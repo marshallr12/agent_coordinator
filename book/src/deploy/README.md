@@ -624,5 +624,56 @@ named by `NODE=`.
    summaries, with the binaries' commit, into the bring-up task, then remove
    the build worktree with `git worktree remove`.
 
-A host prepared this way can run `agentc-supervisor launch-root` by hand. Unattended
-claiming is P3b pilot-core work and is not provided by these steps.
+A host prepared this way can run `agentc-supervisor launch-root` by hand, or
+claim work unattended with the live loop below.
+
+## Live supervisor loop
+
+`agentc-supervisor run` (as root) is the P3b pilot-core loop for one host.
+Each poll it:
+
+1. refuses to claim while the filesystem holding `/var/lib/agentc` has less
+   than `[run] min_free_mib` free (default 20480);
+2. reads `next` for the implementer with
+   `/var/lib/agentc/impl/coordinator/credentials.toml`, for the project named
+   by `.agent-coordinator.toml` on the mirror's `[run] branch` (default
+   `main`);
+3. for a `claim_task` suggestion, fetches `/var/lib/agentc/mirror.git` and,
+   as `agentc-impl`, clones its branch head to `impl/clones/<session>` and
+   prepares `impl/runs/<session>`; it copies the credential into the run's
+   coordinator state and writes the prompt: the implementer contract
+   (`crates/supervisor/contracts/implementer.md`, at most 1,500 words) with
+   the task title inside `<task-title>` tags and the repository's `AGENTS.md`
+   and `CONTRIBUTING.md` appended inside `<repository-instructions>` tags as
+   data. Closing tags inside the data are defused, whatever their case;
+4. as `agentc-impl`, connects a coordinator session named after the launch
+   and claims the task with `agent-coordinator claim`; the launch gets the
+   same session through `AGENT_COORDINATOR_SESSION`;
+5. runs `launch-root` for the launch;
+6. removes the clone and the run directory once the run is terminal (or never
+   started); a started run without a terminal record is kept for recovery;
+7. rewrites `/var/lib/agentc/heartbeat.json` (poll count, time, outcome).
+
+`agentc-impl` owns `coordinator/` and `runs/`, so root never follows a
+symlink there. The credential is read, and the run's credential copy and
+prompt are created, one path component at a time from the root-owned
+`/var/lib/agentc/impl` without following a symlink. The file read must be a
+regular, single-link file owned by `agentc-impl` of at most 64 KiB; a FIFO
+is refused without blocking. Errors name the path, never the contents. The
+instruction files are read as size-bounded blobs from the root-owned mirror
+at the cloned revision, never from the clone. When a launch fails after its
+claim, the loop logs the task and attempt ids; the lease is left to expire.
+
+`--once` polls a single time. Recovery claims, reviewer launches, lease
+renewal and release, and the kill switch are not part of this loop yet.
+`host-setup.sh` installs the `agentc-run` systemd unit without enabling it.
+It requires the firewall and egress units and restarts after a crash. To opt
+in:
+
+```sh
+sudo systemctl enable --now agentc-run
+```
+
+On start, the loop removes terminal runs that an earlier loop left behind,
+so do not keep evidence from hand-run implementer launches under
+`impl/runs/` while the unit runs.

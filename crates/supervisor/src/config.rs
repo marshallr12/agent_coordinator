@@ -52,6 +52,8 @@ pub struct Config {
     /// The candidate-push helper `launch-root` runs beside each implementer
     /// launch (decision U25).
     pub push_helper: PushHelper,
+    /// Live mode: the `run` loop that claims and launches work (P3b).
+    pub run: crate::run_loop::RunConfig,
 }
 
 /// Where the candidate-push helper is installed and whom it runs as.
@@ -112,6 +114,7 @@ impl Default for Config {
             verification: BTreeMap::new(),
             shadow: crate::shadow::ShadowConfig::default(),
             push_helper: PushHelper::default(),
+            run: crate::run_loop::RunConfig::default(),
         }
     }
 }

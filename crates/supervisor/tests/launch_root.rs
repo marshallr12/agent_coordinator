@@ -97,5 +97,12 @@ fn launch_passes_the_push_socket_and_session_id_and_nothing_else_changes() {
         .position(|e| *e == entry)
         .expect("no socket variable");
     pushed_env.remove(index);
+    // An implementer task launch also joins the session `run` claimed in.
+    let session_entry = format!("AGENT_COORDINATOR_SESSION={session}");
+    let index = pushed_env
+        .iter()
+        .position(|e| *e == session_entry)
+        .expect("no session variable");
+    pushed_env.remove(index);
     assert_eq!(pushed_env, env);
 }

@@ -68,6 +68,12 @@ enum Commands {
         #[arg(long)]
         once: bool,
     },
+    /// As root: poll `next`, claim, launch and clean up in a loop (P3b live mode).
+    Run {
+        /// Poll once and exit instead of looping.
+        #[arg(long)]
+        once: bool,
+    },
     /// Summarise a would-launch log (default: the configured shadow log).
     ShadowReport {
         #[arg(long)]
@@ -184,6 +190,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(shadow::run(&config.shadow, once))?
         }
+        Commands::Run { once } => live_run(&config, cli.config.as_deref(), once)?,
         Commands::NetnsRelay { .. } => unreachable!("dispatched before loading config"),
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
@@ -249,4 +256,16 @@ fn launch_root(
     _config: &config::Config,
 ) -> Result<ExitCode> {
     anyhow::bail!("launch-root requires Linux")
+}
+
+/// Runs the live supervisor loop.
+#[cfg(target_os = "linux")]
+fn live_run(config: &config::Config, path: Option<&std::path::Path>, once: bool) -> Result<()> {
+    agentc_supervisor::run_loop::live::run(config, path, once)
+}
+
+/// The live loop needs Linux account switching.
+#[cfg(not(target_os = "linux"))]
+fn live_run(_config: &config::Config, _path: Option<&std::path::Path>, _once: bool) -> Result<()> {
+    anyhow::bail!("run requires Linux")
 }

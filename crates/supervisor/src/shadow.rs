@@ -102,15 +102,36 @@ pub async fn run(config: &ShadowConfig, once: bool) -> Result<()> {
 /// Builds a client from the configured credential file entry.
 fn connect(config: &ShadowConfig) -> Result<CoordinatorClient> {
     let path = &config.credential_file;
+    client(path, &config.origin, config.allow_insecure_loopback)
+}
+
+/// A client for the entry of the CLI-format credentials file at `path`
+/// whose origin is `origin` (normalized), or its first entry when `origin`
+/// is empty.
+pub(crate) fn client(path: &Path, origin: &str, insecure: bool) -> Result<CoordinatorClient> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let file: CredentialFile =
-        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    client_from(&text, path, origin, insecure)
+}
+
+/// As [`client`], from the credentials file's `text`, which was read from
+/// `shown`. A parse error is reported without its message, which may quote
+/// the file.
+pub(crate) fn client_from(
+    text: &str,
+    shown: &Path,
+    origin: &str,
+    insecure: bool,
+) -> Result<CoordinatorClient> {
+    let Ok(file) = toml::from_str::<CredentialFile>(text) else {
+        bail!("{} is not a valid credentials file", shown.display());
+    };
+    let normal = |o: &str| coordinator_client::normalize_origin(o, insecure).ok();
     let entry = file
         .credentials
         .into_iter()
-        .find(|c| config.origin.is_empty() || c.origin == config.origin)
-        .with_context(|| format!("no matching credential in {}", path.display()))?;
-    CoordinatorClient::new(&entry.origin, entry.token, config.allow_insecure_loopback)
+        .find(|c| origin.is_empty() || normal(&c.origin) == normal(origin))
+        .with_context(|| format!("no matching credential in {}", shown.display()))?;
+    CoordinatorClient::new(&entry.origin, entry.token, insecure)
         .map_err(|error| anyhow::anyhow!("coordinator client: {error}"))
 }
 
@@ -152,7 +173,11 @@ async fn project_ids(client: &CoordinatorClient, config: &ShadowConfig) -> Resul
 }
 
 /// `GET next` for one project and role.
-async fn fetch_next(client: &CoordinatorClient, project: &str, role: &str) -> Result<Value> {
+pub(crate) async fn fetch_next(
+    client: &CoordinatorClient,
+    project: &str,
+    role: &str,
+) -> Result<Value> {
     let path = format!("/api/v1/projects/{project}/next");
     get_data(client, &path, &[("role", role.to_owned())]).await
 }
@@ -262,7 +287,7 @@ fn append(path: &Path, record: &Value) -> Result<()> {
 }
 
 /// Milliseconds since the Unix epoch (0 if the clock is before it).
-fn now_ms() -> u128 {
+pub(crate) fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis())
@@ -391,5 +416,18 @@ mod tests {
             toml::from_str::<ShadowConfig>("").unwrap(),
             ShadowConfig::default()
         );
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn parse_errors_never_quote_the_file() {
+        let error = client_from("token = \"secret-value", Path::new("c.toml"), "", false)
+            .err()
+            .unwrap();
+        assert!(!format!("{error:#}").contains("secret-value"));
     }
 }

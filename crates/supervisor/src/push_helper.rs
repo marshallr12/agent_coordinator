@@ -19,8 +19,8 @@
 //! the implementer account, the group of every launch's socket directory, so
 //! it can connect to a concurrent implementer launch's helper; that helper
 //! refuses it because the client is not in its `launch-root`'s process tree.
-mod accounts;
-mod files;
+pub(crate) mod accounts;
+pub(crate) mod files;
 mod layout;
 
 pub use layout::{MAX_SOCKET_PATH, check_socket_path};

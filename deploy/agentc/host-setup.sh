@@ -455,6 +455,20 @@ EOF
 # url = "http://127.0.0.1:$STAGING_PORT"
 # browser = true
 
+# Live mode (plan P3b): \`agentc-supervisor run\` (unit agentc-run) polls
+# \`next\` with $STATE/impl/coordinator/credentials.toml, claims, launches and
+# cleans up; clones come from $STATE/mirror.git and the heartbeat is
+# $STATE/heartbeat.json.
+# [run]
+# poll_seconds = 60
+# harness = "claude"             # or "codex"
+# model = "default"
+# effort = "high"
+# min_free_mib = 20480           # refuse to claim below this much free disk
+# branch = "main"                # mirror branch each clone starts from
+# allow_insecure_loopback = false
+# reviewer = false               # reviewer launches are not implemented yet
+
 # Shadow mode (plan P3a): \`agentc-supervisor shadow\` polls the read-only
 # \`next\` endpoint with a read-access host credential and logs would-launch
 # records with cost estimates; \`shadow-report\` summarises the log.
@@ -570,6 +584,31 @@ install_egress_service() {
   install_service agentc-egress "$PREFIX/bin/agentc-supervisor egress-proxy" ""
 }
 
+# Installs the live supervisor loop (agentc-supervisor run, plan P3b) as a
+# systemd unit but never enables or starts it: the owner opts in with
+# systemctl enable --now agentc-run. Reboot-safe: it starts only after the
+# firewall and egress proxy (and stops with the firewall), restarts after a
+# crash, and a started launch that never finished is kept for recovery
+# rather than reused. sysvinit hosts get no unit.
+install_run_unit() {
+  has_systemd || { echo "no systemd: agentc-run unit not installed"; return 0; }
+  cat > /etc/systemd/system/agentc-run.service <<UNIT
+[Unit]
+Description=agentc-run (agentc live supervisor loop)
+Wants=network-online.target
+After=network-online.target agentc-firewall.service agentc-egress.service
+Requires=agentc-firewall.service agentc-egress.service
+[Service]
+ExecStart=$PREFIX/bin/agentc-supervisor run
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=60
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+}
+
 # True when systemd is the running init (MX Linux and others may use sysvinit).
 has_systemd() { [ -d /run/systemd/system ]; }
 
@@ -657,9 +696,12 @@ remove_service() {
 # configuration and keys) survive. The push App key is the owner's: it is
 # kept, handed back to root (0400). Each role's Claude token is zeroed and
 # deleted. Each shared parent goes only once empty.
-# Agent accounts are retired first, so nothing they run outlives the firewall;
-# the egress account only once its unit (Restart=always) is stopped.
+# The agentc-run loop stops first, then agent accounts are retired, so nothing
+# they run outlives the firewall; the egress account only once its unit
+# (Restart=always) is stopped.
 uninstall() {
+  # The loop runs launches as the agent accounts; stop it before retiring them.
+  remove_service agentc-run
   for user in "${AGENTS[@]}" "$PUSH_USER"; do retire_account "$user"; done
   remove_service agentc-egress
   retire_account agentc-egress
@@ -782,7 +824,7 @@ remove_own_paths() {
     rm -f -- "$PREFIX/bin/$name"
   done
   rm -rf -- "$PREFIX/rustup" "$PREFIX/cargo" "$PREFIX/rustup-init.sh" "$PREFIX"/suite-bin.*
-  for name in impl rev push mirror.git shadow; do rm -rf -- "${STATE:?}/$name"; done
+  for name in impl rev push mirror.git shadow heartbeat.json heartbeat.tmp; do rm -rf -- "${STATE:?}/$name"; done
   for name in supervisor.toml cargo-config.toml agentc.nft push.toml; do
     rm -f -- "$ETC/$name"
   done
@@ -852,6 +894,8 @@ EOF
   fi
   cat <<EOF
 Push helper configuration: $ETC/push.toml (written only when absent).
+Unattended claiming is installed but not enabled; opt in with
+  sudo systemctl enable --now agentc-run
 Run implementer launches as root through launch-root, which starts the helper:
   sudo $PREFIX/bin/agentc-supervisor launch-root --role implementer --harness claude \\
     --clone <clone> --run <run> --task <task-id>
@@ -874,6 +918,7 @@ main() {
   secure_push_key
   install_firewall
   install_egress_service
+  install_run_unit
   next_steps
 }
 
