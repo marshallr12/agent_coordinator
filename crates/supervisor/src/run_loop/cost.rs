@@ -6,9 +6,10 @@
 //! dollar cost; Codex usage is priced with the `[shadow]` price table. The
 //! same events reveal a 429, which marks the vendor exhausted. A Claude
 //! launch killed before its `result` event is costed from the usage of its
-//! `assistant` events and its row is marked `usd_estimated`. A reviewer
-//! launch's cost is recorded the same way ([`settle_review`]), once per
-//! session.
+//! `assistant` events, priced by the model they report, and its row is
+//! marked `usd_estimated` (with a `usd_unpriced_reason` when it has no
+//! dollars). A reviewer launch's cost is recorded the same way
+//! ([`settle_review`]), once per session.
 use super::record::LaunchRecord;
 use super::review_cost::ReviewLaunch;
 use super::{Driver, Launch, health};
@@ -18,6 +19,7 @@ use crate::profile::Role;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Tokens and dollars one launch used.
@@ -41,6 +43,9 @@ pub struct Digest {
     /// A rate limit (429) ended the launch; holds the reset time (ms since
     /// the epoch) when the harness named one.
     pub exhausted: Option<Option<i64>>,
+    /// The model the harness reported on the `assistant` events a launch
+    /// without a `result` was summed from; `None` otherwise.
+    pub model: Option<String>,
 }
 
 /// Reads every JSON event line: Claude's final `result` (dollars and
@@ -64,6 +69,7 @@ pub fn digest(events: &[u8]) -> Digest {
         }
     }
     if !finished && digest.usage == Usage::default() {
+        digest.model = assistant.model();
         digest.usage = assistant.total();
     }
     digest
@@ -75,6 +81,8 @@ pub fn digest(events: &[u8]) -> Digest {
 #[derive(Default)]
 struct Assistant {
     messages: Vec<(Option<String>, Usage)>,
+    /// The model of the last `assistant` event that named a real one.
+    model: Option<String>,
 }
 
 impl Assistant {
@@ -84,6 +92,10 @@ impl Assistant {
         }
         let message = &event["message"];
         let id = message["id"].as_str().map(str::to_owned);
+        // Claude marks messages it wrote itself with a `<synthetic>` model.
+        if let Some(model) = message["model"].as_str().filter(|m| !m.starts_with('<')) {
+            self.model = Some(model.to_owned());
+        }
         let u = &message["usage"];
         let usage = Usage {
             input_tokens: tokens(u, "input_tokens") + tokens(u, "cache_creation_input_tokens"),
@@ -99,6 +111,11 @@ impl Assistant {
             Some((_, last)) => *last = usage,
             None => self.messages.push((id, usage)),
         }
+    }
+
+    /// The model the events reported, if any.
+    fn model(&self) -> Option<String> {
+        self.model.clone()
     }
 
     /// The per-turn usage summed, marked estimated; zero when no assistant
@@ -209,11 +226,19 @@ pub fn settle(
         let until = reset.unwrap_or(now.saturating_add(minutes.saturating_mul(60_000)));
         health::mark_exhausted(config, launch.vendor.harness, until);
     }
-    let usage = priced(digest.usage, config, &launch.vendor.model);
-    if let Err(error) = append(config, &entry(config, launch, record, &usage, now)) {
+    let costed = priced(
+        digest.usage,
+        config,
+        &launch.vendor.model,
+        digest.model.as_deref(),
+    );
+    if let Some(reason) = &costed.reason {
+        eprintln!("agentc-supervisor run: cost left unpriced: {reason}");
+    }
+    if let Err(error) = append(config, &entry(config, launch, record, &costed, now)) {
         eprintln!("agentc-supervisor run: record cost: {error:#}");
     }
-    note(&usage)
+    note(&costed.usage)
 }
 
 /// Records a finished reviewer launch's cost in the ledger against its task
@@ -223,7 +248,17 @@ pub fn settle_review(config: &Config, launch: &ReviewLaunch, events: &[u8], now:
     if recorded(config, Role::Reviewer, &launch.session.to_string()) {
         return true;
     }
-    let usage = priced(digest(events).usage, config, &launch.vendor.model);
+    let digest = digest(events);
+    let costed = priced(
+        digest.usage,
+        config,
+        &launch.vendor.model,
+        digest.model.as_deref(),
+    );
+    if let Some(reason) = &costed.reason {
+        eprintln!("agentc-supervisor run: review cost left unpriced: {reason}");
+    }
+    let usage = &costed.usage;
     let line = json!({
         "at_ms": now, "role": Role::Reviewer.slug(), "project": launch.project,
         "task": launch.task, "session": launch.session,
@@ -232,7 +267,7 @@ pub fn settle_review(config: &Config, launch: &ReviewLaunch, events: &[u8], now:
         "cached_input_tokens": usage.cached_input_tokens,
         "output_tokens": usage.output_tokens, "usd": usage.usd,
     });
-    let line = estimated(canary(config, line), &usage);
+    let line = estimated(canary(config, line), &costed);
     let appended = append(config, &line);
     if let Err(error) = &appended {
         eprintln!("agentc-supervisor run: record review cost: {error:#}");
@@ -249,17 +284,71 @@ fn recorded(config: &Config, role: Role, session: &str) -> bool {
     lines.any(|e| e["role"] == role.slug() && e["session"] == session)
 }
 
+/// A launch's usage with the dollars it was priced at.
+struct Costed {
+    usage: Usage,
+    /// The price-table entry that priced an estimated row, when it is not
+    /// the launch's configured model.
+    priced_as: Option<String>,
+    /// Why an estimated row has no dollars.
+    reason: Option<String>,
+}
+
 /// `usage` with dollars from the price table when the harness gave none.
-fn priced(mut usage: Usage, config: &Config, model: &str) -> Usage {
-    if usage.usd.is_none()
-        && let Some(price) = config.shadow.price_table().get(model)
-    {
-        let dollars = usage.input_tokens as f64 * price.input
-            + usage.cached_input_tokens as f64 * price.cached_input
-            + usage.output_tokens as f64 * price.output;
-        usage.usd = Some(estimate::cents(dollars / 1_000_000.0));
+/// An estimated row is priced by the model its events `reported` (the
+/// configured model may be `default`, which names no real model), then by
+/// the `configured` one, then by a `default` entry of `[shadow.prices]`; if
+/// none has a price the row says why.
+fn priced(mut usage: Usage, config: &Config, configured: &str, reported: Option<&str>) -> Costed {
+    let mut costed = Costed {
+        usage: Usage::default(),
+        priced_as: None,
+        reason: None,
+    };
+    if usage.usd.is_none() {
+        let table = config.shadow.price_table();
+        let candidates: Vec<&str> = reported
+            .into_iter()
+            .chain([configured])
+            .chain(usage.estimated.then_some("default"))
+            .collect();
+        let found = candidates
+            .iter()
+            .find_map(|model| price_of(&table, model).map(|price| (*model, price)));
+        if let Some((model, price)) = found {
+            let dollars = usage.input_tokens as f64 * price.input
+                + usage.cached_input_tokens as f64 * price.cached_input
+                + usage.output_tokens as f64 * price.output;
+            usage.usd = Some(estimate::cents(dollars / 1_000_000.0));
+            if usage.estimated && model != configured {
+                costed.priced_as = Some(model.to_owned());
+            }
+        } else if usage.estimated {
+            let reported =
+                reported.map_or("no model reported".into(), |m| format!("reported {m:?}"));
+            costed.reason = Some(format!(
+                "no price for {reported}, configured {configured:?} or a \"default\" entry in [shadow.prices]"
+            ));
+        }
     }
-    usage
+    costed.usage = usage;
+    costed
+}
+
+/// The price of `model`: its own entry, else the longest entry it extends
+/// with a dated suffix (`claude-haiku-4-5-20251001` uses `claude-haiku-4-5`).
+fn price_of(table: &BTreeMap<String, estimate::Price>, model: &str) -> Option<estimate::Price> {
+    table.get(model).copied().or_else(|| {
+        table
+            .iter()
+            .filter(|(key, _)| {
+                model
+                    .strip_prefix(key.as_str())
+                    .is_some_and(|rest| rest.starts_with('-'))
+            })
+            .max_by_key(|(key, _)| key.len())
+            .map(|(_, price)| *price)
+    })
 }
 
 /// One ledger line for the launch.
@@ -267,9 +356,10 @@ fn entry(
     config: &Config,
     launch: &Launch,
     record: &LaunchRecord,
-    usage: &Usage,
+    costed: &Costed,
     now: i64,
 ) -> Value {
+    let usage = &costed.usage;
     let line = json!({
         "at_ms": now, "role": Role::Implementer.slug(), "project": launch.project,
         "task": launch.suggestion.task, "session": launch.session_id,
@@ -278,7 +368,7 @@ fn entry(
         "cached_input_tokens": usage.cached_input_tokens,
         "output_tokens": usage.output_tokens, "usd": usage.usd,
     });
-    estimated(canary(config, line), usage)
+    estimated(canary(config, line), costed)
 }
 
 /// `line` with `canary: true` when its `project` is the
@@ -301,10 +391,18 @@ fn canary(config: &Config, mut line: Value) -> Value {
 }
 
 /// `line` with `usd_estimated: true` when the usage was summed from
-/// `assistant` events; rows costed from a `result` carry no such field.
-fn estimated(mut line: Value, usage: &Usage) -> Value {
-    if usage.estimated {
+/// `assistant` events, plus the `priced_model` that priced it when that was
+/// not the configured model, or the `usd_unpriced_reason` when it has no
+/// dollars; rows costed from a `result` carry none of these fields.
+fn estimated(mut line: Value, costed: &Costed) -> Value {
+    if costed.usage.estimated {
         line["usd_estimated"] = json!(true);
+        if let Some(model) = &costed.priced_as {
+            line["priced_model"] = json!(model);
+        }
+        if let Some(reason) = &costed.reason {
+            line["usd_unpriced_reason"] = json!(reason);
+        }
     }
     line
 }
@@ -371,7 +469,8 @@ mod tests {
             digest,
             Digest {
                 usage,
-                exhausted: None
+                exhausted: None,
+                model: None,
             }
         );
     }
@@ -429,10 +528,12 @@ mod tests {
         };
         let config = Config::default();
         assert_eq!(
-            priced(usage.clone(), &config, "claude-opus-5-5").usd,
+            priced(usage.clone(), &config, "claude-opus-5-5", None)
+                .usage
+                .usd,
             Some(4.0)
         );
-        assert_eq!(priced(usage, &config, "unknown").usd, None);
+        assert_eq!(priced(usage, &config, "unknown", None).usage.usd, None);
     }
 
     /// A Claude `assistant` event of message `id` reporting `output` tokens.
@@ -462,9 +563,105 @@ mod tests {
             }
         );
         let config = Config::default();
-        let priced = priced(usage, &config, "claude-opus-5-5");
+        let priced = priced(usage, &config, "claude-opus-5-5", None).usage;
         assert_eq!(priced.usd, Some(20.0));
         assert!(note(&priced).ends_with("1000007 output tokens, estimated)."));
+    }
+
+    /// A killed launch's usage: 1M output tokens, estimated.
+    fn killed_usage() -> Usage {
+        Usage {
+            output_tokens: 1_000_000,
+            estimated: true,
+            ..Usage::default()
+        }
+    }
+
+    #[test]
+    fn a_default_model_launch_is_priced_by_the_model_its_events_report() {
+        let mut message = assistant("m1", 1_000_000);
+        message["message"]["model"] = json!("claude-opus-5-5");
+        let synthetic = json!({"type": "assistant", "message": {
+            "id": "m2", "model": "<synthetic>", "usage": {"output_tokens": 0}}});
+        let digest = digest(&lines(&[message, synthetic]));
+        assert_eq!(digest.model.as_deref(), Some("claude-opus-5-5"));
+        let config = Config::default();
+        let costed = priced(digest.usage, &config, "default", digest.model.as_deref());
+        assert_eq!(costed.usage.usd, Some(20.0));
+        assert_eq!(costed.reason, None);
+        let line = estimated(json!({"model": "default"}), &costed);
+        assert_eq!(line["usd_estimated"], true);
+        assert_eq!(line["priced_model"], "claude-opus-5-5");
+        assert!(line.get("usd_unpriced_reason").is_none());
+    }
+
+    #[test]
+    fn a_dated_model_id_uses_its_base_entry() {
+        let config = Config::default();
+        let costed = priced(
+            killed_usage(),
+            &config,
+            "default",
+            Some("claude-haiku-4-5-20251001"),
+        );
+        assert_eq!(costed.usage.usd, Some(5.0));
+        let costed = priced(
+            killed_usage(),
+            &config,
+            "default",
+            Some("claude-haiku-4-50"),
+        );
+        assert_eq!(costed.usage.usd, None);
+    }
+
+    #[test]
+    fn an_unreported_default_model_falls_back_to_the_default_price() {
+        let mut config = Config::default();
+        config.shadow.prices.insert(
+            "default".into(),
+            estimate::Price {
+                input: 1.0,
+                cached_input: 1.0,
+                output: 3.0,
+            },
+        );
+        let costed = priced(killed_usage(), &config, "default", None);
+        assert_eq!(costed.usage.usd, Some(3.0));
+        assert_eq!(costed.priced_as, None);
+        // An unpriced reported model still falls through to it.
+        let costed = priced(killed_usage(), &config, "default", Some("novel-model"));
+        assert_eq!(costed.usage.usd, Some(3.0));
+        assert_eq!(costed.priced_as, None);
+        // A configured model with no price of its own is priced as `default`.
+        let costed = priced(killed_usage(), &config, "novel-model", None);
+        assert_eq!(costed.priced_as.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn an_estimated_row_without_dollars_records_why() {
+        let config = Config::default();
+        let costed = priced(killed_usage(), &config, "default", Some("novel-model"));
+        assert_eq!(costed.usage.usd, None);
+        let reason = costed.reason.clone().expect("a reason");
+        assert!(reason.contains("novel-model") && reason.contains("default"));
+        let line = estimated(json!({}), &costed);
+        assert_eq!(line["usd_estimated"], true);
+        assert_eq!(line["usd_unpriced_reason"], json!(reason));
+        // No `assistant` model at all is said too.
+        let costed = priced(killed_usage(), &config, "default", None);
+        assert!(
+            costed
+                .reason
+                .is_some_and(|r| r.contains("no model reported"))
+        );
+        // A `result`-costed or non-estimated row carries no reason.
+        let plain = Usage {
+            estimated: false,
+            ..killed_usage()
+        };
+        let costed = priced(plain, &config, "default", None);
+        assert!(costed.reason.is_none());
+        assert!(estimated(json!({}), &costed).get("usd_estimated").is_none());
     }
 
     #[test]
