@@ -1,0 +1,4 @@
+# Text files are stored and checked out with LF line endings on every
+# platform, so a Windows checkout with core.autocrlf=true holds the same bytes
+# as a Linux one (include_str! contents, scripts, file-comparing tests).
+* text=auto eol=lf
