@@ -4,7 +4,8 @@ Status: **proposed; the containment prototype gate is blocked; not approved for
 unattended execution**. Task `7011c55f-652e-47d3-a409-7d46420c7eb6` activates a
 native Windows replacement for the abandoned WSL host approach. Its first
 phase, task `a9126e52-654c-4b26-8a7d-7748261d2c4a`, delivers this design and the
-containment prototype. This chapter does not claim that Windows services or a
+containment prototype. Task `3787e738-d381-4e4f-96b0-75f7afe22155` prepares
+phase 2. This chapter does not claim that Windows services or a
 production Windows sandbox are implemented. The
 [current implementation](implementation-status.md) remains authoritative. The
 Linux backend remains supported.
@@ -283,7 +284,8 @@ before it has passed; a blocked gate stops the phases behind it.
 | Phase | Content | Gate to start | State |
 | --- | --- | --- | --- |
 | 1 | This design and the containment prototype | None | Delivered by task `a9126e52`; the prototype gate is **blocked** |
-| 2 | The same matrix with launches running as dedicated role accounts, plus network policy loss | An owner-controlled elevated session on the target | Not started; needs the owner |
+| 2 preparation | A role-account mode for the prototype and the owner runbook | Owner decision `df37b339` | Delivered by task `3787e738`; exercised only as a same-account dry run |
+| 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | Not started; needs the owner to follow the [runbook](#owner-runbook-for-the-role-account-run) |
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Blocked |
 | 4 | SCM services, lifecycle and recovery acceptance | Phase 3 | Blocked |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Blocked |
@@ -296,7 +298,7 @@ integration complete each task; only the final acceptance can admit a host.
 ## Containment prototype
 
 `deploy/agentc/windows-containment-probe.py` is a disposable experiment with
-three parts.
+four parts.
 
 - `windows-containment-probe.py` is the driver. It holds the accepted value of
   every row, creates the host-side canaries and positive controls, and derives
@@ -306,6 +308,8 @@ three parts.
   the handle-based reader.
 - `windows-probe-fixture/` is a Rust crate with no dependencies. It is the
   workload and the attacker.
+- `windows-probe-owner.py` is the [role-account mode](#role-account-mode): the
+  owner's step and the manifest that a separate account's run reads.
 
 For each boundary variant the driver does the following.
 
@@ -358,6 +362,89 @@ credential, and never changes WSL.
 without any Windows API, so the Linux deploy-script job runs it. On native
 Windows it also runs the reader against real hard links, junctions and a
 junction swapped during the read.
+
+### Role-account mode
+
+The single-account run above launches as the invoking account, so the protected
+owner and the launch identity are one account. Role-account mode separates
+them, which is what phase 2 has to show. It has three steps.
+
+1. **Owner step.** `--owner-plant` runs as the owner. It plants the owner's
+   canaries (a private directory with a file and a credential stand-in, one
+   registry key, a pipe and two events) and stages the interpreter, the probe
+   source and a Rust toolchain where another account can read them. It records
+   the owner's SID, those targets and the result of each owner-token control in
+   a manifest, then waits.
+2. **Role run.** A separate account runs the staged probe with
+   `--owner-manifest`. The whole matrix then launches as that account. The
+   registry and profile rows address the owner's hive and profile by SID, and
+   nine `owner.*` rows attack the owner's files, process, pipe and events.
+3. **Owner finish.** The waiting owner step reads the role run's report by
+   handle, adds rows that its canaries are exactly as planted, recomputes the
+   verdict and writes the final report.
+
+Every owner row is paired with an owner control from the manifest, and a control
+the owner did not record as passed fails. The row
+`identity.role_account_distinct` passes only when the launch identity is not the
+owner. With `--same-account-dry-run` the owner step starts the role run itself
+under the same account. That exercises every step but proves nothing about a
+role account, so that row fails and the gate stays blocked.
+
+### Owner runbook for the role-account run
+
+This is the cross-account run that phase 2 needs. Only the owner can do it,
+because step 1 needs elevation. It has been exercised only as a same-account
+dry run; treat a row that fails for any reason other than the boundary as a
+defect in this procedure, and stop.
+
+1. In an elevated shell, create a temporary local standard account. The command
+   asks for a password.
+
+   ```text
+   net user AgentcProbeRole * /add
+   ```
+
+2. In your own shell, not elevated, from the source checkout, start the owner
+   step. Replace `NEW_REPORT` with a new absolute path outside the repository.
+   It prints one command and waits for up to an hour.
+
+   ```text
+   python -I deploy/agentc/windows-containment-probe.py --owner-plant --staging C:\Users\Public\agentc-probe-staging --role-account AgentcProbeRole --output NEW_REPORT
+   ```
+
+3. In a second shell, not elevated, run the printed command as the role account
+   and enter its password. It takes a few minutes.
+
+   ```text
+   runas /user:AgentcProbeRole "PRINTED_COMMAND"
+   ```
+
+4. The owner step finishes by itself and prints the verdict. In `NEW_REPORT`,
+   `identity.role_account_distinct` must pass, and for the less-privileged
+   variant `host.registry_environment_open` must be `error:5`.
+
+5. In an elevated shell, remove the account and its profile, then delete the
+   staging directory.
+
+   ```text
+   net user AgentcProbeRole /delete
+   Get-CimInstance Win32_UserProfile | Where-Object LocalPath -like '*AgentcProbeRole' | Remove-CimInstance
+   Remove-Item -Recurse C:\Users\Public\agentc-probe-staging
+   ```
+
+What each step changes on the host:
+
+| Step | Change | Removed by |
+| --- | --- | --- |
+| 1 | One local standard account | Step 5 |
+| 2 | The staging directory, about half a gigabyte, with access entries for the role account | Step 5 |
+| 2 | The owner's canaries: a temporary directory, one key under your `Software` registry key, a pipe and two events | The owner step, when it ends |
+| 3 | The role account's profile directory and registry hive, created on its first run | Step 5 |
+| 3 | A run directory under that profile, AppContainer profiles and private window stations | The role run deletes the profiles and stations; step 5 removes the directory with the profile |
+
+No step installs a service or a firewall rule, changes WSL or reads a real
+credential. A passing run closes the registry finding. It does not finish phase
+2: behavior when network policy is lost still needs its own privileged test.
 
 ### MiniAir findings, 2026-11-09
 
@@ -426,6 +513,22 @@ What follows from these rows:
   executable, so the builder exports a plain copy. A host that stages worker
   output must expect this.
 
+### Same-account dry run, 2026-11-09
+
+Registered producer `95d67b03-b3ba-4c0c-b159-4d0a67dd40c2` ran source
+`eb05df6d00905e5031f3b3a83072101af948a9ae` in role-account mode with
+`--same-account-dry-run`. The staged interpreter ran the staged probe, the owner
+step read the role report by handle and wrote the final report, coordinator
+artifact `b13c0e79-191e-45e6-9d7d-bf8cb108cdf7`, SHA-256
+`1a0d1bd909c3736a51bf29466c2e94b9f639b3a0d5512d671af45e7f0c39852c`.
+
+This is plumbing evidence only. Of 644 mandatory rows, 634 passed. All five
+owner controls passed, all 54 owner attack rows were denied and the three
+canary-integrity rows passed. `identity.role_account_distinct` failed, as it
+must when one account plays both parts, and the registry `Environment` rows
+failed as they did in the single-account run. Nothing here shows that a role
+account is denied the owner's registry; only the runbook above can.
+
 ### Disposition
 
 **NO-GO for Windows supervised execution.** The prototype gate is blocked by
@@ -435,7 +538,9 @@ Everything else the prototype can test passed for the proposed boundary.
 The blocked gate stops phase 3 and everything behind it. Phase 2 is the next
 step and needs the owner: an elevated session on the target to create role
 accounts, run this matrix with launches under them, and test network policy
-loss. Until that passes, no runtime, service, broker or installer work starts.
+loss. The [owner runbook](#owner-runbook-for-the-role-account-run) is the first
+part of that. Until it passes, no runtime, service, broker or installer work
+starts.
 
 Still unverified, and never to be read as passed:
 

@@ -17,8 +17,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   and each other, and fails closed on any missing or unexpected result. On the
   one evaluated host its gate is **blocked**: a launch running as the owner can
   open the owner's registry `Environment` key, which only separate role
-  accounts can close. No Windows supervised harness or service exists or is
-  admitted, and the prototype cannot issue a host acceptance receipt.
+  accounts can close. The prototype has a role-account mode for that run, in
+  which the owner plants canaries and a separate account launches the matrix;
+  it has been exercised only with one account playing both parts, and the
+  cross-account run needs the owner. No Windows supervised harness or service
+  exists or is admitted, and the prototype cannot issue a host acceptance receipt.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the

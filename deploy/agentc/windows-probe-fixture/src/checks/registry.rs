@@ -49,6 +49,11 @@ fn open_key(path: &str, access: u32) -> io::Result<Key> {
     Ok(Key(key))
 }
 
+/// Opens a key for reading values and closes it again without reading any.
+pub fn open_for_query(path: &str) -> io::Result<()> {
+    open(path, ffi::KEY_QUERY_VALUE)
+}
+
 /// Opens a key and closes it again; the granted access is the observation.
 fn open(path: &str, access: u32) -> io::Result<()> {
     open_key(path, access).map(|_| ())

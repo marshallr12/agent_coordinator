@@ -4,6 +4,7 @@ mod desktop;
 mod files;
 mod ipc;
 mod network;
+mod owner;
 mod paths;
 mod peers;
 mod process;
@@ -27,6 +28,7 @@ pub fn run(spec: &Spec, work: &Path, report: &mut Report) -> Result<(), String> 
     scheduler::run(report);
     ipc::run(spec, report)?;
     registry::run(spec, report)?;
+    owner::run(spec, report)?;
     network::run(spec, report);
     paths::run(spec, work, report)?;
     desktop::run(report);
