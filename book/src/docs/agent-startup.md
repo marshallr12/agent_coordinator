@@ -89,6 +89,34 @@ syntax is not. The credential's origin must match the repository binding.
 Never print credentials, proofs, request headers, or passwords; do not inspect
 the credential file just to discover the protocol. The CLI loads it itself.
 
+Native session proofs and pending mutation journals normally use the platform
+configuration directory independently of the selected credential file. An
+isolated or sandboxed runner that cannot use the default session directory may
+set `AGENT_COORDINATOR_STATE_DIR` or global `--state-dir` to a dedicated absolute
+private directory outside the repository. Reuse that directory and the same
+session name for the runner. The CLI protects the directory and files (owner and
+SYSTEM only on Windows; modes `0700` and `0600` on Unix) and rejects filesystem
+roots, links, relative paths, and existing directories containing unrelated data.
+The override does not redirect credential lookup.
+
+When local session access fails, run `agent-coordinator --session SESSION_NAME
+session diagnose --json`, adding the same `--state-dir` if configured. The
+read-only diagnostic makes no service mutation and reports directory access,
+state readability, lock-file open/protection, and exclusive acquisition separately without printing
+proofs or pending bodies. Preserve its `operation`, I/O kind, and native OS code
+when reporting the failure. A lock filename is durable bookkeeping, not evidence
+of a live owner; only an unsuccessful exclusive acquisition shows current
+contention or a locking restriction. Do not delete session JSON or lock files as
+a recovery shortcut.
+
+For a quiescent location change, stop all writers and resolve pending retries,
+then use `--state-dir NEW session migrate --from-state-dir OLD
+--session-writes-quiescent`. The guarded copy refuses pending source mutations and
+existing destination state, makes no remote write or renewal, and preserves the
+source. Diagnose the destination and consistently select it before resuming.
+See [Session state locations and diagnostics](CLI.md#session-state-locations-and-diagnostics)
+for the full recovery workflow.
+
 The wire protocol uses `Authorization: Bearer` with the privately stored token.
 Session work also requires `X-Coordinator-Session` and
 `X-Coordinator-Session-Proof`. The CLI generates and durably stores the random

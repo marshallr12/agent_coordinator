@@ -27,8 +27,8 @@ pub async fn launch(cli: &Cli, context: &ContextData, args: &LaunchArgs) -> Resu
     }
     // A second client must use a different harness. This lock is separate from
     // the short-lived CLI state lock, so this client's native CLI remains usable.
-    let _launcher_lock = state::lock(&path.with_extension("mcp-client.json"))
-        .map_err(|_| Failure::temporary("Cannot acquire the MCP launcher lock. Another client may use this local harness; select another --session for an independent client."))?;
+    let _launcher_lock =
+        state::lock(&path.with_extension("mcp-client.json")).map_err(Failure::state_access)?;
     let response = context
         .client
         .get(
@@ -68,6 +68,9 @@ pub async fn launch(cli: &Cli, context: &ContextData, args: &LaunchArgs) -> Resu
                 "false"
             },
         );
+    if let Some(state_dir) = &cli.state_dir {
+        child.env("AGENT_COORDINATOR_STATE_DIR", state_dir);
+    }
     // Never hold the native mutation journal lock while the client runs. Its
     // CLI subprocesses must use their ordinary short-lived locks and journals.
     drop(session_lock);
