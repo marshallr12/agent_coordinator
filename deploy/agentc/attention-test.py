@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import socket
 import socketserver
 import ssl
@@ -48,6 +49,7 @@ class Fake:
         self.last_read_at = None
         self.withhold_ack_link = False
         self.digest_queries = []
+        self.digest_stalls = []  # seconds each next digest request waits before answering
         self.pages = []
         self.coordinator_tokens = []
         self.reports = []
@@ -70,6 +72,8 @@ class Fake:
                     body = {"data": {"items": fake.tasks, "next_cursor": None}}
                 elif self.path.startswith("/api/v1/projects/p/digest"):
                     fake.digest_queries.append(self.path)
+                    if fake.digest_stalls:
+                        time.sleep(fake.digest_stalls.pop(0))
                     body = {"data": {**DIGEST, "last_read_at": fake.last_read_at,
                                      "ack_link": {"url": ACK_URL, "expires_at": "later"}
                                      if "ack_link=true" in self.path and not fake.withhold_ack_link
@@ -452,6 +456,73 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(self.canary()[0], 1)
         self.assertEqual(len(self.fake.pages), 1)
+
+    def stalling_canary(self, stalls, *extra):
+        """A canary run whose digest requests wait `stalls` seconds each, then answer at once."""
+        self.fake.digest_stalls = list(stalls)
+        with mock.patch.object(attention, "pause", lambda seconds: None):
+            return self.canary("--probe-timeout", "0.3", *extra)
+
+    def test_a_digest_probe_that_times_out_once_and_then_succeeds_does_not_page(self):
+        code, err = self.stalling_canary([1.0])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.fake.pages, [])
+        self.assertEqual(len(self.fake.digest_queries), 2)
+        self.assertIn("digest request failed (TimeoutError); retry 1 of 2", err)
+        self.assertNotIn("probe failed", err)
+
+    def test_a_digest_probe_that_keeps_timing_out_pages_after_the_bounded_retries(self):
+        code, err = self.stalling_canary([1.0] * 5)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.fake.digest_queries), 3)
+        self.assertEqual(len(self.fake.pages), 1)
+        self.assertIn("digest: digest probe failed (", self.fake.pages[0][1])
+        self.assertIn("retry 2 of 2", err)
+
+    def test_the_number_of_probe_attempts_is_a_setting(self):
+        code, _ = self.stalling_canary([1.0] * 5, "--probe-attempts", "1")
+        self.assertEqual((code, len(self.fake.digest_queries)), (1, 1))
+        self.fake.digest_queries.clear()
+        code, _ = self.stalling_canary([1.0] * 5, "--probe-attempts", "5")
+        self.assertEqual((code, len(self.fake.digest_queries)), (1, 5))
+        with mock.patch.dict(os.environ, {"ATTENTION_PROBE_ATTEMPTS": "4",
+                                          "ATTENTION_PROBE_TIMEOUT": "7",
+                                          "ATTENTION_DIGEST_BUDGET": "2"}):
+            args = attention.parse(["canary", "--ntfy-topic", "t"])
+        self.assertEqual((args.probe_attempts, args.probe_timeout, args.digest_budget), (4, 7, 2))
+
+    def test_a_connection_reset_is_retried_but_an_http_error_status_is_not(self):
+        calls = []
+        real_fetch = attention.fetch
+
+        def reset_once(url, token=None, timeout=15.0):
+            calls.append(url)
+            if len(calls) == 1:
+                raise ConnectionResetError()
+            return real_fetch(url, token, timeout)
+        with mock.patch.object(attention, "fetch", reset_once), \
+                mock.patch.object(attention, "pause", lambda seconds: None):
+            self.assertEqual(self.canary()[0], 0)
+        self.assertGreater(len(calls), 1)
+        self.fake.next_status = 500
+        self.fake.digest_queries.clear()
+        code, _ = self.canary()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.fake.digest_queries), 1)
+
+    def test_a_slow_digest_over_the_budget_is_logged_with_its_time_and_does_not_page(self):
+        code, err = self.stalling_canary([0.4], "--digest-budget", "0.1", "--probe-timeout", "5")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.fake.pages, [])
+        match = re.search(r"canary: digest request took (\d+\.\d)s \(budget 0s\)", err)
+        self.assertIsNotNone(match, err)
+        self.assertGreaterEqual(float(match.group(1)), 0.4)
+
+    def test_a_fast_digest_and_a_turned_off_budget_log_nothing(self):
+        self.assertNotIn("digest request took", self.canary()[1])
+        code, err = self.stalling_canary([0.2], "--digest-budget", "0", "--probe-timeout", "5")
+        self.assertEqual(code, 0)
+        self.assertNotIn("digest request took", err)
 
     def test_hri_over_the_limit_fails_the_canary(self):
         self.assertEqual(self.canary("--max-hri", "2")[0], 0)

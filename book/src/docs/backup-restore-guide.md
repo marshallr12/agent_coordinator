@@ -161,6 +161,84 @@ Record the local snapshot time and verified off-server copy time separately.
 Hourly local backups do not provide hourly host-loss protection unless verified
 off-server transfer also runs at least hourly.
 
+### The hourly transfer on the 1-GB VM
+
+On the production VM (GCP e2-micro, 953 MB of memory, one persistent disk) the
+hourly `agent-coordinator-backup-transfer.service` stalled authenticated reads
+such as the project digest. Readings taken on 2026-11-18 during a transfer
+(20:06:02 to 20:08:32 UTC, 28.1 s of CPU in 150 s of wall time):
+
+- Disk I/O saturation is the mechanism, with memory pressure. I/O pressure
+  `full avg10` rose from 0.3 to 21.8, 67.1, 88.0 and 68.3 over the run; memory
+  pressure `full avg10` reached 47.5 and 51.6; buff/cache fell from 624 MB to
+  376 MB. Stall time added over the run was 87.3 s for I/O, 32.5 s for memory
+  and 2.2 s for CPU, and CPU pressure never exceeded 5.7. It is not CPU.
+- The peak lasts about a minute in the middle of the run (60 to 120 s after the
+  start) and the pressure stays raised for a minute or more after the unit
+  exits. `/healthz` stayed under 1.6 s throughout while the digest took
+  25 to 30 s.
+
+Which step produces the peak was not measured. From the script, the steps are:
+verify the source snapshot (reads about 345 MB), tar and gzip it (reads 345 MB,
+writes the archive, most of the CPU), digest the archive, upload, download
+(writes the archive again), digest the download, extract it (writes 345 MB), and
+verify the extracted copy (reads 345 MB). The early part of the run reads
+(`io full avg10` was 21.8 at 30 s); the peak at 60 to 120 s lines up with the
+download and, above all, the extraction, which writes the full 345 MB, dirties
+most of the VM's free memory and forces writeback while the page cache is being
+evicted. This is a reasoned attribution, not a measurement. The script now
+prints a `step NAME at HH:MM:SS UTC` line before each step, so the next reading
+names the step.
+
+What the transfer now does to stay out of the service's way:
+
+- `Nice=19`, `CPUWeight=20`, `IOSchedulingClass=idle` and `IOWeight=10`. The I/O
+  settings only take effect when the disk's scheduler honours them (BFQ);
+  on `none` or `mq-deadline` they do nothing, which is why the next two
+  changes do not depend on them.
+- `MemoryHigh=300M`, so under memory pressure the transfer is reclaimed and
+  throttled before the service's page cache is.
+- After each step the helper flushes and asks the kernel to drop that file's
+  pages (`posix_fadvise(DONTNEED)`) for the snapshot, archive, download and
+  extracted copy, so repeated passes over 345 MB do not push the database's
+  pages out of memory.
+
+The transfer is unchanged otherwise: every hourly snapshot has a new name, so
+the existing skip of an already verified snapshot does not apply, and the
+download, digest and restore-verify steps are the evidence that the off-server
+copy is good, so none is dropped.
+
+**Owner steps on the VM** (the broad `gcloud compute ssh` rule is blocked for
+agents). From a checkout at the new revision:
+
+```sh
+sudo install -m 0755 deploy/gcp-backup-transfer.py /usr/local/sbin/agent-coordinator-backup-transfer
+sudo install -m 0644 deploy/agent-coordinator-backup-transfer.service /etc/systemd/system/
+sudo systemctl daemon-reload
+systemctl show agent-coordinator-backup-transfer.service \
+  -p Nice -p CPUWeight -p IOWeight -p IOSchedulingClass -p MemoryHigh
+cat /sys/block/sda/queue/scheduler   # [bfq] means the I/O weights apply
+```
+
+To measure a transfer with its steps, start one and sample pressure beside it
+(about 3 minutes), then compare the sample times with the unit's step lines:
+
+```sh
+sudo systemctl start --no-block agent-coordinator-backup-transfer.service
+for i in $(seq 1 36); do
+  printf '%s io:%s mem:%s\n' "$(date -u +%T)" \
+    "$(grep full /proc/pressure/io | cut -d' ' -f2)" \
+    "$(grep full /proc/pressure/memory | cut -d' ' -f2)"
+  sleep 5
+done
+journalctl -u agent-coordinator-backup-transfer.service --since '5 min ago' -o cat | grep '^step'
+```
+
+and time the digest from a workstation during the run (`curl -s -o /dev/null
+-w '%{time_total}\n' -H "Authorization: Bearer $(cat TOKEN_FILE)"
+URL/api/v1/projects/ID/digest`). The canary's journal line records slow digests
+without paging (see "Attention budget: digest and canary" in the Service deployment examples chapter).
+
 ## Back up before a schema upgrade
 
 Keep the exact currently installed binary until the upgrade is accepted. Before a

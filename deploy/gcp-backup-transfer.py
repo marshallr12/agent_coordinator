@@ -24,9 +24,39 @@ def run(args):
         raise RuntimeError(f'{Path(args[0]).name} operation failed with exit {result.returncode}')
     return result.stdout
 
+def step(name):
+    """One journal line per step, so a pressure reading can be matched to the step that caused it."""
+    print(f'step {name} at {time.strftime("%H:%M:%S", time.gmtime())} UTC (monotonic {time.monotonic():.0f}s)',
+          flush=True)
+
+def drop_cache(path):
+    """Ask the kernel to forget this file's clean pages.
+
+    The VM has under 1 GB of memory; reading and writing a 345 MB snapshot
+    several times would otherwise evict the page cache the service's SQLite
+    reads depend on. Dirty pages are flushed first, because only clean pages
+    are dropped. Advisory: a failure changes nothing.
+    """
+    if path.is_dir():
+        for child in path.rglob('*'):
+            if child.is_file():
+                drop_cache(child)
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
 def digest(path):
     with path.open('rb') as source:
-        return hashlib.file_digest(source, 'sha256').hexdigest()
+        result = hashlib.file_digest(source, 'sha256').hexdigest()
+    drop_cache(path)
+    return result
 
 with (state / '.lock').open('a') as transfer_lock:
     fcntl.flock(transfer_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -41,28 +71,43 @@ with (state / '.lock').open('a') as transfer_lock:
         if previous.exists() and json.loads(previous.read_text())['snapshot'] == snapshot.name:
             print('Newest snapshot already verified off-server.')
             raise SystemExit(0)
+        step('verify-source')
         report = json.loads(run([binary, 'backup-verify', '--snapshot', str(snapshot)]))
+        drop_cache(snapshot)
         destination = bucket + '/snapshots/' + snapshot.name + '.tar.gz'
         with tempfile.TemporaryDirectory(prefix='transfer-', dir=state) as temporary:
             working = Path(temporary)
             archive = working / 'snapshot.tar.gz'
             # Deterministic gzip header and tar contents for the immutable source.
             import gzip
+            step('archive')
             with archive.open('wb') as raw:
                 with gzip.GzipFile(filename='', mode='wb', fileobj=raw, mtime=0) as zipped:
                     with tarfile.open(fileobj=zipped, mode='w') as bundle:
                         bundle.add(snapshot, arcname='snapshot', recursive=True)
+            drop_cache(snapshot)
+            step('digest-archive')
             source_digest = digest(archive)
+            step('upload')
             run(['gcloud','storage','cp',str(archive),destination,'--quiet'])
+            drop_cache(archive)
             downloaded = working / 'downloaded.tar.gz'
+            step('download')
             run(['gcloud','storage','cp',destination,str(downloaded),'--quiet'])
+            drop_cache(downloaded)
+            step('digest-download')
             if digest(downloaded) != source_digest:
                 raise RuntimeError('Downloaded backup archive does not match uploaded bytes.')
             restored = working / 'verified'
             restored.mkdir(mode=0o700)
+            step('extract')
             with tarfile.open(downloaded) as bundle:
                 bundle.extractall(restored, filter='data')
+            drop_cache(restored)
+            step('verify-restored')
             run([binary,'backup-verify','--snapshot',str(restored / 'snapshot')])
+            drop_cache(restored)
+            step('receipt')
             receipt = {'snapshot': snapshot.name, 'object': destination,
                        'sha256': source_digest, 'verified_at_unix': int(time.time())}
             staged = state / 'last-verified.json.tmp'
@@ -73,6 +118,7 @@ with (state / '.lock').open('a') as transfer_lock:
             os.replace(staged, previous)
         # Keep the same snapshots as the source's retention (5 daily).
         retained = {p.name + '.tar.gz' for p in snapshots}
+        step('prune')
         objects = run(['gcloud','storage','ls',bucket + '/snapshots/','--quiet']).splitlines()
         for item in objects:
             if item.startswith(bucket + '/snapshots/') and item.endswith('.tar.gz'):
