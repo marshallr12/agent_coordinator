@@ -212,6 +212,7 @@ class SmtpRelayTests(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.token = self.dir / "token"
         self.token.write_text(TOKEN + "\n")
+        self.token.chmod(0o400)
         self.password_file = self.dir / "smtp-password"
         self.password_file.write_text(PASSWORD + "\n")
         self.password_file.chmod(0o400)
@@ -365,6 +366,7 @@ class AttentionTests(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.token = self.dir / "token"
         self.token.write_text(TOKEN + "\n")
+        self.token.chmod(0o400)
         self.heartbeat = self.dir / "heartbeat.json"
         self.beat()
 
@@ -379,6 +381,23 @@ class AttentionTests(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             code = attention.main(argv)
         return code, err.getvalue()
+
+    def test_a_group_or_other_readable_token_is_refused(self):
+        for mode in (0o440, 0o404, 0o644):
+            self.token.chmod(mode)
+            with self.assertRaises(SystemExit) as refused:
+                self.canary()
+            self.assertIn("readable by other users", str(refused.exception))
+            self.assertNotIn(TOKEN, str(refused.exception))
+        self.assertEqual(self.fake.pages, [])
+        self.token.chmod(0o400)
+        self.assertEqual(self.canary()[0], 0)
+
+    def test_a_group_readable_token_stops_the_digest_too(self):
+        self.token.chmod(0o440)
+        with self.assertRaises(SystemExit) as refused:
+            attention.main(["digest", "--url", self.fake.url, "--project", "p", "--token-file", str(self.token)])
+        self.assertIn("readable by other users", str(refused.exception))
 
     def test_a_healthy_loop_pages_nobody(self):
         self.assertEqual(self.canary()[0], 0)
