@@ -628,6 +628,16 @@ cd \"\$CARGO_TARGET_DIR\" && pwd -P >| '$TMPDIR/claude-mock-cwd'" \
  || { echo "candidate checks failed: $?" >&2; kill "$MARKER_PID"; exit 42; }
 kill "$MARKER_PID"
 test "$(cat "$TMPDIR/claude-mock-cwd")" = "$CLONE"
+# The 2950bb54 case: a job started in the background dies with its call, the
+# call says so, and a later call waiting for what it writes would wait forever.
+WARNING="$("$PREFIX" "(sleep 2; touch \"\$TMPDIR/background-done\") > /dev/null 2>&1 &
+pwd -P >| '$TMPDIR/claude-mock-cwd'" 2>&1 > /dev/null)" || exit 45
+case "$WARNING" in
+ *"Background jobs do not survive a candidate-shell call"*) ;;
+ *) echo "no background job warning: $WARNING" >&2; exit 46;;
+esac
+sleep 4
+"$PREFIX" "test ! -e \"\$TMPDIR/background-done\" && pwd -P >| '$TMPDIR/claude-mock-cwd'" || exit 47
 test "$(cat "$TMPDIR/harness-only")" = harness
 test ! -e "$TMPDIR/candidate-write"
 test "$(cat "$RUN/candidate-tmp/candidate-write")" = candidate

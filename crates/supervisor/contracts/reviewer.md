@@ -36,6 +36,19 @@ release anything.
    every command succeeds, with each nested skip reported as skipped. A skip
    the change adds without a real sandbox limitation is a finding.
 
+   Run each gate command in the foreground of a single Bash call, with the
+   Bash tool's `timeout` at its maximum, since a build or test run takes far
+   longer than the default; redirect its output into `$TMPDIR` if it is long.
+   Every Bash call runs in its own sandbox, and a command started in the
+   background (`cmd &`, `nohup`, `setsid`) is killed when that call returns:
+   its log stays empty and waiting on it never ends. The call prints a
+   warning when that happens. If the harness moves a long foreground call to
+   the background, it keeps running; read it with the background-task output
+   tool, never a shell loop. A call is stopped after 45 minutes (exit 252),
+   and once two calls in a row were stopped, further commands are refused:
+   return your verdict then (`request_changes`, naming the commands that
+   could not finish).
+
    Any other failure is a finding unless you prove it pre-existing. Never
    call a failure an environment artifact, flaky or unrelated on judgement
    alone. Rerun the failing test(s) on `{{base}}`, for example in a temporary

@@ -334,6 +334,19 @@ file. As a result, `cd` does not persist between reviewer Bash commands. An
 instrumented owner run (a git shim logging its working directory) must still
 confirm this against the pinned Claude Code release.
 
+Each command also gets its own sandbox and PID namespace, so a command a reviewer
+starts in the background (`cmd &`) is killed when its call returns. Every
+process other than the command's shell that is still alive when the command ends
+is named in a warning on stderr (`Background jobs do not survive a
+candidate-shell call`); the exit status is unchanged. The reviewer contract tells
+reviewers to run the gate in the foreground with the Bash tool's maximum
+`timeout`. A command running past 45 minutes is stopped with exit status 252 and a
+message, and once two commands in a row were stopped, `candidate-shell` refuses
+every further command (exit status 126) and tells the reviewer to return its
+verdict, so a review that cannot make progress ends in bounded time. The count
+lives in `$RUN/tmp/candidate-stuck`, outside the nested sandbox, and any command
+that ends in time resets it.
+
 Local tests exercise actual Bubblewrap with a mock Bash harness, including
 cross-run writes, seed replacement, hard links, inherited descriptors, and child
 cleanup. The root containment suite also uses mock harnesses. For each role it
