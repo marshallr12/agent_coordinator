@@ -630,7 +630,9 @@ async fn enrich_workflow_status(
     {
         let snapshot = crate::workflow::workflow_snapshot(c, p, &task.id, now).await?;
         task.workflow_status = snapshot["work_status"].as_str().map(str::to_owned);
-        if task.workflow_status.as_deref() == Some("waiting_review") {
+        // A pending scoped decision makes the task blocked even while a review lease
+        // is live; the lease stays in the workflow evidence but is not processing.
+        if task.status(now) == "waiting_review" {
             task.processing = review_processing(c, &snapshot).await?;
         }
     } else if task.status(now) == "in_progress" {

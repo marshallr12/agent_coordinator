@@ -31,6 +31,10 @@ const tasks = [
   makeTask('t-lapsed', 'Lapsed review task', 'waiting_review', { processing: { kind: 'review', stage: 'review_lease_expired', active: false, holders: [], pending_reviews: 1 } }),
   makeTask('t-recovery', 'Recovery task', 'recovery_required', { current_attempt_id: 'a-2' }),
   makeTask('t-blocked', 'Blocked task', 'blocked', { blocked_reason: 'Waiting' }),
+  // A pending scoped decision blocks the task while the reviewer's lease is still live; processing must not override it.
+  makeTask('t-blocked-review', 'Blocked live review task', 'blocked', { processing: { kind: 'review', stage: 'in_review', active: true, holders: [reviewer], pending_reviews: 1 } }),
+  makeTask('t-recovery-review', 'Recovery with review payload task', 'recovery_required', { current_attempt_id: 'a-3', processing: { kind: 'review', stage: 'in_review', active: true, holders: [reviewer], pending_reviews: 1 } }),
+  makeTask('t-integration-work', 'Integration with work payload task', 'waiting_integration', { processing: { kind: 'work', stage: 'in_progress', active: true, holders: [worker] } }),
 ];
 const detailOf = (task) => ({ ...task, attempts: [], checkpoints: [], workflow: { phase: 'review', blockers: [], submission: null, activities: [], next_actions: [] }, job_evidence: { jobs: [], reservations: [] }, lifecycle_events: [], replaces: [] });
 
@@ -135,7 +139,7 @@ async function main() {
     await send('Page.navigate', { url: `http://127.0.0.1:${serverPort}/` });
     await waitPage("document.querySelector('.project-card')", 'project list');
     await evaluate("document.querySelector('.project-open').click()");
-    await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 6", 'task list');
+    await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 9", 'task list');
 
     // What a badge looks like: its text, its icon, whether the icon animates, and its tooltip.
     const describe = (scope, title) => evaluate(`(() => {
@@ -151,6 +155,9 @@ async function main() {
       'Lapsed review task': { text: 'Review Lease Expired', animated: false },
       'Recovery task': { text: 'Recovery Required', animated: false },
       'Blocked task': { text: 'Blocked', animated: false },
+      'Blocked live review task': { text: 'Blocked', animated: false },
+      'Recovery with review payload task': { text: 'Recovery Required', animated: false },
+      'Integration with work payload task': { text: 'Waiting Integration', animated: false },
     };
     const inks = {};
     for (const [title, expected] of Object.entries(expectations)) {
@@ -161,6 +168,15 @@ async function main() {
     }
     assert(inks['Active review task'] !== inks['Queued review task'] && inks['Active review task'] !== inks['Lapsed review task'], 'The active review does not have a distinct color.');
     await shot('list');
+    // An incompatible processing payload never wins: no review accent, stage class, active state or lease tooltip.
+    const accent = (title) => evaluate(`(() => { const row = [...document.querySelectorAll('#tasks-list .task-row')].find((item) => item.querySelector('.task-title').textContent === ${JSON.stringify(title)}); const badge = row.querySelector('.status-badge'); return { rowClass: row.className, badgeClass: badge.className, tip: badge.querySelector('.status-tip') ? badge.querySelector('.status-tip').textContent : null, ink: getComputedStyle(badge).color, accent: getComputedStyle(row).getPropertyValue('--task-accent').trim() }; })()`);
+    const plainBlocked = await accent('Blocked task');
+    for (const title of ['Blocked live review task', 'Recovery with review payload task', 'Integration with work payload task']) {
+      const view = await accent(title);
+      assert(!/stage-|is-active/.test(view.rowClass + view.badgeClass) && view.tip === null, `"${title}" still carries processing state: ${JSON.stringify(view)}`);
+    }
+    const blockedLive = await accent('Blocked live review task');
+    assert(blockedLive.ink === plainBlocked.ink && blockedLive.accent === plainBlocked.accent, `The blocked task with a live review lease has the review color or accent: ${JSON.stringify([blockedLive, plainBlocked])}`);
     // The queued review has a still dashed icon, never the active animation or color.
     const queued = await describe('list', 'Queued review task');
     assert(queued.icon.includes('queued') && !queued.tip.includes('Lease expires'), 'The queued review should show a still queued icon and no lease.');
@@ -189,7 +205,7 @@ async function main() {
       if (title === 'Active review task') await shot('detail-review');
       if (title === 'In progress task') await shot('detail-work');
       await evaluate("document.querySelector('#back-to-tasks').click()");
-      await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 6", 'task list');
+      await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 9", 'task list');
     }
 
     // Live updates without a reload: the queued review gets claimed, the active review finishes, the
@@ -201,7 +217,7 @@ async function main() {
     tasks[2] = { ...tasks[2], work_status: 'recovery_required', processing: null };
     await waitPage("document.querySelector('#detail-status .status-label').textContent === 'In Review' && getComputedStyle(document.querySelector('#detail-status .status-icon')).animationName !== 'none'", 'detail to follow the review claim', 9000);
     await evaluate("document.querySelector('#back-to-tasks').click()");
-    await waitPage("document.querySelectorAll('#tasks-list .task-row').length >= 5", 'task list');
+    await waitPage("document.querySelectorAll('#tasks-list .task-row').length >= 8", 'task list');
     await evaluate("document.querySelector('#tasks-auto-refresh').click()");
     await waitPage("(() => { const text = (title) => [...document.querySelectorAll('#tasks-list .task-row')].find((row) => row.querySelector('.task-title').textContent === title)?.querySelector('.status-label').textContent; return text('Queued review task') === 'In Review' && text('In progress task') === 'Recovery Required'; })()", 'list to follow live state via auto-refresh', 9000);
     const after = await describe('list', 'In progress task');
@@ -209,6 +225,30 @@ async function main() {
     assert(await evaluate('window.__noReload === true'), 'The page reloaded instead of updating in place.');
     const finished = await evaluate("(() => { const row = [...document.querySelectorAll('#tasks-list .task-row')].find((item) => item.querySelector('.task-title').textContent === 'Active review task'); return row ? row.querySelector('.status-label').textContent : null; })()");
     assert(finished === null || finished === 'Done', `A finished review still shows an active indicator: ${finished}`);
+
+    // Blocked while the review lease stays live, then the decision is resolved: the same processing payload
+    // is shown again as In Review in the open detail and in the list, without a reload; a lapsed lease stays inactive.
+    const blockedIndex = tasks.findIndex((task) => task.id === 't-blocked-review');
+    const blockedLiveReview = tasks[blockedIndex];
+    const listLabel = (title) => `(() => { const row = [...document.querySelectorAll('#tasks-list .task-row')].find((item) => item.querySelector('.task-title').textContent === ${JSON.stringify(title)}); return row ? row.querySelector('.status-label').textContent : null; })()`;
+    await openDetail('Blocked live review task');
+    const detailBlocked = await describe('detail', 'Blocked live review task');
+    assert(detailBlocked.text === 'Blocked' && !detailBlocked.animated && detailBlocked.tip === null && !await evaluate("document.querySelector('#detail-status').className.includes('stage-')"), `Detail of a blocked task with a live review lease shows review state: ${JSON.stringify(detailBlocked)}`);
+    tasks[blockedIndex] = { ...blockedLiveReview, work_status: 'waiting_review' };
+    await waitPage("document.querySelector('#detail-status .status-label').textContent === 'In Review' && getComputedStyle(document.querySelector('#detail-status .status-icon')).animationName !== 'none' && document.querySelector('#detail-status').className.includes('is-active')", 'detail to restore In Review after the decision is resolved', 9000);
+    await evaluate("document.querySelector('#back-to-tasks').click()");
+    await waitPage(`${listLabel('Blocked live review task')} === 'In Review'`, 'list to restore In Review after the decision is resolved', 9000);
+    const restored = await describe('list', 'Blocked live review task');
+    assert(restored.animated && restored.tip.includes('Reviewer: oracle-1-verdict'), `The restored review is not animated with its lease context: ${JSON.stringify(restored)}`);
+    assert((await accent('Blocked live review task')).rowClass.includes('stage-in_review'), 'The restored review lacks its row accent.');
+    // A new decision blocks it again, and then the lease expires: neither state is active.
+    tasks[blockedIndex] = blockedLiveReview;
+    await waitPage(`${listLabel('Blocked live review task')} === 'Blocked'`, 'list to block the review again', 9000);
+    assert(!(await describe('list', 'Blocked live review task')).animated, 'The re-blocked review still animates.');
+    tasks[blockedIndex] = { ...blockedLiveReview, work_status: 'waiting_review', processing: { kind: 'review', stage: 'review_lease_expired', active: false, holders: [], pending_reviews: 1 } };
+    await waitPage(`${listLabel('Blocked live review task')} === 'Review Lease Expired'`, 'list to show the expired review lease', 9000);
+    assert(!(await describe('list', 'Blocked live review task')).animated, 'An expired review lease animates.');
+    assert(await evaluate('window.__noReload === true'), 'The page reloaded during the blocked-review transitions.');
 
     // Reduced motion: the stage text stays, the animation stops.
     await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
