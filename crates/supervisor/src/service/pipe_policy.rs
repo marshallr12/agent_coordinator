@@ -82,6 +82,54 @@ pub fn package_descriptor(runner: &str, package: &str) -> Result<String> {
     ))
 }
 
+/// The NETWORK logon SID, which every token of a logon over the network
+/// carries.
+const NETWORK: &str = "S-1-5-2";
+
+/// The access list of one launch's broker pipe. `broker`, the account the
+/// broker runs as, owns the pipe and has it in full; the launch's `account`
+/// and its `package` each get [`CLIENT_RIGHTS`]. An AppContainer token is
+/// granted only what both its user check and its package check grant, so
+/// the launch's token needs both entries. A NETWORK token is denied
+/// outright, the list is protected and the low label lets a low-integrity
+/// client write. When the launch runs as the broker's own account, that
+/// account's one entry is the owner's.
+pub fn broker_descriptor(broker: &str, account: &str, package: &str) -> Result<String> {
+    let (broker, account) = (checked_sid(broker)?, checked_sid(account)?);
+    let package = checked_sid(package)?;
+    ensure!(
+        package != broker && package != account,
+        "a package cannot be an account"
+    );
+    let client = if account == broker {
+        String::new()
+    } else {
+        format!("(A;;{CLIENT_RIGHTS};;;{account})")
+    };
+    Ok(format!(
+        "O:{broker}D:P(D;;GA;;;{NETWORK})(A;;GA;;;{broker}){client}\
+         (A;;{CLIENT_RIGHTS};;;{package}){LOW_LABEL}"
+    ))
+}
+
+/// The access list of a broker's control pipe, through which the runner
+/// opens and closes launches: `broker` owns it and has it in full, the
+/// runner's account `client` gets [`CLIENT_RIGHTS`], and a NETWORK token is
+/// denied. The owner is written out because the runner trusts the pipe only
+/// when the broker's account owns it: the Windows pipe client checks that
+/// before it sends anything.
+pub fn control_descriptor(broker: &str, client: &str) -> Result<String> {
+    let (broker, client) = (checked_sid(broker)?, checked_sid(client)?);
+    let client = if client == broker {
+        String::new()
+    } else {
+        format!("(A;;{CLIENT_RIGHTS};;;{client})")
+    };
+    Ok(format!(
+        "O:{broker}D:P(D;;GA;;;{NETWORK})(A;;GA;;;{broker}){client}"
+    ))
+}
+
 /// The accounts a pipe serves and, for a launch's candidate pipe, the one
 /// package its client's token must carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +156,16 @@ impl Admitted {
     /// or with another, is refused.
     pub fn package(runner: &str, package: &str) -> Result<Self> {
         let allowed = vec![checked_sid(runner)?.to_owned()];
+        let package = Some(checked_sid(package)?.to_owned());
+        Ok(Self { allowed, package })
+    }
+
+    /// A launch's broker pipe: only a token whose user is the launch's
+    /// `account` and whose package is exactly the launch's `package`. The
+    /// broker's own account is not served, and neither is the launch's
+    /// account without that package.
+    pub fn launch(account: &str, package: &str) -> Result<Self> {
+        let allowed = vec![checked_sid(account)?.to_owned()];
         let package = Some(checked_sid(package)?.to_owned());
         Ok(Self { allowed, package })
     }
@@ -300,6 +358,104 @@ mod tests {
         assert!(package_descriptor(RUNNER, RUNNER).is_err());
         assert!(package_descriptor(RUNNER, "S-1-15-2)(A;;GA;;;WD").is_err());
         assert!(Admitted::package(RUNNER, "WD").is_err());
+    }
+
+    /// The account a broker runs as, apart from the launch's.
+    const BROKER: &str = "S-1-5-80-1-2-3-4-5";
+
+    #[test]
+    fn a_broker_pipe_list_names_its_owner_the_launchs_account_and_package_and_denies_network() {
+        let list = broker_descriptor(BROKER, CLIENT, PACKAGE).unwrap();
+        assert_eq!(
+            list,
+            format!(
+                "O:{BROKER}D:P(D;;GA;;;S-1-5-2)(A;;GA;;;{BROKER})(A;;0x120083;;;{CLIENT})\
+                 (A;;0x120083;;;{PACKAGE})S:(ML;;NW;;;LW)"
+            )
+        );
+        assert_eq!(list.matches("(A;").count(), 3, "exactly three grants");
+        assert!(!list.contains("WD") && !list.contains("AC") && !list.contains("BU"));
+        let same = broker_descriptor(CLIENT, CLIENT, PACKAGE).unwrap();
+        assert_eq!(
+            same,
+            format!(
+                "O:{CLIENT}D:P(D;;GA;;;S-1-5-2)(A;;GA;;;{CLIENT})\
+                 (A;;0x120083;;;{PACKAGE})S:(ML;;NW;;;LW)"
+            )
+        );
+    }
+
+    #[test]
+    fn a_control_pipe_list_is_owned_by_the_broker_and_lets_in_only_the_runner() {
+        let list = control_descriptor(BROKER, CLIENT).unwrap();
+        assert_eq!(
+            list,
+            format!("O:{BROKER}D:P(D;;GA;;;S-1-5-2)(A;;GA;;;{BROKER})(A;;0x120083;;;{CLIENT})")
+        );
+        let same = control_descriptor(CLIENT, CLIENT).unwrap();
+        assert_eq!(
+            same,
+            format!("O:{CLIENT}D:P(D;;GA;;;S-1-5-2)(A;;GA;;;{CLIENT})")
+        );
+        for forged in ["", "WD", "S-1-5-80)(A;;GA;;;WD"] {
+            assert!(control_descriptor(forged, CLIENT).is_err(), "{forged:?}");
+            assert!(control_descriptor(BROKER, forged).is_err(), "{forged:?}");
+        }
+    }
+
+    #[test]
+    fn a_broker_pipe_list_takes_only_plain_sids_and_a_package_that_is_not_an_account() {
+        assert!(broker_descriptor(BROKER, CLIENT, CLIENT).is_err());
+        assert!(broker_descriptor(BROKER, CLIENT, BROKER).is_err());
+        for forged in ["", "WD", "S-1-15-2)(A;;GA;;;WD"] {
+            assert!(
+                broker_descriptor(forged, CLIENT, PACKAGE).is_err(),
+                "{forged:?}"
+            );
+            assert!(
+                broker_descriptor(BROKER, forged, PACKAGE).is_err(),
+                "{forged:?}"
+            );
+            assert!(
+                broker_descriptor(BROKER, CLIENT, forged).is_err(),
+                "{forged:?}"
+            );
+            assert!(Admitted::launch(forged, PACKAGE).is_err(), "{forged:?}");
+            assert!(Admitted::launch(CLIENT, forged).is_err(), "{forged:?}");
+        }
+    }
+
+    #[test]
+    fn a_broker_pipe_serves_only_the_launchs_account_with_exactly_its_package() {
+        let served = Admitted::launch(CLIENT, PACKAGE).unwrap();
+        let token = |account: &str, package: Package| ClientFacts {
+            package,
+            ..facts(Some(account), Some(9))
+        };
+        let client = admit(&served, &token(CLIENT, Package::Sid(PACKAGE.into()))).unwrap();
+        assert_eq!(
+            (client.account.as_str(), client.package.as_deref()),
+            (CLIENT, Some(PACKAGE))
+        );
+        let refusals = [
+            (token(CLIENT, Package::None), Refusal::WrongPackage(None)),
+            (
+                token(CLIENT, Package::Sid(OTHER_PACKAGE.into())),
+                Refusal::WrongPackage(Some(OTHER_PACKAGE.into())),
+            ),
+            (token(CLIENT, Package::Unknown), Refusal::PackageUnknown),
+            (
+                token(OTHER, Package::Sid(PACKAGE.into())),
+                Refusal::NotAllowed(OTHER.into()),
+            ),
+            (
+                token(BROKER, Package::Sid(PACKAGE.into())),
+                Refusal::NotAllowed(BROKER.into()),
+            ),
+        ];
+        for (facts, refusal) in refusals {
+            assert_eq!(admit(&served, &facts), Err(refusal));
+        }
     }
 
     #[test]

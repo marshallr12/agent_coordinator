@@ -13,6 +13,7 @@
 //! Without it the service claims nothing, because no provider harness is
 //! supported on Windows; it still writes its heartbeat, and it never opens
 //! the runner's pipe.
+use super::authority_pipe::AuthorityServer;
 use super::job::Limits;
 use super::launcher::LaunchSpec;
 use super::process::Command;
@@ -23,12 +24,15 @@ use super::text::wide;
 use crate::config::Config;
 use crate::host_runtime::Refusing;
 use crate::run_loop::Launch;
+use crate::service::authority::Authority;
 use crate::service::lifecycle::Report;
 use crate::service::stand_in::{Ledger, Recorded, StandIn, StandInSettings};
 use crate::service::supervisor::{LoopDriver, NO_HARNESS, NoHarness, Pace, SupervisorSettings};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
@@ -100,9 +104,65 @@ fn with_stand_in(
     let link = PipeLink::new(&settings.runner_pipe, &settings.runner_sid);
     let remote = RemoteHost::new(Fixture(stand_in.clone()), link);
     let recorded = Recorded::new(remote, ledger.clone());
-    let work = StandIn::new(&stand_in.queue_dir, ledger);
-    let mut driver = LoopDriver::new(recorded, work, pace, host.shared_signal());
+    let work = StandIn::new(&stand_in.queue_dir, ledger.clone());
+    let driver = LoopDriver::new(recorded, work, pace, host.shared_signal());
+    let authority = Arc::new(Authority::new(Box::new(ledger)));
+    let _served = match settings.publication_broker() {
+        Some(broker) => Some(AuthorityService::start(
+            settings,
+            broker,
+            authority.clone(),
+        )?),
+        None => None,
+    };
+    let mut driver = driver.with_authority(authority);
     crate::run_loop::run(&mut driver, config, false)
+}
+
+/// The authority pipe served on a thread of its own while the loop runs;
+/// dropping it stops the thread and removes the pipe.
+struct AuthorityService {
+    done: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AuthorityService {
+    /// Serves `settings.authority_pipe`, owned by this service's account,
+    /// to the publication broker's account `broker`, answering from
+    /// `authority`.
+    fn start(
+        settings: &SupervisorSettings,
+        broker: &str,
+        authority: Arc<Authority>,
+    ) -> Result<Self> {
+        let me = super::token::current_user_sid()?;
+        let pipe = &settings.authority_pipe;
+        let mut server = AuthorityServer::new(pipe, &me, broker, authority, None)?;
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = done.clone();
+        let thread = std::thread::spawn(move || {
+            let stopping = || stop.load(Ordering::SeqCst);
+            while !stopping() {
+                if let Err(error) = server.serve_one(Duration::from_millis(500), &stopping) {
+                    eprintln!("agentc-supervisor windows-service: authority pipe: {error:#}");
+                }
+            }
+        });
+        Ok(Self {
+            done,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for AuthorityService {
+    /// Stops the serving thread and waits for it.
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// Runs the loop with no work: every poll is refused and the heartbeat

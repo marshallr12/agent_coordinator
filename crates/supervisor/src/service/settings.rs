@@ -37,6 +37,23 @@ pub struct ServiceSettings {
     pub terminate_patience_seconds: u64,
     /// Seconds between status reports while the service is stopping.
     pub status_interval_seconds: u64,
+    /// The egress broker's control pipe below `\\.\pipe\`. Empty: no
+    /// launch is offered brokered egress, and a launch's token still has
+    /// no network at all. Set: every launch must be admitted by the broker
+    /// before it starts, and a launch the broker does not admit, or whose
+    /// broker is not there, is not started.
+    pub egress_control_pipe: String,
+    /// The egress broker's account, as SID text: its control pipe is used
+    /// only when this account owns it. Required with `egress_control_pipe`.
+    pub egress_broker_sid: String,
+    /// The publication broker's control pipe below `\\.\pipe\`. Empty: no
+    /// launch is offered brokered publication. Set: every implementer
+    /// launch must be admitted by the broker before it starts, as with
+    /// egress, and is told its pipe in the CLI's candidate push variable.
+    pub publication_control_pipe: String,
+    /// The publication broker's account, as SID text. Required with
+    /// `publication_control_pipe`.
+    pub publication_broker_sid: String,
 }
 
 impl Default for ServiceSettings {
@@ -51,6 +68,10 @@ impl Default for ServiceSettings {
             preshutdown_timeout_seconds: 120,
             terminate_patience_seconds: 20,
             status_interval_seconds: 3,
+            egress_control_pipe: String::new(),
+            egress_broker_sid: String::new(),
+            publication_control_pipe: String::new(),
+            publication_broker_sid: String::new(),
         }
     }
 }
@@ -72,6 +93,27 @@ impl ServiceSettings {
         pipe_path(&self.pipe_name)
     }
 
+    /// The egress broker's control pipe and account, when launches are
+    /// to be admitted by one; an error when only one of them is set or
+    /// either is malformed.
+    pub fn egress(&self) -> Result<Option<(&str, &str)>> {
+        let pair = (
+            self.egress_control_pipe.as_str(),
+            self.egress_broker_sid.as_str(),
+        );
+        broker_pair("egress", pair)
+    }
+
+    /// The publication broker's control pipe and account, as
+    /// [`ServiceSettings::egress`].
+    pub fn publication(&self) -> Result<Option<(&str, &str)>> {
+        let pair = (
+            self.publication_control_pipe.as_str(),
+            self.publication_broker_sid.as_str(),
+        );
+        broker_pair("publication", pair)
+    }
+
     /// Refuses settings the service could not honor. The service calls it
     /// before it opens anything.
     pub fn validate(&self) -> Result<()> {
@@ -82,6 +124,8 @@ impl ServiceSettings {
             "windows_service.client_sid names no client account; the pipe would serve nobody"
         );
         checked_sid(&self.client_sid)?;
+        self.egress()?;
+        self.publication()?;
         ensure!(
             self.status_interval_seconds >= 1,
             "windows_service.status_interval_seconds must be at least 1"
@@ -103,6 +147,25 @@ impl ServiceSettings {
         );
         Ok(())
     }
+}
+
+/// A broker's control pipe and account from the settings named after
+/// `broker`: both empty is none, and one without the other or either
+/// malformed is an error.
+fn broker_pair<'a>(
+    broker: &str,
+    (pipe, sid): (&'a str, &'a str),
+) -> Result<Option<(&'a str, &'a str)>> {
+    if pipe.is_empty() && sid.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        !pipe.is_empty() && !sid.is_empty(),
+        "windows_service.{broker}_control_pipe and {broker}_broker_sid are set together \
+         or not at all"
+    );
+    pipe_path(pipe)?;
+    Ok(Some((pipe, checked_sid(sid)?)))
 }
 
 #[cfg(test)]
@@ -129,6 +192,45 @@ mod tests {
         let refused = settings.validate().unwrap_err().to_string();
         assert!(refused.contains("client_sid"), "{refused}");
         valid().validate().unwrap();
+        assert_eq!(valid().egress().unwrap(), None, "no egress by default");
+    }
+
+    #[test]
+    fn an_egress_broker_is_named_by_its_control_pipe_and_its_account() {
+        let settings = ServiceSettings {
+            egress_control_pipe: "agentc-egress-control".into(),
+            egress_broker_sid: "S-1-5-80-1-2".into(),
+            ..valid()
+        };
+        settings.validate().unwrap();
+        let named = settings.egress().unwrap();
+        assert_eq!(named, Some(("agentc-egress-control", "S-1-5-80-1-2")));
+    }
+
+    #[test]
+    fn a_publication_broker_is_named_as_the_egress_broker_is_and_none_by_default() {
+        assert_eq!(valid().publication().unwrap(), None);
+        let settings = ServiceSettings {
+            publication_control_pipe: "agentc-publication-control".into(),
+            publication_broker_sid: "S-1-5-80-3-4".into(),
+            ..valid()
+        };
+        settings.validate().unwrap();
+        let named = settings.publication().unwrap();
+        assert_eq!(named, Some(("agentc-publication-control", "S-1-5-80-3-4")));
+        for half in [
+            ServiceSettings {
+                publication_control_pipe: "agentc-publication-control".into(),
+                ..valid()
+            },
+            ServiceSettings {
+                publication_broker_sid: "S-1-5-80-3-4".into(),
+                ..valid()
+            },
+        ] {
+            let refused = half.validate().unwrap_err().to_string();
+            assert!(refused.contains("publication_control_pipe"), "{refused}");
+        }
     }
 
     #[test]
@@ -142,7 +244,13 @@ mod tests {
 
     #[test]
     fn settings_the_service_could_not_honor_are_refused() {
-        let broken: [fn(&mut ServiceSettings); 8] = [
+        let broken: [fn(&mut ServiceSettings); 11] = [
+            |s| s.egress_control_pipe = "agentc-egress-control".into(),
+            |s| s.egress_broker_sid = "S-1-5-80-1-2".into(),
+            |s| {
+                s.egress_control_pipe = r"..\x".into();
+                s.egress_broker_sid = "S-1-5-80-1-2".into();
+            },
             |s| s.client_sid = "everyone".into(),
             |s| s.client_sid = "S-1-5-1)(A;;GA;;;WD".into(),
             |s| s.pipe_name = r"..\x".into(),

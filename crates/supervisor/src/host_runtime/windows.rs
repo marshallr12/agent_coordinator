@@ -27,17 +27,24 @@
 //! admits one configured client, and the platform-neutral
 //! [`crate::service`] decides its life. [`supervisor_service`] hosts the
 //! supervisor's own loop as a second service, which reaches launches only
-//! through that pipe ([`pipe_client`], [`remote`]).
+//! through that pipe ([`pipe_client`], [`remote`]). A launch reaches a host
+//! broker over a pipe of its own that admits only the launch's token
+//! ([`broker`]).
 //!
 //! [`WindowsHost`] is the [`HostRuntime`] over one [`launcher::Launcher`].
 //! No provider harness is supported on Windows yet, so what a launch runs
 //! comes from a [`Planner`] the caller supplies; nothing in this crate
 //! builds a harness launch for it.
 pub mod adoption;
+pub mod authority_pipe;
+pub mod broker;
+pub mod broker_control;
 pub mod candidate;
 pub mod candidate_pipe;
 pub mod candidate_shell;
 pub mod desktop;
+pub mod egress_admission;
+pub mod egress_broker;
 pub mod inspection;
 pub mod job;
 pub mod journal;
@@ -46,6 +53,7 @@ pub mod pipe;
 pub mod pipe_client;
 pub mod process;
 pub mod profile;
+pub mod publication_broker;
 pub mod reader;
 pub mod recovery;
 pub mod remote;

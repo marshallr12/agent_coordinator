@@ -7,11 +7,13 @@
 //! Every launch is journaled before it starts ([`super::journal`]). When the
 //! runner's input ends, the runner exits, its job handles close and Windows
 //! ends every launch it held.
+use super::broker::Role;
 use super::candidate::{self, Candidate, CandidateSpec, Tuning};
 use super::candidate_pipe::{self, Server};
 use super::desktop::StationNotOurs;
+use super::egress_admission::{Admissions, BrokerRoute, EgressRoute};
 use super::journal::{CandidateRecord, Entry, Journal, Stage};
-use super::launcher::{LaunchSpec, Launcher, Seen, job_owner};
+use super::launcher::{LaunchSpec, Launcher, Prepared, Seen, job_owner};
 use super::process::Command;
 use super::reader::{PathRefused, validated_read};
 use super::recovery;
@@ -47,6 +49,12 @@ pub enum Request {
         attempt: Option<String>,
         #[serde(default)]
         generation: Option<u64>,
+        /// The side of the review the launch works on, journaled with it.
+        #[serde(default)]
+        role: Option<Role>,
+        /// The coordinator task the launch works on, journaled with it.
+        #[serde(default)]
+        task: Option<String>,
         /// A reviewer launch's candidate, prepared with it.
         #[serde(default)]
         candidate: Option<Box<CandidateSpec>>,
@@ -130,6 +138,44 @@ impl Request {
     }
 }
 
+/// What the caller of `prepare` says a launch is for: the exact source
+/// revision, the coordinator attempt and generation, the side of the
+/// review and the task. Journaled, not checked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Purpose {
+    source: Option<String>,
+    attempt: Option<String>,
+    generation: Option<u64>,
+    role: Option<Role>,
+    task: Option<String>,
+}
+
+impl Purpose {
+    /// The journal entry of `launch`, just `prepared` in the AppContainer
+    /// profile `profile` for this purpose, with no directories, candidate
+    /// or start recorded yet.
+    fn entry(self, launch: &str, profile: String, prepared: &Prepared) -> Entry {
+        Entry {
+            launch: launch.to_owned(),
+            stage: Stage::Prepared,
+            profile,
+            package_sid: prepared.package_sid.clone(),
+            job_owner: prepared.job_owner.clone(),
+            executable: None,
+            source: self.source,
+            attempt: self.attempt,
+            generation: self.generation,
+            role: self.role,
+            task: self.task,
+            pid: None,
+            created: None,
+            control: None,
+            work: None,
+            candidate: None,
+        }
+    }
+}
+
 /// A launcher, its journal and the launches this run prepared.
 pub struct Runner {
     launcher: Launcher,
@@ -137,6 +183,12 @@ pub struct Runner {
     mine: BTreeSet<String>,
     /// The candidates of this run's reviewer launches.
     candidates: BTreeMap<String, Served>,
+    /// The egress broker every launch must be admitted by, if any, and
+    /// the launches it admitted.
+    egress: Admissions,
+    /// The publication broker every implementer launch must be admitted
+    /// by, if any, and the launches it admitted.
+    publication: Admissions,
 }
 
 /// A reviewer launch's candidate and the threads that serve its pipe.
@@ -169,7 +221,29 @@ impl Runner {
             journal: Journal::open(state)?,
             mine: BTreeSet::new(),
             candidates: BTreeMap::new(),
+            egress: Admissions::default(),
+            publication: Admissions::default(),
         })
+    }
+
+    /// This runner, having every launch admitted by the egress broker
+    /// `route` before it starts; `None` offers no launch brokered egress.
+    pub fn with_egress(mut self, route: Option<EgressRoute>) -> Self {
+        self.egress = Admissions::new(route);
+        self
+    }
+
+    /// This runner, having every implementer launch admitted by the
+    /// publication broker `route` before it starts; `None` offers no launch
+    /// brokered publication.
+    pub fn with_publication(mut self, route: Option<BrokerRoute>) -> Self {
+        self.publication = Admissions::new(route);
+        self
+    }
+
+    /// The runner's egress admissions, for a caller that reports on them.
+    pub fn egress(&self) -> &Admissions {
+        &self.egress
     }
 
     /// The candidate of this run's reviewer launch `launch`, if it has one.
@@ -188,10 +262,18 @@ impl Runner {
                 source,
                 attempt,
                 generation,
+                role,
+                task,
                 candidate,
             } => {
-                let record = (source, attempt, generation);
-                self.prepare(&launch, spec, record, candidate.map(|spec| *spec))
+                let purpose = Purpose {
+                    source,
+                    attempt,
+                    generation,
+                    role,
+                    task,
+                };
+                self.prepare(&launch, spec, purpose, candidate.map(|spec| *spec))
             }
             Request::HoldFile { launch, path } => {
                 let handle = self.launcher.hold_file(&launch, &path)?;
@@ -272,7 +354,7 @@ impl Runner {
         &mut self,
         launch: &str,
         spec: LaunchSpec,
-        (source, attempt, generation): (Option<String>, Option<String>, Option<u64>),
+        purpose: Purpose,
         candidate: Option<CandidateSpec>,
     ) -> Result<Value> {
         ensure!(
@@ -295,20 +377,10 @@ impl Runner {
             .as_ref()
             .map(|served| record_of(&served.candidate));
         let entry = Entry {
-            launch: launch.to_owned(),
-            stage: Stage::Prepared,
-            profile,
-            package_sid: prepared.package_sid.clone(),
-            job_owner: prepared.job_owner.clone(),
-            executable: None,
-            source,
-            attempt,
-            generation,
-            pid: None,
-            created: None,
             control: Some(control),
             work: Some(work),
             candidate: record,
+            ..purpose.entry(launch, profile, &prepared)
         };
         self.journal_or_undo(launch, &entry, candidate)?;
         let mut answer = serde_json::to_value(prepared)?;
@@ -458,17 +530,51 @@ impl Runner {
         (self.journal.load(launch)).with_context(|| format!("launch {launch} has no journal entry"))
     }
 
-    /// Journals the intent to start, starts, then journals the identity
-    /// Windows gave the launch. A refused start leaves nothing running.
+    /// Starts a prepared launch once its candidate runner and, when they
+    /// are configured, the egress and publication brokers allow it. A start
+    /// that fails gives up the brokers' admissions again.
     fn start(&mut self, launch: &str, command: &Command, listed: &[u64]) -> Result<Value> {
-        let mut entry = self.entry(launch)?;
+        let entry = self.entry(launch)?;
         ensure!(!self.launcher.runs(launch)?, "launch {launch} already runs");
         self.refuse_broken_candidate(launch)?;
+        let command = self.egress.admit(&entry, command)?;
+        let started = self
+            .publication
+            .admit(&entry, &command)
+            .and_then(|command| self.start_admitted(entry, &command, listed));
+        if started.is_err() {
+            self.give_up_admissions(launch);
+        }
+        started
+    }
+
+    /// Asks both brokers to stop serving `launch`, whose start failed. A
+    /// launch whose release fails stays kept: its cleanup asks again.
+    fn give_up_admissions(&mut self, launch: &str) {
+        let released = [
+            ("egress", self.egress.release(launch)),
+            ("publication", self.publication.release(launch)),
+        ];
+        for (broker, error) in released {
+            if let Some(error) = error {
+                eprintln!("agentc-supervisor: {broker} of {launch}: {error}");
+            }
+        }
+    }
+
+    /// Journals the intent to start, starts, then journals the identity
+    /// Windows gave the launch. A refused start leaves nothing running.
+    fn start_admitted(
+        &mut self,
+        mut entry: Entry,
+        command: &Command,
+        listed: &[u64],
+    ) -> Result<Value> {
         entry.stage = Stage::Starting;
         entry.executable = command.argv.first().cloned();
         (entry.pid, entry.created) = (None, None);
         self.journal.save(&entry)?;
-        let started = match self.launcher.start(launch, command, listed) {
+        let started = match self.launcher.start(&entry.launch, command, listed) {
             Ok(started) => started,
             Err(error) => {
                 entry.stage = Stage::Prepared;
@@ -512,6 +618,8 @@ impl Runner {
     fn cleanup(&mut self, launch: &str, remove: bool) -> Result<Value> {
         let entry = self.entry(launch)?;
         self.retire_candidate(launch)?;
+        let egress = self.egress.release(launch);
+        let publication = self.publication.release(launch);
         let deleted = self.launcher.cleanup(launch);
         let profile_deleted = deleted.is_ok();
         let detail = deleted.err().map(|error| format!("{error:#}"));
@@ -524,7 +632,8 @@ impl Runner {
         self.mine.remove(launch);
         Ok(
             json!({ "profile_deleted": profile_deleted, "detail": detail,
-                   "directories_removed": remove }),
+                   "directories_removed": remove, "egress_detail": egress,
+                   "publication_detail": publication }),
         )
     }
 
@@ -569,7 +678,12 @@ impl Runner {
             remove_directories(&entry)?;
         }
         self.journal.remove(launch)?;
-        Ok(json!({ "profile_deleted": deleted, "directories_removed": remove }))
+        let egress = self.egress.release_earlier(launch);
+        let publication = self.publication.release_earlier(launch);
+        Ok(
+            json!({ "profile_deleted": deleted, "directories_removed": remove,
+                   "egress_detail": egress, "publication_detail": publication }),
+        )
     }
 }
 
@@ -756,4 +870,74 @@ pub fn serve(input: impl BufRead, mut output: impl Write, state: &Path) -> Resul
         output.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `prepare` request with `extra` fields besides the required ones,
+    /// as the runner parses it.
+    fn parsed(extra: Value) -> serde_json::Result<Request> {
+        let mut request = json!({"op": "prepare", "launch": "l1",
+            "spec": {"profile": "agentc.test", "less_privileged": true, "capabilities": [],
+                     "limits": {"processes": 4, "process_memory_mb": 64, "job_memory_mb": 128},
+                     "control": "c", "work": "w"}});
+        for (name, value) in extra.as_object().unwrap() {
+            request[name] = value.clone();
+        }
+        serde_json::from_value(request)
+    }
+
+    /// [`parsed`], which must succeed.
+    fn prepare(extra: Value) -> Request {
+        parsed(extra).unwrap()
+    }
+
+    /// The role a `prepare` request carries.
+    fn role_of(request: Request) -> Option<Role> {
+        let Request::Prepare { role, .. } = request else {
+            panic!("not a prepare request");
+        };
+        role
+    }
+
+    #[test]
+    fn a_prepare_request_may_name_a_role_and_older_ones_name_none() {
+        assert_eq!(role_of(prepare(json!({}))), None);
+        let named = prepare(json!({"role": "reviewer", "attempt": "a1", "generation": 2}));
+        assert_eq!(role_of(named), Some(Role::Reviewer));
+        assert!(parsed(json!({"role": "owner"})).is_err(), "an unknown role");
+    }
+
+    #[test]
+    fn the_purpose_of_a_launch_is_journaled_as_given() {
+        let prepared = Prepared {
+            package_sid: "S-1-15-2-1".into(),
+            desktop: r"s\d".into(),
+            job_owner: "runner:10:500".into(),
+        };
+        let purpose = Purpose {
+            source: Some("6be041f".into()),
+            attempt: Some("a1".into()),
+            generation: Some(4),
+            role: Some(Role::Implementer),
+            task: Some("t-1".into()),
+        };
+        let entry = purpose.entry("impl-1", "agentc.test".into(), &prepared);
+        assert_eq!(entry.role, Some(Role::Implementer));
+        assert_eq!(entry.task.as_deref(), Some("t-1"));
+        let kept = (
+            entry.source.as_deref(),
+            entry.attempt.as_deref(),
+            entry.generation,
+        );
+        assert_eq!(kept, (Some("6be041f"), Some("a1"), Some(4)));
+        assert_eq!(
+            (entry.launch.as_str(), entry.profile.as_str()),
+            ("impl-1", "agentc.test")
+        );
+        assert_eq!(entry.package_sid, prepared.package_sid);
+        assert_eq!(entry.stage, Stage::Prepared);
+    }
 }

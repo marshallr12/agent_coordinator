@@ -3,6 +3,7 @@
 //! and again once Windows has given the launch its identity. A runner that
 //! finds an entry it did not write this run never starts that launch again:
 //! it only judges whether the launch may still run ([`super::recovery`]).
+use super::broker::Role;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -42,6 +43,17 @@ pub struct Entry {
     pub source: Option<String>,
     pub attempt: Option<String>,
     pub generation: Option<u64>,
+    /// The side of the review the caller says the launch works on.
+    /// Recorded, not checked; absent when the caller named none and in
+    /// older entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+    /// The coordinator task the caller says the launch works on, which
+    /// names an implementer's candidate ref at the publication broker.
+    /// Recorded, not checked; absent when the caller named none and in
+    /// older entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
     /// The root process of the last start and its creation time.
     pub pid: Option<u32>,
     pub created: Option<u64>,
@@ -164,6 +176,8 @@ mod tests {
             source: Some("6be041f".into()),
             attempt: Some("a1".into()),
             generation: Some(4),
+            role: None,
+            task: None,
             pid: None,
             created: None,
             control: None,
@@ -194,6 +208,47 @@ mod tests {
             plain.get("candidate").is_none(),
             "older readers see no new field"
         );
+    }
+
+    #[test]
+    fn a_launchs_role_is_saved_and_older_entries_without_one_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let saved = Entry {
+            role: Some(Role::Implementer),
+            ..entry("impl-1")
+        };
+        journal.save(&saved).unwrap();
+        assert_eq!(journal.load("impl-1"), Some(saved.clone()));
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join("impl-1.json")).unwrap()).unwrap();
+        assert_eq!(written["role"], "implementer");
+        let older = serde_json::to_value(entry("old-1")).unwrap();
+        assert!(
+            older.get("role").is_none(),
+            "older readers see no new field"
+        );
+        fs::write(dir.path().join("old-1.json"), older.to_string()).unwrap();
+        assert_eq!(journal.load("old-1").map(|e| e.role), Some(None));
+    }
+
+    #[test]
+    fn a_launchs_task_is_saved_and_older_entries_without_one_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let saved = Entry {
+            task: Some("t-1".into()),
+            ..entry("impl-1")
+        };
+        journal.save(&saved).unwrap();
+        assert_eq!(journal.load("impl-1"), Some(saved));
+        let older = serde_json::to_value(entry("old-1")).unwrap();
+        assert!(
+            older.get("task").is_none(),
+            "older readers see no new field"
+        );
+        fs::write(dir.path().join("old-1.json"), older.to_string()).unwrap();
+        assert_eq!(journal.load("old-1").map(|e| e.task), Some(None));
     }
 
     #[test]

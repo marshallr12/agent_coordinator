@@ -38,6 +38,12 @@
 //! WIP ref naming the requested commit is accepted again without pushing; one
 //! naming anything else is a [`RefusalCode::LeaseConflict`]. Nothing is ever
 //! updated or deleted.
+//!
+//! A helper whose authority can end while it serves uses [`serve_one_gated`]:
+//! its gate is asked before any bundle byte is read and again just before
+//! the remote is written, and a refusal (normally
+//! [`RefusalCode::NotAuthorized`]) is the reply. The Linux helper fixes its
+//! launch at spawn and uses [`serve_one`], whose gate always passes.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -108,6 +114,10 @@ pub enum RefusalCode {
     /// The helper could not prepare its private repository, store the bundle,
     /// run the secret scan, or record its lease or intent.
     Internal,
+    /// The helper's authority check refused the push: the calling launch
+    /// may not publish, or the coordinator no longer authorizes its
+    /// attempt. Only a helper served through [`serve_one_gated`] sends it.
+    NotAuthorized,
 }
 
 /// A published candidate: the fixed ref, the commit and tree it now names,
@@ -390,19 +400,57 @@ pub fn send_push<S: Read + Write>(
     prerequisites: &[&str],
     kind: PushKind,
 ) -> Result<PushReceipt> {
-    let checkout = canonical_git_root(checkout)?;
-    let revision = resolve_exact_commit(&checkout, revision)?;
-    let tree = git_text(&checkout, ["rev-parse", &format!("{revision}^{{tree}}")])?;
-    let bundle = OutgoingBundle::create(&checkout, &revision, prerequisites)?;
-    let sent = send_request(stream, &revision, &tree, kind, &bundle.path);
-    let reply = read_line(stream, MAX_REPLY_LINE).and_then(|line| PushReply::parse(&line));
-    match (sent, reply) {
-        (_, Ok(PushReply::Accepted(receipt))) => {
-            validate_candidate_reference(&checkout, &receipt.reference)?;
-            check_receipt(receipt, &revision, &tree, kind)
+    PreparedPush::new(checkout, revision, prerequisites, kind)?.send(stream)
+}
+
+/// A push whose bundle is made and waiting to be sent. A helper that drops
+/// a client silent for long after it connects (the Windows publication
+/// broker's pipe does after ten seconds) is reached only once this exists,
+/// so the time bundling takes is never spent connected.
+pub struct PreparedPush {
+    checkout: PathBuf,
+    revision: String,
+    tree: String,
+    kind: PushKind,
+    bundle: OutgoingBundle,
+}
+
+impl PreparedPush {
+    /// Resolves `revision` in `checkout` and bundles it minus
+    /// `prerequisites`, as [`send_push`] does before it sends.
+    pub fn new(
+        checkout: &Path,
+        revision: &str,
+        prerequisites: &[&str],
+        kind: PushKind,
+    ) -> Result<Self> {
+        let checkout = canonical_git_root(checkout)?;
+        let revision = resolve_exact_commit(&checkout, revision)?;
+        let tree = git_text(&checkout, ["rev-parse", &format!("{revision}^{{tree}}")])?;
+        let bundle = OutgoingBundle::create(&checkout, &revision, prerequisites)?;
+        Ok(Self {
+            checkout,
+            revision,
+            tree,
+            kind,
+            bundle,
+        })
+    }
+
+    /// Sends the request and the bundle on `stream` and checks the
+    /// helper's receipt; a refusal is a [`PushRefusal`] error.
+    pub fn send<S: Read + Write>(&self, stream: &mut S) -> Result<PushReceipt> {
+        let (revision, tree, kind) = (&self.revision, &self.tree, self.kind);
+        let sent = send_request(stream, revision, tree, kind, &self.bundle.path);
+        let reply = read_line(stream, MAX_REPLY_LINE).and_then(|line| PushReply::parse(&line));
+        match (sent, reply) {
+            (_, Ok(PushReply::Accepted(receipt))) => {
+                validate_candidate_reference(&self.checkout, &receipt.reference)?;
+                check_receipt(receipt, revision, tree, kind)
+            }
+            (_, Ok(PushReply::Refused(refusal))) => Err(refusal.into()),
+            (Err(error), Err(_)) | (Ok(()), Err(error)) => Err(error),
         }
-        (_, Ok(PushReply::Refused(refusal))) => Err(refusal.into()),
-        (Err(error), Err(_)) | (Ok(()), Err(error)) => Err(error),
     }
 }
 
@@ -553,7 +601,25 @@ impl<T, E> Refuse<T> for std::result::Result<T, E> {
 /// reply that could not be written. One helper serves its connections one at
 /// a time: concurrent calls sharing a work directory are not supported.
 pub fn serve_one<S: Read + Write>(stream: &mut S, spec: &HelperSpec) -> Result<PushReply> {
-    let reply = fit_reply(match receive_and_publish(stream, spec) {
+    serve_one_gated(stream, spec, &|| Ok(()))
+}
+
+/// The check a gated helper makes before it accepts a bundle and again just
+/// before it publishes; a refusal becomes the reply.
+pub type Gate<'a> = &'a dyn Fn() -> std::result::Result<(), PushRefusal>;
+
+/// As [`serve_one`], asking `gate` twice: once the request line and length
+/// are read and before any bundle byte is, and again after the import and
+/// the secret scan, just before the remote is written. A helper whose
+/// authority can end while it serves (a Windows publication broker asking
+/// the supervisor) refuses through it; nothing is published after a
+/// refusal.
+pub fn serve_one_gated<S: Read + Write>(
+    stream: &mut S,
+    spec: &HelperSpec,
+    gate: Gate<'_>,
+) -> Result<PushReply> {
+    let reply = fit_reply(match receive_and_publish(stream, spec, gate) {
         Ok(receipt) => PushReply::Accepted(receipt),
         Err(refusal) => PushReply::Refused(refusal),
     });
@@ -580,11 +646,17 @@ fn reply_too_long(refusal: &PushRefusal) -> bool {
     PushReply::Refused(refusal.clone()).to_line().len() > MAX_REPLY_LINE
 }
 
-/// Reads the request, refuses a second candidate commit, then reads the
-/// bundle and imports, scans and publishes it to the ref its kind selects.
-fn receive_and_publish<R: Read>(stream: &mut R, spec: &HelperSpec) -> Step<PushReceipt> {
+/// Reads the request, asks `gate`, refuses a second candidate commit, then
+/// reads the bundle and imports and scans it, asks `gate` again and
+/// publishes it to the ref its kind selects.
+fn receive_and_publish<R: Read>(
+    stream: &mut R,
+    spec: &HelperSpec,
+    gate: Gate<'_>,
+) -> Step<PushReceipt> {
     let request = read_request(stream)?;
     let length = read_length(stream, spec.max_bundle_bytes)?;
+    gate()?;
     let helper = Helper::open(spec)?;
     if request.kind == PushKind::Candidate {
         helper.refuse_other_than_leased(&request)?;
@@ -592,6 +664,7 @@ fn receive_and_publish<R: Read>(stream: &mut R, spec: &HelperSpec) -> Step<PushR
     let bundle = helper.receive_bundle(stream, length)?;
     let quarantine = helper.import(&bundle, &request)?;
     helper.scan(&request.revision)?;
+    gate()?;
     let receipt = match request.kind {
         PushKind::Candidate => helper.publish(&request),
         PushKind::Wip => helper.publish_wip(&request),
@@ -1126,3 +1199,6 @@ fn read_bundle_header(path: &Path) -> Result<BundleHeader> {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod gate_tests;

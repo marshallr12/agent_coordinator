@@ -14,6 +14,7 @@
 //! everywhere. The Windows Service Control Manager binding, the named pipe
 //! and the runner service (`host_runtime::windows`) only feed it facts and
 //! carry out what it decides.
+pub mod authority;
 pub mod control;
 pub mod drain;
 pub mod lifecycle;

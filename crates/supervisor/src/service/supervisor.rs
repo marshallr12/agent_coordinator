@@ -13,6 +13,7 @@
 //! [`NoHarness`], which claims nothing because no provider harness is
 //! supported there, and the acceptance stand-in
 //! ([`super::stand_in::StandIn`]). Neither contacts a coordinator.
+use super::authority::{Authority, Held};
 use super::lifecycle::Signal;
 use super::pipe_policy::{checked_sid, pipe_path};
 use super::stand_in::{StandIn, StandInSettings};
@@ -47,6 +48,13 @@ pub struct SupervisorSettings {
     pub runner_sid: String,
     /// Seconds between status reports while the service is stopping.
     pub status_interval_seconds: u64,
+    /// The authority pipe the publication broker asks before each push,
+    /// below `\\.\pipe\`.
+    pub authority_pipe: String,
+    /// The publication broker's account, as SID text: the only client the
+    /// authority pipe serves. Empty: the pipe is not served, and a broker
+    /// that asks is refused every push.
+    pub publication_broker_sid: String,
     /// The acceptance stand-in; off by default.
     pub stand_in: StandInSettings,
 }
@@ -59,6 +67,8 @@ impl Default for SupervisorSettings {
             runner_pipe: "agentc-runner".into(),
             runner_sid: String::new(),
             status_interval_seconds: 3,
+            authority_pipe: "agentc-supervisor-authority".into(),
+            publication_broker_sid: String::new(),
             stand_in: StandInSettings::default(),
         }
     }
@@ -79,7 +89,17 @@ impl SupervisorSettings {
             self.status_interval_seconds >= 1,
             "windows_supervisor.status_interval_seconds must be at least 1"
         );
+        pipe_path(&self.authority_pipe)?;
+        if !self.publication_broker_sid.is_empty() {
+            checked_sid(&self.publication_broker_sid)?;
+        }
         self.stand_in.validate()
+    }
+
+    /// The publication broker's account, when the authority pipe is to be
+    /// served to it.
+    pub fn publication_broker(&self) -> Option<&str> {
+        Some(self.publication_broker_sid.as_str()).filter(|sid| !sid.is_empty())
     }
 }
 
@@ -165,6 +185,9 @@ pub struct LoopDriver<H: HostRuntime, W: Work, P: Pace> {
     work: W,
     pace: P,
     signal: Arc<Signal>,
+    /// Where the launches it holds attempts for are recorded, for the
+    /// publication broker's questions; `None` records nothing.
+    authority: Option<Arc<Authority>>,
 }
 
 impl<H: HostRuntime, W: Work, P: Pace> LoopDriver<H, W, P> {
@@ -176,7 +199,28 @@ impl<H: HostRuntime, W: Work, P: Pace> LoopDriver<H, W, P> {
             work,
             pace,
             signal,
+            authority: None,
         }
+    }
+
+    /// This driver, recording in `authority` each launch from its claim
+    /// until just before its release.
+    pub fn with_authority(mut self, authority: Arc<Authority>) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+
+    /// Records that `launch` works for `lease`'s attempt.
+    fn hold(&self, launch: &Launch, lease: &Lease) {
+        let Some(authority) = &self.authority else {
+            return;
+        };
+        let held = Held {
+            task: launch.suggestion.task.clone(),
+            attempt: lease.attempt.clone(),
+            generation: lease.generation,
+        };
+        authority.hold(&launch.session_id.to_string(), held);
     }
 }
 
@@ -211,8 +255,11 @@ impl<H: HostRuntime, W: Work, P: Pace> Driver for LoopDriver<H, W, P> {
         Ok(())
     }
 
+    /// Claims, and holds the launch's attempt for the broker's questions.
     fn claim(&mut self, launch: &Launch) -> Result<Lease> {
-        self.work.claim(launch)
+        let lease = self.work.claim(launch)?;
+        self.hold(launch, &lease);
+        Ok(lease)
     }
 
     /// There is no checkout to register.
@@ -226,8 +273,11 @@ impl<H: HostRuntime, W: Work, P: Pace> Driver for LoopDriver<H, W, P> {
         Some(self.pace.now_ms())
     }
 
-    fn renew(&mut self, _launch: &Launch, lease: &Lease) -> Result<Lease> {
-        self.work.renew(lease)
+    /// Renews, holding the attempt as the renewal describes it.
+    fn renew(&mut self, launch: &Launch, lease: &Lease) -> Result<Lease> {
+        let renewed = self.work.renew(lease)?;
+        self.hold(launch, &renewed);
+        Ok(renewed)
     }
 
     /// Nothing here submits an attempt.
@@ -235,7 +285,12 @@ impl<H: HostRuntime, W: Work, P: Pace> Driver for LoopDriver<H, W, P> {
         Some("active".to_owned())
     }
 
+    /// Forgets the launch's attempt first, so nothing is published for it
+    /// once its release is under way, then releases it.
     fn release(&mut self, launch: &Launch, lease: &Lease, summary: &str) -> Result<()> {
+        if let Some(authority) = &self.authority {
+            authority.forget(&launch.session_id.to_string());
+        }
         self.work.release(launch, lease, summary)
     }
 
@@ -471,6 +526,42 @@ mod tests {
                 .unwrap()
                 .contains("supported on Windows")
         );
+    }
+
+    #[test]
+    fn a_launch_has_authority_from_its_claim_until_its_release_begins() {
+        use super::super::authority::Verdict;
+        let (dir, config) = fixture(&["item-a"]);
+        let authority = Arc::new(Authority::new(Box::new(ledger(dir.path()))));
+        let mut driver = driver(dir.path(), Behaviour::Exits, None);
+        driver = driver.with_authority(authority.clone());
+        let suggestion = crate::run_loop::Suggestion {
+            task: "item-a".into(),
+            revision: 1,
+            title: String::new(),
+        };
+        let launch = Launch::plan(&config, "local", suggestion);
+        let id = launch.session_id.to_string();
+        assert!(matches!(
+            authority.judge(&id, "item-a"),
+            Verdict::Refused(_)
+        ));
+        let lease = driver.claim(&launch).unwrap();
+        assert_eq!(authority.judge(&id, "item-a"), Verdict::Current);
+        let renewed = driver.renew(&launch, &lease).unwrap();
+        assert_eq!(authority.judge(&id, "item-a"), Verdict::Current);
+        driver.release(&launch, &renewed, "done").unwrap();
+        let after = authority.judge(&id, "item-a");
+        assert!(matches!(&after, Verdict::Refused(why) if why.contains("holds no")));
+        // Held again by mistake, the released attempt is still refused.
+        let held = Held {
+            task: "item-a".into(),
+            attempt: renewed.attempt.clone(),
+            generation: 1,
+        };
+        authority.hold(&id, held);
+        let reread = authority.judge(&id, "item-a");
+        assert!(matches!(&reread, Verdict::Refused(why) if why.contains("released")));
     }
 
     #[test]

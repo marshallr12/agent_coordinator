@@ -14,6 +14,7 @@
 //! cannot tell whether the request was carried out, so it must not conclude
 //! that a launch ended.
 use super::sys::{Local, check, sid_text};
+use super::text::wide;
 use crate::service::pipe_policy::{CLIENT_ACCESS, checked_sid, pipe_path};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
@@ -21,14 +22,17 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
-use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+use std::time::{Duration, Instant};
+use windows_sys::Win32::Foundation::{ERROR_PIPE_BUSY, ERROR_SUCCESS};
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
 use windows_sys::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
 use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
-use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
 
 /// The longest answer line the client accepts.
 const MAX_ANSWER_BYTES: u64 = 16 * 1024 * 1024;
+/// How long a client waits for a busy pipe's instance to be free.
+const BUSY_PATIENCE: Duration = Duration::from_secs(5);
 
 /// One connection to a runner service whose pipe's owner was verified.
 #[derive(Debug)]
@@ -42,14 +46,21 @@ pub struct Client {
 
 impl Client {
     /// Connects to the pipe `name` and verifies that the account `runner`
-    /// (SID text) owns it. A pipe owned by anyone else is closed unused.
+    /// (SID text) owns it: the runner service's, or a broker's for its
+    /// control pipe. A pipe owned by anyone else is closed unused.
     pub fn connect(name: &str, runner: &str) -> Result<Self> {
+        Self::connect_within(name, runner, BUSY_PATIENCE)
+    }
+
+    /// As [`Client::connect`], waiting at most `busy` for an instance of a
+    /// pipe whose every instance is serving a client.
+    pub fn connect_within(name: &str, runner: &str, busy: Duration) -> Result<Self> {
         let runner = checked_sid(runner)?;
-        let file = open(name)?;
+        let file = open(name, busy)?;
         let owner = owner_sid(&file).context("the pipe's owner cannot be read; it is not used")?;
         ensure!(
             owner.eq_ignore_ascii_case(runner),
-            "the pipe {name} is owned by {owner}, not by the runner account {runner}; \
+            "the pipe {name} is owned by {owner}, not by the serving account {runner}; \
              it is not used"
         );
         let server_process = server_process(&file)?;
@@ -94,14 +105,42 @@ impl Client {
 }
 
 /// Opens the pipe `name` with a client's rights. The server may identify
-/// this process on the connection and may not impersonate it further.
-fn open(name: &str) -> Result<File> {
+/// this process on the connection and may not impersonate it further. A
+/// pipe whose every instance is busy, as a server's one instance is
+/// between two clients, is waited for up to `patience`.
+fn open(name: &str, patience: Duration) -> Result<File> {
     let path = pipe_path(name)?;
     let mut options = OpenOptions::new();
     options
         .access_mode(CLIENT_ACCESS)
         .security_qos_flags(SECURITY_IDENTIFICATION);
-    (options.open(&path)).with_context(|| format!("open the runner's pipe {path}"))
+    let deadline = Instant::now() + patience;
+    loop {
+        let opened = options.open(&path);
+        let left = deadline.saturating_duration_since(Instant::now());
+        match opened {
+            Err(error) if busy(&error) && !left.is_zero() => wait_for_instance(&path, left)?,
+            opened => return opened.with_context(|| format!("open the pipe {path}")),
+        }
+    }
+}
+
+/// Whether `error` says every instance of the pipe is serving a client.
+fn busy(error: &std::io::Error) -> bool {
+    error.raw_os_error() == i32::try_from(ERROR_PIPE_BUSY).ok()
+}
+
+/// Waits up to `patience` for an instance of the pipe at `path` to be free.
+/// Whether one is, the next open says; a wait that ends otherwise is not
+/// an error of its own.
+fn wait_for_instance(path: &str, patience: Duration) -> Result<()> {
+    let path = wide(path)?;
+    let millis = u32::try_from(patience.as_millis())
+        .unwrap_or(u32::MAX - 1)
+        .max(1);
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    unsafe { WaitNamedPipeW(path.as_ptr(), millis) };
+    Ok(())
 }
 
 /// The SID text of the pipe's owner, as Windows reports it for the handle.
@@ -200,7 +239,7 @@ mod tests {
         let mut pipe = Pipe::create(&name, &me, &me, None).unwrap();
         let expected = "S-1-5-21-111-222-333-1111";
         let refused = Client::connect(&name, expected).unwrap_err().to_string();
-        assert!(refused.contains("not by the runner account"), "{refused}");
+        assert!(refused.contains("not by the serving account"), "{refused}");
         // The server saw at most a connection that sent nothing.
         match pipe.accept(Duration::from_millis(200)).unwrap() {
             Accepted::Idle | Accepted::Refused(_) => {}

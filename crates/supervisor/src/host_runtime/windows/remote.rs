@@ -24,6 +24,7 @@
 //! A failure that repeats is logged once and then about once a minute with
 //! a count ([`Quiet`]), not at every look.
 use super::Planner;
+use super::broker::Role;
 use super::pipe_client::Client;
 use super::process::Command;
 use crate::host_runtime::{
@@ -209,11 +210,18 @@ impl<P: Planner, L: Link> RemoteHost<P, L> {
 
 impl<P: Planner, L: Link> HostRuntime for RemoteHost<P, L> {
     /// Has the runner create the launch's profile, directories and desktop,
-    /// and says which package, job owner and executable identify it.
+    /// and says which package, job owner and executable identify it. The
+    /// run loop's launches are implementers, and the runner journals that
+    /// role and the task, which names the launch's candidate ref at the
+    /// publication broker. A [`Launch`] carries no coordinator attempt or
+    /// generation, so none is sent: the supervisor's own authority record
+    /// ([`crate::service::authority`]) holds them.
     fn prepare(&mut self, launch: &Launch) -> Result<StartIntent> {
         let (spec, command) = self.planner.plan(launch)?;
         let mut request = Self::about("prepare", launch);
         request["spec"] = serde_json::to_value(&spec)?;
+        request["role"] = json!(Role::Implementer);
+        request["task"] = json!(launch.suggestion.task);
         let answer = self.call(request)?;
         let text = |field: &str| answer[field].as_str().map(str::to_owned);
         let intent = StartIntent {
@@ -476,6 +484,11 @@ mod tests {
         assert_eq!((identity.pid, identity.started), (4242, Some(77)));
         let asked = fake.0.borrow().asked.clone();
         assert_eq!(asked[0]["spec"]["less_privileged"], true);
+        assert_eq!(asked[0]["role"], "implementer");
+        assert_eq!(asked[0]["task"], launch.suggestion.task);
+        for unknown in ["attempt", "generation"] {
+            assert!(asked[0].get(unknown).is_none(), "{unknown} was sent");
+        }
         assert_eq!(asked[1]["argv"], json!(["fixture.exe", "run"]));
         assert_eq!(asked[1]["launch"], launch.session_id.to_string());
     }

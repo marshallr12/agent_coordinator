@@ -29,8 +29,38 @@ pub const DEFAULT_ALLOW: &[&str] = &[
     "static.crates.io",
 ];
 
-const MAX_HEAD: usize = 8 * 1024;
-const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest request head a client may send before its CONNECT is judged.
+pub const MAX_HEAD: usize = 8 * 1024;
+/// How long a client has to send its whole request head.
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// The answer to a request that is refused; nothing is contacted upstream.
+pub const FORBIDDEN: &[u8] = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+/// The answer once the tunnel to an allowed destination is open.
+pub const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+
+/// Where the request head in `bytes` ends (just past its blank line), if
+/// it is complete.
+pub fn head_end(bytes: &[u8]) -> Option<usize> {
+    let end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
+    Some(end + 4)
+}
+
+/// The host a request head asks to tunnel to, when it is a CONNECT to port
+/// 443 of a host `allow` lists; `None` for anything to refuse.
+pub fn permitted_target(head: &str, allow: &[String]) -> Option<String> {
+    connect_target(head).filter(|host| allowed(host, allow))
+}
+
+/// As the proxy's own resolution, blocking: `host:443`'s publicly routable
+/// addresses only, so an allowlisted name cannot be pointed at loopback or
+/// the local network. A name that does not resolve has none.
+pub fn public_addresses_blocking(host: &str) -> Vec<SocketAddr> {
+    use std::net::ToSocketAddrs;
+    match (host, 443).to_socket_addrs() {
+        Ok(resolved) => resolved.filter(|a| public_address(a.ip())).collect(),
+        Err(_) => Vec::new(),
+    }
+}
 
 /// Whether `host` matches an allowlist entry (exact, or `.suffix`).
 pub fn allowed(host: &str, allow: &[String]) -> bool {
@@ -81,15 +111,11 @@ async fn handle(mut client: TcpStream, allow: &[String]) -> Result<()> {
     };
     log(target.as_deref().unwrap_or("-"), !addresses.is_empty());
     if addresses.is_empty() {
-        client
-            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
-            .await?;
+        client.write_all(FORBIDDEN).await?;
         return Ok(());
     }
     let mut upstream = TcpStream::connect(&addresses[..]).await?;
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await?;
+    client.write_all(ESTABLISHED).await?;
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
     Ok(())
 }
@@ -104,41 +130,66 @@ async fn permitted_addresses(host: &str) -> Vec<SocketAddr> {
 }
 
 /// Whether `ip` may be tunnelled to: not loopback, private, link-local,
-/// unspecified, multicast or otherwise local (IPv4-mapped IPv6 included).
+/// unspecified, multicast, reserved or otherwise local. An IPv6 address
+/// that carries an IPv4 one (mapped, compatible or the NAT64 well-known
+/// prefix) is judged by the IPv4 address it reaches.
 pub fn public_address(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => public_v4(v4),
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+        IpAddr::V6(v6) => match embedded_v4(v6) {
             Some(v4) => public_v4(v4),
             None => public_v6(v6),
         },
     }
 }
 
-/// IPv4 addresses that are not local, private or non-unicast.
+/// The IPv4 address an IPv6 address stands for: IPv4-mapped
+/// (`::ffff:a.b.c.d`), IPv4-translated (`::ffff:0:a.b.c.d`),
+/// IPv4-compatible (`::a.b.c.d`), NAT64 with the well-known prefix
+/// (`64:ff9b::a.b.c.d`) or 6to4 (`2002:aabb:ccdd::`).
+fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = ip.segments();
+    let v4 = |high: u16, low: u16| Ipv4Addr::from((u32::from(high) << 16) | u32::from(low));
+    let tail = v4(segments[6], segments[7]);
+    let compatible = segments[..6] == [0; 6];
+    let translated = segments[..6] == [0, 0, 0, 0, 0xffff, 0];
+    let nat64 = segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0];
+    let six_to_four = (segments[0] == 0x2002).then(|| v4(segments[1], segments[2]));
+    let carried = (compatible || translated || nat64).then_some(tail);
+    ip.to_ipv4_mapped().or(carried).or(six_to_four)
+}
+
+/// IPv4 addresses that are not local, private, reserved or non-unicast.
 fn public_v4(ip: Ipv4Addr) -> bool {
     let [first, second, ..] = ip.octets();
     let this_network = first == 0;
     let shared = first == 100 && (second & 0xc0) == 64; // 100.64.0.0/10
+    let benchmarking = first == 198 && (second & 0xfe) == 18; // 198.18.0.0/15
+    let reserved = first >= 240; // 240.0.0.0/4, the broadcast address too
     !(ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
         || ip.is_unspecified()
         || ip.is_multicast()
-        || ip.is_broadcast()
         || this_network
-        || shared)
+        || shared
+        || benchmarking
+        || reserved)
 }
 
-/// IPv6 addresses that are not local, unique-local or non-unicast.
+/// IPv6 addresses that are not local, unique-local or non-unicast, and not
+/// the local-use NAT64 prefix, whose translation is the local network's.
 fn public_v6(ip: Ipv6Addr) -> bool {
-    let site_local = (ip.segments()[0] & 0xffc0) == 0xfec0; // fec0::/10
+    let segments = ip.segments();
+    let site_local = (segments[0] & 0xffc0) == 0xfec0; // fec0::/10
+    let local_nat64 = segments[..3] == [0x64, 0xff9b, 1]; // 64:ff9b:1::/48
     !(ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || ip.is_unique_local()
         || ip.is_unicast_link_local()
-        || site_local)
+        || site_local
+        || local_nat64)
 }
 
 /// Reads until the blank line that ends the request head.
@@ -210,6 +261,26 @@ mod tests {
         reply
     }
 
+    #[test]
+    fn a_head_ends_at_its_blank_line_and_only_allowed_connects_are_permitted() {
+        assert_eq!(head_end(b"CONNECT a:443 HTTP/1.1\r\n\r\nrest"), Some(26));
+        assert_eq!(head_end(b"CONNECT a:443 HTTP/1.1\r\n"), None);
+        let permitted = |head: &str| permitted_target(head, &list());
+        assert_eq!(
+            permitted("CONNECT github.com:443 HTTP/1.1\r\n\r\n").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(permitted("CONNECT example.com:443 HTTP/1.1\r\n\r\n"), None);
+        assert_eq!(permitted("CONNECT github.com:80 HTTP/1.1\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn blocking_resolution_keeps_no_local_address() {
+        assert!(public_addresses_blocking("localhost").is_empty());
+        assert!(public_addresses_blocking("127.0.0.1").is_empty());
+        assert!(public_addresses_blocking("no-such-host.invalid").is_empty());
+    }
+
     #[tokio::test]
     async fn refused_hosts_get_403_without_upstream_contact() {
         let reply = proxy_reply("example.com", list()).await;
@@ -245,6 +316,17 @@ mod tests {
             "::ffff:127.0.0.1",
             "::ffff:10.0.0.1",
             "::ffff:169.254.1.1",
+            "::127.0.0.1",
+            "::10.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "240.0.0.1",
+            "64:ff9b:1::a00:1",
+            "2002:7f00:1::",
+            "2002:c0a8:101::1",
+            "::ffff:0:7f00:1",
         ] {
             assert!(!public_address(local.parse().unwrap()), "{local}");
         }
@@ -258,6 +340,10 @@ mod tests {
             "100.128.0.1",
             "2606:4700::1111",
             "::ffff:1.1.1.1",
+            "64:ff9b::101:101",
+            "198.20.0.1",
+            "223.255.255.1",
+            "2002:101:101::1",
         ] {
             assert!(public_address(public.parse().unwrap()), "{public}");
         }

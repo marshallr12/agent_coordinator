@@ -19,6 +19,7 @@
 //! hold the thread longer than that either: a wait a client asks for is cut
 //! to [`MAX_WAIT_MS`] whatever the service is doing ([`admitted`]), and the
 //! client asks again.
+use super::egress_admission::{BrokerRoute, EgressRoute};
 use super::pipe::{Accepted, Line, Pipe, Session};
 use super::runner::{Request, Runner, answer};
 use super::scm::{self, Host};
@@ -81,12 +82,32 @@ fn open(
     let wake = Some(host.wake());
     let pipe = Pipe::create(&settings.pipe_name, runner_sid, &settings.client_sid, wake)
         .context("the pipe is not served")?;
-    let mut runner = Runner::new(&settings.state_dir)?;
+    let mut runner = Runner::new(&settings.state_dir)?
+        .with_egress(egress_route(settings)?)
+        .with_publication(publication_route(settings)?);
     let settled = startup::settle(&mut runner)?;
     for line in settled.lines() {
         log.line(&line);
     }
     Ok((pipe, runner))
+}
+
+/// The egress broker the settings name, which every launch must then be
+/// admitted by; `None` when they name none.
+fn egress_route(settings: &ServiceSettings) -> Result<Option<EgressRoute>> {
+    let named = settings.egress()?;
+    named
+        .map(|(pipe, broker)| EgressRoute::new(pipe, broker))
+        .transpose()
+}
+
+/// The publication broker the settings name, which every implementer
+/// launch must then be admitted by; `None` when they name none.
+fn publication_route(settings: &ServiceSettings) -> Result<Option<BrokerRoute>> {
+    let named = settings.publication()?;
+    named
+        .map(|(pipe, broker)| BrokerRoute::publication(pipe, broker))
+        .transpose()
 }
 
 /// What the service logs about its preshutdown time limit. The installer
