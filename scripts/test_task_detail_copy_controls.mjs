@@ -224,7 +224,7 @@ async function fixtureServer() {
       for await (const chunk of request) body += chunk;
       const input = JSON.parse(body);
       const id = `fixture-artifact-${attachmentReservations.size + 1}`;
-      const artifact = { id, project_id: 'fixture-project', task_id: input.task_id, kind: 'upload', display_name: input.filename, media_type: input.media_type, size_bytes: input.size_bytes, sha256: input.sha256, state: 'reserved', availability: 'pending' };
+      const artifact = { id, project_id: 'fixture-project', task_id: input.task_id, kind: 'upload', display_name: input.filename, media_type: input.media_type, size_bytes: input.size_bytes, sha256: input.sha256, state: 'reserved', pinned: false, retention_until: null, deleted_at: null };
       attachmentReservations.set(id, { artifact, input });
       return json(response, { artifact, upload_path: `/api/v1/projects/fixture-project/artifacts/${id}/content` });
     }
@@ -247,7 +247,7 @@ async function fixtureServer() {
       assert(reservation, 'Binary upload had no task artifact reservation.');
       assert(bytes.length === reservation.input.size_bytes, 'Uploaded bytes differ from the reservation size.');
       assert(createHash('sha256').update(bytes).digest('hex') === reservation.input.sha256, 'Uploaded bytes differ from the reserved digest.');
-      const artifact = { ...reservation.artifact, state: 'finalized', availability: 'available', finalized_at: new Date().toISOString() };
+      const artifact = { ...reservation.artifact, state: 'finalized', finalized_at: new Date().toISOString() };
       uploadedAttachments.set(id, artifact); attachmentBytes.set(id, bytes);
       return json(response, { artifact });
     }
@@ -945,9 +945,25 @@ async function main() {
     assert(await evaluate("document.querySelector('#task-attachments-state').textContent.includes('saved bytes and request keys')"), 'Uncertain attachment upload did not explain safe retry.');
     await evaluate("document.querySelector('#retry-task-attachments').click()");
     await waitPage("document.querySelector('#task-attachments-list').textContent.includes('palette.svg') && document.querySelector('#task-attachments-list a')", 'uploaded task attachment');
-    const downloadedAttachment = await evaluate("(async () => { const link = document.querySelector('#task-attachments-list a'); const response = await fetch(link.href); return { ok: response.ok, filename: link.download, body: await response.text() }; })()");
+    const downloadedAttachment = await evaluate("(async () => { const link = document.querySelector('#task-attachments-list .task-attachment-heading a'); const response = await fetch(link.href); return { ok: response.ok, filename: link.download, label: link.getAttribute('aria-label'), iconOnly: link.textContent === '' && Boolean(link.querySelector('svg')), besideName: link.previousElementSibling?.textContent === 'palette.svg', type: response.headers.get('content-type'), body: await response.text() }; })()");
     assert(downloadedAttachment.ok && downloadedAttachment.filename === 'palette.svg' && downloadedAttachment.body === palette, 'The attachment download did not preserve the uploaded image context.');
+    assert(downloadedAttachment.iconOnly && downloadedAttachment.besideName && downloadedAttachment.label === 'Download palette.svg', 'The attachment download is not an icon button beside the attachment name.');
+    assert(downloadedAttachment.type === 'image/svg+xml', `The attachment downloaded as ${downloadedAttachment.type}, not its image/svg+xml media type.`);
     assert(attachmentUploadKeys.length === 2 && attachmentUploadKeys[0] === attachmentUploadKeys[1], 'Retry did not reuse the exact binary upload idempotency key.');
+    const mixedFiles = [
+      { name: 'pixel.png', type: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff] },
+      { name: 'notes.txt', type: 'text/plain', bytes: [...Buffer.from('plain notes\n')] },
+      { name: 'brief.pdf', type: 'application/pdf', bytes: [...Buffer.from('%PDF-1.4\n%%EOF\n')] }
+    ];
+    await evaluate(`(() => { const input = document.querySelector('#task-attachment-files'); const transfer = new DataTransfer(); for (const file of ${JSON.stringify(mixedFiles)}) transfer.items.add(new File([new Uint8Array(file.bytes)], file.name, { type: file.type })); input.files = transfer.files; document.querySelector('#upload-task-attachments').click(); })()`);
+    await waitPage("document.querySelectorAll('#task-attachments-list .task-attachment-heading a').length === 4", 'download icons for every uploaded file type');
+    const downloads = await evaluate("(async () => Promise.all([...document.querySelectorAll('#task-attachments-list .task-attachment-entry')].map(async (entry) => { const link = entry.querySelector('.task-attachment-heading a'); const response = await fetch(link.href); return { name: entry.querySelector('strong').textContent, filename: link.download, listed: entry.querySelector('p').textContent.split(' · ')[0], type: response.headers.get('content-type'), disposition: response.headers.get('content-disposition'), bytes: [...new Uint8Array(await response.arrayBuffer())] }; })))()");
+    for (const expected of [{ name: 'palette.svg', type: 'image/svg+xml', bytes: [...Buffer.from(palette)] }, ...mixedFiles]) {
+      const got = downloads.find((entry) => entry.name === expected.name);
+      assert(got, `${expected.name} has no download icon.`);
+      assert(got.type === expected.type && got.listed === expected.type, `${expected.name} downloaded as ${got.type} (listed ${got.listed}), not ${expected.type}.`);
+      assert(got.filename === expected.name && got.disposition.startsWith('attachment') && JSON.stringify(got.bytes) === JSON.stringify(expected.bytes), `${expected.name} did not download with its own name and bytes.`);
+    }
     task.lifecycle = 'canceled';
     task.work_status = 'canceled';
     await openFixtureTask();

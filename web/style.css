@@ -234,7 +234,10 @@ a.nav-item { text-decoration: none; }
 .task-attachment-entry { padding: 12px 0; border-bottom: 1px solid #edf1f2; }
 .task-attachment-entry:last-child { border-bottom: 0; }
 .task-attachment-entry p { margin: 4px 0; overflow-wrap: anywhere; }
-.task-attachment-entry .button { margin-top: 6px; }
+.task-attachment-heading { display: flex; align-items: center; gap: 8px; }
+.task-attachment-heading strong { min-width: 0; overflow-wrap: anywhere; }
+.task-attachment-heading .task-action-icon { display: inline-grid; place-items: center; flex: none; }
+.task-attachment-entry > .button { margin-top: 6px; }
 .evidence-entry { padding: 14px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .evidence-entry:last-child { border-bottom: 0; }
 .evidence-entry h3 { margin: 0 0 8px; }

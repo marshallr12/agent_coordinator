@@ -1110,18 +1110,31 @@
     const target = $('task-attachments-state'); setText(target, message); setClass(target, error ? 'inline-alert error' : 'muted');
   }
 
+  // Task history records omit the live `availability` the artifact endpoints report, so derive it from the
+  // record's own state, deletion and retention fields. The content route still refuses an unavailable file.
+  function attachmentAvailability(record) {
+    if (record.availability) return record.availability;
+    if (record.state !== 'finalized' || record.deleted_at) return record.deleted_at ? 'deleted' : record.state;
+    const until = record.retention_until ? Date.parse(record.retention_until) : NaN;
+    return !record.pinned && until <= Date.now() ? 'expired' : 'available';
+  }
+
   function renderTaskAttachments(records, pending, hasMore = false) {
     const list = $('task-attachments-list');
     const items = records.map((record) => ({ key: `record:${record.id}`, sig: sig(record), build: () => {
       const entry = el('div', 'task-attachment-entry');
-      add(entry, el('strong', '', record.display_name || 'Attachment'));
-      add(entry, el('p', 'muted', `${record.media_type || 'Unknown type'} · ${record.size_bytes ?? 'Unknown'} bytes · ${displayStatus(record.availability || record.state || 'unknown')}`));
-      if (record.availability === 'available' && record.kind === 'upload') {
-        const link = el('a', 'button subtle', 'Download attachment');
+      const heading = el('div', 'task-attachment-heading');
+      add(heading, el('strong', '', record.display_name || 'Attachment'));
+      const availability = attachmentAvailability(record), downloadable = availability === 'available' && record.kind === 'upload';
+      if (downloadable) {
+        const link = iconize(el('a', 'button subtle'), `Download ${record.display_name || 'attachment'}`, 'download');
         link.href = `${projectPath(state.projectId)}/artifacts/${encodeURIComponent(record.id)}/content`;
         link.download = record.display_name || 'attachment';
-        add(entry, link);
-      } else if (record.external_url) {
+        add(heading, link);
+      }
+      add(entry, heading);
+      add(entry, el('p', 'muted', `${record.media_type || 'Unknown type'} · ${record.size_bytes ?? 'Unknown'} bytes · ${displayStatus(availability || 'unknown')}`));
+      if (!downloadable && record.external_url) {
         try {
           const url = new URL(record.external_url);
           if (url.protocol === 'https:' && !url.username && !url.password) {
