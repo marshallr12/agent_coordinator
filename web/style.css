@@ -518,3 +518,13 @@ div.compare-diff .diff-line { grid-template-columns: 22px minmax(0, 1fr); font-f
 .dependency-truncated { margin-top: 10px; }
 @media (max-width: 620px) { .dependency-columns { grid-template-columns: 1fr; } .dependency-item { flex-wrap: wrap; } }
 .dependency-item .status-badge.done { color: var(--pill-ready-ink); background: var(--teal-soft); }
+
+.observations-dialog { width: min(100% - 32px, 720px); }
+.observations-dialog form { max-height: calc(100dvh - 32px); overflow-y: auto; }
+.observation-controls { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; margin: 12px 0; }
+.observation-controls label { display: block; font-size: 12px; color: var(--muted); }
+.observation-controls input, .observation-controls select { display: block; width: 100%; margin-top: 4px; }
+.observation-list { margin: 8px 0; border-top: 1px solid var(--line); }
+.observation-status { font-size: 12px; }
+.observations-dialog .dialog-actions { flex-wrap: wrap; }
+@media (max-width: 620px) { .observation-controls { grid-template-columns: 1fr; } .observations-dialog .dialog-actions .button { flex: 1 1 100%; } }

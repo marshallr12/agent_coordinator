@@ -162,6 +162,8 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   human reconciliation with recorded termination/isolation evidence, and a per-resource
   History dialog (current holds, then released/resolved reservations across projects,
   one page at a time) backed by `GET /api/v1/resources/{id}/reservations`.
+  Each job's bounded observation history can be searched, filtered by state and
+  downloaded as JSON from the task page (capped at 2,000 observations or 2 MiB).
 - Immutable code/general submissions pinned to task and policy revisions, with
   acceptance evidence, handoffs, and full Git commit/tree identities for code.
   Active jobs and unresolved physical holds prevent submission.
