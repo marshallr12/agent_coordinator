@@ -205,6 +205,22 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   candidate. The capability record admits only that build. No Windows driver
   calls the record yet, so no product Claude launch runs on Windows.
 
+- Phase 7 step 7a of the Windows host added the installer core:
+  `agentc-supervisor windows-host install` registers the four services
+  stopped, each under its own virtual account with bounded recovery, a
+  preshutdown limit and a required-privileges list, makes the state tree
+  with complete access lists, writes a configuration that carries only what
+  has no default, and copies the push App's key where only the publication
+  account can read it; `windows-host status` reports drift and changes
+  nothing. Only what differs is changed, a link or a directory someone else
+  owns is refused before anything changes, and every change is journaled.
+  The [design](windows-host-design.md#phase-7-steps) records it and the
+  [Windows host installation](windows-installation.md) chapter is the
+  operator's view. **No service the installer registered has been started,
+  no Windows host is accepted, and no provider harness runs on Windows.**
+  Update, rollback and uninstall, the owner-attended acceptance and the gap
+  report are steps 7b to 7d.
+
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
   isolated tmpfs; the host harness directory stays hidden. Invalid paths,

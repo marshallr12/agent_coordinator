@@ -2,9 +2,12 @@
 # (`agentc-supervisor --config <this file> windows-service`), the supervisor
 # (`... windows-service --role supervisor`) and the egress and publication
 # brokers (`--role egress`, `--role publication`). Every entry has
-# an in-code default; the commented lines show those defaults. Nothing here
-# is installed by this repository: a service is installed only by an owner,
-# from an elevated session.
+# an in-code default; the commented lines show those defaults. A service is
+# installed only by an owner, from an elevated session, with
+# `agentc-supervisor windows-host install`, which writes this file's
+# installed counterpart: the entries that have no usable default (the service
+# SIDs, the control pipes and the remote) and nothing else. This file is the
+# reference for every other entry.
 [windows_service]
 # The service's name in the Service Control Manager.
 # name = "agentc-runner"

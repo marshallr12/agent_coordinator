@@ -47,6 +47,7 @@ pub mod desktop;
 pub mod egress_admission;
 pub mod egress_broker;
 pub mod inspection;
+pub mod installer;
 pub mod job;
 pub mod journal;
 pub mod launcher;

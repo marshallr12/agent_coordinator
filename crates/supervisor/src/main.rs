@@ -157,6 +157,121 @@ enum Commands {
         #[arg(long, value_enum, default_value = "runner")]
         role: ServiceRole,
     },
+    /// On Windows: install this binary as a host, or report how the
+    /// machine differs from one. Both need an elevated session.
+    #[cfg(windows)]
+    WindowsHost {
+        #[command(subcommand)]
+        command: HostCommand,
+    },
+}
+
+/// What `windows-host` does.
+#[cfg(windows)]
+#[derive(Subcommand)]
+enum HostCommand {
+    /// Register the four services, stopped, each under its own virtual
+    /// account; make the state tree; write the configuration; and copy the
+    /// push App's key, if one is given. Only what differs from an installed
+    /// host is changed, so a second run changes nothing. What it is told is
+    /// recorded, so a later run needs no arguments.
+    Install(InstallArgs),
+    /// Report what `install` would change, and what each running service's
+    /// token holds. It changes nothing and exits non-zero unless the
+    /// machine is an installed host.
+    Status(LayoutArgs),
+}
+
+/// Where an installation lives.
+#[cfg(windows)]
+#[derive(Args)]
+struct LayoutArgs {
+    /// The directory of the binary and the configuration.
+    #[arg(long, default_value = agentc_supervisor::windows_installer::model::PROGRAM_DIR)]
+    program_dir: String,
+    /// The root of the services' state tree.
+    #[arg(long, default_value = agentc_supervisor::windows_installer::model::STATE_ROOT)]
+    state_dir: String,
+    /// What every service and pipe name starts with. Another prefix makes
+    /// an installation beside the real one, for tests.
+    #[arg(long, hide = true, default_value = agentc_supervisor::windows_installer::model::PREFIX)]
+    service_prefix: String,
+}
+
+#[cfg(windows)]
+impl LayoutArgs {
+    /// The layout these arguments name.
+    fn layout(&self) -> agentc_supervisor::windows_installer::Layout {
+        agentc_supervisor::windows_installer::Layout {
+            program_dir: self.program_dir.clone(),
+            state_root: self.state_dir.clone(),
+            prefix: self.service_prefix.clone(),
+        }
+    }
+}
+
+/// When Windows starts the services.
+#[cfg(windows)]
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum StartArg {
+    /// Only when asked (the default on a first install).
+    Demand,
+    /// At boot, without a logon.
+    Auto,
+}
+
+/// What `windows-host install` can be told. Everything is remembered: on
+/// a later run an argument is needed only to change it.
+#[cfg(windows)]
+#[derive(Args)]
+struct InstallArgs {
+    #[command(flatten)]
+    layout: LayoutArgs,
+    /// The one remote candidates are published to. It has no default, so
+    /// the first install needs it.
+    #[arg(long)]
+    remote: Option<String>,
+    /// The push App's id.
+    #[arg(long, requires = "installation_id")]
+    app_id: Option<u64>,
+    /// The push App's installation on the repository.
+    #[arg(long, requires = "app_id")]
+    installation_id: Option<u64>,
+    /// The push App's PEM private key. It is copied, never moved or shown,
+    /// to a directory only the publication account can read.
+    #[arg(long)]
+    key_source: Option<String>,
+    /// When Windows starts the services.
+    #[arg(long, value_enum)]
+    start: Option<StartArg>,
+    /// The acceptance stand-in's command, as its arguments; this enables
+    /// the stand-in. The installer writes it down and never runs it. Give
+    /// it last: everything after it, hyphens included, is the command.
+    #[arg(long, num_args = 1.., allow_hyphen_values = true, conflicts_with = "no_stand_in")]
+    stand_in_fixture: Option<Vec<String>>,
+    /// Turn the acceptance stand-in off again.
+    #[arg(long)]
+    no_stand_in: bool,
+}
+
+#[cfg(windows)]
+impl InstallArgs {
+    /// What this run's arguments change.
+    fn overrides(&self) -> agentc_supervisor::windows_installer::Overrides {
+        use agentc_supervisor::windows_installer::model::StartType;
+        let start = |start| match start {
+            StartArg::Demand => StartType::Demand,
+            StartArg::Auto => StartType::Auto,
+        };
+        let off = self.no_stand_in.then(Vec::new);
+        agentc_supervisor::windows_installer::Overrides {
+            remote: self.remote.clone(),
+            app: self.app_id.zip(self.installation_id),
+            key_source: self.key_source.clone(),
+            start: self.start.map(start),
+            stand_in_fixture: self.stand_in_fixture.clone().or(off),
+        }
+    }
 }
 
 /// Which Windows service a process is.
@@ -277,6 +392,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         // `ExitCode`.
         std::process::exit(status as i32);
     }
+    #[cfg(windows)]
+    if let Commands::WindowsHost { command } = &cli.command {
+        // The installer writes the configuration; it does not read one first.
+        return windows_host(command);
+    }
     let config = config::Config::load(cli.config.as_deref())?;
     match cli.command {
         Commands::Settings { role } => print!("{}", role_settings::render(role, &config.state_dir)),
@@ -335,6 +455,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 ServiceRole::Publication => broker_service::run_publication(config)?,
             }
         }
+        #[cfg(windows)]
+        Commands::WindowsHost { .. } => unreachable!("dispatched before loading config"),
         Commands::StandInJudge { ledger } => return stand_in_judge(&ledger),
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
@@ -342,6 +464,36 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Runs `windows-host install` or `status`, prints its report as JSON and
+/// exits non-zero unless the machine is, or now is, an installed host.
+#[cfg(windows)]
+fn windows_host(command: &HostCommand) -> Result<ExitCode> {
+    use agentc_supervisor::host_runtime::windows::installer::WindowsHost;
+    use agentc_supervisor::windows_installer::{install_from, journal::Journal, status_from};
+    let mut host = WindowsHost::new()?;
+    let digest = host.binary_sha256()?;
+    let report = match command {
+        HostCommand::Status(layout) => status_from(&host, layout.layout(), digest)?,
+        HostCommand::Install(args) => {
+            let layout = args.layout.layout();
+            let mut journal = Journal::at(layout.journal());
+            install_from(&mut host, layout, &args.overrides(), digest, &mut journal)?
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(report_code(report.clean()))
+}
+
+/// Success, or 1.
+#[cfg(windows)]
+fn report_code(ok: bool) -> ExitCode {
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 /// Serves contained launches on standard input and output until the input
