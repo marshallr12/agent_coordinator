@@ -134,3 +134,21 @@ fixture-backed browser: queued, active and lapsed reviews and live In Progress
 work in both the task list and the task detail, live updates without a reload,
 tooltips on focus, and reduced motion. Run it with
 `CHROME_BIN=/path/to/chrome node scripts/test_status_indicators.mjs`.
+
+## Blockers summary
+
+The task queue opens with a **Blockers** card. It groups the loaded queue by the
+precondition each task carries (a human decision, a saved blocker, unfinished
+prerequisites or required children), by `recovery_required`, and by the review
+and integration statuses, and adds the open integrator reports that need a
+person and the decisions the attention digest says will proceed on their own.
+Each group shows its count and up to ten items. An item opens the task, the
+integrator reports or the decisions list; **Show all** applies the matching
+status filter. Every queue load adds one digest request and one open-reports
+request, however many tasks the project has, and never fetches task detail. A
+source that fails is named in the card, so a failure never reads as "nothing is
+waiting". The card renders through the `reconcile()` and `setState()`
+helpers, so an unchanged poll makes no mutation. `scripts/test_blockers_summary.mjs`
+covers each group, the links, the empty state, the request budget and the
+one-column mobile layout; run it like the other browser tests with
+`CHROME_BIN=/path/to/chrome node scripts/test_blockers_summary.mjs`.

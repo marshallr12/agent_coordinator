@@ -14,6 +14,8 @@
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
   };
 
+  state.blockers = { projectId: '', seq: 0, inflight: false, loaded: false, digest: null, digestError: '', reports: null, reportsMore: false, reportsError: '' };
+
   const PENDING_MUTATION_KEY = 'agent-coordinator.pending-mutation';
   const ATTACHMENT_DB_NAME = 'agent-coordinator-attachment-journal';
   const ATTACHMENT_STORE_NAME = 'batches';
@@ -748,6 +750,7 @@
     state.taskSearch = { queue: '', completed: '' }; $('tasks-search').value = '';
     state.taskPages = []; state.taskPageIndex = 0; state.tasks = []; state.queueTasks = []; state.taskQueueLoaded = false;
     state.completedTasks = []; state.completedLoaded = false; state.completedPageIndex = 0;
+    Object.assign(state.blockers, { projectId: '', loaded: false, inflight: false, digest: null, digestError: '', reports: null, reportsMore: false, reportsError: '' }); ++state.blockers.seq;
   }
 
   function showTaskPage(index, updateSummary = true) {
@@ -802,9 +805,89 @@
         const pageIndex = Math.min(requestedPageIndex, Math.max(0, state.taskPages.length - 1));
         showTaskPage(pageIndex, false);
       }
+      loadBlockers(requestedProjectId);
     }
     catch (error) { if (requestedProjectId === state.projectId && state.requestSeq.tasks === requestId && !silent) setState($('tasks-state'), errorMessage(error), false, true); }
     finally { if (state.inflight.tasks?.requestId === requestId) state.inflight.tasks = null; renderTaskPagination(); }
+  }
+
+  // ---- Blockers summary ---------------------------------------------------------------------------
+  // Groups the loaded queue by what each task waits for and links every item to where it is cleared. It
+  // reuses the queue already loaded and adds one bounded digest request and one bounded reports request per
+  // queue load, however many tasks there are. A task appears in every blocked group whose precondition it carries.
+  const BLOCKER_LIMIT = 10;
+  const REVIEW_STATUSES = ['waiting_review', 'waiting_integration', 'integrating', 'validating'];
+  const preconditionFor = (task, codes) => (task.preconditions || []).find((item) => codes.includes(item.code));
+  // Opens the project's decisions in Knowledge & evidence.
+  function openDecisions() { $('shared-kind').value = 'decisions'; enterTopLevel('shared'); }
+  // Puts the queue's status filter on `status`, showing every task in it.
+  function filterQueueByStatus(status) {
+    const filter = $('status-filter'); filter.value = status; filter.dispatchEvent(new Event('change')); filter.focus();
+  }
+  function blockerGroups(tasks, digest, reports) {
+    const fromTasks = (pick) => tasks.flatMap((task) => { const note = pick(task); return note === null ? [] : [{ kind: 'task', id: text(task.id), label: text(task.title || task.id), note, status: taskStatus(task) }]; });
+    const blockedBy = (...codes) => (task) => { const found = taskStatus(task) === 'blocked' && preconditionFor(task, codes); return found ? text(found.message) : null; };
+    const decisions = (digest?.pending_reversible_decisions || []).map((item) => ({ kind: 'decision', id: text(item.decision_id), label: text(item.question), note: `Proceeds on its recommendation (${text(item.recommendation)}) at ${formatDate(item.proceeds_at)}` }));
+    const people = (reports || []).filter((report) => report.requires_human && !report.resolved_at).map((report) => ({ kind: 'report', id: text(report.id), label: reportKind(report), note: `${report.task_id ? `Task ${text(report.task_id)} · ` : ''}Recorded ${formatDate(report.created_at)}` }));
+    const groups = [
+      ['decision', 'Needs a human decision', [...fromTasks(blockedBy('scoped_decisions_pending')), ...decisions]],
+      ['blocked', 'Saved blocker', fromTasks(blockedBy('task_blocked'))],
+      ['prerequisites', 'Waiting on prerequisites', fromTasks(blockedBy('dependencies_incomplete', 'required_objective_children_incomplete'))],
+      ['recovery', 'Recovery required', fromTasks((task) => taskStatus(task) === 'recovery_required' ? text(preconditionFor(task, ['recovery_inspection_required'])?.message || 'Inspect the expired attempt before resuming.') : null)],
+      ['review', 'Awaiting review or integration', fromTasks((task) => REVIEW_STATUSES.includes(taskStatus(task)) ? statusIndicator(task).label : null)],
+      ['reports', 'Integrator reports needing a person', people],
+    ];
+    return groups.filter(([, , items]) => items.length).map(([key, title, items]) => ({
+      key, title, total: items.length, more: key === 'reports' && state.blockers.reportsMore, items: items.slice(0, BLOCKER_LIMIT),
+      showAll: items.length > BLOCKER_LIMIT || (key === 'reports' && state.blockers.reportsMore) ? [...new Set(items.map((item) => item.kind === 'task' ? item.status : item.kind))] : [],
+    }));
+  }
+  function blockerItem(item) {
+    const row = el('li', 'blocker-item'), open = el('button', 'button text-button', item.label); open.type = 'button';
+    if (item.kind === 'task') { open.title = `Task ${item.id}`; open.addEventListener('click', () => openTask(item.id, 'tasks')); }
+    else if (item.kind === 'report') { open.title = `Report ${item.id}`; open.addEventListener('click', () => openReports()); }
+    else { open.title = `Decision ${item.id}`; open.addEventListener('click', () => openDecisions()); }
+    add(row, open); add(row, el('span', 'muted blocker-note', item.note));
+    return row;
+  }
+  function blockerGroup(group) {
+    const card = el('section', 'blocker-group'), heading = add(card, el('h3', '', `${group.title} (${group.total}${group.more ? '+' : ''})`));
+    heading.id = `blocker-${group.key}-heading`; card.setAttribute('aria-labelledby', heading.id);
+    const list = add(card, el('ul', 'blocker-items'));
+    group.items.forEach((item) => add(list, blockerItem(item)));
+    group.showAll.forEach((target) => {
+      const decision = target === 'decision', report = target === 'report', label = decision ? 'Show all decisions' : report ? 'Show all integrator reports' : `Show all ${displayStatus(target).toLowerCase()} tasks`;
+      const button = actionButton(label, () => decision ? openDecisions() : report ? openReports() : filterQueueByStatus(target), false);
+      button.setAttribute('aria-label', `${label}: ${group.title}`); add(card, button);
+    });
+    return card;
+  }
+  // Patches the card from the loaded queue and whatever the digest and reports requests returned so far.
+  function renderBlockers() {
+    const card = $('blockers-card'), blockers = state.blockers, visible = state.taskView === 'queue' && state.taskQueueLoaded && Boolean(state.projectId);
+    show(card, visible);
+    if (!visible) return;
+    const groups = blockerGroups(state.queueTasks, blockers.digest, blockers.reports);
+    reconcile($('blockers-groups'), groups.map((group) => ({ key: group.key, sig: sig(group), build: () => blockerGroup(group) })));
+    const failures = [blockers.digestError && `The attention digest could not be loaded: ${blockers.digestError}`, blockers.reportsError && `Integrator reports could not be loaded: ${blockers.reportsError}`].filter(Boolean);
+    if (failures.length) setState($('blockers-state'), failures.join(' '), false, true);
+    else if (!blockers.loaded && !groups.length) setState($('blockers-state'), 'Loading blockers…', true);
+    else if (!groups.length) setState($('blockers-state'), 'Nothing is waiting. No task is blocked, awaiting a decision, review or recovery, and no integrator report needs a person.');
+    else show($('blockers-state'), false);
+  }
+  // Fetches the one digest and one open-reports page the summary needs; a failed source is named, not hidden.
+  async function loadBlockers(projectId) {
+    const blockers = state.blockers;
+    if (blockers.inflight) return;
+    blockers.inflight = true; const seq = blockers.seq;
+    try {
+      const [digest, reports] = await Promise.allSettled([request(`${projectPath(projectId)}/digest?hours=1`), request(`${projectPath(projectId)}/integrator/reports?${new URLSearchParams({ open: 'true', limit: '50' })}`)]);
+      if (seq !== blockers.seq || projectId !== state.projectId) return;
+      blockers.digest = digest.status === 'fulfilled' ? digest.value.data : null; blockers.digestError = digest.status === 'fulfilled' ? '' : errorMessage(digest.reason);
+      blockers.reports = reports.status === 'fulfilled' ? listData(reports.value.data) : null; blockers.reportsMore = reports.status === 'fulfilled' && Boolean(reports.value.data?.next_before);
+      blockers.reportsError = reports.status === 'fulfilled' ? '' : errorMessage(reports.reason);
+      blockers.loaded = true; blockers.projectId = projectId;
+    } finally { if (seq === blockers.seq) blockers.inflight = false; renderBlockers(); }
   }
 
   async function loadCompletedTasks(silent = false) {
@@ -891,6 +974,7 @@
   }
 
   function renderTasks() {
+    renderBlockers();
     const target = $('tasks-list'); const filter = $('status-filter').value;
     const tasks = state.tasks;
     const pageCount = state.taskView === 'completed' ? Math.ceil(searchedCompletedTasks().length / state.taskPageSize) : state.taskPages.length;
