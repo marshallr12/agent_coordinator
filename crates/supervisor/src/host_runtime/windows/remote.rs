@@ -11,10 +11,18 @@
 //! - An exchange that fails, a refusal and an answer that cannot be read
 //!   are never "the launch ended". [`RemoteHost::observe`] answers running
 //!   and [`RemoteHost::recover`] answers that the launch may be running.
+//!   Only the runner's journal can say a launch is over without an exit
+//!   seen: when `observe` fails and the journal, asked separately, no
+//!   longer names the launch or says an earlier runner's launch ended (a
+//!   runner restarted and reclaimed it), `observe` answers
+//!   [`Observation::Gone`].
 //! - A launch is started by one `start` request and never by a second: the
 //!   runner refuses to prepare an id it has journaled, and this runtime
 //!   forgets a launch's command once it asked for the start.
 //! - Nothing is removed for a launch the runner says may still run.
+//!
+//! A failure that repeats is logged once and then about once a minute with
+//! a count ([`Quiet`]), not at every look.
 use super::Planner;
 use super::pipe_client::Client;
 use super::process::Command;
@@ -23,10 +31,12 @@ use crate::host_runtime::{
 };
 use crate::run_loop::Launch;
 use crate::run_loop::record::LaunchRecord;
+use crate::service::quiet::Quiet;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::time::Instant;
 use uuid::Uuid;
 
 /// One request to the runner and its answer. An error means the exchange
@@ -95,6 +105,8 @@ pub struct RemoteHost<P: Planner, L: Link> {
     link: RefCell<L>,
     /// The command of each prepared launch, until its start is asked for.
     planned: BTreeMap<Uuid, Command>,
+    /// Which failure lines to write; a cell for the same reason as `link`.
+    quiet: RefCell<Quiet>,
 }
 
 impl<P: Planner, L: Link> RemoteHost<P, L> {
@@ -105,6 +117,33 @@ impl<P: Planner, L: Link> RemoteHost<P, L> {
             planner,
             link: RefCell::new(link),
             planned: BTreeMap::new(),
+            quiet: RefCell::new(Quiet::default()),
+        }
+    }
+
+    /// Logs `text` under `key`, unless it only repeats the last line there.
+    fn log(&self, key: &str, text: &str) {
+        let lines = self.quiet.borrow_mut().lines(key, text, Instant::now());
+        for line in lines {
+            eprintln!("agentc-supervisor run: {line}");
+        }
+    }
+
+    /// After `observe` failed with `error`: the launch is gone when the
+    /// runner's journal no longer names it or says it ended; otherwise it
+    /// still counts as running.
+    fn unobserved(&self, launch: &Launch, error: &anyhow::Error) -> Observation {
+        let id = launch.session_id.to_string();
+        match self.standing(&id) {
+            Ok(Standing::Absent | Standing::Ended) => {
+                let why = format!("the runner no longer holds launch {id}, so it ended unseen");
+                self.log("observe", &format!("{why} ({error:#})"));
+                Observation::Gone
+            }
+            _ => {
+                self.log("observe", &format!("observe the launch: {error:#}"));
+                Observation::Running
+            }
         }
     }
 
@@ -212,30 +251,29 @@ impl<P: Planner, L: Link> HostRuntime for RemoteHost<P, L> {
         })
     }
 
-    /// The root's exit, once the runner reports it. Anything else,
-    /// including every failure to ask, is running.
+    /// The root's exit, once the runner reports it, or
+    /// [`Observation::Gone`] when the runner no longer holds the launch
+    /// ([`Self::unobserved`]). Anything else, including every other
+    /// failure to ask, is running.
     fn observe(&mut self, launch: &Launch) -> Observation {
         let mut request = Self::about("observe", launch);
         request["wait_ms"] = json!(0);
         match self.call(request) {
-            Ok(answer) if answer["state"] == "exited" => match answer["code"].as_u64() {
-                Some(code) => Observation::Exited {
-                    code: code as u32 as i32,
-                },
-                None => Observation::Running,
-            },
-            Ok(_) => Observation::Running,
-            Err(error) => {
-                eprintln!("agentc-supervisor run: observe the launch: {error:#}");
-                Observation::Running
+            Ok(answer) => {
+                self.quiet.borrow_mut().clear("observe");
+                exit_in(&answer)
             }
+            Err(error) => self.unobserved(launch, &error),
         }
     }
 
     /// Has the runner put the stop marker in the launch's control directory.
     fn request_stop(&mut self, launch: &Launch) {
         if let Err(error) = self.call(Self::about("request_stop", launch)) {
-            eprintln!("agentc-supervisor run: ask the launch to stop: {error:#}");
+            self.log(
+                "request_stop",
+                &format!("ask the launch to stop: {error:#}"),
+            );
         }
     }
 
@@ -243,8 +281,8 @@ impl<P: Planner, L: Link> HostRuntime for RemoteHost<P, L> {
     fn terminate(&mut self, launch: &Launch) {
         match self.call(Self::about("terminate", launch)) {
             Ok(answer) if answer["quiescent"] == json!(true) => {}
-            Ok(_) => eprintln!("agentc-supervisor run: the launch's job did not empty"),
-            Err(error) => eprintln!("agentc-supervisor run: terminate the launch: {error:#}"),
+            Ok(_) => self.log("terminate", "the launch's job did not empty"),
+            Err(error) => self.log("terminate", &format!("terminate the launch: {error:#}")),
         }
     }
 
@@ -260,7 +298,7 @@ impl<P: Planner, L: Link> HostRuntime for RemoteHost<P, L> {
             Ok(Standing::Held { started }) => !started || self.root_exited(&id),
             Ok(Standing::MayRun) => false,
             Err(error) => {
-                eprintln!("agentc-supervisor run: ask the runner about {id}: {error:#}");
+                self.log("recover", &format!("ask the runner about {id}: {error:#}"));
                 false
             }
         };
@@ -289,6 +327,21 @@ impl<P: Planner, L: Link> HostRuntime for RemoteHost<P, L> {
         self.call(request).map(|_| Removed::Launch)
     }
 }
+
+/// The exit an `observe` answer reports; an answer without an exit code
+/// is still running.
+fn exit_in(answer: &Value) -> Observation {
+    match (answer["state"].as_str(), answer["code"].as_u64()) {
+        // An NTSTATUS exit code keeps its 32 bits and shows negative.
+        (Some("exited"), Some(code)) => Observation::Exited {
+            code: code as u32 as i32,
+        },
+        _ => Observation::Running,
+    }
+}
+
+#[cfg(test)]
+mod crash_tests;
 
 #[cfg(test)]
 mod tests {
@@ -446,6 +499,7 @@ mod tests {
     #[test]
     fn only_a_reported_exit_is_an_exit() {
         let ((mut host, fake), launch) = (host(), launch());
+        fake.0.borrow_mut().journal = vec![journaled(&launch, "started", "held")];
         assert_eq!(host.observe(&launch), Observation::Running);
         for failing in ["broken", "refused"] {
             let mut script = fake.0.borrow_mut();
@@ -465,6 +519,32 @@ mod tests {
             code: 0xC000_013A_u32 as i32,
         };
         assert_eq!(host.observe(&launch), exited);
+    }
+
+    #[test]
+    fn a_launch_the_runner_no_longer_holds_is_gone_and_nothing_else_is() {
+        let ((mut host, fake), launch) = (host(), launch());
+        let mut look = |journal: Vec<Value>, unreadable: &[&str], broken: Vec<&'static str>| {
+            let mut script = fake.0.borrow_mut();
+            (script.journal, script.broken) = (journal, broken);
+            script.unreadable = unreadable.iter().map(|name| name.to_string()).collect();
+            script.refused = vec!["observe"];
+            drop(script);
+            host.observe(&launch)
+        };
+        // The restarted runner reclaimed it, or judged it ended.
+        assert_eq!(look(vec![], &[], vec![]), Observation::Gone);
+        let ended = vec![journaled(&launch, "started", "ended")];
+        assert_eq!(look(ended, &[], vec![]), Observation::Gone);
+        // Held, possibly running, a torn entry, or a journal that cannot be
+        // read: still running.
+        for verdict in ["held", "may_be_running"] {
+            let named = vec![journaled(&launch, "started", verdict)];
+            assert_eq!(look(named, &[], vec![]), Observation::Running);
+        }
+        assert_eq!(look(vec![], &["torn.json"], vec![]), Observation::Running);
+        let unasked = look(vec![], &[], vec!["recover"]);
+        assert_eq!(unasked, Observation::Running);
     }
 
     #[test]
@@ -579,13 +659,8 @@ mod tests {
             (judged, host.observe(&launch), host.cleanup(&launch).ok())
         });
         serve_one(&mut pipe, &mut runner);
-        // Unknown to the runner: ended, nothing to see running, nothing to
-        // remove.
-        let expected = (
-            Recovery::Ended,
-            Observation::Running,
-            Some(Removed::Nothing),
-        );
+        // Unknown to the runner: ended, gone, nothing to remove.
+        let expected = (Recovery::Ended, Observation::Gone, Some(Removed::Nothing));
         assert_eq!(asker.join().unwrap(), expected);
     }
 

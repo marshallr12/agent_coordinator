@@ -419,8 +419,13 @@ impl Ledger for Runner {
         Ok((judged.collect(), unreadable))
     }
 
+    /// Removes the ended launch's profile, its control and working
+    /// directories and its entry. The directories go too because the entry
+    /// is the only record of them: once it is removed, a supervisor that
+    /// asks to clean the launch up is told nothing of it exists, and
+    /// nothing reads a launch's directories after it ended.
     fn reclaim(&mut self, launch: &str) -> Result<()> {
-        Runner::reclaim(self, launch, false).map(|_| ())
+        Runner::reclaim(self, launch, true).map(|_| ())
     }
 }
 

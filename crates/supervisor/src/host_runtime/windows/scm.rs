@@ -29,10 +29,10 @@ use windows_sys::Win32::System::EventLog::{
     DeregisterEventSource, EVENTLOG_ERROR_TYPE, RegisterEventSourceW, ReportEventW,
 };
 use windows_sys::Win32::System::Services::{
-    ChangeServiceConfig2W, CloseServiceHandle, OpenSCManagerW, OpenServiceW,
+    CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfig2W,
     RegisterServiceCtrlHandlerExW, SC_HANDLE, SC_MANAGER_CONNECT, SERVICE_ACCEPT_PRESHUTDOWN,
-    SERVICE_ACCEPT_STOP, SERVICE_CHANGE_CONFIG, SERVICE_CONFIG_PRESHUTDOWN_INFO,
-    SERVICE_PRESHUTDOWN_INFO, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS,
+    SERVICE_ACCEPT_STOP, SERVICE_CONFIG_PRESHUTDOWN_INFO, SERVICE_PRESHUTDOWN_INFO,
+    SERVICE_QUERY_CONFIG, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS,
     SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_TABLE_ENTRYW,
     SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
 };
@@ -331,11 +331,11 @@ impl Drop for ScHandle {
     }
 }
 
-/// Asks the Service Control Manager to give the service `name` `timeout` to
-/// stop at preshutdown. Needs the right to change the service's
-/// configuration, which the account the service runs as may not have; the
-/// caller decides what a refusal means.
-pub fn set_preshutdown_timeout(name: &str, timeout: Duration) -> Result<()> {
+/// Reads the time the Service Control Manager gives the service `name` to
+/// stop at preshutdown. The installer sets it; a service's own account
+/// cannot (`OpenServiceW` with the right to change the configuration was
+/// refused with error 5 on every 4c run), but it can read it.
+pub fn preshutdown_timeout(name: &str) -> Result<Duration> {
     let name = wide(name)?;
     // SAFETY: no machine name and no database name: the local active one.
     let manager = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
@@ -344,20 +344,29 @@ pub fn set_preshutdown_timeout(name: &str, timeout: Duration) -> Result<()> {
     }
     let manager = ScHandle(manager);
     // SAFETY: the manager handle is live and the name is NUL-terminated.
-    let service = unsafe { OpenServiceW(manager.0, name.as_ptr(), SERVICE_CHANGE_CONFIG) };
+    let service = unsafe { OpenServiceW(manager.0, name.as_ptr(), SERVICE_QUERY_CONFIG) };
     if service.is_null() {
         return Err(last_error("OpenServiceW"));
     }
     let service = ScHandle(service);
-    let info = SERVICE_PRESHUTDOWN_INFO {
-        dwPreshutdownTimeout: u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
+    let mut info = SERVICE_PRESHUTDOWN_INFO {
+        dwPreshutdownTimeout: 0,
     };
-    let pointer = std::ptr::from_ref(&info).cast::<c_void>();
-    // SAFETY: the service handle is live and `pointer` is readable for the
-    // structure this information level takes.
-    let changed =
-        unsafe { ChangeServiceConfig2W(service.0, SERVICE_CONFIG_PRESHUTDOWN_INFO, pointer) };
-    check(changed, "ChangeServiceConfig2W")
+    let (size, mut needed) = (size_of::<SERVICE_PRESHUTDOWN_INFO>() as u32, 0);
+    let buffer = std::ptr::from_mut(&mut info).cast::<u8>();
+    // SAFETY: the service handle is live and `buffer` is writable for
+    // `size` bytes, the structure this information level fills.
+    let read = unsafe {
+        QueryServiceConfig2W(
+            service.0,
+            SERVICE_CONFIG_PRESHUTDOWN_INFO,
+            buffer,
+            size,
+            &mut needed,
+        )
+    };
+    check(read, "QueryServiceConfig2W")?;
+    Ok(Duration::from_millis(u64::from(info.dwPreshutdownTimeout)))
 }
 
 #[cfg(test)]
@@ -436,10 +445,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_service_cannot_have_its_preshutdown_time_set() {
-        // Opening the manager may be refused, and so may opening a service
-        // that does not exist; either way nothing is changed.
+    fn an_unknown_service_has_no_preshutdown_time_to_read() {
         let name = "agentc-no-such-service-for-the-test";
-        assert!(set_preshutdown_timeout(name, Duration::from_secs(1)).is_err());
+        assert!(preshutdown_timeout(name).is_err());
+    }
+
+    #[test]
+    fn the_preshutdown_time_of_a_service_every_windows_has_can_be_read() {
+        // The Windows Event Log service exists on every supported build,
+        // and any account may read a service's configuration.
+        let timeout = preshutdown_timeout("EventLog").unwrap();
+        assert!(timeout > Duration::ZERO, "{timeout:?}");
     }
 }

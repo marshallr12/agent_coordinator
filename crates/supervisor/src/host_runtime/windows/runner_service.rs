@@ -1,7 +1,8 @@
 //! The role runner as a Windows service.
 //!
 //! The service starts, in this order: it validates its settings, makes its
-//! state directory, tries to set its own preshutdown time limit, creates the
+//! state directory, reads back the preshutdown time limit its installer
+//! set and logs it, creates the
 //! secured pipe, opens the runner and judges every journaled launch
 //! ([`crate::service::startup`]), and only then reports running. Nothing
 //! before the pipe exists is served, and a failure at any step stops the
@@ -75,11 +76,7 @@ fn open(
     runner_sid: &str,
     log: &mut Log,
 ) -> Result<(Pipe, Runner)> {
-    let timeout = Duration::from_secs(settings.preshutdown_timeout_seconds);
-    match scm::set_preshutdown_timeout(&settings.name, timeout) {
-        Ok(()) => log.line(&format!("preshutdown time limit set to {timeout:?}")),
-        Err(error) => log.line(&format!("preshutdown time limit not set: {error:#}")),
-    }
+    log.line(&preshutdown_line(settings));
     host.starting(2, START_HINT)?;
     let wake = Some(host.wake());
     let pipe = Pipe::create(&settings.pipe_name, runner_sid, &settings.client_sid, wake)
@@ -90,6 +87,23 @@ fn open(
         log.line(&line);
     }
     Ok((pipe, runner))
+}
+
+/// What the service logs about its preshutdown time limit. The installer
+/// sets the limit; the service's account may not change its own service's
+/// configuration, so the service only reads the limit back and says
+/// whether it is short of `preshutdown_timeout_seconds`. Nothing here stops
+/// the service.
+fn preshutdown_line(settings: &ServiceSettings) -> String {
+    let wanted = Duration::from_secs(settings.preshutdown_timeout_seconds);
+    match scm::preshutdown_timeout(&settings.name) {
+        Ok(limit) if limit >= wanted => format!("preshutdown time limit is {limit:?}"),
+        Ok(limit) => format!(
+            "preshutdown time limit is {limit:?}, less than preshutdown_timeout_seconds \
+             ({wanted:?}); the installer must set it"
+        ),
+        Err(error) => format!("preshutdown time limit could not be read: {error:#}"),
+    }
 }
 
 /// Makes the state directory with an access list for the runner's account,

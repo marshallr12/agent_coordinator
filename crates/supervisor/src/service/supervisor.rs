@@ -295,6 +295,12 @@ mod tests {
         Runs,
         /// Looking at it kills the supervisor (a panic).
         KillsTheSupervisor,
+        /// It can never be seen to end, terminated or not: a runner that
+        /// cannot be asked.
+        Unseen,
+        /// The host no longer knows it at the first look: a runner that
+        /// restarted and reclaimed it.
+        Vanishes,
     }
 
     /// A host runtime that follows a script and counts what it was asked.
@@ -336,7 +342,8 @@ mod tests {
                 Behaviour::Runs if self.terminated.contains(&launch.session_id) => {
                     Observation::Exited { code: -1 }
                 }
-                Behaviour::Runs => Observation::Running,
+                Behaviour::Runs | Behaviour::Unseen => Observation::Running,
+                Behaviour::Vanishes => Observation::Gone,
             }
         }
 
@@ -501,6 +508,53 @@ mod tests {
         // The second item was never claimed, and the loop returned.
         assert_eq!(events(dir.path(), "claim").len(), 1);
         assert!(stopping_waits.get() >= config.run.drain_seconds as u32);
+        assert_eq!(judge(&ledger(dir.path()).events()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_stop_ends_within_the_drain_while_the_launch_cannot_be_seen_and_releases_nothing() {
+        let (dir, config) = fixture(&["item-a", "item-b"]);
+        let mut driver = driver(dir.path(), Behaviour::Unseen, Some(3));
+        let stopping_waits = driver.pace.stopping_waits.clone();
+        run(&mut driver, &config, false).unwrap();
+        // Asked to stop, terminated at the drain's deadline, then waited for
+        // no longer than the settle window.
+        assert_eq!(events(dir.path(), "stop_requested").len(), 1);
+        assert_eq!(events(dir.path(), "terminate").len(), 1);
+        let settle = crate::run_loop::lease::SETTLE_AFTER_TERMINATE.as_secs();
+        let most = config.run.drain_seconds + settle + 2;
+        assert!(
+            u64::from(stopping_waits.get()) <= most,
+            "{} waits",
+            stopping_waits.get()
+        );
+        // It may still run: nothing is released, its record stays for
+        // recovery, and the judge says so.
+        assert!(events(dir.path(), "release").is_empty());
+        let records = LaunchRecord::load_all(&config);
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].released);
+        let problems = judge(&ledger(dir.path()).events());
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].ends_with("was started and never released"));
+        assert_eq!(events(dir.path(), "claim").len(), 1);
+    }
+
+    #[test]
+    fn a_launch_the_host_no_longer_knows_is_released_and_cleaned_up() {
+        let (dir, config) = fixture(&["item-a"]);
+        let mut driver = driver(dir.path(), Behaviour::Exits, None);
+        driver.host = Recorded::new(Scripted::new(Behaviour::Vanishes), ledger(dir.path()));
+        let outcome = iterate(&mut driver, &config);
+        let launched = Outcome::Launched {
+            task: "item-a".into(),
+            exit_code: crate::run_loop::UNSEEN_EXIT_CODE,
+        };
+        assert_eq!(outcome, launched);
+        assert_eq!(events(dir.path(), "gone").len(), 1);
+        assert_eq!(events(dir.path(), "release").len(), 1);
+        assert_eq!(events(dir.path(), "cleanup").len(), 1);
+        assert!(LaunchRecord::load_all(&config).is_empty());
         assert_eq!(judge(&ledger(dir.path()).events()), Vec::<String>::new());
     }
 

@@ -462,7 +462,7 @@ reaches the operating system only through it, by `run_loop::Driver::host`.
 | --- | --- | --- |
 | `prepare` | Makes the launch's source tree and run directory | `StartIntent`: boot id and, where the host has them, source, executable, container and job identity |
 | `start` | Starts the launch inside the boundary, or fails | `LaunchIdentity`: pid and start time |
-| `observe` | Looks whether the launch ended | `Observation`: running, or exited with a code |
+| `observe` | Looks whether the launch ended | `Observation`: running, exited with a code, or gone (the host no longer knows the launch, so no exit was seen) |
 | `request_stop` | Asks the launch to end by itself | Nothing |
 | `terminate` | Ends the launch and everything it started | Nothing |
 | `recover` | Judges a saved launch record without starting anything | `Recovery`: may be running, or ended |
@@ -470,7 +470,9 @@ reaches the operating system only through it, by `run_loop::Driver::host`.
 
 The loop writes the `StartIntent` into the launch record before the start and
 adds the `LaunchIdentity` after it. A failure to look is "running", and
-"ended" needs evidence: a lost observer proves nothing.
+"ended" needs evidence: a lost observer proves nothing. "Gone" is evidence
+too: only a host that asked where the launch stands and was told it no
+longer exists says it ([task `76685e6b`](#settling-a-launch-the-runner-no-longer-holds)).
 
 `run_loop::Driver` keeps selection, admission, leases, quiet hours, cost,
 checkpoints and review orchestration. The reviewer side
@@ -641,7 +643,8 @@ Windows, against a fake clock.
 | `lifecycle` | Running, a stop or preshutdown request that ends admission at once, a drain to a monotonic deadline, termination, and `Stopped { quiescent }`. A preshutdown that arrives during a stop's drain shortens the deadline and never lengthens it. After the deadline a termination has a patience; when it runs out the service stops with `quiescent: false`, which is never made clean later |
 | `control` | What the control handler does with a control code: record stop or preshutdown in an atomic signal and answer. Interrogate records nothing; every other control is "not implemented" |
 | `drain` | Carries a service's launches through the ending: asks each to stop once, kills one whose root ended, kills what remains at the deadline, and lets the service report stopped in quiescence only when every launch is confirmed ended. Killing does not wait: every remaining launch is killed in one step and later steps only look whether each job has emptied (changed by the second part of 4b; 4a waited for each in turn) |
-| `startup` | Judges every journaled launch: one Windows says ended is reclaimed, one that may still run is left untouched and reported, a failed reclaim and an unreadable file are reported. Its journal interface has no way to start a launch |
+| `startup` | Judges every journaled launch: one Windows says ended is reclaimed (its profile, its control and working directories and its entry; the directories since task `76685e6b`), one that may still run is left untouched and reported, a failed reclaim and an unreadable file are reported. Its journal interface has no way to start a launch |
+| `quiet` | Which log lines a service writes while one failure repeats: the first, then the same line once a minute with how often it was held back (task `76685e6b`) |
 | `pipe_policy` | The pipe's access list as SDDL text and the decision to admit a client from the facts Windows reported |
 | `settings` | The `[windows_service]` configuration |
 
@@ -657,15 +660,21 @@ while it stops. A service that stops with launches Windows did not confirm
 ended reports a service-specific exit code of 1; one that could not start
 reports 2. Started from a console, the dispatcher fails at once and the
 command exits with an error that says it must be started by the service
-manager. At start the service tries to set its own preshutdown time limit from
-`preshutdown_timeout_seconds`; the account it runs as may not be allowed to,
-so a refusal is logged and does not stop the service. Under the SCM in 4c both
-services were refused (error 5), so installation sets the limit; see the
-[4c runbook](#owner-runbook-for-phase-4c).
+manager. The preshutdown time limit is the **installer's** to set (runbook
+step 4). Until task `76685e6b` the runner tried to set its own from
+`preshutdown_timeout_seconds` at every start, and under the SCM its virtual
+account was refused every time (`OpenServiceW` error 5: it lacks the right to
+change its own service's configuration), which logged a warning about a limit
+the installer had already set. The runner now only **reads the limit back**
+(`QueryServiceConfig2W`, which needs the right to read the configuration) and
+logs it: `preshutdown time limit is 120s`, or that it is less than
+`preshutdown_timeout_seconds` and the installer must set it, or why it could
+not be read. None of these stops the service. The setting still bounds the
+drain: it must exceed the preshutdown grace plus the termination patience.
 
 **The runner as a service** (`host_runtime::windows::runner_service`). It
 starts in this order and reports running only at the end: validate the
-settings, make the state directory, try the preshutdown limit, create the
+settings, make the state directory, read back the preshutdown limit, create the
 pipe, open the runner and judge the journal. A failure at any step stops the
 service. One thread then waits for a client, serves the admitted client one
 request line at a time, and steps the service's ending between waits, so a
@@ -786,8 +795,8 @@ what a launch runs comes from a `Planner`, as with `WindowsHost`.
 | --- | --- | --- |
 | `prepare` | `prepare` | The launch is not prepared; nothing is claimed |
 | `start` | `start`, asked once: the command is forgotten before the request goes out | The start failed as far as the loop knows; it is never asked again |
-| `observe` | `observe` with no wait | Running |
-| `request_stop`, `terminate` | The same | Logged; the launch is not taken to have ended |
+| `observe` | `observe` with no wait; if that fails, `recover` | Running, unless the journal no longer names the launch or says an earlier runner's launch ended: then gone ([task `76685e6b`](#settling-a-launch-the-runner-no-longer-holds)) |
+| `request_stop`, `terminate` | The same | Logged once, then once a minute with a count; the launch is not taken to have ended |
 | `recover` | `recover`, then `observe` for a launch the runner holds | May be running |
 | `cleanup` | `recover`, then `cleanup` or `reclaim` with `remove_directories`; a launch the journal does not name is reported as nothing to remove | Nothing is removed |
 
@@ -817,6 +826,90 @@ on an interactive desktop too.
 the ownership check against a pipe a second account really made; a launch
 carried through the remote runtime under a role account.
 
+### Settling a launch the runner no longer holds
+
+Task `76685e6b` changed this after the runner-crash round of the third 4c
+machine run (task `4197c362`, MiniAir, 2026-11-13). Everything here is
+**implemented** and tested on native Windows and, where it is platform
+neutral, on Linux; **none of it has been machine-run** under the Service
+Control Manager.
+
+**What the run showed.** The fixture ended within 3 seconds of the runner's
+death. Windows restarted the runner, and at start it judged the launch ended
+and reclaimed it, which removed the launch's journal entry. From then on the
+runner answered every request about that launch with "is not prepared" or
+"was not prepared by this runner". The supervisor counted each refusal as
+"running", as the rules above say. It asked once a second and logged every
+refusal: 43,847 lines, 5.8 MB in 12 hours. It renewed the dead launch's lease
+until the 240-minute budget ran out and drained it. The runner refused the
+stop request and the termination as well, so the supervisor went back to
+waiting. A service stop then waited on the same launch, and the service stayed
+`STOP_PENDING` until the machine was restarted. The supervisor's launch record
+(`released: false`) and the launch's two directories were left behind, and
+`stand-in-judge` still said ok.
+
+**The rules now.**
+
+- **A launch the runner no longer holds is gone.** When `observe` fails,
+  `RemoteHost` asks the runner's journal where the launch stands, as
+  `recover` does. If the journal no longer names it and has no unreadable
+  entry, or says an earlier runner's launch ended, `observe` answers
+  `Observation::Gone`. Otherwise it answers running, as before: a failed
+  exchange, a refusal about a launch the runner still holds, a torn entry
+  and a journal that cannot be read prove nothing. On `Gone` the loop ends
+  `supervise` as if the launch had exited, with no exit code. It releases the
+  attempt with a handoff that says the launch ended unseen and its exit code
+  is unknown. It reports exit code -1 (`UNSEEN_EXIT_CODE`) and then cleans up
+  as usual. The supervisor only observes a launch after its start succeeded,
+  so a journal without it means the runner reclaimed it. A runner reclaims a
+  launch only when Windows says both its root process and its job's owner
+  are gone.
+- **The restarted runner removes the directories.** The startup reclaim now
+  removes the ended launch's control and working directories as well as its
+  profile and entry. The entry is the only record of those directories, and
+  nothing reads a launch's directories once it has ended. The supervisor's
+  later `cleanup` finds nothing to remove and says so. If removing the
+  directories fails, the entry stays for the next start, and the supervisor's
+  `cleanup` sends `reclaim` with `remove_directories`.
+- **A drain cannot wait for ever.** Once a drain has terminated the launch, the
+  loop waits at most `SETTLE_AFTER_TERMINATE` (10 seconds) to see it end. A
+  drain can come from a stop request, a spent budget or an attempt the
+  service ended. If the launch still has not been seen to end, the loop gives
+  up: the launch is **unsettled**. It may still run, so its attempt is **not
+  released** and its record stays. On the next pass, `record::recover` judges
+  it as it judges a launch left by a crashed supervisor, and the host claims
+  nothing new until the launch is judged ended. A service stop is therefore
+  honored within `[run] drain_seconds` plus 10 seconds, even while the runner
+  cannot be asked at all. The same bound applies on Linux, where a killed
+  process group is normally seen to end at the next look.
+- **A repeated failure is logged once a minute.** `service::quiet` writes the
+  first line of each kind (`observe`, `request_stop`, `terminate`,
+  `recover`). It holds back the same line until a minute has passed, then
+  writes it with the count held back (`... (repeated 60 more times in the
+  last 60 s)`). A different line first says how often the previous one was
+  repeated. An answer from `observe` resets its kind.
+- **The judge reports what was left.** `stand-in-judge` now also reports a
+  launch that was asked to start and was never released, or never cleaned up
+  (a cleanup that found nothing counts). It counts a `gone` ledger line as an
+  end. It is meant for a ledger whose run has ended; a launch still running
+  counts as never released. On the third run's ledger it would have reported
+  the runner-crash launch on both counts.
+
+**Tests.** `remote::crash_tests` reproduces the runner-crash sequence
+through the supervisor's own loop. The first runner journals a prepared,
+then started, launch with two directories and "crashes". A real `Runner`
+over the same journal is settled as the runner service settles it at
+start, and it answers every later request. The loop sees the launch gone,
+releases it with the unseen-exit handoff and cleans it up. The ledger has
+`gone`, `release` and `cleanup` (`removed: nothing`) and the judge finds
+nothing. The supervisor's record, the two directories and the journal entry
+are all gone. `remote`'s scripted tests cover every standing that is and is
+not "gone". `service::supervisor` has a stop while a launch can never be
+seen to end: it ends within the drain plus the settle window, nothing is
+released, the record stays and the judge reports the launch. It also has a
+launch the host no longer knows at the first look. The judge, `quiet` and the
+preshutdown read-back (`scm`, against the Event Log service) have unit tests.
+
 ### Phase 4b, second part: the supervisor service, the stand-in and the 4c runbook
 
 Task `49aaca03-8d3b-4fe6-b0c4-4d0de68c7b1e` built these. Everything here is
@@ -831,7 +924,10 @@ what that showed. **Nothing here is machine-accepted.**
 4a SCM binding. The loop already ends correctly once its driver says it is
 stopping: it claims nothing more, asks a running launch to stop, terminates
 it after `[run] drain_seconds`, releases its attempt and returns, and after a
-restart it settles what it left through the host runtime's `recover`. The
+restart it settles what it left through the host runtime's `recover`. If the
+terminated launch is still not seen to end within 10 seconds, the loop returns
+without releasing it and leaves it to that recovery
+([task `76685e6b`](#settling-a-launch-the-runner-no-longer-holds)). The
 service's driver, `LoopDriver`, only makes "stopping" follow the stop or
 preshutdown the control handler recorded, and reports a rising checkpoint
 while the loop drains. The service holds no launch: launches are requests to
@@ -856,8 +952,10 @@ cleanup, to a ledger, one JSON object per line. Each line is flushed to disk
 recorded does not happen. An item is offered until it is claimed and never
 again. `agentc-supervisor stand-in-judge --ledger FILE` reads a ledger and
 reports a task that was asked to start more than once, a release of a launch
-that was started and is not known to have ended, and any unreadable line. It
-exits non-zero for any of those and for a ledger with no event.
+that was started and is not known to have ended, a launch that was started
+and never released or never cleaned up (since task `76685e6b`), and any
+unreadable line. It exits non-zero for any of those and for a ledger with no
+event.
 
 **A failed prepare** (decided in task `8981c84a`). The loop prepares a
 launch before it claims the item, so a prepare the runner refuses claims

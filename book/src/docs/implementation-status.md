@@ -87,6 +87,18 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   command judges that ledger for a second launch or a release without an
   ended launch.
 
+- Task `76685e6b` changed how the supervisor
+  [settles a launch the runner no longer holds](windows-host-design.md#settling-a-launch-the-runner-no-longer-holds),
+  after the third 4c run's runner-crash round. It now releases and cleans up
+  a launch that a restarted runner reclaimed, and the restarted runner
+  removes that launch's directories. A drain that terminated a launch waits
+  at most 10 more seconds and otherwise leaves the attempt unreleased for
+  recovery, so a service stop ends. A repeated failure is logged once a
+  minute, the stand-in judge also reports a started launch that was never
+  released or never cleaned up, and the runner reads back its preshutdown
+  limit instead of trying to set it. This is tested on native Windows and
+  Linux; **it has not been machine-run under the Service Control Manager**.
+
 - Phase 4c's [machine run](windows-host-design.md#phase-4c-machine-run-2026-11-11)
   on MiniAir, 2026-11-11, installed both services under their own virtual
   service accounts from an exact recorded build. They started, ran, connected

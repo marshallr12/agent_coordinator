@@ -62,6 +62,11 @@ pub enum Observation {
     Running,
     /// The launch ended with this exit code.
     Exited { code: i32 },
+    /// The host no longer knows the launch and nothing of it runs there, so
+    /// its exit was never seen: on Windows, a runner that restarted after
+    /// a crash judged it ended and reclaimed it. Only a host that asked and
+    /// was told says this; a failure to ask is still `Running`.
+    Gone,
 }
 
 /// What a backend concludes about a launch recorded by an earlier supervisor.
@@ -109,7 +114,8 @@ pub trait HostRuntime {
     /// never starts the launch outside it.
     fn start(&mut self, launch: &Launch) -> Result<LaunchIdentity>;
     /// Whether the launch this runtime started has ended. A failure to look
-    /// is [`Observation::Running`]: a lost observer proves nothing.
+    /// is [`Observation::Running`]: a lost observer proves nothing. A host
+    /// that is told the launch no longer exists says [`Observation::Gone`].
     fn observe(&mut self, launch: &Launch) -> Observation;
     /// Asks the launch to end by itself.
     fn request_stop(&mut self, launch: &Launch);
