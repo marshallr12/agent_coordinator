@@ -824,9 +824,21 @@ Each poll it:
    for recovery;
 8. rewrites `/var/lib/agentc/heartbeat.json` (poll count, time, outcome) after
    every poll, and every 30 seconds while an implementer or reviewer launch
-   runs, adding `"launch": {"role", "task"}` (the poll count and outcome stay
-   those of the last finished poll). A heartbeat older than the canary's 300
-   seconds therefore means a hung or stopped supervisor, not a long launch.
+   runs, adding `"launch": {"role", "task"}`. A poll's heartbeat has a `state`:
+   `idle` (nothing offered), `stopped` (a host-wide admission stop: recovery
+   pending, disk, kill switch, vendor or cost admission, or the total strike
+   limit; `stop` gives the reason and `next` was not asked), `held` (every task
+   `next` could offer is held on this host by its own strikes; `hold` names the
+   first holds), `launched` or `failed`. `skipped_holds` lists (at most 20, with
+   `skipped_hold_count` the full number) the locally held tasks the poll passed
+   over, whether or not it then launched something else. While a launch runs the
+   heartbeat says `"state": "busy"` and `"outcome": "Busy"`, and the previous
+   poll's outcome moves to `last_outcome`, so an earlier `Refused` or `Held`
+   result is never mistaken for the host's present state. The poll count stays
+   that of the last finished poll. The heartbeat holds task ids and reasons
+   only, never credentials, session proofs or harness logs. A heartbeat older
+   than the canary's 300 seconds therefore means a hung or stopped supervisor,
+   not a long launch.
 
 Renewal is progress-gated. At the service's `renew_after_seconds` cadence the
 loop renews only while `launch-root` is alive, `$RUN/events.jsonl` (the
@@ -978,10 +990,26 @@ A launch whose harness exits 0 although the agent neither submitted nor
 released its attempt (a broken shell, a refused tool, an agent that gave up)
 is counted in `/var/lib/agentc/unsubmitted.json`, per task and in total, until
 a launch submits. After `[run] empty_exit_limit` (default 2) such launches of
-one task, the loop stops claiming that task and reports `Refused: task ... is
-held`; after `[run] empty_exit_total_limit` (default 5) in a row across all
-tasks it claims nothing. `0` turns a limit off. The host stays held until the
-operator has fixed the cause and removed `unsubmitted.json`. The release
+one task, the loop stops claiming that task; after `[run] empty_exit_total_limit`
+(default 5) in a row across all tasks it claims nothing and reports `Refused`.
+`0` turns a limit off. A held task does not block other work: each poll sends the
+held tasks (at most 64, most strikes first, then by id, the same list for every
+project) to `next` as `exclude_tasks`, so the next independent ready task in
+the project is offered and claimed, while a held task is never claimed or
+launched and selection never changes a count in `unsubmitted.json`. A service
+that ignores the parameter, or more than 64 holds, can still offer a held
+task; it is passed over, with no second `next` call. When every task `next`
+could offer is held, the poll reports `Held: task ... is held ...` (state
+`held` in the heartbeat) and polls again at the normal interval; the
+`skipped_holds` and `Held` text name the tasks. Strikes survive a supervisor
+restart, because they live in `unsubmitted.json`. To release a task, first
+inspect it: read `unsubmitted.json`, the task's attempt history and the retained
+logs in `unsubmitted/<session>/`, and confirm the cause (a missing
+prerequisite, a broken tool or an unclear task) is fixed. Then remove only that
+task's entry from `unsubmitted.json` (set its `tasks` count to 0 and leave
+`total` alone) or, once the host itself is repaired, remove the file; do not
+reset strikes merely to advance the queue. The total limit stays a host-wide
+stop until the operator has fixed the cause and removed `unsubmitted.json`. The release
 handoff of every launch that ended without a submission carries the agent's
 final message (the Claude `result`, else its last text, or Codex's last
 `agent_message`; at most 1000 characters) and says where the launch's logs
@@ -1076,8 +1104,15 @@ subject's current submission is the one `next` offered; if the claim reply
 names no attempt, root releases the activity's current attempt rather than
 hold the review for its lease. After `[run] review_attempts` (default 3)
 failed verdicts in a row for one submission, the loop stops claiming it and
-logs why, until it restarts. The clone, run and mirror branch are removed
-after every review. No review is taken while the reviewer has reached `[health]
+logs why, until it restarts. That hold is local to the loop and kept in memory:
+each review poll sends the held submissions (at most 64, most failures first)
+to `next` as `exclude_submissions`, so an independent review behind a held one
+is offered and claimed instead, while a held submission is never claimed or
+launched and its count is not reset. A replacement submission has a new
+identity and is judged on its own failures. Held submissions the service passed
+over are logged (`passed over held submissions ...`); when only held reviews
+remain the poll logs `Held` naming them (at most 64) and claims nothing, once
+per poll. The clone, run and mirror branch are removed after every review. No review is taken while the reviewer has reached `[health]
 reviewer_daily_usd` (default 50) in the ledger below, which counts reviewer
 launches' cost.
 
