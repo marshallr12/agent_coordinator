@@ -85,6 +85,11 @@ enum Commands {
         #[arg(long)]
         once: bool,
     },
+    /// As root: send the cost ledger's unsent rows to the coordinator once
+    /// and print how many it stored. A host that has run without reporting
+    /// imports its whole ledger this way; rows already stored are not
+    /// duplicated.
+    ReportCosts,
     /// Summarise a would-launch log (default: the configured shadow log).
     ShadowReport {
         #[arg(long)]
@@ -208,6 +213,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             runtime.block_on(shadow::run(&config.shadow, once))?
         }
         Commands::Run { once } => live_run(&config, cli.config.as_deref(), once)?,
+        Commands::ReportCosts => report_costs(&config, cli.config.as_deref())?,
         Commands::NetnsRelay { .. } => unreachable!("dispatched before loading config"),
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
@@ -285,4 +291,22 @@ fn live_run(config: &config::Config, path: Option<&std::path::Path>, once: bool)
 #[cfg(not(target_os = "linux"))]
 fn live_run(_config: &config::Config, _path: Option<&std::path::Path>, _once: bool) -> Result<()> {
     anyhow::bail!("run requires Linux")
+}
+
+/// Sends the unsent cost rows once and prints the summary as JSON.
+#[cfg(target_os = "linux")]
+fn report_costs(config: &config::Config, path: Option<&std::path::Path>) -> Result<()> {
+    let summary = agentc_supervisor::run_loop::live::report_once(config, path)?;
+    println!(
+        "{}",
+        serde_json::json!({"accepted": summary.accepted, "duplicates": summary.duplicates,
+                           "rejected": summary.rejected, "pending": summary.pending})
+    );
+    Ok(())
+}
+
+/// Reporting uses the live loop's credential handling, which needs Linux.
+#[cfg(not(target_os = "linux"))]
+fn report_costs(_config: &config::Config, _path: Option<&std::path::Path>) -> Result<()> {
+    anyhow::bail!("report-costs requires Linux")
 }

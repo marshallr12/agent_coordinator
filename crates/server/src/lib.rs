@@ -34,6 +34,7 @@ pub mod reverts;
 pub mod session_idle;
 pub mod state;
 pub mod state_wait;
+pub mod telemetry;
 pub mod workflow;
 
 use axum::{
@@ -69,6 +70,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(integrator_observe::routes())
         .merge(integrator_reports::routes())
         .merge(integrator_reverts::routes())
+        .merge(telemetry::routes())
         .merge(reverts::routes())
         .merge(jobs::routes())
         .merge(auth::routes())

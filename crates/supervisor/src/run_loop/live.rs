@@ -49,6 +49,9 @@ pub struct LiveDriver {
     revision: String,
     /// The running `launch-root`, if any.
     child: Option<Child>,
+    /// Not before this time (ms since the epoch) does a pass that left cost
+    /// rows unsent run again ([`live_report::RETRY_AFTER_MS`]).
+    report_after_ms: i64,
 }
 
 /// One project the loop works on: its binding, the mirror its clones start
@@ -67,6 +70,20 @@ pub fn run(config: &Config, config_path: Option<&Path>, once: bool) -> Result<()
     let mut driver = LiveDriver::new(config, config_path)?;
     on_stop_requests();
     super::run(&mut driver, config, once)
+}
+
+/// As root, sends every unsent cost-ledger row to the coordinator once
+/// (`agentc-supervisor report-costs`), whatever the retry interval.
+pub fn report_once(config: &Config, config_path: Option<&Path>) -> Result<super::report::Summary> {
+    accounts::require_root(accounts::effective_uid())?;
+    let driver = LiveDriver::new(config, config_path)?;
+    let main = &driver.slots[0].binding.project_id;
+    Ok(super::live_report::pass(
+        config,
+        &driver.runtime,
+        &driver.client,
+        main,
+    ))
 }
 
 /// Records SIGTERM and SIGINT in [`STOP`] instead of dying.
@@ -125,6 +142,7 @@ impl LiveDriver {
             account,
             revision: String::new(),
             child: None,
+            report_after_ms: 0,
         })
     }
 
@@ -515,6 +533,21 @@ impl Driver for LiveDriver {
 
     fn credential_expiry_ms(&self, harness: Harness) -> Option<i64> {
         super::live_health::expiry_ms(&self.config, harness)
+    }
+
+    fn report_costs(&mut self, config: &Config) {
+        let now = self.now_ms();
+        if now < self.report_after_ms {
+            return;
+        }
+        let main = &self.slots[0].binding.project_id;
+        let summary = super::live_report::pass(config, &self.runtime, &self.client, main);
+        if summary.pending > 0 {
+            self.report_after_ms = now.saturating_add(super::live_report::RETRY_AFTER_MS);
+        }
+        if summary.accepted + summary.duplicates + summary.rejected + summary.pending > 0 {
+            eprintln!("agentc-supervisor run: report costs: {summary:?}");
+        }
     }
 
     fn events(&self, launch: &Launch) -> Option<Vec<u8>> {

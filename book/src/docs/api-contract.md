@@ -771,6 +771,54 @@ limit applies to reverts.
   criteria, plus the revert evidence as one more criterion; the revert's
   `reland_task_id` names it.
 
+## Supervisor telemetry (cost and canary)
+
+Supervisor hosts report launch cost and end-to-end canary results so the
+console can show autonomy health per project. Each host's own files
+(`costs.jsonl`, `e2e-canary.jsonl`) stay the durable source; the service stores
+only what hosts report, per project, attributed to the reporting principal and
+`host`. All paths are under `/api/v1/projects/{project_id}/telemetry`.
+
+- `POST /cost-rows` with `{host, rows}` (1 to 200 rows) records launch cost
+  rows. A row is `{row_id, role, harness, model, input_tokens,
+  cached_input_tokens, output_tokens, usd, usd_estimated, canary, task_id,
+  session_id, attempt_id, occurred_at_ms}`: `role` is `impl` or `rev`, `usd`
+  is dollars or null when the launch was unpriced (stored as exact millionths),
+  `canary` marks a row of the host's canary project, and `task_id`,
+  `session_id` and `attempt_id` are the host's claims, not checked against the
+  service's records. Unknown fields are refused.
+- `POST /canary-results` with `{host, rows}` records end-to-end canary runs. A
+  row is `{row_id, harness, outcome, duration_seconds, detail, task_id,
+  served_by, occurred_at_ms}`: `outcome` is `ok`, `failed` or `timeout`, and
+  `served_by` is the list of harnesses the host's ledger shows for the task, or
+  null.
+- Both writes are idempotent twice over. The usual `Idempotency-Key` replays the
+  saved reply. Independently, `row_id` (the host's stable identity of one
+  ledger row; the supervisor and `e2e-canary.py` use the SHA-256 of the ledger
+  line) is unique per project and host, so a retry under a new key, a batch of
+  other composition or a re-imported ledger stores each row once; the first
+  report of a row wins. The reply is `{project_id, host, kind, accepted,
+  duplicates}`. The write, its receipt and one `telemetry.cost_reported` or
+  `telemetry.canary_reported` event (host and counts only) commit together.
+- Authorization: reporting needs an agent credential with write access, so a
+  human session, a read-only credential (shadow and reviewer principals) and the
+  integrator credential are refused with `403`; a missing credential is `401`.
+  An unknown project is `not_found`. Reads accept any authenticated reader.
+- `GET /cost?group_by=task|day&host=&since_ms=&until_ms=&include_canary=&limit=`
+  returns the project's launch cost per task (default) or per UTC day, most
+  recent group first. Each item has `impl` and `rev` figures `{launches, usd,
+  unpriced_launches, estimated_launches, input_tokens, cached_input_tokens,
+  output_tokens}`, `total_usd` and `last_at`, plus `task_id` and the task's
+  `title` (null for an unknown task) or `day` (`YYYY-MM-DD`). `totals` sums
+  every matching row; `truncated` says `limit` (1 to 1000, default 100) cut
+  groups off. Rows of a canary project and of budget-exempt (canary) tasks are
+  left out unless `include_canary=true`, as the digest leaves them out.
+- `GET /canaries?host=&harness=&outcome=&since_ms=&limit=&before=` returns the
+  canary history, newest run first (`limit` 1 to 1000, default 100; `before` is
+  a result `id` and an unknown one is `not_found`; `next_before` continues),
+  and `latest`, the newest result of every host and harness the project has
+  seen.
+
 ## Attempt operations
 
 All paths below are under `/api/v1/projects/{project_id}`. Attempts have their

@@ -22,6 +22,17 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   `integrator-reports` CLI commands and the MCP tools
   `coordinator_integrator_reports_list` and `coordinator_integrator_report_get`.
 
+- Supervisor hosts report launch cost rows and end-to-end canary results to the
+  service per project, idempotently and attributed to the reporting principal and
+  host, and the service aggregates them: cost per task and per day (implementer
+  and reviewer) and canary history with the latest result per host and harness
+  (see the [API contract](api-contract.md#supervisor-telemetry-cost-and-canary)).
+  `agentc-supervisor` sends unsent `costs.jsonl` rows after every poll and
+  `e2e-canary.py` sends each run's result, with the host files kept as the source
+  and unsent rows retried; `agentc-supervisor report-costs` and
+  `e2e-canary.py --backfill` import existing files once. These are read
+  endpoints and host reporters only: the console does not show them yet.
+
 - Standalone `agent-coordinator-mcp` stdio adapter with protected, locked, atomic
   mutation journals and exact retry through the service. Native CLI installation
   is not required for coordination. Direct HTTP hosts still need their own
