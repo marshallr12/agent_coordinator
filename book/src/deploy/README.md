@@ -393,7 +393,11 @@ if the helper exits first. The launch then runs as the implementer, with only
 `PATH`, `LANG` and the role's home as `HOME`, as `agentc-supervisor launch
 --session-id <id> --task <task-id> --push-socket <socket>`. The session id is
 also the helper's launch id, so the candidate ref is
-`refs/agent-coordinator/candidates/<task-id>/<session-id>`. `launch` checks
+`refs/agent-coordinator/candidates/<task-id>/<session-id>`; it publishes one
+commit there and never moves it. `checkpoint --push-wip` requests instead go to
+create-only refs `refs/agent-coordinator/candidates/wip/<task-id>/<session-id>/<sha>`,
+which the helper also derives itself, never updates or deletes, and which do not
+spend the candidate. The request cannot name any other ref. `launch` checks
 that the socket is an implementer's, absolute, at most 93 bytes long and a
 socket in a launch's `sock/` directory directly under `<state_dir>/push`, and
 exports it as `AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET`. A Claude launch's

@@ -768,3 +768,93 @@ fn failed_push_does_not_leave_an_intent_to_adopt() {
     assert_eq!(refusal.code, RefusalCode::LeaseConflict);
     assert_eq!(fixture.remote_ref(REFERENCE), Some(failed));
 }
+
+/// The WIP ref prefix of the test helper (task `task-1`, launch `launch-1`).
+const WIP_PREFIX: &str = "refs/agent-coordinator/candidates/wip/task-1/launch-1/";
+
+impl Fixture {
+    /// Sends `revision` as a WIP push through a helper with `spec`.
+    fn send_wip(&self, spec: &HelperSpec, revision: &str) -> Result<PushReceipt> {
+        let base = self.base.clone();
+        exchange(spec, |stream| {
+            send_push(stream, &self.source, revision, &[&base], PushKind::Wip)
+        })
+        .0
+    }
+}
+
+#[test]
+fn wip_pushes_create_their_own_refs_without_spending_the_candidate() {
+    let fixture = fixture();
+    let spec = fixture.spec();
+    let wip = fixture.commit("wip.txt", "wip\n");
+    let receipt = fixture.send_wip(&spec, &wip).unwrap();
+    assert_eq!(receipt.reference, format!("{WIP_PREFIX}{wip}"));
+    assert_eq!(receipt.previous, None);
+    assert_eq!(fixture.remote_ref(&receipt.reference), Some(wip.clone()));
+    assert_eq!(fixture.remote_ref(REFERENCE), None);
+    let candidate = fixture.commit("candidate.txt", "candidate\n");
+    fixture.send(&spec, &candidate).0.unwrap();
+    let later = fixture.commit("later.txt", "later\n");
+    let receipt = fixture.send_wip(&spec, &later).unwrap();
+    assert_eq!(fixture.remote_ref(&receipt.reference), Some(later));
+    assert_eq!(fixture.remote_ref(REFERENCE), Some(candidate));
+}
+
+#[test]
+fn duplicate_wip_sha_is_accepted_without_pushing_again() {
+    let fixture = fixture();
+    let spec = fixture.spec();
+    let wip = fixture.commit("wip.txt", "wip\n");
+    fixture.send_wip(&spec, &wip).unwrap();
+    let replay = fixture.send_wip(&spec, &wip).unwrap();
+    assert_eq!(replay.previous.as_deref(), Some(wip.as_str()));
+    assert_eq!(fixture.remote_ref(&replay.reference), Some(wip));
+}
+
+#[test]
+fn an_existing_wip_ref_naming_another_commit_is_never_updated() {
+    let fixture = fixture();
+    let spec = fixture.spec();
+    let wip = fixture.commit("wip.txt", "wip\n");
+    let reference = format!("{WIP_PREFIX}{wip}");
+    let planted = format!("{}:{reference}", fixture.base);
+    git_ok(
+        &fixture.source,
+        ["push", "--quiet", "origin", planted.as_str()],
+    )
+    .unwrap();
+    let refusal = refusal_of(fixture.send_wip(&spec, &wip));
+    assert_eq!(refusal.code, RefusalCode::LeaseConflict);
+    assert_eq!(fixture.remote_ref(&reference), Some(fixture.base.clone()));
+}
+
+#[test]
+fn requests_cannot_name_other_kinds_or_refs() {
+    let fixture = fixture();
+    let spec = fixture.spec();
+    let candidate = fixture.commit("feature.txt", "feature\n");
+    let tree = fixture.tree(&candidate);
+    let lines = [
+        format!(
+            "{{\"version\":1,\"revision\":\"{candidate}\",\"tree\":\"{tree}\",\"kind\":\"heads\"}}\n"
+        ),
+        format!(
+            "{{\"version\":1,\"revision\":\"{candidate}\",\"tree\":\"{tree}\",\"kind\":\"wip\",\"ref\":\"refs/heads/main\"}}\n"
+        ),
+        format!(
+            "{{\"version\":1,\"revision\":\"{candidate}\",\"tree\":\"{tree}\",\"kind\":\"delete\"}}\n"
+        ),
+    ];
+    for line in lines {
+        let reply = send_raw(&spec, line.as_bytes(), 0, &[]);
+        assert_eq!(code(&reply), Some(RefusalCode::BadRequest), "{line}");
+    }
+    assert_eq!(fixture.remote_ref_names(), ["refs/heads/main"]);
+}
+
+#[test]
+fn the_wip_task_id_is_reserved() {
+    let work_dir = std::env::temp_dir().join("reserved-wip");
+    assert!(HelperSpec::new("origin", "wip", "launch-1", &work_dir).is_err());
+}

@@ -1999,9 +1999,33 @@
       add(view.form,actionButton('Browse older task evidence',taskHistory,false));
       selectField(view,'disposition','Continue work', 'resume', [['resume','Resume saved work'],['restart','Restart implementation after inspection']]);
       view.field('summary','Inspection findings and next steps');
-      for (const [name,label] of [['saved_work_checked','I checked saved work and its source checkpoints'],['running_jobs_checked','I checked still-running and uncertain jobs']]) { const input = view.field(name,label,'','input'); input.type = 'checkbox'; input.value = 'checked'; }
-      view.finish('Record recovery decision', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath(projectId)}/attempts/${encodeURIComponent(attempt.id)}/recovery-resolution`, {generation:attempt.generation,disposition:values.get('disposition'),summary:values.get('summary'),saved_work_checked:values.get('saved_work_checked') === 'checked',running_jobs_checked:values.get('running_jobs_checked') === 'checked'}, 'recovery decision'); });
+      const evidenceFields = recoveryEvidenceFields(view, task, recordedRevision(state.detail, attempt));
+      view.finish('Record recovery decision', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath(projectId)}/attempts/${encodeURIComponent(attempt.id)}/recovery-resolution`, {generation:attempt.generation,disposition:values.get('disposition'),summary:values.get('summary'),...evidenceFields(values)}, 'recovery decision'); });
     } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  // The attempt a recovery superseded (highest earlier generation) and the revision its latest checkpoint recorded; null for a legacy checkpoint.
+  function recordedRevision(detail, attempt) {
+    const prior = (detail?.attempts || []).filter(item => item.generation < attempt.generation).sort((a, b) => b.generation - a.generation)[0];
+    const latest = prior && (detail.checkpoints || []).find(checkpoint => checkpoint.attempt_id === prior.id);
+    return latest?.revision ? { prior, revision: latest.revision } : null;
+  }
+  // Adds the recovery evidence inputs and returns a function that reads them into the request body:
+  // a fetched SHA when the expired attempt recorded a revision, otherwise the two local attestations.
+  function recoveryEvidenceFields(view, task, recorded) {
+    if (!recorded) {
+      for (const [name,label] of [['saved_work_checked','I checked saved work and its source checkpoints'],['running_jobs_checked','I checked still-running and uncertain jobs']]) { const input = view.field(name,label,'','input'); input.type = 'checkbox'; input.value = 'checked'; }
+      return values => ({saved_work_checked:values.get('saved_work_checked') === 'checked',running_jobs_checked:values.get('running_jobs_checked') === 'checked'});
+    }
+    const base = 'refs/agent-coordinator/candidates/wip/', note = el('div', 'recorded-revision'); note.id = 'recovery-recorded-revision';
+    add(note, el('p', '', 'The expired attempt recorded this work-in-progress commit:')); add(note, el('code', '', recorded.revision));
+    // A supervised launch's WIP ref names the supervisor's launch id, which the service never sees,
+    // so it is shown as an ls-remote pattern rather than a guessed exact ref.
+    add(note, el('p', '', 'Find its WIP ref (a CLI push, or a supervised-launch push under any launch id) and paste the commit it names:'));
+    for (const ref of [`git ls-remote origin '${base}${recorded.prior.id}/${recorded.revision}'`, `git ls-remote origin '${base}${task.id}/*/${recorded.revision}'`]) add(note, el('code', '', ref));
+    add(note, el('p', 'muted', 'The service cannot read Git. It only checks that the SHA you enter equals the recorded one, so confirm the fetched ref names it first.'));
+    add(view.form, note);
+    const input = view.field('fetched_revision','Fetched commit SHA (40 lowercase hex characters)','','input'); input.pattern = '[0-9a-f]{40}'; input.maxLength = 40; input.autocomplete = 'off'; input.spellcheck = false;
+    return values => ({fetched_revision:values.get('fetched_revision')});
   }
   function releaseOwnedAttempt(attempt) {
     const view = workflowDialog('Release ownership with a handoff', 'Release leaves the task unfinished. All jobs must have terminal evidence and resource reservations must be released first.');

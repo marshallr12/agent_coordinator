@@ -33,12 +33,13 @@ fn prepared(
 }
 
 /// Pushes and reads back the attempt's prepared worktree commit, returning
-/// its full SHA. A configured candidate push helper refuses the explicit ref.
+/// its full SHA. Under a candidate push helper the helper chooses the WIP ref
+/// (`candidates/wip/<task>/<launch>/<sha>`) and only the SHA matters.
 pub fn push(context: &ContextData, attempt: &str, generation: u64) -> Result<String, Failure> {
     let prepared = prepared(context, attempt, generation)?;
     let (revision, _tree) = worktree::current_snapshot(&prepared).map_err(Failure::invalid)?;
     let reference = wip_ref(attempt, &revision);
-    let pushed = candidate_checkpoint::checkpoint(
+    let pushed = candidate_checkpoint::checkpoint_wip(
         &candidate_checkpoint::CheckpointRequest {
             checkout: &prepared.destination,
             repository: &prepared.repository_url,

@@ -9,7 +9,9 @@
 //! Wire protocol, version [`PROTOCOL_VERSION`]:
 //!
 //! 1. The client sends one JSON line `{"version":1,"revision":R,"tree":T}`
-//!    naming the full commit and tree object IDs it is publishing.
+//!    naming the full commit and tree object IDs it is publishing, plus
+//!    `"kind":"wip"` for a work-in-progress push (see below); a candidate
+//!    request omits `kind`.
 //! 2. The client sends the bundle length as a big-endian `u64`, then exactly
 //!    that many bundle bytes.
 //! 3. The helper answers with one JSON line, either
@@ -28,6 +30,14 @@
 //! is accepted again without pushing, and a request for any other commit is
 //! refused with [`RefusalCode::CandidateAlreadyPublished`]; when the helper
 //! has recorded its lease, that refusal comes before any bundle byte is read.
+//!
+//! A `"kind":"wip"` request publishes to its own create-only ref
+//! `refs/agent-coordinator/candidates/wip/<task>/<launch>/<revision>`, also
+//! derived by the helper. It never touches the candidate ref or its lease, so
+//! WIP checkpoints do not spend the launch's one candidate commit. An existing
+//! WIP ref naming the requested commit is accepted again without pushing; one
+//! naming anything else is a [`RefusalCode::LeaseConflict`]. Nothing is ever
+//! updated or deleted.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -190,6 +200,24 @@ impl PushReply {
     }
 }
 
+/// Which ref a push targets: the launch's one candidate ref, or a
+/// create-only work-in-progress ref named after the commit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushKind {
+    #[default]
+    Candidate,
+    Wip,
+}
+
+impl PushKind {
+    /// Whether this is the default kind, which the request line omits so a
+    /// candidate request keeps its original shape.
+    fn is_candidate(&self) -> bool {
+        *self == Self::Candidate
+    }
+}
+
 /// The request line the client sends before the bundle.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -197,6 +225,8 @@ struct PushRequest {
     version: u32,
     revision: String,
     tree: String,
+    #[serde(default, skip_serializing_if = "PushKind::is_candidate")]
+    kind: PushKind,
 }
 
 /// Either reply shape as it appears on the wire, before validation.
@@ -212,8 +242,8 @@ struct WireReply {
     message: Option<String>,
 }
 
-/// Everything a helper is fixed to at spawn: the remote, the one ref it may
-/// write (derived from validated task and launch ids), its private working
+/// Everything a helper is fixed to at spawn: the remote, the candidate ref and
+/// WIP ref prefix it may write (derived from validated task and launch ids), its private working
 /// repository, the credential digests the secret scan refuses, the bundle
 /// size limit, and extra environment for Git children that contact the
 /// remote (where push credentials are supplied).
@@ -221,6 +251,7 @@ struct WireReply {
 pub struct HelperSpec {
     remote: String,
     reference: String,
+    wip_prefix: String,
     work_dir: PathBuf,
     known_digests: Vec<String>,
     max_bundle_bytes: u64,
@@ -235,6 +266,7 @@ impl HelperSpec {
         validate_remote_argument(remote)?;
         validate_ref_component("task", task)?;
         validate_ref_component("launch", launch)?;
+        ensure!(task != "wip", "task id `wip` is reserved for WIP refs");
         ensure!(
             work_dir.is_absolute(),
             "helper work directory must be an absolute path"
@@ -242,6 +274,7 @@ impl HelperSpec {
         Ok(Self {
             remote: remote.to_owned(),
             reference: format!("{CANDIDATE_REF_PREFIX}{task}/{launch}"),
+            wip_prefix: format!("{CANDIDATE_REF_PREFIX}wip/{task}/{launch}/"),
             work_dir: work_dir.to_path_buf(),
             known_digests: Vec::new(),
             max_bundle_bytes: DEFAULT_MAX_BUNDLE_BYTES,
@@ -268,9 +301,14 @@ impl HelperSpec {
         self
     }
 
-    /// The only ref this helper ever writes.
+    /// The launch's one candidate ref.
     pub fn reference(&self) -> &str {
         &self.reference
+    }
+
+    /// The create-only WIP ref for `revision` (a validated full object ID).
+    pub fn wip_reference(&self, revision: &str) -> String {
+        format!("{}{revision}", self.wip_prefix)
     }
 
     /// The Git environment in the borrowed form `git_raw` takes.
@@ -333,14 +371,32 @@ pub fn send_candidate<S: Read + Write>(
     revision: &str,
     prerequisites: &[&str],
 ) -> Result<PushReceipt> {
+    send_push(
+        stream,
+        checkout,
+        revision,
+        prerequisites,
+        PushKind::Candidate,
+    )
+}
+
+/// Like [`send_candidate`], for a push of `kind`: a WIP push goes to the
+/// helper's create-only WIP ref for `revision`.
+pub fn send_push<S: Read + Write>(
+    stream: &mut S,
+    checkout: &Path,
+    revision: &str,
+    prerequisites: &[&str],
+    kind: PushKind,
+) -> Result<PushReceipt> {
     let checkout = canonical_git_root(checkout)?;
     let revision = resolve_exact_commit(&checkout, revision)?;
     let tree = git_text(&checkout, ["rev-parse", &format!("{revision}^{{tree}}")])?;
     let bundle = OutgoingBundle::create(&checkout, &revision, prerequisites)?;
-    let sent = send_request(stream, &revision, &tree, &bundle.path);
+    let sent = send_request(stream, &revision, &tree, kind, &bundle.path);
     let reply = read_line(stream, MAX_REPLY_LINE).and_then(|line| PushReply::parse(&line));
     match (sent, reply) {
-        (_, Ok(PushReply::Accepted(receipt))) => check_receipt(receipt, &revision, &tree),
+        (_, Ok(PushReply::Accepted(receipt))) => check_receipt(receipt, &revision, &tree, kind),
         (_, Ok(PushReply::Refused(refusal))) => Err(refusal.into()),
         (Err(error), Err(_)) | (Ok(()), Err(error)) => Err(error),
     }
@@ -396,11 +452,18 @@ fn bundle_create(checkout: &Path, path: &Path, tip: &str, exclusions: &[String])
 }
 
 /// Writes the request line, the big-endian bundle length and the bundle.
-fn send_request<W: Write>(stream: &mut W, revision: &str, tree: &str, bundle: &Path) -> Result<()> {
+fn send_request<W: Write>(
+    stream: &mut W,
+    revision: &str,
+    tree: &str,
+    kind: PushKind,
+    bundle: &Path,
+) -> Result<()> {
     let request = PushRequest {
         version: PROTOCOL_VERSION,
         revision: revision.to_owned(),
         tree: tree.to_owned(),
+        kind,
     };
     let mut line = serde_json::to_vec(&request).context("encode candidate push request")?;
     line.push(b'\n');
@@ -417,12 +480,25 @@ fn send_request<W: Write>(stream: &mut W, revision: &str, tree: &str, bundle: &P
 }
 
 /// Accepts a receipt only for the commit and tree this client sends, under the
-/// candidate namespace.
-fn check_receipt(receipt: PushReceipt, revision: &str, tree: &str) -> Result<PushReceipt> {
+/// candidate namespace; a WIP receipt must name a WIP ref ending in the commit.
+fn check_receipt(
+    receipt: PushReceipt,
+    revision: &str,
+    tree: &str,
+    kind: PushKind,
+) -> Result<PushReceipt> {
+    let wip = format!("{CANDIDATE_REF_PREFIX}wip/");
+    let in_namespace = match kind {
+        PushKind::Candidate => {
+            receipt.reference.starts_with(CANDIDATE_REF_PREFIX)
+                && !receipt.reference.starts_with(&wip)
+        }
+        PushKind::Wip => {
+            receipt.reference.starts_with(&wip) && receipt.reference.ends_with(revision)
+        }
+    };
     ensure!(
-        receipt.revision == revision
-            && receipt.tree == tree
-            && receipt.reference.starts_with(CANDIDATE_REF_PREFIX),
+        receipt.revision == revision && receipt.tree == tree && in_namespace,
         "candidate push helper acknowledged a different commit, tree or ref"
     );
     Ok(receipt)
@@ -500,17 +576,22 @@ fn reply_too_long(refusal: &PushRefusal) -> bool {
     PushReply::Refused(refusal.clone()).to_line().len() > MAX_REPLY_LINE
 }
 
-/// Reads the request, refuses a second commit, then reads the bundle and
-/// imports, scans and publishes it.
+/// Reads the request, refuses a second candidate commit, then reads the
+/// bundle and imports, scans and publishes it to the ref its kind selects.
 fn receive_and_publish<R: Read>(stream: &mut R, spec: &HelperSpec) -> Step<PushReceipt> {
     let request = read_request(stream)?;
     let length = read_length(stream, spec.max_bundle_bytes)?;
     let helper = Helper::open(spec)?;
-    helper.refuse_other_than_leased(&request)?;
+    if request.kind == PushKind::Candidate {
+        helper.refuse_other_than_leased(&request)?;
+    }
     let bundle = helper.receive_bundle(stream, length)?;
     let quarantine = helper.import(&bundle, &request)?;
     helper.scan(&request.revision)?;
-    let receipt = helper.publish(&request);
+    let receipt = match request.kind {
+        PushKind::Candidate => helper.publish(&request),
+        PushKind::Wip => helper.publish_wip(&request),
+    };
     drop(quarantine);
     receipt
 }
@@ -797,6 +878,34 @@ impl<'a> Helper<'a> {
         self.confirm(request, observed)
     }
 
+    /// Publishes `request.revision` to its create-only WIP ref: an absent ref
+    /// is created, one already naming the revision is accepted again, and one
+    /// naming anything else is refused. Leases and intents are untouched.
+    fn publish_wip(&self, request: &PushRequest) -> Step<PushReceipt> {
+        let reference = self.spec.wip_reference(&request.revision);
+        let observed = self.observe_ref(&reference)?;
+        match observed.as_deref() {
+            None => {
+                let _ = self.push_create(&reference, &request.revision);
+            }
+            Some(current) if current == request.revision => {}
+            Some(_) => return Err(wip_conflict()),
+        }
+        match self.observe_ref(&reference)? {
+            Some(now) if now == request.revision => Ok(PushReceipt {
+                reference,
+                revision: request.revision.clone(),
+                tree: request.tree.clone(),
+                previous: observed,
+            }),
+            Some(_) => Err(wip_conflict()),
+            None => Err(refusal(
+                RefusalCode::PushFailed,
+                "Git could not push the WIP ref",
+            )),
+        }
+    }
+
     /// Whether the remote value `observed` is this helper's: equal to its
     /// lease (its confirmed push, or absent before it), or to its
     /// recorded intent, which covers a push that reaches the remote while the
@@ -816,22 +925,7 @@ impl<'a> Helper<'a> {
     /// failures clear the intent; an observation error keeps it, since the
     /// push may have landed.
     fn push(&self, revision: &str) -> Step<()> {
-        let reference = self.spec.reference();
-        let arguments = [
-            OsString::from("push"),
-            OsString::from("--no-verify"),
-            OsString::from("--no-follow-tags"),
-            OsString::from(format!("--force-with-lease={reference}:")),
-            self.remote.clone(),
-            OsString::from(format!("{revision}:{reference}")),
-        ];
-        let pushed = git_raw(
-            &self.spec.work_dir,
-            arguments,
-            None,
-            &self.spec.environment(),
-        );
-        if matches!(&pushed, Ok(output) if output.status.success()) {
+        if self.push_create(self.spec.reference(), revision) {
             return Ok(());
         }
         let now = self.observe()?;
@@ -876,6 +970,26 @@ impl<'a> Helper<'a> {
         })
     }
 
+    /// Pushes `revision` to `reference` with a `--force-with-lease` requiring
+    /// the ref to be absent; whether Git reported success.
+    fn push_create(&self, reference: &str, revision: &str) -> bool {
+        let arguments = [
+            OsString::from("push"),
+            OsString::from("--no-verify"),
+            OsString::from("--no-follow-tags"),
+            OsString::from(format!("--force-with-lease={reference}:")),
+            self.remote.clone(),
+            OsString::from(format!("{revision}:{reference}")),
+        ];
+        let pushed = git_raw(
+            &self.spec.work_dir,
+            arguments,
+            None,
+            &self.spec.environment(),
+        );
+        matches!(&pushed, Ok(output) if output.status.success())
+    }
+
     /// Deletes the intent ref, once a push's outcome is known.
     fn clear_intent(&self) -> Step<()> {
         git_ok(
@@ -885,12 +999,17 @@ impl<'a> Helper<'a> {
         .refuse(RefusalCode::Internal, "helper could not clear its intent")
     }
 
-    /// The commit the remote advertises for the fixed ref, if any.
+    /// The commit the remote advertises for the candidate ref, if any.
     fn observe(&self) -> Step<Option<String>> {
+        self.observe_ref(self.spec.reference())
+    }
+
+    /// The commit the remote advertises for `reference`, if any.
+    fn observe_ref(&self, reference: &str) -> Step<Option<String>> {
         observe_remote_reference_with(
             &self.spec.work_dir,
             self.remote.clone(),
-            self.spec.reference(),
+            reference,
             &self.spec.environment(),
         )
         .refuse(
@@ -932,6 +1051,14 @@ fn already_published() -> PushRefusal {
     refusal(
         RefusalCode::CandidateAlreadyPublished,
         "this helper already published a different commit and publishes only one",
+    )
+}
+
+/// The refusal for a WIP ref that names a commit other than the request's.
+fn wip_conflict() -> PushRefusal {
+    refusal(
+        RefusalCode::LeaseConflict,
+        "the WIP ref names another commit; WIP refs are never updated",
     )
 }
 
