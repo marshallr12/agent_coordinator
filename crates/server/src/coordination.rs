@@ -611,7 +611,7 @@ pub(crate) async fn task_preconditions_snapshot(
     Ok(value)
 }
 fn human_delivery_unmet() -> Value {
-    json!({"code":"human_delivery_required","message":"A human delivers this task. A supervisor never claims it; an interactive CLI session or the console does, and a human completes it."})
+    json!({"code":"human_delivery_required","message":"A human delivers this task. A supervisor never claims it; an interactive CLI session or the manager does, and a human completes it."})
 }
 async fn enrich_workflow_status(
     c: &mut SqliteConnection,
@@ -2090,7 +2090,7 @@ async fn claim(
         return Err(AppError::new(
             StatusCode::FORBIDDEN,
             "human_delivery_required",
-            "A human delivers this task; a supervisor cannot claim it. Claim it from an interactive CLI session or the console.",
+            "A human delivers this task; a supervisor cannot claim it. Claim it from an interactive CLI session or the manager.",
         )
         .with_details(json!({"required_actor":"human","gate":"human_delivery"})));
     }

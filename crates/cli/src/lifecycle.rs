@@ -169,7 +169,7 @@ pub(crate) fn refusal_hint(code: &str) -> Option<&'static str> {
             "the task has attempts, dependencies or workflow links and cannot be deleted; archive it instead"
         }
         "human_delivery_required" => {
-            "a human delivers this task; claim it from an interactive CLI session or the console, or leave it for its owner"
+            "a human delivers this task; claim it from an interactive CLI session or the manager, or leave it for its owner"
         }
         "revert_author_conflict" => {
             "you contributed to the change this revert undoes, or share a launch with a contributor; an independent agent or a human must cancel or archive it"
