@@ -223,10 +223,24 @@ must be reopened by an operator or revised by an agent (`reason_code`
 is the attention-budget summary: `proceeded_decisions` (reversible decisions the
 service answered with their recommendation in the window),
 `pending_reversible_decisions` (with `proceeds_at`), and `hri`, the
-human-required interventions: `count`, `stalled_tasks` and `items`. A task is
-stalled when it is open and its last three attempts all ended (released,
-blocked, expired or canceled) without a submission; open human-required
-integrator reports are the other items. `POST /api/v1/projects/{project_id}/tasks/{task_id}/paths`
+human-required interventions: `count`, `stalled_tasks`, `stalled_queue` and
+`items`. Two stall rules exist, and each stall item names the rule that fired in
+`rule`. `repeated_attempt_failures` (code `stalled_task`, counted in
+`stalled_tasks`): a task is stalled when it is open and its last three attempts
+all ended (released, blocked, expired or canceled) without a submission.
+`no_progress` (code `stalled_queue`, counted in `stalled_queue`): the project has
+ready work (an open, unarchived, unblocked task with its dependencies done, no
+live attempt, and not waiting on review or integration) and no task progress,
+meaning a claim, checkpoint, submission, review decision or integration
+authorization or result, for more than N hours. The idle clock starts at the
+later of the last progress and the time the oldest ready task became ready, so
+an empty queue, or one that just filled, does not count. One continuing stall is
+one item, with `ready_tasks`, `idle_hours`, `threshold_hours`,
+`last_progress_at` and `stalled_since`; it clears on the next progress. N
+defaults to 6 hours and is set with `--stall-hours` or `COORDINATOR_STALL_HOURS`
+(1 through 336). `--quiet-hours START-END` or `COORDINATOR_QUIET_HOURS`, in UTC
+hours such as `22-07`, removes those hours from the idle clock; they are unset
+by default. Open human-required integrator reports are the other items. `POST /api/v1/projects/{project_id}/tasks/{task_id}/paths`
 with `{"paths": [...]}` replaces the repository-relative paths (files or
 directories, at most 50) a task touches. The integrator records the files of
 out-of-band commits without an agent trailer with

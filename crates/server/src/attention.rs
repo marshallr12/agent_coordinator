@@ -4,7 +4,8 @@
 //!   hours proceeds with the recommendation ([`sweep_timed_out_decisions`]).
 //! * The digest lists what proceeded on its own, what is about to, and the
 //!   human-required interventions (HRI): open human-required integrator
-//!   reports and stalled tasks.
+//!   reports, stalled tasks (`repeated_attempt_failures`) and a stalled queue
+//!   (`no_progress`: ready work and no task progress for the stall threshold).
 //! * Tasks may declare the paths they touch; the integrator records the files
 //!   that landed on the target outside its own results, and `next` skips a
 //!   task whose paths overlap one of them from the last 24 hours.
@@ -20,7 +21,7 @@ use coordinator_core::timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, str::FromStr};
 
 type Reply = Result<Json<Value>, AppError>;
 
@@ -32,12 +33,70 @@ pub const OVERLAP_WINDOW_MS: i64 = 24 * HOUR_MS;
 /// Consecutive attempts that ended without a submission before a task counts
 /// as stalled.
 pub const STALL_ATTEMPTS: i64 = 3;
+/// Hours of ready work without task progress before the queue counts as
+/// stalled, unless the service is configured otherwise.
+pub const DEFAULT_STALL_HOURS: i64 = 6;
+const DAY_MS: i64 = 24 * HOUR_MS;
 const SWEEP_BATCH: i64 = 100;
 const MAX_TASK_PATHS: usize = 50;
 const MAX_SHIPPED_FILES: usize = 1_000;
 const DIGEST_LIMIT: i64 = 100;
 const DEFAULT_DIGEST_HOURS: i64 = 24;
 const MAX_DIGEST_HOURS: i64 = 24 * 14;
+
+/// A daily span of UTC hours that does not count toward the stall clock. The
+/// span starts at `start` and ends before `end`; it wraps past midnight when
+/// `start` is later than `end` (`22-07`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuietHours {
+    start: u8,
+    end: u8,
+}
+
+impl FromStr for QuietHours {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let invalid = || "quiet hours must be START-END in UTC hours 0 through 24, such as 22-07.";
+        let (start, end) = text.split_once('-').ok_or_else(invalid)?;
+        let start: u8 = start.trim().parse().map_err(|_| invalid())?;
+        let end: u8 = end.trim().parse().map_err(|_| invalid())?;
+        if start > 23 || end > 24 || start == end {
+            return Err(invalid().to_owned());
+        }
+        Ok(Self { start, end })
+    }
+}
+
+impl QuietHours {
+    /// Milliseconds of `[from, to)` that fall outside the quiet hours.
+    fn active_ms(quiet: Option<Self>, from: i64, to: i64) -> i64 {
+        if to <= from {
+            return 0;
+        }
+        let Some(quiet) = quiet else {
+            return to - from;
+        };
+        let (start, end) = (
+            i64::from(quiet.start) * HOUR_MS,
+            i64::from(quiet.end) * HOUR_MS,
+        );
+        let spans: &[(i64, i64)] = if start < end {
+            &[(start, end)]
+        } else {
+            &[(0, end), (start, DAY_MS)]
+        };
+        let mut quiet_ms = 0;
+        let mut day = from.div_euclid(DAY_MS) * DAY_MS;
+        while day < to {
+            for (a, b) in spans {
+                quiet_ms += ((day + b).min(to) - (day + a).max(from)).max(0);
+            }
+            day += DAY_MS;
+        }
+        to - from - quiet_ms
+    }
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -355,13 +414,78 @@ async fn stalled_tasks(c: &mut SqliteConnection, project: &str) -> Result<Vec<Va
     Ok(rows
         .iter()
         .map(|row| {
-            json!({"code": "stalled_task", "required_actor": "human",
+            json!({"code": "stalled_task", "rule": "repeated_attempt_failures",
+                   "required_actor": "human",
                    "task_id": row.get::<String, _>("id"),
                    "title": row.get::<String, _>("title"),
                    "priority": row.get::<i64, _>("priority"),
                    "failed_attempts": STALL_ATTEMPTS})
         })
         .collect())
+}
+
+/// One item when the project holds ready work (open, unblocked, unowned, past
+/// its dependencies and not waiting on review or integration) and nothing
+/// moved on any task (a claim, checkpoint, submission, review or integration
+/// result) for more than `stall_hours` outside the quiet hours. The clock starts
+/// at the later of the last progress and the time the oldest ready task became
+/// ready, so a queue that just filled is not already stalled. The digest is
+/// computed on demand, so one continuing stall is one item however long it lasts.
+async fn stalled_queue(
+    c: &mut SqliteConnection,
+    project: &str,
+    now: i64,
+    config: &crate::state::Config,
+) -> Result<Option<Value>, AppError> {
+    let ready = sqlx::query(
+        "SELECT count(*) AS ready,min(t.ready_since) AS since FROM tasks t \
+         WHERE t.project_id=? AND t.lifecycle='open' AND t.archived_at IS NULL \
+         AND t.blocked_reason IS NULL \
+         AND NOT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks p ON p.id=d.prerequisite_id \
+         WHERE d.task_id=t.id AND p.lifecycle!='done') \
+         AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.id=t.current_attempt_id \
+         AND a.state IN ('active','submitted')) \
+         AND NOT EXISTS(SELECT 1 FROM workflow_subjects ws WHERE ws.task_id=t.id \
+         AND ws.phase!='revision_needed')",
+    )
+    .bind(project)
+    .fetch_one(&mut *c)
+    .await?;
+    let ready_tasks: i64 = ready.get("ready");
+    let Some(ready_since) = ready.get::<Option<i64>, _>("since") else {
+        return Ok(None);
+    };
+    let progress: Option<i64> = sqlx::query_scalar(
+        "SELECT max(at) FROM (\
+         SELECT max(created_at) AS at FROM attempts WHERE project_id=?1 \
+         UNION ALL SELECT max(created_at) FROM checkpoints WHERE project_id=?1 \
+         UNION ALL SELECT max(created_at) FROM submissions WHERE project_id=?1 \
+         UNION ALL SELECT max(r.created_at) FROM review_decisions r \
+         JOIN submissions s ON s.id=r.submission_id WHERE s.project_id=?1 \
+         UNION ALL SELECT max(i.created_at) FROM integration_authorizations i \
+         JOIN submissions s ON s.id=i.submission_id WHERE s.project_id=?1 \
+         UNION ALL SELECT max(i.created_at) FROM integration_results i \
+         JOIN submissions s ON s.id=i.submission_id WHERE s.project_id=?1)",
+    )
+    .bind(project)
+    .fetch_one(&mut *c)
+    .await?;
+    let since = progress.unwrap_or(0).max(ready_since);
+    let idle_ms = QuietHours::active_ms(config.quiet_hours, since, now);
+    if idle_ms <= config.stall_hours * HOUR_MS {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "code": "stalled_queue", "rule": "no_progress", "required_actor": "human",
+        "summary": format!(
+            "{ready_tasks} ready task(s) and no task progress for {} hours (threshold {})",
+            idle_ms / HOUR_MS, config.stall_hours),
+        "ready_tasks": ready_tasks,
+        "idle_hours": idle_ms / HOUR_MS,
+        "threshold_hours": config.stall_hours,
+        "last_progress_at": progress.map(timestamp),
+        "stalled_since": timestamp(since),
+    })))
 }
 
 /// `GET /api/v1/projects/{project}/digest?hours=N`: what the attention budget
@@ -413,6 +537,9 @@ async fn digest(
     .await?;
     let mut items = stalled_tasks(&mut c, &project).await?;
     let stalled = items.len();
+    let queue = stalled_queue(&mut c, &project, now, &state.config).await?;
+    let stalled_queue = usize::from(queue.is_some());
+    items.extend(queue);
     items.extend(crate::integrator_reports::human_queue_items(&mut c, &project).await?);
     Ok(response(json!({
         "project_id": project,
@@ -434,7 +561,8 @@ async fn digest(
             "recommendation": row.get::<String, _>("recommendation"),
             "proceeds_at": timestamp(row.get::<i64, _>("created_at") + DECISION_TIMEOUT_MS),
         })).collect::<Vec<_>>(),
-        "hri": {"count": items.len(), "stalled_tasks": stalled, "items": items},
+        "hri": {"count": items.len(), "stalled_tasks": stalled,
+                "stalled_queue": stalled_queue, "items": items},
     })))
 }
 
@@ -449,6 +577,25 @@ mod tests {
         assert!(paths_overlap("README.md", "README.md"));
         assert!(!paths_overlap("crates/server", "crates/server2/lib.rs"));
         assert!(!paths_overlap("a/b", "a/c"));
+    }
+
+    #[test]
+    fn quiet_hours_are_parsed_and_removed_from_the_stall_clock() {
+        assert!("22".parse::<QuietHours>().is_err());
+        assert!("5-5".parse::<QuietHours>().is_err());
+        assert!("24-3".parse::<QuietHours>().is_err());
+        let overnight: QuietHours = "22-07".parse().unwrap();
+        let day = |h: i64| 10 * DAY_MS + h * HOUR_MS;
+        // 20:00 to 08:00 the next day holds 9 quiet hours (22-07) and 3 active.
+        let active = QuietHours::active_ms(Some(overnight), day(20), day(32));
+        assert_eq!(active, 3 * HOUR_MS);
+        let daytime: QuietHours = "9-17".parse().unwrap();
+        assert_eq!(
+            QuietHours::active_ms(Some(daytime), day(0), day(24)),
+            16 * HOUR_MS
+        );
+        assert_eq!(QuietHours::active_ms(None, day(0), day(5)), 5 * HOUR_MS);
+        assert_eq!(QuietHours::active_ms(Some(daytime), day(5), day(1)), 0);
     }
 
     #[test]
