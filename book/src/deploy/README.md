@@ -1002,6 +1002,59 @@ in:
 sudo systemctl enable --now agentc-run
 ```
 
+On a host without systemd (sysvinit, for example MX Linux) it installs
+`/etc/init.d/agentc-run` instead, also without enabling it. The script starts
+after `agentc-firewall` and `agentc-egress` and runs the loop through
+`/opt/agentc/bin/agentc-run-sysv`, which does what the unit's
+`Restart=on-failure` and `KillMode=mixed` do: a crash restarts the loop after
+30 s, and a stop passes SIGTERM to the loop for its drain. After 120 s the
+wrapper is killed and then whatever is left in its process group. The loop
+logs to `/var/log/agentc-run.log`. To opt in:
+
+```sh
+sudo update-rc.d agentc-run defaults && sudo service agentc-run start
+```
+
+Re-running `host-setup.sh` rewrites the script but leaves its rc links (and so
+the opt-in) alone.
+`sudo deploy/agentc/sysvinit-check.sh` checks these pieces live on such a host
+without installing the loop: with a fake supervisor it confirms that `insserv`
+accepts the boot order (dry run), that a crash restarts the loop, that a stop
+drains it and kills what is left in its process group, and that cron runs
+`agentc-cron` with an environment file.
+
+#### Quiet hours
+
+On a host that is also someone's workstation (decision U6: mxmini as the
+secondary supervisor), `QUIET_HOURS` limits claiming to a local-time window:
+
+```sh
+sudo QUIET_HOURS=22:00-07:00 deploy/agentc/host-setup.sh
+```
+
+`/etc/cron.d/agentc-quiet-hours` then runs `/opt/agentc/bin/agentc-quiet-hours`
+every minute. Outside the window it creates `/var/lib/agentc/kill-switch`
+holding `quiet-hours`, so the loop claims nothing new while running launches
+finish; inside the window it removes that switch. It never removes a switch
+with any other content, so to hold the host stopped through the window, write
+something else into the file (`echo owner | sudo tee /var/lib/agentc/kill-switch`).
+Re-running `host-setup.sh` without `QUIET_HOURS` keeps the current window;
+`QUIET_HOURS=` turns quiet hours off and drops a switch they set. It works
+under either init system; setup fails without a cron daemon.
+
+Two daily jobs need the loop to claim, so keep their start inside the window:
+the end-to-end canary (`E2E_CALENDAR`, default 00:00) would wait for the window
+and time out, and the updater (systemd hosts, 00:00 plus up to an hour) refuses
+to run while any kill switch is set. Setup warns when either starts outside
+`QUIET_HOURS`; `22:00-07:00` covers both. While the updater holds its own
+switch, quiet hours leave it alone, and the loop may claim for up to a minute
+after the updater removes it outside the window, until the next check.
+
+The name follows decision U6 (the host supervises in its owner's quiet hours),
+so the window is when work is allowed. The coordinator's own
+`COORDINATOR_QUIET_HOURS` (see the API contract) is different: it names hours
+removed from the stall clock.
+
 On start, the loop removes terminal runs that an earlier loop left behind,
 so do not keep evidence from hand-run implementer launches under
 `impl/runs/` while the unit runs.
@@ -1019,8 +1072,9 @@ attention.py canary --url URL --project ID --token-file TOKEN \
 ```
 
 `host-setup.sh` installs the script as `/opt/agentc/bin/attention.py` and
-schedules both from systemd timers (hosts without systemd get the script and
-environment file only). The canary checks `/healthz`, the supervisor's own `next` call (10 s budget), that the
+schedules both from systemd timers. A host without systemd runs them from
+`/etc/cron.d/agentc` instead (see [Timers without systemd](#timers-without-systemd)).
+The canary checks `/healthz`, the supervisor's own `next` call (10 s budget), that the
 heartbeat is under 300 s old, and, with `--max-hri`, the HRI count. A failing
 check sends one ntfy page and stays quiet until it recovers; a page that could
 not be delivered exits 2 and is retried by the next run. `NTFY_TOKEN`, when set,
@@ -1398,10 +1452,29 @@ script against fake servers, and `host-setup-test.py` checks the generated
 units and the uninstall list; neither starts a real harness. A live green run
 per host and harness is owner evidence, recorded from the results file.
 
+### Timers without systemd
+
+On a host without systemd, `host-setup.sh` writes the ready timers as
+`/etc/cron.d/agentc` entries, by the same rules that enable the systemd
+timers: the attention canary and digest once their token (and, for the
+canary, the ntfy topic) are set, and one end-to-end canary job per configured
+harness once that canary is configured. The schedules come from the same
+settings, translated to cron: `CANARY_INTERVAL` as `Nmin` (N dividing 60) or
+`Nh`, and the calendars as `hourly`, `daily`, `weekly` or `'*-*-* HH:MM'`;
+setup fails on any other form rather than drop a job. Each entry runs
+`/opt/agentc/bin/agentc-cron`, which loads the job's environment file as
+systemd's `EnvironmentFile=` would (literal values, one pair of surrounding
+quotes removed, nothing expanded) and logs to `/var/log/agentc-<name>.log`.
+Unlike the timers, cron does not catch up on a run missed while the host was
+off (`Persistent=true`), and the jobs run without the units' sandboxing
+(`ProtectSystem=strict` and the rest). The updater has no cron job (above).
+
 ### Host updater: verified pull updates with rollback
 
 `deploy/agentc/agentc-update.py`, installed by host-setup as
-`/opt/agentc/bin/agentc-update`, keeps a supervised Linux host (systemd only)
+`/opt/agentc/bin/agentc-update`, keeps a supervised Linux host (systemd only:
+it drains and restarts `agentc-run` with `systemctl`, so a sysvinit host gets no
+updater job)
 on the project's latest release. The `agentc-update.timer` (daily with up to an
 hour of random delay, `Persistent=true`) starts `agentc-update.service`, a
 root oneshot that is not sandboxed, because it replaces files under
@@ -1520,7 +1593,9 @@ sudo python3 -I /opt/agentc/bin/agentc-update --rollback harness   # claude/code
 Both drain the same way, restore what the last update saved, run preflight (no
 canary) and restart `agentc-run`, and mark the release left as rejected so the
 timer does not reinstall it. With the updater unavailable, do the same by hand:
-`sudo touch /var/lib/agentc/kill-switch`, wait for `heartbeat.json` to show no
+`echo owner | sudo tee /var/lib/agentc/kill-switch` (not `touch`: a switch that
+[quiet hours](#quiet-hours) created stays theirs and goes when the window opens),
+wait for `heartbeat.json` to show no
 `launch`, `sudo systemctl stop agentc-run`, copy each file from
 `/opt/agentc/releases/rollback-core-<time>/bin/` over the one in
 `/opt/agentc/bin` (`sudo install -o root -g root -m 0755 <saved> <live>`; for a
@@ -1649,7 +1724,7 @@ To check that the unit starts after a reboot without claiming anything,
 set the kill switch first, then reboot:
 
 ```sh
-sudo touch /var/lib/agentc/kill-switch
+echo owner | sudo tee /var/lib/agentc/kill-switch   # not touch: see Quiet hours
 sudo systemctl enable agentc-run
 sudo reboot
 # after the reboot:

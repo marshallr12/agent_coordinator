@@ -27,6 +27,12 @@
 # repository publishes a release that carries an agentc-host bundle for this
 # host, each timer run finds nothing to install, records outcome no-release in
 # update.jsonl, logs one journal line, exits 0 and changes nothing.
+# Without systemd (sysvinit, e.g. MX Linux) the services are LSB init
+# scripts: agentc-run runs through agentc-run-sysv (crash restart, drain on
+# stop) and is installed but not enabled, and the ready timers except the
+# updater (systemd-only) become /etc/cron.d/agentc entries run by agentc-cron. On any init, QUIET_HOURS
+# (e.g. 22:00-07:00) limits claiming to that local-time window by holding the
+# kill switch outside it (agentc-quiet-hours, every minute from cron).
 set -euo pipefail
 
 PREFIX=/opt/agentc
@@ -95,6 +101,20 @@ UPDATE_SCRIPT=$PREFIX/bin/agentc-update
 UPDATE_ENV=$ETC/update.env
 UPDATE_CALENDAR=${UPDATE_CALENDAR:-daily}
 UPDATE_TIMER=${UPDATE_TIMER:-1}
+# Hosts without systemd (sysvinit, e.g. MX Linux): the agentc-run loop runs
+# from an LSB init script through agentc-run-sysv (crash restart, drain on
+# stop), and the timers above except the updater become cron entries run by
+# agentc-cron.
+RUN_WRAPPER=$PREFIX/bin/agentc-run-sysv
+CRON_RUNNER=$PREFIX/bin/agentc-cron
+CRON_FILE=/etc/cron.d/agentc
+# Quiet hours (decision U6), any init system: the local-time window in which
+# the supervisor may claim work, e.g. QUIET_HOURS=22:00-07:00; outside it
+# agentc-quiet-hours holds the kill switch (running launches finish). Unset
+# keeps the current window; QUIET_HOURS= turns quiet hours off.
+QUIET_SCRIPT=$PREFIX/bin/agentc-quiet-hours
+QUIET_FILE=/etc/cron.d/agentc-quiet-hours
+KILL_SWITCH=$STATE/kill-switch
 KEEP="# --- entries below this line are kept when host-setup.sh re-runs ---"
 
 # Refuses to run without root and the invoking owner account.
@@ -975,7 +995,7 @@ install_attention() {
     attention_env_file | install -o root -g root -m 0644 /dev/stdin "$ATTENTION_ENV"
   fi
   secure_attention_token
-  has_systemd || { echo "no systemd: attention timers not installed"; return 0; }
+  has_systemd || { echo "no systemd: attention jobs go to cron (install_cron_jobs)"; return 0; }
   write_attention_units "$UNIT_DIR"
   systemctl daemon-reload
   for unit in agentc-canary agentc-digest; do
@@ -1166,7 +1186,7 @@ install_e2e() {
     e2e_env_file | install -o root -g root -m 0644 /dev/stdin "$E2E_ENV"
   fi
   secure_e2e_token
-  has_systemd || { echo "no systemd: end-to-end canary timers not installed"; return 0; }
+  has_systemd || { echo "no systemd: end-to-end canary jobs go to cron (install_cron_jobs)"; return 0; }
   write_e2e_units "$UNIT_DIR"
   systemctl daemon-reload
   while IFS= read -r harness; do wanted+=("$harness"); done < <(e2e_harnesses)
@@ -1304,7 +1324,7 @@ install_update() {
   if [ ! -e "$UPDATE_ENV" ]; then
     update_env_file | install -o root -g root -m 0644 /dev/stdin "$UPDATE_ENV"
   fi
-  has_systemd || { echo "no systemd: agentc-update timer not installed"; return 0; }
+  has_systemd || { echo "no systemd: agentc-update timer not installed (it drives agentc-run with systemctl)"; return 0; }
   write_update_units "$UNIT_DIR"
   systemctl daemon-reload
   if [ "$UPDATE_TIMER" = 1 ] && e2e_ready; then systemctl enable --now --quiet agentc-update.timer
@@ -1337,6 +1357,176 @@ build-attestation check.
 Check it with: sudo python3 -I $UPDATE_SCRIPT --check
 Roll back by hand with: sudo python3 -I $UPDATE_SCRIPT --rollback core
 EOF
+}
+
+# Translates systemd timer schedule $1 into a cron schedule, or fails. Known
+# forms: Nmin (N divides 60), Nh (N divides 24), hourly, daily, weekly and
+# '*-*-* HH:MM[:SS]' (seconds dropped). Both run in local time.
+cron_schedule() {
+  local value=$1 n time
+  case $value in
+    hourly) echo "0 * * * *" ;;
+    daily) echo "0 0 * * *" ;;
+    weekly) echo "0 0 * * 1" ;;
+    *min) n=${value%min}; cron_step "$n" 60 && echo "*/$n * * * *" ;;
+    *h) n=${value%h}; cron_step "$n" 24 && echo "0 */$n * * *" ;;
+    '*-*-* '*) cron_time "${value#'*-*-* '}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Prints the cron fields for local time $1 (HH:MM or HH:MM:SS, hour 0-23, and
+# nothing after it: no zone, no second time), or fails.
+cron_time() {
+  [[ $1 =~ ^([01][0-9]|2[0-3]):([0-5][0-9])(:[0-5][0-9])?$ ]] || return 1
+  echo "$((10#${BASH_REMATCH[2]})) $((10#${BASH_REMATCH[1]})) * * *"
+}
+
+# Succeeds when $1 is a positive whole number dividing $2.
+cron_step() { [[ $1 =~ ^[0-9]+$ ]] && (( $1 > 0 && $2 % $1 == 0 )); }
+
+# Exits naming the setting when a timer schedule has no cron form, so a
+# sysvinit host fails setup instead of silently dropping a job.
+check_cron_schedules() {
+  local name
+  for name in CANARY_INTERVAL DIGEST_CALENDAR E2E_CALENDAR; do
+    cron_schedule "${!name}" >/dev/null ||
+      { echo "$name='${!name}' has no cron form; use Nmin, Nh, hourly, daily, weekly or '*-*-* HH:MM'" >&2; exit 1; }
+  done
+}
+
+# Prints the cron line that runs job $1 on systemd schedule $2 through
+# agentc-cron, with the agentc-cron options and command that follow.
+cron_line() {
+  local name=$1 schedule; schedule=$(cron_schedule "$2"); shift 2
+  echo "$schedule root $CRON_RUNNER --name $name $*"
+}
+
+# Prints the cron lines of the ready timers, by the rules that enable the
+# systemd timers: attention_ready per job, e2e_ready and the configured
+# harnesses. The updater has no cron job: it drains and restarts agentc-run
+# with systemctl, so it stays systemd-only (decision U32).
+cron_entries() {
+  local harness
+  if attention_ready agentc-canary; then
+    cron_line canary "$CANARY_INTERVAL" --env "$ATTENTION_ENV" -- /usr/bin/python3 -I "$ATTENTION_SCRIPT" canary
+  fi
+  if attention_ready agentc-digest; then
+    cron_line digest "$DIGEST_CALENDAR" --env "$ATTENTION_ENV" -- /usr/bin/python3 -I "$ATTENTION_SCRIPT" digest
+  fi
+  e2e_ready || return 0
+  while IFS= read -r harness; do
+    cron_line "e2e-canary-$harness" "$E2E_CALENDAR" --env "$E2E_ENV" -- \
+      /usr/bin/flock "$STATE/e2e-canary.lock" /usr/bin/python3 -I "$E2E_SCRIPT" --harness "$harness"
+  done < <(e2e_harnesses)
+}
+
+# The cron file around entries $1.
+cron_file() {
+  cat <<EOF
+# agentc timers for a host without systemd. Written by deploy/agentc/host-setup.sh
+# on every run (only the ready jobs); removed by --uninstall. Each job logs to
+# /var/log/agentc-<name>.log.
+SHELL=/bin/sh
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+$1
+EOF
+}
+
+# Without systemd: installs agentc-cron and writes $CRON_FILE with the ready
+# timers' entries, or removes it when none is ready. systemd hosts keep their
+# timers and are not touched.
+install_cron_jobs() {
+  local entries
+  if has_systemd; then return 0; fi
+  check_cron_schedules
+  refuse_symlink "$CRON_RUNNER"; refuse_symlink "$CRON_FILE"
+  install -o root -g root -m 0755 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/agentc-cron.sh" "$CRON_RUNNER"
+  entries=$(cron_entries)
+  if [ -z "$entries" ]; then
+    rm -f -- "$CRON_FILE"; echo "no systemd: no agentc timer is ready, so $CRON_FILE is not written"; return 0
+  fi
+  cron_file "$entries" | install -o root -g root -m 0644 /dev/stdin "$CRON_FILE"
+  echo "no systemd: agentc timers run from $CRON_FILE"
+}
+
+# Removes the cron file, its runner and the jobs' logs.
+remove_cron_jobs() {
+  local name
+  rm -f -- "$CRON_FILE" "$CRON_RUNNER"
+  for name in canary digest "${E2E_KNOWN_HARNESSES[@]/#/e2e-canary-}"; do rm -f -- "/var/log/agentc-$name.log"; done
+}
+
+# Succeeds when a cron daemon (Debian cron or crond) is installed; quiet
+# hours depend on it to re-apply the window every minute.
+has_cron_daemon() {
+  command -v cron >/dev/null || command -v crond >/dev/null
+}
+
+# Installs agentc-quiet-hours, then applies QUIET_HOURS when it is set: a
+# window is checked (the script exits 2 on a bad one), applied at once and
+# re-applied every minute from $QUIET_FILE; an empty value turns quiet hours
+# off. Unset leaves the current setting alone.
+install_quiet_hours() {
+  refuse_symlink "$QUIET_SCRIPT"; refuse_symlink "$QUIET_FILE"
+  install -o root -g root -m 0755 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/quiet-hours.sh" "$QUIET_SCRIPT"
+  [ -n "${QUIET_HOURS+set}" ] || return 0
+  if [ -z "$QUIET_HOURS" ]; then quiet_hours_off; return 0; fi
+  has_cron_daemon ||
+    { echo "quiet hours need a cron daemon to run $QUIET_FILE; install cron first" >&2; exit 1; }
+  "$QUIET_SCRIPT" "$QUIET_HOURS" "$KILL_SWITCH"
+  quiet_hours_cron | install -o root -g root -m 0644 /dev/stdin "$QUIET_FILE"
+  echo "quiet hours: the supervisor claims only $QUIET_HOURS (local time)"
+  quiet_hours_conflicts
+}
+
+# Warns when a daily job that needs claiming starts outside the window: the
+# end-to-end canary's task would wait for the window and time out, and the
+# updater refuses to run while any kill switch is set.
+quiet_hours_conflicts() {
+  local at
+  if e2e_ready && at=$(calendar_start "$E2E_CALENDAR") && ! claims_at "$at"; then
+    echo "warning: the end-to-end canary starts at $at, outside QUIET_HOURS $QUIET_HOURS; it will time out and page (set E2E_CALENDAR inside the window)" >&2
+  fi
+  if has_systemd && [ "$UPDATE_TIMER" = 1 ] && at=$(calendar_start "$UPDATE_CALENDAR") && ! claims_at "$at"; then
+    echo "warning: the updater starts at $at (up to an hour later), outside QUIET_HOURS $QUIET_HOURS; it refuses to run while the kill switch is set" >&2
+  fi
+}
+
+# Prints the HH:MM a daily calendar ($1) starts at, or fails for other kinds.
+calendar_start() {
+  local fields minute hour rest
+  fields=$(cron_schedule "$1") || return 1
+  read -r minute hour rest <<< "$fields"
+  [[ $minute =~ ^[0-9]+$ && $hour =~ ^[0-9]+$ && $rest == "* * *" ]] || return 1
+  printf '%02d:%02d\n' "$hour" "$minute"
+}
+
+# Succeeds when local time $1 lies inside QUIET_HOURS (asked of the installed
+# script with a throwaway switch, so the window logic lives in one place).
+claims_at() {
+  local dir status=0
+  dir=$(mktemp -d)
+  QUIET_HOURS_NOW=$1 "$QUIET_SCRIPT" "$QUIET_HOURS" "$dir/switch" || status=$?
+  if [ "$status" = 0 ] && [ ! -e "$dir/switch" ]; then status=0; else status=1; fi
+  rm -rf -- "$dir"
+  return "$status"
+}
+
+# The every-minute cron entry for the configured window.
+quiet_hours_cron() {
+  cat <<EOF
+# agentc quiet hours: the supervisor may claim only in $QUIET_HOURS (local time).
+# Written by deploy/agentc/host-setup.sh (QUIET_HOURS); QUIET_HOURS= removes it.
+* * * * * root $QUIET_SCRIPT $QUIET_HOURS $KILL_SWITCH
+EOF
+}
+
+# Turns quiet hours off: no more checks, and a kill switch they set is dropped
+# (one the owner set stays).
+quiet_hours_off() {
+  rm -f -- "$QUIET_FILE"
+  if [ -x "$QUIET_SCRIPT" ]; then "$QUIET_SCRIPT" --release "$KILL_SWITCH"; fi
 }
 
 # Agent uids may reach loopback only on the proxy, the staging coordinator
@@ -1373,9 +1563,9 @@ install_egress_service() {
 # systemctl enable --now agentc-run. Reboot-safe: it starts only after the
 # firewall and egress proxy (and stops with the firewall), restarts after a
 # crash, and a started launch that never finished is kept for recovery
-# rather than reused. sysvinit hosts get no unit.
+# rather than reused. sysvinit hosts get an LSB script instead (run_sysv_script).
 install_run_unit() {
-  has_systemd || { echo "no systemd: agentc-run unit not installed"; return 0; }
+  has_systemd || { install_run_sysv; return 0; }
   cat > /etc/systemd/system/agentc-run.service <<UNIT
 [Unit]
 Description=agentc-run (agentc live supervisor loop)
@@ -1394,6 +1584,63 @@ TimeoutStopSec=120
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
+}
+
+# sysvinit: installs agentc-run-sysv and /etc/init.d/agentc-run, but neither
+# enables nor starts it (the owner opts in with update-rc.d; see push_steps),
+# and never touches the rc links, so an opted-in host stays opted in.
+install_run_sysv() {
+  refuse_symlink "$RUN_WRAPPER"; refuse_symlink /etc/init.d/agentc-run
+  install -o root -g root -m 0755 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/agentc-run-sysv.sh" "$RUN_WRAPPER"
+  run_sysv_script | install -o root -g root -m 0755 /dev/stdin /etc/init.d/agentc-run
+}
+
+# The LSB script for the loop. It starts after the firewall and egress proxy
+# and stops before them. The wrapper restarts the loop 30 s after a crash and
+# passes SIGTERM on for the drain; after 120 s (systemd's TimeoutStopSec) it
+# is killed, and then whatever is left in its process group (start-stop-daemon
+# --background starts a new session for it). Unlike KillMode=mixed this does
+# not reach launches, which the loop starts in their own process groups: the
+# loop stops them while draining, and the next loop start kills any left
+# behind. Every start-stop-daemon call also matches the wrapper's process
+# name, so a stale pidfile whose pid was reused never names another process.
+run_sysv_script() {
+  local pid=/run/agentc-run.pid log=/var/log/agentc-run.log match="--name agentc-run-sysv"
+  cat <<EOF
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          agentc-run
+# Required-Start:    \$network \$remote_fs agentc-firewall agentc-egress
+# Required-Stop:     \$network \$remote_fs agentc-firewall agentc-egress
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: agentc-run (agentc live supervisor loop)
+### END INIT INFO
+case "\$1" in
+  start) start-stop-daemon --start --oknodo --background --make-pidfile --pidfile $pid $match \\
+           --startas /bin/sh -- -c 'exec $RUN_WRAPPER $PREFIX/bin/agentc-supervisor 30 >>$log 2>&1' ;;
+$(run_sysv_stop "$pid" "$match")
+  restart|force-reload) "\$0" stop; "\$0" start ;;
+  status) start-stop-daemon --status --pidfile $pid $match ;;
+  *) echo "usage: \$0 {start|stop|restart|status}"; exit 2 ;;
+esac
+EOF
+}
+
+# The init script's stop branch for pidfile $1 and process match $2. The
+# process group is looked up, not assumed (start-stop-daemon's session leader
+# is an intermediate fork, not the pid it records), only from a process that
+# really is the wrapper, and killed only after this stop ended the wrapper.
+run_sysv_stop() {
+  cat <<EOF
+  stop) set -- \$(ps -o pgid=,comm= -p "\$(cat $1 2>/dev/null)" 2>/dev/null)
+        group=; [ "\${2:-}" != agentc-run-sysv ] || group=\$1
+        # dash's kill takes no "--": the negative pid names the group itself.
+        if start-stop-daemon --stop --pidfile $1 $2 --retry TERM/120/KILL/5 && [ -n "\$group" ]; then
+          kill -KILL "-\$group" 2>/dev/null
+        fi
+        rm -f $1 ;;
+EOF
 }
 
 # True when systemd is the running init (MX Linux and others may use sysvinit).
@@ -1492,6 +1739,9 @@ uninstall() {
   remove_update
   remove_attention
   remove_e2e
+  remove_cron_jobs
+  quiet_hours_off
+  rm -f -- "$QUIET_SCRIPT"
   for user in "${AGENTS[@]}" "$PUSH_USER"; do retire_account "$user"; done
   remove_service agentc-egress
   retire_account agentc-egress
@@ -1612,7 +1862,7 @@ remove_claude_tokens() {
 # suite's leftover bin directories, without following symlinks.
 remove_own_paths() {
   local name
-  for name in agentc-supervisor agent-coordinator agentc-push claude codex node bwrap; do
+  for name in agentc-supervisor agent-coordinator agentc-push agentc-run-sysv claude codex node bwrap; do
     rm -f -- "$PREFIX/bin/$name"
   done
   rm -rf -- "$PREFIX/rustup" "$PREFIX/cargo" "$PREFIX/rustup-init.sh" "$PREFIX"/suite-bin.* "$BROWSERS"
@@ -1676,6 +1926,12 @@ EOF
   push_steps
 }
 
+# Prints the command that enables and starts agentc-run under this host's init.
+run_opt_in() {
+  if has_systemd; then echo "  sudo systemctl enable --now agentc-run"
+  else echo "  sudo update-rc.d agentc-run defaults && sudo service agentc-run start"; fi
+}
+
 # Prints the candidate-push helper's remaining step and the implementer
 # launch command.
 push_steps() {
@@ -1692,7 +1948,7 @@ EOF
   cat <<EOF
 Push helper configuration: $ETC/push.toml (written only when absent).
 Unattended claiming is installed but not enabled; opt in with
-  sudo systemctl enable --now agentc-run
+$(run_opt_in)
 Run implementer launches as root through launch-root, which starts the helper:
   sudo $PREFIX/bin/agentc-supervisor launch-root --role implementer --harness claude \\
     --clone <clone> --run <run> --task <task-id>
@@ -1721,6 +1977,8 @@ main() {
   install_attention
   install_e2e
   install_update
+  install_cron_jobs
+  install_quiet_hours
   next_steps
 }
 

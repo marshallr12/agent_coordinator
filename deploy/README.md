@@ -44,7 +44,13 @@ push App key (returned to root) and other
 installers' files, such as the integrator's, under the same directories.
 The two services are systemd units where systemd is the init system and LSB
 `/etc/init.d` scripts otherwise (for example MX Linux with sysvinit), where the
-proxy logs to `/var/log/agentc-egress.log`.
+proxy logs to `/var/log/agentc-egress.log`. There the live loop is
+`/etc/init.d/agentc-run` (installed, not enabled), and the attention and
+end-to-end canary timers become `/etc/cron.d/agentc` entries; see
+[Live supervisor loop](../book/src/deploy/README.md#live-supervisor-loop) and
+[Timers without systemd](../book/src/deploy/README.md#timers-without-systemd).
+`QUIET_HOURS=22:00-07:00` limits claiming to that local-time window on any
+host; see [Quiet hours](../book/src/deploy/README.md#quiet-hours).
 
 ### Staging coordinator and UI verification
 
