@@ -1049,7 +1049,7 @@
   function renderTaskDetail(quiet = false) {
     const data = state.detail || {}; const task = data.task || data; const project = state.projects.find((item) => text(item.id) === state.projectId);
     const title = task.title || 'Untitled task'; const taskId = text(task.id || state.selectedTaskId);
-    setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), title); setText($('detail-task-id-value'), taskId); setText($('detail-task-revision'), task.revision || 1); setText($('detail-description'), task.description || 'No description provided.');
+    setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), title); setText($('detail-task-id-value'), taskId); setText($('detail-task-revision'), task.revision || 1); setProp($('compare-revisions-button'), 'disabled', !(Number(task.revision) > 1)); setAttr($('compare-revisions-button'), 'title', Number(task.revision) > 1 ? 'Compare two saved revisions of this task' : 'This task has only one revision'); setText($('detail-description'), task.description || 'No description provided.');
     const status = taskStatus(task); paintStatusBadge($('detail-status'), task); setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
     const humanDelivered = $('detail-human-delivered'); show(humanDelivered, Boolean(task.human_delivered)); setAttr(humanDelivered, 'title', 'A human delivers this task. Supervisors never receive or claim it.');
     const readOnly = Boolean(task.archived_at || ['done', 'completed'].includes(status));
@@ -2932,6 +2932,123 @@
     }
     kind.addEventListener('change', () => load()); view.finish('Close', (_,dialog) => dialog.close()); load();
   }
+  // ---- Task revision comparison ---------------------------------------------------------------
+  // Each side of a line diff is capped so the O(n*m) table stays small and the dialog stays responsive.
+  const DIFF_LINE_CAP = 2000, COMPARE_PAGE_LIMIT = 10;
+  const COMPARE_FIELDS = [['title', 'Title'], ['kind', 'Kind'], ['priority', 'Priority'], ['lifecycle', 'Lifecycle'], ['depends_on', 'Prerequisite tasks']];
+  const compareValue = (value) => value === undefined || value === null ? 'Not recorded' : Array.isArray(value) ? (value.length ? value.join(', ') : 'None') : text(value);
+  // Splits stored text into lines, keeping at most DIFF_LINE_CAP of them; `total` is the uncapped count.
+  function capLines(value) {
+    const all = Array.isArray(value) ? value.map(text) : text(value) === '' ? [] : text(value).split(/\r?\n/);
+    return { lines: all.slice(0, DIFF_LINE_CAP), total: all.length };
+  }
+  // Line diff by longest common subsequence: [{op: 'same' | 'add' | 'del', value}], in reading order.
+  function diffLines(before, after) {
+    let head = 0, tail = 0;
+    while (head < before.length && head < after.length && before[head] === after[head]) head++;
+    while (tail < before.length - head && tail < after.length - head && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+    const a = before.slice(head, before.length - tail), b = after.slice(head, after.length - tail);
+    const table = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+    for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+    const ops = before.slice(0, head).map((value) => ({ op: 'same', value }));
+    let i = 0, j = 0;
+    while (i < a.length && j < b.length) {
+      if (a[i] === b[j]) { ops.push({ op: 'same', value: a[i] }); i++; j++; }
+      else if (table[i + 1][j] >= table[i][j + 1]) ops.push({ op: 'del', value: a[i++] });
+      else ops.push({ op: 'add', value: b[j++] });
+    }
+    while (i < a.length) ops.push({ op: 'del', value: a[i++] });
+    while (j < b.length) ops.push({ op: 'add', value: b[j++] });
+    return ops.concat(before.slice(before.length - tail).map((value) => ({ op: 'same', value })));
+  }
+  const DIFF_MARKS = { add: ['+', 'Added'], del: ['−', 'Removed'], same: ['=', 'Unchanged'] };
+  // One list item per diff line. The change is stated in words and a symbol, so colour is never the only cue.
+  function diffList(tag, ops, emptyNote) {
+    const list = el(tag, 'compare-diff');
+    if (!ops.length) { add(list, el(tag === 'ul' ? 'li' : 'div', 'muted', emptyNote)); return list; }
+    for (const { op, value } of ops) {
+      const line = el(tag === 'ul' ? 'li' : 'div', `diff-line diff-${op}`), [symbol, word] = DIFF_MARKS[op];
+      const mark = el('span', 'diff-mark', tag === 'ul' ? word : symbol); mark.title = word; if (tag !== 'ul') mark.setAttribute('aria-label', word);
+      add(line, mark); add(line, el('span', 'diff-text', value)); line.dataset.op = op; add(list, line);
+    }
+    return list;
+  }
+  function compareSection(parent, title, changed) {
+    const section = el('section', 'compare-section'), head = el('div', 'compare-section-head');
+    add(head, el('h3', '', title)); add(head, el('span', `compare-flag${changed ? ' changed' : ''}`, changed ? 'Changed' : 'Unchanged'));
+    section.dataset.field = title; section.dataset.changed = String(changed); add(section, head); add(parent, section); return section;
+  }
+  // Says which side was cut at DIFF_LINE_CAP lines, so a capped comparison is never mistaken for a complete one.
+  function truncationNote(section, sides, base, next) {
+    const cut = [[base, sides[0]], [next, sides[1]]].filter(([, side]) => side.total > DIFF_LINE_CAP).map(([record, side]) => `revision ${record.revision} has ${side.total.toLocaleString('en-US')} lines`);
+    if (cut.length) add(section, el('p', 'compare-truncation', `Truncated: only the first ${DIFF_LINE_CAP.toLocaleString('en-US')} lines of each side are compared (${cut.join('; ')}).`));
+  }
+  function renderRevisionComparison(target, base, next) {
+    const before = base.definition || {}, after = next.definition || {};
+    const head = el('div', 'compare-columns');
+    for (const record of [base, next]) add(head, el('p', 'compare-column-head', `Revision ${record.revision} · saved ${formatDate(record.created_at)}`));
+    add(target, head);
+    if (base.revision === next.revision) add(target, el('p', 'muted', 'Both selections are the same revision, so nothing differs.'));
+    const grid = el('div', 'compare-fields');
+    for (const [name, label] of COMPARE_FIELDS) {
+      const changed = sig(before[name]) !== sig(after[name]), row = el('div', 'compare-row');
+      row.dataset.field = name; row.dataset.changed = String(changed);
+      const caption = el('div', 'compare-row-head'); add(caption, el('span', 'compare-field', label)); add(caption, el('span', `compare-flag${changed ? ' changed' : ''}`, changed ? 'Changed' : 'Unchanged')); add(row, caption);
+      for (const [record, definition] of [[base, before], [next, after]]) { const cell = el('div', 'compare-cell'); add(cell, el('span', 'compare-cell-label', `Revision ${record.revision}`)); add(cell, el('span', 'compare-cell-value', compareValue(definition[name]))); add(row, cell); }
+      add(grid, row);
+    }
+    add(target, grid);
+    const criteria = [capLines(before.acceptance_criteria), capLines(after.acceptance_criteria)];
+    const criteriaOps = diffLines(criteria[0].lines, criteria[1].lines);
+    const criteriaSection = compareSection(target, 'Acceptance criteria', criteriaOps.some((item) => item.op !== 'same'));
+    add(criteriaSection, el('p', 'muted', `${criteriaOps.filter((item) => item.op === 'add').length} added · ${criteriaOps.filter((item) => item.op === 'del').length} removed · ${criteriaOps.filter((item) => item.op === 'same').length} unchanged`));
+    truncationNote(criteriaSection, criteria, base, next);
+    add(criteriaSection, diffList('ul', criteriaOps, 'No acceptance criteria in either revision.'));
+    const description = [capLines(before.description), capLines(after.description)];
+    const descriptionOps = diffLines(description[0].lines, description[1].lines);
+    const descriptionSection = compareSection(target, 'Description', descriptionOps.some((item) => item.op !== 'same'));
+    truncationNote(descriptionSection, description, base, next);
+    add(descriptionSection, diffList('div', descriptionOps, 'No description in either revision.'));
+  }
+  function compareRevisions() {
+    const projectId = state.projectId, taskId = state.selectedTaskId, currentActor = actorId(), current = Number((state.detail?.task || state.detail || {}).revision) || 0;
+    const view = workflowDialog('Compare task revisions', 'Pick a base and a target revision. Text is shown exactly as saved; nothing here changes the task.');
+    view.dialog.classList.add('compare-dialog');
+    const base = selectField(view, 'compare_base', 'Base revision', '', []), target = selectField(view, 'compare_target', 'Target revision', '', []);
+    const status = add(view.form, el('p', 'muted')), body = add(view.form, el('div', 'compare-body')), more = actionButton('Load more revisions', () => load(true), false);
+    status.setAttribute('role', 'status'); add(view.form, more);
+    const revisions = new Map(); let cursor = null, sequence = 0, chosen = false, pages = 0;
+    const numbers = () => [...revisions.keys()].sort((a, b) => b - a);
+    function sync() {
+      const list = numbers();
+      reconcile(base, optionItems(list.map((n) => [String(n), `Revision ${n}${n === current ? ' (current)' : ''}`]))); reconcile(target, optionItems(list.map((n) => [String(n), `Revision ${n}${n === current ? ' (current)' : ''}`])));
+      if (!chosen && list.length) {
+        const newest = revisions.has(current) ? current : list[0];
+        setProp(target, 'value', String(newest)); setProp(base, 'value', String(list.find((n) => n < newest) ?? newest));
+      }
+      show(more, Boolean(cursor));
+      setText(status, list.length < 2 && !cursor ? 'Only one revision is recorded for this task, so there is nothing to compare.' : `${list.length} revision${list.length === 1 ? '' : 's'} loaded${cursor ? '. Load more to reach others.' : '.'}`);
+      const first = revisions.get(Number(base.value)), second = revisions.get(Number(target.value));
+      patchSection(body, first && second ? sig(first, second) : 'empty', (section) => { if (first && second) renderRevisionComparison(section, first, second); });
+    }
+    async function load(append = false) {
+      const mine = ++sequence; more.disabled = true;
+      try {
+        let page;
+        do {
+          page = (await request(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/history?kind=task_revisions&limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
+          if (mine !== sequence || currentActor !== actorId() || !view.dialog.isConnected) return;
+          for (const item of page.items || []) if (item.task_id === taskId && item.record?.revision !== undefined) revisions.set(Number(item.record.revision), item.record);
+          cursor = page.next_cursor; pages++;
+          // History is served oldest first, so keep paging until the task's current revision is loaded.
+        } while (!append && cursor && !revisions.has(current) && pages < COMPARE_PAGE_LIMIT);
+        sync();
+      } catch (error) { if (mine === sequence) setText(status, errorMessage(error)); }
+      finally { if (mine === sequence) more.disabled = false; }
+    }
+    for (const select of [base, target]) select.addEventListener('change', () => { chosen = true; sync(); });
+    view.finish('Close', (_, dialog) => dialog.close()); setText(status, 'Loading revisions…'); show(more, false); load();
+  }
   async function objectives() {
     if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
     const projectId = state.projectId, currentActor = actorId();
@@ -2990,6 +3107,7 @@
   }
   $('project-policy-button').addEventListener('click',openProjectPolicy);
   $('task-history-button').addEventListener('click',taskHistory);
+  $('compare-revisions-button').addEventListener('click',compareRevisions);
   $('upload-task-attachments').addEventListener('click', uploadTaskAttachments);
   $('retry-task-attachments').addEventListener('click', retryTaskAttachments);
   $('objective-list-button').addEventListener('click',objectives);
