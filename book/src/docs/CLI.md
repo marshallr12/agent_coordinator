@@ -28,7 +28,11 @@ commands and recovery steps.
 
 ## Repository and credential configuration
 
-Commit a non-secret `.agent-coordinator.toml` at the repository root:
+For an existing Git repository, `agent-coordinator adopt` writes and commits
+this binding for you; see [Adopt a repository](#adopt-a-repository). It uses the
+credential the CLI already holds and does not create one, so the credential
+steps below still apply. To connect a repository by hand instead, commit a
+non-secret `.agent-coordinator.toml` at the repository root:
 
 ```toml
 service_url = "https://coordinator.example.com"
