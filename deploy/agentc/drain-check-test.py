@@ -204,9 +204,37 @@ class DrainCheckTest(unittest.TestCase):
         activity(self.db, "w-int", "t-sub2", "t-act2")
         self.assert_blocked("active_integrations", "w-int", "t-sub2", "state=active")
 
-    def test_recovery_required_activity_blocks(self):
+    def test_recovery_required_activities_are_parked_without_blocking(self):
         activity(self.db, "w-rec", "t-sub", "t-act", state="recovery_required")
-        self.assert_blocked("recovery_required", "w-rec", "state=recovery_required")
+        activity(self.db, "w-rec2", "t-sub2", "t-act2", state="recovery_required")
+        code, out, _ = self.run_check()
+        self.assertEqual(code, 0, out)
+        self.assertIn("recovery_required: 2 ", out)
+        lines = out.splitlines()
+        self.assertFalse(any(l.startswith("blocking ") for l in lines), out)
+        parked = [l for l in lines if l.startswith("parked recovery_required:")]
+        self.assertEqual(len(parked), 2, out)
+        self.assertIn("activity=w-rec subject_task=t-sub state=recovery_required", parked[0])
+        self.assertIn("activity=w-rec2 subject_task=t-sub2 state=recovery_required", parked[1])
+        self.assertEqual(lines[-1], "drained; 2 parked row(s) do not block")
+
+    def test_recovery_required_with_another_category_blocks_and_lists_both(self):
+        activity(self.db, "w-rec", "t-sub", "t-act", state="recovery_required")
+        job(self.db, "j-live")
+        code, out, _ = self.run_check()
+        self.assertEqual(code, 1, out)
+        lines = out.splitlines()
+        self.assertEqual(sum(l.startswith("blocking jobs:") for l in lines), 1, out)
+        self.assertEqual(sum(l.startswith("parked recovery_required:") for l in lines), 1, out)
+        self.assertEqual(lines[-1], "not drained: 1 blocking row(s); 1 parked row(s) do not block")
+
+    def test_recovery_required_with_an_unreadable_category_still_fails(self):
+        activity(self.db, "w-rec", "t-sub", "t-act", state="recovery_required")
+        self.db.execute("DROP TABLE publication_intents")
+        self.db.commit()
+        code, out, err = self.run_check()
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("could not read", err)
 
     def test_unreconciled_publication_intent_blocks(self):
         activity(self.db, "w-pub", "t-sub", "t-act", state="completed")
@@ -276,7 +304,8 @@ class DrainCheckTest(unittest.TestCase):
         self.assertEqual(code, 1)
         for text in ("attempts: 1 ", "jobs: 1 ", "reservations: 1 ", "recovery_required: 1 ",
                      "held_integrations: 0 ", "active_integrations: 0 ", "publication_intents: 0 ",
-                     "not drained: 4 blocking row(s)"):
+                     "not drained: 3 blocking row(s); 1 parked row(s) do not block",
+                     "parked recovery_required: activity=w-rec"):
             self.assertIn(text, out)
 
     def test_output_has_no_task_text(self):
