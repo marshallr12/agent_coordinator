@@ -30,6 +30,11 @@ const MAX_LISTED: usize = 50;
 const MAX_TRAILERS: usize = 3;
 /// Bytes kept of a listed subject or trailer (cut on a character boundary).
 const MAX_TEXT: usize = 160;
+/// Human commits of one move whose files are recorded; the service keeps a
+/// file for a day, so a long run of older commits adds nothing.
+const MAX_SHIPS: usize = 50;
+/// Files recorded per human commit (the service accepts 1,000).
+const MAX_SHIP_FILES: usize = 1_000;
 /// Serialized details size the report stays within, below the service's
 /// 65,536-byte limit with room for the envelope.
 const MAX_DETAILS_BYTES: usize = 60_000;
@@ -68,6 +73,7 @@ impl<C: ChecksSource> Integrator<C> {
     ) -> Result<bool> {
         let published = self.state.published(&target.key());
         let (commits, results) = out_of_band(mirror, (from, to), published)?;
+        self.record_human_ships(project, mirror, &commits).await;
         let landing = Landing {
             target,
             from,
@@ -77,6 +83,45 @@ impl<C: ChecksSource> Integrator<C> {
         match landing_report(&landing, &commits) {
             Some(report) => Ok(self.report_best_effort(project, report).await),
             None => Ok(true),
+        }
+    }
+}
+
+impl<C: ChecksSource> Integrator<C> {
+    /// Tells the service which files the user's own out-of-band commits (no
+    /// agent trailer) changed. Advisory, like the rest of this check: a
+    /// failure is logged and never holds the move.
+    async fn record_human_ships(&self, project: &str, mirror: &Path, commits: &[CommitInfo]) {
+        for commit in commits.iter().filter(|c| flag(c).is_none()).take(MAX_SHIPS) {
+            let files = match git::changed_files(mirror, &commit.sha) {
+                Ok(files) => files,
+                Err(error) => {
+                    eprintln!(
+                        "agentc-integrator: {project}: files of {}: {error:#}",
+                        commit.sha
+                    );
+                    continue;
+                }
+            };
+            let files: Vec<String> = files
+                .into_iter()
+                .filter(|file| file.len() <= 1024 && !file.contains('\\'))
+                .take(MAX_SHIP_FILES)
+                .collect();
+            if files.is_empty() {
+                continue;
+            }
+            match self.service.human_ship(project, &commit.sha, &files).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(refusal)) => eprintln!(
+                    "agentc-integrator: {project}: human ship {}: {}",
+                    commit.sha, refusal.code
+                ),
+                Err(error) => eprintln!(
+                    "agentc-integrator: {project}: human ship {}: {error:#}",
+                    commit.sha
+                ),
+            }
         }
     }
 }

@@ -154,6 +154,9 @@ async fn scan_tasks(
     now: i64,
 ) -> Result<Scan, AppError> {
     let mut scan = Scan::default();
+    let human_files =
+        crate::attention::recent_human_files(c, p, now - crate::attention::OVERLAP_WINDOW_MS)
+            .await?;
     for id in crate::coordination::next_task_candidates(c, p, now, CANDIDATE_LIMIT).await? {
         let task = crate::coordination::task_preconditions_snapshot(c, p, &id, actor, now).await?;
         let unmet = task["unmet_preconditions"]
@@ -161,6 +164,15 @@ async fn scan_tasks(
             .cloned()
             .unwrap_or_default();
         if scan.consider(&unmet) {
+            // A task whose paths a human just changed waits: the change may
+            // already have done, or conflict with, the work.
+            if !crate::attention::overlapping_paths(c, &id, &human_files)
+                .await?
+                .is_empty()
+            {
+                *scan.skipped.entry("path_overlap".into()).or_default() += 1;
+                continue;
+            }
             scan.action = Some(task_action(p, &task, policy));
             break;
         }

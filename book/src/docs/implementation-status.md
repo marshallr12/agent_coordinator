@@ -147,6 +147,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   relaying session, the verbatim prompt and response, and the enabling human
   principal and policy revision; the dashboard and `decisions show` mark it as
   relayed. Without the switch or the `relay` evidence the agent is still refused.
+- Attention budget (P3b): a decision may carry a recommendation and be marked
+  reversible, and `serve` answers it with that recommendation after 24 hours
+  unanswered (`timed_out`); `GET .../digest` lists those decisions and the
+  human-required interventions, which include stalled tasks (three consecutive
+  attempts without a submission); tasks may declare paths and `next` skips a
+  task overlapping files the integrator saw land out of band in the last 24
+  hours. `deploy/agentc/attention.py` renders and mails the digest and runs a
+  canary that pages through ntfy once per failing check; the digest mail and the
+  ntfy topic are host configuration, not exercised by CI.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
   safe storage reconciliation. Native upload journals preserve exact bytes and

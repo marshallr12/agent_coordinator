@@ -973,6 +973,26 @@ On start, the loop removes terminal runs that an earlier loop left behind,
 so do not keep evidence from hand-run implementer launches under
 `impl/runs/` while the unit runs.
 
+### Attention budget: digest and canary
+
+`deploy/agentc/attention.py` reads the service as the supervisor's credential
+(a file holding only the bearer token):
+
+```sh
+attention.py digest --url URL --project ID --token-file TOKEN \
+    --mail-to you@example.org --smtp-host localhost
+attention.py canary --url URL --project ID --token-file TOKEN \
+    --heartbeat /var/lib/agentc/heartbeat.json --ntfy-topic TOPIC --max-hri 3
+```
+
+Run the digest daily and the canary every few minutes from a timer. The canary
+checks `/healthz`, the supervisor's own `next` call (10 s budget), that the
+heartbeat is under 300 s old, and, with `--max-hri`, the HRI count. A failing
+check sends one ntfy page and stays quiet until it recovers; a page that could
+not be delivered exits 2 and is retried by the next run. `NTFY_TOKEN`, when set,
+authenticates to ntfy. `deploy/agentc/attention-test.py` tests both against
+local fake servers.
+
 ### Running the loop against staging
 
 `[run.binding]` in `/etc/agentc/supervisor.toml` replaces the mirror's
