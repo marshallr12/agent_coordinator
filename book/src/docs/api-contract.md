@@ -258,6 +258,9 @@ other creator, human or agent, gets a 403 and nothing is created. A `canary`
 task is always admitted, is not counted in `admitted_this_week` and is never
 held; task views and the `admission` object report `admission_class: "canary"`.
 A canary principal's tasks without the class are budgeted like any agent's.
+The digest leaves canary tasks out of every figure below: they are never
+stalled tasks, never ready work for the stalled-queue rule, never task progress,
+and integrator reports about them are not listed among the human interventions.
 
 `GET /api/v1/projects/{project_id}/digest?hours=N` (default 24, at most 336)
 is the attention-budget summary: `proceeded_decisions` (reversible decisions the

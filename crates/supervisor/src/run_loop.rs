@@ -70,6 +70,11 @@ pub struct RunConfig {
     /// The coordinator and project to work on instead of the mirror
     /// branch's `.agent-coordinator.toml` (a staging coordinator).
     pub binding: Option<binding::Binding>,
+    /// A second project, normally the host's canary project, claimed from
+    /// alongside the main one on the same coordinator. Its ready tasks are
+    /// claimed first. It needs its own repository mirror, and an integrator
+    /// instance of its own (see the deployment chapter).
+    pub canary_binding: Option<binding::CanaryBinding>,
     /// Commit author and committer name set in each implementer clone.
     pub git_name: String,
     /// Commit author and committer email set in each implementer clone.
@@ -97,6 +102,7 @@ impl Default for RunConfig {
             branch: "main".into(),
             allow_insecure_loopback: false,
             binding: None,
+            canary_binding: None,
             git_name: "agentc implementer".into(),
             git_email: "agentc-impl@agentc.invalid".into(),
             reviewer: false,
@@ -162,8 +168,17 @@ impl Launch {
 
 /// What the loop needs from the coordinator and the host.
 pub trait Driver {
-    /// The project this host works on.
+    /// The project this host works on: the selected one (see [`Driver::select`]).
     fn project(&self) -> &str;
+    /// Every project the host claims from, the main one first; more than one
+    /// only with `[run.canary_binding]`.
+    fn projects(&self) -> Vec<String> {
+        vec![self.project().to_owned()]
+    }
+    /// Makes `project` (one of [`Driver::projects`]) the one `project`,
+    /// `next` and the reviewer side act on. A single-project driver has
+    /// nothing to switch.
+    fn select(&mut self, _project: &str) {}
     /// `next` data for `role`.
     fn next(&mut self, role: Role) -> Result<Value>;
     /// Free bytes on the filesystem holding the state directory.
@@ -299,11 +314,18 @@ pub fn sweep_terminal(driver: &mut impl Driver, config: &Config) {
     }
 }
 
-/// One poll: recovery, admission, `next`, then the launch it suggests.
+/// One poll: recovery, admission, `next`, then the launch it suggests. With
+/// more than one project, reviews are polled in each, then `next` in each
+/// of the extra (canary) projects before the main one, so a ready canary
+/// task is claimed ahead of any other work.
 pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
+    let projects = driver.projects();
+    let main = projects.first().cloned().unwrap_or_default();
+    driver.select(&main);
     if let Some(reason) = record::recover(driver, config) {
         return Outcome::Refused(reason);
     }
+    driver.select(&main);
     if let Some(reason) = refusal(driver, &config.run) {
         return Outcome::Refused(reason);
     }
@@ -312,21 +334,35 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
         Err(reason) => return Outcome::Refused(reason),
     };
     if config.run.reviewer {
-        review_hook(driver, config);
+        for project in &projects {
+            driver.select(project);
+            review_hook(driver, config);
+        }
     }
-    let next = match driver.next(Role::Implementer) {
-        Ok(next) => next,
-        Err(error) => return Outcome::Failed(format!("next: {error:#}")),
-    };
-    let Some(suggestion) = suggestion(&next) else {
-        return Outcome::Idle;
-    };
-    let launch = Launch {
-        vendor,
-        ..Launch::plan(config, driver.project(), suggestion)
-    };
-    let result = work(driver, config, &launch);
-    finish(driver, config, &launch, result)
+    let mut failure = None;
+    for project in projects.iter().skip(1).chain(projects.first()) {
+        driver.select(project);
+        let next = match driver.next(Role::Implementer) {
+            Ok(next) => next,
+            Err(error) => {
+                failure.get_or_insert(format!("next: {error:#}"));
+                continue;
+            }
+        };
+        let Some(suggestion) = suggestion(&next) else {
+            continue;
+        };
+        let launch = Launch {
+            vendor,
+            ..Launch::plan(config, project, suggestion)
+        };
+        let result = work(driver, config, &launch);
+        let outcome = finish(driver, config, &launch, result);
+        driver.select(&main);
+        return outcome;
+    }
+    driver.select(&main);
+    failure.map_or(Outcome::Idle, Outcome::Failed)
 }
 
 /// Why the host must not claim now, if it must not. The disk high-water

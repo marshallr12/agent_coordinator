@@ -325,11 +325,32 @@ pub(crate) async fn human_queue_items(
     c: &mut SqliteConnection,
     p: &str,
 ) -> Result<Vec<Value>, AppError> {
+    open_human_items(c, p, false).await
+}
+
+/// The same items without those of canary tasks, for the digest's human
+/// interventions: a canary task is a probe, not work.
+pub(crate) async fn human_queue_items_without_canary(
+    c: &mut SqliteConnection,
+    p: &str,
+) -> Result<Vec<Value>, AppError> {
+    open_human_items(c, p, true).await
+}
+
+/// The open human-required reports of `p` as items, leaving out those about
+/// canary tasks when `without_canary`.
+async fn open_human_items(
+    c: &mut SqliteConnection,
+    p: &str,
+    without_canary: bool,
+) -> Result<Vec<Value>, AppError> {
     let rows = sqlx::query(
         "SELECT * FROM integrator_reports WHERE project_id=? AND resolved_at IS NULL \
-         AND requires_human=1 ORDER BY rowid LIMIT ?",
+         AND requires_human=1 AND (?=0 OR task_id IS NULL OR task_id NOT IN \
+         (SELECT id FROM tasks WHERE budget_exempt IS NOT NULL)) ORDER BY rowid LIMIT ?",
     )
     .bind(p)
+    .bind(without_canary)
     .bind(HUMAN_QUEUE_LIMIT)
     .fetch_all(&mut *c)
     .await?;

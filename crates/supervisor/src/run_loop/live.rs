@@ -38,8 +38,10 @@ pub struct LiveDriver {
     config_arg: Vec<String>,
     runtime: tokio::runtime::Runtime,
     client: CoordinatorClient,
-    /// The coordinator, project and credential selector worked under.
-    binding: Binding,
+    /// The projects worked on: the main one, then the canary's if any.
+    slots: Vec<Slot>,
+    /// The slot `next`, [`Driver::project`] and the reviewer act on.
+    active: usize,
     /// Whether coordinator calls may use plain HTTP to loopback.
     insecure: bool,
     account: Account,
@@ -47,7 +49,15 @@ pub struct LiveDriver {
     revision: String,
     /// The running `launch-root`, if any.
     child: Option<Child>,
-    /// The reviewer side when `[run] reviewer` is on.
+}
+
+/// One project the loop works on: its binding, the mirror its clones start
+/// from, and its reviewer side when `[run] reviewer` is on.
+struct Slot {
+    /// The coordinator, project and credential selector worked under.
+    binding: Binding,
+    /// The host mirror this project's clones start from.
+    mirror: PathBuf,
     reviewer: Option<LiveReviewer>,
 }
 
@@ -73,17 +83,34 @@ fn on_stop_requests() {
 }
 
 impl LiveDriver {
-    /// Resolves the binding (`[run.binding]`, else the mirror's), installs
-    /// its root-owned copy and connects with the implementer's credential.
+    /// Resolves the binding (`[run.binding]`, else the mirror's) and the
+    /// canary one if any, installs their root-owned copies and connects with
+    /// the implementer's credential.
     fn new(config: &Config, config_path: Option<&Path>) -> Result<Self> {
         let binding = resolve_binding(config)?;
         let insecure = binding::insecure(&binding.service_url, config.run.allow_insecure_loopback)?;
-        install_binding(config, &binding.to_toml()?)?;
+        install_binding(&binding::installed_path(config), &binding.to_toml()?)?;
+        let mut bindings = vec![(binding.clone(), mirror(config))];
+        if let Some(canary) = &config.run.canary_binding {
+            canary.check_against(&binding)?;
+            let extra = canary.binding();
+            install_binding(&binding::canary_installed_path(config), &extra.to_toml()?)?;
+            bindings.push((extra, canary.mirror_path(config)));
+        }
         let account = Account::lookup(Role::Implementer.user(config))?;
         let credentials = read_credentials(config, &account)?;
         let shown = role_dir(config).join(CREDENTIALS);
         let text = String::from_utf8(credentials).context("credentials are not UTF-8")?;
-        let reviewer = reviewer(config, config_path, &binding, insecure)?;
+        let all: Vec<&Binding> = bindings.iter().map(|(b, _)| b).collect();
+        let mut slots = Vec::new();
+        for (binding, mirror) in &bindings {
+            let reviewer = reviewer(config, config_path, binding, &all, mirror, insecure)?;
+            slots.push(Slot {
+                binding: binding.clone(),
+                mirror: mirror.clone(),
+                reviewer,
+            });
+        }
         Ok(Self {
             config: config.clone(),
             config_arg: config_path
@@ -92,13 +119,25 @@ impl LiveDriver {
                 .collect(),
             runtime: tokio::runtime::Runtime::new()?,
             client: crate::shadow::client_from(&text, &shown, &binding.service_url, insecure)?,
-            binding,
+            slots,
+            active: 0,
             insecure,
             account,
             revision: String::new(),
             child: None,
-            reviewer,
         })
+    }
+
+    /// The slot `next` and the reviewer side act on.
+    fn slot(&self) -> &Slot {
+        &self.slots[self.active]
+    }
+
+    /// The slot working `project` (the active one if none does).
+    fn slot_of(&self, project: &str) -> &Slot {
+        (self.slots.iter())
+            .find(|slot| slot.binding.project_id == project)
+            .unwrap_or_else(|| self.slot())
     }
 
     /// Runs `program args` as the implementer in `cwd` and returns its
@@ -156,7 +195,7 @@ impl LiveDriver {
 
     /// The launch attempt's state from its task's detail, if readable.
     fn read_attempt_state(&self, launch: &Launch, lease: &Lease) -> Option<String> {
-        let (project, task) = (&self.binding.project_id, &launch.suggestion.task);
+        let (project, task) = (&launch.project, &launch.suggestion.task);
         let path = format!("/api/v1/projects/{project}/tasks/{task}");
         let call = crate::shadow::get_data(&self.client, &path, &[]);
         match self.runtime.block_on(call) {
@@ -197,7 +236,8 @@ impl LiveDriver {
         let run = self.below_role(&launch.run)?;
         let owner = (self.account.uid, self.account.gid);
         let base = role_dir(&self.config);
-        place_credential(&base, &run, &self.binding, credential, owner)
+        let binding = &self.slot_of(&launch.project).binding;
+        place_credential(&base, &run, binding, credential, owner)
     }
 }
 
@@ -219,12 +259,24 @@ pub(super) fn instruction(mirror: &Path, revision: &str, name: &str) -> Option<S
 
 impl Driver for LiveDriver {
     fn project(&self) -> &str {
-        &self.binding.project_id
+        &self.slot().binding.project_id
+    }
+
+    fn projects(&self) -> Vec<String> {
+        (self.slots.iter())
+            .map(|slot| slot.binding.project_id.clone())
+            .collect()
+    }
+
+    fn select(&mut self, project: &str) {
+        if let Some(index) = (self.slots.iter()).position(|s| s.binding.project_id == project) {
+            self.active = index;
+        }
     }
 
     fn next(&mut self, role: Role) -> Result<Value> {
         let name = format!("{role:?}").to_lowercase();
-        let call = crate::shadow::fetch_next(&self.client, &self.binding.project_id, &name);
+        let call = crate::shadow::fetch_next(&self.client, self.project(), &name);
         self.runtime.block_on(call)
     }
 
@@ -236,7 +288,7 @@ impl Driver for LiveDriver {
     /// copies the role's coordinator credential into the run's state where
     /// the binding's CLI looks for it.
     fn create(&mut self, launch: &Launch) -> Result<()> {
-        let mirror = mirror(&self.config);
+        let mirror = self.slot_of(&launch.project).mirror.clone();
         clone::git_output(&mirror, &["fetch", "--prune", "--quiet"])?;
         let head = format!("refs/heads/{}", self.config.run.branch);
         let sha = clone::git_output(&mirror, &["rev-parse", "--verify", &head])?;
@@ -264,8 +316,8 @@ impl Driver for LiveDriver {
         self.place_credential(launch, &credential)
     }
 
-    fn instructions(&mut self, _launch: &Launch) -> Vec<(String, String)> {
-        let mirror = mirror(&self.config);
+    fn instructions(&mut self, launch: &Launch) -> Vec<(String, String)> {
+        let mirror = self.slot_of(&launch.project).mirror.clone();
         let read = |name: &&str| {
             Some((
                 (*name).to_owned(),
@@ -453,7 +505,8 @@ impl Driver for LiveDriver {
     }
 
     fn reviewer(&mut self) -> Option<&mut dyn ReviewDriver> {
-        self.reviewer.as_mut().map(|r| r as &mut dyn ReviewDriver)
+        let active = self.active;
+        (self.slots[active].reviewer.as_mut()).map(|r| r as &mut dyn ReviewDriver)
     }
 
     fn harness_status(&mut self, harness: Harness) -> Result<()> {
@@ -474,12 +527,16 @@ pub(super) fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
-/// The reviewer side, built only when `[run] reviewer` is on, working
-/// under the same binding as the implementer side.
+/// The reviewer side of one project, built only when `[run] reviewer` is
+/// on, working under the same binding as the implementer side. `all` lists
+/// every binding the host serves, so a project's credential copy is never
+/// taken for a stale one.
 fn reviewer(
     config: &Config,
     path: Option<&Path>,
     binding: &Binding,
+    all: &[&Binding],
+    mirror: &Path,
     insecure: bool,
 ) -> Result<Option<LiveReviewer>> {
     if !config.run.reviewer {
@@ -489,7 +546,7 @@ fn reviewer(
         .map(|p| format!("--config={}", p.display()))
         .into_iter()
         .collect();
-    LiveReviewer::new(config, &arg, binding, insecure).map(Some)
+    LiveReviewer::new(config, &arg, binding, all, mirror, insecure).map(Some)
 }
 
 /// The binding the loop works under: `[run.binding]` from the host
@@ -531,13 +588,12 @@ pub(super) fn mirror(config: &Config) -> PathBuf {
     config.state_dir.join("mirror.git")
 }
 
-/// Writes the binding to [`binding::installed_path`] (root-owned, mode
-/// 0644 so the role can read it), replacing it atomically. Renewals,
-/// releases and a `[run.binding]` launch's own CLI then never read the
-/// clone's role-writable `.agent-coordinator.toml`.
-fn install_binding(config: &Config, text: &str) -> Result<()> {
+/// Writes the binding to `path`, one of the [`binding::installed_path_for`]
+/// copies (root-owned, mode 0644 so the role can read it), replacing it
+/// atomically. Renewals, releases and a `[run.binding]` launch's own CLI then
+/// never read the clone's role-writable `.agent-coordinator.toml`.
+fn install_binding(path: &Path, text: &str) -> Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let path = binding::installed_path(config);
     let temp = path.with_extension("tmp");
     let _ = std::fs::remove_file(&temp);
     let mut options = std::fs::OpenOptions::new();
@@ -548,7 +604,7 @@ fn install_binding(config: &Config, text: &str) -> Result<()> {
         .open(&temp)?;
     file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
     file.write_all(text.as_bytes())?;
-    std::fs::rename(&temp, &path).with_context(|| format!("replace {}", path.display()))
+    std::fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))
 }
 
 /// The implementer's coordinator credential file, relative to its role
@@ -611,7 +667,9 @@ fn role_env(config: &Config, launch: &Launch, insecure: bool) -> Vec<(&'static s
         ("AGENT_COORDINATOR_SESSION", launch.session_id.to_string()),
         (
             binding::REPO_CONFIG_ENV,
-            binding::installed_path(config).display().to_string(),
+            binding::installed_path_for(config, &launch.project)
+                .display()
+                .to_string(),
         ),
     ];
     if insecure {
@@ -704,6 +762,36 @@ mod tests {
         assert!(env.iter().all(|(name, _)| *name != binding::INSECURE_ENV));
         let insecure = role_env(&Config::default(), &launch, true);
         assert!(insecure.contains(&(binding::INSECURE_ENV, "true".into())));
+    }
+
+    #[test]
+    fn role_commands_of_a_canary_launch_read_the_canary_binding_copy() {
+        let mut config = Config::default();
+        config.run.canary_binding = Some(binding::CanaryBinding {
+            service_url: "https://agents.example.com".into(),
+            project_id: "canary".into(),
+            project_name: None,
+            mirror: None,
+        });
+        let suggestion = |task: &str| Suggestion {
+            task: task.into(),
+            revision: 1,
+            title: String::new(),
+        };
+        let repo = |project: &str| {
+            let launch = Launch::plan(&config, project, suggestion("t"));
+            let env = role_env(&config, &launch, false);
+            let (_, path) = env
+                .into_iter()
+                .find(|(name, _)| *name == binding::REPO_CONFIG_ENV)
+                .unwrap();
+            path
+        };
+        assert_eq!(repo("p"), "/var/lib/agentc/coordinator-binding.toml");
+        assert_eq!(
+            repo("canary"),
+            "/var/lib/agentc/coordinator-binding-canary.toml"
+        );
     }
 
     #[test]
@@ -846,9 +934,9 @@ mod tests {
             state_dir: dir.path().to_path_buf(),
             ..Config::default()
         };
-        install_binding(&config, "old").unwrap();
-        install_binding(&config, "project_id = \"p\"").unwrap();
         let path = binding::installed_path(&config);
+        install_binding(&path, "old").unwrap();
+        install_binding(&path, "project_id = \"p\"").unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "project_id = \"p\""

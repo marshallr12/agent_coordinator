@@ -8,6 +8,8 @@
 //!   (`no_progress`: ready work and no task progress for the stall threshold).
 //! * The digest also lists the agent tasks the weekly admission budget held
 //!   (see [`crate::admission`]).
+//! * Canary tasks (`admission_class: "canary"`) are not counted: they are
+//!   never stalled tasks, ready work, progress, or human-required reports.
 //! * Tasks may declare the paths they touch; the integrator records the files
 //!   that landed on the target outside its own results, and `next` skips a
 //!   task whose paths overlap one of them from the last 24 hours.
@@ -32,6 +34,14 @@ use subtle::ConstantTimeEq;
 type Reply = Result<Json<Value>, AppError>;
 
 const HOUR_MS: i64 = 3_600_000;
+/// The canary tasks (see [`crate::admission`]): probes of the pipeline, left
+/// out of the digest's human interventions and its progress clock so that
+/// the dogfood figures describe real work.
+macro_rules! canary_tasks {
+    () => {
+        "(SELECT id FROM tasks WHERE budget_exempt IS NOT NULL)"
+    };
+}
 /// How long a reversible decision waits for an answer before it proceeds.
 pub const DECISION_TIMEOUT_MS: i64 = 24 * HOUR_MS;
 /// How far back a human change blocks overlapping tasks from `next`.
@@ -864,7 +874,7 @@ async fn ack_digest(
 async fn stalled_tasks(c: &mut SqliteConnection, project: &str) -> Result<Vec<Value>, AppError> {
     let rows = sqlx::query(
         "SELECT t.id,t.title,t.priority FROM tasks t WHERE t.project_id=? AND t.lifecycle='open' \
-         AND t.archived_at IS NULL AND (SELECT count(*) FROM (SELECT state FROM attempts a \
+         AND t.budget_exempt IS NULL AND t.archived_at IS NULL AND (SELECT count(*) FROM (SELECT state FROM attempts a \
          WHERE a.task_id=t.id ORDER BY a.generation DESC LIMIT ?) WHERE state IN \
          ('released','blocked','expired','canceled'))=? ORDER BY t.priority,t.created_at,t.id LIMIT ?",
     )
@@ -903,7 +913,7 @@ async fn stalled_queue(
     let ready = sqlx::query(
         "SELECT count(*) AS ready,min(t.ready_since) AS since FROM tasks t \
          WHERE t.project_id=? AND t.lifecycle='open' AND t.archived_at IS NULL \
-         AND t.blocked_reason IS NULL \
+         AND t.budget_exempt IS NULL AND t.blocked_reason IS NULL \
          AND NOT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks p ON p.id=d.prerequisite_id \
          WHERE d.task_id=t.id AND p.lifecycle!='done') \
          AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.id=t.current_attempt_id \
@@ -918,18 +928,21 @@ async fn stalled_queue(
     let Some(ready_since) = ready.get::<Option<i64>, _>("since") else {
         return Ok(None);
     };
-    let progress: Option<i64> = sqlx::query_scalar(
-        "SELECT max(at) FROM (\
-         SELECT max(created_at) AS at FROM attempts WHERE project_id=?1 \
-         UNION ALL SELECT max(created_at) FROM checkpoints WHERE project_id=?1 \
-         UNION ALL SELECT max(created_at) FROM submissions WHERE project_id=?1 \
-         UNION ALL SELECT max(r.created_at) FROM review_decisions r \
-         JOIN submissions s ON s.id=r.submission_id WHERE s.project_id=?1 \
-         UNION ALL SELECT max(i.created_at) FROM integration_authorizations i \
-         JOIN submissions s ON s.id=i.submission_id WHERE s.project_id=?1 \
-         UNION ALL SELECT max(i.created_at) FROM integration_results i \
-         JOIN submissions s ON s.id=i.submission_id WHERE s.project_id=?1)",
-    )
+    let progress: Option<i64> = sqlx::query_scalar(concat!(
+        "SELECT max(at) FROM (SELECT max(created_at) AS at FROM attempts WHERE project_id=?1 AND task_id NOT IN ",
+        canary_tasks!(),
+        " UNION ALL SELECT max(c.created_at) FROM checkpoints c JOIN attempts a ON a.id=c.attempt_id WHERE c.project_id=?1 AND a.task_id NOT IN ",
+        canary_tasks!(),
+        " UNION ALL SELECT max(created_at) FROM submissions WHERE project_id=?1 AND task_id NOT IN ",
+        canary_tasks!(),
+        " UNION ALL SELECT max(r.created_at) FROM review_decisions r JOIN submissions s ON s.id=r.submission_id WHERE s.project_id=?1 AND s.task_id NOT IN ",
+        canary_tasks!(),
+        " UNION ALL SELECT max(i.created_at) FROM integration_authorizations i JOIN submissions s ON s.id=i.submission_id WHERE s.project_id=?1 AND s.task_id NOT IN ",
+        canary_tasks!(),
+        " UNION ALL SELECT max(i.created_at) FROM integration_results i JOIN submissions s ON s.id=i.submission_id WHERE s.project_id=?1 AND s.task_id NOT IN ",
+        canary_tasks!(),
+        ")",
+    ))
     .bind(project)
     .fetch_one(&mut *c)
     .await?;
@@ -1025,7 +1038,9 @@ async fn digest(
     let queue = stalled_queue(&mut c, &project, now, &state.config).await?;
     let stalled_queue = usize::from(queue.is_some());
     items.extend(queue);
-    items.extend(crate::integrator_reports::human_queue_items(&mut c, &project).await?);
+    items.extend(
+        crate::integrator_reports::human_queue_items_without_canary(&mut c, &project).await?,
+    );
     let last_read: Option<i64> =
         sqlx::query_scalar("SELECT last_read_at FROM digest_reads WHERE project_id=?")
             .bind(&project)

@@ -84,6 +84,7 @@ impl Fixture {
                 program: root.path().join("h/agentc-push"),
                 config: root.path().join("push.toml"),
                 user: "unused".into(),
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -463,6 +464,27 @@ fn host_problems_name_a_missing_helper_program_configuration_and_account() {
     fixture.spec.role = Role::Reviewer;
     let problems = host_problems(&fixture.spec, &fixture.config).join("\n");
     assert!(!problems.contains("push helper"), "{problems}");
+}
+
+#[test]
+fn a_project_with_its_own_helper_configuration_is_served_with_it() {
+    if skip_without_tmp("a_project_with_its_own_helper_configuration_is_served_with_it") {
+        return;
+    }
+    let mut fixture = Fixture::new("bind", 0);
+    let own = fixture.root.path().join("push-canary.toml");
+    let project = fixture.spec.project.clone().unwrap();
+    (fixture.config.push_helper.project_configs).insert(project, own.clone());
+    // The shared configuration is not what this project needs.
+    let problems = host_problems(&fixture.spec, &fixture.config).join("\n");
+    assert!(problems.contains("push-canary.toml"), "{problems}");
+    assert!(!problems.contains("/push.toml"), "{problems}");
+    let coordinator = fixture.spec.run.join("state/coordinator");
+    fs::create_dir_all(&coordinator).unwrap();
+    fs::write(coordinator.join("credentials.toml"), "").unwrap();
+    assert_eq!(run(&fixture.plan()).unwrap(), 0);
+    let helper = fixture.record("helper").unwrap();
+    assert_eq!(arguments(&helper)[1], format!("--config={}", own.display()));
 }
 
 #[test]

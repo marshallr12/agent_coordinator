@@ -117,7 +117,8 @@ only from an agent principal the operator designates with
 `--canary-principals` (`COORDINATOR_CANARY_PRINCIPALS`); any other creator is
 refused with a 403 and no task. A canary task is always admitted and is not
 counted against the budget, and the same principal's tasks without the class
-are budgeted normally.
+are budgeted normally. The canary asks for priority 0 (urgent, the highest the
+service accepts), so selection hands it out before every task of priority 1 to 3.
 
 Default priorities are urgent, high, normal, and low. Within a project, selection
 filters eligibility and requested task kinds/capabilities, then orders by

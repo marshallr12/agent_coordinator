@@ -6,7 +6,7 @@
 //! is removed with its `$RUN` once its final output has been read.
 use super::binding::{self, Binding};
 use super::health::Vendor;
-use super::live::{self, mirror};
+use super::live;
 use super::review::{self, Review, ReviewClaim, ReviewDriver, Strikes};
 use super::review_cost::{self, ReviewLaunch};
 use super::rooted;
@@ -78,6 +78,10 @@ pub struct LiveReviewer {
     runtime: tokio::runtime::Runtime,
     client: CoordinatorClient,
     project: String,
+    /// The host mirror this project's reviews clone from.
+    mirror: PathBuf,
+    /// The installed binding copy the CLI reads for this project.
+    installed: PathBuf,
     /// Whether coordinator calls may use plain HTTP to loopback.
     insecure: bool,
     account: Account,
@@ -86,11 +90,15 @@ pub struct LiveReviewer {
 
 impl LiveReviewer {
     /// Connects with the reviewer principal's credential under the loop's
-    /// `binding` and resolves the reviewer account.
+    /// `binding` and resolves the reviewer account. `all` is every binding
+    /// the host serves, whose credential copies are kept; `mirror` is the
+    /// binding's repository mirror.
     pub fn new(
         config: &Config,
         config_arg: &[String],
         binding: &Binding,
+        all: &[&Binding],
+        mirror: &Path,
         insecure: bool,
     ) -> Result<Self> {
         let home = verdict_home(config);
@@ -98,7 +106,7 @@ impl LiveReviewer {
         let path = home.join("credentials.toml");
         let text =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        remove_stale_credentials(&home, binding)?;
+        remove_stale_credentials(&home, all)?;
         place_named_credential(&home, binding, &text)?;
         let origin = &binding.service_url;
         Ok(Self {
@@ -107,6 +115,8 @@ impl LiveReviewer {
             runtime: tokio::runtime::Runtime::new()?,
             client: crate::shadow::client_from(&text, &path, origin, insecure)?,
             project: binding.project_id.clone(),
+            mirror: mirror.to_owned(),
+            installed: binding::installed_path_for(config, &binding.project_id),
             insecure,
             account: Account::lookup(Role::Reviewer.user(config))?,
             strikes: Strikes::default(),
@@ -128,7 +138,12 @@ impl LiveReviewer {
             .args(args)
             .current_dir(verdict_home(&self.config))
             .env_clear();
-        command.envs(verdict_env(&self.config, session, self.insecure));
+        command.envs(verdict_env(
+            &self.config,
+            &self.installed,
+            session,
+            self.insecure,
+        ));
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -149,11 +164,8 @@ impl LiveReviewer {
     /// Clones the mirror into a root-owned checkout the CLI fetches the
     /// candidate into while it verifies it before claiming.
     fn checkout(&self, dest: &Path) -> Result<()> {
-        let origin = clone::git_output(
-            &mirror(&self.config),
-            &["config", "--get", "remote.origin.url"],
-        )?;
-        let source = mirror(&self.config).display().to_string();
+        let origin = clone::git_output(&self.mirror, &["config", "--get", "remote.origin.url"])?;
+        let source = self.mirror.display().to_string();
         let parent = dest.parent().context("checkout parent")?;
         std::fs::create_dir_all(parent)?;
         clone::git_output(
@@ -198,21 +210,21 @@ impl LiveReviewer {
     /// branch the reviewer's clone can see; a submission without one is
     /// reviewed at the mirror's branch head.
     fn candidate(&self, claim: &ReviewClaim) -> Result<String> {
-        let mirror = mirror(&self.config);
+        let mirror = &self.mirror;
         let (Some(reference), Some(revision)) = (
             claim.submission["candidate_ref"].as_str(),
             claim.submission["candidate_revision"].as_str(),
         ) else {
             let head = format!("refs/heads/{}", self.config.run.branch);
-            return clone::git_output(&mirror, &["rev-parse", "--verify", &head]);
+            return clone::git_output(mirror, &["rev-parse", "--verify", &head]);
         };
         let refspec = format!("+{reference}:{}", review_branch(claim.session));
         clone::git_output(
-            &mirror,
+            mirror,
             &["fetch", "--no-tags", "--quiet", "origin", &refspec],
         )?;
         let commit = format!("{}^{{commit}}", review_branch(claim.session));
-        let fetched = clone::git_output(&mirror, &["rev-parse", "--verify", &commit])?;
+        let fetched = clone::git_output(mirror, &["rev-parse", "--verify", &commit])?;
         ensure!(
             fetched == revision,
             "the candidate ref moved from {revision} to {fetched}"
@@ -224,14 +236,11 @@ impl LiveReviewer {
     /// `launch-root`; the launch's final output.
     fn launch(&mut self, review: &Review, claim: &ReviewClaim, paths: &Paths) -> Result<String> {
         let revision = self.candidate(claim)?;
-        let origin = clone::git_output(
-            &mirror(&self.config),
-            &["config", "--get", "remote.origin.url"],
-        )?;
+        let origin = clone::git_output(&self.mirror, &["config", "--get", "remote.origin.url"])?;
         self.as_reviewer(
             "clone",
             vec![
-                format!("--url={}", mirror(&self.config).display()),
+                format!("--url={}", self.mirror.display()),
                 format!("--revision={revision}"),
                 format!("--dest={}", paths.clone.display()),
                 format!("--origin-url={origin}"),
@@ -252,9 +261,8 @@ impl LiveReviewer {
         let base = claim.submission["base_revision"]
             .as_str()
             .unwrap_or(&self.config.run.branch);
-        let mirror = mirror(&self.config);
-        let read =
-            |name: &&str| Some(((*name).to_owned(), live::instruction(&mirror, base, name)?));
+        let mirror = &self.mirror;
+        let read = |name: &&str| Some(((*name).to_owned(), live::instruction(mirror, base, name)?));
         super::INSTRUCTION_FILES.iter().filter_map(read).collect()
     }
 
@@ -348,7 +356,7 @@ impl LiveReviewer {
             }
         }
         let branch = review_branch(session);
-        let _ = clone::git_output(&mirror(&self.config), &["update-ref", "-d", &branch]);
+        let _ = clone::git_output(&self.mirror, &["update-ref", "-d", &branch]);
     }
 
     /// `reviews <subcommand>` arguments naming the claimed attempt.
@@ -631,13 +639,13 @@ fn place_named_credential(home: &Path, binding: &Binding, text: &str) -> Result<
 
 /// Removes the verdict credential copies a `[run.binding]` change left in
 /// the root-only `home`: every `<name>/` holding `config/credentials.toml`
-/// whose name is not the binding's `project_name` (all of them when it has
-/// none). Paths are opened beneath `home` without following symlinks, so a
+/// whose name is not one of the `bindings`' `project_name`s (all of them
+/// when they have none). Paths are opened beneath `home` without following symlinks, so a
 /// symlinked entry is neither recognised nor followed.
-fn remove_stale_credentials(home: &Path, binding: &Binding) -> Result<()> {
+fn remove_stale_credentials(home: &Path, bindings: &[&Binding]) -> Result<()> {
     for entry in std::fs::read_dir(home).with_context(|| format!("list {}", home.display()))? {
         let name = entry?.file_name();
-        if is_stale_copy(home, &name, binding) {
+        if is_stale_copy(home, &name, bindings) {
             // `remove_tree` opens the entry's parent beneath its base, so the
             // base is `home`'s parent and the entry's parent `home` itself.
             let (Some(base), Some(leaf)) = (home.parent(), home.file_name()) else {
@@ -654,17 +662,25 @@ fn remove_stale_credentials(home: &Path, binding: &Binding) -> Result<()> {
 }
 
 /// Whether `name` in `home` is a project-named credential copy other than
-/// the binding's own. Hidden entries and the claim `checkouts` never are.
-fn is_stale_copy(home: &Path, name: &std::ffi::OsStr, binding: &Binding) -> bool {
-    let current = binding.project_name.as_deref().map(std::ffi::OsStr::new);
+/// the bindings' own. Hidden entries and the claim `checkouts` never are.
+fn is_stale_copy(home: &Path, name: &std::ffi::OsStr, bindings: &[&Binding]) -> bool {
+    let current = |b: &&Binding| b.project_name.as_deref().map(std::ffi::OsStr::new) == Some(name);
     let hidden = name.as_encoded_bytes().starts_with(b".");
     let credential = Path::new(name).join("config").join("credentials.toml");
-    Some(name) != current && !hidden && name != "checkouts" && rooted::is_regular(home, &credential)
+    !bindings.iter().any(current)
+        && !hidden
+        && name != "checkouts"
+        && rooted::is_regular(home, &credential)
 }
 
-/// The environment of root's reviewer-principal CLI commands; `insecure`
-/// adds the loopback flag.
-fn verdict_env(config: &Config, session: Uuid, insecure: bool) -> Vec<(&'static str, String)> {
+/// The environment of root's reviewer-principal CLI commands, reading the
+/// `installed` binding copy; `insecure` adds the loopback flag.
+fn verdict_env(
+    config: &Config,
+    installed: &Path,
+    session: Uuid,
+    insecure: bool,
+) -> Vec<(&'static str, String)> {
     let home = verdict_home(config).display().to_string();
     let mut env = vec![
         (
@@ -675,10 +691,7 @@ fn verdict_env(config: &Config, session: Uuid, insecure: bool) -> Vec<(&'static 
         ("LANG", "C.UTF-8".into()),
         ("AGENT_COORDINATOR_HOME", home),
         ("AGENT_COORDINATOR_SESSION", session.to_string()),
-        (
-            binding::REPO_CONFIG_ENV,
-            binding::installed_path(config).display().to_string(),
-        ),
+        (binding::REPO_CONFIG_ENV, installed.display().to_string()),
     ];
     if insecure {
         env.push((binding::INSECURE_ENV, "true".into()));
@@ -745,7 +758,7 @@ mod tests {
     fn the_verdict_credential_never_reaches_reviewer_commands() {
         let config = Config::default();
         let session = Uuid::nil();
-        let verdict = verdict_env(&config, session, false);
+        let verdict = verdict_env(&config, &binding::installed_path(&config), session, false);
         assert!(verdict.contains(&(
             "AGENT_COORDINATOR_HOME",
             "/var/lib/agentc/verdict/home".into()
@@ -755,7 +768,7 @@ mod tests {
                 .iter()
                 .all(|(name, _)| *name != binding::INSECURE_ENV)
         );
-        let insecure = verdict_env(&config, session, true);
+        let insecure = verdict_env(&config, &binding::installed_path(&config), session, true);
         assert!(insecure.contains(&(binding::INSECURE_ENV, "true".into())));
         let reviewer = reviewer_env(&config);
         assert!(reviewer.iter().all(|(_, value)| !value.contains("verdict")));
@@ -843,7 +856,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), home.join("Linked")).unwrap();
         std::fs::create_dir_all(home.join("checkouts/s")).unwrap();
         std::fs::write(home.join("credentials.toml"), "t").unwrap();
-        remove_stale_credentials(&home, &binding).unwrap();
+        remove_stale_credentials(&home, &[&binding]).unwrap();
         assert!(!home.join("Old").exists(), "stale copy kept");
         assert!(home.join("Current/config/credentials.toml").is_file());
         assert!(
@@ -851,9 +864,20 @@ mod tests {
                 && outside.path().join("config/credentials.toml").is_file()
         );
         assert!(home.join("checkouts/s").is_dir() && home.join("credentials.toml").is_file());
+        let mut canary = binding.clone();
+        canary.project_name = Some("Canary".into());
+        place_named_credential(&home, &canary, "t").unwrap();
+        place_named_credential(&home, &binding, "t").unwrap();
+        remove_stale_credentials(&home, &[&binding, &canary]).unwrap();
+        assert!(home.join("Current/config/credentials.toml").is_file());
+        assert!(
+            home.join("Canary/config/credentials.toml").is_file(),
+            "second binding's copy kept"
+        );
         binding.project_name = None;
-        remove_stale_credentials(&home, &binding).unwrap();
+        remove_stale_credentials(&home, &[&binding]).unwrap();
         assert!(!home.join("Current").exists(), "unbound copy kept");
+        assert!(!home.join("Canary").exists(), "unbound copy kept");
     }
 
     #[test]

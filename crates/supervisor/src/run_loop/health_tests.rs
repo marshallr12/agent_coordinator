@@ -163,6 +163,31 @@ fn every_finished_launch_records_its_cost_against_the_task() {
 }
 
 #[test]
+fn a_ledger_row_of_the_canary_project_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path());
+    config.run.canary_binding = Some(super::binding::CanaryBinding {
+        service_url: "https://agents.example.com".into(),
+        project_id: "canary".into(),
+        project_name: None,
+        mirror: None,
+    });
+    let mut fake = Fake::with_canary();
+    iterate(&mut fake, &config);
+    fake.nexts = vec![("canary", json!({"action": null}))];
+    iterate(&mut fake, &config);
+    let rows = ledger(&config);
+    assert_eq!(
+        (&rows[0]["project"], &rows[0]["task"], &rows[0]["canary"]),
+        (&json!("canary"), &json!("c1"), &json!(true))
+    );
+    assert_eq!(
+        (&rows[1]["project"], &rows[1].get("canary")),
+        (&json!("p1"), &None)
+    );
+}
+
+#[test]
 fn a_killed_launch_without_a_result_is_estimated_and_counts_toward_the_cap() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(dir.path());

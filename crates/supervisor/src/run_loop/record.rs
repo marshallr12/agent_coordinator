@@ -61,6 +61,10 @@ pub struct LaunchRecord {
     /// twice when a failed release is retried by recovery.
     #[serde(default)]
     pub cost_recorded: bool,
+    /// The project the task belongs to (absent in older records: the main
+    /// project, the only one then).
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// The root-owned directory of launch records, `<state_dir>/launches`.
@@ -85,6 +89,7 @@ impl LaunchRecord {
             release_failures: 0,
             vendor: Some(launch.vendor.clone()),
             cost_recorded: false,
+            project: Some(launch.project.clone()),
         }
     }
 
@@ -277,6 +282,9 @@ pub fn recover(driver: &mut impl Driver, config: &Config) -> Option<String> {
 /// Records a dead launch's cost (and any 429) unless that is done, releases
 /// its attempt unless that is done, then removes its clone, run and record.
 fn settle(driver: &mut impl Driver, config: &Config, record: &mut LaunchRecord) {
+    if let Some(project) = &record.project {
+        driver.select(project);
+    }
     let launch = record.launch(config, driver.project());
     let cost = settle_cost(driver, config, &launch, record);
     let summary = format!("{RECOVERED} {cost}").trim_end().to_owned();

@@ -71,6 +71,19 @@ pub struct PushHelper {
     /// Unprivileged account the helper runs as; it alone can read the push
     /// App key.
     pub user: String,
+    /// Helper configuration by coordinator project id for a project whose
+    /// repository `config` does not name, such as the `[run.canary_binding]`
+    /// project's. Each file is protected like `config`.
+    pub project_configs: BTreeMap<String, PathBuf>,
+}
+
+impl PushHelper {
+    /// The configuration file the helper serving `project` reads.
+    pub fn config_for(&self, project: Option<&str>) -> &Path {
+        project
+            .and_then(|project| self.project_configs.get(project))
+            .unwrap_or(&self.config)
+    }
 }
 
 impl Default for PushHelper {
@@ -83,6 +96,7 @@ impl Default for PushHelper {
             program: PathBuf::from("/opt/agentc/bin/agentc-push"),
             config: PathBuf::from("/etc/agentc/push.toml"),
             user: "agentc-push".into(),
+            project_configs: BTreeMap::new(),
         }
     }
 }
@@ -184,6 +198,35 @@ mod tests {
         assert!(toml::from_str::<Config>("[run.binding]\nproject_id = \"p\"\n").is_err());
         let extra = format!("{text}repository = \"x\"\n");
         assert!(toml::from_str::<Config>(&extra).is_err());
+    }
+
+    #[test]
+    fn a_canary_binding_is_optional_and_checked_for_unknown_keys() {
+        assert_eq!(Config::default().run.canary_binding, None);
+        let text = "[run.canary_binding]\nservice_url = \"https://agents.example.com\"\nproject_id = \"c\"\nmirror = \"/srv/c.git\"\n";
+        let config: Config = toml::from_str(text).unwrap();
+        let canary = config.run.canary_binding.unwrap();
+        assert_eq!(canary.project_id, "c");
+        assert_eq!(
+            canary.mirror_path(&Config::default()),
+            Path::new("/srv/c.git")
+        );
+        assert!(toml::from_str::<Config>("[run.canary_binding]\nproject_id = \"c\"\n").is_err());
+        assert!(toml::from_str::<Config>(&format!("{text}repository = \"x\"\n")).is_err());
+    }
+
+    #[test]
+    fn a_project_can_have_its_own_push_helper_configuration() {
+        let text = "[push_helper.project_configs]\ncanary = \"/etc/agentc/push-canary.toml\"\n";
+        let config: Config = toml::from_str(text).unwrap();
+        let helper = &config.push_helper;
+        assert_eq!(
+            helper.config_for(Some("canary")),
+            Path::new("/etc/agentc/push-canary.toml")
+        );
+        for other in [Some("main"), None] {
+            assert_eq!(helper.config_for(other), helper.config);
+        }
     }
 
     #[test]

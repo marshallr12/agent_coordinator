@@ -160,7 +160,7 @@ class E2ETests(unittest.TestCase):
         self.assertEqual(row["duration_seconds"], 60.0)  # two polls of 30 s before done
         self.assertEqual(row["served_by"], ["claude"])
         [task] = self.fake.created
-        self.assertEqual((task["kind"], task["priority"]), ("code", 3))
+        self.assertEqual((task["kind"], task["priority"]), ("code", 0))  # urgent: ahead of all other work
         self.assertIn("CANARY.md", task["description"])
         self.assertEqual(len(task["acceptance_criteria"]), 1)
         self.assertEqual(task["admission_class"], "canary")  # outside the weekly agent budget
@@ -239,6 +239,30 @@ class E2ETests(unittest.TestCase):
             args = e2e.parse(["--timeout-minutes", "7"])
         self.assertEqual((args.harness, args.url, args.timeout_minutes), ("codex", self.fake.url, 7.0))
         self.assertEqual(args.poll_seconds, e2e.DEFAULT_POLL_SECONDS)
+
+    def test_the_priority_defaults_to_the_highest_the_service_accepts_and_is_configurable(self):
+        self.assertEqual(e2e.DEFAULT_PRIORITY, 0)
+        self.assertEqual(e2e.PRIORITIES, (0, 1, 2, 3))  # the service takes 0 (urgent) through 3 (low)
+        self.canary("--priority", "2")
+        self.assertEqual(self.fake.created[-1]["priority"], 2)
+        self.fake.polls = 0
+        with mock.patch.dict(os.environ, {"E2E_PRIORITY": "1"}):
+            self.canary()
+            self.assertEqual(self.fake.created[-1]["priority"], 1)
+            self.fake.polls = 0
+            self.canary("--priority", "0")  # a flag wins over the environment
+            self.assertEqual(self.fake.created[-1]["priority"], 0)
+        with mock.patch.dict(os.environ, {"E2E_PRIORITY": ""}):  # empty counts as unset
+            self.fake.polls = 0
+            self.canary()
+            self.assertEqual(self.fake.created[-1]["priority"], 0)
+
+    def test_a_priority_the_service_would_refuse_is_refused_up_front(self):
+        argv = ["--harness", "claude", "--project", "p", "--ntfy-topic", "t"]
+        with mock.patch.dict(os.environ, clear=True), contextlib.redirect_stderr(io.StringIO()):
+            for bad in ("-1", "4", "high"):
+                with self.assertRaises(SystemExit):
+                    e2e.parse([*argv, "--priority", bad])
 
     def test_code_defaults_name_the_production_service_and_host_paths(self):
         with mock.patch.dict(os.environ, clear=True):
