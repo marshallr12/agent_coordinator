@@ -54,6 +54,11 @@ pub struct Entry {
     /// older entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    /// SHA-256 digests of the coordinator credentials the caller says the
+    /// launch was given, which the publication broker's secret scan
+    /// refuses. Absent when there are none and in older entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_digests: Vec<String>,
     /// The root process of the last start and its creation time.
     pub pid: Option<u32>,
     pub created: Option<u64>,
@@ -178,6 +183,7 @@ mod tests {
             generation: Some(4),
             role: None,
             task: None,
+            known_digests: Vec::new(),
             pid: None,
             created: None,
             control: None,

@@ -7,7 +7,7 @@
 //! Every launch is journaled before it starts ([`super::journal`]). When the
 //! runner's input ends, the runner exits, its job handles close and Windows
 //! ends every launch it held.
-use super::broker::Role;
+use super::broker::{Role, checked_digests};
 use super::candidate::{self, Candidate, CandidateSpec, Tuning};
 use super::candidate_pipe::{self, Server};
 use super::desktop::StationNotOurs;
@@ -55,6 +55,10 @@ pub enum Request {
         /// The coordinator task the launch works on, journaled with it.
         #[serde(default)]
         task: Option<String>,
+        /// Digests of the coordinator credentials the launch is given,
+        /// journaled with it for the publication broker's secret scan.
+        #[serde(default)]
+        known_digests: Vec<String>,
         /// A reviewer launch's candidate, prepared with it.
         #[serde(default)]
         candidate: Option<Box<CandidateSpec>>,
@@ -140,7 +144,8 @@ impl Request {
 
 /// What the caller of `prepare` says a launch is for: the exact source
 /// revision, the coordinator attempt and generation, the side of the
-/// review and the task. Journaled, not checked.
+/// review, the task and the digests of the credentials the launch is given.
+/// Journaled; only the digests' form is checked.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Purpose {
     source: Option<String>,
@@ -148,6 +153,7 @@ struct Purpose {
     generation: Option<u64>,
     role: Option<Role>,
     task: Option<String>,
+    known_digests: Vec<String>,
 }
 
 impl Purpose {
@@ -167,6 +173,7 @@ impl Purpose {
             generation: self.generation,
             role: self.role,
             task: self.task,
+            known_digests: self.known_digests,
             pid: None,
             created: None,
             control: None,
@@ -264,14 +271,17 @@ impl Runner {
                 generation,
                 role,
                 task,
+                known_digests,
                 candidate,
             } => {
+                checked_digests(&known_digests)?;
                 let purpose = Purpose {
                     source,
                     attempt,
                     generation,
                     role,
                     task,
+                    known_digests,
                 };
                 self.prepare(&launch, spec, purpose, candidate.map(|spec| *spec))
             }
@@ -874,6 +884,7 @@ pub fn serve(input: impl BufRead, mut output: impl Write, state: &Path) -> Resul
 
 #[cfg(test)]
 mod tests {
+    use super::super::broker::MAX_KNOWN_DIGESTS;
     use super::*;
 
     /// A `prepare` request with `extra` fields besides the required ones,
@@ -910,6 +921,37 @@ mod tests {
         assert!(parsed(json!({"role": "owner"})).is_err(), "an unknown role");
     }
 
+    /// The credential digests a `prepare` request carries.
+    fn digests_of(request: Request) -> Vec<String> {
+        let Request::Prepare { known_digests, .. } = request else {
+            panic!("not a prepare request");
+        };
+        known_digests
+    }
+
+    #[test]
+    fn a_prepare_request_may_name_credential_digests_and_older_ones_name_none() {
+        assert!(digests_of(prepare(json!({}))).is_empty());
+        let digest = "ab".repeat(32);
+        let named = prepare(json!({"known_digests": [digest]}));
+        assert_eq!(digests_of(named), [digest]);
+    }
+
+    #[test]
+    fn a_prepare_with_a_malformed_digest_is_refused_before_anything_is_made() {
+        let state = tempfile::tempdir().unwrap();
+        let mut runner = Runner::new(state.path()).unwrap();
+        for digest in ["AB".repeat(32), "ab".repeat(31), "zz".repeat(32)] {
+            let request = prepare(json!({"known_digests": [digest]}));
+            let refused = format!("{:#}", runner.handle(request).unwrap_err());
+            assert!(refused.contains("credential digest"), "{refused}");
+        }
+        let too_many = vec!["ab".repeat(32); MAX_KNOWN_DIGESTS + 1];
+        let refused = runner.handle(prepare(json!({ "known_digests": too_many })));
+        assert!(refused.is_err(), "more digests than a grant may carry");
+        assert_eq!(runner.journal.load("l1"), None, "nothing was journaled");
+    }
+
     #[test]
     fn the_purpose_of_a_launch_is_journaled_as_given() {
         let prepared = Prepared {
@@ -923,10 +965,12 @@ mod tests {
             generation: Some(4),
             role: Some(Role::Implementer),
             task: Some("t-1".into()),
+            known_digests: vec!["ab".repeat(32)],
         };
         let entry = purpose.entry("impl-1", "agentc.test".into(), &prepared);
         assert_eq!(entry.role, Some(Role::Implementer));
         assert_eq!(entry.task.as_deref(), Some("t-1"));
+        assert_eq!(entry.known_digests, ["ab".repeat(32)]);
         let kept = (
             entry.source.as_deref(),
             entry.attempt.as_deref(),

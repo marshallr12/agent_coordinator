@@ -91,6 +91,7 @@ fn entry(launch: &str, owner: &str, control: PathBuf, work: PathBuf) -> Entry {
         generation: None,
         role: None,
         task: None,
+        known_digests: Vec::new(),
         pid: None,
         created: None,
         control: Some(control),

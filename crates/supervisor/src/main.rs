@@ -147,8 +147,10 @@ enum Commands {
     /// On Windows: run one role as a service. `runner` serves launches over
     /// a named pipe to the one configured client (`[windows_service]` in
     /// the configuration); `supervisor` runs the live loop and reaches
-    /// launches through that pipe (`[windows_supervisor]`). It must be
-    /// started by the service manager; from a console it refuses.
+    /// launches through that pipe (`[windows_supervisor]`); `egress` and
+    /// `publication` are the brokers the runner admits launches to
+    /// (`[windows_egress]`, `[windows_publication]`). It must be started by
+    /// the service manager; from a console it refuses.
     #[cfg(windows)]
     #[command(hide = true)]
     WindowsService {
@@ -163,6 +165,10 @@ enum Commands {
 enum ServiceRole {
     Runner,
     Supervisor,
+    /// The egress broker (`[windows_egress]`).
+    Egress,
+    /// The publication broker (`[windows_publication]`).
+    Publication,
 }
 
 /// Identifies one launch.
@@ -218,6 +224,10 @@ impl SpecArgs {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if let Some(code) = publication_askpass() {
+        return code;
+    }
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(error) => {
@@ -225,6 +235,28 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// On Windows, Git runs this binary as the publication broker's askpass
+/// helper: the push's token is in `AGENTC_PUSH_ASKPASS_TOKEN` and the one
+/// argument is Git's prompt. It prints the App user name or the token, for
+/// `github.com` prompts only, as `agentc-push` does on Linux. `None` when
+/// this process is not that helper.
+#[cfg(windows)]
+fn publication_askpass() -> Option<ExitCode> {
+    use agentc_integrator::push_askpass;
+    let marker = std::env::var_os(push_askpass::TOKEN_VARIABLE);
+    let (token, prompt) = push_askpass::invoked_prompt(marker, std::env::args().skip(1))?;
+    Some(match push_askpass::answer(&prompt, &token) {
+        Ok(answer) => {
+            println!("{answer}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("agentc-supervisor: {error:#}");
+            ExitCode::from(1)
+        }
+    })
 }
 
 /// Dispatches one subcommand.
@@ -293,10 +325,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         #[cfg(windows)]
         Commands::WindowsService { role } => {
-            use agentc_supervisor::host_runtime::windows::{runner_service, supervisor_service};
+            use agentc_supervisor::host_runtime::windows::{
+                broker_service, runner_service, supervisor_service,
+            };
             match role {
                 ServiceRole::Runner => runner_service::run(config.windows_service.clone())?,
                 ServiceRole::Supervisor => supervisor_service::run(config)?,
+                ServiceRole::Egress => broker_service::run_egress(config)?,
+                ServiceRole::Publication => broker_service::run_publication(config)?,
             }
         }
         Commands::StandInJudge { ledger } => return stand_in_judge(&ledger),

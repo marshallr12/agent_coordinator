@@ -1,10 +1,12 @@
-//! Git credential prompts answered by `agentc-push` itself. For each
+//! Git credential prompts answered by the candidate-push helper itself:
+//! `agentc-push` on Linux, the publication broker on Windows. For each
 //! connection the helper gives the Git children that contact the remote
-//! `GIT_ASKPASS` pointing at this binary and the connection's installation
-//! token in [`TOKEN_VARIABLE`]; Git then runs `agentc-push "<prompt>"`, which
-//! prints the App user name or that token, for `github.com` prompts only. No
-//! token lands in a URL, an argument, a Git config or a file.
-use agentc_integrator::askpass::{APP_USER, GITHUB_HOST, prompt_host};
+//! `GIT_ASKPASS` pointing at the helper's own binary and the connection's
+//! installation token in [`TOKEN_VARIABLE`]; Git then runs that binary with
+//! one prompt, and it prints the App user name or that token, for
+//! `github.com` prompts only. No token lands in a URL, an argument, a Git
+//! config or a file.
+use crate::askpass::{APP_USER, GITHUB_HOST, prompt_host};
 use anyhow::{Context, Result, bail, ensure};
 use std::ffi::OsString;
 use std::path::Path;

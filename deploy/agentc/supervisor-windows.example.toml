@@ -1,6 +1,7 @@
-# agentc-supervisor configuration for the two Windows services:
-# the role runner (`agentc-supervisor --config <this file> windows-service`)
-# and the supervisor (`... windows-service --role supervisor`). Every entry has
+# agentc-supervisor configuration for the Windows services: the role runner
+# (`agentc-supervisor --config <this file> windows-service`), the supervisor
+# (`... windows-service --role supervisor`) and the egress and publication
+# brokers (`--role egress`, `--role publication`). Every entry has
 # an in-code default; the commented lines show those defaults. Nothing here
 # is installed by this repository: a service is installed only by an owner,
 # from an elevated session.
@@ -85,3 +86,62 @@
 # fixture = []
 # An existing directory the runner's account can create launch directories in.
 # launch_root = 'C:\ProgramData\agentc\runner\stand-in-launches'
+
+# The egress broker (`... windows-service --role egress`). It forwards a
+# launch's CONNECT requests to the hosts the Linux proxy allows
+# (egress_allow and egress_allow_extra) on public addresses only. It refuses
+# to start until runner_sid is set.
+[windows_egress]
+# The service's name in the Service Control Manager.
+# name = "agentc-egress"
+# The service's directory, holding service.log. Created with an access list
+# for the broker's account, the system and administrators only.
+# state_dir = 'C:\ProgramData\agentc\egress'
+# The control pipe the runner admits launches through, below \\.\pipe\
+# (the runner's windows_service.egress_control_pipe).
+# control_pipe = "agentc-egress-control"
+# The runner service's account, as SID text: the only client the control
+# pipe serves. No usable default.
+# runner_sid = ""
+# Files the egress account must not be able to open. The service tries each
+# at start and refuses to run if it can open one; one that is not there is
+# logged as not checked.
+# must_not_open = ['C:\ProgramData\agentc\publication-key\push-app.pem']
+
+# The publication broker (`... windows-service --role publication`). It
+# publishes an implementer launch's candidate to that launch's own ref on
+# one remote. It refuses to start until runner_sid, remote and
+# supervisor_sid are set.
+[windows_publication]
+# The service's name in the Service Control Manager.
+# name = "agentc-publication"
+# The service's directory, holding service.log and, below work\, each
+# launch's private repository. Created with an access list for the broker's
+# account, the system and administrators only.
+# state_dir = 'C:\ProgramData\agentc\publication'
+# The control pipe the runner admits implementer launches through, below
+# \\.\pipe\ (the runner's windows_service.publication_control_pipe).
+# control_pipe = "agentc-publication-control"
+# The runner service's account, as SID text. No usable default.
+# runner_sid = ""
+# The one remote candidates are published to. No usable default.
+# remote = ""
+# The supervisor's authority pipe, asked before each push, below \\.\pipe\
+# authority_pipe = "agentc-supervisor-authority"
+# The supervisor service's account, as SID text: the authority pipe is asked
+# only when this account owns it. No usable default.
+# supervisor_sid = ""
+# The push App's id and its installation on the repository, set together.
+# 0: the broker has no push credentials and Git reaches the remote with
+# none, which only a local remote accepts. With an App, every push gets an
+# installation token narrowed to the remote's repository with contents:
+# write, revoked after the push; remote must then be
+# https://github.com/<owner>/<repo>.git.
+# app_id = 0
+# installation_id = 0
+# The App's PEM private key. Give only the publication service's account
+# read access (and the system and administrators full control); the broker
+# reads it at start and stops if it cannot sign with it.
+# private_key = 'C:\ProgramData\agentc\publication-key\push-app.pem'
+# The GitHub REST API base, HTTPS only.
+# api_base = "https://api.github.com"

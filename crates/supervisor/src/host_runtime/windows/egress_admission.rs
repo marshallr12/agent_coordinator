@@ -21,7 +21,7 @@
 //! or whose admission ended without an answer, is kept for release and
 //! asked again before the next admission and at the next cleanup.
 use super::broker::Role;
-use super::broker_control::{ControlClient, Opened};
+use super::broker_control::{Admission, ControlClient, Opened};
 use super::egress_broker::PIPE_VARIABLE;
 use super::journal::Entry;
 use super::pipe_client;
@@ -133,18 +133,28 @@ impl BrokerRoute {
         Ok(command)
     }
 
-    /// Asks the broker to serve `entry`'s launch, with its task for the
-    /// publication broker.
+    /// Asks the broker to serve `entry`'s launch, with its task and its
+    /// credentials' digests for the publication broker.
     fn open(&self, entry: &Entry) -> Result<Opened> {
         let role = entry.role.context("the launch has no role")?;
         let generation = entry.generation.unwrap_or(FIRST_GENERATION);
-        let task = match self.kind {
-            Brokered::Egress => None,
-            Brokered::Publication => Some(entry.task.clone().context("the launch has no task")?),
+        let (task, digests) = match self.kind {
+            Brokered::Egress => (None, Vec::new()),
+            Brokered::Publication => {
+                let task = entry.task.clone().context("the launch has no task")?;
+                (Some(task), entry.known_digests.clone())
+            }
         };
         let (launch, package) = (entry.launch.clone(), entry.package_sid.clone());
         self.within(move |control| {
-            control.open_for(&launch, role, &package, generation, task.as_deref())
+            control.admit(&Admission {
+                launch: &launch,
+                role,
+                package: &package,
+                generation,
+                task: task.as_deref(),
+                known_digests: &digests,
+            })
         })
     }
 
@@ -359,6 +369,7 @@ mod tests {
             generation: Some(3),
             role,
             task: Some("t-1".into()),
+            known_digests: Vec::new(),
             pid: None,
             created: None,
             control: None,
@@ -592,6 +603,32 @@ mod tests {
                 (control.serve_one(Duration::from_millis(100), &stop)).unwrap();
             }
         })
+    }
+
+    #[test]
+    fn a_publication_admission_carries_the_launch_s_credential_digests() {
+        let (name, done) = (unique(), Arc::new(AtomicBool::new(false)));
+        let broker = Broker::new("publication", &me(), Arc::new(Unused)).unwrap();
+        let mut control = Control::new(&name, broker, &me(), None).unwrap();
+        let stop = done.clone();
+        let server = std::thread::spawn(move || {
+            let stopping = || stop.load(Ordering::SeqCst);
+            while !stopping() {
+                (control.serve_one(Duration::from_millis(100), &stopping)).unwrap();
+            }
+            control
+        });
+        let route = BrokerRoute::publication(&name, &me()).unwrap();
+        let digests = vec!["ab".repeat(32)];
+        let given = Entry {
+            known_digests: digests.clone(),
+            ..entry(Some(Role::Implementer))
+        };
+        route.admit(&given, &command()).unwrap();
+        done.store(true, Ordering::SeqCst);
+        let mut control = server.join().unwrap();
+        let grant = control.broker().grant(&id()).expect("the launch is open");
+        assert_eq!(grant.known_digests(), digests.as_slice());
     }
 
     #[test]

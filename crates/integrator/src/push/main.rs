@@ -17,15 +17,15 @@
 //! Linux, so the helper itself is built only there; elsewhere the binary
 //! refuses to run.
 #[cfg(target_os = "linux")]
-mod askpass;
+use agentc_integrator::mint_budget as budget;
 #[cfg(target_os = "linux")]
-mod budget;
+use agentc_integrator::push_askpass as askpass;
 #[cfg(target_os = "linux")]
 mod cli;
 #[cfg(target_os = "linux")]
 mod config;
 #[cfg(target_os = "linux")]
-mod preamble;
+use agentc_integrator::push_preamble as preamble;
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]

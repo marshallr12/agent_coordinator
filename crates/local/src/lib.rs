@@ -9,6 +9,7 @@
 pub mod candidate_push;
 pub mod git_workflow;
 mod persist;
+mod private_directory;
 mod process;
 pub mod secret_scan;
 

@@ -1,5 +1,5 @@
-//! The publication broker with real AppContainer launches (phase 6, step
-//! 6c).
+//! The publication broker with real AppContainer launches (phase 6, steps
+//! 6c and 6d).
 //!
 //! Each test runs in a new logon session of the same account ([`support`]).
 //! There the supervisor's authority pipe and the publication broker's
@@ -17,7 +17,7 @@ mod support;
 use agentc_supervisor::host_runtime::windows::authority_pipe::{AuthorityRoute, AuthorityServer};
 use agentc_supervisor::host_runtime::windows::broker::{Broker, Role};
 use agentc_supervisor::host_runtime::windows::broker_control::{
-    Control, ControlClient, Opened, control_pipe_name,
+    Admission, Control, ControlClient, Opened, control_pipe_name,
 };
 use agentc_supervisor::host_runtime::windows::egress_admission::PUBLICATION_VARIABLE;
 use agentc_supervisor::host_runtime::windows::launcher::Launcher;
@@ -25,6 +25,7 @@ use agentc_supervisor::host_runtime::windows::publication_broker::{Publication, 
 use agentc_supervisor::host_runtime::windows::token;
 use agentc_supervisor::service::authority::{ACTIVE, AttemptReader, AttemptView, Authority, Held};
 use agentc_supervisor::service::pipe_policy::{CLIENT_ACCESS, pipe_path};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
@@ -60,8 +61,9 @@ const BUNDLED_REF: &str = "refs/heads/evil";
 /// ref and nothing else, the same commit again is accepted unchanged and a
 /// wrong tree is refused;
 /// a launch the supervisor holds no attempt for and a reviewer launch are
-/// refused; a foreign launch cannot open another launch's pipe; and once
-/// the launch is closed its pipe is gone.
+/// refused; a foreign launch cannot open another launch's pipe; once the
+/// launch is closed its pipe is gone; and a candidate adding a credential
+/// the launch was given is refused by the secret scan.
 #[test]
 fn only_an_authorized_implementer_launch_publishes_and_only_its_own_ref() {
     in_a_new_session("publication");
@@ -91,6 +93,7 @@ fn child_in_a_new_logon_session() {
         "publication" => publication(),
         "lost" => lost(),
         "runner" => runner::admitted_starts(),
+        "installed" => installed::host(),
         "client" => client(),
         other => panic!("no such role: {other}"),
     });
@@ -121,14 +124,27 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
 }
 
 /// A bare remote holding a base commit, and a bundle of a candidate on it
-/// whose only ref is [`BUNDLED_REF`].
+/// whose only ref is [`BUNDLED_REF`]; beside it a second candidate on the
+/// base that adds a line holding [`LEAKED_TOKEN`].
 struct Repository {
     remote: PathBuf,
     bundle: PathBuf,
     candidate: String,
     tree: String,
     wrong_tree: String,
+    leak: Bundled,
 }
+
+/// A candidate bundle, its commit and the commit's tree.
+struct Bundled {
+    bundle: PathBuf,
+    commit: String,
+    tree: String,
+}
+
+/// A coordinator token as a launch might be given one: 64 hex digits, the
+/// form whose digest the secret scan checks.
+const LEAKED_TOKEN: &str = "5ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7";
 
 impl Repository {
     /// Makes the remote and the bundle in `trees`, the bundle in `tools`.
@@ -148,27 +164,35 @@ impl Repository {
         );
         let candidate = commit(&checkout, "feature.txt");
         let bundle = tools.join("candidate.bundle");
-        git(&checkout, &["update-ref", BUNDLED_REF, &candidate]);
-        let excluded = format!("^{base}");
-        git(
-            &checkout,
-            &[
-                "bundle",
-                "create",
-                bundle.to_str().unwrap(),
-                BUNDLED_REF,
-                &excluded,
-            ],
-        );
+        bundle_of(&checkout, (&candidate, &base), &bundle);
         let tree_of = |commit: &str| git(&checkout, &["rev-parse", &format!("{commit}^{{tree}}")]);
         let (tree, wrong_tree) = (tree_of(&candidate), tree_of(&base));
+        git(&checkout, &["checkout", "--quiet", "--detach", &base]);
+        let leaked = commit_text(&checkout, "notes.txt", &format!("token {LEAKED_TOKEN}\n"));
+        let leak = Bundled {
+            bundle: tools.join("leak.bundle"),
+            tree: tree_of(&leaked),
+            commit: leaked,
+        };
+        bundle_of(&checkout, (&leak.commit, &base), &leak.bundle);
         Self {
             remote,
             bundle,
             candidate,
             tree,
             wrong_tree,
+            leak,
         }
+    }
+
+    /// What a launch needs to send the leaking candidate.
+    fn leak_variables(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (BUNDLE, self.leak.bundle.display().to_string()),
+            (REVISION, self.leak.commit.clone()),
+            (TREE, self.leak.tree.clone()),
+            (WRONG_TREE, self.wrong_tree.clone()),
+        ]
     }
 
     /// The remote's refs, one `name commit` per line, in name order.
@@ -190,9 +214,25 @@ impl Repository {
     }
 }
 
-/// Commits a file named `name` and returns the commit.
+/// Writes a bundle of `commit` over `base` to `path`, carrying only
+/// [`BUNDLED_REF`].
+fn bundle_of(checkout: &Path, (commit, base): (&str, &str), path: &Path) {
+    git(checkout, &["update-ref", BUNDLED_REF, commit]);
+    let (path, excluded) = (path.to_str().unwrap(), format!("^{base}"));
+    git(
+        checkout,
+        &["bundle", "create", path, BUNDLED_REF, &excluded],
+    );
+}
+
+/// Commits a file named `name` holding its name and returns the commit.
 fn commit(checkout: &Path, name: &str) -> String {
-    std::fs::write(checkout.join(name), name).unwrap();
+    commit_text(checkout, name, name)
+}
+
+/// Commits a file named `name` holding `text` and returns the commit.
+fn commit_text(checkout: &Path, name: &str, text: &str) -> String {
+    std::fs::write(checkout.join(name), text).unwrap();
     git(checkout, &["add", "--", name]);
     let identity = [
         "-c",
@@ -308,10 +348,21 @@ impl Services {
 
     /// Has the broker admit `launch` as `role` working on [`TASK`].
     fn admit(&self, launch: &Launch, role: Role) -> Opened {
-        let opened = self
-            .control()
-            .open_for(&launch.id, role, &launch.package, 1, Some(TASK));
-        opened.unwrap()
+        self.admit_with(launch, role, &[])
+    }
+
+    /// As [`Services::admit`], for a launch given the credentials
+    /// `known_digests` are of.
+    fn admit_with(&self, launch: &Launch, role: Role, known_digests: &[String]) -> Opened {
+        let admission = Admission {
+            launch: &launch.id,
+            role,
+            package: &launch.package,
+            generation: 1,
+            task: Some(TASK),
+            known_digests,
+        };
+        self.control().admit(&admission).unwrap()
     }
 
     /// Records, as the supervisor's loop does at its claim, that `launch`
@@ -348,7 +399,24 @@ fn push(
     (opened, repository): (&Opened, &Repository),
     steps: &str,
 ) -> Vec<String> {
-    let mut variables = repository.variables();
+    push_with(
+        launcher,
+        (launch, tools),
+        opened,
+        repository.variables(),
+        steps,
+    )
+}
+
+/// Runs the `push` probe in `launch` with `steps`, sending what
+/// `variables` name, and returns its report.
+fn push_with(
+    launcher: &mut Launcher,
+    (launch, tools): (&Launch, &Path),
+    opened: &Opened,
+    mut variables: Vec<(&'static str, String)>,
+    steps: &str,
+) -> Vec<String> {
     variables.push((STEPS, steps.to_owned()));
     let report = start_probe(launcher, (launch, tools), "push", (Some(opened), variables));
     finish(launcher, launch, &report)
@@ -363,7 +431,7 @@ fn candidate_ref(launch: &Launch) -> String {
 fn publication() -> String {
     let dir = tempfile::tempdir().unwrap();
     let (trees, mut launcher) = (Trees::new(&dir), Launcher::new().unwrap());
-    let ids = ["a", "b", "rev", "foreign"].map(id);
+    let ids = ["a", "b", "rev", "foreign", "leak"].map(id);
     let launches = ids
         .each_ref()
         .map(|name| prepare(&mut launcher, &trees, name));
@@ -371,12 +439,13 @@ fn publication() -> String {
     let tools = client_tools(&trees, &packages);
     let repository = Repository::new(&trees, &tools);
     let services = Services::start(&trees, &repository.remote);
-    let [own, unheld, reviewer, foreign] = &launches;
+    let [own, unheld, reviewer, foreign, leaker] = &launches;
     let said = [
         authorized(&mut launcher, &services, (own, &tools), &repository),
         unauthorized(&mut launcher, &services, (unheld, &tools), &repository),
         reviewing(&mut launcher, &services, (reviewer, &tools), &repository),
         foreign_open(&mut launcher, &services, (foreign, own), &tools),
+        leaking(&mut launcher, &services, (leaker, &tools), &repository),
     ];
     check_refs(&repository, own);
     for launch in &launches {
@@ -444,6 +513,25 @@ fn reviewing(
         "refused not_authorized",
         "{lines:?}"
     );
+    lines.join(", ")
+}
+
+/// An implementer launch with authority, admitted with the digest of the
+/// credential it was given, whose candidate adds that credential: the
+/// secret scan refuses it and nothing is published.
+fn leaking(
+    launcher: &mut Launcher,
+    services: &Services,
+    (launch, tools): (&Launch, &Path),
+    repository: &Repository,
+) -> String {
+    services.hold(launch);
+    let digest = hex::encode(Sha256::digest(LEAKED_TOKEN.as_bytes()));
+    let opened = services.admit_with(launch, Role::Implementer, &[digest]);
+    let variables = repository.leak_variables();
+    let lines = push_with(launcher, (launch, tools), &opened, variables, "good");
+    let refused = outcome(&lines, "good");
+    assert_eq!(refused, "refused secret_detected", "{lines:?}");
     lines.join(", ")
 }
 
@@ -551,6 +639,10 @@ fn client() -> String {
             .map(|step| format!("{step} = {}", push_once(step)))
             .collect::<Vec<_>>()
             .join("\n"),
+        "read" => match File::open(variable(TARGET)) {
+            Ok(_) => "read = opened".into(),
+            Err(error) => format!("read = error {}", error.raw_os_error().unwrap_or(-1)),
+        },
         "open" => match open_pipe(&variable(TARGET)) {
             Ok(_) => "open = opened".into(),
             Err(error) => format!("open = error {}", error.raw_os_error().unwrap_or(-1)),
@@ -735,5 +827,134 @@ mod runner {
             log.trim(),
             unoffered.trim()
         )
+    }
+}
+
+/// Phase 6d, owner-attended: the installed `agentc-publication` service,
+/// under its own virtual service account and with the push App's key,
+/// publishes an authorized implementer launch's candidate to the real
+/// remote under that launch's own ref, and three further launches
+/// (implementer, reviewer and candidate) cannot read the key. This test plays the
+/// supervisor (it serves the authority pipe) and the runner, so the
+/// service is configured with this account as both. The runbook sets
+/// `AGENTC_6D_PUBLICATION_PIPE`, `AGENTC_6D_PUBLICATION_SID`,
+/// `AGENTC_6D_AUTHORITY_PIPE`, `AGENTC_6D_CHECKOUT` (a clone of the remote
+/// whose `origin/main` the candidate is made on), `AGENTC_6D_KEY` and
+/// `AGENTC_6D_TASK`, then deletes the published ref.
+#[test]
+#[ignore = "owner-attended: needs the installed agentc-publication service and the push key"]
+fn the_installed_publication_service_publishes_to_the_real_remote() {
+    in_a_new_session("installed");
+}
+
+mod installed {
+    //! The host's side of the installed-service test.
+    use super::*;
+
+    /// One of the runbook's variables.
+    fn setting(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"))
+    }
+
+    /// A candidate commit on the checkout's `origin/main` and its bundle.
+    fn candidate(tools: &Path) -> Bundled {
+        let checkout = PathBuf::from(setting("AGENTC_6D_CHECKOUT"));
+        git(
+            &checkout,
+            &["checkout", "--quiet", "--detach", "origin/main"],
+        );
+        let text = format!("Step 6d acceptance candidate {}\n", uuid::Uuid::new_v4());
+        let commit = commit_text(&checkout, "daa42f71-acceptance.txt", &text);
+        let bundle = tools.join("acceptance.bundle");
+        bundle_of(&checkout, (&commit, "origin/main"), &bundle);
+        let tree = git(&checkout, &["rev-parse", &format!("{commit}^{{tree}}")]);
+        Bundled {
+            bundle,
+            commit,
+            tree,
+        }
+    }
+
+    /// The supervisor's authority pipe for the service's account, with
+    /// `launch` holding an attempt of `task`.
+    fn supervisor(task: &str, launch: &Launch) -> Serving {
+        let authority = Arc::new(Authority::new(Box::new(Reads(Arc::default()))));
+        let held = Held {
+            task: task.into(),
+            attempt: format!("attempt-{}", launch.id),
+            generation: 1,
+        };
+        authority.hold(&launch.id, held);
+        let (pipe, broker) = (
+            setting("AGENTC_6D_AUTHORITY_PIPE"),
+            setting("AGENTC_6D_PUBLICATION_SID"),
+        );
+        let mut server = AuthorityServer::new(&pipe, &me(), &broker, authority, None).unwrap();
+        Serving::start(move |stop| server.serve_one(Duration::from_millis(100), stop).unwrap())
+    }
+
+    /// The host's side: publish through the service, then probe the key.
+    /// A launch starts once, so the push has a launch of its own and the
+    /// three key probes one each.
+    pub fn host() -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let (trees, mut launcher) = (Trees::new(&dir), Launcher::new().unwrap());
+        let launches = ["pub-push", "pub-impl", "pub-rev", "pub-cand"]
+            .map(|name| prepare(&mut launcher, &trees, &id(name)));
+        let packages = launches.each_ref().map(|launch| launch.package.as_str());
+        let tools = client_tools(&trees, &packages);
+        let task = setting("AGENTC_6D_TASK");
+        let _supervisor = supervisor(&task, &launches[0]);
+        let published = publish(&mut launcher, (&launches[0], &tools), &task);
+        let read = launches[1..]
+            .iter()
+            .map(|launch| read_key(&mut launcher, (launch, &tools)))
+            .collect::<Vec<_>>();
+        for launch in &launches {
+            launcher.cleanup(&launch.id).unwrap();
+        }
+        format!("{published}; key: {}", read.join(", "))
+    }
+
+    /// Admits `launch` working on `task` and has it push the candidate;
+    /// the reply must accept it at the launch's own ref.
+    fn publish(launcher: &mut Launcher, (launch, tools): (&Launch, &Path), task: &str) -> String {
+        let candidate = candidate(tools);
+        let (pipe, sid) = (
+            setting("AGENTC_6D_PUBLICATION_PIPE"),
+            setting("AGENTC_6D_PUBLICATION_SID"),
+        );
+        let mut control = ControlClient::connect(&pipe, &sid).unwrap();
+        let opened = control
+            .open_for(
+                &launch.id,
+                Role::Implementer,
+                &launch.package,
+                1,
+                Some(task),
+            )
+            .unwrap();
+        let variables = vec![
+            (BUNDLE, candidate.bundle.display().to_string()),
+            (REVISION, candidate.commit.clone()),
+            (TREE, candidate.tree.clone()),
+            (WRONG_TREE, candidate.tree.clone()),
+        ];
+        let lines = push_with(launcher, (launch, tools), &opened, variables, "good");
+        let reference = format!("refs/agent-coordinator/candidates/{task}/{}", launch.id);
+        let accepted = format!("accepted {reference} {}", candidate.commit);
+        assert_eq!(outcome(&lines, "good"), accepted, "{lines:?}");
+        assert!(control.close(&launch.id).unwrap());
+        format!("published {reference} {}", candidate.commit)
+    }
+
+    /// Whether `launch` can open the push key for reading.
+    fn read_key(launcher: &mut Launcher, (launch, tools): (&Launch, &Path)) -> String {
+        let target = vec![(TARGET, setting("AGENTC_6D_KEY"))];
+        let report = start_probe(launcher, (launch, tools), "read", (None, target));
+        let lines = finish(launcher, launch, &report);
+        let read = outcome(&lines, "read").to_owned();
+        assert_eq!(read, "error 5", "{}: {lines:?}", launch.id);
+        format!("{} {read}", launch.id)
     }
 }

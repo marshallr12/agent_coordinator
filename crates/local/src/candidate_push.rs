@@ -58,8 +58,8 @@ use uuid::Uuid;
 
 use crate::git_workflow::{
     canonical_git_root, git_ok, git_raw, git_raw_from_file, git_remote_argument, git_text,
-    observe_remote_reference_with, outgoing_secret_findings, protect_directory,
-    protected_create_new, resolve_exact_commit, validate_candidate_reference, validate_full_oid,
+    observe_remote_reference_with, outgoing_secret_findings, protected_create_new,
+    resolve_exact_commit, validate_candidate_reference, validate_full_oid,
     validate_remote_argument,
 };
 
@@ -748,7 +748,7 @@ impl<'a> Helper<'a> {
     fn open(spec: &'a HelperSpec) -> Step<Self> {
         const FAILED: &str = "helper could not prepare its private repository";
         fs::create_dir_all(&spec.work_dir).refuse(RefusalCode::Internal, FAILED)?;
-        protect_directory(&spec.work_dir).refuse(RefusalCode::Internal, FAILED)?;
+        crate::private_directory::protect(&spec.work_dir).refuse(RefusalCode::Internal, FAILED)?;
         git_ok(
             &spec.work_dir,
             ["init", "--bare", "--quiet", "--template=", "."],

@@ -1,6 +1,7 @@
 //! The publication handler's own decisions. What a launch inside an
 //! AppContainer meets on its pipe is shown by the native suite
 //! (`tests/windows_publication.rs`), since no token here carries a package.
+use super::super::publication_credentials::Credentials;
 use super::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -87,4 +88,188 @@ fn a_launch_is_published_under_its_own_ref_and_repository() {
     assert_eq!(spec.reference(), "refs/agent-coordinator/candidates/t/l");
     let reserved = publication.spec(&grant(Role::Implementer, Some("wip")), "wip");
     assert!(reserved.is_err(), "the WIP namespace is not a task");
+}
+
+#[test]
+fn a_launch_s_credential_digests_reach_its_secret_scan() {
+    let (publication, _) = broker(Verdict::Current);
+    let plain = publication
+        .spec(&grant(Role::Implementer, Some("t")), "t")
+        .unwrap();
+    assert!(
+        format!("{plain:?}").contains("known_digests: 0"),
+        "{plain:?}"
+    );
+    let digests = vec!["ab".repeat(32), "cd".repeat(32)];
+    let given = grant(Role::Implementer, Some("t")).with_known_digests(digests);
+    let spec = publication.spec(&given.unwrap(), "t").unwrap();
+    assert!(format!("{spec:?}").contains("known_digests: 2"), "{spec:?}");
+}
+
+/// Credentials that count mints and revocations, and can be broken.
+#[derive(Default)]
+struct Counted {
+    minted: AtomicU32,
+    revoked: AtomicU32,
+    broken: std::sync::atomic::AtomicBool,
+}
+
+impl Credentials for Arc<Counted> {
+    /// `token-<n>`, or an error while broken.
+    fn mint(&self) -> Result<String> {
+        anyhow::ensure!(!self.broken.load(Ordering::SeqCst), "GitHub is down");
+        Ok(format!(
+            "token-{}",
+            self.minted.fetch_add(1, Ordering::SeqCst)
+        ))
+    }
+
+    /// Counts the revocation.
+    fn revoke(&self, _token: &str) -> Result<()> {
+        self.revoked.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A broker answering `verdict` that pushes with counted credentials.
+fn pushing(verdict: Verdict) -> (Publication, Arc<Counted>) {
+    let counted = Arc::new(Counted::default());
+    let askpass = std::path::Path::new(r"C:\agentc\agentc-supervisor.exe");
+    let push = PushAuthority::new(Box::new(counted.clone()), askpass).unwrap();
+    let (publication, _) = broker(verdict);
+    (publication.with_push(Arc::new(push)), counted)
+}
+
+#[test]
+fn no_token_is_minted_for_a_launch_without_authority() {
+    let (publication, counted) = pushing(Verdict::Refused("released".into()));
+    let refused = publication.token_for("l", "t").err().unwrap();
+    assert_eq!(refused.code, RefusalCode::NotAuthorized);
+    assert_eq!(counted.minted.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_push_s_token_reaches_git_through_askpass_and_is_revoked_after() {
+    let (publication, counted) = pushing(Verdict::Current);
+    let token = publication.token_for("l", "t").unwrap().unwrap();
+    let spec = publication
+        .spec(&grant(Role::Implementer, Some("t")), "t")
+        .unwrap();
+    let shown = format!(
+        "{:?}",
+        spec.with_git_environment(token.git_environment().unwrap())
+    );
+    assert!(
+        shown.contains("GIT_ASKPASS") && !shown.contains("token-0"),
+        "{shown}"
+    );
+    assert_eq!(counted.revoked.load(Ordering::SeqCst), 0);
+    drop(token);
+    assert_eq!(counted.revoked.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_failed_mint_and_a_spent_budget_are_refused_as_the_linux_helper_words_them() {
+    let (publication, counted) = pushing(Verdict::Current);
+    counted.broken.store(true, Ordering::SeqCst);
+    let failed = publication.token_for("l", "t").err().unwrap();
+    assert_eq!(
+        (failed.code, failed.message.as_str()),
+        (RefusalCode::Internal, NO_CREDENTIALS)
+    );
+    counted.broken.store(false, Ordering::SeqCst);
+    // The failed mint spent one of the burst.
+    for _ in 1..agentc_integrator::mint_budget::MINT_BURST {
+        drop(publication.token_for("l", "t").unwrap());
+    }
+    let spent = publication.token_for("l", "t").err().unwrap();
+    assert_eq!(spent.message, RATE_LIMITED);
+}
+
+#[test]
+fn without_credentials_no_token_is_asked_for() {
+    let (publication, fixed) = broker(Verdict::Current);
+    assert!(publication.token_for("l", "t").unwrap().is_none());
+    assert_eq!(
+        fixed.asked.load(Ordering::SeqCst),
+        0,
+        "the gate is the protocol's"
+    );
+}
+
+/// A client's side of a session in memory: what it sent, then what the
+/// broker wrote back.
+struct Duplex {
+    sent: std::io::Cursor<Vec<u8>>,
+    written: Vec<u8>,
+}
+
+impl Read for Duplex {
+    /// The client's bytes, then the end of the stream.
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.sent.read(buffer)
+    }
+}
+
+impl Write for Duplex {
+    /// Keeps what the broker writes.
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.written.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    /// Nothing is buffered.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serves `sent` as one session of launch `l` on task `t` with counted
+/// credentials, returning the reply and the mints made.
+fn served(sent: Vec<u8>) -> (PushReply, u32, u32) {
+    let (publication, counted) = pushing(Verdict::Current);
+    let dir = tempfile::tempdir().unwrap();
+    let publication = Publication {
+        work_root: dir.path().to_path_buf(),
+        ..publication
+    };
+    let spec = publication
+        .spec(&grant(Role::Implementer, Some("t")), "t")
+        .unwrap();
+    let mut duplex = Duplex {
+        sent: std::io::Cursor::new(sent),
+        written: Vec::new(),
+    };
+    let reply = publication
+        .serve_stream("l", "t", spec, &mut duplex)
+        .unwrap();
+    let (minted, revoked) = (
+        counted.minted.load(Ordering::SeqCst),
+        counted.revoked.load(Ordering::SeqCst),
+    );
+    (reply, minted, revoked)
+}
+
+#[test]
+fn a_session_that_is_no_push_request_costs_no_mint() {
+    for sent in [
+        b"not a push request\n".to_vec(),
+        Vec::new(),
+        b"{\"version\":9}\n\0\0\0\0\0\0\0\x01".to_vec(),
+    ] {
+        let (reply, minted, _) = served(sent);
+        assert!(matches!(reply, PushReply::Refused(_)), "{reply:?}");
+        assert_eq!(minted, 0);
+    }
+}
+
+#[test]
+fn a_well_formed_preamble_costs_one_mint_revoked_whatever_the_bundle() {
+    let mut sent = br#"{"version":1,"revision":"0000000000000000000000000000000000000001","tree":"0000000000000000000000000000000000000002"}"#.to_vec();
+    sent.push(b'\n');
+    sent.extend_from_slice(&4_u64.to_be_bytes());
+    sent.extend_from_slice(b"junk");
+    let (reply, minted, revoked) = served(sent);
+    assert!(matches!(reply, PushReply::Refused(_)), "{reply:?}");
+    assert_eq!((minted, revoked), (1, 1));
 }

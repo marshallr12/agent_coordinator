@@ -32,10 +32,12 @@
 use super::authority_pipe::AuthorityRoute;
 use super::broker::{Grant, Halt, Handler, Role};
 use super::pipe::{Received, Session};
+use super::publication_credentials::{NoToken, PushAuthority, Token};
 use crate::service::authority::Verdict;
+use agentc_integrator::push_preamble::Preamble;
 use anyhow::Result;
 use coordinator_local::candidate_push::{
-    HelperSpec, PushRefusal, PushReply, RefusalCode, serve_one_gated,
+    DEFAULT_MAX_BUNDLE_BYTES, HelperSpec, PushRefusal, PushReply, RefusalCode, serve_one_gated,
 };
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
@@ -58,6 +60,13 @@ const TICK: Duration = Duration::from_millis(250);
 const LINGER: Duration = Duration::from_secs(5);
 /// The most bytes one read of a session takes.
 const CHUNK: usize = 64 * 1024;
+/// The refusal while another push of the launch is under way.
+const BUSY: &str = "another push of this launch is under way";
+/// The refusal when no helper spec can be made for the launch.
+const UNPUBLISHABLE: &str = "the broker cannot publish this launch";
+/// The refusals when no token was minted, as the Linux helper words them.
+const NO_CREDENTIALS: &str = "helper could not obtain push credentials";
+const RATE_LIMITED: &str = "push rate limit reached; retry later";
 
 /// Who decides whether a launch may publish now.
 pub trait Gatekeeper: Send + Sync {
@@ -78,6 +87,8 @@ pub struct Publication {
     work_root: PathBuf,
     gatekeeper: Arc<dyn Gatekeeper>,
     git_environment: Vec<(String, String)>,
+    /// The push credentials, when the broker has them.
+    push: Option<Arc<PushAuthority>>,
     /// The launches with a push under way.
     busy: Mutex<BTreeSet<String>>,
 }
@@ -92,19 +103,28 @@ impl Publication {
             work_root,
             gatekeeper,
             git_environment: Vec::new(),
+            push: None,
             busy: Mutex::default(),
         }
     }
 
     /// Sets environment variables for the Git children that contact the
-    /// remote, where push credentials would be supplied.
+    /// remote when the broker pushes without credentials of its own.
     pub fn with_git_environment(mut self, environment: Vec<(String, String)>) -> Self {
         self.git_environment = environment;
         self
     }
 
+    /// Pushes with a token from `push` for each push, minted once the
+    /// supervisor says the launch may publish and revoked after the push.
+    pub fn with_push(mut self, push: Arc<PushAuthority>) -> Self {
+        self.push = Some(push);
+        self
+    }
+
     /// Serves one push for `grant`'s launch working on `task`, unless
-    /// another of its pushes is under way.
+    /// another of its pushes is under way. Its token, if any, is revoked
+    /// when this returns.
     fn publish(
         &self,
         grant: &Grant,
@@ -113,31 +133,73 @@ impl Publication {
         halt: &Halt,
     ) -> Result<PushReply> {
         let Some(_turn) = Turn::take(&self.busy, grant.launch()) else {
-            let busy = refusal(
-                RefusalCode::Internal,
-                "another push of this launch is under way",
-            );
-            return reply_with(session, busy);
+            return reply_with(session, refusal(RefusalCode::Internal, BUSY));
         };
-        let spec = match self.spec(grant, task) {
-            Ok(spec) => spec,
-            Err(_) => {
-                let bad = refusal(
-                    RefusalCode::Internal,
-                    "the broker cannot publish this launch",
-                );
-                return reply_with(session, bad);
-            }
+        let Ok(spec) = self.spec(grant, task) else {
+            return reply_with(session, refusal(RefusalCode::Internal, UNPUBLISHABLE));
         };
-        let gate = || self.gate(grant.launch(), task);
-        let mut stream = Stream::new(session, halt);
-        serve_one_gated(&mut stream, &spec, &gate)
+        self.serve_stream(grant.launch(), task, spec, &mut Stream::new(session, halt))
     }
 
-    /// The helper spec of `grant`'s launch: its own ref and repository.
+    /// Serves the push protocol on `stream` for `launch` with `spec`. With
+    /// push credentials, the request's preamble is read first, as the
+    /// Linux helper does: only a version 1 request line with a bundle
+    /// length within the limit is worth a token, so anything else is
+    /// refused by the protocol without a mint.
+    fn serve_stream<S: Read + Write>(
+        &self,
+        launch: &str,
+        task: &str,
+        spec: HelperSpec,
+        stream: &mut S,
+    ) -> Result<PushReply> {
+        let gate = || self.gate(launch, task);
+        let Some(push) = &self.push else {
+            return serve_one_gated(stream, &spec, &gate);
+        };
+        let preamble = Preamble::read(stream);
+        let worth = preamble.worth_minting(DEFAULT_MAX_BUNDLE_BYTES);
+        let mut replayed = preamble.replay(stream);
+        if !worth {
+            let spec = spec.with_git_environment(push.untokened_environment()?);
+            return serve_one_gated(&mut replayed, &spec, &gate);
+        }
+        let token = match self.token_for(launch, task) {
+            Ok(Some(token)) => token,
+            Ok(None) => return serve_one_gated(&mut replayed, &spec, &gate),
+            Err(refused) => return reply_on(&mut replayed, refused),
+        };
+        let spec = spec.with_git_environment(token.git_environment()?);
+        serve_one_gated(&mut replayed, &spec, &gate)
+    }
+
+    /// The token for one push of `launch`, minted only after the supervisor
+    /// said it may publish and within its budget; none when the broker
+    /// pushes without credentials.
+    fn token_for(
+        &self,
+        launch: &str,
+        task: &str,
+    ) -> std::result::Result<Option<Token<'_>>, PushRefusal> {
+        let Some(push) = &self.push else {
+            return Ok(None);
+        };
+        self.gate(launch, task)?;
+        match push.mint_for(launch) {
+            Ok(token) => Ok(Some(token)),
+            Err(NoToken::RateLimited) => Err(refusal(RefusalCode::Internal, RATE_LIMITED)),
+            Err(NoToken::Unavailable) => Err(refusal(RefusalCode::Internal, NO_CREDENTIALS)),
+        }
+    }
+
+    /// The helper spec of `grant`'s launch: its own ref and repository, the
+    /// digests of its credentials for the secret scan to refuse, and the
+    /// Git environment of a broker without credentials; a push's token
+    /// replaces that environment once it is minted.
     fn spec(&self, grant: &Grant, task: &str) -> Result<HelperSpec> {
         let work_dir = self.work_root.join(grant.launch());
         let spec = HelperSpec::new(&self.remote, task, grant.launch(), &work_dir)?;
+        let spec = spec.with_known_digests(grant.known_digests().to_vec());
         Ok(spec.with_git_environment(self.git_environment.clone()))
     }
 
@@ -215,6 +277,13 @@ fn refusal(code: RefusalCode, message: &str) -> PushRefusal {
         code,
         message: message.to_owned(),
     }
+}
+
+/// Writes `refused` as the one reply line on `stream`.
+fn reply_on<W: Write>(stream: &mut W, refused: PushRefusal) -> Result<PushReply> {
+    let reply = PushReply::Refused(refused);
+    stream.write_all(&reply.to_line())?;
+    Ok(reply)
 }
 
 /// Writes `refused` as the session's one reply line.
