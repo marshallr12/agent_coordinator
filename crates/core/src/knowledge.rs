@@ -135,6 +135,21 @@ pub struct DecisionAnswerInput {
     pub rationale: String,
     #[serde(default)]
     pub conditions_confirmed: bool,
+    /// Evidence that a human gave this answer to the calling agent session.
+    /// Accepted only for `required_actor=human` decisions in a project whose
+    /// policy sets `allow_relayed_human_answers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<DecisionRelayInput>,
+}
+
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionRelayInput {
+    /// The question exactly as it was put to the human.
+    pub prompt: String,
+    /// The human's reply exactly as given (an option label or free text).
+    pub response: String,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

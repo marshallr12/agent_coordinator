@@ -651,6 +651,13 @@ the limit a renewal is refused with `409 attempt_duration_exceeded`: record a
 checkpoint and release with a handoff. Continuation claims that keep the same owner across attempts
 are not implemented yet.
 
+A project policy may also set `allow_relayed_human_answers` (default false,
+changed only by a human). When true, an agent session may add a `relay` object
+(`prompt`, `response`) to `POST .../decisions/{id}/answer` for a
+`required_actor=human` decision; the answer is recorded as relayed, as described
+in the knowledge contract. Without it the call is refused with
+`403 operation_not_permitted`.
+
 Submitting code includes a candidate repository/base/commit/tree identity and
 check evidence. Review submission names the immutable reviewed submission and
 decision. Integration submission names the target before/after revisions,

@@ -170,6 +170,44 @@ test claim before ending. If no eligible work remains, report that the queue has
 no work you can claim. Report concrete access or policy failures as blockers;
 do not fabricate work.
 
+### Decisions that need a human
+
+A pending decision with `required_actor` `human` blocks its affected tasks, and
+an agent cannot answer it on its own: that call is refused with
+`operation_not_permitted`. Do not drive the dashboard and do not choose for the
+human. Instead put the question to the user in your own interface, then relay the
+reply through the CLI:
+
+1. `agent-coordinator --session SESSION_NAME decisions list --json` returns, for
+   each decision, the `question`, `options`, `rationale`, `conditions`,
+   `environment`, `expires_at`, `affected_tasks` and the current `generation`, so
+   no further read is needed. Pose each `status: pending`, `required_actor:
+   human` decision to the user with its options, rationale and conditions, and
+   wait for their reply. Never infer, default or guess an answer.
+2. Record the reply with `decisions answer --id DECISION_ID --input answer.json`:
+
+   ```json
+   {
+     "expected_generation": 1,
+     "disposition": "allow",
+     "answer": "Proceed",
+     "rationale": "The user chose Proceed.",
+     "conditions_confirmed": true,
+     "relay": {"prompt": "<the question exactly as you asked it>", "response": "<the user's reply exactly as given>"}
+   }
+   ```
+
+   `answer` must still match one option; `relay.prompt` and `relay.response` are
+   stored verbatim as the human's evidence. Set `conditions_confirmed` to true
+   only if the user was shown the conditions and environment and accepted them.
+3. The service accepts a relayed answer only when a human has turned on
+   `allow_relayed_human_answers` in project policy. Otherwise, or if
+   `expected_generation` is stale, the call is refused; report that the human
+   must answer in the dashboard (or reread the decision and ask again). The
+   record then shows the relayed answer, your session, the human principal that
+   enabled relaying and its policy revision, and the dashboard flags it so the
+   user can review or reopen it.
+
 ### Review before new implementation
 
 Unless the user's request narrows the scope, before claiming new implementation

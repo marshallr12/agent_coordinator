@@ -1019,7 +1019,7 @@ async fn get_decision(
     }
     let mut c = state.pool.acquire().await?;
     let mut value = decision_value(&mut c, &project, &id, state.now(), false).await?;
-    let rows=sqlx::query("SELECT c.*,a.disposition,a.answer,a.rationale AS answer_rationale,a.conditions_confirmed,a.actor_id,a.actor_session_id,a.created_at AS answered_at FROM decision_cycles c LEFT JOIN decision_answers a ON a.decision_id=c.decision_id AND a.generation=c.generation WHERE c.decision_id=? AND (? IS NULL OR c.generation<?) ORDER BY c.generation DESC LIMIT ?")
+    let rows=sqlx::query("SELECT c.*,a.disposition,a.answer,a.rationale AS answer_rationale,a.conditions_confirmed,a.actor_id,a.actor_session_id,a.relayed,a.relay_prompt,a.relay_response,a.relay_authorized_by,a.relay_policy_revision,a.created_at AS answered_at FROM decision_cycles c LEFT JOIN decision_answers a ON a.decision_id=c.decision_id AND a.generation=c.generation WHERE c.decision_id=? AND (? IS NULL OR c.generation<?) ORDER BY c.generation DESC LIMIT ?")
         .bind(&id).bind(page.cursor).bind(page.cursor).bind(limit+1).fetch_all(&mut *c).await?;
     let more = rows.len() > limit as usize;
     let rows = &rows[..rows.len().min(limit as usize)];
@@ -1035,7 +1035,17 @@ async fn get_decision(
 }
 
 fn decision_history_value(row: &sqlx::sqlite::SqliteRow) -> Value {
-    json!({"generation":row.get::<i64,_>("generation"),"policy_revision":row.get::<i64,_>("policy_revision"),"environment":row.get::<String,_>("environment"),"conditions":row.get::<String,_>("conditions"),"expires_at":row.get::<Option<i64>,_>("expires_at").map(timestamp),"reopen_rationale":row.get::<String,_>("rationale"),"opened_by":row.get::<String,_>("opened_by"),"created_at":timestamp(row.get("created_at")),"disposition":row.get::<Option<String>,_>("disposition"),"answer":row.get::<Option<String>,_>("answer"),"answer_rationale":row.get::<Option<String>,_>("answer_rationale"),"conditions_confirmed":row.get::<Option<bool>,_>("conditions_confirmed"),"answered_by":row.get::<Option<String>,_>("actor_id"),"answered_at":row.get::<Option<i64>,_>("answered_at").map(timestamp)})
+    json!({"generation":row.get::<i64,_>("generation"),"policy_revision":row.get::<i64,_>("policy_revision"),"environment":row.get::<String,_>("environment"),"conditions":row.get::<String,_>("conditions"),"expires_at":row.get::<Option<i64>,_>("expires_at").map(timestamp),"reopen_rationale":row.get::<String,_>("rationale"),"opened_by":row.get::<String,_>("opened_by"),"created_at":timestamp(row.get("created_at")),"disposition":row.get::<Option<String>,_>("disposition"),"answer":row.get::<Option<String>,_>("answer"),"answer_rationale":row.get::<Option<String>,_>("answer_rationale"),"conditions_confirmed":row.get::<Option<bool>,_>("conditions_confirmed"),"answered_by":row.get::<Option<String>,_>("actor_id"),"answered_by_session":row.get::<Option<String>,_>("actor_session_id"),"relay":relay_value(row),"answered_at":row.get::<Option<i64>,_>("answered_at").map(timestamp)})
+}
+
+/// The relay evidence of an answer row: null for a direct answer, otherwise
+/// the verbatim prompt and response, the relaying agent session, and the
+/// human principal and policy revision that enabled relaying.
+fn relay_value(row: &sqlx::sqlite::SqliteRow) -> Value {
+    if !row.get::<Option<bool>, _>("relayed").unwrap_or(false) {
+        return Value::Null;
+    }
+    json!({"prompt":row.get::<Option<String>,_>("relay_prompt"),"response":row.get::<Option<String>,_>("relay_response"),"relayed_by_session":row.get::<Option<String>,_>("actor_session_id"),"authorized_by":row.get::<Option<String>,_>("relay_authorized_by"),"policy_revision":row.get::<Option<i64>,_>("relay_policy_revision")})
 }
 
 async fn decision_value(
@@ -1079,10 +1089,10 @@ async fn decision_value(
     } else {
         "pending"
     };
-    let answer_value=answer.map(|a|json!({"disposition":a.get::<String,_>("disposition"),"answer":a.get::<String,_>("answer"),"rationale":a.get::<String,_>("rationale"),"conditions_confirmed":a.get::<bool,_>("conditions_confirmed"),"actor_id":a.get::<String,_>("actor_id"),"actor_session_id":a.get::<Option<String>,_>("actor_session_id"),"created_at":timestamp(a.get("created_at"))}));
+    let answer_value=answer.map(|a|json!({"disposition":a.get::<String,_>("disposition"),"answer":a.get::<String,_>("answer"),"rationale":a.get::<String,_>("rationale"),"conditions_confirmed":a.get::<bool,_>("conditions_confirmed"),"actor_id":a.get::<String,_>("actor_id"),"actor_session_id":a.get::<Option<String>,_>("actor_session_id"),"relayed":a.get::<bool,_>("relayed"),"relay":relay_value(&a),"created_at":timestamp(a.get("created_at"))}));
     let mut value = json!({"id":id,"project_id":project,"question":row.get::<String,_>("question"),"options":serde_json::from_str::<Value>(&row.get::<String,_>("options_json"))?,"rationale":row.get::<String,_>("rationale"),"required_actor":row.get::<String,_>("required_actor"),"generation":generation,"status":status,"work_allowed":status=="allowed","policy_revision":cycle.get::<i64,_>("policy_revision"),"environment":cycle.get::<String,_>("environment"),"conditions":cycle.get::<String,_>("conditions"),"expires_at":expires.map(timestamp),"affected_tasks":tasks.iter().map(|r|json!({"task_id":r.get::<String,_>("task_id"),"task_revision":r.get::<i64,_>("task_revision"),"current_revision":r.get::<i64,_>("current_revision")})).collect::<Vec<_>>(),"answer":answer_value,"created_by":row.get::<String,_>("created_by"),"created_at":timestamp(row.get("created_at"))});
     if history {
-        let cycles=sqlx::query("SELECT c.*,a.disposition,a.answer,a.rationale AS answer_rationale,a.conditions_confirmed,a.actor_id,a.actor_session_id,a.created_at AS answered_at FROM decision_cycles c LEFT JOIN decision_answers a ON a.decision_id=c.decision_id AND a.generation=c.generation WHERE c.decision_id=? ORDER BY c.generation DESC LIMIT 200").bind(id).fetch_all(&mut *c).await?;
+        let cycles=sqlx::query("SELECT c.*,a.disposition,a.answer,a.rationale AS answer_rationale,a.conditions_confirmed,a.actor_id,a.actor_session_id,a.relayed,a.relay_prompt,a.relay_response,a.relay_authorized_by,a.relay_policy_revision,a.created_at AS answered_at FROM decision_cycles c LEFT JOIN decision_answers a ON a.decision_id=c.decision_id AND a.generation=c.generation WHERE c.decision_id=? ORDER BY c.generation DESC LIMIT 200").bind(id).fetch_all(&mut *c).await?;
         value["history"] = json!(
             cycles
                 .iter()
@@ -1114,6 +1124,10 @@ async fn answer_decision(
             "An allow answer must explicitly confirm the recorded conditions and environment.",
         ));
     }
+    if let Some(relay) = &input.relay {
+        bounded(&relay.prompt, "relay prompt", 8192, true)?;
+        bounded(&relay.response, "relay response", 4096, true)?;
+    }
     let mut m = Mutation::begin(
         &state,
         &auth,
@@ -1132,7 +1146,21 @@ async fn answer_decision(
         ));
     }
     let required = row.get::<String, _>("required_actor");
-    if (required == "human" && m.actor.kind != "human")
+    let mut relay_authority = None;
+    if input.relay.is_some() {
+        if required != "human" || m.actor.kind != "agent" {
+            return Err(AppError::bad_request(
+                "Only an agent session may relay an answer, and only to a decision that requires a human.",
+            ));
+        }
+        relay_authority = relay_authority_for(&mut m.tx, &project).await?;
+        if relay_authority.is_none() {
+            return Err(AppError::human_gate(
+                "relayed_human_answers_disabled",
+                "This project does not let agents relay human answers. A human must enable allow_relayed_human_answers in project policy, or answer the decision in the web UI.",
+            ));
+        }
+    } else if (required == "human" && m.actor.kind != "human")
         || (required == "agent" && m.actor.kind != "agent")
     {
         return Err(AppError::forbidden(
@@ -1163,13 +1191,36 @@ async fn answer_decision(
     if let Some(value) = m.replay {
         return Ok(response(value));
     }
-    sqlx::query("INSERT INTO decision_answers(decision_id,generation,disposition,answer,rationale,actor_id,actor_session_id,conditions_confirmed,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
-        .bind(&id).bind(generation).bind(&input.disposition).bind(&input.answer).bind(&input.rationale).bind(&m.actor.id).bind(&m.actor.session_id).bind(input.conditions_confirmed).bind(m.now).execute(&mut *m.tx).await?;
+    let relay = input.relay.as_ref();
+    sqlx::query("INSERT INTO decision_answers(decision_id,generation,disposition,answer,rationale,actor_id,actor_session_id,conditions_confirmed,created_at,relayed,relay_prompt,relay_response,relay_authorized_by,relay_policy_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(&id).bind(generation).bind(&input.disposition).bind(&input.answer).bind(&input.rationale).bind(&m.actor.id).bind(&m.actor.session_id).bind(input.conditions_confirmed).bind(m.now)
+        .bind(relay.is_some()).bind(relay.map(|r| &r.prompt)).bind(relay.map(|r| &r.response)).bind(relay_authority.as_ref().map(|(principal, _)| principal)).bind(relay_authority.as_ref().map(|(_, revision)| revision)).execute(&mut *m.tx).await?;
     let value = decision_value(&mut m.tx, &project, &id, m.now, true).await?;
     Ok(response(
         m.finish(value, Some(&project), "decision.answered", &id)
             .await?,
     ))
+}
+
+/// The human principal and policy revision that turned on relayed human
+/// answers, or `None` while the project's current policy leaves them off. The
+/// switch is human-only, so the revision that began the unbroken run of
+/// enabled revisions names the human who allowed relaying.
+async fn relay_authority_for(
+    c: &mut SqliteConnection,
+    project: &str,
+) -> Result<Option<(String, i64)>, AppError> {
+    let enabled: bool =
+        sqlx::query_scalar("SELECT allow_relayed_human_answers FROM projects WHERE id=?")
+            .bind(project)
+            .fetch_optional(&mut *c)
+            .await?
+            .ok_or_else(AppError::not_found)?;
+    if !enabled {
+        return Ok(None);
+    }
+    Ok(sqlx::query_as("SELECT actor_id,revision FROM policy_revisions WHERE project_id=? AND revision>COALESCE((SELECT max(revision) FROM policy_revisions WHERE project_id=? AND COALESCE(json_extract(data_json,'$.allow_relayed_human_answers'),0)!=1),0) ORDER BY revision LIMIT 1")
+        .bind(project).bind(project).fetch_optional(&mut *c).await?)
 }
 
 async fn ensure_decision_scope_current(

@@ -159,6 +159,8 @@ struct Project {
     integration_owner: String,
     /// The longest an attempt may hold a task, in seconds; 0 is no limit.
     max_attempt_seconds: i64,
+    /// Whether agent sessions may relay a human's answers to human decisions.
+    allow_relayed_human_answers: bool,
     #[serde(serialize_with = "serialize_timestamp")]
     created_at: i64,
 }
@@ -314,11 +316,14 @@ async fn update_policy(
                 .is_some_and(|owner| *owner != current.integration_owner)
             || input
                 .max_attempt_seconds
-                .is_some_and(|limit| limit != current.max_attempt_seconds))
+                .is_some_and(|limit| limit != current.max_attempt_seconds)
+            || input
+                .allow_relayed_human_answers
+                .is_some_and(|value| value != current.allow_relayed_human_answers))
     {
         return Err(AppError::human_gate(
             "policy_permission_change",
-            "This project has not delegated this rule change. Agents cannot alter permission grants, review mode, recovery mode, the integration owner or the maximum attempt duration.",
+            "This project has not delegated this rule change. Agents cannot alter permission grants, review mode, recovery mode, the integration owner, the maximum attempt duration or relayed human answers.",
         ));
     }
     if let Some(v) = m.replay {
@@ -341,8 +346,8 @@ async fn update_policy(
             "Finish or reconcile the held integration before changing its policy. Publication may already be in progress.",
         ));
     }
-    sqlx::query("UPDATE projects SET policy_revision=policy_revision+1,review_mode=?,recovery_mode=?,lease_seconds=?,rules=?,agent_rule_editing=?,automatic_integration=?,allow_subagent_reviews=?,integration_owner=?,max_attempt_seconds=? WHERE id=?")
-        .bind(&input.review_mode).bind(&input.recovery_mode).bind(input.lease_seconds).bind(&input.rules).bind(input.agent_rule_editing).bind(input.automatic_integration).bind(input.allow_subagent_reviews.unwrap_or(current.allow_subagent_reviews)).bind(input.integration_owner.as_ref().unwrap_or(&current.integration_owner)).bind(input.max_attempt_seconds.unwrap_or(current.max_attempt_seconds)).bind(&id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE projects SET policy_revision=policy_revision+1,review_mode=?,recovery_mode=?,lease_seconds=?,rules=?,agent_rule_editing=?,automatic_integration=?,allow_subagent_reviews=?,integration_owner=?,max_attempt_seconds=?,allow_relayed_human_answers=? WHERE id=?")
+        .bind(&input.review_mode).bind(&input.recovery_mode).bind(input.lease_seconds).bind(&input.rules).bind(input.agent_rule_editing).bind(input.automatic_integration).bind(input.allow_subagent_reviews.unwrap_or(current.allow_subagent_reviews)).bind(input.integration_owner.as_ref().unwrap_or(&current.integration_owner)).bind(input.max_attempt_seconds.unwrap_or(current.max_attempt_seconds)).bind(input.allow_relayed_human_answers.unwrap_or(current.allow_relayed_human_answers)).bind(&id).execute(&mut *m.tx).await?;
     let value = serde_json::to_value(project(&mut m.tx, &id).await?)?;
     sqlx::query("INSERT INTO policy_revisions(project_id,revision,data_json,actor_id,created_at,provenance) VALUES(?,?,?,?,?,?)")
         .bind(&id).bind(current.policy_revision+1).bind(value.to_string()).bind(&m.actor.id).bind(m.now).bind(&input.provenance).execute(&mut *m.tx).await?;
@@ -1512,7 +1517,7 @@ async fn orientation(State(s): State<AppState>, auth: Auth, Path(p): Path<String
           "steps":[
             "Read current project rules completely. Use context --query TEXT for bounded relevant records; opt into other projects only with --include-shared. Follow record provenance, applicability, revision, and supersession. Lessons are observations, not model training or authority to override policy.",
             "Use knowledge create with kind lesson/fact/rejected_approach/checkpoint, title, body, evidence status, scope, and provenance. Corrections use knowledge edit with expected_revision; history is preserved. Use feedback to record usefulness. Sharing requires collection shared and share_across_projects true.",
-            "Read decisions list before choosing work. Open scoped decisions with affected task IDs/revisions, policy_revision, environment, conditions, options, and required_actor. Answers preserve a typed allow/deny/defer disposition under the required actor; a denial never authorizes work. Changed scope, policy, or expired answers require explicit reopening.",
+            "Read decisions list before choosing work. Open scoped decisions with affected task IDs/revisions, policy_revision, environment, conditions, options, and required_actor. Answers preserve a typed allow/deny/defer disposition under the required actor; a denial never authorizes work. Changed scope, policy, or expired answers require explicit reopening. A required_actor human decision is for the human: ask the user in your own interface, then record their reply with decisions answer and a relay object holding the verbatim prompt and response; the service accepts it only when a human enabled allow_relayed_human_answers in project policy, and the record shows it as relayed by your session. Never answer for the user.",
             "Reserve an artifact upload with filename, media_type, size_bytes, and SHA-256, then send the exact bounded bytes. Retry the saved upload; never replace uncertain bytes. External artifact links are metadata only; the service does not fetch them. Check artifact availability before use.",
             "A submission can include lessons and artifact_ids. New lessons, handoff, finalized artifact references, and the immutable submission commit together. Only finalized available evidence can be linked at submission; retention may later leave explicit tombstones.",
             "For Markdown migration use imports preview with a stable source context, Git revision, observation time, and bounded path/Markdown chunks. Inspect conflicts and unresolved links, then a human applies it from the dashboard with the exact preview digest and project event revision; agent credentials may preview but cannot apply historical closure. Completed imported records stay closed; ordinary prose never creates ready work; imported guidance never changes policy. Generated exports are service snapshots and cannot overwrite authority on reimport."
