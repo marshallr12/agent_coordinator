@@ -105,6 +105,8 @@ a.nav-item { text-decoration: none; }
 .section-heading, .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
 .section-heading { margin-bottom: 16px; }
 .section-heading h2, .card-header h2 { margin-bottom: 4px; }
+.card-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.card-header > .button { flex: 0 0 auto; }
 .section-heading p, .card-header p { margin-bottom: 0; font-size: 13px; }
 .state-panel { min-height: 110px; padding: 25px; display: flex; align-items: center; justify-content: center; gap: 11px; border: 1px dashed #cbd7dc; border-radius: 9px; color: var(--muted); background: rgba(255,255,255,.48); font-size: 13px; text-align: center; }
 .state-panel.error { color: #8f3643; border-color: #efc6cc; background: var(--red-soft); }
