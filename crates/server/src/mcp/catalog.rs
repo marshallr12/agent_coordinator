@@ -84,7 +84,7 @@ fn build_catalog() -> Vec<Operation> {
     vec![
         read(
             "coordinator_projects_list",
-            "List projects visible to this credential. Follow next_cursor until absent.",
+            "List active (not archived) projects visible to this credential. Follow next_cursor until absent.",
             "/api/v1/projects",
             page(),
         ),

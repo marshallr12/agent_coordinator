@@ -2010,6 +2010,17 @@ async fn claim_activity(
             "This historical code submission has no durable candidate ref. Revise it (reason_code candidate_missing) or ask an operator to reopen it for a checkpointed submission.",
         ));
     }
+    let archived: bool =
+        sqlx::query_scalar("SELECT archived_at IS NOT NULL FROM projects WHERE id=?")
+            .bind(&project)
+            .fetch_one(&mut *m.tx)
+            .await?;
+    if archived {
+        return Err(AppError::conflict(
+            "project_archived",
+            "This project is archived. Restore it before claiming workflow work.",
+        ));
+    }
     if m.actor.kind == "agent"
         && !crate::autonomy::instructions_acknowledged(&mut m.tx, &owner_session, &project).await?
     {

@@ -69,6 +69,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/projects", get(projects).post(create_project))
         .route("/api/v1/projects/{project}/policy", patch(update_policy))
+        .route("/api/v1/projects/{project}/archive", post(archive_project))
+        .route("/api/v1/projects/{project}/restore", post(restore_project))
         .route("/api/v1/projects/{project}/orientation", get(orientation))
         .route(
             "/api/v1/projects/{project}/tasks",
@@ -171,6 +173,21 @@ struct Project {
     allow_relayed_human_answers: bool,
     #[serde(serialize_with = "serialize_timestamp")]
     created_at: i64,
+    /// Present only while the project is archived and hidden from the default list.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_timestamp"
+    )]
+    archived_at: Option<i64>,
+}
+fn serialize_optional_timestamp<S: serde::Serializer>(
+    value: &Option<i64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(value) => serializer.serialize_str(&timestamp(*value)),
+        None => serializer.serialize_none(),
+    }
 }
 fn serialize_timestamp<S: serde::Serializer>(
     value: &i64,
@@ -185,11 +202,25 @@ async fn project(c: &mut SqliteConnection, id: &str) -> Result<Project, AppError
         .await?
         .ok_or_else(AppError::not_found)
 }
+/// Like `project`, but refuses an archived project: new work and policy
+/// changes wait until a human restores it.
+async fn active_project(c: &mut SqliteConnection, id: &str) -> Result<Project, AppError> {
+    let found = project(c, id).await?;
+    if found.archived_at.is_some() {
+        return Err(AppError::conflict(
+            "project_archived",
+            "This project is archived. Restore it before changing its tasks or policy.",
+        ));
+    }
+    Ok(found)
+}
 #[derive(Deserialize)]
 struct Page {
     cursor: Option<String>,
     limit: Option<i64>,
     exclude_done: Option<bool>,
+    /// For the project list: show only archived projects instead of only active ones.
+    archived: Option<bool>,
 }
 impl Page {
     fn limit(&self) -> Result<i64, AppError> {
@@ -205,13 +236,15 @@ impl Page {
 }
 async fn projects(State(s): State<AppState>, _auth: Auth, Query(page): Query<Page>) -> Reply {
     let limit = page.limit()?;
-    let mut items: Vec<Project> =
-        sqlx::query_as("SELECT * FROM projects WHERE (? IS NULL OR id>?) ORDER BY id LIMIT ?")
-            .bind(&page.cursor)
-            .bind(&page.cursor)
-            .bind(limit + 1)
-            .fetch_all(&s.pool)
-            .await?;
+    let mut items: Vec<Project> = sqlx::query_as(
+        "SELECT * FROM projects WHERE (? IS NULL OR id>?) AND (archived_at IS NOT NULL)=? ORDER BY id LIMIT ?",
+    )
+    .bind(&page.cursor)
+    .bind(&page.cursor)
+    .bind(page.archived.unwrap_or(false))
+    .bind(limit + 1)
+    .fetch_all(&s.pool)
+    .await?;
     let more = items.len() > limit as usize;
     items.truncate(limit as usize);
     let cursor = if more {
@@ -308,7 +341,7 @@ async fn update_policy(
         &input,
     )
     .await?;
-    let current = project(&mut m.tx, &id).await?;
+    let current = active_project(&mut m.tx, &id).await?;
     if m.actor.kind == "agent"
         && (!current.agent_rule_editing
             || current.agent_rule_editing != input.agent_rule_editing
@@ -368,6 +401,99 @@ async fn update_policy(
     crate::autonomy::reconcile_required_reviews(&mut m.tx, &reconcile).await?;
     Ok(response(
         m.finish(value, Some(&id), "policy.updated", &id).await?,
+    ))
+}
+
+#[derive(Deserialize, Serialize)]
+struct ProjectArchiveInput {
+    reason: String,
+}
+async fn archive_project(
+    State(s): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<ProjectArchiveInput>, JsonRejection>,
+) -> Reply {
+    project_archive_change(s, auth, id, headers, payload(body)?, "archive").await
+}
+async fn restore_project(
+    State(s): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<ProjectArchiveInput>, JsonRejection>,
+) -> Reply {
+    project_archive_change(s, auth, id, headers, payload(body)?, "restore").await
+}
+/// Archive hides a project from the default list while keeping every record;
+/// restore brings it back. Both are human-only and refuse a project whose work
+/// is still in flight, so an archived project never has a live owner.
+async fn project_archive_change(
+    s: AppState,
+    auth: Auth,
+    id: String,
+    headers: HeaderMap,
+    input: ProjectArchiveInput,
+    action: &'static str,
+) -> Reply {
+    bounded(&input.reason, "reason", 4096, true)?;
+    let operation = format!("POST /api/v1/projects/{id}/{action}");
+    let mut m = Mutation::begin(&s, &auth, &headers, &operation, &input).await?;
+    admin_or_operator(&m.actor)?;
+    if let Some(v) = m.replay {
+        return Ok(response(v));
+    }
+    let current = project(&mut m.tx, &id).await?;
+    if action == "archive" {
+        if current.archived_at.is_some() {
+            return Err(AppError::conflict(
+                "project_archived",
+                "This project is already archived.",
+            ));
+        }
+        let active: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM tasks WHERE project_id=?1 AND deleted_at IS NULL AND current_attempt_id IS NOT NULL) \
+             + (SELECT count(*) FROM workflow_activities WHERE project_id=?1 AND state IN ('queued','active','recovery_required')) \
+             + (SELECT count(*) FROM workflow_subjects ws JOIN tasks t ON t.id=ws.task_id WHERE t.project_id=?1 AND ws.phase IN ('review','integration')) \
+             + (SELECT count(*) FROM integration_holds h JOIN workflow_activities a ON a.id=h.activity_id WHERE a.project_id=?1 AND h.state='held')",
+        )
+        .bind(&id)
+        .fetch_one(&mut *m.tx)
+        .await?;
+        if active > 0 {
+            return Err(AppError::conflict(
+                "project_active",
+                "Release or finish the project's claimed tasks, reviews and integrations before archiving it.",
+            ));
+        }
+        sqlx::query("UPDATE projects SET archived_at=? WHERE id=?")
+            .bind(m.now)
+            .bind(&id)
+            .execute(&mut *m.tx)
+            .await?;
+    } else {
+        if current.archived_at.is_none() {
+            return Err(AppError::conflict(
+                "project_not_archived",
+                "This project is not archived.",
+            ));
+        }
+        sqlx::query("UPDATE projects SET archived_at=NULL WHERE id=?")
+            .bind(&id)
+            .execute(&mut *m.tx)
+            .await?;
+    }
+    let value = serde_json::to_value(project(&mut m.tx, &id).await?)?;
+    let event_data = json!({"reason":input.reason,"actor_id":m.actor.id});
+    let kind = if action == "archive" {
+        "project.archived"
+    } else {
+        "project.restored"
+    };
+    Ok(response(
+        m.finish_with_event_data(value, &event_data, Some(&id), kind, &id)
+            .await?,
     ))
 }
 
@@ -1418,6 +1544,7 @@ async fn create_task(
     if let Some(v) = m.replay {
         return Ok(response(v));
     }
+    active_project(&mut m.tx, &p).await?;
     let id = Uuid::new_v4().to_string();
     let admission = crate::admission::admit(
         &mut m,
@@ -2043,6 +2170,12 @@ async fn acknowledge(
         return Ok(response(v));
     }
     let proj = project(&mut m.tx, &input.project_id).await?;
+    if proj.archived_at.is_some() {
+        return Err(AppError::conflict(
+            "project_archived",
+            "This project is archived. A human must restore it before work can be claimed.",
+        ));
+    }
     if proj.policy_revision != input.policy_revision
         || input.instruction_version != INSTRUCTION_VERSION
         || input.sections != [REQUIRED_SECTION]
@@ -2160,6 +2293,12 @@ async fn claim(
         }
         v["replayed"] = json!(true);
         return Ok(response(v));
+    }
+    if proj.archived_at.is_some() {
+        return Err(AppError::conflict(
+            "project_archived",
+            "This project is archived. Restore it before claiming work.",
+        ));
     }
     if proj.policy_revision != input.policy_revision
         || input.instruction_version != INSTRUCTION_VERSION

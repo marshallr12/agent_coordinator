@@ -10,7 +10,7 @@
   const state = {
     actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
     projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', credentialDownloadUrl: null,
-    taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
+    taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedProjects: [], archivedProjectsLoaded: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
   };
 
@@ -241,6 +241,7 @@
 
   const actorId = () => text(state.actor?.id || state.actor?.principal_id);
   const mutationOperation = (path, method) => {
+    if (method === 'POST' && /\/projects\/[^/]+\/(archive|restore)$/.test(path)) return 'project_archive';
     if (method === 'POST' && /\/projects\/[^/]+\/tasks\/[^/]+\/archive$/.test(path)) return 'archive_completed_task';
     if (['POST', 'PUT', 'PATCH'].includes(method) && /\/projects\/[^/]+\/(workflow-policy|policy|workflow-activities\/[^/]+\/[^/]+|tasks\/[^/]+\/workflow\/reopen)$/.test(path)) return 'workflow_change';
     if (['POST','PATCH'].includes(method) && /\/projects\/[^/]+\/(knowledge|decisions|artifacts|imports)(\/|$)/.test(path)) return 'shared_change';
@@ -395,7 +396,7 @@
     ++state.digestSeq; state.digestProjectId = ''; state.digestLoaded = false; clear($('digest-content'));
     ++state.autonomySeq; state.autonomyProjectId = ''; state.autonomyLoaded = false; state.autonomySummaries.clear(); clear($('autonomy-content'));
     $('context-search').reset();
-    state.credentials = []; state.credentialsLoaded = false; state.operators = []; state.restoreItems = []; state.archivedLoaded = false; state.archivedProjectId = ''; state.archivedTasks = []; state.detailKey = ''; clear($('archived-list')); state.resources = []; state.resourcesLoaded = false; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
+    state.credentials = []; state.credentialsLoaded = false; state.operators = []; state.restoreItems = []; state.archivedLoaded = false; state.archivedProjectId = ''; state.archivedTasks = []; state.archivedProjects = []; state.archivedProjectsLoaded = false; clear($('archived-projects-list')); state.detailKey = ''; clear($('archived-list')); state.resources = []; state.resourcesLoaded = false; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
     clearCredentialDownload();
     setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('restore-status')); clear($('clock-status')); clear($('restore-requirements')); clear($('task-operator-actions')); show($('credentials-list'), false);
@@ -414,10 +415,10 @@
   function showView(view) {
     state.currentView = view;
     syncHistory();
-    ['overview', 'project', 'reports', 'agent-sessions', 'digest', 'autonomy', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
+    ['overview', 'archived-projects', 'project', 'reports', 'agent-sessions', 'digest', 'autonomy', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
     show($('task-view-tabs'), view === 'tasks' || view === 'archived');
     updateTaskViewTabs();
-    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports', 'agent-sessions', 'digest', 'autonomy'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
+    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['archived-projects', 'project', 'reports', 'agent-sessions', 'digest', 'autonomy'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
     if (view === 'tasks') { fillProjectSelect(); setProp($('new-task-button'), 'disabled', !state.projectId); setProp($('refresh-tasks'), 'disabled', !state.projectId); $('project-select')?.focus(); }
   }
 
@@ -430,6 +431,7 @@
     if (view === 'tasks') return project ? `${project}/${state.taskView === 'completed' ? 'completed' : 'tasks'}` : '#/tasks';
     if (view === 'task-detail') return project && state.selectedTaskId ? `${project}/task/${encodeURIComponent(state.selectedTaskId)}` : '#/tasks';
     if (PROJECT_PAGES[view]) return project ? `${project}/${PROJECT_PAGES[view]}` : view === 'archived' ? '#/archived' : '';
+    if (view === 'archived-projects') return '#/archived-projects';
     return ['shared', 'resources', 'admin'].includes(view) ? `#/${view}` : '';
   }
   function routeUrl(route) { return `${location.pathname}${location.search}${route}`; }
@@ -467,6 +469,7 @@
         else { updateTaskViewTabs(); showView('tasks'); loadTasks(); }
       } else if (head === 'account') { showView('overview'); myAccount(); }
       else if (head === 'archived') selectTaskView('archived');
+      else if (head === 'archived-projects') openArchivedProjects();
       else if (head === 'tasks' || head === 'shared' || head === 'resources' || (head === 'admin' && state.actor?.role === 'admin')) enterTopLevel(head);
       else showView('overview');
     } finally { routing = false; }
@@ -499,6 +502,7 @@
     if (operation === 'resolve_resource') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; showView('task-detail'); await loadTaskDetail(); setGlobalAlert('Resolution recorded. Review the updated job and hold evidence.', 'success'); };
     if (operation === 'resolve_integrator_report') return async () => { state.projectId = context.projectId || state.projectId; openReports(); setGlobalAlert('Report resolution recorded. Review the current reports.', 'success'); };
     if (operation === 'create_project') return async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); };
+    if (operation === 'project_archive') return async () => { await loadProjects(); await loadArchivedProjects(); setGlobalAlert('Project archive change recorded.', 'success'); };
     if (operation === 'create_task') return async () => { state.projectId = context.projectId || state.projectId; await loadTasks(); setGlobalAlert('Task created.', 'success'); };
     if (operation === 'archive_completed_task') return async () => { removeCompletedTask(context.projectId, context.taskId); };
     if (operation === 'issue_credential') return async (data) => { downloadIssuedCredential(data); await loadCredentials(); };
@@ -632,10 +636,79 @@
       });
       add(binding, download);
     });
+    show($('archive-project-button'), state.actor?.kind === 'human');
     showView('project'); $('project-heading').focus();
     loadIntegrationOwner(state.projectId);
   }
+
+  // Archived projects: hidden from the project list, restorable by a human operator.
+  function openArchivedProjects() {
+    showView('archived-projects'); $('archived-projects-heading').focus(); loadArchivedProjects();
+  }
+  async function loadArchivedProjects() {
+    if (state.fetching.has('archived-projects')) return;
+    state.fetching.add('archived-projects');
+    if (!state.archivedProjectsLoaded) setState($('archived-projects-state'), 'Loading archived projects…', true);
+    try {
+      const projects = [];
+      let cursor = null;
+      do { const params = new URLSearchParams({archived: 'true', limit: '200'}); if (cursor) params.set('cursor', cursor); const page = (await request(`/api/v1/projects?${params}`)).data; projects.push(...listData(page)); cursor = page?.next_cursor || null; } while (cursor);
+      state.archivedProjects = projects; state.archivedProjectsLoaded = true;
+      renderArchivedProjects();
+    } catch (error) { if (!state.archivedProjectsLoaded) setState($('archived-projects-state'), errorMessage(error), false, true); else setGlobalAlert(errorMessage(error)); }
+    finally { state.fetching.delete('archived-projects'); }
+  }
+  function renderArchivedProjects() {
+    const target = $('archived-projects-list');
+    if (!state.archivedProjects.length) { reconcile(target, []); show(target, false); setState($('archived-projects-state'), 'No archived projects.', false); return; }
+    show($('archived-projects-state'), false); show(target, true);
+    reconcile(target, state.archivedProjects.map((project) => ({ key: project.id, sig: sig(project, state.actor?.kind), build: () => archivedProjectCard(project) })));
+  }
+  function archivedProjectCard(project) {
+    const card = el('article', 'project-card archived-project-card'), projectId = text(project.id);
+    add(card, el('h3', '', project.name || 'Unnamed project'));
+    add(card, el('p', 'repo', project.repository_url || 'Repository not configured'));
+    add(card, el('p', 'project-id', `Project ID · ${projectId || 'Unavailable'}`));
+    const footer = el('div', 'project-card-footer');
+    add(footer, el('span', 'project-meta', `Archived · ${formatDate(project.archived_at)}`));
+    if (state.actor?.kind === 'human') {
+      const restore = el('button', 'button subtle', 'Restore'); restore.type = 'button'; restore.dataset.mutation = 'true';
+      restore.setAttribute('aria-label', `Restore project ${project.name || projectId}`);
+      restore.addEventListener('click', () => restoreProject(project));
+      add(footer, restore);
+    }
+    add(card, footer);
+    return card;
+  }
+  function openArchiveProject() {
+    const project = state.projects.find((item) => text(item.id) === state.projectId);
+    if (!project || state.actor?.kind !== 'human') { setGlobalAlert('Only a human operator can archive a project.'); return; }
+    const view = workflowDialog('Archive project', `Archive ${project.name || project.id}? It leaves the project list and takes no new work until it is restored from Archived projects. Its tasks and records are kept.`);
+    view.field('reason', 'Reason');
+    view.finish('Archive project', (values, dialog) => {
+      dialog.close();
+      startMutation(`${projectPath(project.id)}/archive`, {reason: values.get('reason').trim()}, 'project archive', async () => {
+        state.archivedProjectsLoaded = false; await loadProjects(); state.projectId = ''; showView('overview');
+        setGlobalAlert(`${project.name || 'Project'} archived. Find it under Archived projects.`, 'success');
+      }, 'POST', (error) => { if (!error.uncertain) setGlobalAlert(archiveProjectError(error)); }, {projectId: project.id});
+    });
+  }
+  function restoreProject(project) {
+    if (state.actor?.kind !== 'human') { setGlobalAlert('Only a human operator can restore a project.'); return; }
+    startMutation(`${projectPath(project.id)}/restore`, {reason: 'Restored from the Archived projects view.'}, 'project restore', async () => {
+      await loadProjects(); await loadArchivedProjects();
+      setGlobalAlert(`${project.name || 'Project'} restored to the project list.`, 'success');
+    }, 'POST', (error) => { if (!error.uncertain) setGlobalAlert(archiveProjectError(error)); }, {projectId: project.id});
+  }
+  function archiveProjectError(error) {
+    if (error.code === 'project_active') return 'The project was not archived: it still has claimed tasks, reviews or integrations. Let them finish or release them, then try again.';
+    return errorMessage(error);
+  }
   $('back-to-projects').addEventListener('click', () => showView('overview'));
+  $('archived-projects-button').addEventListener('click', openArchivedProjects);
+  $('archived-projects-back').addEventListener('click', () => showView('overview'));
+  $('refresh-archived-projects').addEventListener('click', () => loadArchivedProjects());
+  $('archive-project-button').addEventListener('click', openArchiveProject);
   $('integration-owner-button').addEventListener('click', openIntegrationOwner);
   $('integrator-reports-button').addEventListener('click', openReports);
   $('back-to-project-settings').addEventListener('click', () => openProjectSettings(state.projectId));
