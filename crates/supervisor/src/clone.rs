@@ -242,6 +242,32 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    /// Walks `root` and asserts that every path below it is readable by
+    /// group and other, searchable where it is a directory, and writable by
+    /// neither. A path that cannot be read is named in the panic.
+    fn assert_readable_without_worker_writes(root: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let metadata = fs::metadata(&path)
+                .unwrap_or_else(|error| panic!("cannot read mirror path {path:?}: {error}"));
+            let mode = metadata.permissions().mode();
+            assert_eq!(mode & 0o022, 0, "worker-writeable mirror path {path:?}");
+            assert_eq!(mode & 0o044, 0o044, "unreadable mirror path {path:?}");
+            if metadata.is_dir() {
+                assert_eq!(mode & 0o011, 0o011, "unsearchable mirror path {path:?}");
+                pending.extend(children(&path));
+            }
+        }
+    }
+
+    /// The paths directly inside `dir`, which is named if it cannot be listed.
+    fn children(dir: &Path) -> Vec<std::path::PathBuf> {
+        let entries = fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("cannot list mirror path {dir:?}: {error}"));
+        entries.map(|entry| entry.unwrap().path()).collect()
+    }
+
     #[test]
     fn canonical_origin_keeps_push_disabled() {
         let dir = tempfile::tempdir().unwrap();
@@ -329,6 +355,12 @@ mod tests {
         // runner's umask, without mutating process-global state in parallel
         // tests. The production failure is the equivalent umask 0077 case.
         run(Some(&mirror), &["config", "core.sharedRepository", "0600"]).unwrap();
+        // Git 2.47 and later let `fetch` leave `git maintenance run --auto`
+        // running detached. Its `objects/maintenance.lock` is removed just
+        // after `fetch` returns, so the walk below could list the lock and
+        // then find it gone. With automatic maintenance off, `fetch` leaves
+        // no process behind and the walk reads a directory at rest.
+        run(Some(&mirror), &["config", "maintenance.auto", "false"]).unwrap();
         let work = Path::new(&url);
         fs::write(work.join("a.txt"), "new mirror content\n").unwrap();
         run(
@@ -366,21 +398,7 @@ mod tests {
                 0o755
             );
         }
-        let mut pending = vec![mirror.join("objects")];
-        while let Some(path) = pending.pop() {
-            let metadata = fs::metadata(&path).unwrap();
-            let mode = metadata.permissions().mode();
-            assert_eq!(mode & 0o022, 0, "worker-writeable mirror path {path:?}");
-            assert_eq!(mode & 0o044, 0o044, "unreadable mirror path {path:?}");
-            if metadata.is_dir() {
-                assert_eq!(mode & 0o011, 0o011, "unsearchable mirror path {path:?}");
-                pending.extend(
-                    fs::read_dir(path)
-                        .unwrap()
-                        .map(|entry| entry.unwrap().path()),
-                );
-            }
-        }
+        assert_readable_without_worker_writes(&mirror.join("objects"));
         // Invocation-only: do not change the repository's persisted settings.
         assert_eq!(
             text(
