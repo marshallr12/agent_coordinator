@@ -1272,6 +1272,141 @@ script against fake servers, and `host-setup-test.py` checks the generated
 units and the uninstall list; neither starts a real harness. A live green run
 per host and harness is owner evidence, recorded from the results file.
 
+### Host updater: verified pull updates with rollback
+
+`deploy/agentc/agentc-update.py`, installed by host-setup as
+`/opt/agentc/bin/agentc-update`, keeps a supervised Linux host (systemd only)
+on the project's latest release. The `agentc-update.timer` (daily with up to an
+hour of random delay, `Persistent=true`) starts `agentc-update.service`, a
+root oneshot that is not sandboxed, because it replaces files under
+`/opt/agentc` and `/etc/agentc`, drops to `agentc-impl` for the preflight and
+runs `containment-suite.sh`. A Windows Scheduled Task is deferred until a
+Windows host supervises.
+
+#### The release it installs
+
+The updater reads `GET <UPDATE_API_URL>/repos/<UPDATE_REPO>/releases/latest`
+and expects these assets (a draft or prerelease, a tag that is not a version
+and a non-HTTPS URL are all refused):
+
+- `agentc-host-<version>-linux-<arch>.tar.gz`, one top directory holding
+  `bin/agentc-supervisor`, `bin/agent-coordinator`, `bin/agentc-push` and its own
+  `SHA256SUMS` (every file, no extras). It may also carry `harness.json`
+  (`{"claude": {"file": "harness/claude", "version": "2.1.0"}, ...}`) with the
+  harness binaries it names, and `scripts/containment-suite.sh`.
+- `SHA256SUMS`, the release asset listing the archive's SHA-256.
+- A GitHub build attestation for the archive, checked with `gh attestation
+  verify <file> --repo <repo>` (`UPDATE_ATTEST_COMMAND`). Root needs a `gh`
+  login (`sudo gh auth login`); a missing `gh` or a refusal rejects the release.
+
+Nothing live changes until the release has passed all three checks (the asset
+SHA256SUMS line, the attestation, and the bundle's own manifest) and unpacked
+into `/opt/agentc/releases/<version>/`, next to the previous releases. The
+unpacker takes only regular files and directories, refuses paths that leave the
+directory and bounds the member count and size. **The repository's release
+workflow does not yet build or attest this bundle**; until it does, the updater
+finds no matching asset and refuses to change anything.
+
+#### One run
+
+1. It refuses to start unless `agentc-run` is active, no kill switch is set by
+   the owner, and the canary is configured (`E2E_PROJECT`); it takes
+   `/var/lib/agentc/update.lock` and the canary lock
+   `/var/lib/agentc/e2e-canary.lock`, so a scheduled canary never overlaps it.
+2. A release is acted on only if it is newer than what the updater installed. The
+   state file `/var/lib/agentc/update-state.json` records the supervisor's hash;
+   binaries that host-setup re-pinned no longer match it and count as unknown, so
+   the next run installs the latest release over them.
+3. **Drain.** It creates the kill switch (`[health] kill_switch`, default
+   `/var/lib/agentc/kill-switch`), waits until the heartbeat shows no launch for
+   `UPDATE_SETTLE_SECONDS`, then stops `agentc-run`. A launch is never cut off: past
+   `UPDATE_DRAIN_TIMEOUT_MINUTES` (240) the run is *deferred* to the next tick,
+   having changed nothing.
+4. **Switch.** The old `agentc-supervisor`, `agent-coordinator` and `agentc-push`
+   are saved under `/opt/agentc/releases/rollback-core-*`, then each file in
+   `/opt/agentc/bin` is replaced by an atomic rename.
+5. **Check.** `agentc-supervisor preflight` runs as `agentc-impl` on a fresh clone of
+   the mirror for each canary harness; the kill switch is removed, `agentc-run`
+   starts, and `e2e-canary.py` runs for each harness in `E2E_HARNESSES`. Real
+   tasks may be claimed by the new version while the canary runs.
+6. **Promote or roll back.** If everything passes the release is recorded as
+   installed. If the switch, preflight, restart or canary fails, the run drains
+   again (forced after the timeout), restores the saved binaries, restarts
+   `agentc-run`, remembers the release as rejected (it is not retried until a newer
+   one appears or `--retry`), pages through ntfy and exits 1. A rollback that
+   itself fails is paged as `ROLLBACK FAILED` and exits 2: the host needs the owner.
+
+#### Harness updates
+
+If the release carries `harness.json` and a harness differs from the one in
+`/opt/agentc/bin`, a second, staged step follows a promoted core: while drained,
+the new `claude`/`codex` is copied beside the live one and must report its
+declared version as `agentc-impl`; it is then renamed into place and the `[pinned]`
+entries in `/etc/agentc/supervisor.toml` are rewritten (nothing else in the file
+changes). The harness is promoted only when **preflight, the end-to-end canary and
+the release's `containment-suite.sh`** all pass. Otherwise the previous binary and
+the previous `supervisor.toml` come back, a page is sent, and the core update
+stays: the harness release is remembered as rejected. `UPDATE_HARNESS=0` turns
+the step off.
+
+#### Settings
+
+Every setting has a default in `agentc-update.py`, shown commented in
+`/etc/agentc/update.env` (written once, never overwritten). The service also
+reads `/etc/agentc/e2e-canary.env` for `E2E_PROJECT`, `E2E_HARNESSES`,
+`E2E_NTFY_TOPIC` and `E2E_TIMEOUT_MINUTES`.
+
+| Variable | Default |
+| --- | --- |
+| `UPDATE_REPO` | `marshallr12/agent_coordinator` |
+| `UPDATE_API_URL` | `https://api.github.com` |
+| `UPDATE_ATTEST_COMMAND` | `gh attestation verify {file} --repo {repo}` |
+| `UPDATE_DRAIN_TIMEOUT_MINUTES` | 240 |
+| `UPDATE_SETTLE_SECONDS`, `UPDATE_POLL_SECONDS` | 10, 15 |
+| `UPDATE_KEEP` | 3 release directories, besides those a rollback needs |
+| `UPDATE_HARNESS` | 1 |
+| `UPDATE_NTFY_TOPIC`, `UPDATE_NTFY_URL` | `E2E_NTFY_TOPIC`, `https://ntfy.sh` |
+| `UPDATE_MIRROR_BRANCH` | `main` |
+| `UPDATE_AS_IMPL` | `setpriv` to `agentc-impl` with an empty environment |
+| `UPDATE_CANARY_COMMAND` | `python3 -I /opt/agentc/bin/e2e-canary.py --harness {harness} --timeout-minutes {timeout}` |
+| `UPDATE_SUITE_COMMAND` | the release's `scripts/containment-suite.sh` |
+
+The timer's schedule is `UPDATE_CALENDAR` when host-setup runs (default
+`daily`). host-setup enables the timer only where the end-to-end canary is ready
+(see above); `UPDATE_TIMER=0` installs it but never enables it. `sudo python3 -I
+/opt/agentc/bin/agentc-update --check` reports what a run would do and changes
+nothing; `--retry` clears the rejected releases. Each run appends a line to
+`/var/lib/agentc/update.jsonl`.
+
+#### Manual rollback
+
+```sh
+sudo python3 -I /opt/agentc/bin/agentc-update --rollback core      # binaries
+sudo python3 -I /opt/agentc/bin/agentc-update --rollback harness   # claude/codex and pins
+```
+
+Both drain the same way, restore what the last update saved, run preflight (no
+canary) and restart `agentc-run`, and mark the release left as rejected so the
+timer does not reinstall it. With the updater unavailable, do the same by hand:
+`sudo touch /var/lib/agentc/kill-switch`, wait for `heartbeat.json` to show no
+`launch`, `sudo systemctl stop agentc-run`, copy each file from
+`/opt/agentc/releases/rollback-core-<time>/bin/` over the one in
+`/opt/agentc/bin` (`sudo install -o root -g root -m 0755 <saved> <live>`; for a
+harness also restore `supervisor.toml` from `rollback-harness-<time>/`), run
+`sudo /opt/agentc/bin/agentc-supervisor preflight` with a spec as in
+`containment-suite.sh`, `sudo systemctl start agentc-run` and `sudo rm
+/var/lib/agentc/kill-switch`. `host-setup.sh --uninstall` removes the timer,
+units, script, state, lock and `/opt/agentc/releases`; the results file is kept.
+
+`deploy/agentc/agentc-update-test.py` runs the updater end to end against a
+fake release server, systemctl, supervisor, canary and containment suite: a good
+release promoted, a failing canary and a failing preflight rolled back and not
+retried, a refused attestation, SHA256SUMS mismatch and path escape, a running
+launch deferring the run, and good, suite-failing and mis-versioned harnesses.
+`host-setup-test.py` checks the generated units, settings and uninstall list. No
+real release, `gh`, systemd or harness is involved; a live run on a host is
+owner evidence.
+
 ### Running the loop against staging
 
 `[run.binding]` in `/etc/agentc/supervisor.toml` replaces the mirror's

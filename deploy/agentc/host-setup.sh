@@ -19,7 +19,11 @@
 # installs attention.py with the agentc-canary (every 10 minutes) and
 # agentc-digest (daily) systemd timers, configured by /etc/agentc/attention.env,
 # and e2e-canary.py with a daily agentc-e2e-canary@<harness> timer per
-# configured harness, configured by /etc/agentc/e2e-canary.env.
+# configured harness, configured by /etc/agentc/e2e-canary.env. Finally it
+# installs agentc-update (the root-owned pull updater, deploy/agentc/agentc-update.py)
+# with the agentc-update timer, configured by /etc/agentc/update.env; the timer
+# is enabled once the end-to-end canary is, because a release is promoted only
+# when that canary passes.
 set -euo pipefail
 
 PREFIX=/opt/agentc
@@ -79,6 +83,13 @@ E2E_TOKEN=${E2E_TOKEN:-$ETC/e2e-canary-token}
 E2E_CALENDAR=${E2E_CALENDAR:-daily}
 E2E_KNOWN_HARNESSES=(claude codex)
 E2E_DEFAULT_HARNESSES=claude
+# The host updater (agentc-update.py): the script, an environment file written
+# once, and a timer. It runs as root, takes the canary lock, and is enabled
+# only where the end-to-end canary is (UPDATE_TIMER=0 never enables it).
+UPDATE_SCRIPT=$PREFIX/bin/agentc-update
+UPDATE_ENV=$ETC/update.env
+UPDATE_CALENDAR=${UPDATE_CALENDAR:-daily}
+UPDATE_TIMER=${UPDATE_TIMER:-1}
 KEEP="# --- entries below this line are kept when host-setup.sh re-runs ---"
 
 # Refuses to run without root and the invoking owner account.
@@ -1168,6 +1179,127 @@ timers:
 EOF
 }
 
+# Prints, one per line, every path --uninstall removes for the host updater.
+# The results file (update.jsonl, its evidence) is kept; see remove_update.
+update_paths() {
+  echo "$UNIT_DIR/agentc-update.service"
+  echo "$UNIT_DIR/agentc-update.timer"
+  echo "$UPDATE_ENV"
+  echo "$UPDATE_SCRIPT"
+  echo "$STATE/update-state.json"
+  echo "$STATE/update-state.json.tmp"
+  echo "$STATE/update.lock"
+}
+
+# The updater's oneshot service. Unlike the canary units it is not sandboxed:
+# it replaces files under $PREFIX and $ETC, drains agentc-run, drops to
+# agentc-impl for the preflight and runs containment-suite.sh, which inspects
+# the host. HOME is root's so gh finds the login `gh attestation verify` needs.
+update_service() {
+  cat <<EOF
+[Unit]
+Description=agentc host update (verified release, drain, canary, rollback)
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+Environment=HOME=/root
+EnvironmentFile=-$E2E_ENV
+EnvironmentFile=-$UPDATE_ENV
+ExecStart=/usr/bin/python3 -I $UPDATE_SCRIPT
+TimeoutStartSec=12h
+EOF
+}
+
+update_timer() {
+  cat <<EOF
+[Unit]
+Description=Run the agentc host update ($UPDATE_CALENDAR)
+[Timer]
+OnCalendar=$UPDATE_CALENDAR
+RandomizedDelaySec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+# The environment file written when absent. Every entry has a code default in
+# agentc-update.py and is shown commented; the updater also reads the
+# end-to-end canary's file (project, harnesses, ntfy topic) written above.
+update_env_file() {
+  cat <<EOF
+# agentc host updater (agentc-update.py). Written by deploy/agentc/host-setup.sh
+# when absent; never overwritten, removed by --uninstall. Commented lines show
+# the in-code defaults. The canary settings (E2E_*) come from $E2E_ENV.
+
+# UPDATE_REPO=marshallr12/agent_coordinator   # GitHub repository whose latest release is installed
+# UPDATE_API_URL=https://api.github.com
+# UPDATE_ATTEST_COMMAND=gh attestation verify {file} --repo {repo}   # root needs a gh login
+# UPDATE_DRAIN_TIMEOUT_MINUTES=240  # wait this long for a running launch, then try again next tick
+# UPDATE_SETTLE_SECONDS=10          # how long the loop must look idle before it is stopped
+# UPDATE_POLL_SECONDS=15
+# UPDATE_KEEP=3                     # release directories kept besides those a rollback needs
+# UPDATE_HARNESS=1                  # 0: never stage the release's claude/codex binaries
+# UPDATE_NTFY_TOPIC=                # default: E2E_NTFY_TOPIC; pages a rejected release or failed rollback
+# UPDATE_NTFY_URL=https://ntfy.sh
+# UPDATE_MIRROR_BRANCH=main         # mirror branch the preflight clone starts from
+# UPDATE_AS_IMPL=setpriv --reuid=agentc-impl --regid=agentc-impl --init-groups env -i PATH=/usr/bin:/bin HOME=$STATE/impl/home
+# UPDATE_CANARY_COMMAND=python3 -I $PREFIX/bin/e2e-canary.py --harness {harness} --timeout-minutes {timeout}
+# UPDATE_SUITE_COMMAND=             # default: scripts/containment-suite.sh from the release
+EOF
+}
+
+# Writes the service and timer into directory $1.
+write_update_units() {
+  update_service > "$1/agentc-update.service"
+  update_timer > "$1/agentc-update.timer"
+}
+
+# Installs agentc-update, the environment file (once) and the units. It needs
+# attention.py beside it (install_attention put it there). The timer is
+# enabled only when the end-to-end canary is ready and UPDATE_TIMER is not 0.
+install_update() {
+  refuse_symlink "$UPDATE_SCRIPT"; refuse_symlink "$UPDATE_ENV"
+  install -o root -g root -m 0755 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/agentc-update.py" "$UPDATE_SCRIPT"
+  if [ ! -e "$UPDATE_ENV" ]; then
+    update_env_file | install -o root -g root -m 0644 /dev/stdin "$UPDATE_ENV"
+  fi
+  has_systemd || { echo "no systemd: agentc-update timer not installed"; return 0; }
+  write_update_units "$UNIT_DIR"
+  systemctl daemon-reload
+  if [ "$UPDATE_TIMER" = 1 ] && e2e_ready; then systemctl enable --now --quiet agentc-update.timer
+  else systemctl disable --now --quiet agentc-update.timer 2>/dev/null || true; fi
+}
+
+# Stops the timer and removes the units, environment file, script, state and
+# the release directories. The results file is the owner's evidence: kept.
+remove_update() {
+  local path
+  if has_systemd; then
+    systemctl disable --now agentc-update.timer 2>/dev/null || true
+    systemctl stop agentc-update.service 2>/dev/null || true
+  fi
+  while IFS= read -r path; do rm -f -- "$path"; done < <(update_paths)
+  rm -rf -- "${PREFIX:?}/releases"
+  if has_systemd; then systemctl daemon-reload; fi
+  if [ -f "$STATE/update.jsonl" ]; then echo "kept $STATE/update.jsonl (the updater's results)"; fi
+}
+
+# Prints what the owner supplies for the host updater.
+update_note() {
+  cat <<EOF
+Host updater: agentc-update ($UPDATE_CALENDAR timer, configured by $UPDATE_ENV)
+installs the latest verified release side by side under $PREFIX/releases, drains
+agentc-run, switches, runs preflight and the end-to-end canary, and rolls back
+by itself on a failure. It needs the end-to-end canary configured (above), the
+agentc-run loop running, and a gh login for root (sudo gh auth login) for the
+build-attestation check.
+Check it with: sudo python3 -I $UPDATE_SCRIPT --check
+Roll back by hand with: sudo python3 -I $UPDATE_SCRIPT --rollback core
+EOF
+}
+
 # Agent uids may reach loopback only on the proxy, the staging coordinator
 # and the ephemeral range (tests bind port 0); everything else, including
 # DNS and every non-loopback address, is rejected. Claude launches run in
@@ -1318,6 +1450,7 @@ remove_service() {
 uninstall() {
   # The loop runs launches as the agent accounts; stop it before retiring them.
   remove_service agentc-run
+  remove_update
   remove_attention
   remove_e2e
   for user in "${AGENTS[@]}" "$PUSH_USER"; do retire_account "$user"; done
@@ -1499,6 +1632,7 @@ still requires separate owner verification.
 EOF
   attention_token_note
   e2e_token_note
+  update_note
   push_steps
 }
 
@@ -1545,6 +1679,7 @@ main() {
   install_run_unit
   install_attention
   install_e2e
+  install_update
   next_steps
 }
 

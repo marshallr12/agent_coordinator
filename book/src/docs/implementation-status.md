@@ -169,6 +169,16 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   failure or timeout; `host-setup.sh` installs an `agentc-e2e-canary@<harness>`
   daily timer per configured harness. Tests cover it against fake servers; live
   runs per host and harness are owner evidence and have not been recorded.
+  `deploy/agentc/agentc-update.py` (installed as `agentc-update` with an
+  `agentc-update.timer`) is a root-owned pull updater for Linux/systemd hosts: it
+  fetches the latest release, verifies the SHA256SUMS asset, the build attestation
+  and the bundle manifest, installs side by side, drains the supervisor, switches,
+  runs preflight and the end-to-end canary and rolls back by itself on failure;
+  harness binaries are staged and promoted only when preflight, the canary and
+  `containment-suite.sh` pass. `agentc-update-test.py` covers it end to end
+  against fakes. The release workflow does not yet build or attest the host
+  bundle it expects, so no host has been updated by it; a Windows host updater
+  is deferred.
 - Digest read tracking and the neglect page: the service stores a per-project
   `last_read_at` for the digest (`digest_reads`), set by a human opening the
   digest page in the dashboard or by the signed, expiring "I read this" link in
