@@ -919,8 +919,8 @@
   function setTaskDetailCopyFeedback(message, kind) {
     const target = $('detail-copy-feedback'); setClass(target, `task-detail-copy-feedback ${kind || ''}`); setText(target, message); show(target, Boolean(message));
   }
-  async function copyTaskDetailValue(button, label, sourceId) {
-    const value = button.dataset.copyValue;
+  async function copyTaskDetailValue(source, label) {
+    const value = source.textContent; const sourceId = source.id;
     if (!value) return;
     try { await navigator.clipboard.writeText(value); setTaskDetailCopyFeedback(`${label} copied to clipboard.`, 'success'); }
     catch (_) { selectTaskDetailText(sourceId); setTaskDetailCopyFeedback(`Clipboard access was unavailable. ${label} is selected; copy it with your browser.`, 'fallback'); }
@@ -936,7 +936,6 @@
     const data = state.detail || {}; const task = data.task || data; const project = state.projects.find((item) => text(item.id) === state.projectId);
     const title = task.title || 'Untitled task'; const taskId = text(task.id || state.selectedTaskId);
     setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), title); setText($('detail-task-id-value'), taskId); setText($('detail-task-revision'), task.revision || 1); setText($('detail-description'), task.description || 'No description provided.');
-    setData($('copy-task-name'), 'copyValue', title); setData($('copy-task-id'), 'copyValue', taskId);
     const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); setClass(badge, `status-badge ${status}`); setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
     const humanDelivered = $('detail-human-delivered'); show(humanDelivered, Boolean(task.human_delivered)); setAttr(humanDelivered, 'title', 'A human delivers this task. Supervisors never receive or claim it.');
     const readOnly = Boolean(task.archived_at || ['done', 'completed'].includes(status));
@@ -1312,7 +1311,7 @@
   });
   $('archived-search').addEventListener('input', () => { state.archivedPageIndex = 0; renderArchivedTasks(); });
   $('status-filter').addEventListener('change', () => { state.taskPageIndex = 0; rebuildQueuePages(); showTaskPage(0); });
-  $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else showView('tasks'); }); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation(`/api/v1/admin/agents`, { name: input.value.trim(), class: $('agent-class').value, access: $('agent-access').value }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
+  $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else showView('tasks'); }); [['task-detail-heading', 'Task name'], ['detail-task-id-value', 'Task ID']].forEach(([id, label]) => { const source = $(id); source.addEventListener('click', () => copyTaskDetailValue(source, label)); source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); copyTaskDetailValue(source, label); } }); }); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation(`/api/v1/admin/agents`, { name: input.value.trim(), class: $('agent-class').value, access: $('agent-access').value }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
   $('refresh-archive').addEventListener('click',loadArchivedTasks); $('archive-project-select').addEventListener('change',loadArchivedTasks);
   function showToken(token) { clearCredentialDownload(); setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
   function clearCredentialDownload() {

@@ -883,14 +883,18 @@ async function main() {
     assert(await evaluate("document.querySelector('#task-detail-heading').textContent") === task.title, 'Task name was not rendered exactly.');
     assert(await evaluate("document.querySelector('#detail-task-id-value').textContent") === task.id, 'Task ID was not rendered exactly.');
     assert(await evaluate("(() => { const labels = Array.from(document.querySelectorAll('#task-operator-actions button'), button => (button.getAttribute('aria-label') || button.textContent)); return labels.includes('Archive task') && labels.includes('Cancel task'); })()"), 'Open task did not expose labeled archive and cancellation controls.');
-    await evaluate("document.querySelector('#copy-task-name').click()");
+    assert(await evaluate("!document.querySelector('#copy-task-name') && !document.querySelector('#copy-task-id')"), 'Copy task name and Copy task ID buttons were not removed.');
+    await evaluate("document.querySelector('#task-detail-heading').click()");
     await waitPage("window.__copiedTaskDetailValue !== null", 'task-name clipboard write');
-    assert(await evaluate('window.__copiedTaskDetailValue') === task.title, 'Copy task name did not write the exact task title.');
+    assert(await evaluate('window.__copiedTaskDetailValue') === task.title, 'Clicking the task name did not write the exact task title.');
 
-    await evaluate("window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = true; document.querySelector('#copy-task-id').click()");
+    await evaluate("window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = true; document.querySelector('#detail-task-id-value').click()");
     await waitPage("document.querySelector('#detail-copy-feedback').textContent.includes('Clipboard access was unavailable')", 'manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === task.id, 'Clipboard fallback did not select the exact task ID.');
     assert(await evaluate("document.querySelector('#detail-copy-feedback').classList.contains('fallback')"), 'Clipboard fallback was not identified to assistive technology and styling.');
+    await evaluate("window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = false; document.querySelector('#detail-task-id-value').click()");
+    await waitPage("window.__copiedTaskDetailValue !== null", 'task-id clipboard write');
+    assert(await evaluate('window.__copiedTaskDetailValue') === task.id, 'Clicking the task ID did not write the exact task ID.');
     const openFixtureTask = async () => {
       await send('Page.navigate', { url: `http://127.0.0.1:${serverPort}/` });
       await waitPage("document.querySelector('.project-open')", 'fixture project');
