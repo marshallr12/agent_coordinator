@@ -139,7 +139,7 @@ async fn run_helper(
     credentials: GithubCredentials,
 ) -> Result<()> {
     let shutdown = shutdown_signal()?;
-    process::exit_with_parent(args.parent_pid)?;
+    let launch = process::exit_with_parent(args.parent_pid)?;
     let askpass = std::env::current_exe().context("locate this binary for GIT_ASKPASS")?;
     let socket = socket::bind(&args.socket)?;
     eprintln!("agentc-push: serving {}", spec.reference());
@@ -151,7 +151,7 @@ async fn run_helper(
         budget: Mutex::new(MintBudget::new(MINT_BURST, MINT_INTERVAL, Instant::now())),
         askpass,
         timeout: serve::IO_TIMEOUT,
-        launch: process::parent_id()?,
+        launch,
     };
     server.run(shutdown).await
 }
