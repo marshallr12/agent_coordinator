@@ -337,13 +337,17 @@
     const binding = $('project-binding-content'); clear(binding);
     const snippet = `service_url = ${JSON.stringify(location.origin)}\nproject_id = ${JSON.stringify(state.projectId)}`;
     add(binding, el('code', 'binding-snippet', snippet));
-    const copy = el('button', 'button subtle', 'Copy binding'); copy.type = 'button';
-    copy.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(snippet); setText(copy, 'Copied'); }
-      catch (_) { setText(copy, 'Copy unavailable'); }
-      window.setTimeout(() => setText(copy, 'Copy binding'), 1600);
+    const download = el('button', 'button subtle', 'Download'); download.type = 'button';
+    download.addEventListener('click', () => {
+      const file = new Blob([snippet], {type: 'application/toml;charset=utf-8'});
+      const url = URL.createObjectURL(file);
+      const link = el('a'); link.href = url; link.download = '.agent-coordinator.toml';
+      add(document.body, link); link.click(); link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setText(download, 'Downloaded');
+      window.setTimeout(() => setText(download, 'Download'), 1600);
     });
-    add(binding, copy);
+    add(binding, download);
     showView('project'); $('project-heading').focus();
   }
   $('back-to-projects').addEventListener('click', () => showView('overview'));
