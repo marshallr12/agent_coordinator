@@ -10,6 +10,7 @@
 use crate::config::Config;
 use crate::confine::StatePaths;
 use crate::role_settings;
+use crate::test_support::NESTED_SANDBOX_ENV;
 use clap::ValueEnum;
 use serde_json::{Value, json};
 use std::ffi::OsString;
@@ -245,6 +246,10 @@ fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
         ("AGENT_COORDINATOR_HOME".into(), state.coordinator.into()),
         ("NO_PROXY".into(), "127.0.0.1,localhost".into()),
         ("no_proxy".into(), "127.0.0.1,localhost".into()),
+        // The role's in-launch gate skips, with a note, the tests that need
+        // the real Bubblewrap or host resources a launch lacks; CI's required
+        // checks run them before the integrator lands anything.
+        (NESTED_SANDBOX_ENV.into(), "1".into()),
     ];
     for name in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
         env.push((name.into(), config.egress_proxy_url().into()));
@@ -369,6 +374,23 @@ mod tests {
                     .iter()
                     .any(|(name, value)| name == "HTTPS_PROXY" && value == "http://127.0.0.1:3128")
             );
+        }
+    }
+
+    #[test]
+    fn every_launch_marks_its_tests_as_nested_in_a_sandbox() {
+        for role in [Role::Implementer, Role::Reviewer] {
+            for harness in [Harness::Claude, Harness::Codex] {
+                let command = command(&spec(role, harness), &Config::default());
+                let marker = command
+                    .env
+                    .iter()
+                    .find(|(name, _)| name == NESTED_SANDBOX_ENV);
+                assert_eq!(
+                    marker.map(|(_, value)| value.as_os_str()),
+                    Some("1".as_ref())
+                );
+            }
         }
     }
 

@@ -58,6 +58,13 @@ struct Fixture {
     spec: LaunchSpec,
 }
 
+/// Whether test `name` must skip because it runs nested inside a launch
+/// sandbox: its fixture lives under `/tmp`, for short socket paths, and a
+/// launch mounts `/tmp` read-only.
+fn skip_without_tmp(name: &str) -> bool {
+    crate::test_support::skip_when_nested_because(name, crate::test_support::READ_ONLY_TMP)
+}
+
 /// Writes an executable script.
 fn script(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -162,6 +169,11 @@ fn alive(pid: &Value) -> bool {
 
 #[test]
 fn implementer_launch_runs_beside_a_helper_with_exact_arguments_and_environment() {
+    if skip_without_tmp(
+        "implementer_launch_runs_beside_a_helper_with_exact_arguments_and_environment",
+    ) {
+        return;
+    }
     let fixture = Fixture::new("bind", 7);
     let coordinator = fixture.spec.run.join("state/coordinator");
     fs::create_dir_all(&coordinator).unwrap();
@@ -264,6 +276,9 @@ fn implementer_launch_runs_beside_a_helper_with_exact_arguments_and_environment(
 
 #[test]
 fn the_launch_directory_has_the_documented_owners_and_modes() {
+    if skip_without_tmp("the_launch_directory_has_the_documented_owners_and_modes") {
+        return;
+    }
     let fixture = Fixture::new("bind", 0);
     let owners = Owners {
         supervisor: accounts::effective_uid(),
@@ -284,6 +299,9 @@ fn the_launch_directory_has_the_documented_owners_and_modes() {
 
 #[test]
 fn a_failing_launch_still_stops_the_helper_and_returns_its_code() {
+    if skip_without_tmp("a_failing_launch_still_stops_the_helper_and_returns_its_code") {
+        return;
+    }
     let fixture = Fixture::new("bind", 3);
     assert_eq!(run(&fixture.plan()).unwrap(), 3);
     let helper = fixture.record("helper").unwrap();
@@ -294,6 +312,9 @@ fn a_failing_launch_still_stops_the_helper_and_returns_its_code() {
 
 #[test]
 fn a_launch_that_cannot_start_still_stops_the_helper_and_cleans_up() {
+    if skip_without_tmp("a_launch_that_cannot_start_still_stops_the_helper_and_cleans_up") {
+        return;
+    }
     let fixture = Fixture::new("bind", 0);
     fs::remove_file(crate::relay::program(&fixture.config)).unwrap();
     let error = run(&fixture.plan()).unwrap_err();
@@ -309,6 +330,9 @@ fn a_launch_that_cannot_start_still_stops_the_helper_and_cleans_up() {
 
 #[test]
 fn a_helper_that_exits_early_fails_the_launch_before_it_runs() {
+    if skip_without_tmp("a_helper_that_exits_early_fails_the_launch_before_it_runs") {
+        return;
+    }
     let fixture = Fixture::new("exit", 0);
     let error = run(&fixture.plan()).unwrap_err();
     assert!(
@@ -324,6 +348,9 @@ fn a_helper_that_exits_early_fails_the_launch_before_it_runs() {
 
 #[test]
 fn a_helper_that_never_publishes_its_socket_times_out_and_is_stopped() {
+    if skip_without_tmp("a_helper_that_never_publishes_its_socket_times_out_and_is_stopped") {
+        return;
+    }
     let fixture = Fixture::new("silent", 0);
     let plan = Plan {
         start_timeout: Duration::from_millis(500),
@@ -342,6 +369,9 @@ fn a_helper_that_never_publishes_its_socket_times_out_and_is_stopped() {
 
 #[test]
 fn a_helper_ignoring_sigterm_is_killed_after_the_stop_timeout() {
+    if skip_without_tmp("a_helper_ignoring_sigterm_is_killed_after_the_stop_timeout") {
+        return;
+    }
     let fixture = Fixture::new("stubborn", 0);
     let plan = Plan {
         stop_timeout: Duration::from_millis(300),
@@ -356,6 +386,9 @@ fn a_helper_ignoring_sigterm_is_killed_after_the_stop_timeout() {
 
 #[test]
 fn a_reviewer_runs_without_a_helper() {
+    if skip_without_tmp("a_reviewer_runs_without_a_helper") {
+        return;
+    }
     let mut fixture = Fixture::new("bind", 0);
     let role = fixture.config.state_dir.join("rev");
     fixture.spec.role = Role::Reviewer;
@@ -379,6 +412,9 @@ fn a_reviewer_runs_without_a_helper() {
 
 #[test]
 fn launch_root_assigns_the_socket_itself_and_needs_a_safe_task() {
+    if skip_without_tmp("launch_root_assigns_the_socket_itself_and_needs_a_safe_task") {
+        return;
+    }
     let mut fixture = Fixture::new("bind", 0);
     fixture.spec.push_socket = Some("/tmp/other.sock".into());
     assert!(format!("{:#}", run(&fixture.plan()).unwrap_err()).contains("--push-socket"));
@@ -398,6 +434,9 @@ fn launch_root_assigns_the_socket_itself_and_needs_a_safe_task() {
 fn launch_root_requires_root() {
     assert!(accounts::require_root(1000).is_err());
     assert!(accounts::require_root(0).is_ok());
+    if skip_without_tmp("launch_root_requires_root") {
+        return;
+    }
     let fixture = Fixture::new("bind", 0);
     if accounts::effective_uid() != 0 {
         let error = launch_root(&fixture.spec, None, &fixture.config).unwrap_err();
@@ -411,6 +450,9 @@ fn launch_root_requires_root() {
 
 #[test]
 fn host_problems_name_a_missing_helper_program_configuration_and_account() {
+    if skip_without_tmp("host_problems_name_a_missing_helper_program_configuration_and_account") {
+        return;
+    }
     let mut fixture = Fixture::new("bind", 0);
     fixture.config.push_helper.user = "agentc-no-such-user".into();
     fs::remove_file(&fixture.config.push_helper.program).unwrap();
@@ -430,6 +472,9 @@ fn socket_paths_the_helper_cannot_bind_are_refused_before_anything_starts() {
     let over = PathBuf::from(format!("/{}", "a".repeat(MAX_SOCKET_PATH)));
     assert!(check_socket_path(&over).is_err());
     assert!(check_socket_path(Path::new("relative/push.sock")).is_err());
+    if skip_without_tmp("socket_paths_the_helper_cannot_bind_are_refused_before_anything_starts") {
+        return;
+    }
     let mut fixture = Fixture::new("bind", 0);
     let long = fixture.root.path().join("s".repeat(40));
     fs::rename(&fixture.config.state_dir, &long).unwrap();
@@ -487,6 +532,9 @@ fn stale_launch_directories_are_swept_only_when_owned_unlocked_directories() {
 
 #[test]
 fn a_new_launch_sweeps_what_a_killed_one_left() {
+    if skip_without_tmp("a_new_launch_sweeps_what_a_killed_one_left") {
+        return;
+    }
     let fixture = Fixture::new("bind", 0);
     let stale = fixture.config.state_dir.join("push/old-launch");
     fs::create_dir_all(stale.join("sock")).unwrap();
@@ -572,6 +620,11 @@ fn the_helper_log_is_new_and_never_follows_a_planted_link() {
 #[test]
 fn a_vanished_entry_is_not_stale_and_concurrent_launches_never_break_each_other() {
     let owner = accounts::effective_uid();
+    if skip_without_tmp(
+        "a_vanished_entry_is_not_stale_and_concurrent_launches_never_break_each_other",
+    ) {
+        return;
+    }
     let root = tempfile::tempdir_in("/tmp").unwrap();
     assert!(!layout::is_stale(&root.path().join("gone"), owner).unwrap());
     let push = root.path().join("push");

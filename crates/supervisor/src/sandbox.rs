@@ -874,6 +874,12 @@ test -e "$RUN/prompt.md"
 
     #[test]
     fn mount_audit_refuses_preexisting_hardlinks_special_files_and_symlinked_roots() {
+        if crate::test_support::skip_when_nested_because(
+            "mount_audit_refuses_preexisting_hardlinks_special_files_and_symlinked_roots",
+            crate::test_support::LONG_SOCKET_PATH,
+        ) {
+            return;
+        }
         let fixture = Fixture::new(Role::Implementer);
         let linked = fixture.spec.clone.join("hardlink");
         fs::hard_link(&fixture.outside, &linked).unwrap();

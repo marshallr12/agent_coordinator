@@ -166,6 +166,7 @@ fn exited_leftovers_are_told_apart_from_killed_ones() {
     let mut exited = Command::new("/bin/true").spawn().unwrap();
     wait_for_zombie(exited.id());
     let mut running = Command::new("/bin/sleep").arg("300").spawn().unwrap();
+    wait_for_name(running.id(), "sleep");
     let mut found = kill_leftovers().unwrap();
     found.sort_by(|a, b| a.name.cmp(&b.name));
     let named = |name: &str, exited| Leftover {
@@ -178,6 +179,21 @@ fn exited_leftovers_are_told_apart_from_killed_ones() {
         exited.try_wait().is_err() && running.try_wait().is_err(),
         "not reaped"
     );
+}
+
+/// Waits up to five seconds for `pid` to take command name `name`. A vfork
+/// spawn can return before the kernel renames the exec'd child, which then
+/// still carries this test thread's name.
+fn wait_for_name(pid: u32, name: &str) {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap();
+        if comm.trim_end() == name {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("{pid} never became {name}");
 }
 
 /// Waits up to five seconds for `pid` to become a zombie.

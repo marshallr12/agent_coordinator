@@ -36,11 +36,10 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
 }
 
 /// Builds the fixture, committing `content` as the candidate's `file.txt`.
+/// The short prefix (still with a space) keeps the helper socket's path under
+/// the 108-byte limit even below a supervised launch's long `$TMPDIR`.
 fn fixture(content: &str) -> Fixture {
-    let directory = tempfile::Builder::new()
-        .prefix("candidate checkpoint ")
-        .tempdir()
-        .unwrap();
+    let directory = tempfile::Builder::new().prefix("ckpt ").tempdir().unwrap();
     let remote = directory.path().join("remote.git");
     let checkout = directory.path().join("checkout");
     let (remote, path) = (
