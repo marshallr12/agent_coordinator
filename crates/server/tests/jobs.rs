@@ -484,6 +484,114 @@ async fn reservations_are_atomic_and_capacity_is_global_across_projects() {
 }
 
 #[tokio::test]
+async fn resources_can_be_updated_and_deleted_only_by_humans_and_only_when_unheld() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("resource-edit").await;
+    let (_, attempt, generation) = fixture.claimed(&fixture.a, &project, "holder").await;
+    let id = fixture.resource("device/editable", 2).await;
+    let path = format!("/api/v1/resources/{id}");
+    let key = || Uuid::new_v4().to_string();
+
+    let (status, error) = fixture
+        .call(&fixture.a, "PATCH", &path, &key(), json!({"capacity":3}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    let (status, error) = fixture
+        .call(&fixture.a, "DELETE", &path, &key(), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    let (status, error) = fixture
+        .call(&fixture.admin, "PATCH", &path, &key(), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+
+    let update = json!({"key":"device/renamed","capacity":4,"description":"changed"});
+    let idempotency = key();
+    let (status, updated) = fixture
+        .call(&fixture.admin, "PATCH", &path, &idempotency, update.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["data"]["key"], "device/renamed");
+    assert_eq!(updated["data"]["capacity"], 4);
+    assert_eq!(updated["data"]["description"], "changed");
+    let (_, replay) = fixture
+        .call(&fixture.admin, "PATCH", &path, &idempotency, update)
+        .await;
+    assert_eq!(replay["data"], updated["data"]);
+
+    let other = fixture.resource("device/other", 1).await;
+    let (status, error) = fixture
+        .call(
+            &fixture.admin,
+            "PATCH",
+            &path,
+            &key(),
+            json!({"key":"device/other"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], "resource_exists");
+
+    let (status, reserved) = fixture
+        .reserve(
+            &fixture.a,
+            &project,
+            &attempt,
+            generation,
+            json!([{"resource_id":id,"units":3}]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reserved}");
+    let (status, error) = fixture
+        .call(
+            &fixture.admin,
+            "PATCH",
+            &path,
+            &key(),
+            json!({"capacity":2}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], "resource_capacity_below_holds");
+    let (status, error) = fixture
+        .call(&fixture.admin, "DELETE", &path, &key(), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], "resource_in_use");
+
+    let (status, deleted) = fixture
+        .call(
+            &fixture.admin,
+            "DELETE",
+            &format!("/api/v1/resources/{other}"),
+            &key(),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    let (_, listed) = fixture
+        .call(&fixture.admin, "GET", "/api/v1/resources", "", json!({}))
+        .await;
+    let ids: Vec<_> = listed["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, vec![id.clone()]);
+    let (status, error) = fixture
+        .call(
+            &fixture.admin,
+            "DELETE",
+            &format!("/api/v1/resources/{other}"),
+            &key(),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+}
+
+#[tokio::test]
 async fn scoped_reporter_survives_lease_and_session_loss_but_parent_revocation_stops_it() {
     let fixture = Fixture::new().await;
     let project = fixture.project("reporter-auth").await;

@@ -216,6 +216,8 @@
     if (method === 'POST' && path.startsWith('/api/v1/admin/restore/')) return 'restore_change';
     if (method === 'POST' && /\/admin\/agents\/[^/]+\/credentials$/.test(path)) return 'rotate_credential';
     if (method === 'POST' && path === '/api/v1/resources') return 'create_resource';
+    if (method === 'PATCH' && /^\/api\/v1\/resources\/[^/]+$/.test(path)) return 'update_resource';
+    if (method === 'DELETE' && /^\/api\/v1\/resources\/[^/]+$/.test(path)) return 'delete_resource';
     if (method === 'POST' && /\/projects\/[^/]+\/reservations\/[^/]+\/resolve$/.test(path)) return 'resolve_resource';
     if (method === 'POST' && /\/projects\/[^/]+\/integrator\/reports\/[^/]+\/resolve$/.test(path)) return 'resolve_integrator_report';
     if (method === 'POST' && path === '/api/v1/projects') return 'create_project';
@@ -451,6 +453,8 @@
     if (operation === 'shared_change') return async (data) => { state.projectId = context.projectId || state.projectId; showView('shared'); if (context.preview) showImportPreview(data, state.projectId); else { await loadShared(); setGlobalAlert('Shared record saved.', 'success'); } };
     if (operation === 'workflow_change') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; if (state.selectedTaskId) { showView('task-detail'); await loadTaskDetail(); } else await loadTasks(); setGlobalAlert('Workflow update recorded. Inspect the current candidate and next actions.', 'success'); };
     if (operation === 'create_resource') return async () => { await loadResources(); setGlobalAlert('Resource created.', 'success'); };
+    if (operation === 'update_resource') return async () => { await loadResources(); setGlobalAlert('Resource updated.', 'success'); };
+    if (operation === 'delete_resource') return async () => { await loadResources(); setGlobalAlert('Resource deleted.', 'success'); };
     if (operation === 'resolve_resource') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; showView('task-detail'); await loadTaskDetail(); setGlobalAlert('Resolution recorded. Review the updated job and hold evidence.', 'success'); };
     if (operation === 'resolve_integrator_report') return async () => { state.projectId = context.projectId || state.projectId; openReports(); setGlobalAlert('Report resolution recorded. Review the current reports.', 'success'); };
     if (operation === 'create_project') return async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); };
@@ -1373,17 +1377,42 @@
       state.resources = append ? [...new Map([...state.resources, ...items].map(item => [item.id, item])).values()] : items;
       state.resourceCursor = page.next_cursor || null; state.resourcesLoaded = true;
       reconcile($('resources-list'), state.resources.map(resource => ({ key: resource.id, sig: sig(resource), build: () => {
-        const card = el('article', 'card'); add(card, el('h2', '', resource.key));
-        add(card, el('p', 'muted', resource.description || 'No description'));
-        add(card, el('p', '', `${resource.held_units ?? 0} held / ${resource.capacity} capacity units`));
-        add(card, el('code', 'binding-snippet', resource.id));
-        return card;
+        const row = el('tr');
+        add(add(row, el('td')), el('code', '', resource.key));
+        add(row, el('td', '', resource.description || 'No description'));
+        add(row, el('td', '', text(resource.capacity)));
+        add(row, el('td', '', text(resource.held_units ?? 0)));
+        add(add(row, el('td')), el('code', '', resource.id));
+        const actions = add(row, el('td', 'row-actions'));
+        const edit = el('button', 'button subtle', 'Edit'); edit.type = 'button'; edit.dataset.mutation = 'true'; edit.setAttribute('aria-label', `Edit resource ${resource.key}`);
+        edit.addEventListener('click', () => openResourceEditor(resource)); add(actions, edit);
+        const remove = el('button', 'button subtle', 'Delete'); remove.type = 'button'; remove.dataset.mutation = 'true'; remove.setAttribute('aria-label', `Delete resource ${resource.key}`);
+        remove.addEventListener('click', () => openResourceDeletion(resource)); add(actions, remove);
+        return row;
       } })));
       if (state.resources.length) show($('resources-state'), false);
       else setState($('resources-state'), 'No resources yet. Define a stable key before reserving shared capacity.');
       show($('load-more-resources'), Boolean(state.resourceCursor));
     } catch (error) { if (requestedActor === actorId() && !(silent && state.resourcesLoaded)) setState($('resources-state'), errorMessage(error), false, true); }
     finally { state.fetching.delete('resources'); }
+  }
+
+  function openResourceEditor(resource) {
+    const view = workflowDialog('Edit resource', 'Changing the key renames the resource for every project. Capacity cannot drop below the units currently held.');
+    const key = view.field('key', 'Resource key', resource.key, 'input'); key.maxLength = 255;
+    const capacity = view.field('capacity', 'Capacity units', resource.capacity, 'input'); capacity.type = 'number'; capacity.min = '1'; capacity.max = '1000';
+    const description = view.field('description', 'Description', resource.description || '', 'input'); description.required = false; description.maxLength = 2000;
+    view.finish('Save resource', (values, dialog) => {
+      dialog.close();
+      startMutation(`/api/v1/resources/${encodeURIComponent(resource.id)}`, {key: values.get('key').trim(), capacity: Number(values.get('capacity')), description: values.get('description').trim()}, 'resource update', restoredMutationCallbacks('update_resource'), 'PATCH');
+    });
+  }
+  function openResourceDeletion(resource) {
+    const view = workflowDialog('Delete resource', `Delete ${resource.key}? This cannot be undone. A resource that any reservation has used cannot be deleted.`);
+    view.finish('Delete resource', (_values, dialog) => {
+      dialog.close();
+      startMutation(`/api/v1/resources/${encodeURIComponent(resource.id)}`, undefined, 'resource deletion', restoredMutationCallbacks('delete_resource'), 'DELETE');
+    });
   }
 
   function renderJobEvidence(data) {
