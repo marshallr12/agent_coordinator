@@ -10,6 +10,11 @@
 # real tokens. A dummy left by a run whose EXIT trap never ran is a FAIL. The
 # suite never prints a token, and compares an existing one with the dummy only
 # when its size matches the dummy's.
+#
+# A harness (claude, codex) the host does not have, with no binary under
+# /opt/agentc/bin and no [pinned] entry, has its checks reported as SKIP.
+# A harness that is pinned but has no binary, or whose binary reports another
+# version, still FAILS.
 set -uo pipefail
 
 PREFIX=/opt/agentc
@@ -29,6 +34,9 @@ PROBE_SERVER=
 DUMMY_TOKEN=agentc-suite-dummy-token
 DUMMY_TOKENS=()
 STALE_TOKENS=()
+CONFIG=/etc/agentc/supervisor.toml
+HARNESSES=(claude codex)
+ABSENT_HARNESSES=()
 
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAILED=1; }
@@ -42,6 +50,45 @@ expect_ok_logged() {
   if "$@" >"$log" 2>&1; then pass "$d"; else fail "$d (log: $log)"; tail -n 40 "$log" | sed 's/^/    /'; fi
 }
 expect_fail() { local d=$1; shift; if "$@" >/dev/null 2>&1; then fail "$d"; else pass "$d"; fi; }
+
+# The version supervisor.toml's [pinned] table gives harness $1; empty when unpinned.
+pinned_version() {
+  [ -f "$CONFIG" ] || return 0
+  awk -v name="$1" '
+    /^[ \t]*\[/ { table = $0; sub(/^[ \t]*/, "", table); sub(/[ \t]*(#.*)?$/, "", table); next }
+    table == "[pinned]" && $0 ~ "^[ \t]*" name "[ \t]*=" { v = $0; sub(/^[^"]*"/, "", v); sub(/".*$/, "", v); print v }
+  ' "$CONFIG"
+}
+
+# Succeeds when harness $1 is absent from this host: no binary, no pin.
+harness_absent() {
+  [[ " ${ABSENT_HARNESSES[*]:-} " == *" $1 "* ]]
+}
+
+# Reports the checks of harness $1 as skipped (once per call) and fails the
+# caller's check when the harness is absent: `harness_skipped claude "what" || ...`.
+# Prints "SKIP <what> (<harness> is not installed and not pinned)".
+harness_skipped() {
+  harness_absent "$1" || return 1
+  echo "SKIP $2 ($1 is not installed and not pinned on this host)"
+}
+
+# Sorts the harnesses into present and absent (see ABSENT_HARNESSES), and
+# FAILS a harness that is pinned but missing or reports another version.
+# Silent for a harness that is present and matches its pin.
+select_harnesses() {
+  local harness pin binary reported
+  ABSENT_HARNESSES=()
+  for harness in "${HARNESSES[@]}"; do
+    pin=$(pinned_version "$harness")
+    binary=$PREFIX/bin/$harness
+    if [ ! -e "$binary" ] && [ -z "$pin" ]; then ABSENT_HARNESSES+=("$harness"); continue; fi
+    if [ ! -e "$binary" ]; then fail "$harness: pinned $pin but $binary is missing"; continue; fi
+    if [ -z "$pin" ]; then fail "$harness: $binary is installed but supervisor.toml pins no version"; continue; fi
+    reported=$(as agentc-impl "$binary" --version 2>&1)
+    [[ $reported == *"$pin"* ]] || fail "$harness: $binary does not report pinned version $pin"
+  done
+}
 
 # Runs a command as an agent account with an empty environment.
 as() {
@@ -78,14 +125,19 @@ check_profiles() {
   role=$(role_of "$user")
   local spec=(--role "$role" --clone "$base/clones/suite" --run "$base/runs/suite")
   for harness in claude codex; do
+    harness_skipped "$harness" "$user/$harness: preflight" && continue
     as "$user" "$SUP" prepare "${spec[@]}" --harness "$harness" >/dev/null 2>&1
     if [ "$role/$harness" = reviewer/codex ]; then codex_reviewer_refused "$user" "${spec[@]}"; continue; fi
     expect_ok "$user/$harness: preflight clean" as "$user" "$SUP" preflight "${spec[@]}" --harness "$harness"
   done
-  expect_ok "$user/claude: --safe-mode (no candidate CLAUDE.md or hooks)" \
-    sh -c "sudo -u $user $SUP launch ${spec[*]} --harness claude --dry-run | grep -q -- '\"--safe-mode\"'"
-  expect_ok "$user/codex: project_doc_max_bytes=0 (no candidate AGENTS.md)" \
-    sh -c "sudo -u $user $SUP launch ${spec[*]} --harness codex --dry-run | grep -q 'project_doc_max_bytes=0'"
+  if ! harness_skipped claude "$user/claude: --safe-mode"; then
+    expect_ok "$user/claude: --safe-mode (no candidate CLAUDE.md or hooks)" \
+      sh -c "sudo -u $user $SUP launch ${spec[*]} --harness claude --dry-run | grep -q -- '\"--safe-mode\"'"
+  fi
+  if ! harness_skipped codex "$user/codex: project_doc_max_bytes=0"; then
+    expect_ok "$user/codex: project_doc_max_bytes=0 (no candidate AGENTS.md)" \
+      sh -c "sudo -u $user $SUP launch ${spec[*]} --harness codex --dry-run | grep -q 'project_doc_max_bytes=0'"
+  fi
 }
 
 # A planted hook must not run, and origin must not be pushable.
@@ -116,17 +168,25 @@ check_writes() {
 # claude-config holds no login, and the role cannot take Claude's OAuth
 # refresh lock there.
 check_seeds() {
-  local user=$1 base=$STATE/${1#agentc-} path
-  for path in "$base" "$base/claude-config" /etc/agentc; do
+  local user=$1 base=$STATE/${1#agentc-} path seeds=("$base" /etc/agentc)
+  local files=(/etc/agentc/cargo-config.toml) claude=1
+  harness_skipped claude "$user: claude-config seed checks" && claude=0
+  if [ "$claude" = 1 ]; then
+    seeds=("$base" "$base/claude-config" /etc/agentc)
+    files=("$base/claude-config/settings.json" "$base/claude-config/CLAUDE.md" /etc/agentc/cargo-config.toml)
+  fi
+  for path in "${seeds[@]}"; do
     expect_fail "$user: cannot create entries in protected $path" as "$user" touch "$path/.suite-seed-write"
   done
-  for path in "$base/claude-config/settings.json" "$base/claude-config/CLAUDE.md" /etc/agentc/cargo-config.toml; do
+  for path in "${files[@]}"; do
     expect_fail "$user: protected seed is not writable: $path" as "$user" test -w "$path"
   done
-  expect_fail "$user: cannot mkdir claude-config/.oauth_refresh.lock" \
-    as "$user" mkdir "$base/claude-config/.oauth_refresh.lock"
-  expect_fail "$user: no retired claude-config/.credentials.json" \
-    test -e "$base/claude-config/.credentials.json" -o -L "$base/claude-config/.credentials.json"
+  if [ "$claude" = 1 ]; then
+    expect_fail "$user: cannot mkdir claude-config/.oauth_refresh.lock" \
+      as "$user" mkdir "$base/claude-config/.oauth_refresh.lock"
+    expect_fail "$user: no retired claude-config/.credentials.json" \
+      test -e "$base/claude-config/.credentials.json" -o -L "$base/claude-config/.credentials.json"
+  fi
   expect_ok "$user: per-launch Cargo baseline is seeded" cmp /etc/agentc/cargo-config.toml "$base/runs/suite/state/cargo/config.toml"
 }
 
@@ -874,6 +934,7 @@ check_cargo_test() {
   expect_ok_logged "impl: cargo test (uid + firewall)" /root/agentc-cargo-test.log \
     as agentc-impl sh -c "cd $clone && env $env cargo test --workspace --locked --no-fail-fast"
   local roots="sandbox_workspace_write.writable_roots=[\"$run\",\"$run/state/cargo\"]"
+  if harness_skipped codex "impl: cargo test inside codex sandbox"; then return; fi
   expect_ok_logged "impl: cargo test inside codex sandbox" /root/agentc-cargo-test-codex.log as agentc-impl sh -c \
     "cd $clone && env $env AGENTC_TEST_NESTED_SANDBOX=1 CODEX_HOME=$base/codex-home $PREFIX/bin/codex sandbox -c sandbox_mode=workspace-write -c sandbox_workspace_write.network_access=true -c '$roots' -- cargo test --workspace --locked --no-fail-fast"
   expect_ok "impl: codex leg noted its skipped real-Bubblewrap tests" \
@@ -884,7 +945,8 @@ main() {
   [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
   local cargo_test=${1:-} relay_bin stub_bin push_bin
   trap suite_cleanup EXIT
-  install_dummy_tokens
+  select_harnesses
+  harness_absent claude || install_dummy_tokens
   make_suite_bin "$SUP"; relay_bin=$SUITE_BIN
   make_suite_bin /bin/false; stub_bin=$SUITE_BIN
   make_suite_bin "$SUP"; push_bin=$SUITE_BIN
@@ -898,16 +960,22 @@ main() {
     check_writes "$1" "$2"
     check_seeds "$1"
     check_egress "$1"
-    check_codex_sandbox "$1"
-    check_claude_sandbox "$1"
-    check_claude_launch "$1" "$relay_bin"
-    check_claude_token "$1" "$2"
-    check_relay_probe "$1" "$stub_bin"
+    if ! harness_skipped codex "$1/codex: sandbox checks"; then check_codex_sandbox "$1"; fi
+    if ! harness_skipped claude "$1/claude: sandbox, launch, token and relay checks"; then
+      check_claude_sandbox "$1"
+      check_claude_launch "$1" "$relay_bin"
+      check_claude_token "$1" "$2"
+      check_relay_probe "$1" "$stub_bin"
+    fi
   done
-  check_candidate_token
-  check_reviewer_claude_nesting
-  check_push_kill "$push_bin"
-  check_push_launch "$push_bin"
+  if ! harness_skipped claude "agentc-rev/claude: candidate token and nesting checks"; then
+    check_candidate_token
+    check_reviewer_claude_nesting
+  fi
+  if ! harness_skipped claude "agentc-impl/claude: push helper kill and launch checks"; then
+    check_push_kill "$push_bin"
+    check_push_launch "$push_bin"
+  fi
   check_push_key
   check_attention_token
   check_browser
@@ -916,4 +984,5 @@ main() {
   exit "$FAILED"
 }
 
-main "$@"
+# Sourcing the script (host-setup-test.py does) defines the functions only.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

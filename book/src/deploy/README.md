@@ -767,9 +767,14 @@ that have background link to the section that explains it. All steps that
 need root are the owner's; an agent only prepares commands and reads the
 pasted output. Stop at the first step that fails.
 
-Prerequisites: the owner's pinned `claude` and `codex` at `~/.local/bin`
-(host-setup always installs both, so `codex` is required even when only Claude
-runs), Bubblewrap 0.8 or newer, and, for UI verification, `node` on `PATH` or
+Prerequisites: at least one of the owner's `claude` and `codex` at
+`~/.local/bin`. Each one found is installed, pinned and prepared for both role
+accounts; one that is absent is skipped, with one line saying so, and
+leaves no `/opt/agentc/bin` copy, no pin and no role setup (the containment
+suite reports its checks as SKIP). host-setup refuses, before changing the
+host, when neither is installed or when a role in `supervisor.toml` or
+`E2E_HARNESSES` names one that is not. Without Claude, set `[run] harness =
+"codex"`. Bubblewrap 0.8 or newer, and, for UI verification, `node` on `PATH` or
 named by `NODE=`. The installer downloads the pinned reviewer
 [headless browser](#reviewer-headless-browser) and may `apt-get` its libraries.
 
@@ -829,7 +834,9 @@ named by `NODE=`. The installer downloads the pinned reviewer
 
    Pass means rc 0 and no `FAIL`. A `NOTE` about a dummy token means step 3
    is unfinished. `SKIP` is acceptable only for a leg whose input this host
-   lacks by design; record the reason.
+   lacks by design; record the reason. A harness that is neither installed
+   nor pinned has all its checks reported as `SKIP`; one that is pinned but
+   missing, or reports another version, still `FAIL`s.
 8. **Record the evidence** outside Git. Paste the installer's and the suite's
    summaries, with the binaries' commit, into the bring-up task, then remove
    the build worktree with `git worktree remove`.
@@ -1652,7 +1659,8 @@ fails and pages. Any other agent that sends the class is refused the same way.
 it), the templates `agentc-e2e-canary@.service` and `agentc-e2e-canary@.timer`,
 and `/etc/agentc/e2e-canary.env`, written once and never overwritten. One timer
 instance runs per harness in `E2E_HARNESSES` (space separated, default
-`claude`; known: `claude`, `codex`): `agentc-e2e-canary@claude.timer` starts
+`claude`, or the installed one on a host without Claude; known: `claude`,
+`codex`; each must be installed): `agentc-e2e-canary@claude.timer` starts
 `agentc-e2e-canary@claude.service` at `OnCalendar=daily` (`Persistent=true`).
 All instances take one lock, `/var/lib/agentc/e2e-canary.lock`, so harnesses
 run in turn. The service runs as root under `NoNewPrivileges`,
@@ -1780,7 +1788,8 @@ asset the updater reports `no-release` and leaves the host unchanged.
 
 If the release carries `harness.json` and a harness differs from the one in
 `/opt/agentc/bin`, a second, staged step follows a promoted core: while drained,
-the new `claude`/`codex` is copied beside the live one and must report its
+the new `claude`/`codex` (a harness the host does not have is never staged or
+pinned) is copied beside the live one and must report its
 declared version as `agentc-impl`; it is then renamed into place and the `[pinned]`
 entries in `/etc/agentc/supervisor.toml` are rewritten (nothing else in the file
 changes). The harness is promoted only when **preflight, the end-to-end canary and

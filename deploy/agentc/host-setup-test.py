@@ -8,6 +8,7 @@ functions and does nothing else) and checks the unit files it would write, the
 environment file and the --uninstall list.
 """
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -888,6 +889,277 @@ class QuietHours(unittest.TestCase):
     def test_install_refuses_a_bad_window_before_writing_anything(self):
         self.assertNotEqual(self.install("25:00-07:00").returncode, 0)
         self.assertFalse((self.dir / "cron-quiet").exists())
+
+
+CONTAINMENT = HERE / "containment-suite.sh"
+HARNESS_OUTPUT = {"claude": "2.1.326 (Claude Code)", "codex": "codex-cli 0.169.0"}
+HARNESS_VERSION = {"claude": "2.1.326", "codex": "0.169.0"}
+
+
+class OptionalHarness(unittest.TestCase):
+    """host-setup installs, pins and prepares each harness the owner has and skips the other,
+    for the implementer and the reviewer alike. Runs without root: `install`, `sudo`, `chown`
+    and the ownership walk are stubbed, and every path is under a temporary directory."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.home, self.prefix, self.state, self.etc = (self.dir / n for n in ("home", "opt", "var", "etc"))
+        (self.home / ".local/bin").mkdir(parents=True)
+        for path in (self.prefix / "bin", self.state, self.etc):
+            path.mkdir(parents=True)
+        for name, text in (("agentc-supervisor", "#!/bin/sh\nprintf 'seed %s\\n' \"$*\"\n"),
+                           ("agent-coordinator", "#!/bin/sh\n"), ("agentc-push", "#!/bin/sh\n")):
+            self.executable(self.dir / name, text)
+
+    def executable(self, path, text):
+        path.write_text(text)
+        path.chmod(0o755)
+
+    def install_harness(self, name):
+        self.executable(self.home / ".local/bin" / name,
+                        f"#!/bin/sh\n[ \"$1\" = --version ] && echo '{HARNESS_OUTPUT[name]}'\n")
+
+    def script(self, code):
+        return f"""set -euo pipefail; source "$1"
+OWNER=owner; OWNER_HOME={self.home}; PREFIX={self.prefix}; STATE={self.state}; ETC={self.etc}
+E2E_ENV={self.etc}/e2e-canary.env
+SUPERVISOR={self.dir}/agentc-supervisor; CLI={self.dir}/agent-coordinator; PUSH={self.dir}/agentc-push
+install() {{ local a=(); while [ $# -gt 0 ]; do case $1 in -o|-g) shift 2;; *) a+=("$1"); shift;; esac; done; command install "${{a[@]}}"; }}
+sudo() {{ shift 2; "$@"; }}
+protected_chain() {{ :; }}
+chown() {{ :; }}
+id() {{ command id -u; }}
+bubblewrap_setting() {{ :; }}
+detect_browser() {{ echo /usr/bin/chromium; }}
+{code}"""
+
+    def sh(self, code):
+        return subprocess.run(["bash", "-c", self.script(code), "bash", str(SCRIPT)],
+                              capture_output=True, text=True, env={"PATH": os.environ["PATH"]})
+
+    def setup_host(self, *, check=True):
+        result = self.sh("select_harnesses; create_dirs; install_binaries; install_seeds; write_config")
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def pins(self):
+        text = (self.etc / "supervisor.toml").read_text()
+        return text.split("[pinned]\n")[1].split("\n\n")[0].splitlines()
+
+    def role_dir(self, role, child):
+        return self.state / role / child
+
+    def only(self, present):
+        absent = "codex" if present == "claude" else "claude"
+        self.install_harness(present)
+        result = self.setup_host()
+        for line in (result.stdout + result.stderr).splitlines():
+            self.assertFalse(line.startswith("refusing"), line)
+        skipped = [line for line in result.stdout.splitlines() if "skipping harness" in line]
+        self.assertEqual(len(skipped), 1, result.stdout)
+        self.assertIn(absent, skipped[0])
+        self.assertNotIn(present, skipped[0])
+        self.assertEqual((self.prefix / f"bin/{present}").read_text(), (self.home / f".local/bin/{present}").read_text())
+        self.assertFalse((self.prefix / f"bin/{absent}").exists())
+        self.assertEqual([line for line in self.pins() if not line.startswith("#")],
+                         [f'{present} = "{HARNESS_VERSION[present]}"'])
+        self.assertNotIn(f"{absent} =", "\n".join(self.pins()))
+        return absent
+
+    def test_only_claude_is_installed_pinned_and_prepared_for_both_roles(self):
+        self.only("claude")
+        for role in ("impl", "rev"):
+            self.assertTrue((self.role_dir(role, "claude-config") / "settings.json").is_file(), role)
+            self.assertTrue((self.role_dir(role, "claude-config") / "CLAUDE.md").is_file(), role)
+            self.assertTrue(self.role_dir(role, "home").is_dir())
+            self.assertFalse(self.role_dir(role, "codex-home").exists(), role)
+        # The reviewer's seed is generated for the reviewer role, the implementer's for its own.
+        self.assertIn("settings --role reviewer", (self.role_dir("rev", "claude-config") / "settings.json").read_text())
+        self.assertIn("settings --role implementer", (self.role_dir("impl", "claude-config") / "settings.json").read_text())
+
+    def test_only_codex_is_installed_pinned_and_prepared_for_both_roles(self):
+        self.only("codex")
+        for role in ("impl", "rev"):
+            self.assertTrue(self.role_dir(role, "codex-home").is_dir(), role)
+            self.assertTrue(self.role_dir(role, "home").is_dir())
+            self.assertFalse(self.role_dir(role, "claude-config").exists(), role)
+        self.assertTrue((self.etc / "cargo-config.toml").is_file())
+
+    def test_a_stale_copy_of_a_skipped_harness_is_removed_and_its_pin_dropped(self):
+        for name in ("claude", "codex"):
+            self.install_harness(name)
+        self.setup_host()
+        self.assertEqual(len([line for line in self.pins() if not line.startswith("#")]), 2)
+        (self.home / ".local/bin/codex").unlink()
+        self.setup_host()
+        self.assertFalse((self.prefix / "bin/codex").exists())
+        self.assertEqual([line for line in self.pins() if not line.startswith("#")], ['claude = "2.1.326"'])
+
+    def test_with_both_installed_nothing_is_skipped_and_both_are_pinned(self):
+        for name in ("claude", "codex"):
+            self.install_harness(name)
+        result = self.setup_host()
+        self.assertNotIn("skipping", result.stdout + result.stderr)
+        self.assertEqual(self.pins(), ['claude = "2.1.326"', 'codex = "0.169.0"'])
+        for role in ("impl", "rev"):
+            self.assertTrue(self.role_dir(role, "codex-home").is_dir())
+            self.assertTrue((self.role_dir(role, "claude-config") / "settings.json").is_file())
+
+    def refused(self, code, *, installed, message):
+        for name in installed:
+            self.install_harness(name)
+        result = self.sh(f"""changed() {{ echo "CHANGED $1"; }}
+          for step in require_bubblewrap create_users create_dirs install_binaries install_seeds write_config; do
+            eval "$step() {{ changed $step; }}"
+          done
+          require_root() {{ :; }}
+          main""")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refusing", result.stderr)
+        self.assertIn(message, result.stderr)
+        # Nothing on the host changed before the refusal.
+        self.assertNotIn("CHANGED", result.stdout)
+        self.assertEqual(list(self.prefix.joinpath("bin").iterdir()), [])
+
+    def test_neither_harness_installed_is_refused_before_anything_changes(self):
+        self.refused("", installed=[], message="no agent harness is installed")
+
+    def test_a_role_naming_a_missing_harness_is_refused_before_anything_changes(self):
+        (self.etc / "supervisor.toml").write_text('[pinned]\nclaude = "1"\n\n# KEEP\n[run]\nharness = "codex"  # primary\n')
+        self.install_harness("claude")
+        self.refused("", installed=["claude"], message="names harness codex, which is not installed")
+        (self.etc / "supervisor.toml").write_text('[health.fallback]\nharness = "claude"\n')
+        shutil.rmtree(self.home / ".local")
+        (self.home / ".local/bin").mkdir(parents=True)
+        self.refused("", installed=["codex"], message="names harness claude, which is not installed")
+
+    def test_e2e_harnesses_naming_a_missing_harness_is_refused_before_anything_changes(self):
+        (self.etc / "e2e-canary.env").write_text("E2E_PROJECT=p\nE2E_HARNESSES=claude, codex\n")
+        self.refused("", installed=["claude"], message="E2E_HARNESSES")
+
+    def test_commented_and_other_harness_settings_do_not_count_as_naming_a_harness(self):
+        (self.etc / "supervisor.toml").write_text('# harness = "codex"\n[run]\nharness = "claude"\n')
+        self.install_harness("claude")
+        result = self.setup_host()
+        self.assertEqual(result.returncode, 0)
+
+    def test_the_canary_defaults_to_the_installed_harness(self):
+        self.install_harness("codex")
+        out = self.sh("select_harnesses >/dev/null; e2e_harnesses; e2e_env_file | grep '^# E2E_HARNESSES='")
+        self.assertEqual(out.stdout.splitlines(), ["codex", "# E2E_HARNESSES=codex"], out.stderr)
+        self.install_harness("claude")
+        out = self.sh("select_harnesses >/dev/null; e2e_harnesses")
+        self.assertEqual(out.stdout.split(), ["claude"])
+
+    def test_next_steps_name_only_the_installed_harness(self):
+        self.install_harness("claude")
+        out = self.sh("select_harnesses >/dev/null; harness_steps; push_steps").stdout
+        self.assertIn("claude setup-token", out)
+        self.assertNotIn("codex login", out)
+        self.assertIn("--harness claude", out)
+        self.install_harness("codex")
+        (self.home / ".local/bin/claude").unlink()
+        out = self.sh("select_harnesses >/dev/null; harness_steps; push_steps").stdout
+        self.assertIn("codex login", out)
+        self.assertNotIn("setup-token", out)
+        self.assertIn('[run] harness = "codex"', out)
+        self.assertIn("--harness codex", out)
+
+
+class OptionalHarnessInTheSuite(unittest.TestCase):
+    """containment-suite.sh skips the checks of a harness that is neither installed nor pinned,
+    and fails one that is pinned but missing or reports another version."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        (self.dir / "bin").mkdir()
+
+    def suite(self, code, pins=(), installed=()):
+        config = self.dir / "supervisor.toml"
+        config.write_text("[pinned]\n" + "".join(f'{n} = "{v}"\n' for n, v in pins)
+                          + "\n[push_helper]\nclaude = \"not-a-pin\"\n")
+        for name, version in installed:
+            path = self.dir / "bin" / name
+            path.write_text(f"#!/bin/sh\necho 'tool {version}'\n")
+            path.chmod(0o755)
+        script = f"""set -uo pipefail; source "$1"
+PREFIX={self.dir}; CONFIG={config}
+as() {{ shift; "$@"; }}
+{code}"""
+        return subprocess.run(["bash", "-c", script, "bash", str(CONTAINMENT)], capture_output=True, text=True)
+
+    def test_an_unpinned_missing_harness_is_skipped_for_both_roles(self):
+        out = self.suite("""select_harnesses; echo "absent=${ABSENT_HARNESSES[*]}"
+          for user in agentc-impl agentc-rev; do
+            harness_skipped codex "$user/codex: sandbox checks" && echo "skipped $user"
+            harness_skipped claude "$user/claude: sandbox checks" || echo "run $user"
+          done""", pins=[("claude", "2.1.326")], installed=[("claude", "2.1.326")])
+        self.assertEqual(out.returncode, 0, out.stderr)
+        lines = out.stdout.splitlines()
+        self.assertEqual([line for line in lines if line.startswith("FAIL")], [])
+        self.assertIn("absent=codex", lines)
+        for user in ("agentc-impl", "agentc-rev"):
+            self.assertIn(f"SKIP {user}/codex: sandbox checks (codex is not installed and not pinned on this host)", lines)
+            self.assertIn(f"run {user}", lines)
+
+    def test_the_swapped_host_skips_claude(self):
+        out = self.suite("select_harnesses; echo \"absent=${ABSENT_HARNESSES[*]}\"; harness_skipped claude 'x'",
+                         pins=[("codex", "0.169.0")], installed=[("codex", "0.169.0")])
+        self.assertIn("absent=claude", out.stdout)
+        self.assertIn("SKIP x (claude is not installed and not pinned on this host)", out.stdout)
+        self.assertNotIn("FAIL", out.stdout)
+
+    def test_the_profile_checks_skip_the_absent_harness_for_the_reviewer_too(self):
+        out = self.suite("""select_harnesses
+          expect_ok() { echo "RAN $1"; }
+          role_of() { echo reviewer; }
+          codex_reviewer_refused() { echo "RAN refusal"; }
+          check_profiles agentc-rev""", pins=[("claude", "2.1.326")], installed=[("claude", "2.1.326")])
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("SKIP agentc-rev/codex: preflight (codex is not installed and not pinned on this host)", out.stdout)
+        self.assertIn("SKIP agentc-rev/codex: project_doc_max_bytes=0", out.stdout)
+        self.assertIn("RAN agentc-rev/claude: preflight clean", out.stdout)
+        self.assertIn("RAN agentc-rev/claude: --safe-mode", out.stdout)
+        self.assertNotIn("RAN refusal", out.stdout)
+
+    def test_a_pinned_harness_with_no_binary_fails(self):
+        out = self.suite("select_harnesses; echo \"absent=${ABSENT_HARNESSES[*]}\"",
+                         pins=[("claude", "2.1.326"), ("codex", "0.169.0")], installed=[("claude", "2.1.326")])
+        self.assertIn("FAIL codex: pinned 0.169.0 but", out.stdout)
+        self.assertIn("absent=\n", out.stdout)
+
+    def test_a_harness_reporting_another_version_fails(self):
+        out = self.suite("select_harnesses", pins=[("claude", "2.1.326")], installed=[("claude", "2.1.999")])
+        self.assertIn("FAIL claude:", out.stdout)
+        self.assertIn("does not report pinned version 2.1.326", out.stdout)
+
+    def test_an_installed_unpinned_binary_fails_and_a_matching_one_is_silent(self):
+        out = self.suite("select_harnesses", installed=[("codex", "0.169.0")])
+        self.assertIn("FAIL codex:", out.stdout)
+        ok = self.suite("select_harnesses", pins=[("claude", "2.1.326"), ("codex", "0.169.0")],
+                        installed=[("claude", "2.1.326"), ("codex", "0.169.0")])
+        self.assertEqual(ok.stdout, "")
+        self.assertEqual(ok.returncode, 0)
+
+    def test_the_pin_is_read_only_from_the_pinned_table(self):
+        out = self.suite("pinned_version claude; pinned_version codex", pins=[("codex", "0.169.0")])
+        self.assertEqual(out.stdout.split(), ["0.169.0"])
+
+    def test_every_harness_specific_check_is_gated_in_main(self):
+        main = subprocess.run(["bash", "-c", 'source "$1"; declare -f main', "bash", str(CONTAINMENT)],
+                              capture_output=True, text=True).stdout
+        for gated in ("check_codex_sandbox", "check_claude_sandbox", "check_claude_launch", "check_claude_token",
+                      "check_relay_probe", "check_candidate_token", "check_reviewer_claude_nesting",
+                      "check_push_kill", "check_push_launch", "install_dummy_tokens"):
+            lines = main.splitlines()
+            at = next(i for i, line in enumerate(lines) if gated in line)
+            self.assertTrue(any("harness_skipped" in line or "harness_absent" in line for line in lines[max(0, at - 4):at + 1]),
+                            gated)
 
 
 if __name__ == "__main__":

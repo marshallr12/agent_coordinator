@@ -5,6 +5,11 @@
 #     deploy/agentc/host-setup.sh
 #   sudo deploy/agentc/host-setup.sh --uninstall
 #
+# A harness (claude, codex) is optional: each one whose binary the owner has under
+# ~/.local/bin is installed, pinned and prepared for both role accounts; one the
+# owner has not installed is skipped (one line says so). At least one is required,
+# and a harness named by a role in supervisor.toml or by E2E_HARNESSES must be installed.
+#
 # Creates the agentc-impl / agentc-rev / agentc-egress / agentc-push accounts,
 # root-owned pinned binaries, Rust toolchain and reviewer headless browser
 # under /opt/agentc (apt adds the browser's missing libraries), private
@@ -94,6 +99,10 @@ E2E_TOKEN=${E2E_TOKEN:-$ETC/e2e-canary-token}
 E2E_CALENDAR=${E2E_CALENDAR:-daily}
 E2E_KNOWN_HARNESSES=(claude codex)
 E2E_DEFAULT_HARNESSES=claude
+# The harnesses the owner has installed (set by select_harnesses) and the
+# ones skipped; the order is the preference order.
+INSTALLED_HARNESSES=()
+SKIPPED_HARNESSES=()
 # The host updater (agentc-update.py): the script, an environment file written
 # once, and a timer. It runs as root, takes the canary lock, and is enabled
 # only where the end-to-end canary is (UPDATE_TIMER=0 never enables it).
@@ -122,6 +131,62 @@ require_root() {
   [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
   OWNER=${SUDO_USER:?run with sudo from the owner account}
   OWNER_HOME=$(getent passwd "$OWNER" | cut -d: -f6)
+}
+
+# Succeeds when harness $1 is one the owner has installed (see select_harnesses).
+harness_installed() {
+  [[ " ${INSTALLED_HARNESSES[*]:-} " == *" $1 "* ]]
+}
+
+# The owner's executable for harness $1, resolved; fails when there is none.
+owner_harness_binary() {
+  local resolved
+  resolved=$(readlink -f -- "$OWNER_HOME/.local/bin/$1" 2>/dev/null) || return 1
+  [ -f "$resolved" ] && [ -x "$resolved" ] || return 1
+  echo "$resolved"
+}
+
+# Every active `harness = "<name>"` setting of an existing supervisor.toml
+# (a role's harness, the fallback, a shadow profile), one name per line.
+configured_harnesses() {
+  [ -f "$ETC/supervisor.toml" ] || return 0
+  awk '/^[ \t]*harness[ \t]*=[ \t]*"/ { v = $0; sub(/^[^"]*"/, "", v); sub(/".*$/, "", v); print v }' "$ETC/supervisor.toml"
+}
+
+# Decides which harnesses this host gets, before anything changes: those whose
+# binary the owner has. Refuses (exit 1) when there is none, or when a role in
+# supervisor.toml or E2E_HARNESSES names one that is missing. Prints one line
+# for each harness it skips.
+select_harnesses() {
+  local harness name missing=()
+  INSTALLED_HARNESSES=(); SKIPPED_HARNESSES=()
+  for harness in "${E2E_KNOWN_HARNESSES[@]}"; do
+    if owner_harness_binary "$harness" >/dev/null; then
+      INSTALLED_HARNESSES+=("$harness")
+    else
+      SKIPPED_HARNESSES+=("$harness")
+    fi
+  done
+  if [ "${#INSTALLED_HARNESSES[@]}" -eq 0 ]; then
+    echo "refusing: no agent harness is installed for $OWNER; install claude or codex in $OWNER_HOME/.local/bin (at least one is required)" >&2
+    exit 1
+  fi
+  for harness in ${SKIPPED_HARNESSES[@]+"${SKIPPED_HARNESSES[@]}"}; do
+    missing+=("$harness")
+  done
+  while IFS= read -r name; do
+    case " ${missing[*]:-} " in
+      *" $name "*) echo "refusing: $ETC/supervisor.toml names harness $name, which is not installed for $OWNER ($OWNER_HOME/.local/bin/$name)" >&2; exit 1 ;;
+    esac
+  done < <(configured_harnesses)
+  while IFS= read -r name; do
+    case " ${missing[*]:-} " in
+      *" $name "*) echo "refusing: E2E_HARNESSES in $E2E_ENV names harness $name, which is not installed for $OWNER ($OWNER_HOME/.local/bin/$name)" >&2; exit 1 ;;
+    esac
+  done < <(e2e_requested_harnesses)
+  for harness in ${SKIPPED_HARNESSES[@]+"${SKIPPED_HARNESSES[@]}"}; do
+    echo "skipping harness $harness: $OWNER_HOME/.local/bin/$harness is not installed for $OWNER (no $PREFIX/bin/$harness, no pin, no role setup)"
+  done
 }
 
 # Creates the system accounts; agents get no login shell.
@@ -228,6 +293,7 @@ create_dirs() {
     install -d -o root -g "$user" -m 0750 "$role"
     protected_chain "$role"
     for child in home codex-home coordinator clones runs verification downloads; do
+      [ "$child" != codex-home ] || harness_installed codex || continue
       path=$role/$child
       refuse_symlink "$path"
       if [ -e "$path" ]; then
@@ -237,8 +303,10 @@ create_dirs() {
       fi
       install -d -o "$user" -g "$user" -m 0700 "$path"
     done
-    seal_claude_config "$user" "$role/claude-config"
-    secure_claude_token "$user" "$role/claude-token"
+    if harness_installed claude; then
+      seal_claude_config "$user" "$role/claude-config"
+      secure_claude_token "$user" "$role/claude-token"
+    fi
   done
 }
 
@@ -322,6 +390,7 @@ install_seeds() {
   for user in "${AGENTS[@]}"; do
     role=${user#agentc-}
     [ "$role" = impl ] && name=implementer || name=reviewer
+    harness_installed claude || continue
     path=$STATE/$role/claude-config
     protected_chain "$path"
     temp=$(mktemp "$path/.seed.XXXXXXXX")
@@ -351,8 +420,15 @@ install_binaries() {
   install -o root -g root -m 0755 "$SUPERVISOR" "$PREFIX/bin/agentc-supervisor"
   install -o root -g root -m 0755 "$CLI" "$PREFIX/bin/agent-coordinator"
   install -o root -g root -m 0755 "$push" "$PREFIX/bin/agentc-push"
-  install -o root -g root -m 0755 "$(readlink -f "$OWNER_HOME/.local/bin/claude")" "$PREFIX/bin/claude"
-  install -o root -g root -m 0755 "$(readlink -f "$OWNER_HOME/.local/bin/codex")" "$PREFIX/bin/codex"
+  local harness binary
+  for harness in "${E2E_KNOWN_HARNESSES[@]}"; do
+    if harness_installed "$harness"; then
+      binary=$(owner_harness_binary "$harness")
+      install -o root -g root -m 0755 "$binary" "$PREFIX/bin/$harness"
+    else
+      rm -f -- "$PREFIX/bin/$harness"
+    fi
+  done
   install_node
 }
 
@@ -677,14 +753,30 @@ refresh_canary_mirror() {
     git config --system --add safe.directory "$STATE/mirror-canary.git"
 }
 
+# The [pinned] entries: each installed harness's version, read as the
+# implementer account, and a comment for each skipped one (no pin is set).
+pinned_lines() {
+  local harness version
+  local as_agent=(sudo -u agentc-impl env -i HOME="$STATE/impl/home")
+  for harness in "${E2E_KNOWN_HARNESSES[@]}"; do
+    if harness_installed "$harness"; then
+      case $harness in
+        claude) version=$("${as_agent[@]}" "$PREFIX/bin/claude" --version | awk '{print $1}') ;;
+        codex) version=$("${as_agent[@]}" "$PREFIX/bin/codex" --version | awk '{print $NF}') ;;
+      esac
+      echo "$harness = \"$version\""
+    else
+      echo "# $harness is not installed for the owner: no pin"
+    fi
+  done
+}
+
 # Writes the host config: defaults shown commented, pins and extras set.
 # Everything below the KEEP marker (the host owner's verification entries)
 # survives re-runs.
 write_config() {
-  local claude codex kept=""
-  local as_agent=(sudo -u agentc-impl env -i HOME="$STATE/impl/home")
-  claude=$("${as_agent[@]}" "$PREFIX/bin/claude" --version | awk '{print $1}')
-  codex=$("${as_agent[@]}" "$PREFIX/bin/codex" --version | awk '{print $NF}')
+  local kept="" pins
+  pins=$(pinned_lines)
   [ -f "$ETC/supervisor.toml" ] && kept=$(sed -n "/^$KEEP\$/,\$p" "$ETC/supervisor.toml" | tail -n +2)
   cat > "$ETC/supervisor.toml" <<EOF
 # agentc-supervisor host configuration. Every entry has an in-code default;
@@ -704,8 +796,7 @@ egress_allow_extra = ["$EXTRA_EGRESS"]
 # egress_probe_blocked_host = "blocked.invalid"
 
 [pinned]
-claude = "$claude"
-codex = "$codex"
+$pins
 
 # The candidate-push helper launch-root runs beside implementer launches.
 [push_helper]
@@ -732,7 +823,7 @@ EOF
 # $STATE/heartbeat.json.
 # [run]
 # poll_seconds = 60
-# harness = "claude"             # or "codex"
+# harness = "claude"             # or "codex"; must be installed (Claude is the default)
 # model = "default"
 # effort = "high"
 # min_free_mib = 20480           # refuse to claim below this much free disk
@@ -1131,11 +1222,12 @@ e2e_env_file() {
 
 # Owner-supplied: the canary project (printed by canary-setup.py), where
 # failures page, and the harnesses to canary (space separated; default
-# $E2E_DEFAULT_HARNESSES). Re-run host-setup.sh after changing them.
+# $E2E_DEFAULT_HARNESSES, or the installed one when claude is not installed;
+# each must be installed). Re-run host-setup.sh after changing them.
 E2E_PROJECT=
 E2E_NTFY_TOPIC=
 # NTFY_TOKEN=                  # only for a protected ntfy topic
-# E2E_HARNESSES=$E2E_DEFAULT_HARNESSES
+# E2E_HARNESSES=$(e2e_default_harness)
 
 # E2E_URL=https://agents.sithbit.com
 # E2E_TOKEN_FILE=$E2E_TOKEN
@@ -1151,13 +1243,31 @@ E2E_NTFY_TOPIC=
 EOF
 }
 
+# The harnesses E2E_HARNESSES names in the environment file (commas or
+# spaces), one per line, unvalidated; none when it is unset or empty.
+e2e_requested_harnesses() {
+  local line=""
+  [ ! -f "$E2E_ENV" ] || line=$(sed -n 's/^E2E_HARNESSES=//p' "$E2E_ENV" | tail -n 1)
+  line=${line//,/ }
+  [ -z "${line// /}" ] || printf '%s\n' $line
+}
+
+# The harness canaried when E2E_HARNESSES names none: $E2E_DEFAULT_HARNESSES,
+# or the installed one on a host without it.
+e2e_default_harness() {
+  if [ "${#INSTALLED_HARNESSES[@]}" -eq 0 ] || harness_installed "$E2E_DEFAULT_HARNESSES"; then
+    echo "$E2E_DEFAULT_HARNESSES"
+  else
+    echo "${INSTALLED_HARNESSES[0]}"
+  fi
+}
+
 # The harnesses named by E2E_HARNESSES in the environment file (commas or
 # spaces), else the default, one per line; only known harnesses are listed.
 e2e_harnesses() {
-  local line="" harness
-  [ ! -f "$E2E_ENV" ] || line=$(sed -n 's/^E2E_HARNESSES=//p' "$E2E_ENV" | tail -n 1)
-  line=${line//,/ }
-  [ -n "${line// /}" ] || line=$E2E_DEFAULT_HARNESSES
+  local line harness
+  line=$(e2e_requested_harnesses | tr '\n' ' ')
+  [ -n "${line// /}" ] || line=$(e2e_default_harness)
   for harness in $line; do
     case " ${E2E_KNOWN_HARNESSES[*]} " in
       *" $harness "*) echo "$harness" ;;
@@ -1303,7 +1413,7 @@ update_env_file() {
 # UPDATE_SETTLE_SECONDS=10          # how long the loop must look idle before it is stopped
 # UPDATE_POLL_SECONDS=15
 # UPDATE_KEEP=3                     # release directories kept besides those a rollback needs
-# UPDATE_HARNESS=1                  # 0: never stage the release's claude/codex binaries
+# UPDATE_HARNESS=1                  # 0: never stage the release's claude/codex binaries (one this host lacks is never staged)
 # UPDATE_NTFY_TOPIC=                # default: E2E_NTFY_TOPIC; pages a rejected release or failed rollback
 # UPDATE_NTFY_URL=https://ntfy.sh
 # UPDATE_MIRROR_BRANCH=main         # mirror branch the preflight clone starts from
@@ -1896,10 +2006,11 @@ keep_push_key() {
   fi
 }
 
-# Prints the manual steps that remain (reserved bootstrap).
-next_steps() {
-  cat <<EOF
-Host seeds installed. Manual steps (reserved bootstrap, once per role):
+# Prints the sign-in steps of each installed harness, and the setting a host
+# without Claude needs (the run loop's default harness is Claude).
+harness_steps() {
+  if harness_installed claude; then
+    cat <<EOF
   Claude: as the owner, run $PREFIX/bin/claude setup-token, so each role has
   its own revocable token, then install it (paste the token, then press
   Ctrl-D twice without Enter, so no newline is stored):
@@ -1908,10 +2019,26 @@ Host seeds installed. Manual steps (reserved bootstrap, once per role):
   inference-only: renew it before it expires and revoke it at claude.ai if it
   is ever exposed. Agent accounts never use claude auth login: its refresh
   needs a writable claude-config, which stays root-owned.
+EOF
+  fi
+  if harness_installed codex; then
+    cat <<EOF
   Codex:
   sudo -u agentc-impl -H env HOME=$STATE/impl/home CODEX_HOME=$STATE/impl/codex-home \\
     HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT $PREFIX/bin/codex login
   (repeat for agentc-rev with rev/ paths)
+EOF
+  fi
+  if ! harness_installed claude; then
+    echo "  Without Claude, set [run] harness = \"codex\" below the KEEP line in $ETC/supervisor.toml."
+  fi
+}
+
+# Prints the manual steps that remain (reserved bootstrap).
+next_steps() {
+  cat <<EOF
+Host seeds installed. Manual steps (reserved bootstrap, once per role):
+$(harness_steps)
 Coordinator credentials: issue class=supervised (impl: write, rev: read) in the
 dashboard and save each credentials.toml as $STATE/<role>/coordinator/credentials.toml (0600).
 For run-loop reviews, issue a separate write principal (it never implements) and
@@ -1956,7 +2083,7 @@ Push helper configuration: $ETC/push.toml (written only when absent).
 Unattended claiming is installed but not enabled; opt in with
 $(run_opt_in)
 Run implementer launches as root through launch-root, which starts the helper:
-  sudo $PREFIX/bin/agentc-supervisor launch-root --role implementer --harness claude \\
+  sudo $PREFIX/bin/agentc-supervisor launch-root --role implementer --harness ${INSTALLED_HARNESSES[0]} \\
     --clone <clone> --run <run> --task <task-id>
 EOF
 }
@@ -1964,6 +2091,7 @@ EOF
 main() {
   require_root
   if [ "${1:-}" = "--uninstall" ]; then uninstall; return; fi
+  select_harnesses
   require_bubblewrap
   create_users
   create_dirs

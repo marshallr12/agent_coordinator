@@ -7,7 +7,8 @@ The maintained deployment guide is in the [Agent Coordinator book source](../boo
 `agentc/host-setup.sh` prepares a Linux host for unattended, supervised agent
 launches: the `agentc-impl` and `agentc-rev` accounts (plus `agentc-egress` for
 the proxy and `agentc-push` for the candidate-push helper), root-owned pinned
-`claude`, `codex`, `agent-coordinator`, `agentc-supervisor` and `agentc-push`
+`claude` and `codex` (each only when the owner has it installed; at least one is
+required), `agent-coordinator`, `agentc-supervisor` and `agentc-push`
 binaries and a Rust toolchain under `/opt/agentc`, private
 0700 per-role state under `/var/lib/agentc`, a read-only Git mirror, the
 `agentc-egress` allowlist proxy and an nftables table that filters only the
