@@ -13,6 +13,9 @@
 # projects = []
 # state_dir = "/var/lib/agentc/integrator"
 # poll_seconds = 30
+# Seconds a result whose push the remote refused waits before the next push
+# while the target tip is unchanged; doubles per refusal up to an hour.
+# refused_push_wait_seconds = 120
 # result_branch_prefix = "ac/results/"
 # "github" (Actions check runs + rules API) or "fake" (local JSON file; with
 # no file nothing publishes). Production sets "github" and the [github] App.

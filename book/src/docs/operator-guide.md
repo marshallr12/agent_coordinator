@@ -303,6 +303,12 @@ result failed. A forged, tampered or stale record (a changed roster, a resolved
 report, another tip) is refused with `checks_not_passed`, and
 `details.exemption_refused` names why.
 
+An exemption does not bypass the hosting rules: if the target's ruleset requires the
+check on the pushed commit, the push is refused, the refusal reason is logged and the
+subject backs off. See *Refused pushes, and exempt subjects under a hosting rule that
+requires the check* in the workflow specification for the behaviour and the exact
+ruleset change that lets such a subject land.
+
 The task view (`workflow.integration_exemptions`, with the open `target_fix_task`;
 `integration_blocked.fix_task`) and the digest (`exempted_landings`) show that a
 subject landed under an exemption and that the target has an open fix task.

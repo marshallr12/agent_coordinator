@@ -105,6 +105,60 @@ unchanged. The integrator feeds the queued and running state through
 `POST …/integrator/check-progress`; completed runs and publication come from
 receipts and push authority as before.
 
+### Refused pushes, and exempt subjects under a hosting rule that requires the check
+
+The integrator publishes by a fast-forward push of R to the target, and the
+hosting service has the last word. A push the remote refuses leaves the target
+unchanged; the integrator then observes it (disposition `not_published`) and
+ends its authority. The refusal is never silent and never a tight loop:
+
+- **Reason.** The integrator reads the push's own output (`git push
+  --porcelain`: the `remote:` messages, the `!` ref status, `error:` and
+  `fatal:` lines) and keeps a single line of at most 400 characters:
+  `git push exited with status N: <lines joined by " | ">`. URLs, anything
+  with userinfo, token shapes (`ghp_`, `ghs_`, `github_pat_`, …), the word after
+  `Authorization`, `Bearer`, `token`, `password` or `secret`, and any other
+  opaque string of 32 or more characters (full object ids excepted) are
+  replaced before it is stored. The line is written to the journal as
+  `push of R refused (attempt N): <reason>`, is the `detail` of that cycle's
+  JSON log line, and is sent in the observation's `evidence` after the tip:
+  `ls-remote refs/heads/main = <tip>; push refused: <reason>`.
+- **Backoff.** The integrator remembers the refusal in `state.json` under the
+  target, the result id, R and the tip T0. While all four are unchanged it does
+  not build the result again, poll its checks or ask for push authority; it
+  skips the subject (`Blocked`, which names the count, the remaining seconds and
+  the reason) and works the rest of the queue. The wait is
+  `refused_push_wait_seconds` (default 120; 0 means every cycle), doubled for each
+  further refusal and capped at one hour. A moved target gives a new T0 and a new
+  result, which is attempted at once. A landed result forgets its refusals.
+  A subject therefore costs one hold per wait, not one per cycle.
+
+An exemption records that a failing check is not the author's doing; it does
+not change what the hosting service enforces. When the target's ruleset
+requires that status check on the pushed commit, GitHub refuses to advance the
+branch to R, whose check is red, whatever the service and the integrator
+verified. The exemption is still recorded and the target's fix task still
+opens, but the subject cannot land until the check passes on R (that is, until
+the fix lands on the target and the subject is integrated on it) or the owner
+lets the integrator past that rule. The integrator reads only the *types* of
+the rules on the branch, not the checks a rule requires, so it cannot tell
+beforehand that a push will be refused; it tries the push once per wait and
+reports the refusal as above. Nothing in the integrator or the service changes
+a ruleset or the required checks.
+
+Exact change the owner must make for an exempt subject to land while the
+target's check is red (the integrator and the service do not make it):
+in the repository's ruleset for the target branch (Settings → Rules →
+Rulesets), add the integrator's GitHub App to the **bypass list** with mode
+**Always** (REST: `bypass_actors` entry `{"actor_id": <the App's id>,
+"actor_type": "Integration", "bypass_mode": "always"}`). Keep the
+`non_fast_forward` and `required_status_checks` rules in the ruleset: the
+integrator freezes pushes when either type is missing. The bypass applies to
+every push of the App, so the safeguard becomes the integrator's own gate: a
+result is pushed only when every roster check passed on R or is exempt, and the
+service verifies that again before it grants authority. Leaving the ruleset as
+it is stays safe; exempt subjects then wait for the fix.
+
 Status is derived from authoritative records, including server-time lease
 validity. The database must not rely on a periodic job to change `in_progress`
 to `recovery_required` before refusing a stale update. Transactional projections

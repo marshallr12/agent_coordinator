@@ -234,6 +234,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   No roster entry declares inputs until the owner applies the documented roster
   change, and production deployment is a separate owner-directed step.
 
+- When the hosting service refuses the integrator's push (for example a ruleset
+  that requires the status check on the pushed commit, which an exemption cannot
+  satisfy), the integrator records a bounded, credential-free reason in its
+  journal and in the observation's evidence and backs off for that target tip
+  and result instead of retrying every cycle. The cause in production was not
+  confirmed from push output; the first refusal after deployment records it. See
+  the [workflow specification](workflow-spec.md) for the behaviour and the
+  ruleset change the owner would have to make.
+
 - Supervisor hosts report launch cost rows and end-to-end canary results to the
   service per project, idempotently and attributed to the reporting principal and
   host, and the service aggregates them: cost per task and per day (implementer

@@ -35,6 +35,11 @@ pub struct Config {
     /// Mirrors, result worktrees, intents and the loop state live here.
     pub state_dir: PathBuf,
     pub poll_seconds: u64,
+    /// Seconds a result whose push the remote refused waits before it is
+    /// pushed again while the target tip and the result are unchanged; the
+    /// wait doubles with every refusal up to an hour. A new tip or a new
+    /// result is attempted at once. 0 retries on every cycle.
+    pub refused_push_wait_seconds: u64,
     /// Prefix of the branches result commits are pushed to for checks.
     pub result_branch_prefix: String,
     /// Check source. Defaults to `fake`: with no fake file there are no
@@ -72,6 +77,7 @@ impl Default for Config {
             projects: Vec::new(),
             state_dir: PathBuf::from("/var/lib/agentc/integrator"),
             poll_seconds: 30,
+            refused_push_wait_seconds: 120,
             result_branch_prefix: "ac/results/".into(),
             checks: ChecksKind::Fake,
             fake_checks_file: PathBuf::from("/var/lib/agentc/integrator/fake-checks.json"),
