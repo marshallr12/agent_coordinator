@@ -67,7 +67,10 @@ const LOW_LABEL: &str = "S:(ML;;NW;;;LW)";
 /// launch's `package` as [`CLIENT_RIGHTS`], with a low label. The candidate
 /// and the reviewer run as the runner's account, so the user part of the
 /// check passes for both. Windows then also requires the token's package to
-/// be granted, and only `package` is.
+/// be granted, and only `package` is. The list names `runner` as the pipe's
+/// owner: the shim uses a pipe only when its own account owns it, and the
+/// owner Windows would pick by default is the Administrators group when the
+/// runner's token is elevated (seen 2026-11-17).
 pub fn package_descriptor(runner: &str, package: &str) -> Result<String> {
     let (runner, package) = (checked_sid(runner)?, checked_sid(package)?);
     ensure!(
@@ -75,7 +78,7 @@ pub fn package_descriptor(runner: &str, package: &str) -> Result<String> {
         "a package cannot be the runner's account"
     );
     Ok(format!(
-        "D:P(A;;GA;;;{runner})(A;;{CLIENT_RIGHTS};;;{package}){LOW_LABEL}"
+        "O:{runner}D:P(A;;GA;;;{runner})(A;;{CLIENT_RIGHTS};;;{package}){LOW_LABEL}"
     ))
 }
 
@@ -292,7 +295,7 @@ mod tests {
         let list = package_descriptor(RUNNER, PACKAGE).unwrap();
         assert_eq!(
             list,
-            format!("D:P(A;;GA;;;{RUNNER})(A;;0x120083;;;{PACKAGE})S:(ML;;NW;;;LW)")
+            format!("O:{RUNNER}D:P(A;;GA;;;{RUNNER})(A;;0x120083;;;{PACKAGE})S:(ML;;NW;;;LW)")
         );
         assert!(package_descriptor(RUNNER, RUNNER).is_err());
         assert!(package_descriptor(RUNNER, "S-1-15-2)(A;;GA;;;WD").is_err());

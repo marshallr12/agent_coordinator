@@ -378,6 +378,11 @@ fn child_in_a_new_logon_session() {
         "time_limit" => time_limit(),
         "probe" => probe(),
         "shell_probe" => shell_probe(),
+        "shim" => shim(),
+        "fixture" => fixture(),
+        "reach" => reach(),
+        "harness_probe" => harness_probe(),
+        "harness_command" => harness_command(),
         other => panic!("no such role: {other}"),
     });
     let said = match &outcome {
@@ -420,6 +425,20 @@ impl Trees {
         }
     }
 
+    /// The candidate spec of the launch `other`, with trees of its own.
+    fn other_candidate(&self) -> CandidateSpec {
+        let system = std::env::var("SystemRoot").unwrap() + r"\System32";
+        let tools = self.at("other-candidate-tools");
+        CandidateSpec {
+            launch: self.launch("other-candidate"),
+            source: self.at("other-source"),
+            shell: tools.join("sh.exe"),
+            shim: self.at("other-tools").join("agentc-supervisor.exe"),
+            reviewer_temp: self.at("other-work").join("tmp"),
+            path: vec![tools, system.into()],
+        }
+    }
+
     /// The candidate spec: its shell is the copy in `tools`.
     fn candidate(&self) -> CandidateSpec {
         let system = std::env::var("SystemRoot").unwrap() + r"\System32";
@@ -427,6 +446,8 @@ impl Trees {
             launch: self.launch("candidate"),
             source: self.at("source"),
             shell: self.at("tools").join("sh.exe"),
+            shim: self.at("reviewer-tools").join("agentc-supervisor.exe"),
+            reviewer_temp: self.at("reviewer-work").join("tmp"),
             path: vec![self.at("tools"), system.into()],
         }
     }
@@ -551,6 +572,260 @@ fn run_grants(candidate: &candidate::Candidate, trees: &Trees) -> String {
     format!("source write refused: {}", text(&into_source).trim())
 }
 
+/// Step 5d: harness-shaped commands from a real reviewer launch through the
+/// prefix script and the shim into the candidate, the refusals that come
+/// before anything runs, a call that finds every command slot taken, and
+/// the packages the pipe's access list keeps out.
+#[test]
+fn a_harness_shaped_command_runs_through_the_shim_and_others_are_refused() {
+    with_the_pinned_shell("shim");
+}
+
+/// `path` as the pinned shell writes it.
+fn slashed(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
+/// The reviewer's tool directory, readable by its `package` alone besides
+/// the owner: the pinned shell, the supervisor program as its shim, and
+/// one file per harness argument the reviewer's script passes on.
+fn reviewer_tools(trees: &Trees, package: &str) {
+    use agentc_supervisor::candidate::form::{git_bash_path, recorded};
+    let tools = trees.at("reviewer-tools");
+    shell_tools(&tools, package);
+    let program = env!("CARGO_BIN_EXE_agentc-supervisor");
+    std::fs::copy(program, tools.join("agentc-supervisor.exe")).unwrap();
+    let temp = trees.at("reviewer-work").join("tmp");
+    std::fs::create_dir(&temp).unwrap();
+    let temp = temp.display().to_string();
+    let inside = format!("{}/claude-1a2b-cwd", git_bash_path(&temp).unwrap());
+    let argument = |command: &str, cwd: &str| recorded("/c/none/snapshot.sh", &temp, command, cwd);
+    let files = [
+        (
+            "good",
+            argument(
+                "'echo out; echo err >&2; echo x > \"$TEMP/good-ran\"; exit 3'",
+                &inside,
+            ),
+        ),
+        ("cd", argument("'cd \"$TEMP\" && echo moved'", &inside)),
+        ("slow", argument("'sleep 8'", &inside)),
+        (
+            "outside",
+            argument(
+                "'echo x > \"$TEMP/outside-ran\"'",
+                "/c/Windows/claude-1a2b-cwd",
+            ),
+        ),
+        ("hook", "echo x > hook-ran".to_owned()),
+    ];
+    for (name, text) in files {
+        std::fs::write(tools.join(name), text).unwrap();
+    }
+}
+
+/// What the reviewer's shell runs: each argument through the prefix script
+/// as the harness would pass it, and a fifth call while four slow ones hold
+/// every command slot.
+fn reviewer_script(trees: &Trees, pipe: &str) -> String {
+    let tools = slashed(&trees.at("reviewer-tools"));
+    let cwd = slashed(
+        &trees
+            .at("reviewer-work")
+            .join("tmp")
+            .join("claude-1a2b-cwd"),
+    );
+    let prefix = slashed(&trees.at("reviewer-control").join("candidate-shell"));
+    let temp = trees.at("reviewer-work").join("tmp").display().to_string();
+    let source = trees.at("source").display().to_string();
+    format!(
+        "p='{prefix}'; t='{tools}'; \
+         \"$p\" \"$(cat $t/good)\"; echo \"good=$?\"; cat '{cwd}'; \
+         \"$p\" \"$(cat $t/cd)\"; echo \"cd=$?\"; cat '{cwd}'; \
+         \"$p\" \"$(cat $t/hook)\"; echo \"hook=$?\"; \
+         \"$p\" \"$(cat $t/outside)\"; echo \"outside=$?\"; \
+         \"$p\" \"$(cat $t/good)\" extra; echo \"two=$?\"; \
+         for i in 1 2 3 4; do \"$p\" \"$(cat $t/slow)\" & done; sleep 3; \
+         $t/agentc-supervisor.exe windows-candidate-shell --pipe {pipe} --temp '{temp}' \
+         --clone '{source}' --wait-seconds 1 -- \"$(cat $t/good)\"; echo \"busy=$?\"; wait; \
+         echo done"
+    )
+}
+
+/// The environment of a process the test starts in a launch whose working
+/// directory is `work`. `LOCALAPPDATA` must be there: Windows refuses to
+/// start a process in an AppContainer without it (error 203, seen
+/// 2026-11-17), since it derives the package's folders from it.
+fn launch_environment(path: &Path, work: &Path) -> serde_json::Map<String, Value> {
+    let root = std::env::var("SystemRoot").unwrap();
+    let pairs = [
+        ("PATH", format!("{};{root}\\System32", path.display())),
+        ("SystemRoot", root),
+        ("LOCALAPPDATA", work.display().to_string()),
+    ];
+    pairs
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), json!(v)))
+        .collect()
+}
+
+/// Starts `argv` as the root of `launch`, waits for it and returns its exit
+/// code and what it wrote.
+fn run_in_launch(runner: &mut Runner, trees: &Trees, launch: &str, argv: Value) -> (u64, String) {
+    let log = trees.at(&format!("{launch}.log"));
+    let (tools, work) = (format!("{launch}-tools"), format!("{launch}-work"));
+    let environment = launch_environment(&trees.at(&tools), &trees.at(&work));
+    let start = json!({"op": "start", "launch": launch, "argv": argv,
+        "directory": trees.at(&work), "environment": environment, "output": log});
+    let started = ask(runner, start);
+    assert_eq!(started["ok"], true, "{started}");
+    let seen = ask(
+        runner,
+        json!({"op": "observe", "launch": launch, "wait_ms": 120_000}),
+    );
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(seen["state"], "exited", "{seen}: {said}");
+    (seen["code"].as_u64().unwrap(), said)
+}
+
+/// Checks what the reviewer's script printed, line by line where the order
+/// is fixed.
+fn check_reviewer(said: &str, trees: &Trees) {
+    use agentc_supervisor::candidate::form::{CWD_OUTSIDE, NOT_THE_FORM, git_bash_path};
+    use agentc_supervisor::candidate::shim::NOT_ONE_ARGUMENT;
+    let source = git_bash_path(&trees.at("source").display().to_string()).unwrap();
+    let refused = |why: &str| format!("candidate-shell: refused: {why}");
+    let wanted = [
+        "out".to_owned(),
+        "err".to_owned(),
+        "good=3".to_owned(),
+        source.clone(),
+        "moved".to_owned(),
+        "cd=0".to_owned(),
+        source,
+        refused(NOT_THE_FORM),
+        "hook=126".to_owned(),
+        refused(CWD_OUTSIDE),
+        "outside=126".to_owned(),
+        refused(NOT_ONE_ARGUMENT),
+        "two=126".to_owned(),
+    ];
+    let lines: Vec<&str> = said.lines().map(str::trim).collect();
+    assert_eq!(lines[..wanted.len()], wanted, "{said}");
+    let rest = lines[wanted.len()..].join("\n");
+    assert!(
+        rest.contains("every command slot of this review was still taken"),
+        "{said}"
+    );
+    assert!(
+        rest.contains("busy=126") && rest.ends_with("done"),
+        "{said}"
+    );
+}
+
+/// The shim's arguments for a caller that is not the reviewer: a call for
+/// `pipe` that the shim itself accepts, so only the pipe can refuse it.
+fn stranger_arguments(pipe: &str) -> Vec<String> {
+    use agentc_supervisor::candidate::form::recorded;
+    let temp = r"C:\none\tmp";
+    let cwd = "/c/none/tmp/claude-1a2b-cwd";
+    let argument = recorded("/c/none/s.sh", temp, "'echo stranger-ran'", cwd);
+    let fixed = ["windows-candidate-shell", "--pipe", pipe, "--temp", temp];
+    let rest = ["--clone", r"C:\none\src", "--wait-seconds", "1", "--"];
+    let words = fixed.iter().chain(&rest).map(|word| word.to_string());
+    words.chain([argument]).collect()
+}
+
+/// Asserts that a stranger's shim ended refused because Windows would not
+/// let it open the pipe, and that its command never ran.
+fn assert_kept_out(who: &str, status: u64, said: &str) {
+    assert_eq!(status, 126, "{who}: {said}");
+    let denied = said.contains("open the candidate pipe") && said.contains("os error 5");
+    assert!(denied, "{who} was not refused by the access list: {said}");
+    assert!(
+        !said.contains("stranger-ran"),
+        "{who}'s command ran: {said}"
+    );
+}
+
+/// The candidate's own package cannot open its reviewer's pipe.
+fn candidate_is_kept_out(runner: &Runner, trees: &Trees, pipe: &str) -> String {
+    use agentc_supervisor::candidate::form::single_quoted;
+    let program = env!("CARGO_BIN_EXE_agentc-supervisor");
+    std::fs::copy(program, trees.at("tools").join("agentc-supervisor.exe")).unwrap();
+    let words: Vec<String> = stranger_arguments(pipe)
+        .iter()
+        .map(|word| single_quoted(word))
+        .collect();
+    let candidate = runner.candidate("reviewer").unwrap();
+    let call = candidate
+        .run(&format!("agentc-supervisor.exe {}", words.join(" ")))
+        .unwrap();
+    assert_kept_out("the candidate", u64::from(call.status), &text(&call));
+    text(&call).trim().to_owned()
+}
+
+/// Another launch's package cannot open the pipe either.
+fn another_launch_is_kept_out(runner: &mut Runner, trees: &Trees, pipe: &str) -> String {
+    let other = json!({"op": "prepare", "launch": "other", "spec": trees.launch("other")});
+    let prepared = ask(runner, other);
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    let owner = token::current_user_sid().unwrap();
+    let package = prepared["package_sid"].as_str().unwrap();
+    let list = sddl::shared_source(&owner, &[package]).unwrap();
+    create_directory(&trees.at("other-tools"), &list).unwrap();
+    let program = trees.at("other-tools").join("agentc-supervisor.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_agentc-supervisor"), &program).unwrap();
+    let mut argv = vec![program.display().to_string()];
+    argv.extend(stranger_arguments(pipe));
+    let (code, said) = run_in_launch(runner, trees, "other", json!(argv));
+    assert_kept_out("another launch", code, &said);
+    let cleanup = json!({"op": "cleanup", "launch": "other", "remove_directories": true});
+    assert_eq!(ask(runner, cleanup)["ok"], true);
+    said.trim().to_owned()
+}
+
+/// The reviewer's own package was served; the candidate's package and
+/// another launch's package cannot even open the pipe.
+fn check_strangers(runner: &mut Runner, trees: &Trees, pipe: &str) -> String {
+    let own = candidate_is_kept_out(runner, trees, pipe);
+    let other = another_launch_is_kept_out(runner, trees, pipe);
+    format!("candidate: {own:?}; other launch: {other:?}")
+}
+
+/// The shim role: see the test that starts it.
+fn shim() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let trees = Trees {
+        root: dir.path().to_owned(),
+    };
+    let mut runner = Runner::new(&trees.at("state")).unwrap();
+    let request = json!({"op": "prepare", "launch": "reviewer", "spec": trees.launch("reviewer"),
+                         "candidate": trees.candidate()});
+    let prepared = ask(&mut runner, request);
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    tools(&trees, prepared["candidate_package_sid"].as_str().unwrap());
+    reviewer_tools(&trees, prepared["package_sid"].as_str().unwrap());
+    let pipe = "agentc-candidate-reviewer";
+    let shell = trees.at("reviewer-tools").join("sh.exe");
+    let argv = json!([shell, "-c", reviewer_script(&trees, pipe)]);
+    let (code, said) = run_in_launch(&mut runner, &trees, "reviewer", argv);
+    assert_eq!(code, 0, "{said}");
+    check_reviewer(&said, &trees);
+    let ran = trees.at("candidate-work").join("tmp");
+    assert!(
+        ran.join("good-ran").exists(),
+        "the accepted command did not run"
+    );
+    assert!(!ran.join("outside-ran").exists(), "a refused command ran");
+    assert!(!trees.at("source").join("hook-ran").exists(), "a hook ran");
+    let strangers = check_strangers(&mut runner, &trees, pipe);
+    let cleanup = json!({"op": "cleanup", "launch": "reviewer", "remove_directories": true});
+    let cleaned = ask(&mut runner, cleanup);
+    assert_eq!(cleaned["ok"], true, "{cleaned}");
+    format!("{:?} | {strangers}", said.trim())
+}
+
 /// A command past a short time limit is stopped with the limit's status;
 /// after two in a row the candidate refuses; the candidate retires.
 fn time_limit() -> String {
@@ -586,4 +861,831 @@ fn time_limit() -> String {
     launcher.cleanup("rev").unwrap();
     candidate::remove_trees(&spec);
     "two stopped at 2 s, the third refused".into()
+}
+
+/// Step 5e: a synthetic credential kept by a reviewer launch (in its
+/// environment, its files, its process, a handle it inherited and a
+/// registry key) is out of its candidate's reach, and so are the reviewer's
+/// pipe, another launch and the runner; a broken or missing candidate
+/// runner refuses the launch. The same probe runs first in the reviewer,
+/// where it must reach what is the reviewer's own, so a refusal in the
+/// candidate is not a probe that cannot work.
+#[test]
+fn a_reviewers_credential_and_processes_are_out_of_its_candidates_reach() {
+    with_the_pinned_shell("fixture");
+}
+
+/// Names the file that tells the probe what to try.
+const TARGETS: &str = "AGENTC_CANDIDATE_TEST_TARGETS";
+/// The registry value the synthetic credential is kept in.
+const VALUE: &str = "credential";
+
+/// One line of the probe's report.
+fn line(kind: &str, name: &str, outcome: &str) -> String {
+    format!("{kind} {name} = {outcome}")
+}
+
+/// The Windows error of a failed attempt, as the report spells it.
+fn refused(error: &std::io::Error) -> String {
+    format!("error {}", error.raw_os_error().unwrap_or(-1))
+}
+
+/// Whether the file at `path` can be read, and whether it is the credential.
+fn reach_file(path: &str) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(text) if text.contains(SYNTHETIC) => "read".into(),
+        Ok(_) => "read something else".into(),
+        Err(error) => refused(&error),
+    }
+}
+
+/// Whether the process `pid` can be opened to be queried, to have its
+/// memory read (its environment is there) and to have a handle taken out.
+fn reach_process(pid: u64) -> String {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+    let rights = [
+        ("query", PROCESS_QUERY_LIMITED_INFORMATION),
+        ("read", PROCESS_VM_READ),
+        ("handles", PROCESS_DUP_HANDLE),
+    ];
+    let attempt = |(name, right): (&str, u32)| {
+        // SAFETY: opens a process by id; a handle that comes back is closed.
+        let handle = unsafe { OpenProcess(right, 0, pid as u32) };
+        if handle.is_null() {
+            return format!("{name}: {}", refused(&std::io::Error::last_os_error()));
+        }
+        // SAFETY: the handle was just opened and is closed once.
+        unsafe { CloseHandle(handle) };
+        format!("{name}: opened")
+    };
+    rights.map(attempt).join(", ")
+}
+
+/// Whether the pipe `name` can be opened with a client's rights.
+fn reach_pipe(name: &str) -> String {
+    use agentc_supervisor::service::pipe_policy::{CLIENT_ACCESS, pipe_path};
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.access_mode(CLIENT_ACCESS);
+    match options.open(pipe_path(name).unwrap()) {
+        Ok(_) => "opened".into(),
+        Err(error) => refused(&error),
+    }
+}
+
+/// Whether the key `subkey` of the account's hive can be opened and its
+/// credential read.
+fn reach_key(subkey: &str) -> String {
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+    let (name, value) = (wide(subkey), wide(VALUE));
+    let mut key: HKEY = std::ptr::null_mut();
+    let mut bytes = [0_u8; 512];
+    let mut size = bytes.len() as u32;
+    // SAFETY: the strings are NUL-terminated; `key` receives a handle that
+    // is closed once; the buffer is writable for `size` bytes.
+    unsafe {
+        let opened = RegOpenKeyExW(HKEY_CURRENT_USER, name.as_ptr(), 0, KEY_READ, &mut key);
+        if opened != 0 {
+            return format!("error {opened}");
+        }
+        let (none, data) = (std::ptr::null_mut(), bytes.as_mut_ptr());
+        let read = RegQueryValueExW(key, value.as_ptr(), none, none, data, &mut size);
+        RegCloseKey(key);
+        if read != 0 {
+            return format!("opened, value error {read}");
+        }
+    }
+    "read".into()
+}
+
+/// The path of every disk file this process holds a handle to, lower case.
+fn file_handles() -> Vec<String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_TYPE_DISK, GetFileType, GetFinalPathNameByHandleW,
+    };
+    let path = |raw: usize| {
+        let handle = raw as windows_sys::Win32::Foundation::HANDLE;
+        let mut name = [0_u16; 1024];
+        // SAFETY: `raw` is a handle of this process, from its own handle
+        // table; the buffer is writable for its length.
+        let length = unsafe {
+            if GetFileType(handle) != FILE_TYPE_DISK {
+                return None;
+            }
+            GetFinalPathNameByHandleW(handle, name.as_mut_ptr(), name.len() as u32, 0)
+        };
+        let text = String::from_utf16_lossy(&name[..(length as usize).min(name.len())]);
+        (length > 0).then(|| text.to_lowercase())
+    };
+    own_handles().into_iter().filter_map(path).collect()
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    /// The native query the handle snapshot comes from.
+    fn NtQueryInformationProcess(
+        process: windows_sys::Win32::Foundation::HANDLE,
+        class: u32,
+        information: *mut core::ffi::c_void,
+        length: u32,
+        returned: *mut u32,
+    ) -> i32;
+}
+
+/// The value of every handle this process holds, from its own handle
+/// table. Guessing values instead ends a process in an AppContainer with
+/// an invalid-handle exception (seen 2026-11-17).
+fn own_handles() -> Vec<usize> {
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    /// `ProcessHandleInformation`: a count, a reserved word, then one
+    /// five-word entry per handle whose first word is the handle's value.
+    const HANDLE_INFORMATION: u32 = 51;
+    const WORDS_PER_ENTRY: usize = 5;
+    let mut words = vec![0_usize; 2 + WORDS_PER_ENTRY * 16_384];
+    let bytes = (words.len() * size_of::<usize>()) as u32;
+    let mut returned = 0_u32;
+    // SAFETY: the buffer is writable for `bytes` bytes and aligned for the
+    // words Windows writes into it.
+    let status = unsafe {
+        let buffer = words.as_mut_ptr().cast();
+        let process = GetCurrentProcess();
+        NtQueryInformationProcess(process, HANDLE_INFORMATION, buffer, bytes, &mut returned)
+    };
+    assert_eq!(status, 0, "NtQueryInformationProcess");
+    let entries = words[2..].chunks(WORDS_PER_ENTRY).take(words[0]);
+    entries.map(|entry| entry[0]).collect()
+}
+
+/// The probe: tries everything the targets file names and reports each
+/// outcome on its own line.
+fn reach() -> String {
+    let file = std::env::var(TARGETS).unwrap();
+    let targets: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let named = |kind: &str| targets[kind].as_object().cloned().unwrap_or_default();
+    let mut lines = Vec::new();
+    for (name, path) in named("files") {
+        lines.push(line("file", &name, &reach_file(path.as_str().unwrap())));
+    }
+    for (name, pid) in named("processes") {
+        lines.push(line(
+            "process",
+            &name,
+            &reach_process(pid.as_u64().unwrap()),
+        ));
+    }
+    for (name, pipe) in named("pipes") {
+        lines.push(line("pipe", &name, &reach_pipe(pipe.as_str().unwrap())));
+    }
+    for (name, key) in named("keys") {
+        lines.push(line("key", &name, &reach_key(key.as_str().unwrap())));
+    }
+    lines.push(format!("handles = {}", file_handles().join(" | ")));
+    lines.join("\n")
+}
+
+/// A key of the account's hive holding the synthetic credential, which the
+/// owner and `package` may read and nobody else. Deleted when dropped.
+struct CredentialKey(String);
+
+impl CredentialKey {
+    /// Creates the key with a protected access list.
+    fn create(package: &str) -> Self {
+        use agentc_supervisor::host_runtime::windows::sys::Descriptor;
+        use windows_sys::Win32::System::Registry::{
+            HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_SZ, RegCloseKey, RegCreateKeyExW,
+            RegSetValueExW,
+        };
+        let subkey = format!(r"Software\agentc-test-{}", uuid::Uuid::new_v4().simple());
+        let owner = token::current_user_sid().unwrap();
+        let list = format!("D:P(A;;KA;;;{owner})(A;;KR;;;{package})");
+        let security = Descriptor::parse(&list).unwrap();
+        let attributes = security.attributes(false);
+        let (name, value, data) = (wide(&subkey), wide(VALUE), wide(SYNTHETIC));
+        let mut key: HKEY = std::ptr::null_mut();
+        // SAFETY: every string is NUL-terminated; the attributes and their
+        // descriptor outlive the call; `key` receives a handle closed once.
+        unsafe {
+            #[rustfmt::skip]
+            let created = RegCreateKeyExW(HKEY_CURRENT_USER, name.as_ptr(), 0, std::ptr::null(),
+                0, KEY_ALL_ACCESS, &attributes, &mut key, std::ptr::null_mut());
+            assert_eq!(created, 0, "RegCreateKeyExW");
+            let bytes = (data.len() * 2) as u32;
+            let set = RegSetValueExW(key, value.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), bytes);
+            assert_eq!(set, 0, "RegSetValueExW");
+            RegCloseKey(key);
+        }
+        Self(subkey)
+    }
+}
+
+impl Drop for CredentialKey {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteKeyW};
+        let name = wide(&self.0);
+        // SAFETY: the name is NUL-terminated.
+        unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, name.as_ptr()) };
+    }
+}
+
+/// A tool directory `package` may read: the pinned shell and this test
+/// program as `probe.exe`.
+fn probe_tools(tools: &Path, package: &str) {
+    shell_tools(tools, package);
+    std::fs::copy(std::env::current_exe().unwrap(), tools.join("probe.exe")).unwrap();
+}
+
+/// The shell text that runs the probe with its report at `report`.
+fn probe_line(targets: &Path, report: &str) -> String {
+    format!(
+        "{ROLE}=reach {REPORT}=\"{report}\" {TARGETS}='{}' probe.exe {CHILD} --exact --ignored",
+        slashed(targets)
+    )
+}
+
+/// Starts `argv` as the root of `launch` with `extra` variables and the
+/// held handles `listed`, and returns its process id.
+fn start_in_launch(
+    runner: &mut Runner,
+    trees: &Trees,
+    launch: &str,
+    argv: Value,
+    (extra, listed): (&[(&str, &str)], &[u64]),
+) -> u64 {
+    let (tools, work) = (format!("{launch}-tools"), format!("{launch}-work"));
+    let mut environment = launch_environment(&trees.at(&tools), &trees.at(&work));
+    for (name, value) in extra {
+        environment.insert(name.to_string(), json!(value));
+    }
+    let log = trees.at(&format!("{launch}.log"));
+    let start = json!({"op": "start", "launch": launch, "argv": argv, "listed": listed,
+        "directory": trees.at(&work), "environment": environment, "output": log});
+    let started = ask(runner, start);
+    assert_eq!(started["ok"], true, "{started}");
+    started["pid"].as_u64().unwrap()
+}
+
+/// Waits for the probe's report at `path` and returns its lines; the probe
+/// writes `ok: ` before them.
+fn report_at(path: &Path, log: &Path) -> Vec<String> {
+    for _ in 0..600 {
+        let said = std::fs::read_to_string(path).unwrap_or_default();
+        if said.starts_with("ok: ") {
+            // Read again a moment later: the first look may be mid-write.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let whole = std::fs::read_to_string(path).unwrap();
+            return whole[4..].lines().map(str::to_owned).collect();
+        }
+        assert!(said.is_empty(), "the probe failed: {said}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let said = std::fs::read_to_string(log).unwrap_or_default();
+    panic!("no report at {}; the log says: {said}", path.display());
+}
+
+/// The outcome the report `lines` give for `kind name`.
+fn outcome<'a>(lines: &'a [String], kind: &str, name: &str) -> &'a str {
+    let start = format!("{kind} {name} = ");
+    let found = lines.iter().find_map(|line| line.strip_prefix(&start));
+    found.unwrap_or_else(|| panic!("no line for {kind} {name} in {lines:?}"))
+}
+
+/// A broken candidate runner (its shell is not there yet) answers the
+/// readiness check as broken and its launch is not started; a launch
+/// without a candidate has a missing runner; the capability record refuses
+/// a reviewer for both.
+fn check_readiness(runner: &mut Runner, trees: &Trees) -> String {
+    use agentc_supervisor::candidate::capability::{Runner as Readiness, decide};
+    let ready = |runner: &mut Runner, launch: &str| {
+        ask(runner, json!({"op": "candidate_ready", "launch": launch}))
+    };
+    let broken = ready(runner, "reviewer");
+    assert_eq!(broken["runner"], "broken", "{broken}");
+    let shell = trees.at("reviewer-tools").join("sh.exe");
+    let start = json!({"op": "start", "launch": "reviewer", "argv": [shell, "-c", "true"],
+        "directory": trees.at("reviewer-work"), "environment": {}, "output": trees.at("no.log")});
+    let refused = ask(runner, start);
+    assert_eq!(refused["ok"], false, "{refused}");
+    let why = refused["error"].as_str().unwrap().to_owned();
+    assert!(why.contains("the candidate runner is broken"), "{why}");
+    assert!(!trees.at("no.log").exists(), "a refused launch got a log");
+    let plain = json!({"op": "prepare", "launch": "plain", "spec": trees.launch("plain")});
+    assert_eq!(ask(runner, plain)["ok"], true);
+    assert_eq!(ready(runner, "plain")["runner"], "missing");
+    let cleanup = json!({"op": "cleanup", "launch": "plain", "remove_directories": true});
+    assert_eq!(ask(runner, cleanup)["ok"], true);
+    let detail = broken["detail"].as_str().unwrap().to_owned();
+    for state in [Readiness::Missing, Readiness::Broken(detail.clone())] {
+        let facts = windows_reviewer(state);
+        assert!(decide(&facts).is_err(), "{facts:?} was admitted");
+    }
+    format!("broken: {detail}; start refused: {why}")
+}
+
+/// A Windows Claude reviewer of the recorded build with only routed tools,
+/// whose candidate runner is in `runner`'s state.
+fn windows_reviewer(
+    runner: agentc_supervisor::candidate::capability::Runner,
+) -> agentc_supervisor::candidate::capability::Facts<'static> {
+    use agentc_supervisor::candidate::capability::{Facts, Host, ROUTED_TOOLS, WINDOWS_CLAUDE};
+    use agentc_supervisor::profile::{Harness, Role};
+    let build = &WINDOWS_CLAUDE[0];
+    Facts {
+        host: Host::Windows,
+        role: Role::Reviewer,
+        harness: Harness::Claude,
+        build: Some((build.version, build.sha256)),
+        tools: ROUTED_TOOLS,
+        runner,
+    }
+}
+
+/// The two launches of the fixture and what each keeps.
+struct Fixture {
+    /// The reviewer's root process.
+    reviewer: u64,
+    /// The other launch's root process.
+    other: u64,
+    /// Kept until the fixture ends, which deletes the key.
+    key: CredentialKey,
+}
+
+/// Prepares the reviewer and another reviewer launch, each with its
+/// candidate, and returns the reviewer's and its candidate's packages.
+fn prepare_both(runner: &mut Runner, trees: &Trees) -> (String, String) {
+    let request = json!({"op": "prepare", "launch": "reviewer", "spec": trees.launch("reviewer"),
+                         "candidate": trees.candidate()});
+    let prepared = ask(runner, request);
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    let other = json!({"op": "prepare", "launch": "other", "spec": trees.launch("other"),
+                       "candidate": trees.other_candidate()});
+    let second = ask(runner, other);
+    assert_eq!(second["ok"], true, "{second}");
+    probe_tools(
+        &trees.at("other-tools"),
+        second["package_sid"].as_str().unwrap(),
+    );
+    let package = second["candidate_package_sid"].as_str().unwrap();
+    shell_tools(&trees.at("other-candidate-tools"), package);
+    let sid = |name: &str| prepared[name].as_str().unwrap().to_owned();
+    (sid("package_sid"), sid("candidate_package_sid"))
+}
+
+/// Plants the credential in the reviewer's and the other launch's files and
+/// in a file only the runner's account can open, and writes the targets
+/// file into the source tree, which both packages can read.
+fn plant(trees: &Trees, fixture: &Fixture) -> PathBuf {
+    for tree in [
+        "reviewer-control",
+        "reviewer-work",
+        "other-control",
+        "other-work",
+    ] {
+        std::fs::write(trees.at(tree).join("secret.txt"), SYNTHETIC).unwrap();
+    }
+    let secret = |tree: &str| trees.at(tree).join("secret.txt");
+    let targets = json!({
+        "files": {"reviewer-control": secret("reviewer-control"),
+                  "reviewer-work": secret("reviewer-work"), "held": trees.at("held.txt"),
+                  "other-control": secret("other-control"), "other-work": secret("other-work")},
+        "processes": {"reviewer": fixture.reviewer, "other": fixture.other,
+                      "runner": std::process::id()},
+        "pipes": {"reviewer": "agentc-candidate-reviewer", "other": "agentc-candidate-other"},
+        "keys": {"reviewer": fixture.key.0},
+    });
+    let file = trees.at("source").join("targets.json");
+    std::fs::write(&file, targets.to_string()).unwrap();
+    file
+}
+
+/// Starts both launches' root processes: each holds the credential in its
+/// environment, and the reviewer's also inherits a handle to a file only
+/// the runner's account can open. They sleep until they are ended.
+fn start_both(runner: &mut Runner, trees: &Trees, package: &str) -> Fixture {
+    std::fs::write(trees.at("held.txt"), SYNTHETIC).unwrap();
+    let hold = json!({"op": "hold_file", "launch": "reviewer", "path": trees.at("held.txt")});
+    let held = ask(runner, hold);
+    assert_eq!(held["ok"], true, "{held}");
+    let listed = [held["handle"].as_u64().unwrap()];
+    let secret = [("ANTHROPIC_API_KEY", SYNTHETIC)];
+    let sleeper = |launch: &str| {
+        let shell = trees.at(&format!("{launch}-tools")).join("sh.exe");
+        json!([
+            shell,
+            "-c",
+            "while [ ! -f go ]; do sleep 1; done; sh go; sleep 600"
+        ])
+    };
+    let reviewer = start_in_launch(
+        runner,
+        trees,
+        "reviewer",
+        sleeper("reviewer"),
+        (&secret, &listed),
+    );
+    let other = start_in_launch(runner, trees, "other", sleeper("other"), (&secret, &[]));
+    Fixture {
+        key: CredentialKey::create(package),
+        reviewer,
+        other,
+    }
+}
+
+/// What the reviewer's own probe must reach, and must not: its files, its
+/// pipe, its key and the handle it inherited are its own; the other launch
+/// and the runner are not.
+fn check_control(lines: &[String]) {
+    for (kind, name, wanted) in [
+        ("file", "reviewer-control", "read"),
+        ("file", "reviewer-work", "read"),
+        ("pipe", "reviewer", "opened"),
+        ("key", "reviewer", "read"),
+    ] {
+        assert_eq!(
+            outcome(lines, kind, name),
+            wanted,
+            "{kind} {name}: {lines:?}"
+        );
+    }
+    let handles = lines.last().unwrap();
+    assert!(
+        handles.contains("held.txt"),
+        "the reviewer holds no handle: {lines:?}"
+    );
+    for (kind, name) in [
+        ("file", "held"),
+        ("file", "other-control"),
+        ("file", "other-work"),
+    ] {
+        assert_eq!(
+            outcome(lines, kind, name),
+            "error 5",
+            "{kind} {name}: {lines:?}"
+        );
+    }
+    assert_eq!(outcome(lines, "pipe", "other"), "error 5", "{lines:?}");
+}
+
+/// Nothing of the fixture is within the candidate's reach: every file,
+/// pipe and key is refused, no process can be opened in any way, and it
+/// holds no handle to a file of the fixture outside its own trees.
+fn check_candidate(lines: &[String], trees: &Trees) {
+    let (handles, attempts) = lines.split_last().unwrap();
+    for attempt in attempts {
+        let (what, outcome) = attempt.split_once(" = ").unwrap();
+        let reached = ["read", "opened"]
+            .iter()
+            .any(|word| outcome.split([',', ' ']).any(|part| part == *word));
+        assert!(
+            !reached && outcome.contains("error"),
+            "the candidate reached {what}: {outcome}"
+        );
+    }
+    let root = trees.root.display().to_string().to_lowercase();
+    let own = [
+        r"\candidate-control",
+        r"\candidate-work",
+        r"\source",
+        r"\tools",
+    ];
+    let held = handles.strip_prefix("handles = ").unwrap();
+    for path in held.split(" | ").filter(|path| path.contains(&root)) {
+        let tree = &path[path.find(&root).unwrap() + root.len()..];
+        let allowed = own.iter().any(|name| tree.starts_with(name));
+        assert!(allowed, "the candidate holds a handle to {path}");
+    }
+}
+
+/// The fixture role: see the test that starts it.
+fn fixture() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let trees = Trees {
+        root: dir.path().to_owned(),
+    };
+    let mut runner = Runner::new(&trees.at("state")).unwrap();
+    let (package, candidate_package) = prepare_both(&mut runner, &trees);
+    let readiness = check_readiness(&mut runner, &trees);
+    probe_tools(&trees.at("tools"), &candidate_package);
+    probe_tools(&trees.at("reviewer-tools"), &package);
+    let ready = ask(
+        &mut runner,
+        json!({"op": "candidate_ready", "launch": "reviewer"}),
+    );
+    assert_eq!(ready["runner"], "ready", "{ready}");
+    let fixture = start_both(&mut runner, &trees, &package);
+    let targets = plant(&trees, &fixture);
+    let report = slashed(&trees.at("reviewer-work").join("reach.txt"));
+    let go = trees.at("reviewer-work").join("go");
+    std::fs::write(go, probe_line(&targets, &report)).unwrap();
+    let log = trees.at("reviewer.log");
+    let control = report_at(&trees.at("reviewer-work").join("reach.txt"), &log);
+    check_control(&control);
+    let candidate = runner.candidate("reviewer").unwrap();
+    let probed = candidate
+        .run(&probe_line(&targets, "$TEMP/reach.txt"))
+        .unwrap();
+    let shown = candidate.run("env").unwrap();
+    drop(candidate);
+    assert!(
+        !text(&shown).contains(SYNTHETIC),
+        "the credential is in the environment"
+    );
+    let report = trees.at("candidate-work").join("tmp").join("reach.txt");
+    assert!(
+        report.exists(),
+        "the candidate's probe did not run: {}",
+        text(&probed)
+    );
+    let reached = report_at(&report, &log);
+    check_candidate(&reached, &trees);
+    for launch in ["reviewer", "other"] {
+        let cleanup = json!({"op": "cleanup", "launch": launch, "remove_directories": true});
+        let cleaned = ask(&mut runner, cleanup);
+        assert_eq!(cleaned["ok"], true, "{cleaned}");
+    }
+    drop(fixture);
+    format!("{readiness} || reviewer: {control:?} || candidate: {reached:?}")
+}
+
+/// Names a native Claude Code executable on this host; unset where the
+/// owner has none to probe.
+const CLAUDE: &str = "AGENTC_TEST_CLAUDE";
+
+/// Step 5f groundwork: whether native Claude Code starts at all inside a
+/// launch, full and less privileged. It only asks for the version: no
+/// network, no credential and no session.
+#[test]
+fn native_claude_code_reports_its_version_inside_a_launch() {
+    if std::env::var_os(CLAUDE).is_none() {
+        eprintln!("{CLAUDE} is unset; harness_probe was not checked");
+        return;
+    }
+    in_a_new_session("harness_probe");
+}
+
+/// Runs `claude.exe --version` in a fresh launch, `less` privileged or
+/// not, from a copy only that launch's package may read, and returns how
+/// it ended and what it printed.
+fn harness_probe_one(trees: &Trees, runner: &mut Runner, less: bool) -> String {
+    let launch = format!("harness-{less}");
+    let mut spec = trees.launch(&launch);
+    spec.less_privileged = less;
+    let prepared = ask(
+        runner,
+        json!({"op": "prepare", "launch": launch, "spec": spec}),
+    );
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    let tools = trees.at(&format!("{launch}-tools"));
+    let owner = token::current_user_sid().unwrap();
+    let package = prepared["package_sid"].as_str().unwrap();
+    create_directory(&tools, &sddl::shared_source(&owner, &[package]).unwrap()).unwrap();
+    let program = tools.join("claude.exe");
+    std::fs::copy(std::env::var_os(CLAUDE).unwrap(), &program).unwrap();
+    let work = trees.at(&format!("{launch}-work")).display().to_string();
+    let home = [
+        ("USERPROFILE", work.as_str()),
+        ("HOME", &work),
+        ("APPDATA", &work),
+    ];
+    start_in_launch(
+        runner,
+        trees,
+        &launch,
+        json!([program, "--version"]),
+        (&home, &[]),
+    );
+    let seen = ask(
+        runner,
+        json!({"op": "observe", "launch": launch, "wait_ms": 120_000}),
+    );
+    let said = std::fs::read_to_string(trees.at(&format!("{launch}.log"))).unwrap_or_default();
+    let cleanup = json!({"op": "cleanup", "launch": launch, "remove_directories": true});
+    assert_eq!(ask(runner, cleanup)["ok"], true);
+    let ended_well = seen["state"] == "exited" && seen["code"] == 0;
+    assert!(ended_well, "less_privileged={less}: {seen}: {said}");
+    assert!(
+        said.contains("(Claude Code)"),
+        "less_privileged={less}: {said}"
+    );
+    format!("less_privileged={less}: {seen} said {:?}", said.trim())
+}
+
+/// Both harness probes. Each must end by itself with status 0 and a
+/// version line, as observed on MiniAir on 2026-11-17.
+fn harness_probe() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let trees = Trees {
+        root: dir.path().to_owned(),
+    };
+    let mut runner = Runner::new(&trees.at("state")).unwrap();
+    let full = harness_probe_one(&trees, &mut runner, false);
+    let less = harness_probe_one(&trees, &mut runner, true);
+    format!("{full} | {less}")
+}
+
+/// Names a copy of the owner's Claude Code credential file for the one
+/// owner-attended run of step 5f. Unset everywhere else, so the run, which
+/// uses the network and the owner's subscription, never starts by itself.
+const LOGIN: &str = "AGENTC_TEST_CLAUDE_LOGIN";
+
+/// What the harness is asked to run: it writes a file in the candidate's
+/// temp, so where it ran can be checked, and prints a marker it computes.
+const ASKED: &str = "echo ran > \"$TEMP/harness-ran\"; echo marker-$((6*7)) | tr a-z A-Z";
+
+/// Step 5f: one real Bash command from native Claude Code inside a
+/// less-privileged reviewer launch with network, through the prefix script
+/// and the shim into its candidate, which has none. Owner-attended only.
+#[test]
+fn native_claude_code_runs_a_bash_command_in_its_candidate() {
+    if std::env::var_os(CLAUDE).is_none() || std::env::var_os(LOGIN).is_none() {
+        eprintln!("{CLAUDE} or {LOGIN} is unset; harness_command was not checked");
+        return;
+    }
+    in_a_new_session("harness_command");
+}
+
+/// The temp Windows gives a process of the AppContainer `profile` whose
+/// `LOCALAPPDATA` is `local`: `<local>\Packages\<profile>\AC\Temp` (seen
+/// 2026-11-16). Nothing makes it, so the caller does.
+fn substituted_temp(local: &Path, profile: &str) -> PathBuf {
+    local.join("Packages").join(profile).join("AC").join("Temp")
+}
+
+/// The reviewer's tool directory for the harness: the pinned shell as
+/// `sh.exe` and as `bash.exe` (the harness's shell), the shim, the harness
+/// copy and a prefix that logs its arguments before the runner's script.
+fn harness_tools(trees: &Trees, package: &str) {
+    let tools = trees.at("reviewer-tools");
+    shell_tools(&tools, package);
+    std::fs::copy(tools.join("sh.exe"), tools.join("bash.exe")).unwrap();
+    let program = env!("CARGO_BIN_EXE_agentc-supervisor");
+    std::fs::copy(program, tools.join("agentc-supervisor.exe")).unwrap();
+    std::fs::copy(std::env::var_os(CLAUDE).unwrap(), tools.join("claude.exe")).unwrap();
+    let log = slashed(&trees.at("reviewer-work").join("prefix.log"));
+    let script = slashed(&trees.at("reviewer-control").join("candidate-shell"));
+    let text = format!(
+        "#!/bin/sh\n{{ echo \"args=$# TEMP=$TEMP\"; printf '%s\\n' \"$1\"; echo ---; }} >> '{log}'\n\
+         exec '{script}' \"$@\"\n"
+    );
+    std::fs::write(tools.join("logging-prefix"), text).unwrap();
+}
+
+/// The reviewer's Claude Code configuration directory in its working
+/// directory: the reviewer's permission rules and the credential copy.
+/// Claude's own sandbox, which needs Bubblewrap, stays off on Windows.
+fn harness_config(trees: &Trees) -> PathBuf {
+    use agentc_supervisor::profile::Role;
+    let config = trees.at("reviewer-work").join("claude-config");
+    std::fs::create_dir(&config).unwrap();
+    let state = trees.at("state");
+    let mut settings = agentc_supervisor::role_settings::settings(Role::Reviewer, &state);
+    settings["sandbox"] = json!({"enabled": false});
+    std::fs::write(config.join("settings.json"), settings.to_string()).unwrap();
+    std::fs::copy(
+        std::env::var_os(LOGIN).unwrap(),
+        config.join(".credentials.json"),
+    )
+    .unwrap();
+    config
+}
+
+/// The harness's command line: the Linux reviewer flags and tool allowlist,
+/// asked to run [`ASKED`] once.
+fn harness_argv(trees: &Trees) -> Value {
+    let prompt = format!(
+        "Use the Bash tool exactly once to run this command, then reply with its output \
+         and nothing else: {ASKED}"
+    );
+    let program = trees.at("reviewer-tools").join("claude.exe");
+    json!([
+        program,
+        prompt,
+        "-p",
+        "--safe-mode",
+        "--setting-sources",
+        "user",
+        "--permission-mode",
+        "dontAsk",
+        "--permission-prompts",
+        "none",
+        "--strict-mcp-config",
+        "--model",
+        "sonnet",
+        "--tools",
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash"
+    ])
+}
+
+/// The variables the harness gets besides [`launch_environment`]'s.
+fn harness_environment(trees: &Trees, config: &Path) -> Vec<(&'static str, String)> {
+    let work = trees.at("reviewer-work").display().to_string();
+    let tools = trees.at("reviewer-tools");
+    vec![
+        ("USERPROFILE", work.clone()),
+        ("HOME", work.clone()),
+        ("APPDATA", work),
+        ("CLAUDE_CONFIG_DIR", config.display().to_string()),
+        (
+            "CLAUDE_CODE_GIT_BASH_PATH",
+            tools.join("bash.exe").display().to_string(),
+        ),
+        (
+            "CLAUDE_CODE_SHELL_PREFIX",
+            slashed(&tools.join("logging-prefix")),
+        ),
+        ("DISABLE_AUTOUPDATER", "1".into()),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
+    ]
+}
+
+/// Runs the harness in the reviewer launch until it ends and returns its
+/// state, exit code and what it printed.
+fn run_harness(runner: &mut Runner, trees: &Trees, config: &Path) -> (Value, String) {
+    let extra = harness_environment(trees, config);
+    let pairs: Vec<(&str, &str)> = extra.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    start_in_launch(
+        runner,
+        trees,
+        "reviewer",
+        harness_argv(trees),
+        (&pairs, &[]),
+    );
+    let seen = ask(
+        runner,
+        json!({"op": "observe", "launch": "reviewer", "wait_ms": 240_000}),
+    );
+    if seen["state"] != "exited" {
+        ask(runner, json!({"op": "terminate", "launch": "reviewer"}));
+        ask(
+            runner,
+            json!({"op": "observe", "launch": "reviewer", "wait_ms": 10_000}),
+        );
+    }
+    let said = std::fs::read_to_string(trees.at("reviewer.log")).unwrap_or_default();
+    (seen, said)
+}
+
+/// Removes the credential copy and the whole configuration directory, and
+/// says whether the harness had changed the copy (a refreshed login).
+fn forget_login(config: &Path) -> bool {
+    let original = std::fs::read(std::env::var_os(LOGIN).unwrap()).unwrap();
+    let copy = std::fs::read(config.join(".credentials.json")).unwrap_or_default();
+    std::fs::remove_dir_all(config).unwrap();
+    assert!(!config.exists(), "the credential copy was left");
+    copy != original
+}
+
+/// Prepares the reviewer launch, with `internetClient`, and its candidate,
+/// without it; the reviewer's temp is the one Windows will substitute.
+fn prepare_harness(runner: &mut Runner, trees: &Trees) -> PathBuf {
+    let mut spec = trees.launch("reviewer");
+    spec.capabilities.push("internetClient".into());
+    let mut candidate = trees.candidate();
+    let temp = substituted_temp(&trees.at("reviewer-work"), &spec.profile);
+    candidate.reviewer_temp = temp.clone();
+    let request = json!({"op": "prepare", "launch": "reviewer", "spec": spec,
+                         "candidate": candidate});
+    let prepared = ask(runner, request);
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    tools(trees, prepared["candidate_package_sid"].as_str().unwrap());
+    harness_tools(trees, prepared["package_sid"].as_str().unwrap());
+    std::fs::create_dir_all(&temp).unwrap();
+    temp
+}
+
+/// The harness_command role: see the test that starts it.
+fn harness_command() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let trees = Trees {
+        root: dir.path().to_owned(),
+    };
+    let mut runner = Runner::new(&trees.at("state")).unwrap();
+    let temp = prepare_harness(&mut runner, &trees);
+    let config = harness_config(&trees);
+    let (seen, said) = run_harness(&mut runner, &trees, &config);
+    let refreshed = forget_login(&config);
+    let prefix =
+        std::fs::read_to_string(trees.at("reviewer-work").join("prefix.log")).unwrap_or_default();
+    let ran = trees
+        .at("candidate-work")
+        .join("tmp")
+        .join("harness-ran")
+        .exists();
+    let cleanup = json!({"op": "cleanup", "launch": "reviewer", "remove_directories": true});
+    assert_eq!(ask(&mut runner, cleanup)["ok"], true);
+    let seen_all = format!(
+        "{seen}; temp {}; refreshed {refreshed}; ran in candidate {ran}; \
+         said {:?}; prefix {prefix:?}",
+        temp.display(),
+        said.trim()
+    );
+    assert!(seen["state"] == "exited" && seen["code"] == 0, "{seen_all}");
+    assert!(ran && said.contains("MARKER-42"), "{seen_all}");
+    seen_all
 }

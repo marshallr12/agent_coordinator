@@ -23,14 +23,15 @@ use super::profile::Capabilities;
 use super::reader::create_directory;
 use super::sddl;
 use super::sys::check;
+use crate::candidate::capability::{self, Runner};
 use crate::candidate::{CALL_SECONDS, STUCK_CALLS};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 
 /// The most bytes of a command's output and error returned to the reviewer.
@@ -44,6 +45,13 @@ const EMPTY_PATIENCE: Duration = Duration::from_secs(10);
 /// How long a job may take to empty by itself after its command ended
 /// before what is left counts as left running.
 const SETTLE: Duration = Duration::from_secs(2);
+/// How often a running command's wait looks whether the candidate is
+/// being retired.
+const SLICE: Duration = Duration::from_millis(250);
+/// What the readiness check's command prints.
+const READY: &str = "agentc-candidate-ready";
+/// Why a command is not run, or is cut short, once the launch is ending.
+pub const RETIRING: &str = "the launch is ending; its candidate runs no more commands";
 /// The variables Windows replaces in a process it starts in an
 /// AppContainer (observed 2026-11-16); the command file sets them again.
 const REPLACED: [&str; 3] = ["LOCALAPPDATA", "TEMP", "TMP"];
@@ -63,6 +71,12 @@ pub struct CandidateSpec {
     /// The pinned POSIX shell: a program that runs the script file given as
     /// its one argument.
     pub shell: PathBuf,
+    /// The supervisor program the reviewer launch runs as its shim
+    /// ([`crate::candidate::shim`]); the reviewer's package must be able to
+    /// read it.
+    pub shim: PathBuf,
+    /// The reviewer's temp, where the harness keeps its cwd file.
+    pub reviewer_temp: PathBuf,
     /// The directories of the candidate's `PATH`, in order.
     pub path: Vec<PathBuf>,
 }
@@ -76,6 +90,9 @@ pub struct Candidate {
     environment: BTreeMap<String, String>,
     /// Consecutive commands stopped at the time limit.
     stuck: AtomicU32,
+    /// Set once the launch is ending: no command starts after that and a
+    /// running one is ended.
+    retiring: AtomicBool,
     tuning: Tuning,
 }
 
@@ -146,6 +163,7 @@ pub fn prepare(
         boundary,
         spec,
         stuck: AtomicU32::new(0),
+        retiring: AtomicBool::new(false),
         tuning,
     })
 }
@@ -222,6 +240,7 @@ impl Candidate {
     /// limit. After too many commands in a row were stopped it refuses, as
     /// the Linux shell does.
     pub fn run(&self, command: &str) -> Result<Call> {
+        ensure!(!self.is_retiring(), RETIRING);
         if self.stuck.load(Ordering::SeqCst) >= self.tuning.stuck_calls {
             return Ok(refused(self.tuning));
         }
@@ -234,7 +253,68 @@ impl Candidate {
         let _ = std::fs::remove_file(&script);
         let call = outcome.and_then(|(status, left)| self.finish(status, left, &log));
         let _ = std::fs::remove_file(&log);
+        ensure!(!self.is_retiring(), RETIRING);
         call
+    }
+
+    /// Whether the candidate can run commands now: the readiness check of
+    /// the capability record. Anything short of a recorded shell that runs
+    /// a command and returns its output is broken, with the reason.
+    pub fn ready(&self) -> Runner {
+        match self.check() {
+            Ok(()) => Runner::Ready,
+            Err(error) => Runner::Broken(format!("{error:#}")),
+        }
+    }
+
+    /// Fails unless the shell's file is a recorded build and a command run
+    /// with it in the candidate returns [`READY`]. The file is hashed when
+    /// this is asked, not at every command: only the runner's account can
+    /// change the directory it is in.
+    fn check(&self) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let shell = &self.spec.shell;
+        let bytes = std::fs::read(shell).with_context(|| format!("read {}", shell.display()))?;
+        let hash = hex::encode(Sha256::digest(&bytes));
+        capability::recorded_shell(&hash).map_err(|why| anyhow!(why))?;
+        let call = self.run(&format!("echo {READY}"))?;
+        let said = String::from_utf8_lossy(&call.output);
+        ensure!(
+            call.status == 0 && said.trim() == READY,
+            "its shell ended with status {} and said {:?}",
+            call.status,
+            said.trim()
+        );
+        Ok(())
+    }
+
+    /// Stops the candidate for good: a command that has not started is
+    /// refused and a running one is ended within a moment, so the threads
+    /// that serve the candidate's pipe can end with the launch.
+    pub fn stop(&self) {
+        self.retiring.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether [`Candidate::stop`] was called.
+    fn is_retiring(&self) -> bool {
+        self.retiring.load(Ordering::SeqCst)
+    }
+
+    /// Whether the command's process ended before the time limit. The wait
+    /// is cut into slices so that a retiring candidate gives up early; the
+    /// caller then ends the job as it does at the limit.
+    fn ended_in_time(&self, process: windows_sys::Win32::Foundation::HANDLE) -> Result<bool> {
+        let deadline = Instant::now() + Duration::from_secs(self.tuning.call_seconds);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let slice = left.min(SLICE).as_millis() as u32;
+            if ended_within(process, slice)? {
+                return Ok(true);
+            }
+            if left <= SLICE || self.is_retiring() {
+                return Ok(false);
+            }
+        }
     }
 
     /// Starts the command in a fresh job and waits for it; the status, or
@@ -252,8 +332,7 @@ impl Candidate {
             passed: &[],
         };
         let running = process::start(&self.command(script, log), boundary)?;
-        let millis = u32::try_from(self.tuning.call_seconds.saturating_mul(1000));
-        let ended = ended_within(running.process.raw(), millis.unwrap_or(u32::MAX - 1))?;
+        let ended = self.ended_in_time(running.process.raw())?;
         let status = ended
             .then(|| exit_code(running.process.raw()))
             .transpose()?;
@@ -381,6 +460,8 @@ mod tests {
             },
             source: root.join("src"),
             shell: r"C:\tools\sh.exe".into(),
+            shim: r"C:\tools\agentc-supervisor.exe".into(),
+            reviewer_temp: root.join("rw").join("tmp"),
             path: vec![r"C:\tools".into(), r"C:\more tools".into()],
         }
     }

@@ -35,6 +35,8 @@
 //! builds a harness launch for it.
 pub mod adoption;
 pub mod candidate;
+pub mod candidate_pipe;
+pub mod candidate_shell;
 pub mod desktop;
 pub mod inspection;
 pub mod job;

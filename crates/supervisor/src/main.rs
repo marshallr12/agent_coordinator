@@ -121,6 +121,29 @@ enum Commands {
         #[arg(long)]
         state_dir: PathBuf,
     },
+    /// On Windows: a reviewer launch's shell prefix. It keeps only the
+    /// command in the harness's one argument, runs it in the launch's
+    /// candidate through the pipe and returns its output and status;
+    /// anything else is refused with status 126 before anything runs.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    WindowsCandidateShell {
+        /// The launch's candidate pipe.
+        #[arg(long)]
+        pipe: String,
+        /// The reviewer's temp, where the harness keeps its cwd file.
+        #[arg(long)]
+        temp: String,
+        /// The reviewer's clone, which every command starts in.
+        #[arg(long)]
+        clone: String,
+        /// How long to wait for a free command slot (default: 60).
+        #[arg(long)]
+        wait_seconds: Option<u64>,
+        /// What the harness passed its prefix.
+        #[arg(last = true)]
+        arguments: Vec<String>,
+    },
     /// On Windows: run one role as a service. `runner` serves launches over
     /// a named pipe to the one configured client (`[windows_service]` in
     /// the configuration); `supervisor` runs the live loop and reaches
@@ -216,6 +239,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
         // Needs no configuration: every launch arrives as a typed request.
         return windows_runner(state_dir);
     }
+    #[cfg(windows)]
+    if let Some(status) = windows_candidate_shell(&cli.command) {
+        // Needs no configuration, and a Windows status does not fit an
+        // `ExitCode`.
+        std::process::exit(status as i32);
+    }
     let config = config::Config::load(cli.config.as_deref())?;
     match cli.command {
         Commands::Settings { role } => print!("{}", role_settings::render(role, &config.state_dir)),
@@ -259,6 +288,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         #[cfg(windows)]
         Commands::WindowsRunner { .. } => unreachable!("dispatched before loading config"),
         #[cfg(windows)]
+        Commands::WindowsCandidateShell { .. } => {
+            unreachable!("dispatched before loading config")
+        }
+        #[cfg(windows)]
         Commands::WindowsService { role } => {
             use agentc_supervisor::host_runtime::windows::{runner_service, supervisor_service};
             match role {
@@ -283,6 +316,31 @@ fn windows_runner(state_dir: &std::path::Path) -> Result<ExitCode> {
     let (input, output) = (std::io::stdin().lock(), std::io::stdout().lock());
     runner::serve(input, output, state_dir)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Runs the reviewer's shim when `command` is that subcommand and returns
+/// the status for the harness; `None` for every other subcommand.
+#[cfg(windows)]
+fn windows_candidate_shell(command: &Commands) -> Option<u32> {
+    use agentc_supervisor::host_runtime::windows::candidate_shell::{BUSY_WAIT, Shim, run};
+    let Commands::WindowsCandidateShell {
+        pipe,
+        temp,
+        clone,
+        wait_seconds,
+        arguments,
+    } = command
+    else {
+        return None;
+    };
+    let wait = wait_seconds.map_or(BUSY_WAIT, std::time::Duration::from_secs);
+    let shim = Shim {
+        pipe: pipe.clone(),
+        temp: temp.clone(),
+        clone: clone.clone(),
+        wait,
+    };
+    Some(run(&shim, arguments))
 }
 
 /// Judges a stand-in ledger. An empty or missing ledger is an error, not

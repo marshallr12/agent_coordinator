@@ -27,6 +27,7 @@
 //! [`form`] is the command form native Claude Code uses on Windows.
 pub mod capability;
 pub mod form;
+pub mod shim;
 
 use crate::config::Config;
 use crate::confine::{self, StatePaths};

@@ -38,12 +38,35 @@ pub struct Recorded {
     pub evidence: &'static str,
 }
 
-/// Native Claude Code builds whose command paths were observed on Windows.
+/// Native Claude Code builds whose Bash command was observed going through
+/// the prefix into the candidate from inside a contained reviewer launch on
+/// Windows. 2.1.325, whose form was seen only outside a launch, is not one.
 pub const WINDOWS_CLAUDE: &[Recorded] = &[Recorded {
-    version: "2.1.325",
-    sha256: "87e0cb6ae0f4775da388cd3043f4d8097ef961dcddbf55fe90bc61ffc3f57a30",
-    evidence: "windows-host-design.md, Native Claude Code command paths, 2026-11-14",
+    version: "2.1.326",
+    sha256: "44e85ac6d3e36b924a0d631d3f69c13a6907491115d71e97c8eb6160c82b2aed",
+    evidence: "windows-host-design.md, Native Claude Code in a contained reviewer launch, 2026-11-17",
 }];
+
+/// POSIX shells with recorded evidence that they start and run inside an
+/// AppContainer on Windows. A candidate whose shell is any other file is
+/// not ready.
+pub const WINDOWS_SHELLS: &[Recorded] = &[Recorded {
+    version: "busybox-w32 FRP-6354-g5f09fb446 (BusyBox 1.39.0), 64-bit Unicode",
+    sha256: "36b266923fc5765b42f5f981319f39568498fba60b53ccf26e8fc1e575e2a9a9",
+    evidence: "windows-host-design.md, A POSIX shell that starts in an AppContainer, 2026-11-16",
+}];
+
+/// The recorded shell whose file has the hash `sha256`, or why a file with
+/// that hash may not run candidate commands.
+pub fn recorded_shell(sha256: &str) -> Result<&'static Recorded, String> {
+    let known = |shell: &&Recorded| shell.sha256.eq_ignore_ascii_case(sha256);
+    WINDOWS_SHELLS.iter().find(known).ok_or_else(|| {
+        format!(
+            "the candidate's shell (SHA-256 {sha256}) has no recorded evidence that it runs \
+             in an AppContainer; only a recorded shell may run candidate commands"
+        )
+    })
+}
 
 /// Tools a reviewer may be offered on Windows: the file tools, which run no
 /// code, and Bash, which reaches the prefix. The PowerShell tool bypasses
@@ -140,7 +163,9 @@ fn routed(tools: &[&str]) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const SHA: &str = "87e0cb6ae0f4775da388cd3043f4d8097ef961dcddbf55fe90bc61ffc3f57a30";
+    const SHA: &str = "44e85ac6d3e36b924a0d631d3f69c13a6907491115d71e97c8eb6160c82b2aed";
+    /// 2.1.325, whose form was observed only outside a launch.
+    const UNCONTAINED: &str = "87e0cb6ae0f4775da388cd3043f4d8097ef961dcddbf55fe90bc61ffc3f57a30";
 
     /// A ready Windows Claude reviewer of the recorded build.
     fn windows() -> Facts<'static> {
@@ -148,7 +173,7 @@ mod tests {
             host: Host::Windows,
             role: Role::Reviewer,
             harness: Harness::Claude,
-            build: Some(("2.1.325", SHA)),
+            build: Some(("2.1.326", SHA)),
             tools: ROUTED_TOOLS,
             runner: Runner::Ready,
         }
@@ -191,8 +216,8 @@ mod tests {
         assert_eq!(decide(&windows()), Ok(Isolation::CandidateRunner));
         let upper = Facts {
             build: Some((
-                "2.1.325",
-                "87E0CB6AE0F4775DA388CD3043F4D8097EF961DCDDBF55FE90BC61FFC3F57A30",
+                "2.1.326",
+                "44E85AC6D3E36B924A0D631D3F69C13A6907491115D71E97C8EB6160C82B2AED",
             )),
             ..windows()
         };
@@ -218,14 +243,14 @@ mod tests {
             ),
             (
                 Facts {
-                    build: Some(("2.1.326", SHA)),
+                    build: Some(("2.1.325", UNCONTAINED)),
                     ..windows()
                 },
-                "2.1.326",
+                "2.1.325",
             ),
             (
                 Facts {
-                    build: Some(("2.1.325", "00")),
+                    build: Some(("2.1.326", "00")),
                     ..windows()
                 },
                 "no recorded",
@@ -256,6 +281,15 @@ mod tests {
             let refusal = decide(&facts).unwrap_err();
             assert!(refusal.contains(reason), "{refusal}");
         }
+    }
+
+    #[test]
+    fn only_a_recorded_shell_may_run_candidate_commands() {
+        let pinned = WINDOWS_SHELLS[0].sha256;
+        assert!(recorded_shell(pinned).is_ok());
+        assert!(recorded_shell(&pinned.to_uppercase()).is_ok());
+        let refusal = recorded_shell(SHA).unwrap_err();
+        assert!(refusal.contains(SHA) && refusal.contains("no recorded evidence"));
     }
 
     #[test]
