@@ -174,7 +174,11 @@ def run_digest(args):
     if args.mail_to:
         if not args.smtp_host:
             raise SystemExit("attention: --mail-to needs --smtp-host")
-        text = render_digest(data, (data.get("ack_link") or {}).get("url"))
+        ack_url = (data.get("ack_link") or {}).get("url")
+        if not ack_url:
+            print("attention: the service sent no acknowledgement link; designate this token's "
+                  "agent as the project's digest sender (designate-digest-sender)", file=sys.stderr)
+        text = render_digest(data, ack_url)
         message = EmailMessage()
         message["Subject"] = "agentc attention digest"
         message["From"] = args.mail_from

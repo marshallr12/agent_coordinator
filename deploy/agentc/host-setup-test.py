@@ -180,6 +180,7 @@ class AttentionUnits(unittest.TestCase):
         note = bash("attention_token_note")
         self.assertIn("sudo install -o root -g root -m 0400 /dev/stdin /etc/agentc/attention-token", note)
         self.assertNotIn("0440", note)
+        self.assertIn("designate-digest-sender", note)
         self.assertNotIn("agentc-impl", note)
 
     def test_the_units_run_as_root_so_they_still_read_the_token(self):

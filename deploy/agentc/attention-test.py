@@ -43,6 +43,7 @@ class Fake:
     def __init__(self):
         self.next_status = 200
         self.last_read_at = None
+        self.withhold_ack_link = False
         self.digest_queries = []
         self.pages = []
         self.coordinator_tokens = []
@@ -58,7 +59,8 @@ class Fake:
                     fake.digest_queries.append(self.path)
                     body = {"data": {**DIGEST, "last_read_at": fake.last_read_at,
                                      "ack_link": {"url": ACK_URL, "expires_at": "later"}
-                                     if "ack_link=true" in self.path else None}}
+                                     if "ack_link=true" in self.path and not fake.withhold_ack_link
+                                     else None}}
                 self.send_response(status)
                 self.end_headers()
                 self.wfile.write(json.dumps(body).encode())
@@ -485,6 +487,33 @@ class AttentionTests(unittest.TestCase):
             attention.main(["digest", "--url", self.fake.url, "--project", "p",
                             "--token-file", str(self.token)])
         self.assertNotIn("ack_link", self.fake.digest_queries[1])
+
+    def test_a_digest_sent_without_a_link_still_mails_and_says_how_to_get_one(self):
+        sent = []
+
+        class Smtp:
+            def __init__(self, host, port, timeout):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def send_message(self, message):
+                sent.append(message)
+
+        err = io.StringIO()
+        with mock.patch.object(attention.smtplib, "SMTP", Smtp), \
+                mock.patch.object(self.fake, "withhold_ack_link", True), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            attention.main(["digest", "--url", self.fake.url, "--project", "p",
+                            "--token-file", str(self.token), "--mail-to", "me@example.org",
+                            "--smtp-host", "localhost"])
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn(ACK_URL, sent[0].get_content())
+        self.assertIn("designate-digest-sender", err.getvalue())
 
     def neglect_canary(self, clock, day, *extra):
         """One canary run on `day` of a fake clock that starts at START."""

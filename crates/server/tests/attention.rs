@@ -597,20 +597,46 @@ async fn anonymous(
     (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
-/// The ack link the digest hands an agent that asks for one: path and token.
-async fn ack_link(f: &Fixture, project: &str) -> (String, String) {
+/// The ack link the digest hands `caller` when asked for one: path and token,
+/// or `None` when it comes without a link.
+async fn ack_link_for(f: &Fixture, caller: &Caller, project: &str) -> Option<(String, String)> {
     let digest = f
         .ok(
-            &f.a,
+            caller,
             "GET",
             &format!("/api/v1/projects/{project}/digest?ack_link=true"),
             Value::Null,
         )
         .await;
-    let url = digest["ack_link"]["url"].as_str().unwrap().to_owned();
+    assert!(digest["window_hours"].is_number(), "{digest}");
+    let url = digest["ack_link"]["url"].as_str()?.to_owned();
     let url = url.strip_prefix("http://127.0.0.1:8080").unwrap();
     let (path, token) = url.split_once("?token=").unwrap();
-    (path.to_owned(), token.to_owned())
+    Some((path.to_owned(), token.to_owned()))
+}
+
+/// An ack link minted by the human administrator.
+async fn ack_link(f: &Fixture, project: &str) -> (String, String) {
+    ack_link_for(f, &f.admin, project).await.unwrap()
+}
+
+/// The principal and mint record of the project's last read.
+async fn read_record(f: &Fixture, project: &str) -> (String, Option<String>) {
+    sqlx::query_as("SELECT read_via,minted_by FROM digest_reads WHERE project_id=?")
+        .bind(project)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap()
+}
+
+async fn designate_sender(f: &Fixture, project: &str, principal: Value) -> (StatusCode, Value) {
+    f.call(
+        &f.admin,
+        "POST",
+        &format!("/api/v1/projects/{project}/digest/sender"),
+        json!({"principal_id":principal}),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -653,12 +679,106 @@ async fn the_signed_ack_link_records_a_read_without_any_credential() {
     assert_eq!(status, StatusCode::OK, "{done}");
     let now = coordinator_core::timestamp(f.clock.0.load(Ordering::SeqCst));
     assert_eq!(f.digest(&p).await["last_read_at"], now);
-    let via: String = sqlx::query_scalar("SELECT read_via FROM digest_reads WHERE project_id=?")
-        .bind(&p)
-        .fetch_one(&f.state.pool)
-        .await
-        .unwrap();
+    let (via, minted_by) = read_record(&f, &p).await;
     assert_eq!(via, "ack_link");
+    assert_eq!(minted_by.as_deref(), Some(f.admin.principal.as_str()));
+}
+
+#[tokio::test]
+async fn only_a_human_or_the_designated_sender_gets_an_ack_link() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-sender").await;
+
+    // An ordinary agent asking for a link gets the digest without one, and so
+    // does a second agent while another is designated.
+    assert_eq!(ack_link_for(&f, &f.a, &p).await, None);
+    assert_eq!(f.digest(&p).await["digest_sender"], Value::Null);
+
+    // Agents cannot designate themselves or anyone else.
+    let (status, refused) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("/api/v1/projects/{p}/digest/sender"),
+            json!({"principal_id":f.a.principal}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(ack_link_for(&f, &f.a, &p).await, None);
+
+    // The designation names an enabled agent principal, not a human.
+    let (status, body) = designate_sender(&f, &p, json!(f.admin.principal)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = designate_sender(&f, &p, json!("no-such-principal")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // The designated sender gets a link; the other agent still does not.
+    let (status, body) = designate_sender(&f, &p, json!(f.a.principal)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(f.digest(&p).await["digest_sender"], json!(f.a.principal));
+    let (path, token) = ack_link_for(&f, &f.a, &p).await.expect("designated sender");
+    assert_eq!(ack_link_for(&f, &f.b, &p).await, None);
+    // Only for this project.
+    let other = f.project("digest-sender-other").await;
+    assert_eq!(ack_link_for(&f, &f.a, &other).await, None);
+
+    // A read through the sender's link names the sender, not the human.
+    let (status, done) = anonymous(&f.app, "POST", &path, Some(&format!("token={token}"))).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    let (via, minted_by) = read_record(&f, &p).await;
+    assert_eq!(via, "ack_link");
+    assert_eq!(minted_by.as_deref(), Some(f.a.principal.as_str()));
+
+    // A human gets a link too, and the record names the human.
+    let (path, token) = ack_link_for(&f, &f.admin, &p).await.expect("human");
+    let (status, _) = anonymous(&f.app, "POST", &path, Some(&format!("token={token}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        read_record(&f, &p).await.1.as_deref(),
+        Some(f.admin.principal.as_str())
+    );
+
+    // Clearing the designation takes the sender's link away and voids the ones
+    // it already minted.
+    let (path, token) = ack_link_for(&f, &f.a, &p).await.unwrap();
+    let (status, body) = designate_sender(&f, &p, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ack_link_for(&f, &f.a, &p).await, None);
+    let (status, _) = anonymous(&f.app, "GET", &format!("{path}?token={token}"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let before = read_record(&f, &p).await;
+    let (status, _) = anonymous(&f.app, "POST", &path, Some(&format!("token={token}"))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(read_record(&f, &p).await, before);
+}
+
+#[tokio::test]
+async fn the_host_operator_designates_the_digest_sender_locally() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-sender-local").await;
+    let designate = |agent: Option<&'static str>| {
+        coordinator_server::attention::designate_digest_sender(&f.state, &p, agent, "timer setup")
+    };
+    assert!(designate(Some("no-such-agent")).await.is_err());
+    assert!(designate(Some("attention-admin")).await.is_err());
+    assert!(designate(None).await.is_err());
+    assert_eq!(ack_link_for(&f, &f.a, &p).await, None);
+
+    let done = designate(Some("attention-a")).await.unwrap();
+    assert_eq!(done["digest_sender"], json!(f.a.principal));
+    assert!(ack_link_for(&f, &f.a, &p).await.is_some());
+    assert_eq!(ack_link_for(&f, &f.b, &p).await, None);
+
+    designate(None).await.unwrap();
+    assert_eq!(ack_link_for(&f, &f.a, &p).await, None);
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE project_id=? AND kind='digest.sender_set'",
+    )
+    .bind(&p)
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 2);
 }
 
 #[tokio::test]
@@ -702,11 +822,15 @@ async fn the_ack_link_cannot_do_anything_else() {
     // token is refused.
     let (status, _) = anonymous(&f.app, "DELETE", &path, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let (expires, signature) = token.split_once('.').unwrap();
+    let (expires, rest) = token.split_once('.').unwrap();
+    let (minter, signature) = rest.split_once('.').unwrap();
     let longer: i64 = expires.parse::<i64>().unwrap() + DAY;
     for forged in [
-        format!("{longer}.{signature}"),
-        format!("{expires}.{}", "0".repeat(64)),
+        format!("{longer}.{minter}.{signature}"),
+        format!("{expires}.{minter}.{}", "0".repeat(64)),
+        // Another principal named as the minter, under the same signature.
+        format!("{expires}.{}.{signature}", f.a.principal),
+        format!("{expires}.{signature}"),
         "garbage".to_owned(),
         String::new(),
     ] {
