@@ -136,7 +136,16 @@ Additional implemented routes:
   of a task with attempts, dependencies, objective links or workflow links
   (archive it instead). The lifecycle event and the task's revision bump are
   attributed to the acting principal. The existing endpoints express this
-  directly, so none was added.
+  directly, so none was added. The `task.canceled`, `task.archived`,
+  `task.restored` and `task.deleted` events store `{reason, actor_id}` (and
+  `replacement_task_id` for cancel) in their data, which `tasks history
+  --kind events` returns. The task view carries `lifecycle_events` (newest
+  first, up to 20: `seq`, `action`, `actor_id`, `actor_name`, `reason`,
+  `replacement_task_id`, `created_at`) and `replaces` (tasks canceled with this
+  one as `replacement_task_id`: `task_id`, `title`, `actor_id`, `actor_name`,
+  `reason`, `canceled_at`). Migration 36 copied the reason and replacement into
+  events recorded earlier only where their original mutation receipt had not
+  been compacted; other earlier events keep empty data and a null `reason`.
 - GET `.../attempts/{aid}`: attempt, task, current `authority_valid`, current
   `lease_remaining_ms`, and optional registered checkout metadata.
 - POST `.../attempts/{aid}/checkout`: `{generation,workstation_id,identity,path,
