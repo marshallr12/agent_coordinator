@@ -50,6 +50,9 @@ class Fake:
         self.digest_queries = []
         self.pages = []
         self.coordinator_tokens = []
+        self.reports = []
+        self.tasks = []
+        self.workflows = {}
         fake = self
 
         class Coordinator(BaseHTTPRequestHandler):
@@ -58,6 +61,13 @@ class Fake:
                 status, body = 200, {"data": {"status": "ok"}}
                 if self.path.startswith("/api/v1/projects/p/next"):
                     status, body = fake.next_status, {"data": {"action": None}}
+                elif self.path.startswith("/api/v1/projects/p/integrator/reports"):
+                    body = {"data": {"project_id": "p", "items": fake.reports, "next_before": None}}
+                elif self.path.startswith("/api/v1/projects/p/tasks/") and self.path.endswith("/workflow"):
+                    task = self.path.split("/")[-2]
+                    body = {"data": {"integration_blocked": fake.workflows.get(task)}}
+                elif self.path.startswith("/api/v1/projects/p/tasks"):
+                    body = {"data": {"items": fake.tasks, "next_cursor": None}}
                 elif self.path.startswith("/api/v1/projects/p/digest"):
                     fake.digest_queries.append(self.path)
                     body = {"data": {**DIGEST, "last_read_at": fake.last_read_at,
@@ -74,7 +84,8 @@ class Fake:
         class Ntfy(BaseHTTPRequestHandler):
             def do_POST(self):
                 size = int(self.headers.get("Content-Length", 0))
-                fake.pages.append((self.path, self.rfile.read(size).decode()))
+                fake.pages.append((self.path, self.rfile.read(size).decode(),
+                                   self.headers.get("Title")))
                 self.send_response(200)
                 self.end_headers()
 
@@ -413,7 +424,7 @@ class AttentionTests(unittest.TestCase):
         code, err = self.canary()
         self.assertEqual(code, 1)
         self.assertEqual(len(self.fake.pages), 1)
-        path, body = self.fake.pages[0]
+        path, body, _ = self.fake.pages[0]
         self.assertEqual(path, "/alerts")
         self.assertIn("next: next answered 500", body)
         # The same failure on later runs does not page again.
@@ -573,6 +584,150 @@ class AttentionTests(unittest.TestCase):
             self.assertEqual(attention.parse(["canary", "--ntfy-topic", "t"]).neglect_days, 3)
         with mock.patch.dict(os.environ, {"ATTENTION_NEGLECT_DAYS": "5"}):
             self.assertEqual(attention.parse(["canary", "--ntfy-topic", "t"]).neglect_days, 5)
+
+    def block(self, opened_minute=0, report="r1", check="audit", **details):
+        """Opens a blocking fix_target report created at `opened_minute` on the fake clock."""
+        stamp = datetime.fromtimestamp(START + opened_minute * 60, timezone.utc)
+        self.fake.reports = [r for r in self.fake.reports if r["id"] != report] + [{
+            "id": report, "kind": "fix_target", "resolved_at": None,
+            "created_at": stamp.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "details": {"verdict": "target_failing", "blocks_subject": True, "x": "a" * 40,
+                        "check_name": check, "target_branch": "main", **details}}]
+
+    def wait_behind(self, report, *tasks):
+        for task in tasks:
+            self.fake.tasks.append({"id": task, "work_status": "waiting_integration"})
+            self.fake.workflows[task] = {"report_id": report}
+
+    def target_canary(self, clock, minute, *extra):
+        clock[0] = START + minute * 60
+        self.heartbeat.write_text(json.dumps({"at_ms": int(clock[0] * 1000)}))
+        return self.canary(*extra)[0]
+
+    def test_a_target_block_below_the_threshold_pages_nobody(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.block()
+            self.assertEqual(self.target_canary(clock, 0), 0)
+            self.assertEqual(self.target_canary(clock, 30), 0)
+        self.assertEqual(self.fake.pages, [])
+
+    def test_a_target_block_above_the_threshold_pages_once_with_the_cause(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.block(check="audit")
+            self.wait_behind("r1", "t1", "t2")
+            self.wait_behind("other", "t3")
+            self.fake.tasks.append({"id": "t4", "work_status": "ready"})
+            self.assertEqual(self.target_canary(clock, 0), 0)
+            self.assertEqual(self.target_canary(clock, 31), 1)
+            self.assertEqual(len(self.fake.pages), 1)
+            path, body, title = self.fake.pages[0]
+            self.assertEqual((path, title), ("/alerts", "agentc canary failed"))
+            for text in ("project p", "aaaaaaaaaaaa", "audit", "2 blocked subjects", "target_failing"):
+                self.assertIn(text, body)
+            self.assertNotIn("a" * 13, body)
+            # Later runs inside the re-page interval stay quiet.
+            self.assertEqual(self.target_canary(clock, 45), 1)
+            self.assertEqual(self.target_canary(clock, 31 + 359), 1)
+            self.assertEqual(len(self.fake.pages), 1)
+            self.assertNotIn(TOKEN, body)
+
+    def test_a_persisting_target_block_pages_again_after_the_repage_interval(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.block()
+            self.assertEqual(self.target_canary(clock, 40), 1)
+            self.assertEqual(self.target_canary(clock, 40 + 359), 1)
+            self.assertEqual(len(self.fake.pages), 1)
+            self.assertEqual(self.target_canary(clock, 40 + 360), 1)
+            self.assertEqual(len(self.fake.pages), 2)
+            self.assertEqual(self.target_canary(clock, 40 + 400), 1)
+            self.assertEqual(len(self.fake.pages), 2)
+            self.assertEqual(self.target_canary(clock, 40 + 360 + 60, "--target-repage-minutes", "60"), 1)
+            self.assertEqual(len(self.fake.pages), 3)
+
+    def test_a_second_blocked_target_pages_at_once_and_recovery_is_noted_not_paged(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.block(report="r1", check="audit")
+            self.assertEqual(self.target_canary(clock, 40), 1)
+            self.block(report="r2", check="clippy")
+            self.assertEqual(self.target_canary(clock, 41), 1)
+            self.assertEqual(len(self.fake.pages), 2)
+            self.assertIn("clippy", self.fake.pages[1][1])
+            # r1 is resolved: a note, not a page, and r2 stays quiet.
+            self.fake.reports = [r for r in self.fake.reports if r["id"] != "r1"]
+            self.assertEqual(self.target_canary(clock, 42), 1)
+            self.assertEqual([title for _, _, title in self.fake.pages],
+                             ["agentc canary failed", "agentc canary failed", "agentc target recovered"])
+            self.assertIn("recovered: project p", self.fake.pages[2][1])
+            self.assertIn("audit", self.fake.pages[2][1])
+            # r2 recovers too; no further page, one more note, then silence.
+            self.fake.reports = []
+            self.assertEqual(self.target_canary(clock, 43), 0)
+            self.assertEqual(len(self.fake.pages), 4)
+            self.assertEqual(self.fake.pages[3][2], "agentc target recovered")
+            self.assertEqual(self.target_canary(clock, 44), 0)
+            self.assertEqual(len(self.fake.pages), 4)
+            # A new block pages as a new failure.
+            self.block(opened_minute=44, report="r3")
+            self.assertEqual(self.target_canary(clock, 80), 1)
+            self.assertEqual(len(self.fake.pages), 5)
+
+    def test_only_open_blocking_fix_target_reports_count(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.block(report="a", blocks_subject=False)
+            self.block(report="b", verdict="no_result")
+            self.block(report="c")
+            self.fake.reports[-1]["resolved_at"] = "2026-10-08T00:00:00.000Z"
+            self.block(report="d")
+            self.fake.reports[-1]["kind"] = "flaky"
+            self.assertEqual(self.target_canary(clock, 600), 0)
+            self.block(report="e", verdict="target_unverified")
+            self.assertEqual(self.target_canary(clock, 600), 1)
+        self.assertEqual(len(self.fake.pages), 1)
+
+    def test_an_undelivered_recovery_note_is_retried_and_a_failed_probe_is_not_a_recovery(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.block()
+            self.assertEqual(self.target_canary(clock, 40), 1)
+            self.fake.reports = []
+            self.assertEqual(self.target_canary(clock, 41, "--ntfy-url", "http://127.0.0.1:9"), 2)
+            self.assertEqual(len(self.fake.pages), 1)
+            self.assertEqual(self.target_canary(clock, 42), 0)
+            self.assertEqual(len(self.fake.pages), 2)
+            self.assertEqual(self.target_canary(clock, 43), 0)
+            self.assertEqual(len(self.fake.pages), 2)
+            # A reports request that fails neither recovers nor re-pages a block.
+            self.block()
+            self.assertEqual(self.target_canary(clock, 100), 1)
+            self.assertEqual(len(self.fake.pages), 3)
+
+            def broken(args, token):
+                raise OSError("down")
+            with mock.patch.dict(attention.PROBES, {"target": broken}):
+                self.assertEqual(self.target_canary(clock, 101), 1)
+                self.assertEqual(len(self.fake.pages), 4)
+                self.assertIn("target probe failed", self.fake.pages[3][1])
+            self.assertEqual(self.target_canary(clock, 102), 1)
+            self.assertEqual(len(self.fake.pages), 4, "the block was neither recovered nor re-paged")
+
+    def test_the_target_thresholds_are_settings_and_zero_turns_the_check_off(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.block()
+            self.assertEqual(self.target_canary(clock, 10, "--target-block-minutes", "5"), 1)
+            self.assertEqual(self.target_canary(clock, 20, "--target-block-minutes", "0"), 0)
+        with mock.patch.dict(os.environ, clear=True):
+            args = attention.parse(["canary", "--ntfy-topic", "t"])
+            self.assertEqual((args.target_block_minutes, args.target_repage_minutes), (30, 360))
+        with mock.patch.dict(os.environ, {"ATTENTION_TARGET_BLOCK_MINUTES": "10",
+                                          "ATTENTION_TARGET_REPAGE_MINUTES": "90"}):
+            args = attention.parse(["canary", "--ntfy-topic", "t"])
+            self.assertEqual((args.target_block_minutes, args.target_repage_minutes), (10, 90))
 
     def test_options_default_from_the_environment_and_flags_win(self):
         env = {"ATTENTION_URL": self.fake.url, "ATTENTION_PROJECT": "p",

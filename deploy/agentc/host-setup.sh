@@ -980,6 +980,8 @@ ATTENTION_MAIL_TO=
 # ATTENTION_MAX_HRI=                # page when more human-required items are open
 # ATTENTION_HOURS=24                # the digest's window
 # ATTENTION_NEGLECT_DAYS=3          # page when the digest goes unread this many days (0: off)
+# ATTENTION_TARGET_BLOCK_MINUTES=30    # page when a target_failing/target_unverified block lasts this long (0: off)
+# ATTENTION_TARGET_REPAGE_MINUTES=360  # page again only after this long if the block persists
 EOF
 }
 

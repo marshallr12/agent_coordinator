@@ -1187,6 +1187,22 @@ without a read. A digest that was never read counts from the canary's first run
 (recorded in its state file, `canary-state.json`). The check shows as exit
 status 1 of `agentc-canary.service` while it fails, like the other checks.
 
+The canary also reads the open integrator reports. A red target branch stops
+all integration in the project, so a `fix_target` report with `blocks_subject`
+(verdict `target_failing` or `target_unverified`) that has stayed open for more
+than `ATTENTION_TARGET_BLOCK_MINUTES` minutes (default 30,
+`--target-block-minutes`; `0` turns the check off) fails a `target:REPORT`
+check and sends **one** ntfy page. The page names the project, the target
+revision, the failing check and how many subjects wait behind the block (counted
+from the tasks waiting in integration whose workflow view points at the report;
+`unknown` if that cannot be read). The page is not repeated until
+`ATTENTION_TARGET_REPAGE_MINUTES` minutes (default 360, `--target-repage-minutes`)
+have passed since the last one for that report, and a different blocking report
+pages at once. When the report is resolved the check clears without a page and
+the canary sends a single low-priority "recovered" note (retried on the next run
+if ntfy is unreachable). The daily digest still lists the report; this page
+supplements it, so a blocked target no longer waits for the digest.
+
 #### Timers and settings
 
 | Unit | Runs | Default schedule |
@@ -1227,7 +1243,8 @@ Defaulted entries (commented in the file): `ATTENTION_URL`
 `ATTENTION_HEARTBEAT` (`/var/lib/agentc/heartbeat.json`),
 `ATTENTION_HEARTBEAT_MAX_AGE` (300 seconds), `ATTENTION_NTFY_URL`
 (`https://ntfy.sh`), `ATTENTION_STATE`, `ATTENTION_MAX_HRI` (unset: no HRI
-check), `ATTENTION_HOURS` (24), `ATTENTION_NEGLECT_DAYS` (3), `ATTENTION_SMTP_TLS` (`starttls` when a password
+check), `ATTENTION_HOURS` (24), `ATTENTION_NEGLECT_DAYS` (3),
+`ATTENTION_TARGET_BLOCK_MINUTES` (30), `ATTENTION_TARGET_REPAGE_MINUTES` (360), `ATTENTION_SMTP_TLS` (`starttls` when a password
 file is set, otherwise `none`), `ATTENTION_SMTP_PORT` (587 with `starttls`, 465
 with `tls`, 25 with `none`) and `ATTENTION_MAIL_FROM`.
 
