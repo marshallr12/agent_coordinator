@@ -1468,6 +1468,19 @@ launch still takes the loop until it ends, as before. What is per project:
 - the setup command and verification environment, which were already keyed by
   project id, and the ledger rows (`project`, plus `canary: true`).
 
+Mirror Git commands use an invocation-local `core.sharedRepository=0644`: new
+refs and objects remain readable by the isolated role UIDs even when the
+supervisor uses `umask 0077`, while only the mirror owner can write them. This
+does not change the process umask or credential and launch-state permissions.
+An older supervisor can leave root-owned `0600` refs or `0700` directories
+behind; an unprivileged clone may then report a misleading "null OID" error.
+Inspect ownership and permissions before treating that message as corruption.
+Installing the fix prevents new inaccessible mirror entries; an operator must
+also restore read/search permissions on verified repository data left by the
+older process, preserving root-only writes and keeping credentials outside the
+repair. Retain the original failures, then verify a fresh canary in its normal
+scheduled window before starting a new observation period.
+
 Each project also needs an integrator instance. `integrator-host-setup.sh` now
 installs two unit templates, `agentc-integrator@` (`/etc/agentc/integrator.toml`,
 `daemon.lock`) and `agentc-integrator-canary@` (`/etc/agentc/integrator-canary.toml`,
