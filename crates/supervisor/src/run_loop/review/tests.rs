@@ -230,6 +230,30 @@ fn the_reviewer_contract_stays_within_1500_words() {
 }
 
 #[test]
+fn the_reviewer_contract_says_to_run_the_gate_in_the_foreground_and_why() {
+    let flat = REVIEWER_CONTRACT
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "in the foreground of a single Bash call",
+        "`timeout` at its maximum",
+        "a command started in the background",
+        "is killed when that call returns",
+        "its log stays empty",
+        "never a shell loop",
+        "stopped after 45 minutes",
+        "further commands are refused",
+        "return your verdict then",
+    ] {
+        assert!(flat.contains(required), "the contract lacks {required:?}");
+    }
+    let minutes = crate::candidate::CALL_SECONDS / 60;
+    assert!(flat.contains(&format!("stopped after {minutes} minutes")));
+    assert!(flat.contains(&format!("exit {})", 252)));
+}
+
+#[test]
 fn the_reviewer_contract_requires_a_base_rerun_before_dismissing_a_failure() {
     for required in [
         "Rerun the failing test(s) on `{{base}}`",
