@@ -336,7 +336,10 @@ A human can complete an open, unowned task whose change the owner landed outside
 coordinator (`scripts/ship.py`) with `POST .../tasks/{task}/complete-external`. The
 task ends `done`, and the delivered revision, target branch and required-check
 results are recorded as the human's attestation (the service does not reach the
-repository). Agents are refused with the `task_external_completion` human gate.
+repository). Agents are refused with the `task_external_completion` human gate, so
+the manager's task detail page offers a human-only **Complete as delivered externally**
+control (delivered revision, target branch, reason, roster-prefilled check results,
+service refusal codes shown); the CLI cannot reach the route.
 
 Instruction version 7 added clock reconciliation and receipt-retention guidance.
 Instruction version 8 clarifies automatic non-contributing subagent review,
