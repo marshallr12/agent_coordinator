@@ -59,6 +59,20 @@ linked activities, and exact next actions. It never uses a status string as a
 substitute for these facts. These statuses describe the selected task: a code
 task can be waiting for review while its linked review task is in progress.
 
+Task records also carry a read-only `processing` object that says whether
+anyone is acting on the status right now, so a list can tell a queued review
+from a claimed one without opening the task. It is `null` unless the task is
+`in_progress` or `waiting_review`. Its `stage` is `in_progress` (a live,
+authorized, unexpired attempt owns the task), `in_review` (a required review
+activity is claimed under a live lease), `awaiting_reviewer` (every pending
+review is queued and unclaimed) or `review_lease_expired` (a claimed review's
+lease lapsed and needs recovery). `active` is true only for the first two.
+`holders` lists the lease holder's `name`, `harness`, `workstation` and
+`lease_expires_at`; a value the service did not record is `null`, never a
+guess. A live lease proves a claim, not that the holder's process is running.
+The dashboard animates a status icon only while `active` is true, labels every
+stage in text, and shows `holders` in a tooltip that opens on hover and focus.
+
 Status is derived from authoritative records, including server-time lease
 validity. The database must not rely on a periodic job to change `in_progress`
 to `recovery_required` before refusing a stale update. Transactional projections

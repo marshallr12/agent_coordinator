@@ -75,6 +75,43 @@
     if (task?.current_attempt_id && task?.lifecycle === 'open') return 'in_progress';
     return task?.lifecycle || task?.status || 'ready';
   };
+  // What a task's status badge shows. `work_status` stays the filterable status; the server's `processing`
+  // object says whether anyone is acting on it. A live lease shows a claim, never that a process is running,
+  // so the tooltip says so, and a stage the service has no live claim for is never animated.
+  const STAGE_COPY = {
+    in_progress: { label: 'In Progress', icon: 'working', note: 'An agent holds a live lease on this task.' },
+    in_review: { label: 'In Review', icon: 'reviewing', note: 'A reviewer has claimed a required review and holds a live lease.' },
+    awaiting_reviewer: { label: 'Awaiting Reviewer', icon: 'queued', note: 'The review is queued and no reviewer has claimed it yet.' },
+    review_lease_expired: { label: 'Review Lease Expired', icon: 'lapsed', note: 'A reviewer claimed a review but the lease ended; it needs recovery before anyone is reviewing.' },
+  };
+  const statusIndicator = (task) => {
+    const status = taskStatus(task), processing = task?.processing, copy = processing && STAGE_COPY[processing.stage];
+    if (!copy || (processing.stage === 'in_progress') !== (status === 'in_progress')) return { status, label: displayStatus(status), icon: null, active: false, lines: [] };
+    const lines = [copy.note];
+    if (processing.active) lines.push('The lease proves a claim, not that the process is running right now.');
+    if (processing.stage === 'awaiting_reviewer' && processing.pending_reviews > 1) lines.push(`${processing.pending_reviews} reviews are pending.`);
+    for (const holder of processing.holders || []) {
+      const role = holder.role === 'reviewer' ? 'Reviewer' : 'Agent';
+      lines.push(`${role}: ${holder.name || 'not recorded'}`, `Harness: ${holder.harness || 'not recorded'}`, `Workstation: ${holder.workstation || 'not recorded'}`, `Lease expires: ${holder.lease_expires_at ? formatDate(holder.lease_expires_at) : 'not recorded'}`);
+    }
+    return { status, label: copy.label, icon: copy.icon, stage: processing.stage, active: Boolean(processing.active), lines };
+  };
+  let tipCount = 0;
+  // Fills `badge` from the task; leaves it untouched when nothing it shows has changed.
+  function paintStatusBadge(badge, task) {
+    const view = statusIndicator(task), signature = sig(view);
+    setClass(badge, `status-badge ${view.status}${view.stage ? ` stage-${view.stage}` : ''}${view.active ? ' is-active' : ''}`);
+    if (badge.dataset.paint === signature) return badge;
+    badge.dataset.paint = signature; clear(badge);
+    if (view.icon) { const icon = el('span', `status-icon ${view.icon}`); icon.setAttribute('aria-hidden', 'true'); add(badge, icon); }
+    add(badge, el('span', 'status-label', view.label));
+    if (view.lines.length) {
+      const id = `status-tip-${++tipCount}`, tip = el('span', 'status-tip'); tip.id = id; tip.setAttribute('role', 'tooltip');
+      view.lines.forEach((line) => add(tip, el('span', 'status-tip-line', line)));
+      badge.tabIndex = 0; badge.setAttribute('aria-describedby', id); add(badge, tip);
+    } else { badge.removeAttribute('tabindex'); badge.removeAttribute('aria-describedby'); }
+    return badge;
+  }
   const listData = (data) => Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
   const newKey = () => {
     if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
@@ -793,9 +830,9 @@
 
   function taskRow(task, completed) {
     const status = taskStatus(task);
-    const row = el('article', `task-row${completed ? ' completed-task-row' : ''} ${status}`);
+    const stage = statusIndicator(task).stage, row = el('article', `task-row${completed ? ' completed-task-row' : ''} ${status}${stage ? ` stage-${stage}` : ''}`);
     row.setAttribute('role', completed ? 'group' : 'button'); row.setAttribute('tabindex', '0');
-    row.setAttribute('aria-label', `Open task ${task.title || task.id}`);
+    row.setAttribute('aria-label', `Open task ${task.title || task.id}. Status: ${statusIndicator(task).label}`);
     const open = () => openTask(task.id);
     row.addEventListener('click', (event) => {
       const selection = window.getSelection();
@@ -818,7 +855,7 @@
     const created = el('time', 'task-created project-meta', `Created ${formatDate(task.created_at)}`);
     if (task.created_at && !Number.isNaN(new Date(task.created_at).getTime())) created.dateTime = task.created_at;
     const meta = el('span', 'task-meta');
-    const badge = el('span', `status-badge ${status}`, displayStatus(status)); add(meta, badge);
+    const badge = paintStatusBadge(el('span', 'status-badge'), task); add(meta, badge);
     const description = el('span', 'task-description', task.description || 'No description');
     add(row, title); add(row, identity); add(row, created); add(row, meta); add(row, description);
     return row;
@@ -936,7 +973,7 @@
     const data = state.detail || {}; const task = data.task || data; const project = state.projects.find((item) => text(item.id) === state.projectId);
     const title = task.title || 'Untitled task'; const taskId = text(task.id || state.selectedTaskId);
     setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), title); setText($('detail-task-id-value'), taskId); setText($('detail-task-revision'), task.revision || 1); setText($('detail-description'), task.description || 'No description provided.');
-    const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); setClass(badge, `status-badge ${status}`); setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
+    const status = taskStatus(task); paintStatusBadge($('detail-status'), task); setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
     const humanDelivered = $('detail-human-delivered'); show(humanDelivered, Boolean(task.human_delivered)); setAttr(humanDelivered, 'title', 'A human delivers this task. Supervisors never receive or claim it.');
     const readOnly = Boolean(task.archived_at || ['done', 'completed'].includes(status));
     setProp($('task-attachment-files'), 'disabled', readOnly || Boolean(state.mutation || state.attachmentBusy));
@@ -955,7 +992,7 @@
     let view;
     if (!current) {
       const status = taskStatus(task);
-      view = { message: task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.' };
+      view = { message: task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : task.processing?.stage === 'in_review' ? 'A reviewer holds a live review lease. The review activities below show who claimed it.' : task.processing?.stage === 'awaiting_reviewer' ? 'No lease. The review is queued and waiting for a reviewer to claim it.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.' };
     } else {
       const remaining = taskStatus(task) === 'recovery_required' ? 'Ownership ended; recovery required' : current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
       view = { rows: [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]] };
