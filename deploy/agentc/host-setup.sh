@@ -15,7 +15,9 @@
 # prints or copies that key. Nothing else on the host changes. Idempotent:
 # re-running re-pins binaries and reloads the rules. Claude tokens, Codex
 # logins, coordinator credentials and the push App key stay manual (printed at
-# the end); an installed Claude token is held at root:<role> 0440.
+# the end); an installed Claude token is held at root:<role> 0440. It also
+# installs attention.py with the agentc-canary (every 10 minutes) and
+# agentc-digest (daily) systemd timers, configured by /etc/agentc/attention.env.
 set -euo pipefail
 
 PREFIX=/opt/agentc
@@ -55,6 +57,17 @@ TEMP_DIRS=(/tmp /var/tmp /dev/shm)
 # The placeholder token containment-suite.sh installs for a run (its
 # DUMMY_TOKEN); one left behind is warned about, never adopted silently.
 SUITE_DUMMY_TOKEN=agentc-suite-dummy-token
+# The attention canary and digest (attention.py): the script, an environment
+# file written once (the owner's values live there), the owner-installed
+# coordinator token and the timers' schedules (systemd OnUnitActiveSec and
+# OnCalendar values; re-run with new ones to change them).
+ATTENTION_SCRIPT=$PREFIX/bin/attention.py
+ATTENTION_ENV=$ETC/attention.env
+ATTENTION_TOKEN=${ATTENTION_TOKEN:-$ETC/attention-token}
+ATTENTION_TOKEN_GROUP=agentc-impl
+UNIT_DIR=/etc/systemd/system
+CANARY_INTERVAL=${CANARY_INTERVAL:-10min}
+DIGEST_CALENDAR=${DIGEST_CALENDAR:-daily}
 KEEP="# --- entries below this line are kept when host-setup.sh re-runs ---"
 
 # Refuses to run without root and the invoking owner account.
@@ -784,6 +797,189 @@ secure_push_key() {
   chown "$PUSH_USER:$PUSH_USER" -- "$PUSH_KEY"
 }
 
+# Prints the attention units installed in $UNIT_DIR, canary first.
+attention_units() {
+  echo agentc-canary.service
+  echo agentc-canary.timer
+  echo agentc-digest.service
+  echo agentc-digest.timer
+}
+
+# Prints, one per line, every path --uninstall removes for the attention
+# canary and digest: the units, the environment file, the script and the
+# canary's paged-set file (next to the heartbeat). The owner's token file is
+# not listed: it is handed back to root instead (see remove_attention).
+attention_paths() {
+  local unit
+  for unit in $(attention_units); do echo "$UNIT_DIR/$unit"; done
+  echo "$ATTENTION_ENV"
+  echo "$ATTENTION_SCRIPT"
+  echo "$STATE/canary-state.json"
+  echo "$STATE/canary-state.json.tmp"
+}
+
+# A oneshot service for attention.py subcommand $2, described as $1. It runs
+# as root, which the agent firewall does not filter, so it can reach ntfy and
+# the coordinator; it may write only under $STATE (the canary's state file).
+attention_service() {
+  cat <<EOF
+[Unit]
+Description=$1
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+EnvironmentFile=$ATTENTION_ENV
+ExecStart=/usr/bin/python3 -I $ATTENTION_SCRIPT $2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=$STATE
+EOF
+}
+
+attention_canary_service() { attention_service "agentc canary (pages through ntfy when an SLO fails)" canary; }
+attention_digest_service() { attention_service "agentc attention digest (mails the daily summary)" digest; }
+
+attention_canary_timer() {
+  cat <<EOF
+[Unit]
+Description=Run the agentc canary every $CANARY_INTERVAL
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=$CANARY_INTERVAL
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+attention_digest_timer() {
+  cat <<EOF
+[Unit]
+Description=Run the agentc attention digest ($DIGEST_CALENDAR)
+[Timer]
+OnCalendar=$DIGEST_CALENDAR
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+# The environment file written when absent. Entries with a code default in
+# attention.py are shown commented; the ntfy topic and SMTP settings are the
+# owner's to fill in. The coordinator token is a separate file (see
+# attention_token_note).
+attention_env_file() {
+  cat <<EOF
+# agentc attention canary and digest (attention.py). Written by
+# deploy/agentc/host-setup.sh when absent; never overwritten, removed by
+# --uninstall. Commented lines show the in-code defaults.
+
+# Owner-supplied: where the canary pages (required for the canary timer).
+ATTENTION_NTFY_TOPIC=
+# NTFY_TOKEN=                  # only for a protected ntfy topic
+
+# Owner-supplied: mail the daily digest (leave empty to print it to the journal).
+ATTENTION_SMTP_HOST=
+ATTENTION_MAIL_TO=
+# ATTENTION_SMTP_PORT=25
+# ATTENTION_MAIL_FROM=agentc@localhost
+
+# ATTENTION_URL=https://agents.sithbit.com
+# ATTENTION_PROJECT=fe95a6c5-2aad-463f-8446-4366d9a281c7
+# ATTENTION_TOKEN_FILE=$ATTENTION_TOKEN
+# ATTENTION_HEARTBEAT=$STATE/heartbeat.json
+# ATTENTION_HEARTBEAT_MAX_AGE=300   # seconds
+# ATTENTION_NTFY_URL=https://ntfy.sh
+# ATTENTION_STATE=$STATE/canary-state.json
+# ATTENTION_MAX_HRI=                # page when more human-required items are open
+# ATTENTION_HOURS=24                # the digest's window
+EOF
+}
+
+# Installs attention.py, the environment file (once), and the canary and
+# digest units; enables a timer only when what it needs exists, so an
+# unconfigured host does not fail every ten minutes. Without systemd it
+# installs the script and file only.
+install_attention() {
+  local unit
+  refuse_symlink "$ATTENTION_SCRIPT"; refuse_symlink "$ATTENTION_ENV"
+  install -o root -g root -m 0755 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/attention.py" "$ATTENTION_SCRIPT"
+  if [ ! -e "$ATTENTION_ENV" ]; then
+    attention_env_file | install -o root -g root -m 0644 /dev/stdin "$ATTENTION_ENV"
+  fi
+  secure_attention_token
+  has_systemd || { echo "no systemd: attention timers not installed"; return 0; }
+  write_attention_units "$UNIT_DIR"
+  systemctl daemon-reload
+  for unit in agentc-canary agentc-digest; do
+    if attention_ready "$unit"; then systemctl enable --now --quiet "$unit.timer"
+    else systemctl disable --now --quiet "$unit.timer" 2>/dev/null || true; fi
+  done
+}
+
+# Writes the four unit files into directory $1.
+write_attention_units() {
+  local dir=$1
+  attention_canary_service > "$dir/agentc-canary.service"
+  attention_canary_timer > "$dir/agentc-canary.timer"
+  attention_digest_service > "$dir/agentc-digest.service"
+  attention_digest_timer > "$dir/agentc-digest.timer"
+}
+
+# Succeeds when unit $1 has what it needs to run: the token file, and for the
+# canary a non-empty ntfy topic in the environment file.
+attention_ready() {
+  [ -f "$ATTENTION_TOKEN" ] || return 1
+  [ "$1" != agentc-canary ] || grep -Eq '^ATTENTION_NTFY_TOPIC=.' "$ATTENTION_ENV"
+}
+
+# Holds the owner-installed coordinator token at root:$ATTENTION_TOKEN_GROUP
+# 0440 (the role can read it, never change it). Only a root-owned token is
+# adopted; a missing one is left for the owner (see attention_token_note).
+secure_attention_token() {
+  refuse_symlink "$ATTENTION_TOKEN"
+  [ -e "$ATTENTION_TOKEN" ] || return 0
+  require_single_file "$ATTENTION_TOKEN"
+  owned_by_root "$ATTENTION_TOKEN" ||
+    { echo "refusing $ATTENTION_TOKEN: not root-owned (install it with sudo install -o root); owner repair required" >&2; exit 1; }
+  chmod 0400 -- "$ATTENTION_TOKEN"
+  chown "root:$ATTENTION_TOKEN_GROUP" -- "$ATTENTION_TOKEN"
+  chmod 0440 -- "$ATTENTION_TOKEN"
+}
+
+# Stops the timers and removes the attention units, environment file, script
+# and state. The token file is the owner's: it is kept, handed back to root
+# (0400) before the role account that could read it is deleted.
+remove_attention() {
+  local unit path
+  if has_systemd; then
+    for unit in agentc-canary agentc-digest; do
+      systemctl disable --now "$unit.timer" 2>/dev/null || true
+      systemctl stop "$unit.service" 2>/dev/null || true
+    done
+  fi
+  while IFS= read -r path; do rm -f -- "$path"; done < <(attention_paths)
+  if has_systemd; then systemctl daemon-reload; fi
+  if [ -f "$ATTENTION_TOKEN" ] && [ ! -L "$ATTENTION_TOKEN" ] && [ "$(stat -c %h -- "$ATTENTION_TOKEN")" = 1 ]; then
+    chown -h root:root -- "$ATTENTION_TOKEN"; chmod 0400 -- "$ATTENTION_TOKEN"
+    echo "kept $ATTENTION_TOKEN (root:root 0400); delete it yourself to retire the token"
+  fi
+}
+
+# Prints what the owner supplies for the attention timers.
+attention_token_note() {
+  cat <<EOF
+Attention canary and digest: attention.py runs from the agentc-canary
+($CANARY_INTERVAL) and agentc-digest ($DIGEST_CALENDAR) timers, configured by
+$ATTENTION_ENV. Install the supervisor's coordinator token (the bare token,
+nothing else) and set ATTENTION_NTFY_TOPIC (and the SMTP entries to mail the
+digest) there, then re-run this script to enable the timers:
+  sudo install -o root -g $ATTENTION_TOKEN_GROUP -m 0440 /dev/stdin $ATTENTION_TOKEN
+EOF
+}
+
 # Agent uids may reach loopback only on the proxy, the staging coordinator
 # and the ephemeral range (tests bind port 0); everything else, including
 # DNS and every non-loopback address, is rejected. Claude launches run in
@@ -934,6 +1130,7 @@ remove_service() {
 uninstall() {
   # The loop runs launches as the agent accounts; stop it before retiring them.
   remove_service agentc-run
+  remove_attention
   for user in "${AGENTS[@]}" "$PUSH_USER"; do retire_account "$user"; done
   remove_service agentc-egress
   retire_account agentc-egress
@@ -1111,6 +1308,7 @@ Then run: sudo deploy/agentc/containment-suite.sh
 That suite uses a mock shell; authenticated Claude/browser compatibility
 still requires separate owner verification.
 EOF
+  attention_token_note
   push_steps
 }
 
@@ -1155,7 +1353,9 @@ main() {
   install_firewall
   install_egress_service
   install_run_unit
+  install_attention
   next_steps
 }
 
-main "$@"
+# Sourcing the script (the attention test does) defines the functions only.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

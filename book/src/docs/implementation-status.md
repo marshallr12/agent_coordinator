@@ -158,7 +158,10 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   task overlapping files the integrator saw land out of band in the last 24
   hours. `deploy/agentc/attention.py` renders and mails the digest and runs a
   canary that pages through ntfy once per failing check; the digest mail and the
-  ntfy topic are host configuration, not exercised by CI.
+  ntfy topic are host configuration, not exercised by CI. `host-setup.sh`
+  installs the script with the `agentc-canary` (every 10 minutes) and
+  `agentc-digest` (daily) systemd timers; `deploy/agentc/host-setup-test.py`
+  checks the generated units and the uninstall list without root.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
   safe storage reconciliation. Native upload journals preserve exact bytes and
