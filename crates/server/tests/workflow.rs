@@ -5892,6 +5892,7 @@ async fn an_agent_cancels_a_revert_and_the_integrator_drops_it() {
     let (status, v) = revert_action(&f, &f.c, (&p, &revert), "cancel").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["data"]["lifecycle"], "canceled", "{v}");
+    let deleted = v["data"]["deleted"].clone();
     assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], Value::Null);
     assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
     let body = candidate_body(R, &candidate(0xfeed));
@@ -5902,10 +5903,9 @@ async fn an_agent_cancels_a_revert_and_the_integrator_drops_it() {
     let body = json!({"t0":R,"reason":"conflict","evidence":"CONFLICT"});
     let (status, v) = integrator_post(&f, &i, &p, &route, body).await;
     assert_eq!(refusal(status, &v), expected, "{v}");
-    // A canceled revert is no longer open: the result can be reverted again,
-    // and the canceled one deleted since it never had a candidate.
-    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "delete").await;
-    assert_eq!(status, StatusCode::OK, "{v}");
+    // A canceled revert is no longer open: the result can be reverted again.
+    // The canceled one was deleted by the cancel, since it never had a candidate.
+    assert_eq!(deleted, true);
     let again = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
     assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], again["id"]);
     assert_eq!(
@@ -6088,10 +6088,10 @@ async fn the_author_of_a_reverted_change_cannot_cancel_or_archive_its_revert() {
     assert_eq!(v["data"]["lifecycle"], "canceled", "{v}");
 }
 
-// Restoring an archived revert and deleting a canceled one stay open to the
-// author: neither suppresses the revert.
+// Restoring an archived revert stays open to the author, and canceling one
+// deletes it: neither suppresses the revert.
 #[tokio::test]
-async fn the_author_may_still_restore_or_delete_a_revert_another_retired() {
+async fn the_author_may_still_restore_a_revert_another_retired() {
     let f = Fixture::new().await;
     let (p, result, revert) = author_reverted_subject(&f, "revert-author-restore").await;
     let (status, v) = revert_action(&f, &f.c, (&p, &revert), "archive").await;
@@ -6100,8 +6100,7 @@ async fn the_author_may_still_restore_or_delete_a_revert_another_retired() {
     assert_eq!(status, StatusCode::OK, "{v}");
     let (status, v) = revert_action(&f, &f.c, (&p, &revert), "cancel").await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "delete").await;
-    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["deleted"], true, "{v}");
     reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
 }
 

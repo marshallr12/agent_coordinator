@@ -2052,7 +2052,7 @@
       if (task.archived_at) add(target, actionButton('Restore archived task', () => taskLifecycle(task,'restore','Restore this task to the main task queue? Its lifecycle state and history will be preserved.')));
       else {
         if (['open','planned','canceled'].includes(task.lifecycle)) add(target, taskIconButton('Archive task', 'archive', () => taskLifecycle(task,'archive','Archive this task? It will leave the main task queue and remain available in Archived tasks.')));
-        if (['open','planned'].includes(task.lifecycle)) add(target, taskIconButton('Cancel task', 'cancel', () => taskLifecycle(task,'cancel','Cancel this task? It will remain in the task queue with canceled status.')));
+        if (['open','planned'].includes(task.lifecycle)) add(target, taskIconButton('Cancel task', 'cancel', () => taskLifecycle(task,'cancel','Cancel this task? It will be deleted from the task queue, or archived if it has attempt, workflow, objective, or dependency history or a replacement.')));
         if (['planned','canceled'].includes(task.lifecycle)) add(target, actionButton('Delete task', () => taskLifecycle(task,'delete','Remove this task from task views? This is a soft delete that retains task and audit history. The service refuses if attempts, workflow, objective, or dependency history exist.')));
       }
     }
@@ -2084,7 +2084,7 @@
     view.field('reason','Reason for this action');
     view.finish(({archive:'Archive task',restore:'Restore task',cancel:'Cancel task',delete:'Delete task'})[action],(values,dialog)=>{
       dialog.close(); const path=`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}`;
-      const callback=async()=>{if(action==='delete'){showView('tasks');await loadTasks();}else await loadTaskDetail();};
+      const callback=async()=>{if(action==='delete'||action==='cancel'){showView('tasks');await loadTasks();}else await loadTaskDetail();};
       startMutation(action==='delete'?path:`${path}/${action}`,{expected_revision:task.revision,reason:values.get('reason')},`task ${action}`,callback,action==='delete'?'DELETE':'POST',null,{projectId,taskId});
     });
   }

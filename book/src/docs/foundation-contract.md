@@ -121,7 +121,9 @@ Additional implemented routes:
 - POST `.../tasks/{task_id}/unblock`: human-only `{expected_revision,reason}`.
 - POST `.../tasks/{task_id}/{cancel,archive,restore}` and DELETE
   `.../tasks/{task_id}`, each with `{expected_revision,reason}` (`cancel` also
-  takes an optional `replacement_task_id`). Humans may use all four. An agent
+  takes an optional `replacement_task_id`; a cancel also soft-deletes the task, or
+  archives it when it has history or a replacement, and reports `deleted` or
+  `archived`). Humans may use all four. An agent
   session may use all four on a task whose stored `origin` is `agent` or
   `service` (for example e2e canary tasks), without project delegation; the
   caller cannot supply or change the origin. On a task whose origin is `human`

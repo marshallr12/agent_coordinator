@@ -119,39 +119,80 @@ async fn task_archive_restore_cancel_and_delete_are_separate_from_queue() {
         "/api/v1/projects/{p}/tasks/{}",
         task["id"].as_str().unwrap()
     );
-    assert_eq!(
-        f.call(
+    // Canceling a task with no history deletes it.
+    let (status, canceled) = f
+        .call(
             &f.admin,
             "POST",
             &format!("{task_path}/cancel"),
             "cancel-task",
-            input(3)
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    let actual_revision: i64 = sqlx::query_scalar("SELECT revision FROM tasks WHERE id=?")
-        .bind(task["id"].as_str().unwrap())
-        .fetch_one(&f.state.pool)
-        .await
-        .unwrap();
-    let actual_lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM tasks WHERE id=?")
-        .bind(task["id"].as_str().unwrap())
-        .fetch_one(&f.state.pool)
-        .await
-        .unwrap();
-    assert_eq!(actual_lifecycle, "canceled");
-    let (delete_status, delete_response) = f
-        .call(
-            &f.admin,
-            "DELETE",
-            &task_path,
-            "delete-task",
-            input(actual_revision),
+            input(3),
         )
         .await;
-    assert_eq!(delete_status, StatusCode::OK, "{delete_response}");
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_eq!(canceled["data"]["deleted"], true);
+    assert_eq!(canceled["data"]["archived"], false);
+    let (lifecycle, deleted_at): (String, Option<i64>) =
+        sqlx::query_as("SELECT lifecycle,deleted_at FROM tasks WHERE id=?")
+            .bind(task["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(lifecycle, "canceled");
+    assert!(deleted_at.is_some());
+    for list in ["tasks", "tasks/archived"] {
+        let (_, listed) = f
+            .call(
+                &f.admin,
+                "GET",
+                &format!("/api/v1/projects/{p}/{list}"),
+                "",
+                json!({}),
+            )
+            .await;
+        assert!(
+            !listed["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == task["id"]),
+            "{list}"
+        );
+    }
+    let (status, _) = f.call(&f.admin, "GET", &task_path, "", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn canceling_a_task_with_history_archives_it() {
+    let f = Fixture::new().await;
+    let p = f.project("cancel-archives").await;
+    let task = f.task(&p, "Keep my record", vec![]).await;
+    set_origin(&f, &task, "human").await;
+    let id = task["id"].as_str().unwrap();
+    let dependent = f.task(&p, "Needs it", vec![id.to_owned()]).await;
+    let path = format!("/api/v1/projects/{p}/tasks/{id}");
+    let (status, canceled) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{path}/cancel"),
+            "cancel-linked",
+            json!({"expected_revision":1,"reason":"No longer wanted."}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_eq!(canceled["data"]["archived"], true);
+    assert_eq!(canceled["data"]["deleted"], false);
+    let (lifecycle, archived_at, deleted_at): (String, Option<i64>, Option<i64>) =
+        sqlx::query_as("SELECT lifecycle,archived_at,deleted_at FROM tasks WHERE id=?")
+            .bind(id)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(lifecycle, "canceled");
+    assert!(archived_at.is_some());
+    assert!(deleted_at.is_none());
     let (_, main) = f
         .call(
             &f.admin,
@@ -168,6 +209,26 @@ async fn task_archive_restore_cancel_and_delete_are_separate_from_queue() {
             .iter()
             .any(|item| item["id"] == task["id"])
     );
+    let (_, archived) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/archived"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert!(
+        archived["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == task["id"])
+    );
+    let (status, shown) = f.call(&f.admin, "GET", &path, "", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{shown}");
+    assert_eq!(shown["data"]["lifecycle_events"][0]["action"], "canceled");
+    assert!(dependent["id"].is_string());
 }
 async fn set_origin(f: &Fixture, task: &Value, origin: &str) {
     sqlx::query("UPDATE tasks SET origin=?,lifecycle='open',budget_held_at=NULL WHERE id=?")
@@ -1684,8 +1745,20 @@ async fn lifecycle_events_keep_the_reason_actor_and_replacement() {
     assert_eq!(data["reason"], "Superseded by a better plan.");
     assert_eq!(data["replacement_task_id"], new_id);
     assert_eq!(data["actor_id"], f.a.principal);
-    // Archive and restore keep their reasons and carry no replacement.
-    let archive = json!({"expected_revision":2,"reason":"Tidy up."});
+    // Canceling with a replacement archives the task, so its history stays linked. Restore
+    // and archive keep their reasons and carry no replacement.
+    let restore = json!({"expected_revision":2,"reason":"Look again."});
+    let (status, v) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("{old_path}/restore"),
+            "restore",
+            restore,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let archive = json!({"expected_revision":3,"reason":"Tidy up."});
     let (status, v) = f
         .call(
             &f.a,
@@ -1701,7 +1774,8 @@ async fn lifecycle_events_keep_the_reason_actor_and_replacement() {
     assert_eq!(events[0]["action"], "archived");
     assert_eq!(events[0]["reason"], "Tidy up.");
     assert!(events[0]["replacement_task_id"].is_null());
-    assert_eq!(events[1]["action"], "canceled");
+    assert_eq!(events[1]["action"], "restored");
+    assert_eq!(events[2]["action"], "canceled");
 }
 
 #[tokio::test]
