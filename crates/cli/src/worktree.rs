@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -573,7 +573,7 @@ fn save(path: &Path, intent: &PreparationIntent) -> Result<()> {
 
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)
+    fs::File::open(path)
         .with_context(|| format!("open worktree state directory {}", path.display()))?
         .sync_all()
         .with_context(|| format!("sync worktree state directory {}", path.display()))
