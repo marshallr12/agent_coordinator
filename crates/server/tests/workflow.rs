@@ -676,6 +676,13 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
                 recovery_mode,lease_seconds,rules,agent_rule_editing,automatic_integration,
                 created_at,allow_subagent_reviews FROM original.projects"
                 .to_owned()
+        } else if table == "workflow_activities" {
+            // Later migrations add cancel-reason columns the old schema lacks.
+            "INSERT INTO main.workflow_activities(id,project_id,subject_task_id,submission_id,
+                activity_task_id,kind,slot,state,created_at,completed_at,canceled_at)
+                SELECT id,project_id,subject_task_id,submission_id,activity_task_id,kind,slot,
+                state,created_at,completed_at,canceled_at FROM original.workflow_activities"
+                .to_owned()
         } else if table == "review_decisions" {
             "INSERT INTO main.review_decisions SELECT activity_id,submission_id,attempt_id,
                 reviewer_id,reviewer_session_id,decision,summary,created_at
@@ -5282,6 +5289,108 @@ async fn integrator_revise_below_the_limit_only_records_the_landing() {
     .await
     .unwrap();
     assert_eq!(row, (Some(landing), None));
+}
+
+/// Asserts the canceled integration `integration` of subject `t` carries the
+/// cancel reason `code` in its activity, in the task's workflow and
+/// lifecycle history, and in the revision-needed next action.
+async fn assert_cancel_reason(
+    f: &Fixture,
+    p: &str,
+    t: &Value,
+    integration: &Value,
+    code: &str,
+    target_revision: &str,
+) {
+    let path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}",
+        integration["id"].as_str().unwrap()
+    );
+    let (status, activity) = f.call(&f.a, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{activity}");
+    let reason = &activity["data"]["cancel_reason"];
+    assert_eq!(activity["data"]["status"], "canceled", "{activity}");
+    assert_eq!(reason["code"], code, "{activity}");
+    assert!(
+        reason["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Integrator revise: conflict"),
+        "{activity}"
+    );
+    assert_eq!(
+        reason["context"]["submission_base_revision"], BASE,
+        "{activity}"
+    );
+    assert_eq!(
+        reason["context"]["target_revision"], target_revision,
+        "{activity}"
+    );
+    assert_eq!(
+        reason["context"]["evidence"], "CONFLICT (content): src/lib.rs",
+        "{activity}"
+    );
+    let task = fresh_task(f, p, t).await;
+    let activities = task["workflow"]["activities"].as_array().unwrap();
+    let in_task = activities
+        .iter()
+        .find(|a| a["id"] == integration["id"])
+        .unwrap();
+    assert_eq!(in_task["cancel_reason"], *reason, "{task}");
+    assert_eq!(task["workflow"]["phase"], "revision_needed", "{task}");
+    let actions = task["workflow"]["next_actions"].as_array().unwrap();
+    assert!(
+        actions
+            .iter()
+            .any(|a| a.as_str().unwrap().contains(&format!("canceled ({code})"))),
+        "{task}"
+    );
+    let event = task["lifecycle_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["action"] == "activity_canceled")
+        .unwrap_or_else(|| panic!("{task}"));
+    assert_eq!(event["reason_code"], code, "{event}");
+    assert_eq!(event["reason"], reason["detail"], "{event}");
+    assert_eq!(event["activity_id"], integration["id"], "{event}");
+    assert_eq!(
+        event["context"]["target_revision"], target_revision,
+        "{event}"
+    );
+}
+
+// A revise that names the result that moved the target cancels the
+// integration as `target_advanced`, with the target and submission base.
+#[tokio::test]
+async fn a_target_advanced_revise_records_why_the_integration_was_canceled() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "cancel-target-advanced").await;
+    let (_, result) = published_landing(&f, &i, &p, &candidate(0xa1)).await;
+    let (status, v) =
+        conflict_revise(&f, &i, &p, &integration["submission_id"], Some(&result)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_cancel_reason(&f, &p, &t, &integration, "target_advanced", R).await;
+}
+
+// A conflict revise that names no moving result is a `merge_conflict`; the
+// target revision is the one the integrator last pinned for the submission.
+#[tokio::test]
+async fn a_merge_conflict_revise_records_why_the_integration_was_canceled() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "cancel-merge-conflict").await;
+    let submission = &integration["submission_id"];
+    result_of(
+        &f,
+        &i,
+        &p,
+        submission,
+        "2222222222222222222222222222222222222222",
+    )
+    .await;
+    let (status, v) = conflict_revise(&f, &i, &p, submission, None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_cancel_reason(&f, &p, &t, &integration, "merge_conflict", T0).await;
 }
 
 // P4 S4d: the revise that would reach the limit is serialized after a new
