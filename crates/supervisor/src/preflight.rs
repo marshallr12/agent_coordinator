@@ -599,6 +599,9 @@ mod tests {
             toml::from_str("[verification.p1]\nurl = \"http://127.0.0.1:1\"").unwrap();
         config.bin_dir = dir.path().into();
         config.state_dir = dir.path().into();
+        // The test may itself run as the reviewer account (an in-launch gate),
+        // so name an account no process runs as to force the mismatch.
+        config.reviewer_user = "no-such-account".into();
         config.browser = dir.path().join("no-browser");
         let open = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         config.egress_probe_target = open.local_addr().unwrap().to_string();
