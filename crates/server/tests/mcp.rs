@@ -668,6 +668,12 @@ async fn cli_free_bootstrap_claims_and_releases_when_local_capability_is_missing
         orientation["instructions"]
             .as_str()
             .unwrap()
+            .contains(coordinator_server::discovery::TASK_ATTACHMENT_INSTRUCTIONS)
+    );
+    assert!(
+        orientation["instructions"]
+            .as_str()
+            .unwrap()
             .contains(coordinator_server::discovery::CONTINUATION_INSTRUCTIONS)
     );
     assert!(

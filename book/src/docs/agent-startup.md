@@ -314,6 +314,13 @@ files or hard-coded IDs. On a claim conflict, refresh and try another eligible
 task. The CLI acknowledges the exact complete current instructions during claim.
 Lists, connect, and old receipts grant no ownership.
 
+Before implementing a selected task, inspect its artifact history. Download
+available image and file attachments that provide task context before making
+assumptions. With the native CLI, use `tasks history --id TASK_ID --kind artifacts`,
+`artifacts show --id ARTIFACT_ID`, and `artifacts download --id ARTIFACT_ID
+--output PATH`. If a relevant attachment is unavailable or cannot be downloaded,
+report that limitation instead of guessing its contents.
+
 ### Ownership and local capabilities
 
 Ordinary task claims return `data.claim.attempt.id`,

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { createHash } from 'node:crypto';
 import net from 'node:net';
 
 const root = resolve(import.meta.dirname, '..');
@@ -26,6 +27,11 @@ const tasks = Array.from({ length: 30 }, (_, index) => ({
   id: index ? `task-copy-id-${index}` : task.id,
   title: index ? `Fixture task ${index + 1}` : task.title,
 }));
+const uploadedAttachments = new Map();
+const attachmentReservations = new Map();
+const attachmentBytes = new Map();
+let failFirstAttachmentPut = true;
+const attachmentUploadKeys = [];
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -62,6 +68,49 @@ async function fixtureServer() {
       const items = tasks.slice(start, start + limit);
       const nextCursor = start + items.length < tasks.length ? String(start + items.length) : null;
       return json(response, { items, next_cursor: nextCursor });
+    }
+    if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}/history` && url.searchParams.get('kind') === 'artifacts') {
+      const items = [...uploadedAttachments.values()].map((artifact) => ({ task_id: task.id, relation: 'subject', record: artifact }));
+      return json(response, { items, next_cursor: null });
+    }
+    if (url.pathname === '/api/v1/projects/fixture-project/artifacts/uploads' && request.method === 'POST') {
+      let body = '';
+      for await (const chunk of request) body += chunk;
+      const input = JSON.parse(body);
+      const id = `fixture-artifact-${attachmentReservations.size + 1}`;
+      const artifact = { id, project_id: 'fixture-project', task_id: input.task_id, kind: 'upload', display_name: input.filename, media_type: input.media_type, size_bytes: input.size_bytes, sha256: input.sha256, state: 'reserved', availability: 'pending' };
+      attachmentReservations.set(id, { artifact, input });
+      return json(response, { artifact, upload_path: `/api/v1/projects/fixture-project/artifacts/${id}/content` });
+    }
+    const artifactMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/artifacts\/([^/]+)\/content$/);
+    if (artifactMatch && request.method === 'PUT') {
+      const id = artifactMatch[1], reservation = attachmentReservations.get(id);
+      const key = request.headers['idempotency-key'];
+      attachmentUploadKeys.push(key);
+      const chunks = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const bytes = Buffer.concat(chunks);
+      if (failFirstAttachmentPut) {
+        failFirstAttachmentPut = false;
+        response.writeHead(503, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ error: { code: 'upload_busy', message: 'Synthetic uncertain upload result.' } }));
+        return;
+      }
+      assert(Boolean(key), 'Binary upload omitted its idempotency key.');
+      assert(request.headers['x-csrf-token'] === 'fixture-csrf', 'Binary upload omitted the browser CSRF token.');
+      assert(reservation, 'Binary upload had no task artifact reservation.');
+      assert(bytes.length === reservation.input.size_bytes, 'Uploaded bytes differ from the reservation size.');
+      assert(createHash('sha256').update(bytes).digest('hex') === reservation.input.sha256, 'Uploaded bytes differ from the reserved digest.');
+      const artifact = { ...reservation.artifact, state: 'finalized', availability: 'available', finalized_at: new Date().toISOString() };
+      uploadedAttachments.set(id, artifact); attachmentBytes.set(id, bytes);
+      return json(response, { artifact });
+    }
+    if (artifactMatch && request.method === 'GET') {
+      const artifact = uploadedAttachments.get(artifactMatch[1]), bytes = attachmentBytes.get(artifactMatch[1]);
+      if (!artifact || !bytes) { response.writeHead(404); response.end(); return; }
+      response.writeHead(200, { 'Content-Type': artifact.media_type, 'Content-Disposition': `attachment; filename="${artifact.display_name}"`, 'X-Content-Type-Options': 'nosniff' });
+      response.end(bytes);
+      return;
     }
     if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}`) return json(response, task);
     if (url.pathname === '/api/v1/admin/credentials') return json(response, { items: [] });
@@ -302,6 +351,16 @@ async function main() {
       await evaluate("document.querySelector('.task-row').click()");
       await waitPage("!document.querySelector('#task-detail-content').hidden", 'fixture detail');
     };
+    await openFixtureTask();
+    const palette = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><rect width="12" height="12" fill="#123456"/></svg>';
+    await evaluate(`(() => { const input = document.querySelector('#task-attachment-files'); const transfer = new DataTransfer(); transfer.items.add(new File([${JSON.stringify(palette)}], 'palette.svg', { type: 'image/svg+xml' })); input.files = transfer.files; document.querySelector('#upload-task-attachments').click(); })()`);
+    await waitPage("!document.querySelector('#retry-task-attachments').hidden", 'saved attachment retry after uncertain upload');
+    assert(await evaluate("document.querySelector('#task-attachments-state').textContent.includes('saved bytes and request keys')"), 'Uncertain attachment upload did not explain safe retry.');
+    await evaluate("document.querySelector('#retry-task-attachments').click()");
+    await waitPage("document.querySelector('#task-attachments-list').textContent.includes('palette.svg') && document.querySelector('#task-attachments-list a')", 'uploaded task attachment');
+    const downloadedAttachment = await evaluate("(async () => { const link = document.querySelector('#task-attachments-list a'); const response = await fetch(link.href); return { ok: response.ok, filename: link.download, body: await response.text() }; })()");
+    assert(downloadedAttachment.ok && downloadedAttachment.filename === 'palette.svg' && downloadedAttachment.body === palette, 'The attachment download did not preserve the uploaded image context.');
+    assert(attachmentUploadKeys.length === 2 && attachmentUploadKeys[0] === attachmentUploadKeys[1], 'Retry did not reuse the exact binary upload idempotency key.');
     const submission = { id: 'fixture-submission', task_id: task.id, kind: 'code', summary: 'Saved candidate', candidate_revision: 'fixture-source', acceptance_evidence: [] };
     task.blocked_reason = 'Saved blocker\nRepository access must be restored.';
     for (const phase of ['review', 'integration', 'done']) {
@@ -363,7 +422,7 @@ async function main() {
     await evaluate("window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = true; document.querySelector('#copy-token').click()");
     await waitPage("document.querySelector('#issue-feedback').textContent.includes('Clipboard access was unavailable')", 'token manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
-    console.log('PASS: headless Chrome verified project navigation, keyboard focus, queue/completed-task separation, pagination, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified project navigation, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {

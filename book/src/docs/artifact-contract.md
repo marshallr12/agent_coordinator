@@ -133,6 +133,21 @@ same transaction. References are unique, limited to 100, same-project, finalized
 and live. `submission_artifacts` is immutable; later expiry or deletion changes
 availability without erasing the historical reference.
 
+## Task attachments
+
+The task detail page can attach up to ten files at a time to the selected task.
+Each file is limited to 16 MiB and the combined selection to 64 MiB. Uploads use
+the same service quota and 90-day default retention as other artifacts. The task
+attachment list exposes availability and a download link; task history preserves
+the artifact metadata for later readers.
+
+Agents should inspect task artifact history before implementation and download
+relevant images or files to read their contents. Use
+`tasks history --id TASK_ID --kind artifacts` to find artifact IDs, then
+`artifacts show --id ARTIFACT_ID` and
+`artifacts download --id ARTIFACT_ID --output PATH`. A filename or task description
+does not convey the contents of an image attachment.
+
 ## Native transfers and configuration
 
 After reserving an upload, use `artifacts upload --id ID --file PATH` with the
