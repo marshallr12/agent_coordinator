@@ -257,6 +257,7 @@ fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
         Harness::Codex => ("CODEX_HOME".into(), role_dir.join("codex-home").into()),
     });
     env.extend(crate::verification::environment(spec, config));
+    env.extend(crate::run_loop::binding::launch_env(spec, config));
     if let Some(socket) = &spec.push_socket {
         env.push((PUSH_SOCKET_ENV.into(), socket.into()));
     }

@@ -52,6 +52,32 @@ pub fn write(base: &Path, relative: &Path, contents: &[u8], uid: u32, gid: u32) 
     Ok(file.sync_all()?)
 }
 
+/// Creates the directory `relative` below `base` (mode 0700) unless it
+/// exists, and hands it to `uid`:`gid`. The parent is opened beneath `base`
+/// and the directory created through `/proc/self/fd/<parent>`; it is then
+/// reopened without following a symlink, so a planted link is refused.
+pub fn make_dir(base: &Path, relative: &Path, uid: u32, gid: u32) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let shown = base.join(relative);
+    let (Some(parent), Some(name)) = (relative.parent(), relative.file_name()) else {
+        anyhow::bail!("{} has no parent below {}", shown.display(), base.display());
+    };
+    let directory = open_beneath(base, parent, libc::O_PATH | libc::O_DIRECTORY, 0)
+        .with_context(|| format!("open the parent of {}", shown.display()))?;
+    let path = Path::new("/proc/self/fd")
+        .join(directory.as_raw_fd().to_string())
+        .join(name);
+    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        Err(error) if error.kind() != ErrorKind::AlreadyExists => {
+            return Err(error).with_context(|| format!("create {}", shown.display()));
+        }
+        _ => {}
+    }
+    let created = open_beneath(base, relative, libc::O_RDONLY | libc::O_DIRECTORY, 0)
+        .with_context(|| format!("open {} without following symlinks", shown.display()))?;
+    Ok(std::os::unix::fs::fchown(&created, Some(uid), Some(gid))?)
+}
+
 /// The modification time of `relative` below `base`, which must be a
 /// regular file owned by `owner`. The file is opened `O_PATH`, so nothing is
 /// read and a FIFO cannot block.
@@ -155,6 +181,22 @@ mod tests {
         assert!(write(&base, Path::new("real/file.toml"), b"x", uid, gid).is_err());
         write(&base, Path::new("real/new"), b"x", uid, gid).unwrap();
         assert_eq!(fs::read(base.join("real/new")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn directories_are_made_once_and_never_through_symlinks() {
+        let (_dir, base) = base();
+        std::os::unix::fs::symlink(base.join("real"), base.join("dir")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("real/link")).unwrap();
+        // SAFETY: getgid takes no arguments, cannot fail and touches no memory.
+        let (uid, gid) = (me(), unsafe { libc::getgid() });
+        make_dir(&base, Path::new("real/new"), uid, gid).unwrap();
+        make_dir(&base, Path::new("real/new"), uid, gid).unwrap();
+        assert!(base.join("real/new").is_dir());
+        assert!(make_dir(&base, Path::new("dir/other"), uid, gid).is_err());
+        assert!(!base.join("real/other").exists());
+        assert!(make_dir(&base, Path::new("real/link"), uid, gid).is_err());
+        assert!(make_dir(&base, Path::new("real/file.toml"), uid, gid).is_err());
     }
 
     #[test]

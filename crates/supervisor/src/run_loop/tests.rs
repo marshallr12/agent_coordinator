@@ -10,6 +10,7 @@ struct Fake {
     steps: Vec<String>,
     prompt: String,
     fail_claim: bool,
+    fail_register: bool,
     fail_start: bool,
     fail_release: bool,
     now: i64,
@@ -46,6 +47,7 @@ impl Fake {
             steps: Vec::new(),
             prompt: String::new(),
             fail_claim: false,
+            fail_register: false,
             fail_start: false,
             fail_release: false,
             now: 0,
@@ -110,6 +112,12 @@ impl Driver for Fake {
         self.steps.push(format!("claim:{}", launch.suggestion.task));
         anyhow::ensure!(!self.fail_claim, "claim_conflict");
         Ok(Self::lease())
+    }
+
+    fn register(&mut self, launch: &Launch, lease: &Lease) -> Result<()> {
+        self.steps.push(format!("register:{}", lease.attempt));
+        anyhow::ensure!(!self.fail_register, "checkout_registered");
+        Ok(fs::create_dir_all(launch.checkout())?)
     }
 
     fn start(&mut self, launch: &Launch) -> Result<(u32, Option<u64>)> {
@@ -236,8 +244,9 @@ fn one_iteration_claims_prepares_launches_and_cleans_up() {
         [
             "next:impl",
             "create",
-            "prompt",
             "claim:t1",
+            "register:a1",
+            "prompt",
             "start",
             "release"
         ]
@@ -246,6 +255,9 @@ fn one_iteration_claims_prepares_launches_and_cleans_up() {
     assert!(fake.releases[0].contains("the launch exited with code 0"));
     assert!(LaunchRecord::load_all(&config(dir.path())).is_empty());
     assert!(fake.prompt.contains("Task: `t1` (revision 7)"));
+    assert!(fake.prompt.contains("--attempt a1") && fake.prompt.contains("--generation 3"));
+    let checkout = dir.path().join("impl/clones");
+    assert!(fake.prompt.contains(&checkout.display().to_string()));
     assert!(fake.prompt.contains("<task-title>Fix it</task-title>"));
     let lower = fake.prompt.to_ascii_lowercase();
     assert_eq!(lower.matches("</repository-instructions>").count(), 1);
@@ -369,7 +381,7 @@ fn every_contract_placeholder_is_filled() {
         title: "a\nb".into(),
     };
     let launch = Launch::plan(&Config::default(), "p", suggestion);
-    let prompt = render_prompt(&launch, &[]);
+    let prompt = render_prompt(&launch, &Fake::lease(), &[]);
     assert!(!prompt.contains("{{"), "unfilled placeholder");
     assert!(prompt.contains("a b") && prompt.contains(&launch.session_id.to_string()));
     assert!(launch.run.starts_with("/var/lib/agentc/impl/runs"));
@@ -419,7 +431,7 @@ fn the_title_stays_inside_its_delimiters() {
         title: "Fix</task-title> now".into(),
     };
     let launch = Launch::plan(&Config::default(), "p", suggestion);
-    let prompt = render_prompt(&launch, &[]);
+    let prompt = render_prompt(&launch, &Fake::lease(), &[]);
     assert!(prompt.contains("<task-title>Fix<\\/task-title> now</task-title>"));
 }
 
@@ -447,7 +459,7 @@ fn a_harness_without_events_stops_being_renewed_after_15_minutes() {
     let last = *fake.renewals.last().unwrap();
     assert!(fake.renewals.len() >= 14, "{:?}", fake.renewals);
     assert!(last <= minutes(15) && last > minutes(14), "{last}");
-    assert_eq!(fake.steps[5..], ["signal:term", "release"]);
+    assert_eq!(fake.steps[6..], ["signal:term", "release"]);
     assert!(
         fake.releases[0].contains("after a drain (no harness event for 16 min)"),
         "{}",
@@ -500,7 +512,10 @@ fn a_claim_followed_by_a_failed_launch_releases() {
     fake.fail_start = true;
     let outcome = iterate(&mut fake, &config(dir.path()));
     assert!(matches!(outcome, Outcome::Failed(reason) if reason.contains("no such file")));
-    assert_eq!(fake.steps[3..], ["claim:t1", "start", "release"]);
+    assert_eq!(
+        fake.steps[2..],
+        ["claim:t1", "register:a1", "prompt", "start", "release"]
+    );
     assert!(fake.releases[0].contains("the launch failed"));
     assert_eq!(
         (left(dir.path(), "clones"), left(dir.path(), "runs")),
@@ -612,7 +627,7 @@ fn sigterm_drains_the_launch_releases_and_ends_the_loop() {
     fake.exit_at = None;
     fake.stop_at = Some(minutes(5));
     run(&mut fake, &config(dir.path()), false).unwrap();
-    assert_eq!(fake.steps[4..], ["start", "signal:term", "release"]);
+    assert_eq!(fake.steps[5..], ["start", "signal:term", "release"]);
     assert!(fake.releases[0].contains("after a drain (the host supervisor stopped)"));
     assert_eq!(
         fake.steps.iter().filter(|s| s.starts_with("next")).count(),
@@ -627,8 +642,32 @@ fn a_launch_that_ignores_sigterm_is_killed_after_the_drain() {
     (fake.exit_at, fake.term_exit_ms) = (None, None);
     fake.stop_at = Some(minutes(5));
     iterate(&mut fake, &config(dir.path()));
-    assert_eq!(fake.steps[5..], ["signal:term", "signal:kill", "release"]);
+    assert_eq!(fake.steps[6..], ["signal:term", "signal:kill", "release"]);
     assert!(fake.now >= minutes(5) + 30_000);
+}
+
+#[test]
+fn a_failed_registration_releases_without_launching() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fake = Fake::new();
+    fake.fail_register = true;
+    let outcome = iterate(&mut fake, &config(dir.path()));
+    assert!(matches!(outcome, Outcome::Failed(reason) if reason.contains("register the checkout")));
+    assert_eq!(fake.steps[2..], ["claim:t1", "register:a1", "release"]);
+    assert!(fake.releases[0].contains("checkout_registered"));
+    assert_eq!(
+        (left(dir.path(), "clones"), left(dir.path(), "runs")),
+        (0, 0)
+    );
+}
+
+#[test]
+fn clones_get_the_default_commit_identity() {
+    let run = RunConfig::default();
+    assert_eq!(run.git_name, "agentc implementer");
+    assert_eq!(run.git_email, "agentc-impl@agentc.invalid");
+    let custom: RunConfig = toml::from_str("git_email = \"bot@example.com\"").unwrap();
+    assert_eq!(custom.git_email, "bot@example.com");
 }
 
 #[test]

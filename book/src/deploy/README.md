@@ -705,20 +705,36 @@ Each poll it:
 2. reads `next` for the implementer with
    `/var/lib/agentc/impl/coordinator/credentials.toml`, for the project named
    by `.agent-coordinator.toml` on the mirror's `[run] branch` (default
-   `main`);
+   `main`), or by `[run.binding]` when the host configuration sets it
+   ([staging](#running-the-loop-against-staging));
 3. for a `claim_task` suggestion, fetches `/var/lib/agentc/mirror.git` and,
    as `agentc-impl`, clones its branch head to `impl/clones/<session>` and
-   prepares `impl/runs/<session>`; it copies the credential into the run's
-   coordinator state and writes the prompt: the implementer contract
-   (`crates/supervisor/contracts/implementer.md`, at most 1,500 words) with
-   the task title inside `<task-title>` tags and the repository's `AGENTS.md`
-   and `CONTRIBUTING.md` appended inside `<repository-instructions>` tags as
-   data. Closing tags inside the data are defused, whatever their case;
+   prepares `impl/runs/<session>`. The clone gets a repository-local commit
+   identity from `[run] git_name` and `git_email` (default `agentc
+   implementer` / `agentc-impl@agentc.invalid`), since the agent may not run
+   `git config`. The loop copies the credential into the run's
+   coordinator state (`state/coordinator/credentials.toml`, or
+   `state/coordinator/<project_name>/config/credentials.toml` when the
+   binding sets `project_name`, which is where the CLI then looks);
 4. as `agentc-impl`, connects a coordinator session named after the launch
    and claims the task with `agent-coordinator claim`; the launch gets the
    same session through `AGENT_COORDINATOR_SESSION`;
 5. writes the launch record `/var/lib/agentc/launches/<session>.json` (the
-   attempt, its generation and this boot's id), spawns `launch-root` in a
+   attempt, its generation and this boot's id). Then, in the same session as
+   `agentc-impl`, it runs `agent-coordinator worktree prepare`, which adds
+   the attempt's checkout as a worktree of the clone at
+   `impl/clones/<session>/agentc-checkout` (branch `agentc/<session>`, at
+   the cloned revision; the clone's `info/exclude` hides it) and registers
+   it for the attempt, so `submissions code --checkout` accepts it. It writes
+   the prompt: the implementer contract
+   (`crates/supervisor/contracts/implementer.md`, at most 1,500 words) with
+   the attempt, its generation and the checkout filled in, the task title
+   inside `<task-title>` tags and the repository's `AGENTS.md` and
+   `CONTRIBUTING.md` appended inside `<repository-instructions>` tags as
+   data. Closing tags inside the data are defused, whatever their case. The
+   agent commits in the checkout and submits with `submissions code`, which
+   publishes the candidate through the push helper. A failed registration or
+   prompt releases the attempt with a handoff. The loop then spawns `launch-root` in a
    process group of its own, and adds the launch's pid and `/proc` start time
    to the record;
 6. renews the attempt while the launch runs (see below), and releases it with
@@ -778,7 +794,13 @@ symlinks. Launch records live in the root-owned state directory. Every
 coordinator command run as `agentc-impl` (connect, claim, renew, release)
 reads the repository binding from `/var/lib/agentc/coordinator-binding.toml`
 (`AGENT_COORDINATOR_REPO_CONFIG`), a root-owned copy of the mirror's
-`.agent-coordinator.toml`, never the clone's role-writable copy.
+`.agent-coordinator.toml` (or of `[run.binding]`), never the clone's
+role-writable copy. The loop refuses to start when the binding's origin is
+plain `http` to a host that is not loopback, or plain `http` on loopback
+without `[run] allow_insecure_loopback = true`; only then do its own client,
+its role commands and the reviewer's commands get
+`AGENT_COORDINATOR_ALLOW_INSECURE_LOOPBACK`. An `https` origin never does,
+whatever the setting.
 
 ### Admission, cost and project setup
 
@@ -891,3 +913,120 @@ sudo systemctl enable --now agentc-run
 On start, the loop removes terminal runs that an earlier loop left behind,
 so do not keep evidence from hand-run implementer launches under
 `impl/runs/` while the unit runs.
+
+### Running the loop against staging
+
+`[run.binding]` in `/etc/agentc/supervisor.toml` replaces the mirror's
+binding without editing the mirror or any clone:
+
+```toml
+[run]
+allow_insecure_loopback = true
+
+[run.binding]
+service_url = "http://127.0.0.1:18080"
+project_id = "<staging project id>"
+# project_name = "<credential directory>"
+```
+
+All three sides use it: the loop's own `next`, its role commands (connect,
+claim, renew, release), and the reviewer side. For an implementer launch the
+loop claimed, `launch` also exports `AGENT_COORDINATOR_REPO_CONFIG` (the
+root-owned copy) to the harness, so the agent's own CLI calls go to the same
+coordinator rather than the clone's `.agent-coordinator.toml`, and
+`AGENT_COORDINATOR_ALLOW_INSECURE_LOOPBACK=true` only for a permitted
+loopback `http` origin. A Claude launch reaches a loopback coordinator
+through the launch relay (endpoint `coordinator`); Codex reaches it directly
+through the firewall's staging port. With `project_name`, the loop copies the
+implementer's credential into `<project_name>/config/` of the run's
+coordinator state and the reviewer principal's into
+`verdict/home/<project_name>/config/`; the source files stay where they are.
+
+The loop keeps cloning from `/var/lib/agentc/mirror.git`, and the push helper
+keeps publishing candidates to its GitHub repository. Because the CLI reads a
+published candidate back from the project's `repository_url`, which must
+also equal the clone's origin, the staging project must use the mirror's
+origin URL as its repository; `staging.py project` creates such a project.
+The bootstrap project's local bare remote is not reachable from launches.
+Staging candidates therefore land in the GitHub repository under
+`refs/agent-coordinator/candidates/<staging task id>/<session>`, never on a
+branch; nothing integrates them, since the integrator works only with the
+production coordinator.
+
+The owner's steps for one claim-to-submission run on mxmini (root steps
+need `sudo`; stop at the first failure):
+
+1. Install binaries built from a `main` that includes `[run.binding]` (steps
+   1-2 of [bringing up a host](#bringing-up-a-supervised-host)), and keep the
+   loop's unit stopped: `sudo systemctl stop agentc-run`.
+2. Start staging from the same build:
+   `deploy/agentc/staging.py up`.
+3. Install the staging credentials with the commands
+   `deploy/agentc/staging.py credentials` prints. They replace each role's
+   `credentials.toml`; to keep a production entry, merge the two
+   `[[credentials]]` entries into one file (entries are keyed by origin).
+4. Create the pilot project with the mirror's origin as its repository:
+
+   ```sh
+   ORIGIN=$(sudo git -C /var/lib/agentc/mirror.git config --get remote.origin.url)
+   deploy/agentc/staging.py project --repository-url "$ORIGIN"
+   ```
+
+   It prints an `AGENTC_STAGING_BINDING=...` line and the `[run.binding]`
+   table. Add that table, with `allow_insecure_loopback = true` under
+   `[run]`, below the `KEEP` line of `/etc/agentc/supervisor.toml`. Leave
+   `[run] reviewer` off for this run.
+5. Create one trivial task in it as the staging owner (use the printed
+   binding path):
+
+   ```sh
+   export AGENTC_STAGING_BINDING=<printed path>
+   deploy/agentc/staging.py cli owner --json tasks create --input - <<'EOF'
+   {"title": "Staging pilot: add staging-pilot.txt",
+    "description": "Create staging-pilot.txt at the repository root holding the single line `staging pilot`. Change nothing else. This staging pilot task needs only `git diff --check` as its gate. Push the candidate and submit.",
+    "acceptance_criteria": ["staging-pilot.txt holds exactly `staging pilot`", "No other file changes"]}
+   EOF
+   ```
+
+   Note the task id it prints.
+6. Run one poll as root and keep its output:
+
+   ```sh
+   sudo /opt/agentc/bin/agentc-supervisor run --once 2>&1 | tee ~/staging-pilot-run.log
+   ```
+
+   It claims the task, launches, renews while the harness works, releases
+   the attempt if the agent did not submit, and cleans up; it returns when
+   the launch ends. It must report `Launched { task: "<task id>", exit_code: 0 }`.
+7. Record the evidence in the task's "Knowledge & evidence", outside Git:
+   - claim and submission: `deploy/agentc/staging.py cli owner --json
+     request --method get --path
+     /api/v1/projects/<project id>/tasks/<task id>/workflow` shows the
+     attempt and a submission with `candidate_ref` and
+     `candidate_revision`;
+   - launch: the run log above, `sudo cat /var/lib/agentc/heartbeat.json`, and
+     the task's line in `sudo tail -n 3 /var/lib/agentc/costs.jsonl`;
+   - push candidate: `git ls-remote "$ORIGIN"
+     'refs/agent-coordinator/candidates/<task id>/*'` names the
+     `candidate_revision`.
+8. Restore production: remove `[run.binding]` and `allow_insecure_loopback`
+   from `/etc/agentc/supervisor.toml` and put back the production
+   `credentials.toml` files if step 3 replaced them. The next loop start
+   reinstalls the mirror's binding.
+
+To check that the unit starts after a reboot without claiming anything,
+set the kill switch first, then reboot:
+
+```sh
+sudo touch /var/lib/agentc/kill-switch
+sudo systemctl enable agentc-run
+sudo reboot
+# after the reboot:
+systemctl is-active agentc-run
+sudo journalctl -b -u agentc-run --no-pager | head -n 20
+sudo cat /var/lib/agentc/heartbeat.json
+```
+
+`active`, and a heartbeat written after the boot with a `Refused` outcome
+naming the kill switch, is the evidence. Remove the kill switch (and disable
+the unit) as the pilot plan requires afterwards.

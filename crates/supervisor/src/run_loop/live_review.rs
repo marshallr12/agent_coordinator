@@ -4,7 +4,8 @@
 //! launch can read. Each reviewer launch runs as the reviewer account in its
 //! own clone at the candidate revision, gets no coordinator credential, and
 //! is removed with its `$RUN` once its final output has been read.
-use super::live::{self, binding_path, mirror};
+use super::binding::{self, Binding};
+use super::live::{self, mirror};
 use super::review::{self, Review, ReviewClaim, ReviewDriver, Strikes};
 use super::rooted;
 use crate::clone;
@@ -34,31 +35,35 @@ pub struct LiveReviewer {
     runtime: tokio::runtime::Runtime,
     client: CoordinatorClient,
     project: String,
+    /// Whether coordinator calls may use plain HTTP to loopback.
+    insecure: bool,
     account: Account,
     strikes: Strikes,
 }
 
 impl LiveReviewer {
-    /// Connects with the reviewer principal's credential and resolves the
-    /// reviewer account.
+    /// Connects with the reviewer principal's credential under the loop's
+    /// `binding` and resolves the reviewer account.
     pub fn new(
         config: &Config,
         config_arg: &[String],
-        origin: &str,
-        project: &str,
+        binding: &Binding,
+        insecure: bool,
     ) -> Result<Self> {
         let home = verdict_home(config);
         require_root_only(&home)?;
         let path = home.join("credentials.toml");
         let text =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let insecure = config.run.allow_insecure_loopback;
+        place_named_credential(&home, binding, &text)?;
+        let origin = &binding.service_url;
         Ok(Self {
             config: config.clone(),
             config_arg: config_arg.to_vec(),
             runtime: tokio::runtime::Runtime::new()?,
             client: crate::shadow::client_from(&text, &path, origin, insecure)?,
-            project: project.to_owned(),
+            project: binding.project_id.clone(),
+            insecure,
             account: Account::lookup(Role::Reviewer.user(config))?,
             strikes: Strikes::default(),
         })
@@ -79,7 +84,7 @@ impl LiveReviewer {
             .args(args)
             .current_dir(verdict_home(&self.config))
             .env_clear();
-        command.envs(verdict_env(&self.config, session));
+        command.envs(verdict_env(&self.config, session, self.insecure));
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -504,8 +509,33 @@ fn require_root_only(home: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The environment of root's reviewer-principal CLI commands.
-fn verdict_env(config: &Config, session: Uuid) -> Vec<(&'static str, String)> {
+/// Copies the reviewer principal's credential to the binding's
+/// `project_name` directory in the root-only verdict `home` (mode 0700
+/// directories, a 0600 file), where its CLI commands look for it.
+fn place_named_credential(home: &Path, binding: &Binding, text: &str) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if binding.project_name.is_none() {
+        return Ok(());
+    }
+    let path = home.join(binding.credentials());
+    let directory = path.parent().context("credential directory")?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(file.write_all(text.as_bytes())?)
+}
+
+/// The environment of root's reviewer-principal CLI commands; `insecure`
+/// adds the loopback flag.
+fn verdict_env(config: &Config, session: Uuid, insecure: bool) -> Vec<(&'static str, String)> {
     let home = verdict_home(config).display().to_string();
     let mut env = vec![
         (
@@ -517,12 +547,12 @@ fn verdict_env(config: &Config, session: Uuid) -> Vec<(&'static str, String)> {
         ("AGENT_COORDINATOR_HOME", home),
         ("AGENT_COORDINATOR_SESSION", session.to_string()),
         (
-            "AGENT_COORDINATOR_REPO_CONFIG",
-            binding_path(config).display().to_string(),
+            binding::REPO_CONFIG_ENV,
+            binding::installed_path(config).display().to_string(),
         ),
     ];
-    if config.run.allow_insecure_loopback {
-        env.push(("AGENT_COORDINATOR_ALLOW_INSECURE_LOOPBACK", "true".into()));
+    if insecure {
+        env.push((binding::INSECURE_ENV, "true".into()));
     }
     env
 }
@@ -556,11 +586,18 @@ mod tests {
     fn the_verdict_credential_never_reaches_reviewer_commands() {
         let config = Config::default();
         let session = Uuid::nil();
-        let verdict = verdict_env(&config, session);
+        let verdict = verdict_env(&config, session, false);
         assert!(verdict.contains(&(
             "AGENT_COORDINATOR_HOME",
             "/var/lib/agentc/verdict/home".into()
         )));
+        assert!(
+            verdict
+                .iter()
+                .all(|(name, _)| *name != binding::INSECURE_ENV)
+        );
+        let insecure = verdict_env(&config, session, true);
+        assert!(insecure.contains(&(binding::INSECURE_ENV, "true".into())));
         let reviewer = reviewer_env(&config);
         assert!(reviewer.iter().all(|(_, value)| !value.contains("verdict")));
         assert!(
@@ -607,6 +644,25 @@ mod tests {
         let moved = json!({"submission": {"id": "s2"}});
         assert!(current_submission(&review, &moved).is_err());
         assert!(current_submission(&review, &json!({"submission": null})).is_err());
+    }
+
+    #[test]
+    fn the_verdict_credential_is_copied_to_the_project_named_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let mut binding = Binding {
+            service_url: "http://127.0.0.1:18080".into(),
+            project_id: "p".into(),
+            project_name: None,
+        };
+        place_named_credential(home.path(), &binding, "t").unwrap();
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        binding.project_name = Some("Staging".into());
+        place_named_credential(home.path(), &binding, "t").unwrap();
+        let path = home.path().join("Staging/config/credentials.toml");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "t");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! SIGTERM and SIGINT set a flag the loop polls, so it drains rather than
 //! dies; `launch-root` runs in its own process group, which the drain
 //! signals as a whole.
+use super::binding::{self, Binding};
 use super::lease::Lease;
 use super::live_review::LiveReviewer;
 use super::record::{self, LaunchRecord};
@@ -18,7 +19,6 @@ use crate::profile::{Harness, Role};
 use crate::push_helper::accounts::{self, Account};
 use anyhow::{Context, Result, ensure};
 use coordinator_client::CoordinatorClient;
-use serde::Deserialize;
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,12 +29,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static STOP: AtomicBool = AtomicBool::new(false);
 /// The CLI's exit code for an HTTP 409: the attempt is no longer active.
 const CONFLICT_EXIT: i32 = 5;
-/// The repository binding the mirror's branch carries.
-#[derive(Deserialize)]
-struct Binding {
-    service_url: String,
-    project_id: String,
-}
 
 /// Talks to the coordinator and runs commands for one host.
 pub struct LiveDriver {
@@ -43,7 +37,10 @@ pub struct LiveDriver {
     config_arg: Vec<String>,
     runtime: tokio::runtime::Runtime,
     client: CoordinatorClient,
-    project: String,
+    /// The coordinator, project and credential selector worked under.
+    binding: Binding,
+    /// Whether coordinator calls may use plain HTTP to loopback.
+    insecure: bool,
     account: Account,
     /// The mirror revision the current launch was cloned at.
     revision: String,
@@ -75,19 +72,17 @@ fn on_stop_requests() {
 }
 
 impl LiveDriver {
-    /// Resolves the project from the mirror's binding and connects with the
-    /// implementer's credential file.
+    /// Resolves the binding (`[run.binding]`, else the mirror's), installs
+    /// its root-owned copy and connects with the implementer's credential.
     fn new(config: &Config, config_path: Option<&Path>) -> Result<Self> {
-        let spec = format!("{}:.agent-coordinator.toml", config.run.branch);
-        let text = clone::git_output(&mirror(config), &["show", &spec])?;
-        let binding: Binding = toml::from_str(&text).context("parse the mirror's binding")?;
-        install_binding(config, &text)?;
+        let binding = resolve_binding(config)?;
+        let insecure = binding::insecure(&binding.service_url, config.run.allow_insecure_loopback)?;
+        install_binding(config, &binding.to_toml()?)?;
         let account = Account::lookup(Role::Implementer.user(config))?;
         let credentials = read_credentials(config, &account)?;
         let shown = role_dir(config).join(CREDENTIALS);
-        let insecure = config.run.allow_insecure_loopback;
         let text = String::from_utf8(credentials).context("credentials are not UTF-8")?;
-        let reviewer = reviewer(config, config_path, &binding)?;
+        let reviewer = reviewer(config, config_path, &binding, insecure)?;
         Ok(Self {
             config: config.clone(),
             config_arg: config_path
@@ -96,7 +91,8 @@ impl LiveDriver {
                 .collect(),
             runtime: tokio::runtime::Runtime::new()?,
             client: crate::shadow::client_from(&text, &shown, &binding.service_url, insecure)?,
-            project: binding.project_id,
+            binding,
+            insecure,
             account,
             revision: String::new(),
             child: None,
@@ -136,7 +132,7 @@ impl LiveDriver {
     ) -> Result<Output> {
         let mut command = Command::new(program);
         command.args(args).current_dir(cwd).env_clear();
-        command.envs(role_env(&self.config, launch));
+        command.envs(role_env(&self.config, launch, self.insecure));
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -177,6 +173,14 @@ impl LiveDriver {
         let (uid, gid) = (self.account.uid, self.account.gid);
         rooted::write(&role_dir(&self.config), &relative, contents, uid, gid)
     }
+
+    /// Copies the role's credential into the launch's coordinator state.
+    fn place_credential(&self, launch: &Launch, credential: &[u8]) -> Result<()> {
+        let run = self.below_role(&launch.run)?;
+        let owner = (self.account.uid, self.account.gid);
+        let base = role_dir(&self.config);
+        place_credential(&base, &run, &self.binding, credential, owner)
+    }
 }
 
 /// One instruction file at `revision`, read from `mirror` as a blob of
@@ -197,12 +201,12 @@ pub(super) fn instruction(mirror: &Path, revision: &str, name: &str) -> Option<S
 
 impl Driver for LiveDriver {
     fn project(&self) -> &str {
-        &self.project
+        &self.binding.project_id
     }
 
     fn next(&mut self, role: Role) -> Result<Value> {
         let name = format!("{role:?}").to_lowercase();
-        let call = crate::shadow::fetch_next(&self.client, &self.project, &name);
+        let call = crate::shadow::fetch_next(&self.client, &self.binding.project_id, &name);
         self.runtime.block_on(call)
     }
 
@@ -211,7 +215,8 @@ impl Driver for LiveDriver {
     }
 
     /// Fetches the mirror, clones its branch head, prepares `$RUN`, and
-    /// copies the role's coordinator credential into the run's state.
+    /// copies the role's coordinator credential into the run's state where
+    /// the binding's CLI looks for it.
     fn create(&mut self, launch: &Launch) -> Result<()> {
         let mirror = mirror(&self.config);
         clone::git_output(&mirror, &["fetch", "--prune", "--quiet"])?;
@@ -225,6 +230,8 @@ impl Driver for LiveDriver {
             format!("--revision={sha}"),
             format!("--dest={}", launch.clone.display()),
             format!("--origin-url={origin}"),
+            format!("--user-name={}", self.config.run.git_name),
+            format!("--user-email={}", self.config.run.git_email),
         ];
         let root = Path::new("/");
         self.as_role(
@@ -236,7 +243,7 @@ impl Driver for LiveDriver {
         let prepare = self.supervisor_args("prepare", spec_flags(&self.config, launch));
         self.as_role(&program, &prepare, root, launch)?;
         let credential = read_credentials(&self.config, &self.account)?;
-        self.write_run_file(launch, "state/coordinator/credentials.toml", &credential)
+        self.place_credential(launch, &credential)
     }
 
     fn instructions(&mut self, _launch: &Launch) -> Vec<(String, String)> {
@@ -265,6 +272,14 @@ impl Driver for LiveDriver {
         let claim = ["--json", "claim", &format!("--task={}", s.task)].map(String::from);
         let revision = format!("--revision={}", s.revision);
         Lease::parse(&self.cli(launch, &[&claim[..], &[revision]].concat())?)
+    }
+
+    /// Runs `agent-coordinator worktree prepare` as the implementer in the
+    /// launch's session: it adds [`Launch::checkout`] as a worktree of the
+    /// clone at the cloned revision and registers it for the attempt.
+    fn register(&mut self, launch: &Launch, lease: &Lease) -> Result<()> {
+        let args = checkout_args(launch, lease, &self.revision);
+        self.cli(launch, &args).map(drop)
     }
 
     /// Spawns `launch-root` as root in a process group of its own.
@@ -408,11 +423,13 @@ pub(super) fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
-/// The reviewer side, built only when `[run] reviewer` is on.
+/// The reviewer side, built only when `[run] reviewer` is on, working
+/// under the same binding as the implementer side.
 fn reviewer(
     config: &Config,
     path: Option<&Path>,
     binding: &Binding,
+    insecure: bool,
 ) -> Result<Option<LiveReviewer>> {
     if !config.run.reviewer {
         return Ok(None);
@@ -421,7 +438,41 @@ fn reviewer(
         .map(|p| format!("--config={}", p.display()))
         .into_iter()
         .collect();
-    LiveReviewer::new(config, &arg, &binding.service_url, &binding.project_id).map(Some)
+    LiveReviewer::new(config, &arg, binding, insecure).map(Some)
+}
+
+/// The binding the loop works under: `[run.binding]` from the host
+/// configuration when set, else `.agent-coordinator.toml` on the mirror's
+/// `[run] branch`. Neither comes from a role-writable clone.
+fn resolve_binding(config: &Config) -> Result<Binding> {
+    if let Some(binding) = &config.run.binding {
+        binding.check().context("[run.binding]")?;
+        return Ok(binding.clone());
+    }
+    let spec = format!("{}:.agent-coordinator.toml", config.run.branch);
+    let text = clone::git_output(&mirror(config), &["show", &spec])?;
+    Binding::parse(&text).context("the mirror's binding")
+}
+
+/// Writes `credential` below `base` into the run `run` (relative to `base`)
+/// at `state/coordinator/` plus [`Binding::credentials`], creating a
+/// `project_name` directory chain first, all owned by `owner` (uid, gid)
+/// and reached without following symlinks.
+fn place_credential(
+    base: &Path,
+    run: &Path,
+    binding: &Binding,
+    credential: &[u8],
+    owner: (u32, u32),
+) -> Result<()> {
+    let home = run.join("state/coordinator");
+    if let Some(name) = &binding.project_name {
+        for directory in [home.join(name), home.join(name).join("config")] {
+            rooted::make_dir(base, &directory, owner.0, owner.1)?;
+        }
+    }
+    let target = home.join(binding.credentials());
+    rooted::write(base, &target, credential, owner.0, owner.1)
 }
 
 /// The host mirror clones come from, `<state_dir>/mirror.git`.
@@ -429,18 +480,13 @@ pub(super) fn mirror(config: &Config) -> PathBuf {
     config.state_dir.join("mirror.git")
 }
 
-/// The root-owned copy of the mirror's repository binding that every role
-/// CLI command uses, `<state_dir>/coordinator-binding.toml`.
-pub(super) fn binding_path(config: &Config) -> PathBuf {
-    config.state_dir.join("coordinator-binding.toml")
-}
-
-/// Writes the mirror's binding to [`binding_path`] (root-owned, mode 0644 so
-/// the role can read it), replacing it atomically. Renewals and releases
-/// then never read the clone's role-writable `.agent-coordinator.toml`.
+/// Writes the binding to [`binding::installed_path`] (root-owned, mode
+/// 0644 so the role can read it), replacing it atomically. Renewals,
+/// releases and a `[run.binding]` launch's own CLI then never read the
+/// clone's role-writable `.agent-coordinator.toml`.
 fn install_binding(config: &Config, text: &str) -> Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let path = binding_path(config);
+    let path = binding::installed_path(config);
     let temp = path.with_extension("tmp");
     let _ = std::fs::remove_file(&temp);
     let mut options = std::fs::OpenOptions::new();
@@ -492,8 +538,9 @@ fn coordinator_home(launch: &Launch) -> PathBuf {
 }
 
 /// The environment role commands get: the pinned binaries, the role's home,
-/// the egress proxy, and the launch's coordinator home and session.
-fn role_env(config: &Config, launch: &Launch) -> Vec<(&'static str, String)> {
+/// the egress proxy, the launch's coordinator home and session, the
+/// installed binding, and the insecure-loopback flag when `insecure`.
+fn role_env(config: &Config, launch: &Launch, insecure: bool) -> Vec<(&'static str, String)> {
     let proxy = config.egress_proxy_url();
     let home = config.state_dir.join(Role::Implementer.slug()).join("home");
     let mut env = vec![
@@ -512,12 +559,12 @@ fn role_env(config: &Config, launch: &Launch) -> Vec<(&'static str, String)> {
         ),
         ("AGENT_COORDINATOR_SESSION", launch.session_id.to_string()),
         (
-            "AGENT_COORDINATOR_REPO_CONFIG",
-            binding_path(config).display().to_string(),
+            binding::REPO_CONFIG_ENV,
+            binding::installed_path(config).display().to_string(),
         ),
     ];
-    if config.run.allow_insecure_loopback {
-        env.push(("AGENT_COORDINATOR_ALLOW_INSECURE_LOOPBACK", "true".into()));
+    if insecure {
+        env.push((binding::INSECURE_ENV, "true".into()));
     }
     env
 }
@@ -536,6 +583,22 @@ fn spec_flags(_config: &Config, launch: &Launch) -> Vec<String> {
         format!("--project={}", launch.project),
         format!("--task={}", launch.suggestion.task),
         format!("--session-id={}", launch.session_id),
+    ]
+}
+
+/// `worktree prepare` arguments registering the launch's checkout for the
+/// attempt: a branch named after the session, based on `revision`.
+fn checkout_args(launch: &Launch, lease: &Lease, revision: &str) -> Vec<String> {
+    vec![
+        "--json".into(),
+        "worktree".into(),
+        "prepare".into(),
+        format!("--attempt={}", lease.attempt),
+        format!("--generation={}", lease.generation),
+        format!("--source={}", launch.clone.display()),
+        format!("--path={}", launch.checkout().display()),
+        format!("--branch=agentc/{}", launch.session_id),
+        format!("--base={revision}"),
     ]
 }
 
@@ -580,13 +643,88 @@ mod tests {
             title: String::new(),
         };
         let launch = Launch::plan(&Config::default(), "p", suggestion);
-        let env = role_env(&Config::default(), &launch);
+        let env = role_env(&Config::default(), &launch, false);
         let session = launch.session_id.to_string();
         assert!(env.contains(&("AGENT_COORDINATOR_SESSION", session)));
         assert!(env.contains(&("HTTPS_PROXY", "http://127.0.0.1:3128".into())));
         assert!(env.iter().all(|(name, _)| !name.contains("TOKEN")));
         let binding = "/var/lib/agentc/coordinator-binding.toml".to_owned();
         assert!(env.contains(&("AGENT_COORDINATOR_REPO_CONFIG", binding)));
+        assert!(env.iter().all(|(name, _)| *name != binding::INSECURE_ENV));
+        let insecure = role_env(&Config::default(), &launch, true);
+        assert!(insecure.contains(&(binding::INSECURE_ENV, "true".into())));
+    }
+
+    #[test]
+    fn a_run_binding_overrides_the_mirror_and_is_checked() {
+        let mut config = Config::default();
+        config.run.binding = Some(Binding {
+            service_url: "http://127.0.0.1:18080".into(),
+            project_id: "staging-project".into(),
+            project_name: Some("Staging".into()),
+        });
+        let resolved = resolve_binding(&config).unwrap();
+        assert_eq!(resolved.project_id, "staging-project");
+        config.run.binding.as_mut().unwrap().project_name = Some("../x".into());
+        assert!(resolve_binding(&config).is_err());
+    }
+
+    #[test]
+    fn credentials_land_where_the_bindings_cli_reads_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let run = Path::new("runs/s1");
+        std::fs::create_dir_all(base.join(run).join("state/coordinator")).unwrap();
+        // SAFETY: getuid and getgid take no arguments and touch no memory.
+        let owner = unsafe { (libc::getuid(), libc::getgid()) };
+        let mut binding = Binding {
+            service_url: "http://127.0.0.1:18080".into(),
+            project_id: "p".into(),
+            project_name: None,
+        };
+        place_credential(&base, run, &binding, b"legacy", owner).unwrap();
+        let home = base.join(run).join("state/coordinator");
+        assert_eq!(
+            std::fs::read(home.join("credentials.toml")).unwrap(),
+            b"legacy"
+        );
+        binding.project_name = Some("Staging".into());
+        place_credential(&base, run, &binding, b"named", owner).unwrap();
+        let named = home.join("Staging/config/credentials.toml");
+        assert_eq!(std::fs::read(named).unwrap(), b"named");
+        std::fs::remove_dir_all(home.join("Staging")).unwrap();
+        std::os::unix::fs::symlink(base.join("runs"), home.join("Staging")).unwrap();
+        assert!(place_credential(&base, run, &binding, b"x", owner).is_err());
+    }
+
+    #[test]
+    fn the_checkout_is_a_session_branch_inside_the_clone_at_the_cloned_revision() {
+        let suggestion = Suggestion {
+            task: "t".into(),
+            revision: 1,
+            title: String::new(),
+        };
+        let launch = Launch::plan(&Config::default(), "p", suggestion);
+        let lease = Lease {
+            attempt: "a1".into(),
+            generation: 2,
+            renew_after_seconds: 60,
+            progress_age_ms: 0,
+        };
+        let args = checkout_args(&launch, &lease, "abc123");
+        let clone = launch.clone.display();
+        let expected = [
+            "--json".to_owned(),
+            "worktree".into(),
+            "prepare".into(),
+            "--attempt=a1".into(),
+            "--generation=2".into(),
+            format!("--source={clone}"),
+            format!("--path={clone}/agentc-checkout"),
+            format!("--branch=agentc/{}", launch.session_id),
+            "--base=abc123".into(),
+        ];
+        assert_eq!(args, expected);
     }
 
     #[test]
@@ -659,7 +797,7 @@ mod tests {
         };
         install_binding(&config, "old").unwrap();
         install_binding(&config, "project_id = \"p\"").unwrap();
-        let path = binding_path(&config);
+        let path = binding::installed_path(&config);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "project_id = \"p\""

@@ -661,11 +661,19 @@ EOF
 # effort = "high"
 # min_free_mib = 20480           # refuse to claim below this much free disk
 # branch = "main"                # mirror branch each clone starts from
-# allow_insecure_loopback = false
+# allow_insecure_loopback = false  # plain http only to a loopback [run.binding] origin
 # reviewer = false               # also review, posting with $STATE/verdict/home/credentials.toml
 # review_attempts = 3            # stop claiming a submission after this many failed verdicts
 # budget_minutes = 240           # stop renewing a launch's attempt after this
 # drain_seconds = 30             # on stop: SIGTERM, then SIGKILL after this
+# git_name = "agentc implementer"           # commit identity set in each clone
+# git_email = "agentc-impl@agentc.invalid"
+# Default: the mirror branch's .agent-coordinator.toml. Set this table to
+# work on another coordinator, e.g. the one `staging.py project` prints.
+# [run.binding]
+# service_url = "http://127.0.0.1:18080"
+# project_id = "<staging project id>"
+# project_name = "<credential directory>"  # optional CLI credential selector
 
 # Admission before each claim (plan P3b health and cost). While the kill
 # switch file exists the loop claims nothing. A 429 marks the vendor

@@ -46,15 +46,24 @@ pub fn socket_path(spec: &LaunchSpec, endpoint: &Endpoint) -> PathBuf {
     socket_dir(spec).join(format!("{}.sock", endpoint.name))
 }
 
-/// The endpoints a launch needs: always the egress proxy, and a verifying
-/// reviewer's staging coordinator when its URL is on loopback (any other
-/// host is reached through the proxy).
+/// The endpoints a launch needs: always the egress proxy, a verifying
+/// reviewer's staging coordinator when its URL is on loopback, and the
+/// `[run.binding]` coordinator of a loop-claimed implementer when that is on
+/// loopback (any other host is reached through the proxy).
 pub fn endpoints(spec: &LaunchSpec, config: &Config) -> Result<Vec<Endpoint>> {
     let proxy = loopback(&config.egress_listen).context("egress_listen")?;
     let mut list = vec![Endpoint {
         name: "proxy",
         address: proxy,
     }];
+    if let Some(address) = coordinator_address(spec, config)?
+        && address != proxy
+    {
+        list.push(Endpoint {
+            name: "coordinator",
+            address,
+        });
+    }
     if let Some(verification) = crate::verification::for_launch(spec, config)
         && let Some(address) = staging_address(&verification.url)?
         && address != proxy
@@ -65,6 +74,16 @@ pub fn endpoints(spec: &LaunchSpec, config: &Config) -> Result<Vec<Endpoint>> {
         });
     }
     Ok(list)
+}
+
+/// The loopback address of the `[run.binding]` coordinator, for an
+/// implementer launch the loop claimed a task for.
+fn coordinator_address(spec: &LaunchSpec, config: &Config) -> Result<Option<SocketAddr>> {
+    let implementer = spec.role == crate::profile::Role::Implementer && spec.task.is_some();
+    match &config.run.binding {
+        Some(binding) if implementer => staging_address(&binding.service_url),
+        _ => Ok(None),
+    }
 }
 
 /// The lowest port the namespace half can bind without privileges.
@@ -350,6 +369,29 @@ mod tests {
                 "{remote}"
             );
         }
+    }
+
+    #[test]
+    fn a_loopback_run_binding_is_relayed_only_for_claimed_implementer_launches() {
+        let run = Path::new("/w/run");
+        let mut config = Config::default();
+        let bind = |url: &str| crate::run_loop::binding::Binding {
+            service_url: url.into(),
+            project_id: "p1".into(),
+            project_name: None,
+        };
+        config.run.binding = Some(bind("http://127.0.0.1:18080"));
+        let mut claimed = spec(Role::Implementer, run);
+        claimed.task = Some("t1".into());
+        let names = |spec: &LaunchSpec, config: &Config| -> Vec<&str> {
+            let list = endpoints(spec, config).unwrap();
+            list.iter().map(|e| e.name).collect()
+        };
+        assert_eq!(names(&claimed, &config), ["proxy", "coordinator"]);
+        assert_eq!(names(&spec(Role::Implementer, run), &config), ["proxy"]);
+        assert_eq!(names(&spec(Role::Reviewer, run), &config), ["proxy"]);
+        config.run.binding = Some(bind("https://agents.example.com"));
+        assert_eq!(names(&claimed, &config), ["proxy"]);
     }
 
     #[test]
