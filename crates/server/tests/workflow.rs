@@ -4981,6 +4981,100 @@ async fn a_superseded_result_resolves_its_rerun_refused_report() {
     assert!(resolution_note(&f, &refused).await.is_some());
 }
 
+/// The workflow view `tasks show` returns for task `t`.
+async fn shown_workflow(f: &Fixture, p: &str, t: &Value) -> Value {
+    let path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let (status, v) = f.call(&f.a, "GET", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"]["workflow"].clone()
+}
+
+/// Posts a blocking `fix_target` report for the fixture target and returns it.
+async fn fix_target(f: &Fixture, i: &Caller, p: &str, name: &str, result: &str) -> Value {
+    let details = json!({"verdict":"target_failing","repository_url":format!("https://example.test/{name}.git"),
+        "target_branch":"main","x":"4444444444444444444444444444444444444444",
+        "check_name":CHECK,"result_id":result,"r":R,"blocks_subject":true});
+    let (status, v) = report(
+        f,
+        i,
+        p,
+        "fix_target",
+        "target:x:target_failing",
+        None,
+        details,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["requires_human"], true, "{v}");
+    v["data"]["id"].clone()
+}
+
+fn assert_unblocked(workflow: &Value) {
+    assert!(workflow["integration_blocked"].is_null(), "{workflow}");
+    let actions = workflow["next_actions"].to_string();
+    assert!(actions.contains("claim the integration"), "{actions}");
+}
+
+// An open blocking report shows on the task's workflow view with its kind,
+// verdict, target revision and check, and its next_actions name the human
+// action; resolving the report clears both.
+#[tokio::test]
+async fn a_blocking_target_report_shows_on_the_task_until_resolved() {
+    let f = Fixture::new().await;
+    let name = "integration-blocked-resolve";
+    let (p, t, integration, i) = integrator_task(&f, name).await;
+    let result = pinned_result(&f, &i, &p, &integration["submission_id"], T0).await;
+    assert_unblocked(&shown_workflow(&f, &p, &t).await);
+    let id = fix_target(&f, &i, &p, name, &result).await;
+    let workflow = shown_workflow(&f, &p, &t).await;
+    let blocked = &workflow["integration_blocked"];
+    assert_eq!(blocked["report_id"], id, "{workflow}");
+    assert_eq!(blocked["kind"], "fix_target");
+    assert_eq!(blocked["verdict"], "target_failing");
+    assert_eq!(blocked["check_name"], CHECK);
+    assert_eq!(
+        blocked["target_revision"],
+        "4444444444444444444444444444444444444444"
+    );
+    let actions = workflow["next_actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "{workflow}");
+    let action = actions[0].as_str().unwrap();
+    assert!(action.contains("fix the target branch"), "{action}");
+    assert!(action.contains(id.as_str().unwrap()), "{action}");
+    assert!(!action.contains("claim the integration"), "{action}");
+    assert_eq!(
+        workflow["blockers"],
+        json!([]),
+        "not a requirements blocker"
+    );
+    let (status, v) = resolve(&f, &f.admin, &p, &id, json!({"note":"target fixed"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_unblocked(&shown_workflow(&f, &p, &t).await);
+}
+
+// The block also clears when the subject integrates without anyone
+// resolving the report, and a report of another target does not block.
+#[tokio::test]
+async fn a_blocking_report_clears_when_the_subject_integrates() {
+    let f = Fixture::new().await;
+    let name = "integration-blocked-integrated";
+    let (p, t, integration, i) = integrator_task(&f, name).await;
+    let result = authorized(&f, &i, &p, &integration["submission_id"], T0).await;
+    let other = json!({"verdict":"target_failing","repository_url":"https://example.test/other.git",
+        "target_branch":"main","x":"4444444444444444444444444444444444444444",
+        "check_name":CHECK,"blocks_subject":true});
+    report(&f, &i, &p, "fix_target", "other", None, other).await;
+    assert_unblocked(&shown_workflow(&f, &p, &t).await);
+    fix_target(&f, &i, &p, name, &result).await;
+    let blocked = shown_workflow(&f, &p, &t).await;
+    assert_eq!(blocked["integration_blocked"]["kind"], "fix_target");
+    let (status, v) = observe(&f, &i, &p, &result, R, "contained").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let workflow = shown_workflow(&f, &p, &t).await;
+    assert_eq!(workflow["phase"], "done", "{workflow}");
+    assert!(workflow["integration_blocked"].is_null(), "{workflow}");
+}
+
 // P4 S4b: cancelled and skipped attempts are not failures; a skipped
 // deciding attempt passes the check for push authority, as on GitHub.
 #[tokio::test]

@@ -465,6 +465,78 @@ fn human_item(p: &str, report: Value) -> Value {
     })
 }
 
+/// The open human-required report that blocks the integration of the subject
+/// whose current submission is `submission`, as the task view shows it, or
+/// null. A report counts when it names the submission (or a result of it), or
+/// only the task; a `fix_target` report that blocks its subjects counts for
+/// every subject of the same repository and target branch, since the target
+/// is what needs fixing. The newest such report wins. It disappears once a
+/// human resolves it, and the subject leaves integration when it integrates.
+pub(crate) async fn integration_blocked(
+    c: &mut SqliteConnection,
+    p: &str,
+    task_id: &str,
+    submission: &Value,
+) -> Result<Value, AppError> {
+    let row = sqlx::query(
+        "SELECT * FROM integrator_reports WHERE project_id=? AND resolved_at IS NULL \
+         AND requires_human=1 AND (submission_id=? \
+         OR result_id IN (SELECT id FROM integrator_results WHERE submission_id=?) \
+         OR (task_id=? AND submission_id IS NULL AND result_id IS NULL) \
+         OR (kind='fix_target' AND json_extract(details_json,'$.blocks_subject')=1 \
+         AND json_extract(details_json,'$.repository_url')=? \
+         AND json_extract(details_json,'$.target_branch')=?)) ORDER BY rowid DESC LIMIT 1",
+    )
+    .bind(p)
+    .bind(submission["id"].as_str())
+    .bind(submission["id"].as_str())
+    .bind(task_id)
+    .bind(submission["repository"].as_str())
+    .bind(submission["target_branch"].as_str())
+    .fetch_optional(&mut *c)
+    .await?;
+    let Some(row) = row else {
+        return Ok(Value::Null);
+    };
+    let report = report_value(&row)?;
+    let details = &report["details"];
+    let (id, kind) = (report["id"].clone(), report["kind"].clone());
+    Ok(json!({
+        "report_id": id,
+        "kind": kind,
+        "verdict": details["verdict"],
+        "target_revision": details["x"],
+        "result_revision": details["r"],
+        "check_name": details["check_name"],
+        "repository_url": details["repository_url"],
+        "target_branch": details["target_branch"],
+        "created_at": report["created_at"],
+        "action": blocked_action(&kind, &id, details),
+    }))
+}
+
+/// What a human must do about the blocking report, for `next_actions`.
+fn blocked_action(kind: &Value, id: &Value, details: &Value) -> String {
+    let text =
+        |key: &str, fallback: &'static str| details[key].as_str().unwrap_or(fallback).to_owned();
+    let id = id.as_str().unwrap_or_default();
+    if kind == "fix_target" {
+        return format!(
+            "Integration is blocked: check {} fails on target {} of {}. A human must fix \
+             the target branch, then resolve integrator report {id}.",
+            text("check_name", "(unnamed)"),
+            text("x", "(unknown revision)"),
+            text("target_branch", "the target branch"),
+        );
+    }
+    format!(
+        "Integration is blocked by an open {} integrator report ({}). A human must see \
+         report {id} and resolve it.",
+        kind.as_str().unwrap_or("integrator"),
+        text("verdict", "no verdict"),
+    )
+}
+
 /// A human's resolution of one report.
 #[derive(Deserialize, Serialize)]
 struct ResolveInput {
