@@ -222,6 +222,7 @@
     if (method === 'POST' && /\/projects\/[^/]+\/tasks$/.test(path)) return 'create_task';
     if (method === 'POST' && path === '/api/v1/admin/agents') return 'issue_credential';
     if (method === 'POST' && /\/admin\/credentials\/[^/]+\/revoke$/.test(path)) return 'revoke_credential';
+    if (method === 'POST' && /\/admin\/credentials\/[^/]+\/delete$/.test(path)) return 'delete_credential';
     if (method === 'POST' && path === '/api/v1/auth/logout') return 'logout';
     return null;
   };
@@ -404,6 +405,7 @@
     if (operation === 'archive_completed_task') return async () => { removeCompletedTask(context.projectId, context.taskId); };
     if (operation === 'issue_credential') return async (data) => { downloadIssuedCredential(data); await loadCredentials(); };
     if (operation === 'revoke_credential') return async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); };
+    if (operation === 'delete_credential') return async () => { await loadCredentials(); setGlobalAlert('Credential deleted.', 'success'); };
     if (operation === 'logout') return async () => signOutLocal();
     return null;
   }
@@ -1172,12 +1174,20 @@
         if (!credential.revoked_at) {
           add(row, actionButton('Rotate', () => rotateCredential(credential)));
           const revoke = actionButton('Revoke', () => revokeCredential(credential.id)); revoke.className = 'button danger'; add(row, revoke);
-        } else if (offer) add(row, actionButton('New token for this agent', () => replaceAgentCredential(credential)));
+        } else {
+          if (offer) add(row, actionButton('New token for this agent', () => replaceAgentCredential(credential)));
+          add(row, taskIconButton('Delete revoked credential', 'delete', () => confirmDeleteCredential(credential)));
+        }
         return row;
       } };
     }));
     renderMutationState();
   }
+  function confirmDeleteCredential(credential) {
+    const view = workflowDialog('Delete credential', `Delete the revoked credential “${credential.credential_name || 'initial'}” of ${credential.principal_name || credential.name || credential.id}? It will no longer appear in the Issued credentials list. This cannot be undone.`);
+    view.finish('Delete', (values, dialog) => { dialog.close(); deleteCredential(credential.id); });
+  }
+  function deleteCredential(id) { startMutation(`/api/v1/admin/credentials/${encodeURIComponent(id)}/delete`, {}, 'credential deletion', async () => { await loadCredentials(); setGlobalAlert('Credential deleted.', 'success'); }); }
   function revokeCredential(id) { startMutation(`/api/v1/admin/credentials/${encodeURIComponent(id)}/revoke`, {}, 'credential revocation', async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); }); }
 
   // Polling and background refreshes (including the auto-refresh checkbox) share these rules: nothing
@@ -1943,6 +1953,7 @@
       archive: '<rect x="4" y="5" width="16" height="4" rx="1"/><path d="M6 9v10h12V9m-8 4h4"/>',
       cancel: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
       edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z"/>',
+      delete: '<path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
       resolve: '<path d="m5 12 4 4L19 6"/><circle cx="12" cy="12" r="9"/>'
     };
     button.classList.add('task-action-icon'); button.title = label; button.setAttribute('aria-label', label);

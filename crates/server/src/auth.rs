@@ -435,6 +435,10 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/admin/credentials/{id}/revoke",
             post(revoke_credential),
         )
+        .route(
+            "/api/v1/admin/credentials/{id}/delete",
+            post(delete_credential),
+        )
         .route("/api/v1/sessions", post(create_session))
         .route("/api/v1/sessions/{id}", get(get_session))
         .route("/api/v1/sessions/{id}/close", post(close_session))
@@ -625,7 +629,7 @@ async fn credentials(
     if page.cursor.as_ref().is_some_and(|cursor| !valid_id(cursor)) {
         return Err(AppError::bad_request("Invalid cursor."));
     }
-    let rows = sqlx::query("SELECT c.id,c.name AS credential_name,p.name,c.principal_id,c.issued_by,c.created_at,c.revoked_at,c.expires_at,c.class,c.access FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.id>? ORDER BY c.id LIMIT 201")
+    let rows = sqlx::query("SELECT c.id,c.name AS credential_name,p.name,c.principal_id,c.issued_by,c.created_at,c.revoked_at,c.expires_at,c.class,c.access FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.deleted_at IS NULL AND c.id>? ORDER BY c.id LIMIT 201")
         .bind(page.cursor.unwrap_or_default()).fetch_all(&state.pool).await?;
     let next = if rows.len() > 200 {
         Some(rows[199].get::<String, _>("id"))
@@ -740,6 +744,57 @@ async fn revoke_credential(
                 json!({"id":id,"revoked":true}),
                 None,
                 "agent_credential_revoked",
+                &id,
+            )
+            .await?,
+    ))
+}
+
+async fn delete_credential(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<Empty>,
+) -> Result<Json<Value>, AppError> {
+    admin(&auth.actor)?;
+    let mut mutation = Mutation::begin(
+        &state,
+        &auth,
+        &headers,
+        &format!("POST /api/v1/admin/credentials/{id}/delete"),
+        &input,
+    )
+    .await?;
+    admin(&mutation.actor)?;
+    if let Some(replay) = &mutation.replay {
+        return Ok(response(replay.clone()));
+    }
+    let row = sqlx::query("SELECT revoked_at,deleted_at FROM credentials WHERE id=?")
+        .bind(&id)
+        .fetch_optional(&mut *mutation.tx)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    if row.get::<Option<i64>, _>("deleted_at").is_some() {
+        return Err(AppError::not_found());
+    }
+    if row.get::<Option<i64>, _>("revoked_at").is_none() {
+        return Err(AppError::conflict(
+            "credential_not_revoked",
+            "Revoke the credential before deleting it.",
+        ));
+    }
+    sqlx::query("UPDATE credentials SET deleted_at=? WHERE id=?")
+        .bind(mutation.now)
+        .bind(&id)
+        .execute(&mut *mutation.tx)
+        .await?;
+    Ok(response(
+        mutation
+            .finish(
+                json!({"id":id,"deleted":true}),
+                None,
+                "agent_credential_deleted",
                 &id,
             )
             .await?,
