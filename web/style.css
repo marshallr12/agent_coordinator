@@ -139,6 +139,12 @@ textarea { min-height: 108px; resize: vertical; }
 .detail-back-row { margin-bottom: 17px; }
 .detail-heading { margin-bottom: 26px; }
 .detail-heading h1 { max-width: 760px; }
+.detail-heading h1, #detail-task-id-value { cursor: text; user-select: text; }
+.task-identity-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; }
+.task-identity-actions .button { min-height: 32px; padding: 5px 10px; }
+.task-detail-copy-feedback { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.task-detail-copy-feedback.success { color: #176762; }
+.task-detail-copy-feedback.fallback { color: #795218; }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(270px, .7fr); gap: 15px; margin-bottom: 15px; }
 .card { padding: 22px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: 0 3px 8px rgba(29, 50, 63, .025); }
 .resource-form { display: grid; grid-template-columns: minmax(0, 1.2fr) 110px minmax(0, 1.5fr) auto; gap: 12px; align-items: end; margin: 18px 0; }
