@@ -12,7 +12,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use coordinator_local::candidate_push::send_candidate;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, ErrorKind};
 use std::net::Shutdown;
 use std::path::Path;
 use std::process::Command;
@@ -294,11 +294,27 @@ impl Running {
     }
 }
 
-/// Sends `request` raw and returns the helper's parsed reply.
+/// Whether a send failed only because the helper had already closed its end.
+fn closed_early(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+    )
+}
+
+/// Sends `request` raw and returns the helper's parsed reply. Like the real
+/// client (`send_push`), it still reads the reply when the send fails because
+/// the helper closed first: a refusal sent without reading the request (a
+/// foreign launch) can win the race against this write, and the reply is
+/// already waiting to be read.
 fn exchange_raw(fixture: &Fixture, request: &[u8]) -> PushReply {
     let mut stream = fixture.connect();
-    stream.write_all(request).unwrap();
-    stream.shutdown(Shutdown::Write).unwrap();
+    let sent = stream
+        .write_all(request)
+        .and_then(|()| stream.shutdown(Shutdown::Write));
+    if let Err(error) = sent {
+        assert!(closed_early(&error), "send the request: {error}");
+    }
     read_reply(stream)
 }
 
