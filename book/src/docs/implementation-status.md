@@ -85,9 +85,19 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   heartbeat. An acceptance stand-in, off by default, replaces the coordinator
   with a queue directory and a ledger flushed before each effect, and a
   command judges that ledger for a second launch or a release without an
-  ended launch. The phase 4c owner runbook is written as a proposal. **No
-  service was installed, started or configured, nothing has run under the
-  Service Control Manager, and nothing is machine accepted.**
+  ended launch.
+
+- Phase 4c's [machine run](windows-host-design.md#phase-4c-machine-run-2026-11-11)
+  on MiniAir, 2026-11-11, installed both services under their own virtual
+  service accounts from an exact recorded build. They started, ran, connected
+  over the runner's pipe with the supervisor admitted by SID, and stopped
+  cleanly under the Service Control Manager. The run then **stopped at the
+  first unknown**: the runner cannot make a launch as a service, because the
+  service's logon session already has the window station the launcher insists
+  on creating (`station_not_ours`). A refused prepare also leaves its launch
+  directories behind. Task `7f6f242d` addresses both. Neither service may set
+  its own preshutdown limit, so the runbook now sets it at installation. **No
+  lifecycle round was run and nothing is machine accepted.**
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
