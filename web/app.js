@@ -3758,12 +3758,12 @@
   function reportStatus(report) {
     if (!report.resolved_at) return report.requires_human ? 'Needs a person' : 'Open';
     if (report.decision) return report.decision === 'allow' ? 'Resolved: allowed' : 'Resolved: denied';
-    return 'Resolved';
+    return report.resolution_kind === 'automatic' ? 'Resolved automatically' : report.resolution_kind === 'human' ? 'Resolved by a person' : 'Resolved';
   }
   // The report's identities and any resolution as a definition list.
   function reportFacts(report) {
     const detail = name => typeof report.details?.[name] === 'string' ? report.details[name] : '';
-    return factList([['Report', report.id], ['Recorded', timeEl(report.created_at)], ['Check', detail('check_name')], ['Target branch', detail('target_branch')], ['Verdict', detail('verdict')], ['Task', report.task_id], ['Submission', report.submission_id], ['Result', report.result_id], ['Resolved', report.resolved_at && timeEl(report.resolved_at)], ['Resolved by', report.resolved_by], ['Resolution note', report.resolution_note]]);
+    return factList([['Report', report.id], ['Recorded', timeEl(report.created_at)], ['Check', detail('check_name')], ['Target branch', detail('target_branch')], ['Verdict', detail('verdict')], ['Task', report.task_id], ['Submission', report.submission_id], ['Result', report.result_id], ['Resolved', report.resolved_at && timeEl(report.resolved_at)], ['Resolved by', report.resolved_by], ['Resolution kind', report.resolution_kind], ['Resolution note', report.resolution_note]]);
   }
   // A definition list of the [label, value] pairs that have a value.
   function factList(pairs) {

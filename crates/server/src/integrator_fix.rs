@@ -37,6 +37,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection, sqlite::SqliteRow};
+use std::collections::HashSet;
 
 type Reply = Result<Json<Value>, AppError>;
 
@@ -166,6 +167,42 @@ pub(crate) async fn open_for_report(
     insert_fix_task(m, p, &id, &details).await.map(Some)
 }
 
+/// The ids of project `p`'s open reports that the service is handling on its
+/// own: each one opened a fix task (`integrator_fix_tasks.report_id`) that an
+/// agent can still finish or that already finished, so the report is not
+/// requires-human. The automatic path has failed, and the report is
+/// requires-human again, once its task is not `open` or `done` (planned,
+/// canceled, superseded), is archived, carries a `blocked_reason` (other than
+/// the routine one of a submission in the completion workflow), or is parked
+/// by the revise limit. A report without a fix task of its own is never in the
+/// set, so it is flagged exactly as it was stored. Read at `now`, so the flag
+/// follows the task whenever it becomes workable again.
+pub(crate) async fn automatic_report_ids(
+    c: &mut SqliteConnection,
+    p: &str,
+    now: i64,
+) -> Result<HashSet<String>, AppError> {
+    let rows = sqlx::query(
+        "SELECT r.id AS report_id,t.id AS task_id FROM integrator_reports r \
+         JOIN integrator_fix_tasks f ON f.report_id=r.id JOIN tasks t ON t.id=f.task_id \
+         WHERE r.project_id=? AND r.resolved_at IS NULL AND r.requires_human=1 \
+         AND t.lifecycle IN ('open','done') AND t.archived_at IS NULL \
+         AND (t.blocked_reason IS NULL OR t.blocked_reason=?)",
+    )
+    .bind(p)
+    .bind(crate::integrator_reverts::IN_WORKFLOW)
+    .fetch_all(&mut *c)
+    .await?;
+    let mut ids = HashSet::new();
+    for row in rows {
+        let task: String = row.get("task_id");
+        if !crate::autonomy::revise_limit_reached(c, &task, now).await? {
+            ids.insert(row.get("report_id"));
+        }
+    }
+    Ok(ids)
+}
+
 /// The open fix task of a target and check, for the task view and the
 /// digest: `{task_id, title}` or null.
 pub(crate) async fn fix_task_value(
@@ -279,16 +316,29 @@ async fn target_passed(
         input.run_attempt,
         input.started_at
     );
+    // The flag is frozen at resolution: a report the service handled on its
+    // own ends not requires-human; one whose fix task had failed keeps it.
+    let automatic = automatic_report_ids(&mut m.tx, &p, m.now)
+        .await?
+        .contains(&id);
     sqlx::query(
-        "UPDATE integrator_reports SET resolved_at=?,resolved_by=?,resolution_note=? WHERE id=?",
+        "UPDATE integrator_reports SET resolved_at=?,resolved_by=?,resolution_note=?,\
+         resolution_kind='automatic',requires_human=requires_human AND NOT ? WHERE id=?",
     )
     .bind(m.now)
     .bind(&m.actor.id)
     .bind(&note)
+    .bind(automatic)
     .bind(&id)
     .execute(&mut *m.tx)
     .await?;
-    let value = json!({"id": id, "resolved": true, "resolution_note": note});
+    let requires_human: i64 =
+        sqlx::query_scalar("SELECT requires_human FROM integrator_reports WHERE id=?")
+            .bind(&id)
+            .fetch_one(&mut *m.tx)
+            .await?;
+    let value = json!({"id": id, "resolved": true, "resolution_note": note,
+        "resolution_kind": "automatic", "requires_human": requires_human == 1});
     Ok(response(
         m.finish(value, Some(&p), "integrator.report_auto_resolved", &id)
             .await?,

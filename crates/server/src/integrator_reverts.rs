@@ -49,7 +49,7 @@ const NOT_MECHANICAL_MESSAGE: &str =
 /// Refusal message for a revert task that is not open.
 const NOT_OPEN_MESSAGE: &str = "This revert task is not open.";
 /// Blocked reason of a task whose submission is in the completion workflow.
-const IN_WORKFLOW: &str = "An immutable submission is in the completion workflow.";
+pub(crate) const IN_WORKFLOW: &str = "An immutable submission is in the completion workflow.";
 
 /// The integrator's revert routes.
 pub fn routes() -> Router<AppState> {

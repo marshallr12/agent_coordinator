@@ -5744,7 +5744,11 @@ async fn fix_target(f: &Fixture, i: &Caller, p: &str, name: &str, result: &str) 
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    assert_eq!(v["data"]["requires_human"], true, "{v}");
+    assert!(v["data"]["fix_task_id"].is_string(), "{v}");
+    assert_eq!(
+        v["data"]["requires_human"], false,
+        "the service's own fix task handles it: {v}"
+    );
     v["data"]["id"].clone()
 }
 
@@ -5783,6 +5787,8 @@ async fn a_blocking_target_report_shows_on_the_task_until_resolved() {
         .expect("the service opened a fix task");
     assert!(action.contains(fix), "{action}");
     assert!(action.contains("resolves itself"), "{action}");
+    assert!(!action.contains("  "), "no runs of spaces: {action}");
+    assert_eq!(blocked["requires_human"], false, "{blocked}");
     assert!(action.contains(id.as_str().unwrap()), "{action}");
     assert!(!action.contains("claim the integration"), "{action}");
     assert_eq!(
@@ -8014,6 +8020,392 @@ async fn a_target_failing_report_resolves_itself_when_the_check_passes_later() {
         StatusCode::OK,
         "a human still resolves target_unverified: {v}"
     );
+}
+
+#[tokio::test]
+async fn the_resolution_kind_migration_keeps_stored_flags_and_derives_only_what_is_certain() {
+    let dir = tempfile::tempdir().unwrap();
+    let migrations = dir.path().join("schema47");
+    std::fs::create_dir(&migrations).unwrap();
+    for m in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 47)
+    {
+        let name = format!("{:04}_{}.sql", m.version, m.description.replace(' ', "_"));
+        std::fs::write(migrations.join(name), m.sql.as_str().as_bytes()).unwrap();
+    }
+    let database = dir.path().join("upgrade.sqlite3");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&database)
+        .create_if_missing(true)
+        .foreign_keys(false);
+    let mut old = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::migrate::Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&mut old)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO principals(id,name,kind,role,password_hash,created_at) VALUES('person','a-person','human','operator','x',1)").execute(&mut old).await.unwrap();
+    sqlx::query("INSERT INTO principals(id,name,kind,role,created_at) VALUES('bot','a-bot','agent','agent',1)").execute(&mut old).await.unwrap();
+    // (id, kind, stored requires_human, resolved_by or null for open)
+    let rows = [
+        ("gate", "privilege_gate", 1, Some("person")),
+        ("auto-fix", "fix_target", 1, Some("bot")),
+        ("person-fix", "fix_target", 1, Some("person")),
+        ("auto-flaky", "flaky", 0, Some("bot")),
+        ("person-flaky", "flaky", 1, Some("person")),
+        ("open-fix", "fix_target", 1, None),
+    ];
+    for (id, kind, human, by) in rows {
+        sqlx::query("INSERT INTO integrator_reports(id,project_id,kind,dedupe_key,details_json,requires_human,created_by,created_at,resolved_at,resolved_by) VALUES(?,'p',?,?,'{}',?,'bot',1,?,?)")
+            .bind(id).bind(kind).bind(id).bind(human)
+            .bind(by.map(|_| 2_i64)).bind(by)
+            .execute(&mut old).await.unwrap();
+    }
+    old.close().await.unwrap();
+    let state = AppState::open(Config {
+        database_path: database,
+        public_origin: "http://127.0.0.1:8080".into(),
+        allow_insecure_loopback: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let stored: Vec<(String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT id,requires_human,resolution_kind FROM integrator_reports ORDER BY rowid",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    let kind = |k: &str| Some(k.to_owned());
+    assert_eq!(
+        stored,
+        [
+            ("gate".into(), 1, kind("human")),
+            ("auto-fix".into(), 1, kind("automatic")),
+            ("person-fix".into(), 1, None),
+            ("auto-flaky".into(), 0, kind("automatic")),
+            ("person-flaky".into(), 1, None),
+            ("open-fix".into(), 1, None),
+        ],
+        "stored flags are history; the kind is derived only where resolved_by decides it"
+    );
+}
+
+/// Reads report `id` as the admin, with the resolve-time `requires_human`.
+async fn shown_report(f: &Fixture, p: &str, id: &Value) -> Value {
+    let path = format!(
+        "/api/v1/projects/{p}/integrator/reports/{}",
+        id.as_str().unwrap()
+    );
+    let (status, v) = f.call(&f.admin, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"].clone()
+}
+
+/// The ids of the human-queue reports `next` serves, and of the open
+/// requires-human reports the list names.
+async fn human_report_ids(f: &Fixture, p: &str) -> (Vec<Value>, Vec<Value>) {
+    let queue = next_action(f, &f.a, p, "implementer").await["human_queue_items"].clone();
+    let queued = queue
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["code"] == "integrator_report")
+        .map(|item| item["report"]["id"].clone())
+        .collect();
+    let path = format!("/api/v1/projects/{p}/integrator/reports?open=true");
+    let (_, listed) = f.call(&f.a, "GET", &path, Value::Null).await;
+    let flagged = listed["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|report| report["requires_human"] == true)
+        .map(|report| report["id"].clone())
+        .collect();
+    (queued, flagged)
+}
+
+/// The human-required reports of the project's digest.
+async fn digest_human_reports(f: &Fixture, p: &str) -> Vec<Value> {
+    let (status, v) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/digest"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"]["hri"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["code"] == "integrator_report")
+        .map(|item| item["report"]["id"].clone())
+        .collect()
+}
+
+/// The human-required count of the autonomy telemetry.
+async fn human_required_count(f: &Fixture, p: &str) -> i64 {
+    let path = format!("/api/v1/projects/{p}/telemetry/autonomy");
+    let (status, v) = f.call(&f.admin, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"]["human_required"]["integrator_reports"]
+        .as_i64()
+        .unwrap()
+}
+
+/// Claims and submits the service's fix task `fix` through the ordinary
+/// workflow and returns its submission's integration activity.
+async fn submit_fix_task(f: &Fixture, p: &str, fix: &str) -> Value {
+    let (status, task) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{fix}"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    let task = task["data"].clone();
+    let owner = f.claim(&f.a, p, &task, 3).await;
+    let base = "1111111111111111111111111111111111111111";
+    f.checkout(&f.a, p, &owner, base).await;
+    let remote: Option<String> = sqlx::query_scalar(
+        "SELECT canonical_repository_key FROM workflow_policies WHERE project_id=?",
+    )
+    .bind(p)
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/projects/{p}/attempts/{}/submissions",
+        owner["id"].as_str().unwrap()
+    );
+    let body = json!({"generation":owner["generation"],"task_revision":task["revision"],
+        "project_policy_revision":3,"workflow_policy_revision":1,"kind":"code",
+        "summary":"fix ready","acceptance_evidence":[{"criterion":task["acceptance_criteria"][0],
+            "evidence":"the check passes"}],"handoff":"land it","repository":remote,
+        "base_revision":base,"candidate_revision":"2222222222222222222222222222222222222222",
+        "candidate_tree":"3333333333333333333333333333333333333333","candidate_remote":remote,
+        "candidate_ref":format!("refs/agent-coordinator/candidates/{}", Uuid::new_v4())});
+    let (status, submitted) = f.call(&f.a, "POST", &path, body).await;
+    assert_eq!(status, StatusCode::OK, "{submitted}");
+    let submitted = submitted["data"].clone();
+    activity(&submitted, "integration").clone()
+}
+
+/// Lands the fix task `fix`: its submission gets push authority and an
+/// observation shows the result contained in the target.
+async fn land_fix_task(f: &Fixture, i: &Caller, p: &str, fix: &str) {
+    let integration = submit_fix_task(f, p, fix).await;
+    let result = authorized(f, i, p, &integration["submission_id"], T0).await;
+    let (status, v) = observe(f, i, p, &result, R, "contained").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["disposition"], "published", "{v}");
+}
+
+#[tokio::test]
+async fn a_report_the_service_fixes_itself_is_never_requires_human() {
+    let f = Fixture::new().await;
+    let (p, _, _, i) = integrator_task(&f, "target-fix-automatic").await;
+    let failing = fix_report(
+        &f,
+        &i,
+        &p,
+        "k1",
+        target_details("target_failing", CHECK, T0),
+    )
+    .await;
+    let fix = failing["fix_task_id"].as_str().unwrap().to_owned();
+    assert_eq!(failing["requires_human"], false, "{failing}");
+    let id = &failing["id"];
+    let shown = shown_report(&f, &p, id).await;
+    assert_eq!(shown["requires_human"], false, "{shown}");
+    assert_eq!(shown["resolution_kind"], Value::Null);
+    let (queued, flagged) = human_report_ids(&f, &p).await;
+    assert!(
+        queued.is_empty() && flagged.is_empty(),
+        "{queued:?} {flagged:?}"
+    );
+    assert!(digest_human_reports(&f, &p).await.is_empty());
+    assert_eq!(human_required_count(&f, &p).await, 0);
+    land_fix_task(&f, &i, &p, &fix).await;
+    let shown = shown_report(&f, &p, id).await;
+    assert_eq!(shown["requires_human"], false, "landing alone: {shown}");
+    f.clock.0.fetch_add(60_000, Ordering::SeqCst);
+    let after = coordinator_core::timestamp(f.state.now());
+    let (status, v) = target_passed(&f, &i, &p, id, &after).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["resolution_kind"], "automatic", "{v}");
+    assert_eq!(v["data"]["requires_human"], false, "{v}");
+    let shown = shown_report(&f, &p, id).await;
+    assert_eq!(shown["resolution_kind"], "automatic", "{shown}");
+    assert_eq!(shown["requires_human"], false, "{shown}");
+    assert!(
+        shown["resolution_note"]
+            .as_str()
+            .unwrap()
+            .starts_with("Resolved automatically")
+    );
+    let (queued, flagged) = human_report_ids(&f, &p).await;
+    assert!(queued.is_empty() && flagged.is_empty());
+    assert!(digest_human_reports(&f, &p).await.is_empty());
+    assert_eq!(human_required_count(&f, &p).await, 0);
+}
+
+/// Sets the fix task's state the way each way of failing the automatic path
+/// does, and the SQL that undoes it.
+const FIX_FAILURES: [(&str, &str, &str); 4] = [
+    (
+        "canceled",
+        "UPDATE tasks SET lifecycle='canceled' WHERE id=?",
+        "UPDATE tasks SET lifecycle='open' WHERE id=?",
+    ),
+    (
+        "archived",
+        "UPDATE tasks SET archived_at=1 WHERE id=?",
+        "UPDATE tasks SET archived_at=NULL WHERE id=?",
+    ),
+    (
+        "blocked",
+        "UPDATE tasks SET blocked_reason='Waiting on a person.' WHERE id=?",
+        "UPDATE tasks SET blocked_reason=NULL WHERE id=?",
+    ),
+    (
+        "superseded",
+        "UPDATE tasks SET lifecycle='superseded' WHERE id=?",
+        "UPDATE tasks SET lifecycle='open' WHERE id=?",
+    ),
+];
+
+#[tokio::test]
+async fn a_report_needs_a_human_while_its_fix_task_cannot_be_worked() {
+    let f = Fixture::new().await;
+    let (p, _, _, i) = integrator_task(&f, "target-fix-failed").await;
+    let failing = fix_report(
+        &f,
+        &i,
+        &p,
+        "k1",
+        target_details("target_failing", CHECK, T0),
+    )
+    .await;
+    let (fix, id) = (failing["fix_task_id"].as_str().unwrap(), &failing["id"]);
+    for (name, fail, repair) in FIX_FAILURES {
+        sqlx::query(fail)
+            .bind(fix)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        let shown = shown_report(&f, &p, id).await;
+        assert_eq!(shown["requires_human"], true, "{name}: {shown}");
+        let (queued, flagged) = human_report_ids(&f, &p).await;
+        assert_eq!(
+            (queued, flagged),
+            (vec![id.clone()], vec![id.clone()]),
+            "{name}"
+        );
+        assert_eq!(
+            digest_human_reports(&f, &p).await,
+            std::slice::from_ref(id),
+            "{name}"
+        );
+        assert_eq!(human_required_count(&f, &p).await, 1, "{name}");
+        sqlx::query(repair)
+            .bind(fix)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        let shown = shown_report(&f, &p, id).await;
+        assert_eq!(shown["requires_human"], false, "{name} repaired: {shown}");
+        let (queued, flagged) = human_report_ids(&f, &p).await;
+        assert!(queued.is_empty() && flagged.is_empty(), "{name} repaired");
+        assert_eq!(human_required_count(&f, &p).await, 0, "{name} repaired");
+    }
+    // A task the revise limit parks is held from agents until a human looks.
+    let integration = submit_fix_task(&f, &p, fix).await;
+    let shown = shown_report(&f, &p, id).await;
+    let row: (String, Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT lifecycle,blocked_reason,archived_at FROM tasks WHERE id=?")
+            .bind(fix)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(shown["requires_human"], false, "submitted: {row:?}");
+    let at = f.state.now();
+    for n in 0..3 {
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,'submission.reopened',?,'{}',?)")
+            .bind(&p).bind(&f.a.principal).bind(integration["submission_id"].as_str().unwrap())
+            .bind(at - 86_400_000 + 5_000 + n)
+            .execute(&f.state.pool).await.unwrap();
+    }
+    let shown = shown_report(&f, &p, id).await;
+    assert_eq!(shown["requires_human"], true, "parked: {shown}");
+    f.clock.0.fetch_add(10_000, Ordering::SeqCst);
+    let shown = shown_report(&f, &p, id).await;
+    assert_eq!(shown["requires_human"], false, "released: {shown}");
+    // An explicit planned lifecycle is not workable either.
+    sqlx::query("UPDATE tasks SET lifecycle='planned' WHERE id=?")
+        .bind(fix)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(shown_report(&f, &p, id).await["requires_human"], true);
+    sqlx::query("UPDATE tasks SET lifecycle='open' WHERE id=?")
+        .bind(fix)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(shown_report(&f, &p, id).await["requires_human"], false);
+}
+
+#[tokio::test]
+async fn a_report_without_a_fix_task_is_flagged_as_before() {
+    let f = Fixture::new().await;
+    let (p, _, _, i) = integrator_task(&f, "target-fix-none").await;
+    // No repository, branch or check: the service opens no task.
+    let bare = json!({"verdict": "target_failing", "x": T0, "blocks_subject": true});
+    let (status, v) = report(&f, &i, &p, "fix_target", "bare", None, bare).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(v["data"].get("fix_task_id").is_none());
+    assert_eq!(v["data"]["requires_human"], true, "{v}");
+    let id = &v["data"]["id"];
+    assert_eq!(shown_report(&f, &p, id).await["requires_human"], true);
+    // A second report for a target that an unfinished fix task already covers
+    // opens no task of its own and stays flagged.
+    let first = fix_report(
+        &f,
+        &i,
+        &p,
+        "k1",
+        target_details("target_failing", CHECK, T0),
+    )
+    .await;
+    assert_eq!(first["requires_human"], false);
+    let moved = "8888888888888888888888888888888888888888";
+    let second = fix_report(
+        &f,
+        &i,
+        &p,
+        "k2",
+        target_details("target_failing", CHECK, moved),
+    )
+    .await;
+    assert!(second.get("fix_task_id").is_none(), "{second}");
+    assert_eq!(second["requires_human"], true, "{second}");
+    let (queued, flagged) = human_report_ids(&f, &p).await;
+    assert_eq!(queued, [id.clone(), second["id"].clone()]);
+    assert_eq!(flagged, [second["id"].clone(), id.clone()]);
+    // A human resolving one records the kind and keeps the flag.
+    let (status, v) = resolve(&f, &f.admin, &p, id, json!({"note": "looked"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["resolution_kind"], "human");
+    assert_eq!(v["data"]["requires_human"], true);
 }
 
 /// Declares `inputs` for the fixture's check in the project's workflow policy.

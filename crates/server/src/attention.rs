@@ -1124,7 +1124,7 @@ async fn digest(
     let parked_tasks = parked.len();
     items.extend(parked);
     items.extend(
-        crate::integrator_reports::human_queue_items_without_canary(&mut c, &project).await?,
+        crate::integrator_reports::human_queue_items_without_canary(&mut c, &project, now).await?,
     );
     let last_read: Option<i64> =
         sqlx::query_scalar("SELECT last_read_at FROM digest_reads WHERE project_id=?")

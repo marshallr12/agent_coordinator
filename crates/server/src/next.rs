@@ -222,7 +222,7 @@ async fn next(
             .into_value(role),
         Role::Integrator => integrator_next(&mut c, &p, &auth.actor).await?,
     };
-    let mut human_items = crate::integrator_reports::human_queue_items(&mut c, &p).await?;
+    let mut human_items = crate::integrator_reports::human_queue_items(&mut c, &p, now).await?;
     human_items.extend(crate::autonomy::parked_items(&mut c, &p, now, PARKED_ITEM_LIMIT).await?);
     body["human_queue_items"] = json!(human_items);
     Ok(response(body))

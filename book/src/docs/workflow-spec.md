@@ -133,6 +133,16 @@ ends its authority. The refusal is never silent and never a tight loop:
   result, which is attempted at once. A landed result forgets its refusals.
   A subject therefore costs one hold per wait, not one per cycle.
 
+A `fix_target` report with verdict `target_failing` is not an intervention while
+the service's own fix task for it can still be done by an agent: the report reads
+`requires_human: false`, stays out of the human queue and the digest's
+human-required items, and resolves itself (`resolution_kind` `automatic`) when
+the check passes on the target. If that task is canceled, archived, blocked,
+parked at the revise limit or otherwise not workable, the report reads
+`requires_human: true` and a person is asked to act; it follows the task back
+when the task becomes workable. A report for which no task was opened is flagged
+as it always was. See the API contract for the exact rule.
+
 An exemption records that a failing check is not the author's doing; it does
 not change what the hosting service enforces. When the target's ruleset
 requires that status check on the pushed commit, GitHub refuses to advance the
