@@ -358,6 +358,13 @@ exec "$@"
             let root = tempfile::tempdir().unwrap();
             let fake = root.path().join("fake-bwrap");
             write_executable(&fake, FAKE_BWRAP);
+            // The fake is exec'd by the generated shell, which cannot retry.
+            let probe = status_retrying(|| {
+                let mut probe = Command::new(&fake);
+                probe.arg("--");
+                probe
+            });
+            assert!(probe.success());
             let spec = LaunchSpec {
                 clone: root.path().join("clone"),
                 run: root.path().join("run"),
@@ -376,13 +383,13 @@ exec "$@"
 
         /// Runs one command string from the clone; returns its exit code.
         fn run(&self, command: &str) -> i32 {
-            Command::new(shell_path(&self.spec))
-                .arg(command)
-                .current_dir(&self.spec.clone)
-                .status()
-                .unwrap()
-                .code()
-                .unwrap()
+            status_retrying(|| {
+                let mut shell = Command::new(shell_path(&self.spec));
+                shell.arg(command).current_dir(&self.spec.clone);
+                shell
+            })
+            .code()
+            .unwrap()
         }
 
         /// The harness's tracked-directory file.
@@ -420,6 +427,27 @@ exec "$@"
             task: None,
             push_socket: None,
         }
+    }
+
+    /// Runs a command to completion, retrying while exec reports `ETXTBSY`.
+    ///
+    /// A script written moments ago can be briefly unexecutable: another test
+    /// thread may fork while the write descriptor is open, and that child
+    /// holds it until its own exec. Renaming into place does not help, since
+    /// the busy inode is the same. The window is a few milliseconds, so retry
+    /// with a short bounded backoff instead of serializing the tests.
+    fn status_retrying(mut command: impl FnMut() -> Command) -> std::process::ExitStatus {
+        let mut delay = std::time::Duration::from_millis(1);
+        for _ in 0..12 {
+            match command().status() {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+                other => return other.unwrap(),
+            }
+        }
+        command().status().unwrap()
     }
 
     fn write_executable(path: &Path, contents: &str) {
