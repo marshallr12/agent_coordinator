@@ -85,6 +85,7 @@
                 <article class="card"><h3>Integration owner</h3><p id="integration-owner-summary" class="muted">Who publishes approved code to the target branch.</p><button id="integration-owner-button" class="button subtle" data-mutation="true" type="button">Change integration owner</button></article>
                 <article class="card"><h3>Integrator reports</h3><p class="muted">Findings the integrator recorded, such as privilege gates and flaky checks. Resolve the ones that need a person.</p><button id="integrator-reports-button" class="button subtle" type="button">Integrator reports</button></article>
                 <article class="card"><h3>Attention digest</h3><p class="muted">What the attention budget did on its own and what still needs a person. Opening it here records that you read it.</p><button id="digest-button" class="button subtle" type="button">Attention digest</button></article>
+                <article class="card"><h3>Autonomy</h3><p class="muted">Human-required interventions, parked items, cost against the daily caps, review outcomes, canary history and digest status, each with its source.</p><button id="autonomy-button" class="button subtle" type="button">Autonomy</button></article>
                 <article class="card"><h3>Connected sessions</h3><p class="muted">Agent sessions still working in this project. Check them before a test, preflight or cutover.</p><button id="agent-sessions-button" class="button subtle" type="button">Connected sessions</button></article>
               </div>
               <article class="card project-binding-card"><h2>Repository binding</h2><p class="muted">Download this non-secret file, then place <code>.agent-coordinator.toml</code> in the root of your repository so agents connect to this project.</p><div id="project-binding-content" class="binding-content"></div></article>
@@ -105,6 +106,14 @@
               <div class="toolbar"><button id="refresh-digest" class="button subtle" type="button">Refresh</button></div>
               <div id="digest-state" class="state-panel" role="status"></div>
               <div id="digest-content" class="report-list"></div>
+            </section>
+
+            <section id="autonomy-view" class="page-view" aria-labelledby="autonomy-heading" hidden>
+              <div class="detail-back-row"><button id="autonomy-back" class="button text-button" type="button">← Project settings</button></div>
+              <div class="page-heading"><div><p id="autonomy-project-label" class="eyebrow"></p><h1 id="autonomy-heading" tabindex="-1">Autonomy</h1><p class="muted">How much of this project's work runs without a person. Every figure links to the record it comes from: the attention digest, the service's task and review records, or what supervisor hosts report.</p></div></div>
+              <div class="toolbar"><label class="select-label" for="autonomy-window">Show<select id="autonomy-window"><option value="7">Last 7 days</option><option value="14" selected>Last 14 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select></label><button id="refresh-autonomy" class="button subtle" type="button">Refresh</button></div>
+              <div id="autonomy-state" class="state-panel" role="status"></div>
+              <div id="autonomy-content" class="report-list"></div>
             </section>
 
             <section id="agent-sessions-view" class="page-view" aria-labelledby="agent-sessions-heading" hidden>

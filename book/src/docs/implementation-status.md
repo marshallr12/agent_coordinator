@@ -30,8 +30,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   `agentc-supervisor` sends unsent `costs.jsonl` rows after every poll and
   `e2e-canary.py` sends each run's result, with the host files kept as the source
   and unsent rows retried; `agentc-supervisor report-costs` and
-  `e2e-canary.py --backfill` import existing files once. These are read
-  endpoints and host reporters only: the console does not show them yet.
+  `e2e-canary.py --backfill` import existing files once. The supervisor also
+  reports its per-role daily spend caps (`POST .../telemetry/caps`), and
+  `GET .../telemetry/autonomy` counts finished tasks, human-required
+  interventions, review outcomes and parked tasks from the service's own
+  records. The console's per-project **Autonomy** view (opened from the project
+  settings or the summary on each project card) shows these with the digest, and
+  links every figure to the record it comes from.
 
 - Standalone `agent-coordinator-mcp` stdio adapter with protected, locked, atomic
   mutation journals and exact retry through the service. Native CLI installation

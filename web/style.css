@@ -125,7 +125,7 @@ a.nav-item { text-decoration: none; }
 .binding-content .button { width: 100%; margin-top: 8px; }
 .project-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 17px; }
 .project-meta { color: var(--muted); font-size: 11px; }
-.project-open { padding: 0; border: 0; background: transparent; color: var(--teal); font-size: 12px; font-weight: 800; }
+.project-open, .autonomy-open { padding: 0; border: 0; background: transparent; color: var(--teal); font-size: 12px; font-weight: 800; }
 .project-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .project-settings-button { flex-shrink: 0; width: 40px; height: 40px; padding: 0; font-size: 22px; background: var(--surface); color: var(--teal); }
 .project-binding-card { margin-top: 24px; }
@@ -292,3 +292,12 @@ a.nav-item { text-decoration: none; }
 .held-attempts li { display: grid; gap: 2px; overflow-wrap: anywhere; }
 .agent-session-card .report-facts dd { overflow-wrap: anywhere; }
 .held-attempt-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+
+.autonomy-summary { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; margin-top: 10px; font-size: 12px; }
+.autonomy-card h3 { margin: 16px 0 6px; font-size: 13px; }
+.source-line { margin: 12px 0 0; font-size: 12px; }
+.source-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th, .data-table td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.data-table th { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.data-table .text-button { padding: 0; text-align: left; }

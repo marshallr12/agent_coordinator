@@ -72,6 +72,10 @@ const reports = [
   { id: 'report-2', kind: 'fix_target', requires_human: true, created_at: '2026-10-07T00:00:00Z', resolved_at: null, details: { reason: 'two' } },
   { id: 'report-3', kind: 'flaky', requires_human: false, created_at: '2026-10-08T00:00:00Z', resolved_at: null, details: { reason: 'three' } },
 ];
+const autonomy = { window_days: 14, finished: { count: 2, by_day: [{ day: '2026-10-12', count: 2 }] }, human_required: { count: 1, per_finished_task: 0.5, by_day: [{ day: '2026-10-12', count: 1 }], integrator_reports: 1, parked_subjects: 0 }, parked: { count: 1, items: [{ task_id: 'task-1', title: 'Parked task', agent_revises_24h: 3, counted_revises_24h: 3 }] }, reviews: { submissions_reviewed: 2, decisions: 2, approved_first_pass: 1, revised: 1, disagreements: 0 }, caps: [{ host: 'h1', impl_daily_usd: 150, rev_daily_usd: 50, reported_at: '2026-10-12T00:00:00Z' }] };
+const costByDay = { items: [{ day: '2026-10-12', impl: { usd: 10, launches: 1 }, rev: { usd: 2, launches: 1 }, total_usd: 12 }], totals: { impl: {}, rev: {} }, truncated: false };
+const costByTask = { items: [{ task_id: 'task-1', title: 'Parked task', impl: { usd: 10 }, rev: { usd: 2 }, total_usd: 12 }], totals: { impl: {}, rev: {} }, truncated: false };
+const canaries = { items: [{ id: 'c1', host: 'h1', harness: 'claude', outcome: 'ok', duration_seconds: 400, task_id: null, occurred_at: '2026-10-12T00:00:00Z' }], latest: [{ host: 'h1', harness: 'claude', outcome: 'ok', occurred_at: '2026-10-12T00:00:00Z' }], next_before: null };
 const digest = { window_hours: 24, last_read_at: '2026-10-12T00:00:00Z', hri: { items: [{ code: 'hri-1', title: 'Needs a person' }] }, proceeded_decisions: [{ decision_id: 'd-1', question: 'Q1?', proceeded_with: 'yes', proceeded_at: '2026-10-12T10:00:00Z' }], pending_reversible_decisions: [] };
 const sessions = [
   { session_id: 'sess-1', principal: { id: 'pr-1', name: 'agent-a' }, harness: 'claude-code', workstation_id: 'ws-1', started_at: '2026-10-13T08:00:00Z', last_activity_at: '2026-10-13T11:00:00Z', held_attempts: [{ attempt_id: 'attempt-1', task_id: 'task-1', task_title: 'Detail fixture', mode: 'work', expires_at: '2026-10-13T12:15:00Z' }] },
@@ -133,6 +137,9 @@ async function route(request, response) {
     if (rest === `/tasks/${detail.id}`) return json(response, detail);
     if (rest === `/tasks/${detail.id}/history`) return json(response, { items: attachments.map((record) => ({ record })), next_cursor: null });
     if (rest === '/integrator/reports') { const open = url.searchParams.get('open') === 'true'; return json(response, { items: [...reports].reverse().filter((report) => !open || !report.resolved_at), next_before: null }); }
+    if (rest === '/telemetry/autonomy') return json(response, autonomy);
+    if (rest === '/telemetry/cost') return json(response, url.searchParams.get('group_by') === 'day' ? costByDay : costByTask);
+    if (rest === '/telemetry/canaries') return json(response, canaries);
     if (rest === '/digest') return json(response, digest);
     if (rest === '/sessions') return json(response, { items: sessions, truncated: false });
     if (rest === '/knowledge') return json(response, { items: lessons, next_cursor: null });
@@ -284,6 +291,7 @@ async function main() {
     const clickAndWait = (selector, needle) => async () => { const seen = hitCount(needle); await click(selector); const deadline = Date.now() + 5000; while (hitCount(needle) === seen && Date.now() < deadline) await sleep(30); };
 
     // ---- 1. Overview (projects) -------------------------------------------------------------------
+    await waitPage("document.querySelector('.autonomy-summary-text')?.textContent.startsWith('HRI')", 'project card autonomy summary');
     await quiet('overview refresh button', 'overview', clickAndWait('#refresh-projects', 'GET /api/v1/projects'));
     await quiet('overview poll', 'overview', pollTick('GET /api/v1/projects'));
     await onlyChanged('overview project change', '#projects-grid .project-card', () => { projects[1] = { ...projects[1], name: 'Beta renamed' }; }, pollTick('GET /api/v1/projects'));
@@ -334,8 +342,15 @@ async function main() {
     await quiet('digest refresh button', 'digest', clickAndWait('#refresh-digest', '/digest'));
     await onlyChanged('digest one section changed', '#digest-content .report-card', () => { digest.pending_reversible_decisions = [{ decision_id: 'd-2', question: 'Q2?', recommendation: 'go', proceeds_at: '2026-10-14T00:00:00Z' }]; }, clickAndWait('#refresh-digest', '/digest'));
 
-    // ---- 5. Connected sessions --------------------------------------------------------------------
+    // ---- 4b. Autonomy -----------------------------------------------------------------------------
     await click('#digest-back'); await waitPage("!document.querySelector('#project-view').hidden", 'project view');
+    await goTo('#autonomy-button', 'autonomy');
+    await waitPage("document.querySelectorAll('#autonomy-content .autonomy-card').length === 6", 'autonomy');
+    await quiet('autonomy refresh button', 'autonomy', clickAndWait('#refresh-autonomy', 'telemetry/autonomy'));
+    await onlyChanged('autonomy one section changed', '#autonomy-content .autonomy-card', () => { autonomy.reviews = { ...autonomy.reviews, disagreements: 1 }; }, clickAndWait('#refresh-autonomy', 'telemetry/autonomy'));
+    await click('#autonomy-back'); await waitPage("!document.querySelector('#project-view').hidden", 'project view');
+
+    // ---- 5. Connected sessions --------------------------------------------------------------------
     await goTo('#agent-sessions-button', 'agent-sessions');
     await waitPage("document.querySelectorAll('#agent-sessions-list .agent-session-card').length === 2", 'sessions');
     await quiet('sessions refresh button', 'agent-sessions', clickAndWait('#refresh-agent-sessions', '/sessions'));

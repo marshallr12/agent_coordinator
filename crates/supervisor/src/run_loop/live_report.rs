@@ -5,11 +5,17 @@
 //! interval, not one per poll.
 use super::report::{self, Delivery, Summary};
 use crate::config::Config;
+use crate::profile::Role;
 use coordinator_client::CoordinatorClient;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// How long after a pass that left rows unsent the next one waits.
 pub(super) const RETRY_AFTER_MS: i64 = 10 * 60 * 1000;
+
+/// How long after the caps were reported they are reported again, so a
+/// coordinator restored from an older backup learns them again.
+pub(super) const CAPS_EVERY_MS: i64 = 60 * 60 * 1000;
 
 /// This host's name as the coordinator records it (the kernel's hostname,
 /// which is what `e2e-canary.py` reports too).
@@ -70,10 +76,75 @@ pub(super) fn pass(
     report::flush(config, &host_name(), Some(default_project), &mut send)
 }
 
+/// The body of a caps report: this host's daily caps per role.
+fn caps_body(config: &Config, host: &str) -> Value {
+    serde_json::json!({
+        "host": host,
+        "impl_daily_usd": config.health.cap(Role::Implementer),
+        "rev_daily_usd": config.health.cap(Role::Reviewer),
+    })
+}
+
+/// The Idempotency-Key of a caps report: the same caps reuse it.
+fn caps_key(project: &str, body: &Value) -> String {
+    let digest = Sha256::digest(format!("{project}\n{body}"));
+    format!("caps-{}", &hex::encode(digest)[..40])
+}
+
+/// Tells the coordinator the daily caps this host enforces, once per project.
+/// Returns false when any report failed, so the caller tries again later. A
+/// coordinator that predates the route answers 404 and counts as a failure.
+pub(super) fn caps_pass(
+    config: &Config,
+    runtime: &tokio::runtime::Runtime,
+    client: &CoordinatorClient,
+    projects: &[&str],
+) -> bool {
+    let body = caps_body(config, &host_name());
+    let mut sent = true;
+    for project in projects {
+        let path = format!("/api/v1/projects/{project}/telemetry/caps");
+        let key = caps_key(project, &body);
+        match runtime.block_on(client.mutate(&path, &body, &key, None)) {
+            Ok(response) if response.status == 200 => {}
+            Ok(response) => {
+                sent = false;
+                eprintln!(
+                    "agentc-supervisor run: report caps: HTTP {}",
+                    response.status
+                );
+            }
+            Err(error) => {
+                sent = false;
+                eprintln!("agentc-supervisor run: report caps: {error}");
+            }
+        }
+    }
+    sent
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn caps_report_both_roles_and_key_on_their_content() {
+        let mut config = Config::default();
+        config.health.implementer_daily_usd = 12.5;
+        config.health.reviewer_daily_usd = 0.0;
+        let body = caps_body(&config, "h");
+        assert_eq!(body["host"], "h");
+        assert_eq!(body["impl_daily_usd"], 12.5);
+        assert_eq!(body["rev_daily_usd"], 0.0);
+        assert_eq!(caps_key("p", &body), caps_key("p", &body));
+        assert_ne!(caps_key("p", &body), caps_key("q", &body));
+        config.health.reviewer_daily_usd = 5.0;
+        assert_ne!(
+            caps_key("p", &body),
+            caps_key("p", &caps_body(&config, "h"))
+        );
+    }
 
     #[test]
     fn answers_map_to_deliveries() {

@@ -61,10 +61,18 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/projects/{p}/telemetry/canary-results",
             axum::routing::post(report_canaries),
         )
+        .route(
+            "/api/v1/projects/{p}/telemetry/caps",
+            axum::routing::post(report_caps),
+        )
         .route("/api/v1/projects/{p}/telemetry/cost", get(read_costs))
         .route(
             "/api/v1/projects/{p}/telemetry/canaries",
             get(read_canaries),
+        )
+        .route(
+            "/api/v1/projects/{p}/telemetry/autonomy",
+            get(read_autonomy),
         )
 }
 
@@ -676,5 +684,249 @@ async fn read_canaries(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(response(json!({
         "project_id": p, "items": items, "next_before": next, "latest": latest,
+    })))
+}
+
+/// The daily caps one host enforces, as it reports them.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CapsReport {
+    host: String,
+    /// Dollars per 24 hours for implementer launches; 0 means no cap.
+    impl_daily_usd: Option<f64>,
+    /// Dollars per 24 hours for reviewer launches; 0 means no cap.
+    rev_daily_usd: Option<f64>,
+}
+
+impl CapsReport {
+    fn validate(&self) -> Result<(), AppError> {
+        bounded(&self.host, "host", MAX_HOST_BYTES, true)?;
+        let caps = [self.impl_daily_usd, self.rev_daily_usd];
+        if caps
+            .iter()
+            .flatten()
+            .any(|usd| !usd.is_finite() || !(0.0..=MAX_USD).contains(usd))
+        {
+            return Err(AppError::bad_request(
+                "A daily cap must be a finite dollar amount of at least 0.",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Dollars as exact millionths.
+fn micros(usd: Option<f64>) -> Option<i64> {
+    usd.map(|usd| (usd * 1_000_000.0).round() as i64)
+}
+
+/// `POST …/telemetry/caps`: records the daily caps a host enforces, replacing
+/// its earlier report. Like the other writes it needs an agent credential.
+async fn report_caps(
+    State(s): State<AppState>,
+    auth: Auth,
+    Path(p): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<CapsReport>, JsonRejection>,
+) -> Reply {
+    let report = payload(body)?;
+    report.validate()?;
+    let op = format!("POST /api/v1/projects/{p}/telemetry/caps");
+    let mut m = Mutation::begin(&s, &auth, &headers, &op, &report).await?;
+    if let Some(v) = m.replay.take() {
+        return Ok(response(v));
+    }
+    require_reporter(&m.actor)?;
+    require_project(&mut m.tx, &p).await?;
+    sqlx::query("INSERT INTO host_caps(project_id,host,impl_daily_micros,rev_daily_micros,reported_by,reported_at) VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,host) DO UPDATE SET impl_daily_micros=excluded.impl_daily_micros,rev_daily_micros=excluded.rev_daily_micros,reported_by=excluded.reported_by,reported_at=excluded.reported_at")
+        .bind(&p).bind(&report.host)
+        .bind(micros(report.impl_daily_usd)).bind(micros(report.rev_daily_usd))
+        .bind(&m.actor.id).bind(m.now)
+        .execute(&mut *m.tx).await?;
+    let value = json!({"project_id": p, "host": report.host,
+                       "impl_daily_usd": report.impl_daily_usd, "rev_daily_usd": report.rev_daily_usd});
+    let record = format!("{p}/{}", report.host);
+    Ok(response(
+        m.finish_with_event_data(
+            value.clone(),
+            &json!({"host": report.host}),
+            Some(&p),
+            "telemetry.caps_reported",
+            &record,
+        )
+        .await?,
+    ))
+}
+
+/// Days an autonomy read covers unless `days` says otherwise.
+const DEFAULT_AUTONOMY_DAYS: i64 = 14;
+/// The most days an autonomy read covers.
+const MAX_AUTONOMY_DAYS: i64 = 90;
+const DAY_MS: i64 = 86_400_000;
+
+#[derive(Deserialize)]
+struct AutonomyQuery {
+    days: Option<i64>,
+}
+
+/// Per UTC day counts of the rows `sql` returns as (day, count), bound to the
+/// project and the window start; days without rows are absent.
+async fn per_day(
+    c: &mut SqliteConnection,
+    sql: &'static str,
+    p: &str,
+    since: i64,
+) -> Result<Vec<Value>, AppError> {
+    let rows = sqlx::query(sql)
+        .bind(p)
+        .bind(since)
+        .fetch_all(&mut *c)
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| json!({"day": r.get::<String, _>("day"), "count": r.get::<i64, _>("n")}))
+        .collect())
+}
+
+/// Sums the `count` of per-day items.
+fn total(days: &[Value]) -> i64 {
+    days.iter().filter_map(|d| d["count"].as_i64()).sum()
+}
+
+/// Merges per-day counts, adding those of the same day, in day order.
+fn merge_days(parts: &[&[Value]]) -> Vec<Value> {
+    let mut merged = std::collections::BTreeMap::new();
+    for item in parts.iter().copied().flatten() {
+        *merged
+            .entry(item["day"].as_str().unwrap_or_default().to_owned())
+            .or_insert(0) += item["count"].as_i64().unwrap_or(0);
+    }
+    merged
+        .into_iter()
+        .map(|(day, count)| json!({"day": day, "count": count}))
+        .collect()
+}
+
+/// The open tasks the revise limit parks for agents right now, each with the
+/// revises that count in the last 24 hours.
+async fn parked_now(c: &mut SqliteConnection, p: &str, now: i64) -> Result<Vec<Value>, AppError> {
+    let candidates: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT t.id,t.title FROM events e JOIN submissions s ON s.id=e.record_id \
+         JOIN tasks t ON t.id=s.task_id WHERE e.kind='submission.reopened' AND e.project_id=? \
+         AND e.created_at>? AND t.lifecycle='open' AND t.budget_exempt IS NULL ORDER BY t.id",
+    )
+    .bind(p)
+    .bind(now - crate::autonomy::DAY_MS)
+    .fetch_all(&mut *c)
+    .await?;
+    let mut parked = Vec::new();
+    for (id, title) in candidates {
+        if crate::autonomy::revise_limit_reached(c, &id, now).await? {
+            parked.push(json!({
+                "task_id": id, "title": title,
+                "agent_revises_24h": crate::autonomy::agent_revise_count(c, &id, now).await?,
+                "counted_revises_24h": crate::autonomy::park_revise_count(c, &id, now).await?,
+            }));
+        }
+    }
+    Ok(parked)
+}
+
+/// `GET …/telemetry/autonomy?days=N` (default 14, at most 90): the figures the
+/// console's autonomy view shows besides cost and canaries, each computed from
+/// the service's own records. `finished` counts code tasks whose workflow
+/// reached done; `human_required` counts human-required integrator reports
+/// opened and subjects the integrator's revises parked, per UTC day, and
+/// divides by `finished` (`per_finished_task` is null with nothing finished);
+/// `parked` lists the open tasks the revise limit holds from agents now;
+/// `reviews` classifies the submissions reviewed in the window; `caps` are the
+/// daily caps hosts reported. Canary tasks are left out of every figure, as
+/// the digest leaves them out.
+async fn read_autonomy(
+    State(s): State<AppState>,
+    _auth: Auth,
+    Path(p): Path<String>,
+    Query(query): Query<AutonomyQuery>,
+) -> Reply {
+    let days = query.days.unwrap_or(DEFAULT_AUTONOMY_DAYS);
+    if !(1..=MAX_AUTONOMY_DAYS).contains(&days) {
+        return Err(AppError::bad_request("days must be between 1 and 90."));
+    }
+    let mut c = s.pool.acquire().await?;
+    require_project(&mut c, &p).await?;
+    let now = s.now();
+    let since = now - days * DAY_MS;
+    let finished = per_day(
+        &mut c,
+        "SELECT strftime('%Y-%m-%d', w.updated_at/1000, 'unixepoch') AS day, count(*) AS n \
+         FROM workflow_subjects w JOIN tasks t ON t.id=w.task_id \
+         WHERE w.project_id=? AND w.phase='done' AND w.updated_at>=? AND t.budget_exempt IS NULL \
+         GROUP BY day ORDER BY day",
+        &p,
+        since,
+    )
+    .await?;
+    let reports = per_day(&mut c, "SELECT strftime('%Y-%m-%d', r.created_at/1000, 'unixepoch') AS day, count(*) AS n \
+         FROM integrator_reports r WHERE r.project_id=? AND r.requires_human=1 AND r.created_at>=? \
+         AND (r.task_id IS NULL OR r.task_id NOT IN (SELECT id FROM tasks WHERE budget_exempt IS NOT NULL)) \
+         GROUP BY day ORDER BY day", &p, since).await?;
+    let parks = per_day(&mut c, "SELECT strftime('%Y-%m-%d', v.revised_at/1000, 'unixepoch') AS day, count(*) AS n \
+         FROM integrator_revises v JOIN tasks t ON t.id=v.task_id \
+         WHERE t.project_id=? AND v.park_reason IS NOT NULL AND v.revised_at>=? AND t.budget_exempt IS NULL \
+         GROUP BY day ORDER BY day", &p, since).await?;
+    let human_days = merge_days(&[&reports, &parks]);
+    let (finished_total, human_total) = (total(&finished), total(&human_days));
+    let per_finished = (finished_total > 0).then(|| human_total as f64 / finished_total as f64);
+    let (mut reviewed, mut first_pass, mut revised, mut disagreements, mut decisions) =
+        (0_i64, 0_i64, 0_i64, 0_i64, 0_i64);
+    let review_rows = sqlx::query(
+        "SELECT (SELECT count(*) FROM submissions e WHERE e.task_id=s.task_id AND e.created_at<s.created_at) AS earlier, \
+         sum(d.decision='approved') AS approved, sum(d.decision='changes_requested') AS changes \
+         FROM review_decisions d JOIN workflow_activities wa ON wa.id=d.activity_id \
+         JOIN submissions s ON s.id=wa.submission_id JOIN tasks t ON t.id=s.task_id \
+         WHERE wa.project_id=? AND d.created_at>=? AND t.budget_exempt IS NULL GROUP BY s.id",
+    )
+    .bind(&p)
+    .bind(since)
+    .fetch_all(&mut *c)
+    .await?;
+    for row in &review_rows {
+        let (earlier, approved, changes) = (
+            row.get::<i64, _>("earlier"),
+            row.get::<i64, _>("approved"),
+            row.get::<i64, _>("changes"),
+        );
+        reviewed += 1;
+        decisions += approved + changes;
+        first_pass += i64::from(changes == 0 && earlier == 0);
+        revised += i64::from(changes > 0);
+        disagreements += i64::from(approved > 0 && changes > 0);
+    }
+    let caps = sqlx::query("SELECT host,impl_daily_micros,rev_daily_micros,reported_at FROM host_caps WHERE project_id=? ORDER BY host")
+        .bind(&p).fetch_all(&mut *c).await?;
+    let caps: Vec<Value> = caps
+        .iter()
+        .map(|r| {
+            json!({"host": r.get::<String, _>("host"),
+                   "impl_daily_usd": r.get::<Option<i64>, _>("impl_daily_micros").map(usd),
+                   "rev_daily_usd": r.get::<Option<i64>, _>("rev_daily_micros").map(usd),
+                   "reported_at": coordinator_core::timestamp(r.get("reported_at"))})
+        })
+        .collect();
+    let parked = parked_now(&mut c, &p, now).await?;
+    Ok(response(json!({
+        "project_id": p, "window_days": days,
+        "since": coordinator_core::timestamp(since), "until": coordinator_core::timestamp(now),
+        "finished": {"count": finished_total, "by_day": finished},
+        "human_required": {
+            "count": human_total, "per_finished_task": per_finished, "by_day": human_days,
+            "integrator_reports": total(&reports), "parked_subjects": total(&parks),
+        },
+        "parked": {"count": parked.len(), "items": parked},
+        "reviews": {
+            "submissions_reviewed": reviewed, "decisions": decisions,
+            "approved_first_pass": first_pass, "revised": revised, "disagreements": disagreements,
+        },
+        "caps": caps,
     })))
 }

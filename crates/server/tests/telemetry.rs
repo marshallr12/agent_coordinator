@@ -44,6 +44,7 @@ struct Caller {
 
 struct Fixture {
     state: AppState,
+    clock: Arc<TestClock>,
     app: Router,
     _dir: tempfile::TempDir,
     admin: Caller,
@@ -63,13 +64,15 @@ impl Fixture {
         })
         .await
         .unwrap();
-        state.clock = Arc::new(TestClock(AtomicI64::new(DAY_1)));
+        let clock = Arc::new(TestClock(AtomicI64::new(DAY_1)));
+        state.clock = clock.clone();
         let admin = seed(&state, true, "telemetry-admin").await;
         let host = seed(&state, false, "telemetry-host").await;
         let other = seed(&state, false, "telemetry-other").await;
         Self {
             app: router(state.clone()),
             state,
+            clock,
             _dir: dir,
             admin,
             host,
@@ -703,6 +706,305 @@ async fn canary_history_pages_newest_first_and_names_the_latest_per_host_and_har
     assert_eq!(recent["data"]["items"].as_array().unwrap().len(), 2);
     let (status, _) = f.get(&f.other, &format!("{url}?limit=0")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// Seeds the workflow, review, report and revise records the autonomy read
+/// counts, on one connection with foreign keys off so a test names only the
+/// columns that matter.
+struct Records {
+    conn: sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    project: String,
+    agent: String,
+}
+
+impl Records {
+    async fn new(f: &Fixture, project: &str) -> Self {
+        let mut conn = f.state.pool.acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        Self {
+            conn,
+            project: project.into(),
+            agent: f.host.principal.clone(),
+        }
+    }
+
+    /// A submission of `task`, created `ms` after [`DAY_1`]; a task has one
+    /// current submission, so an earlier one is `superseded`.
+    async fn submission(&mut self, id: &str, task: &str, ms: i64, superseded: bool) {
+        sqlx::query("INSERT INTO submissions(id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,workflow_policy_revision,summary,acceptance_evidence_json,handoff,created_by,contributor_session_id,created_at,superseded_at) VALUES(?,?,?,?,'general',1,1,0,'s','[]','h',?,'s',?,?)")
+            .bind(id).bind(&self.project).bind(task).bind(format!("attempt-{id}"))
+            .bind(&self.agent).bind(DAY_1 + ms).bind(superseded.then_some(DAY_1 + ms + 1))
+            .execute(&mut *self.conn).await.unwrap();
+    }
+
+    /// A review of `submission` (of `subject`) by `activity_task`, deciding `decision`.
+    async fn review(
+        &mut self,
+        submission: &str,
+        subject: &str,
+        activity_task: &str,
+        decision: &str,
+    ) {
+        let activity = format!("activity-{activity_task}");
+        sqlx::query("INSERT INTO workflow_activities(id,project_id,subject_task_id,submission_id,activity_task_id,kind,slot,state,created_at) VALUES(?,?,?,?,?,'agent_review',1,'completed',?)")
+            .bind(&activity).bind(&self.project).bind(subject).bind(submission).bind(activity_task).bind(DAY_1)
+            .execute(&mut *self.conn).await.unwrap();
+        sqlx::query("INSERT INTO review_decisions(activity_id,submission_id,attempt_id,reviewer_id,reviewer_session_id,decision,summary,created_at) VALUES(?,?,?,?,?,?,'r',?)")
+            .bind(&activity).bind(submission).bind(format!("review-attempt-{activity_task}"))
+            .bind(&self.agent).bind("rs").bind(decision).bind(DAY_1)
+            .execute(&mut *self.conn).await.unwrap();
+    }
+
+    /// `task`'s workflow reached done `ms` after [`DAY_1`].
+    async fn finished(&mut self, task: &str, submission: &str, ms: i64) {
+        sqlx::query("INSERT INTO workflow_subjects(project_id,task_id,current_submission_id,phase,updated_at) VALUES(?,?,?,'done',?)")
+            .bind(&self.project).bind(task).bind(submission).bind(DAY_1 + ms)
+            .execute(&mut *self.conn).await.unwrap();
+    }
+
+    /// An agent reopened `submission` `ms` after [`DAY_1`].
+    async fn reopened(&mut self, submission: &str, ms: i64) {
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,'submission.reopened',?,'{}',?)")
+            .bind(&self.project).bind(&self.agent).bind(submission).bind(DAY_1 + ms)
+            .execute(&mut *self.conn).await.unwrap();
+    }
+
+    /// A report the integrator opened `ms` after [`DAY_1`].
+    async fn report(&mut self, id: &str, task: Option<&str>, human: bool, ms: i64) {
+        sqlx::query("INSERT INTO integrator_reports(id,project_id,kind,task_id,dedupe_key,details_json,requires_human,created_by,created_at) VALUES(?,?,'privilege_gate',?,?,'{}',?,?,?)")
+            .bind(id).bind(&self.project).bind(task).bind(id).bind(i64::from(human))
+            .bind(&self.agent).bind(DAY_1 + ms)
+            .execute(&mut *self.conn).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_empty_project_reads_zeros_and_empty_lists() {
+    let f = Fixture::new().await;
+    let p = f.project("telemetry-autonomy-empty").await;
+    let url = format!("/api/v1/projects/{p}/telemetry/autonomy");
+    let (status, value) = f.get(&f.other, &url).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let data = &value["data"];
+    assert_eq!(data["window_days"], 14);
+    assert_eq!(data["finished"], json!({"count": 0, "by_day": []}));
+    assert_eq!(data["human_required"]["count"], 0);
+    assert_eq!(data["human_required"]["per_finished_task"], Value::Null);
+    assert_eq!(data["parked"], json!({"count": 0, "items": []}));
+    assert_eq!(data["reviews"]["submissions_reviewed"], 0);
+    assert_eq!(data["caps"], json!([]));
+    for bad in ["days=0", "days=91"] {
+        let (status, _) = f.get(&f.other, &format!("{url}?{bad}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (status, _) = f
+        .get(
+            &f.other,
+            "/api/v1/projects/no-such-project/telemetry/autonomy",
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let anonymous = Request::builder().uri(&url).body(Body::empty()).unwrap();
+    let response = f.app.clone().oneshot(anonymous).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn autonomy_counts_finished_tasks_interventions_reviews_and_parked_items() {
+    let f = Fixture::new().await;
+    let p = f.project("telemetry-autonomy").await;
+    let (done_a, done_b, stuck) = (
+        f.task(&p, "Done A").await,
+        f.task(&p, "Done B").await,
+        f.task(&p, "Stuck").await,
+    );
+    let probe = f.task(&p, "Canary probe").await;
+    sqlx::query("UPDATE tasks SET budget_exempt='canary' WHERE id=?")
+        .bind(&probe)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let activities: Vec<String> = {
+        let mut ids = Vec::new();
+        for n in 0..6 {
+            ids.push(f.task(&p, &format!("Review {n}")).await);
+        }
+        ids
+    };
+    let mut r = Records::new(&f, &p).await;
+    // Done A: approved on its first submission. Done B: changes requested, then
+    // approved by the next submission. The canary probe finishes but is not counted.
+    r.submission("sub-a", &done_a, 0, false).await;
+    r.review("sub-a", &done_a, &activities[0], "approved").await;
+    r.finished(&done_a, "sub-a", 1000).await;
+    r.submission("sub-b1", &done_b, 10, true).await;
+    r.review("sub-b1", &done_b, &activities[1], "changes_requested")
+        .await;
+    r.submission("sub-b2", &done_b, 20, false).await;
+    r.review("sub-b2", &done_b, &activities[2], "approved")
+        .await;
+    r.finished(&done_b, "sub-b2", DAY_MS + 1000).await;
+    r.submission("sub-p", &probe, 30, false).await;
+    r.review("sub-p", &probe, &activities[3], "changes_requested")
+        .await;
+    r.finished(&probe, "sub-p", 2000).await;
+    // Two reviewers disagree about the stuck task's submission, and agents
+    // reopened it three times, which parks it.
+    r.submission("sub-s1", &stuck, 40, true).await;
+    r.review("sub-s1", &stuck, &activities[4], "approved").await;
+    sqlx::query("INSERT INTO workflow_activities(id,project_id,subject_task_id,submission_id,activity_task_id,kind,slot,state,created_at) VALUES('activity-second',?,?,?,?,'human_review',2,'completed',?)")
+        .bind(&p).bind(&stuck).bind("sub-s1").bind(&activities[5]).bind(DAY_1)
+        .execute(&mut *r.conn).await.unwrap();
+    sqlx::query("INSERT INTO review_decisions(activity_id,submission_id,attempt_id,reviewer_id,reviewer_session_id,decision,summary,created_at) VALUES('activity-second','sub-s1','a2',?,'rs','changes_requested','r',?)")
+        .bind(&r.agent).bind(DAY_1)
+        .execute(&mut *r.conn).await.unwrap();
+    r.submission("sub-s2", &stuck, 50, true).await;
+    r.submission("sub-s3", &stuck, 60, false).await;
+    for (n, submission) in ["sub-s1", "sub-s2", "sub-s3"].iter().enumerate() {
+        r.reopened(submission, 100 + n as i64).await;
+    }
+    // Human-required reports: two about real tasks, one about the probe (left
+    // out), one that needs no person (left out).
+    r.report("rep-1", Some(&done_a), true, 5000).await;
+    r.report("rep-2", None, true, DAY_MS + 5000).await;
+    r.report("rep-3", Some(&probe), true, 5000).await;
+    r.report("rep-4", Some(&done_b), false, 5000).await;
+    drop(r);
+
+    let (status, value) = f
+        .get(
+            &f.other,
+            &format!("/api/v1/projects/{p}/telemetry/autonomy"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let data = &value["data"];
+    assert_eq!(
+        data["finished"],
+        json!({"count": 2, "by_day": [{"day":"2027-01-15","count":1},{"day":"2027-01-16","count":1}]})
+    );
+    let hri = &data["human_required"];
+    assert_eq!(hri["integrator_reports"], 2);
+    assert_eq!(hri["count"], 2);
+    assert_eq!(hri["per_finished_task"], 1.0);
+    assert_eq!(
+        hri["by_day"],
+        json!([{"day":"2027-01-15","count":1},{"day":"2027-01-16","count":1}])
+    );
+    // Four reviewed submissions (the probe's is left out): A approved first
+    // time; B's first needed changes; B's second was approved but is not a
+    // first submission; the stuck one's reviewers disagreed.
+    let reviews = &data["reviews"];
+    assert_eq!(reviews["submissions_reviewed"], 4, "{reviews}");
+    assert_eq!(reviews["approved_first_pass"], 1);
+    assert_eq!(reviews["revised"], 2);
+    assert_eq!(reviews["disagreements"], 1);
+    assert_eq!(reviews["decisions"], 5);
+    let parked = data["parked"]["items"].as_array().unwrap();
+    assert_eq!(parked.len(), 1, "{data}");
+    assert_eq!(parked[0]["task_id"], json!(stuck));
+    assert_eq!(parked[0]["title"], "Stuck");
+    assert_eq!(parked[0]["agent_revises_24h"], 3);
+    assert_eq!(parked[0]["counted_revises_24h"], 3);
+
+    // A narrower window drops what happened before it.
+    f.clock.0.store(DAY_1 + 2 * DAY_MS, Ordering::SeqCst);
+    let (_, narrow) = f
+        .get(
+            &f.other,
+            &format!("/api/v1/projects/{p}/telemetry/autonomy?days=1"),
+        )
+        .await;
+    // Only Done B (a day later) is inside the last day; the reopens are older than 24 hours.
+    assert_eq!(narrow["data"]["finished"]["count"], 1);
+    assert_eq!(narrow["data"]["human_required"]["count"], 1);
+    assert_eq!(narrow["data"]["parked"]["count"], 0);
+}
+
+#[tokio::test]
+async fn host_caps_are_reported_replaced_and_read_back() {
+    let f = Fixture::new().await;
+    let p = f.project("telemetry-caps").await;
+    let path = format!("/api/v1/projects/{p}/telemetry/caps");
+    let (status, value) = f
+        .call(
+            &f.host,
+            "POST",
+            &path,
+            json!({"host":"h1","impl_daily_usd":150.0,"rev_daily_usd":50.0}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let (status, _) = f
+        .call(
+            &f.host,
+            "POST",
+            &path,
+            json!({"host":"h2","impl_daily_usd":0.0,"rev_daily_usd":null}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    // The newest report of a host replaces its earlier one.
+    let (status, _) = f
+        .call(
+            &f.host,
+            "POST",
+            &path,
+            json!({"host":"h1","impl_daily_usd":120.5,"rev_daily_usd":40.0}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, read) = f
+        .get(
+            &f.other,
+            &format!("/api/v1/projects/{p}/telemetry/autonomy"),
+        )
+        .await;
+    let caps = read["data"]["caps"].as_array().unwrap();
+    assert_eq!(caps.len(), 2, "{read}");
+    assert_eq!(
+        (caps[0]["host"].as_str(), caps[0]["impl_daily_usd"].as_f64()),
+        (Some("h1"), Some(120.5))
+    );
+    assert_eq!(caps[0]["rev_daily_usd"], 40.0);
+    assert_eq!(caps[1]["impl_daily_usd"], 0.0);
+    assert_eq!(caps[1]["rev_daily_usd"], Value::Null);
+
+    // The same key replays; invalid, human, read-only and unknown-project calls are refused.
+    let body = json!({"host":"h3","impl_daily_usd":1.0,"rev_daily_usd":1.0});
+    let first = f.keyed(&f.host, &path, "caps-key", body.clone()).await;
+    let replay = f.keyed(&f.host, &path, "caps-key", body.clone()).await;
+    assert_eq!(first.0, replay.0);
+    assert_eq!(first.1["data"], replay.1["data"]);
+    for bad in [
+        json!({"host":"h","impl_daily_usd":-1.0}),
+        json!({"host":"","impl_daily_usd":1.0}),
+        json!({"host":"h","impl_daily_usd":1.0,"extra":1}),
+    ] {
+        let (status, _) = f.call(&f.host, "POST", &path, bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (status, _) = f.call(&f.admin, "POST", &path, body.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    sqlx::query("UPDATE credentials SET access='read' WHERE id=?")
+        .bind(&f.other.credential)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, _) = f.call(&f.other, "POST", &path, body.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = f
+        .call(
+            &f.host,
+            "POST",
+            "/api/v1/projects/nope/telemetry/caps",
+            body,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 async fn seed(state: &AppState, human: bool, name: &str) -> Caller {

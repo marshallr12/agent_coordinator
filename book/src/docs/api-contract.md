@@ -835,6 +835,29 @@ only what hosts report, per project, attributed to the reporting principal and
   a result `id` and an unknown one is `not_found`; `next_before` continues),
   and `latest`, the newest result of every host and harness the project has
   seen.
+- `POST /caps` with `{host, impl_daily_usd, rev_daily_usd}` records the daily
+  spend caps (dollars per 24 hours; 0 means no cap, null means not reported)
+  the host enforces per role, replacing that host's earlier report. It follows
+  the write rules above (`403` for a human, read-only or integrator
+  credential; unknown fields are refused) and emits one
+  `telemetry.caps_reported` event. `agentc-supervisor` reports its `[health]`
+  caps for each project it serves.
+- `GET /autonomy?days=N` (default 14, at most 90) returns the figures the
+  console's Autonomy view shows besides cost and canaries, from the service's
+  own records, leaving out canary (budget-exempt) tasks as the digest does:
+  `finished` (`count`, `by_day`: code or general tasks whose workflow reached
+  done); `human_required` (`count`, `by_day`, `per_finished_task`, null when
+  nothing finished, and its two sources, `integrator_reports`, human-required
+  reports opened in the window, and `parked_subjects`, subjects an integrator
+  revise parked); `parked` (`count` and `items`: the open tasks the revise
+  limit holds from agents now, with `agent_revises_24h` and
+  `counted_revises_24h`); `reviews` (`submissions_reviewed`,
+  `approved_first_pass`, a task's first submission with no change requested;
+  `revised`, a submission with a requested change; `disagreements`, a
+  submission one reviewer approved and another sent back; `decisions`); and
+  `caps`, the latest report of each host. Stalls have no recorded start, so
+  they are not part of `human_required`; the digest reports the current ones.
+  Reads accept any authenticated reader.
 
 ## Attempt operations
 

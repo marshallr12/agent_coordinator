@@ -8,7 +8,7 @@
     try { return localStorage.getItem(TASK_AUTO_REFRESH_KEY) === 'true'; } catch { return false; }
   }
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false,
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
     projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', credentialDownloadUrl: null,
     taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
@@ -351,6 +351,7 @@
     ++state.reportsSeq; state.reportsCursor = null; state.reports = []; state.reportsLoaded = false; state.reportsProjectId = ''; clear($('reports-list'));
     ++state.agentSessionsSeq; state.agentSessionsProjectId = ''; state.agentSessionsLoaded = false; clear($('agent-sessions-list'));
     ++state.digestSeq; state.digestProjectId = ''; state.digestLoaded = false; clear($('digest-content'));
+    ++state.autonomySeq; state.autonomyProjectId = ''; state.autonomyLoaded = false; state.autonomySummaries.clear(); clear($('autonomy-content'));
     $('context-search').reset();
     state.credentials = []; state.credentialsLoaded = false; state.operators = []; state.restoreItems = []; state.archivedLoaded = false; state.archivedProjectId = ''; state.archivedTasks = []; state.detailKey = ''; clear($('archived-list')); state.resources = []; state.resourcesLoaded = false; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
@@ -370,10 +371,10 @@
 
   function showView(view) {
     state.currentView = view;
-    ['overview', 'project', 'reports', 'agent-sessions', 'digest', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
+    ['overview', 'project', 'reports', 'agent-sessions', 'digest', 'autonomy', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
     show($('task-view-tabs'), view === 'tasks' || view === 'archived');
     updateTaskViewTabs();
-    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports', 'agent-sessions', 'digest'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
+    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports', 'agent-sessions', 'digest', 'autonomy'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
     if (view === 'tasks') { fillProjectSelect(); setProp($('new-task-button'), 'disabled', !state.projectId); setProp($('refresh-tasks'), 'disabled', !state.projectId); $('project-select')?.focus(); }
   }
 
@@ -438,7 +439,8 @@
       const changed = JSON.stringify(projects) !== JSON.stringify(state.projects) || !state.projectsRendered;
       state.projects = projects;
       if (changed) { state.projectsRendered = true; renderProjects(); fillProjectSelect(); }
-      renderSummary(); if (state.currentView === 'reports') setReportsProjectLabel(); if (state.currentView === 'agent-sessions') setAgentSessionsProjectLabel(); if (state.currentView === 'digest') setDigestProjectLabel();
+      state.projects.forEach(loadAutonomySummary);
+      renderSummary(); if (state.currentView === 'reports') setReportsProjectLabel(); if (state.currentView === 'agent-sessions') setAgentSessionsProjectLabel(); if (state.currentView === 'digest') setDigestProjectLabel(); if (state.currentView === 'autonomy') setAutonomyProjectLabel();
     }
     catch (error) { if (!silent) { setState($('projects-state'), errorMessage(error), false, true); } }
     finally { state.fetching.delete('projects'); }
@@ -482,7 +484,14 @@
       if (selection && !selection.isCollapsed && (card.contains(selection.anchorNode) || card.contains(selection.focusNode))) return;
       openProject(project.id);
     });
-    add(footer, open); add(card, header); add(card, repo); add(card, idLabel); add(card, footer);
+    const summary = el('div', 'autonomy-summary project-meta');
+    const autonomy = el('button', 'autonomy-open', 'Autonomy →'); autonomy.type = 'button';
+    autonomy.setAttribute('aria-label', `Autonomy view for ${project.name || projectId}`);
+    autonomy.addEventListener('click', () => openAutonomy(project.id));
+    const summaryText = add(summary, el('span', 'autonomy-summary-text')); summaryText.dataset.projectId = projectId;
+    summaryText.title = 'From the project\'s telemetry records and workflow records; open the Autonomy view for each figure\'s source.';
+    add(footer, open); add(card, header); add(card, repo); add(card, idLabel); add(card, summary); add(summary, autonomy); add(card, footer);
+    fillAutonomySummary(project, summaryText);
     return card;
   }
 
@@ -536,6 +545,10 @@
   $('digest-button').addEventListener('click', openDigest);
   $('digest-back').addEventListener('click', () => openProjectSettings(state.projectId));
   $('refresh-digest').addEventListener('click', () => loadDigest());
+  $('autonomy-button').addEventListener('click', () => openAutonomy());
+  $('autonomy-back').addEventListener('click', () => openProjectSettings(state.projectId));
+  $('refresh-autonomy').addEventListener('click', () => loadAutonomy());
+  $('autonomy-window').addEventListener('change', () => loadAutonomy());
   $('agent-sessions-button').addEventListener('click', openAgentSessions);
   $('agent-sessions-back').addEventListener('click', () => openProjectSettings(state.projectId));
   $('agent-sessions-window').addEventListener('change', () => loadAgentSessions());
@@ -2084,6 +2097,176 @@
       section('hri', 'Human-required interventions', hri.items || [], digestHriLine)
     ]);
     setState($('digest-state'), digest.last_read_at ? `Last read ${formatDate(digest.last_read_at)} (before this visit).` : 'This digest had not been read before this visit.');
+  }
+  // The autonomy view: how much of the project's work ran without a person, each figure with its source.
+  const AUTONOMY_NO_SUPERVISOR = 'No supervisor host has reported cost, caps or canary results for this project yet, so only the service\'s own records are shown.';
+  const dollars = (value) => value === null || value === undefined ? '—' : `$${Number(value).toFixed(2)}`;
+  const utcDay = (ms = Date.now()) => new Date(ms).toISOString().slice(0, 10);
+  // A same-origin link to the API record a figure comes from.
+  function sourceLink(label, path) {
+    const link = el('a', 'source-link', label); link.href = path; link.target = '_blank'; link.rel = 'noopener noreferrer'; return link;
+  }
+  // "Source: a · b" under a figure.
+  function sourceLine(...links) {
+    const line = el('p', 'muted source-line', 'Source: ');
+    links.forEach(([label, path], index) => { if (index) add(line, document.createTextNode(' · ')); add(line, sourceLink(label, path)); });
+    return line;
+  }
+  // A table of rows; a cell is text or a node.
+  function dataTable(headers, rows, className = '') {
+    const table = el('table', `data-table ${className}`.trim()), head = add(add(table, el('thead')), el('tr'));
+    headers.forEach(header => add(head, el('th', '', header)));
+    const body = add(table, el('tbody'));
+    rows.forEach(cells => { const row = add(body, el('tr')); cells.forEach(cell => { const td = add(row, el('td')); if (cell instanceof Node) add(td, cell); else setText(td, cell); }); });
+    return table;
+  }
+  const outcomeBadge = (outcome) => el('span', `status-badge ${outcome === 'ok' ? 'report-resolved' : 'report-needs-human'}`, outcome);
+  // A task as a button that opens its detail.
+  function taskButton(projectId, taskId, title) {
+    if (!taskId) return '—';
+    const button = el('button', 'button text-button', title ? text(title) : text(taskId)); button.type = 'button';
+    button.title = `Task ${taskId}`; button.addEventListener('click', () => { state.projectId = projectId; openTask(taskId, 'tasks'); });
+    return button;
+  }
+  function openAutonomy(id = state.projectId) {
+    if (!id) { setGlobalAlert('Choose a project first.'); return; }
+    if (state.projectId !== text(id)) resetTaskPages();
+    state.projectId = text(id); state.selectedTaskId = '';
+    setAutonomyProjectLabel(); showView('autonomy'); $('autonomy-heading').focus(); loadAutonomy();
+  }
+  function setAutonomyProjectLabel() {
+    const project = state.projects.find(item => text(item.id) === state.projectId);
+    setText($('autonomy-project-label'), project?.name || 'Project');
+  }
+  // Loads every source of the view at once; a source that fails shows its error in its own card.
+  async function loadAutonomy() {
+    const projectId = state.projectId, seq = ++state.autonomySeq, days = Number($('autonomy-window').value), base = projectPath(projectId);
+    if (state.autonomyProjectId !== projectId) { state.autonomyProjectId = projectId; state.autonomyLoaded = false; reconcile($('autonomy-content'), []); }
+    if (!state.autonomyLoaded) setState($('autonomy-state'), 'Loading autonomy figures…', true);
+    const paths = {
+      autonomy: `${base}/telemetry/autonomy?days=${days}`,
+      costDays: `${base}/telemetry/cost?group_by=day&limit=${days}&since_ms=${Date.now() - days * 86400000}`,
+      costTasks: `${base}/telemetry/cost?group_by=task&limit=15&since_ms=${Date.now() - days * 86400000}`,
+      canaries: `${base}/telemetry/canaries?limit=20`,
+      digest: `${base}/digest`,
+    };
+    const keys = Object.keys(paths);
+    const settled = await Promise.allSettled(keys.map(key => request(paths[key])));
+    if (seq !== state.autonomySeq || projectId !== state.projectId) return;
+    const sources = {};
+    keys.forEach((key, index) => { sources[key] = settled[index].status === 'fulfilled' ? { data: settled[index].value.data, path: paths[key] } : { error: errorMessage(settled[index].reason), path: paths[key] }; });
+    state.autonomyLoaded = true; renderAutonomy(projectId, sources, days);
+  }
+  // One card of the view: its title, a note when a source it needs failed, else its content, then its sources.
+  // `used` is the part of the data the card shows, so a change elsewhere leaves the card alone.
+  function autonomyCard(key, title, needs, used, sources, build, ...links) {
+    const failed = needs.map(name => sources[name]).find(source => source.error);
+    return { key, sig: sig(title, failed?.error, used), build: () => {
+      const card = el('article', 'card report-card autonomy-card'); add(card, el('h2', '', title));
+      if (failed) add(card, el('p', 'inline-alert error', `This figure is unavailable: ${failed.error}`));
+      else build(card);
+      add(card, sourceLine(...links.map(([label, name]) => [label, sources[name].path])));
+      return card;
+    } };
+  }
+  const merged = (...lists) => { const days = new Map(); lists.forEach((list, column) => (list || []).forEach(item => { const row = days.get(item.day) || [0, 0]; row[column] += item.count; days.set(item.day, row); })); return [...days].sort(([a], [b]) => b.localeCompare(a)); };
+  function renderAutonomy(projectId, sources, days) {
+    const autonomy = sources.autonomy.data || {}, digest = sources.digest.data || {}, costDays = sources.costDays.data || {}, costTasks = sources.costTasks.data || {}, canaries = sources.canaries.data || {};
+    const caps = autonomy.caps || [], dayItems = costDays.items || [], canaryItems = canaries.items || [];
+    const noSupervisor = sources.autonomy.data && sources.costDays.data && sources.canaries.data && !caps.length && !dayItems.length && !canaryItems.length;
+    reconcile($('autonomy-content'), [
+      autonomyCard('hri', `Human-required interventions, last ${days} days`, ['autonomy', 'digest'], [autonomy.human_required, autonomy.finished, (digest.hri || {}).count, (digest.hri || {}).stalled_tasks, (digest.hri || {}).stalled_queue], sources, card => {
+        const hri = autonomy.human_required || {}, now = digest.hri || {}, finished = autonomy.finished || {};
+        add(card, factList([['Interventions', text(hri.count)], ['Finished tasks', text(finished.count)], ['Per finished task', hri.per_finished_task === null || hri.per_finished_task === undefined ? 'No task finished in this window' : Number(hri.per_finished_task).toFixed(2)],
+          ['Of which', `${text(hri.integrator_reports)} integrator reports needing a person, ${text(hri.parked_subjects)} subjects parked by the revise limit`], ['Stalled now', `${text((now.stalled_tasks || 0) + (now.stalled_queue || 0))} (not counted above: a stall has no start time in the records)`], ['Waiting for a person now', text(now.count)]]));
+        const rows = merged(finished.by_day, hri.by_day);
+        if (rows.length) add(card, dataTable(['Day (UTC)', 'Finished', 'Interventions'], rows.map(([day, [done, human]]) => [day, text(done), text(human)])));
+        else add(card, el('p', 'muted', 'Nothing finished and no intervention in this window.'));
+        add(card, el('p', 'muted', 'Decisions reserved for a person are not counted; the attention digest reports them separately.'));
+      }, ['Workflow, report and revise records', 'autonomy'], ['Attention digest', 'digest']),
+      autonomyCard('parked', 'Parked and human-required items', ['autonomy', 'digest'], [autonomy.parked, (digest.hri || {}).items], sources, card => {
+        const parked = (autonomy.parked || {}).items || [], waiting = (digest.hri || {}).items || [];
+        add(card, el('h3', '', `Parked by the revise limit (${parked.length})`));
+        if (!parked.length) add(card, el('p', 'muted', 'No task is parked. A task parks when agents revised it three times (not serialized after a landing) or six times in 24 hours.'));
+        else add(card, dataTable(['Task', 'Agent revises (24 h)', 'Counted toward the limit'], parked.map(item => [taskButton(projectId, item.task_id, item.title), text(item.agent_revises_24h), text(item.counted_revises_24h)])));
+        add(card, el('h3', '', `Waiting for a person (${waiting.length})`));
+        if (!waiting.length) add(card, el('p', 'muted', 'Nothing waits for a person.'));
+        waiting.forEach(item => add(card, el('p', '', digestHriLine(item))));
+      }, ['Task and revise records', 'autonomy'], ['Attention digest', 'digest']),
+      autonomyCard('cost', `Cost against the daily caps, last ${days} days`, ['autonomy', 'costDays', 'costTasks'], [caps, costDays, costTasks], sources, card => renderAutonomyCost(card, projectId, caps, costDays, costTasks), ['Reported cost per day', 'costDays'], ['Reported cost per task', 'costTasks'], ['Reported caps', 'autonomy']),
+      autonomyCard('reviews', `Review outcomes, last ${days} days`, ['autonomy'], autonomy.reviews, sources, card => {
+        const reviews = autonomy.reviews || {};
+        if (!reviews.submissions_reviewed) { add(card, el('p', 'muted', 'No submission was reviewed in this window.')); return; }
+        add(card, factList([['Submissions reviewed', text(reviews.submissions_reviewed)], ['Approved first pass', `${text(reviews.approved_first_pass)} (a task's first submission with no change requested)`], ['Needed revision', `${text(reviews.revised)} (a reviewer requested changes)`], ['Reviewer disagreements', `${text(reviews.disagreements)} (one reviewer approved, another requested changes)`], ['Review decisions', text(reviews.decisions)]]));
+      }, ['Review decisions', 'autonomy']),
+      autonomyCard('canaries', 'End-to-end canary history', ['canaries'], canaries, sources, card => {
+        const latest = canaries.latest || [];
+        if (!canaryItems.length) { add(card, el('p', 'muted', 'No canary result has been reported for this project. A supervisor host reports each end-to-end canary run.')); return; }
+        add(card, el('h3', '', 'Latest per host and harness'));
+        add(card, dataTable(['Host', 'Harness', 'Outcome', 'When'], latest.map(item => [item.host, item.harness, outcomeBadge(item.outcome), formatDate(item.occurred_at)])));
+        add(card, el('h3', '', 'History, newest first'));
+        add(card, dataTable(['When', 'Outcome', 'Harness', 'Host', 'Duration', 'Task'], canaryItems.map(item => [formatDate(item.occurred_at), outcomeBadge(item.outcome), item.harness, item.host, `${Math.round(item.duration_seconds)} s`, taskButton(projectId, item.task_id)])));
+        if (canaries.next_before) add(card, el('p', 'muted', 'Older runs are available from the source.'));
+      }, ['Reported canary results', 'canaries']),
+      autonomyCard('digest', 'Digest status', ['digest'], [digest.last_read_at, digest.digest_sender, digest.held_agent_tasks, digest.agent_task_weekly_budget], sources, card => {
+        add(card, factList([['Last read', digest.last_read_at ? formatDate(digest.last_read_at) : 'Never read'], ['Designated sender', digest.digest_sender || 'None designated'], ['Last sent', 'Not recorded: the service sees when the digest is read, not when it is sent'], ['Held agent tasks', text((digest.held_agent_tasks || []).length)], ['Weekly agent-task budget', digest.agent_task_weekly_budget ? `${text(digest.agent_task_weekly_budget.admitted_this_week)} of ${text(digest.agent_task_weekly_budget.limit)} admitted this week` : '']]));
+        const open = el('button', 'button subtle', 'Open the attention digest'); open.type = 'button'; open.addEventListener('click', openDigest); add(card, open);
+      }, ['Attention digest', 'digest']),
+    ]);
+    if (noSupervisor) setState($('autonomy-state'), AUTONOMY_NO_SUPERVISOR); else show($('autonomy-state'), false);
+  }
+  // The cap a project's hosts allow a role per day: the sum of reported caps, null when none was reported, 0 when a host has none.
+  function combinedCap(caps, field) {
+    const values = caps.map(cap => cap[field]).filter(value => value !== null && value !== undefined);
+    if (!values.length) return null;
+    return values.includes(0) ? 0 : values.reduce((sum, value) => sum + value, 0);
+  }
+  const capCell = (spent, cap) => cap === null ? dollars(spent) : cap === 0 ? `${dollars(spent)} (no cap)` : `${dollars(spent)} of ${dollars(cap)}${spent > cap ? ' — over' : ''}`;
+  function renderAutonomyCost(card, projectId, caps, costDays, costTasks) {
+    const dayItems = costDays.items || [], taskItems = costTasks.items || [];
+    add(card, el('h3', '', 'Daily caps reported by supervisor hosts'));
+    if (!caps.length) add(card, el('p', 'muted', 'No host has reported its daily caps, so spend is shown without a cap.'));
+    else add(card, dataTable(['Host', 'Implementation cap', 'Reviewer cap', 'Reported'], caps.map(cap => [cap.host, cap.impl_daily_usd === 0 ? 'None' : dollars(cap.impl_daily_usd), cap.rev_daily_usd === 0 ? 'None' : dollars(cap.rev_daily_usd), formatDate(cap.reported_at)])));
+    add(card, el('h3', '', 'Cost per day (UTC)'));
+    const implCap = combinedCap(caps, 'impl_daily_usd'), revCap = combinedCap(caps, 'rev_daily_usd');
+    if (!dayItems.length) add(card, el('p', 'muted', 'No cost has been reported for this project in this window.'));
+    else {
+      add(card, dataTable(['Day', 'Implementation', 'Review', 'Total', 'Launches'], dayItems.map(item => [item.day, capCell(item.impl.usd, implCap), capCell(item.rev.usd, revCap), dollars(item.total_usd), text(item.impl.launches + item.rev.launches)])));
+      add(card, el('p', 'muted', `Hosts cap the last 24 hours; a UTC day is only an approximation.${caps.length > 1 ? ' With several hosts the caps are added.' : ''} Estimated or unpriced launches: ${text(((costDays.totals || {}).impl || {}).estimated_launches + ((costDays.totals || {}).rev || {}).estimated_launches)} estimated, ${text(((costDays.totals || {}).impl || {}).unpriced_launches + ((costDays.totals || {}).rev || {}).unpriced_launches)} unpriced.`));
+    }
+    add(card, el('h3', '', 'Cost per task'));
+    if (!taskItems.length) add(card, el('p', 'muted', 'No task cost has been reported in this window.'));
+    else add(card, dataTable(['Task', 'Implementation', 'Review', 'Total'], taskItems.map(item => [taskButton(projectId, item.task_id, item.title), dollars(item.impl.usd), dollars(item.rev.usd), dollars(item.total_usd)])));
+    if (costTasks.truncated) add(card, el('p', 'muted', 'Showing the most recent tasks; the source lists more.'));
+  }
+  // A compact autonomy summary on a project card, fetched once a minute at most.
+  const AUTONOMY_SUMMARY_TTL_MS = 60000;
+  function autonomySummaryText(summary) {
+    if (summary.error) return 'Autonomy figures are unavailable.';
+    const parts = [`HRI ${summary.hri}${summary.perFinished === null ? '' : ` (${summary.perFinished.toFixed(2)} per finished task)`} in 7 days`];
+    parts.push(summary.canary ? `Last canary ${summary.canary.outcome}` : 'No canary reported');
+    parts.push(summary.today === null ? 'No cost reported' : `Today ${dollars(summary.today)}`);
+    return parts.join(' · ');
+  }
+  function fillAutonomySummary(project, container) {
+    const summary = state.autonomySummaries.get(text(project.id));
+    if (!summary) { patchSection(container, 'loading', box => add(box, el('span', 'muted', 'Loading autonomy…'))); return; }
+    patchSection(container, sig(autonomySummaryText(summary)), box => {
+      add(box, el('span', summary.error ? 'muted' : '', autonomySummaryText(summary)));
+    });
+  }
+  async function loadAutonomySummary(project) {
+    const id = text(project.id), cached = state.autonomySummaries.get(id), base = projectPath(id);
+    if (cached && Date.now() - cached.at < AUTONOMY_SUMMARY_TTL_MS) return;
+    if (state.fetching.has(`autonomy-summary-${id}`)) return;
+    state.fetching.add(`autonomy-summary-${id}`);
+    try {
+      const [autonomy, canaries, cost] = (await Promise.all([`${base}/telemetry/autonomy?days=7`, `${base}/telemetry/canaries?limit=1`, `${base}/telemetry/cost?group_by=day&limit=1`].map(path => request(path)))).map(result => result.data);
+      const day = (cost.items || [])[0];
+      state.autonomySummaries.set(id, { at: Date.now(), hri: autonomy.human_required.count, perFinished: autonomy.human_required.per_finished_task, canary: (canaries.items || [])[0] || null, today: day ? (day.day === utcDay() ? day.total_usd : 0) : null });
+    } catch (error) { state.autonomySummaries.set(id, { at: Date.now(), error: errorMessage(error) }); }
+    finally { state.fetching.delete(`autonomy-summary-${id}`); }
+    document.querySelectorAll('.autonomy-summary-text').forEach(container => { if (container.dataset.projectId === id) fillAutonomySummary(project, container); });
   }
   function openAgentSessions() {
     if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
