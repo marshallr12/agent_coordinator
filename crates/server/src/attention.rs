@@ -115,6 +115,10 @@ pub fn routes() -> Router<AppState> {
             post(mark_digest_read),
         )
         .route(
+            "/api/v1/projects/{project}/digest/sender",
+            post(set_digest_sender),
+        )
+        .route(
             "/api/v1/projects/{project}/digest/ack",
             get(ack_page).post(ack_digest),
         )
@@ -451,30 +455,34 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
         .into()
 }
 
-fn ack_signature(key: &[u8], project: &str, expires_at: i64) -> String {
+fn ack_signature(key: &[u8], project: &str, expires_at: i64, minter: &str) -> String {
     hex::encode(hmac_sha256(
         key,
-        format!("{ACK_PURPOSE}\n{project}\n{expires_at}").as_bytes(),
+        format!("{ACK_PURPOSE}\n{project}\n{expires_at}\n{minter}").as_bytes(),
     ))
 }
 
-/// The acknowledgement token for `project`, valid until `expires_at`.
-fn ack_token(key: &[u8], project: &str, expires_at: i64) -> String {
-    format!("{expires_at}.{}", ack_signature(key, project, expires_at))
+/// The acknowledgement token for `project`, valid until `expires_at`, minted by
+/// the principal `minter`.
+fn ack_token(key: &[u8], project: &str, expires_at: i64, minter: &str) -> String {
+    format!(
+        "{expires_at}.{minter}.{}",
+        ack_signature(key, project, expires_at, minter)
+    )
 }
 
-/// Checks `token` against the project, the signing key and the clock.
-fn check_ack_token(key: &[u8], project: &str, token: &str, now: i64) -> Result<(), AppError> {
-    let invalid = || {
-        AppError::new(
-            StatusCode::BAD_REQUEST,
-            "digest_link_invalid",
-            "This acknowledgement link is not valid.",
-        )
+/// Checks `token` against the project, the signing key and the clock, and
+/// returns the principal that minted it.
+fn check_ack_token(key: &[u8], project: &str, token: &str, now: i64) -> Result<String, AppError> {
+    let invalid = link_invalid;
+    let mut parts = token.split('.');
+    let (Some(expires), Some(minter), Some(signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(invalid());
     };
-    let (expires, signature) = token.split_once('.').ok_or_else(invalid)?;
     let expires_at: i64 = expires.parse().map_err(|_| invalid())?;
-    let expected = ack_signature(key, project, expires_at);
+    let expected = ack_signature(key, project, expires_at, minter);
     if !bool::from(expected.as_bytes().ct_eq(signature.as_bytes())) {
         return Err(invalid());
     }
@@ -485,7 +493,46 @@ fn check_ack_token(key: &[u8], project: &str, token: &str, now: i64) -> Result<(
             "This acknowledgement link has expired. Open the digest in the dashboard instead.",
         ));
     }
-    Ok(())
+    Ok(minter.to_owned())
+}
+
+/// The agent principal the owner designated to send `project`'s digest.
+async fn digest_sender(
+    c: &mut SqliteConnection,
+    project: &str,
+) -> Result<Option<String>, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT principal_id FROM digest_senders WHERE project_id=?")
+            .bind(project)
+            .fetch_optional(&mut *c)
+            .await?,
+    )
+}
+
+/// Whether `principal` may still vouch for an acknowledgement link: an enabled
+/// human, or the enabled agent principal currently designated as the sender.
+async fn may_mint_ack_link(
+    c: &mut SqliteConnection,
+    project: &str,
+    principal: &str,
+) -> Result<bool, AppError> {
+    let row = sqlx::query("SELECT kind FROM principals WHERE id=? AND disabled_at IS NULL")
+        .bind(principal)
+        .fetch_optional(&mut *c)
+        .await?;
+    Ok(match row.map(|row| row.get::<String, _>("kind")) {
+        Some(kind) if kind == "human" => true,
+        Some(_) => digest_sender(c, project).await?.as_deref() == Some(principal),
+        None => false,
+    })
+}
+
+fn link_invalid() -> AppError {
+    AppError::new(
+        StatusCode::BAD_REQUEST,
+        "digest_link_invalid",
+        "This acknowledgement link is not valid.",
+    )
 }
 
 async fn ack_key(c: &mut SqliteConnection) -> Result<Vec<u8>, AppError> {
@@ -509,15 +556,17 @@ async fn record_read(
     project: &str,
     now: i64,
     via: &str,
+    minted_by: Option<&str>,
 ) -> Result<(), AppError> {
     sqlx::query(
-        "INSERT INTO digest_reads(project_id,last_read_at,read_via) VALUES(?,?,?) \
+        "INSERT INTO digest_reads(project_id,last_read_at,read_via,minted_by) VALUES(?,?,?,?) \
          ON CONFLICT(project_id) DO UPDATE SET last_read_at=excluded.last_read_at,\
-         read_via=excluded.read_via",
+         read_via=excluded.read_via,minted_by=excluded.minted_by",
     )
     .bind(project)
     .bind(now)
     .bind(via)
+    .bind(minted_by)
     .execute(&mut *c)
     .await?;
     Ok(())
@@ -556,10 +605,181 @@ async fn mark_digest_read(
     if let Some(value) = m.replay {
         return Ok(response(value));
     }
-    record_read(&mut m.tx, &project, m.now, "dashboard").await?;
+    record_read(&mut m.tx, &project, m.now, "dashboard", None).await?;
     let value = json!({"project_id": project, "last_read_at": timestamp(m.now)});
     Ok(response(
         m.finish(value, Some(&project), "digest.read", &project)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DigestSenderInput {
+    /// The agent principal to designate, or `null` to clear the designation.
+    principal_id: Option<String>,
+}
+
+async fn require_agent_principal(
+    c: &mut SqliteConnection,
+    principal: &str,
+) -> Result<(), AppError> {
+    let valid: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM principals WHERE id=? AND kind='agent' AND role='agent' \
+         AND disabled_at IS NULL",
+    )
+    .bind(principal)
+    .fetch_one(&mut *c)
+    .await?;
+    if valid == 0 {
+        return Err(AppError::bad_request(
+            "The digest sender must be an enabled agent principal.",
+        ));
+    }
+    Ok(())
+}
+
+/// Designates `principal` as the project's digest sender, or clears the
+/// designation. `designated_by` is `None` for the host-local command.
+async fn store_digest_sender(
+    c: &mut SqliteConnection,
+    project: &str,
+    principal: Option<&str>,
+    designated_by: Option<&str>,
+    now: i64,
+) -> Result<(), AppError> {
+    if let Some(principal) = principal {
+        sqlx::query(
+            "INSERT INTO digest_senders(project_id,principal_id,designated_by,designated_at) \
+             VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET \
+             principal_id=excluded.principal_id,designated_by=excluded.designated_by,\
+             designated_at=excluded.designated_at",
+        )
+        .bind(project)
+        .bind(principal)
+        .bind(designated_by)
+        .bind(now)
+        .execute(&mut *c)
+        .await?;
+    } else {
+        sqlx::query("DELETE FROM digest_senders WHERE project_id=?")
+            .bind(project)
+            .execute(&mut *c)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Host-local designation of the digest sender, by agent name (`None` clears
+/// it). Not mounted as an HTTP route: the owner runs it on the host, where the
+/// digest timer's token lives. The event names the affected agent as its
+/// subject, like the other host-local recoveries.
+pub async fn designate_digest_sender(
+    state: &AppState,
+    project: &str,
+    agent: Option<&str>,
+    reason: &str,
+) -> Result<Value, AppError> {
+    if reason.trim() != reason
+        || reason.is_empty()
+        || reason.len() > 500
+        || reason.chars().any(char::is_control)
+    {
+        return Err(AppError::bad_request(
+            "The reason must contain 1 to 500 bytes without control characters or surrounding whitespace.",
+        ));
+    }
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let clock = state.sample_clock(&mut tx).await?;
+    if clock.incident_detected {
+        tx.commit().await?;
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    if clock.incident_active {
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    if !project_exists(&mut tx, project).await? {
+        return Err(AppError::not_found());
+    }
+    let subject: String = match agent {
+        Some(name) => sqlx::query_scalar(
+            "SELECT id FROM principals WHERE name=? AND kind='agent' AND role='agent' \
+             AND disabled_at IS NULL",
+        )
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::bad_request("The digest sender must be an enabled agent."))?,
+        None => digest_sender(&mut tx, project)
+            .await?
+            .ok_or_else(|| AppError::bad_request("This project has no digest sender to clear."))?,
+    };
+    let sender = agent.map(|_| subject.as_str());
+    store_digest_sender(&mut tx, project, sender, None, clock.now).await?;
+    let event_data = serde_json::to_string(&json!({
+        "reason": reason,
+        "host_local": true,
+        "initiator_kind": "host_operator",
+        "authenticated_principal_id": Value::Null,
+        "subject_principal_id": subject,
+        "digest_sender": sender,
+        "actor_id_role": "subject_reference",
+    }))?;
+    sqlx::query(
+        "INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) \
+         VALUES(?,?,'digest.sender_set',?,?,?)",
+    )
+    .bind(project)
+    .bind(&subject)
+    .bind(project)
+    .bind(event_data)
+    .bind(clock.now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(json!({"project_id": project, "digest_sender": sender, "host_local": true}))
+}
+
+/// `POST /api/v1/projects/{project}/digest/sender`: a human administrator
+/// designates the one agent principal that may mint acknowledgement links for
+/// the project's digest, or clears the designation.
+async fn set_digest_sender(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<DigestSenderInput>, JsonRejection>,
+) -> Reply {
+    let input = payload(body)?;
+    let mut m = Mutation::begin(
+        &state,
+        &auth,
+        &headers,
+        &format!("POST /api/v1/projects/{project}/digest/sender"),
+        &input,
+    )
+    .await?;
+    crate::auth::admin(&m.actor)?;
+    if !project_exists(&mut m.tx, &project).await? {
+        return Err(AppError::not_found());
+    }
+    if let Some(value) = m.replay {
+        return Ok(response(value));
+    }
+    if let Some(principal) = &input.principal_id {
+        require_agent_principal(&mut m.tx, principal).await?;
+    }
+    store_digest_sender(
+        &mut m.tx,
+        &project,
+        input.principal_id.as_deref(),
+        Some(&m.actor.id),
+        m.now,
+    )
+    .await?;
+    let value = json!({"project_id": project, "digest_sender": input.principal_id});
+    Ok(response(
+        m.finish(value, Some(&project), "digest.sender_set", &project)
             .await?,
     ))
 }
@@ -585,11 +805,15 @@ async fn ack_page(
 ) -> Result<Html<String>, AppError> {
     let mut c = state.pool.acquire().await?;
     let key = ack_key(&mut c).await?;
-    check_ack_token(&key, &project, &query.token, state.now())?;
+    let minter = check_ack_token(&key, &project, &query.token, state.now())?;
     if !project_exists(&mut c, &project).await? {
         return Err(AppError::not_found());
     }
-    // A valid token is digits, a dot and hex, so it needs no escaping.
+    if !may_mint_ack_link(&mut c, &project, &minter).await? {
+        return Err(link_invalid());
+    }
+    // A valid token is digits, hex, a principal id and dots, so it needs no
+    // escaping.
     Ok(ack_html(
         "Attention digest",
         &format!(
@@ -602,7 +826,8 @@ async fn ack_page(
 }
 
 /// `POST .../digest/ack` with a form body `token=`: records that the owner read
-/// the digest. The token authorizes this one effect and nothing else.
+/// the digest, naming the principal that minted the link. The token authorizes
+/// this one effect and nothing else, and only while its minter may still mint.
 async fn ack_digest(
     State(state): State<AppState>,
     Path(project): Path<String>,
@@ -619,11 +844,14 @@ async fn ack_digest(
         return Err(crate::state::clock_reconciliation_error());
     }
     let key = ack_key(&mut tx).await?;
-    check_ack_token(&key, &project, &token, clock.now)?;
+    let minter = check_ack_token(&key, &project, &token, clock.now)?;
     if !project_exists(&mut tx, &project).await? {
         return Err(AppError::not_found());
     }
-    record_read(&mut tx, &project, clock.now, "ack_link").await?;
+    if !may_mint_ack_link(&mut tx, &project, &minter).await? {
+        return Err(link_invalid());
+    }
+    record_read(&mut tx, &project, clock.now, "ack_link", Some(&minter)).await?;
     tx.commit().await?;
     Ok(ack_html(
         "Recorded",
@@ -750,7 +978,7 @@ async fn held_agent_tasks(c: &mut SqliteConnection, project: &str) -> Result<Vec
 /// did in the last `hours` (default 24) and what still needs a human.
 async fn digest(
     State(state): State<AppState>,
-    _auth: Auth,
+    auth: Auth,
     Path(project): Path<String>,
     Query(query): Query<DigestQuery>,
 ) -> Reply {
@@ -803,11 +1031,19 @@ async fn digest(
             .bind(&project)
             .fetch_optional(&mut *c)
             .await?;
-    // The link is a bearer capability to mark the digest read, so only a
-    // caller that asks for it receives one.
-    let ack = if query.ack_link.unwrap_or(false) {
+    let sender = digest_sender(&mut c, &project).await?;
+    // The link is a bearer capability to mark the digest read, which silences
+    // the neglect page, so only a human or the designated digest sender that
+    // asks for it receives one. Any other agent gets the digest without it.
+    let may_mint = auth.actor.kind == "human" || sender.as_deref() == Some(&auth.actor.id);
+    let ack = if query.ack_link.unwrap_or(false) && may_mint {
         let expires_at = now + ACK_LINK_TTL_MS;
-        let token = ack_token(&ack_key(&mut c).await?, &project, expires_at);
+        let token = ack_token(
+            &ack_key(&mut c).await?,
+            &project,
+            expires_at,
+            &auth.actor.id,
+        );
         Some(json!({
             "url": format!(
                 "{}/api/v1/projects/{project}/digest/ack?token={token}",
@@ -822,6 +1058,7 @@ async fn digest(
         "project_id": project,
         "last_read_at": last_read.map(timestamp),
         "ack_link": ack,
+        "digest_sender": sender,
         "window_hours": hours,
         "since": timestamp(since),
         "until": timestamp(now),
@@ -889,8 +1126,11 @@ mod tests {
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
         let key = [7u8; 32];
-        let token = ack_token(&key, "p", 1_000);
-        assert!(check_ack_token(&key, "p", &token, 999).is_ok());
+        let token = ack_token(&key, "p", 1_000, "m");
+        assert_eq!(check_ack_token(&key, "p", &token, 999).unwrap(), "m");
+        let (head, signature) = token.rsplit_once('.').unwrap();
+        let swapped = format!("{}.{signature}", head.replace(".m", ".other"));
+        assert!(check_ack_token(&key, "p", &swapped, 999).is_err());
         assert!(check_ack_token(&key, "p", &token, 1_000).is_err());
         assert!(check_ack_token(&key, "q", &token, 999).is_err());
         assert!(check_ack_token(&[8u8; 32], "p", &token, 999).is_err());

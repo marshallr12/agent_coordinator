@@ -1292,6 +1292,17 @@ existing agent credentials, producers, resource holds, and saved work remain sub
 to their original authority and recovery rules. Never include a password in command
 arguments or the audited reason.
 
+Only a human or a project's designated digest sender can obtain a digest
+acknowledgement link, so an agent cannot mark the digest read. The host
+operator designates the sender (the agent that owns the digest timer's token),
+or clears it with `--clear`, without a network call:
+
+```sh
+agent-coordinator-server --database /path/to/coordinator.sqlite3 \
+  designate-digest-sender --project PROJECT_ID --agent AGENT_NAME \
+  --reason 'Digest timer credential'
+```
+
 ## Publish and retrieve deployment reports
 
 Use `artifacts publish` to reserve and upload one reviewed report with a stable

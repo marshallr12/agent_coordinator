@@ -276,10 +276,23 @@ Reads are recorded in two ways only. A human opening the digest in the dashboard
 sends `POST /api/v1/projects/{project_id}/digest/read` (`{}`, an idempotent
 mutation; agent credentials get `operation_not_permitted`), and `GET ...digest`
 itself never counts as a read. `GET ...digest?ack_link=true` adds `ack_link`:
-`url` and `expires_at` of a signed acknowledgement link, valid for 7 days. The
-link's token is `<expiry ms>.<HMAC-SHA256 of purpose, project and expiry>` under
-a key the service generates; it is a bearer capability for one effect and no
-credential. `GET .../digest/ack?token=` answers a page with an "I read this"
+`url` and `expires_at` of a signed acknowledgement link, valid for 7 days, but
+only for a human or for the project's designated digest sender; any other
+agent credential gets the digest with `ack_link: null`, because a read silences
+the digest-neglect page and agents must not be able to do that. The digest also
+reports `digest_sender`, the agent principal id designated for the project
+(`null` by default). A human administrator designates or clears it with
+`POST /api/v1/projects/{project_id}/digest/sender` (`{"principal_id": "<agent
+principal id>"}` or `{"principal_id": null}`, an idempotent mutation; the target
+must be an enabled agent principal and agents get `forbidden`), and the host
+operator with `agent-coordinator-server designate-digest-sender` (see the
+deployment runbook). The
+link's token is `<expiry ms>.<minter principal id>.<HMAC-SHA256 of purpose,
+project, expiry and minter>` under a key the service generates; it is a bearer
+capability for one effect and no credential. A read recorded through it keeps
+the minting principal (`digest_reads.minted_by`), and the link stops working
+when its minter is no longer a human or the designated sender (it is refused
+as `digest_link_invalid`). `GET .../digest/ack?token=` answers a page with an "I read this"
 button (so a link preview or mail scanner records nothing), and
 `POST .../digest/ack` with the form field `token` records the read. Both need no
 other credential, and both refuse a token that is malformed or signed for
