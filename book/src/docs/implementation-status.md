@@ -136,6 +136,20 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   restart into a rewritten station and no lifecycle round has run, and the
   third 4c run is its own task.
 
+- Phase 4c's [third machine run](windows-host-design.md#phase-4c-third-machine-run-2026-11-13)
+  on MiniAir, 2026-11-13, installed both services from `main` at `103e640`.
+  Step 6 passed three times under the Service Control Manager, including a
+  second launch in the same station and a launch after the runner was
+  stopped and started. Of the lifecycle rounds, **supervisor stop and
+  supervisor crash passed**. Runner stop **cannot run as written**: Windows
+  refuses to stop the runner while the supervisor, which depends on it,
+  runs (error 1051). **Runner crash failed**: the launch ended and the
+  restarted runner reclaimed it, but the supervisor never released the
+  attempt and then would not stop, so the removal needed a restart. Child
+  crash, logoff, reboot and power loss were not run; task `76685e6b`
+  follows. Everything the run created was removed. **Nothing is machine
+  accepted.**
+
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
   isolated tmpfs; the host harness directory stays hidden. Invalid paths,

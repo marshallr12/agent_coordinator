@@ -245,7 +245,7 @@ uses. All four facts above hold for a real service.
 | A station the process does not run in, and a session with a second process, are refused; the station's access list is unchanged and no launch directory or journal entry is left | **Demonstrated** by the same test |
 | On an interactive desktop the launcher still refuses | **Demonstrated** by `windows_runner`, `windows_host` and `windows_service` in the owner's desktop session |
 | Under the Service Control Manager: who owns the service's station and what it grants, that the service's process is alone in its logon session, and that the rewrite, the label and the open with every right afterwards succeed on a station Windows made | **Demonstrated once** on MiniAir on 2026-11-12 ([record](#station-observation-and-step-6-2026-11-12)): the runner, as a service, took its station over and made one launch, whose exit was seen. The [second 4c run](#phase-4c-second-machine-run-2026-11-12) had failed here, with the first version of the take-over. What Windows reports about the station after the rewrite was checked by the launcher's own read-back, not recorded separately |
-| Launches after the first, a restart of the runner into a station it already rewrote, and every lifecycle round | **Not demonstrated**; the third 4c run is its own task |
+| Launches after the first, a restart of the runner into a station it already rewrote, and every lifecycle round | In the [third 4c run](#phase-4c-third-machine-run-2026-11-13), 2026-11-13: further launches by the same runner process in its station **demonstrated**, and a launch by a runner that was stopped and started again through the Service Control Manager **demonstrated** once; whether that runner's station was the one it had rewritten was not recorded. The lifecycle rounds are recorded there |
 
 The mechanism needs no installation step and no privilege, so the runbook's
 installation steps are unchanged; its step 6 says what to expect now.
@@ -938,10 +938,33 @@ This is what the owner runs on MiniAir from an **elevated** session. Task
 are corrected from that run. Task `7b848696` followed it again on 2026-11-12
 and was stopped by step 6 a second time
 ([second machine run](#phase-4c-second-machine-run-2026-11-12)); the
-lifecycle rounds of step 7 have still not been run. Task `8981c84a` ran
+lifecycle rounds of step 7 were not run. Task `8981c84a` ran
 steps 1 to 6 and 9 a third time on 2026-11-12, and
-[step 6 passed](#station-observation-and-step-6-2026-11-12). Stop at
-the first step that does not do what it says; do not work around it.
+[step 6 passed](#station-observation-and-step-6-2026-11-12). Task
+`4197c362` ran steps 1 to 7 and 9 on 2026-11-13
+([third machine run](#phase-4c-third-machine-run-2026-11-13)): step 6
+passed three times; the stop and supervisor-crash rounds passed, the
+runner-stop round cannot run as written, the runner-crash round failed, and
+the remaining rounds were not run. Stop at the first step that does not do
+what it says; do not work around it.
+
+Corrections from the third machine run:
+
+- Step 7, runner stop: Windows refuses `sc.exe stop agentc-runner` while
+  the supervisor runs (error 1051), because the supervisor is registered
+  with `depend= agentc-runner`. The round cannot run as written; record it
+  as not run until it is redefined.
+- Step 7, runner crash: until task `76685e6b` is done, this round leaves the
+  supervisor holding a launch it can neither settle nor drain, and the
+  supervisor then does not stop (`STOP_PENDING`). Run it last; the removal
+  then needs a restart first.
+- Step 7, every round: `stand-in-judge` saying `ok: true` does not show that
+  every claimed attempt was released. Check the round's trace for `release`
+  and `cleanup`.
+- Step 7, stop: the trace has `exited` (code 1) between `terminate` and
+  `release`.
+- Step 9: run after a restart with both services stopped, the removal
+  removes the two service profiles at once; Windows has not loaded them.
 
 Corrections from the third run of step 6:
 
@@ -1035,7 +1058,7 @@ Corrections from the run:
    | Round | Action | Expect |
    | --- | --- | --- |
    | Stop | `sc.exe stop agentc-supervisor` during a launch | Admission ends, the launch is asked to stop and ended at the deadline, `STOPPED` with exit code 0 |
-   | Runner stop | `sc.exe stop agentc-runner` during a launch | The runner journals the end and stops clean; the supervisor releases the attempt |
+   | Runner stop | `sc.exe stop agentc-runner` during a launch | The runner journals the end and stops clean; the supervisor releases the attempt. Windows refuses the stop with error 1051 while the supervisor runs ([third run](#phase-4c-third-machine-run-2026-11-13)) |
    | Supervisor crash | Kill the supervisor process during a launch | Windows restarts it; it claims nothing while the launch may run, then releases and goes on |
    | Runner crash | Kill the runner process during a launch | Windows ends the launch with the job; the restarted runner reclaims it; the supervisor releases |
    | Child crash | Kill the fixture's root process | The launch is seen exited and released; nothing is left in the job |
@@ -1309,8 +1332,149 @@ the kit removes them after a restart.
 | A failed start after a claim is released and cleaned up | **Demonstrated** once (`probe-1`, error 203) |
 | The stand-in's wait after a refused prepare | **Not seen** under the SCM: no prepare failed with a build that has it |
 | A second launch in the same station, a runner restarted into a station it rewrote | **Not run** as such. The runner was restarted between builds, each time into a new logon session |
-| Rounds: supervisor stop, runner stop, supervisor crash, runner crash, child crash, logoff, reboot with preshutdown, power loss | **Not run**; the third 4c run is its own task |
-| Removal of the two service profiles | **Open** until the owner restarts MiniAir |
+| Rounds: supervisor stop, runner stop, supervisor crash, runner crash, child crash, logoff, reboot with preshutdown, power loss | **Not run**; the [third 4c run](#phase-4c-third-machine-run-2026-11-13) is its own task |
+| Removal of the two service profiles | **Done** on 2026-11-13 at 02:24 UTC, after the owner restarted MiniAir, by task `4197c362` before its install |
+
+### Phase 4c third machine run, 2026-11-13
+
+Task `4197c362-2bd5-4ad0-8d66-170984a12094`, on MiniAir (Windows 11 Pro
+10.0.26300). `agentc-supervisor.exe` and the probe fixture were built in
+release mode (`--locked`) from a clean checkout of `main` at
+`103e640a304355190e8f8be9c9d4ac8934629d3b`, which contains task
+`8981c84a`'s result. The binary's SHA-256 was
+`18d0204b8333e0bfee3256225b60f142a6473edf321776c9690a719e7daa8cd3`; the
+fixture's was
+`2c650d2906e137d9504650d343337f4007650ca084d9055690bd251229755a85`. Before
+the install the machine had no `agentc` service, directory or service
+profile. The evidence is coordinator artifact
+`20c5927b-dfb6-4c12-9640-cfbbbc55c20e`, SHA-256
+`033a333f4cd483c46cc3088cb6d1015c87dbabb985362c72a7d9adb140855817`: one zip
+of the run's logs, ledgers, both service logs, heartbeats, the services'
+application and Service Control Manager event log entries, `sc.exe qc` and
+`qfailure` output, token privileges and groups, `icacls` output, the
+manifest with the commit and hashes, and the scripts, packed by registered
+job `7629a914-c0b7-4ba2-8cf9-37ca4e16ade6`. All times are UTC; the rounds
+ran in the night of 2026-11-12 to 13 local time.
+
+Who ran what: every script ran in an elevated session on MiniAir, each only
+after the owner's go-ahead in the agent session. The owner restarted
+MiniAir before the install and once more before the removal, and decided to
+stop the rounds at the runner-crash finding.
+
+**Install (steps 1 to 5), 05:14: passed as written.** The installed hashes
+matched the build. Both services registered stopped, demand start, under
+their virtual accounts, the supervisor depending on the runner, with two
+60-second restarts and a one-day reset. The preshutdown limit was set to
+120 000 ms on both before the first start and read back. The directories'
+access lists were as step 3 asks. Both `RUNNING` with the stand-in off
+(runner process 15212, supervisor 19036), tokens recorded (`tokens.json`),
+and no fixture process, AppContainer profile or launch directory. As in the
+earlier runs, every start of the runner logs `preshutdown time limit not
+set: OpenServiceW failed with Windows error 5`; the limit set at
+installation stays in place.
+
+**Step 6, 05:23: passed three times.** With the stand-in on, each item
+traced `prepare claim start start_result exited release cleanup`, its
+cleanup saying `"removed": "launch"`. `s6-first` and `s6-same-station` were
+made by runner process 15212, the second in the station the first had taken
+over. Both services were then stopped and started through the Service
+Control Manager, and the new runner process, 6528, made `s6-after-restart`.
+`stand-in-judge` found no problem and nothing was left.
+
+**Stop round, 06:17: passed.** `sc.exe stop agentc-supervisor` 11 seconds
+into a launch. Trace: `prepare claim start start_result stop_requested
+terminate exited release cleanup`. The fixture ignores a stop request, so it
+was ended at the 30-second drain deadline and exited with code 1; the
+release says the launch exited after a drain because the host supervisor
+stopped. The supervisor was `Stopped` with exit code 0, the judge found no
+problem and nothing was left.
+
+**Runner-stop round, 06:18: not run as written.** `sc.exe stop
+agentc-runner` during a launch was refused:
+
+```text
+[SC] ControlService FAILED 1051:
+A stop control has been sent to a service that other running services are dependent on.
+```
+
+The supervisor depends on the runner, so Windows does not stop the runner
+while the supervisor runs. Nothing was stopped. The round's 180-second
+launch ran to its end with code 0 at 06:21:39 and was released and cleaned
+up; a check at 06:21:48 found nothing left.
+
+**Supervisor-crash round, 06:22: passed.** The supervisor's process
+(17088) was killed during a launch and a second item was queued. Windows
+restarted the supervisor about 60 seconds later (process 15380, connected
+to the runner at 06:23:21). It then recorded `recover` with
+`may_be_running` every 10 seconds while the fixture ran, eleven times,
+`ended` at 06:25:11 when the 180-second fixture ended, then `release` and
+`cleanup` with `"removed": "launch"`. Only then was the second item
+claimed; it exited with code 0 and was released. The judge found no problem
+and nothing was left.
+
+**Runner-crash round, 06:28: failed.** The runner's process (6528) was
+killed during launch `5a5fd655-c78f-461b-bdc0-248a2578f456`. The fixture was
+gone within 3 seconds, and Windows restarted the runner about 60 seconds
+later (process 15056), which logged `start-up: 1 reclaimed` and `reclaimed
+5a5fd655-…`. The supervisor never released the attempt. Its log repeats,
+about once a second:
+
+```text
+agentc-supervisor run: observe the launch: the runner refused "observe": launch 5a5fd655-c78f-461b-bdc0-248a2578f456 is not prepared
+```
+
+It renewed the dead launch's attempt every 60 seconds until its 240-minute
+budget was spent at 10:28. Its drain then failed as well: the restarted
+runner refused `request_stop` (`is not prepared`) and `terminate` (`was not
+prepared by this runner`), and the supervisor went back to observing. Its
+launch record (`released: false`, with the job of runner process 6528) and
+the launch's `-control` and `-work` directories were left. No fixture
+process and no AppContainer profile of the run was left. `stand-in-judge`
+still found no problem: it judges what the ledger holds, and an attempt
+that is never released breaks none of its rules.
+
+**Child-crash, logoff, reboot and power-loss rounds: not run.** The owner
+stopped the rounds at the runner-crash finding.
+
+**Removal (steps 8 and 9), 18:36 and 18:54.** The first removal stopped at
+its first action. `sc.exe stop agentc-supervisor` was accepted, but the
+service stayed `STOP_PENDING` past 180 seconds with its checkpoint still
+advancing: its stop waits on the same launch. Nothing was removed or worked
+around; both service logs, the heartbeat, the ledger and `sc.exe queryex`
+were saved. On the owner's decision MiniAir was restarted (a Restart, at
+18:46); both services are demand start and stayed stopped. The removal run
+again at 18:54 found both services stopped and recorded their
+configuration. Its final check found no fixture process, the judge no
+problem, and the two launch directories of `5a5fd655` still there. It
+deleted both services, `C:\Program Files\agentc` and
+`C:\ProgramData\agentc`, and removed both service profiles, which the run
+had created at 05:14 and Windows had not loaded since the restart. No
+service, directory, profile, profile folder or fixture process is left
+(`removal.json`). The runner's hive was not loaded at the final check, so
+its AppContainer mappings could not be listed; the hive went with the
+runner's profile.
+
+The findings are task `76685e6b-b701-4f61-a95a-e8289c4673a5`: settle a
+launch the restarted runner no longer knows, let the supervisor stop while
+such a launch is outstanding, and the runner's refused preshutdown limit.
+
+| Item | Result |
+| --- | --- |
+| Registration from the recorded commit and hash under two virtual service accounts, failure actions, preshutdown limit, access lists | **Demonstrated** |
+| Step 6 under the SCM: prepare, start, exit seen, release, cleanup | **Demonstrated** three times |
+| Further launches in the same station by the same runner process | **Demonstrated**: `s6-same-station`, and every round after step 6 reused runner process 6528 |
+| A launch after the runner was stopped and started through the SCM | **Demonstrated** once (`s6-after-restart`) |
+| A launch by a runner the SCM restarted after a crash | **Not reached**: the runner-crash round failed first |
+| Round: supervisor stop | **Passed** |
+| Round: runner stop | **Not run as written**: Windows refuses with error 1051 while the supervisor runs |
+| Round: supervisor crash | **Passed** |
+| Round: runner crash | **Failed**: the launch ended and the restarted runner reclaimed it, but the supervisor never released the attempt; task `76685e6b` |
+| Rounds: child crash, logoff, reboot with preshutdown, power loss | **Not run**: stopped at the runner-crash finding on the owner's decision |
+| The supervisor stops on request while a launch it cannot settle is outstanding | **Failed**: `STOP_PENDING` past 180 seconds, cleared only by a restart; task `76685e6b` |
+| `stand-in-judge` catches an attempt that is never released | **No**: it found no problem after the runner-crash round |
+| The stand-in's wait after a refused prepare | **Not seen**: no prepare was refused |
+| Boot without logon, orphan cleanup of launches | **Not run** |
+| Removal of both services, both trees and both service profiles | **Demonstrated**, after one restart |
 
 ## Delivery phases and gates
 
@@ -1325,7 +1489,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
-| 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` follows. **No lifecycle round has been run and nothing is machine-accepted** |
+| 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. **Nothing is machine-accepted** |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
