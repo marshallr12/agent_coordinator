@@ -935,6 +935,15 @@ criteria and submission as JSON data whose `<` are escaped, then the base
 revision's instruction files. The reviewer launch gets no coordinator
 credential and is killed after 45 minutes, inside the unrenewed one-hour lease.
 
+The reviewer judges the in-launch gate (formatter, linter and tests) with
+each nested-sandbox skip reported as skipped. Any other failure is a finding
+unless the reviewer proves it pre-existing: it reruns the failing test(s) on
+the base revision, for example in a temporary worktree, and cites both results.
+A failure that also occurs on the base is a `pre-existing failure:` entry in
+`findings` (test name, candidate result, base result); it does not by itself
+block approval and is posted as advisory. One that passes on the base, or that
+could not be run there, requests changes.
+
 The launch must end with the structured verdict of the review schema:
 `decision`, `summary`, `findings`, `criteria_evidence` and
 `amendment_decision` (null unless the submission carries an `ac_amendment`).

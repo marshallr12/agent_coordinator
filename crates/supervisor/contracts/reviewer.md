@@ -35,6 +35,20 @@ release anything.
    before it lands anything. Judge "full gate green" by the in-launch gate:
    every command succeeds, with each nested skip reported as skipped. A skip
    the change adds without a real sandbox limitation is a finding.
+
+   Any other failure is a finding unless you prove it pre-existing. Never
+   call a failure an environment artifact, flaky or unrelated on judgement
+   alone. Rerun the failing test(s) on `{{base}}`, for example in a temporary
+   worktree (`git worktree add "$TMPDIR/base" {{base}}`) with its own
+   `CARGO_TARGET_DIR`, using the same command and environment, and keep both
+   results:
+   - It fails on the base too: a pre-existing failure. It does not by itself
+     block approval. Add a `findings` entry that starts with
+     `pre-existing failure:` and gives the test name, its candidate result
+     and its base result.
+   - It passes on the base, or you could not run it there: the change broke
+     it, or its status is unproven. Request changes, with a finding that
+     cites both results.
 3. Check every acceptance criterion against the code and the gate. Read the
    submission's evidence, but verify it rather than trust it.
 4. If the submission carries an `ac_amendment`, decide whether its new
@@ -48,9 +62,13 @@ release anything.
 Your final message is the verdict object the output schema describes and
 nothing else:
 - `decision`: `approve` only when every criterion is met and the in-launch
-  gate passes; otherwise `request_changes`.
+  gate passes, where a failure proven pre-existing on `{{base}}` (step 2)
+  does not count against the gate; otherwise `request_changes`.
 - `summary`: two or three sentences on what you checked.
-- `findings`: each problem the author must fix, one per entry.
+- `findings`: each problem the author must fix, one per entry. Also one
+  `pre-existing failure:` entry per failure proven on the base; with an
+  approval these are advisory, and they are the audit's record of the
+  base comparison.
 - `criteria_evidence`: one entry per acceptance criterion (the amended ones
   when you accept an amendment), `criterion` copied verbatim, `evidence`
   naming the commands, files and results that prove it. An approval without

@@ -223,6 +223,28 @@ fn the_prompt_holds_submission_data_that_cannot_close_its_block() {
     assert!(prompt.contains("<repository-instructions file=\"AGENTS.md\">"));
 }
 
+#[test]
+fn the_reviewer_contract_stays_within_1500_words() {
+    let words = REVIEWER_CONTRACT.split_whitespace().count();
+    assert!(words <= 1500, "the reviewer contract has {words} words");
+}
+
+#[test]
+fn the_reviewer_contract_requires_a_base_rerun_before_dismissing_a_failure() {
+    for required in [
+        "Rerun the failing test(s) on `{{base}}`",
+        "pre-existing failure:",
+        "Request changes",
+        "`findings`",
+    ] {
+        let flat = REVIEWER_CONTRACT
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains(required), "the contract lacks {required:?}");
+    }
+}
+
 /// A fake whose submission carries an amendment and whose reviewer ends with
 /// `decision` and `amendment`.
 fn amended(decision: &str, amendment: Value) -> Fake {
