@@ -8,9 +8,9 @@
     try { return localStorage.getItem(TASK_AUTO_REFRESH_KEY) === 'true'; } catch { return false; }
   }
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0, reportsCursor: null, reportsSeq: 0, agentSessionsSeq: 0, digestSeq: 0,
-    projectId: '', selectedTaskId: '', currentView: 'overview', detail: null, credentialDownloadUrl: null,
-    taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedTasks: [], archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false,
+    projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', credentialDownloadUrl: null,
+    taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
   };
 
@@ -36,9 +36,22 @@
   }
 
   const text = (value) => value === null || value === undefined ? '' : String(value);
-  const setText = (node, value) => { if (node) node.textContent = text(value); };
-  const show = (node, visible) => { if (node) node.hidden = !visible; };
-  const clear = (node) => { while (node && node.firstChild) node.removeChild(node.firstChild); };
+  // Idempotent writes: each setter touches the DOM only when the value differs, so a refresh
+  // that returns unchanged data records no mutation (see book/src/docs/web-ui-refresh.md).
+  const setText = (node, value) => {
+    if (!node) return;
+    const next = text(value);
+    if (node.textContent === next) return;
+    // Edit a lone text node in place so a selection inside it is not discarded.
+    if (node.childNodes.length === 1 && node.firstChild.nodeType === Node.TEXT_NODE) node.firstChild.data = next;
+    else node.textContent = next;
+  };
+  const show = (node, visible) => { if (node && node.hidden === visible) node.hidden = !visible; };
+  const setClass = (node, value) => { if (node && node.className !== value) node.className = value; };
+  const setAttr = (node, name, value) => { if (node && node.getAttribute(name) !== text(value)) node.setAttribute(name, text(value)); };
+  const setProp = (node, name, value) => { if (node && node[name] !== value) node[name] = value; };
+  const setData = (node, name, value) => { if (node && node.dataset[name] !== text(value)) node.dataset[name] = text(value); };
+  const clear = (node) => { while (node && node.firstChild) node.removeChild(node.firstChild); if (node) patched.delete(node); };
   const el = (tag, className, content) => {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -67,6 +80,82 @@
     if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
     return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   };
+
+  // ---- Shared patching ----------------------------------------------------------------------
+  // Every refreshed list is rendered from descriptors {key, sig, build}: `key` identifies the item,
+  // `sig` is a string that changes exactly when what is shown changes, and `build()` creates the node.
+  // reconcile() keeps a node whose key and sig match, rebuilds one whose sig changed, and adds or removes
+  // the rest, so a refresh with unchanged data touches nothing. Sections that are not lists use
+  // patchSection(). Both carry focus, selection, open <details> and scroll offsets across a rebuild.
+  const sig = (...values) => JSON.stringify(values);
+  const patched = new WeakMap();
+  function pathWithin(root, node) {
+    const path = [];
+    while (node && node !== root) {
+      const parent = node.parentNode;
+      if (!parent) return null;
+      path.unshift(Array.prototype.indexOf.call(parent.childNodes, node)); node = parent;
+    }
+    return node === root ? path : null;
+  }
+  const nodeAt = (root, path) => path.reduce((node, index) => node?.childNodes[index], root);
+  // Remembers what the person is doing inside `root`.
+  function captureUi(root) {
+    const selection = window.getSelection(), saved = { focus: null, selection: null, details: [...root.querySelectorAll('details')].map((details) => details.open), scrolls: [] };
+    if (root.contains(document.activeElement)) saved.focus = pathWithin(root, document.activeElement);
+    if (selection && selection.rangeCount && !selection.isCollapsed) {
+      const anchor = pathWithin(root, selection.anchorNode), focus = pathWithin(root, selection.focusNode);
+      if (anchor && focus) saved.selection = { anchor, anchorOffset: selection.anchorOffset, focus, focusOffset: selection.focusOffset };
+    }
+    [root, ...root.querySelectorAll('*')].forEach((node) => { if (node.scrollTop || node.scrollLeft) saved.scrolls.push([pathWithin(root, node), node.scrollTop, node.scrollLeft]); });
+    return saved;
+  }
+  // Gives the rebuilt `root` the state captured from the node it replaced.
+  function restoreUi(root, saved) {
+    [...root.querySelectorAll('details')].forEach((details, index) => { if (saved.details[index] && !details.open) details.open = true; });
+    saved.scrolls.forEach(([path, top, left]) => { const node = nodeAt(root, path); if (node) { node.scrollTop = top; node.scrollLeft = left; } });
+    if (saved.focus) { const node = nodeAt(root, saved.focus); if (node?.focus) node.focus({ preventScroll: true }); }
+    if (saved.selection) {
+      const { anchor, anchorOffset, focus, focusOffset } = saved.selection, from = nodeAt(root, anchor), to = nodeAt(root, focus), limit = (node) => node.nodeType === Node.TEXT_NODE ? node.length : node.childNodes.length;
+      if (from && to && anchorOffset <= limit(from) && focusOffset <= limit(to)) window.getSelection().setBaseAndExtent(from, anchorOffset, to, focusOffset);
+    }
+  }
+  function reconcile(parent, descriptors) {
+    if (!parent) return;
+    const used = new Set(), wanted = descriptors.map((item) => {
+      let key = text(item.key), copy = 0;
+      while (used.has(key)) key = `${text(item.key)}#${++copy}`;
+      used.add(key); return { ...item, key };
+    });
+    const existing = new Map();
+    for (const child of [...parent.children]) {
+      const key = patched.get(child)?.key;
+      if (key !== undefined && used.has(key) && !existing.has(key)) existing.set(key, child); else child.remove();
+    }
+    const restores = []; let cursor = parent.firstElementChild;
+    for (const item of wanted) {
+      let node = existing.get(item.key);
+      if (node && patched.get(node).sig !== item.sig) {
+        const saved = captureUi(node), fresh = item.build();
+        patched.set(fresh, { key: item.key, sig: item.sig }); node.replaceWith(fresh);
+        if (cursor === node) cursor = fresh;
+        node = fresh; restores.push([fresh, saved]);
+      } else if (!node) { node = item.build(); patched.set(node, { key: item.key, sig: item.sig }); }
+      if (node === cursor) cursor = cursor.nextElementSibling; else parent.insertBefore(node, cursor);
+    }
+    restores.forEach(([node, saved]) => restoreUi(node, saved));
+  }
+  // Rebuilds `container`'s content with build(container) only when `signature` changed; returns whether it did.
+  function patchSection(container, signature, build) {
+    if (!container || patched.get(container)?.sig === signature) return false;
+    const saved = captureUi(container); clear(container); build(container);
+    patched.set(container, { sig: signature }); restoreUi(container, saved);
+    return true;
+  }
+  // Forgets a container's signature after code outside patchSection() emptied it.
+  const resetSection = (container) => { if (container) patched.delete(container); };
+  // The <option> descriptors for a select: [value, label] pairs.
+  const optionItems = (pairs) => pairs.map(([value, label]) => ({ key: value, sig: sig(label), build: () => { const option = el('option', '', label); option.value = value; return option; } }));
 
   function openAttachmentDatabase() {
     if (!globalThis.indexedDB) return Promise.reject(new Error('This browser cannot save upload bytes for a safe retry.'));
@@ -240,9 +329,9 @@
     const busy = Boolean(state.mutation);
     document.querySelectorAll('form button[type="submit"], [data-mutation="true"]').forEach((button) => {
       const readOnlyAttachment = button.id === 'upload-task-attachments' && taskDetailReadOnly();
-      button.disabled = readOnlyAttachment || (busy && !(state.mutation?.awaitingSecret && button.closest('form')?.dataset.resumeSecret === 'true'));
+      setProp(button, 'disabled', readOnlyAttachment || (busy && !(state.mutation?.awaitingSecret && button.closest('form')?.dataset.resumeSecret === 'true')));
     });
-    if ($('account-button')) $('account-button').disabled = busy;
+    setProp($('account-button'), 'disabled', busy);
   }
 
   function applySession(data) {
@@ -257,17 +346,17 @@
 
   function signOutLocal(preservePending = false) {
     document.querySelectorAll('dialog').forEach(dialog => dialog.close());
-    state.mutation = null; state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
-    ++state.sharedSeq; state.sharedCursor = null; clear($('shared-list')); setText($('shared-freshness'), '');
-    ++state.reportsSeq; state.reportsCursor = null; clear($('reports-list'));
-    ++state.agentSessionsSeq; clear($('agent-sessions-list'));
-    ++state.digestSeq; clear($('digest-content'));
+    state.mutation = null; state.actor = null; state.csrfToken = null; state.projects = []; state.projectsRendered = false; state.tasks = []; state.detail = null;
+    ++state.sharedSeq; state.sharedCursor = null; state.sharedItems = []; state.sharedRules = undefined; state.sharedKey = ''; state.sharedLoaded = false; clear($('shared-list')); setText($('shared-freshness'), '');
+    ++state.reportsSeq; state.reportsCursor = null; state.reports = []; state.reportsLoaded = false; state.reportsProjectId = ''; clear($('reports-list'));
+    ++state.agentSessionsSeq; state.agentSessionsProjectId = ''; state.agentSessionsLoaded = false; clear($('agent-sessions-list'));
+    ++state.digestSeq; state.digestProjectId = ''; state.digestLoaded = false; clear($('digest-content'));
     $('context-search').reset();
-    state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
+    state.credentials = []; state.credentialsLoaded = false; state.operators = []; state.restoreItems = []; state.archivedLoaded = false; state.archivedProjectId = ''; state.archivedTasks = []; state.detailKey = ''; clear($('archived-list')); state.resources = []; state.resourcesLoaded = false; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
     clearCredentialDownload();
     setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('restore-status')); clear($('clock-status')); clear($('restore-requirements')); clear($('task-operator-actions')); show($('credentials-list'), false);
-    if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null;
+    stopPolling();
     show($('dashboard-view'), false); show($('loading-view'), false); show($('login-view'), true);
     $('login-form')?.reset(); $('username')?.focus();
   }
@@ -285,7 +374,7 @@
     show($('task-view-tabs'), view === 'tasks' || view === 'archived');
     updateTaskViewTabs();
     document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports', 'agent-sessions', 'digest'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
-    if (view === 'tasks') { fillProjectSelect(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
+    if (view === 'tasks') { fillProjectSelect(); setProp($('new-task-button'), 'disabled', !state.projectId); setProp($('refresh-tasks'), 'disabled', !state.projectId); $('project-select')?.focus(); }
   }
 
   function issuedCredentialFeedback(data) {
@@ -330,72 +419,81 @@
   }
 
   function renderSummary() {
-    const target = $('overview-summary'); clear(target);
     const visibleTasks = state.taskView === 'completed' ? state.tasks : state.tasks.filter((task) => taskStatus(task) !== 'done');
     const active = visibleTasks.filter((task) => ['claimed', 'in_progress', 'working', 'active'].includes(taskStatus(task))).length;
     const blocked = visibleTasks.filter((task) => taskStatus(task) === 'blocked').length;
-    [['Projects', state.projects.length], ['Tasks in view', visibleTasks.length], ['Active leases', active], ['Blocked', blocked]].forEach(([label, value]) => {
-      const card = el('div', 'summary-card'); add(card, el('span', 'summary-number', value)); add(card, el('span', 'summary-label', label)); add(target, card);
-    });
+    reconcile($('overview-summary'), [['Projects', state.projects.length], ['Tasks in view', visibleTasks.length], ['Active leases', active], ['Blocked', blocked]].map(([label, value]) => ({
+      key: label, sig: sig(value), build: () => { const card = el('div', 'summary-card'); add(card, el('span', 'summary-number', value)); add(card, el('span', 'summary-label', label)); return card; }
+    })));
   }
 
   async function loadProjects(silent = false) {
     if (state.fetching.has('projects')) return;
     state.fetching.add('projects');
-    if (!silent) { show($('projects-state'), true); setState($('projects-state'), 'Loading projects…', true); show($('projects-grid'), false); }
+    if (!silent && !state.projects.length) { show($('projects-state'), true); setState($('projects-state'), 'Loading projects…', true); show($('projects-grid'), false); }
     try {
       const projects = listData((await request('/api/v1/projects')).data);
-      // Preserve focus and open setup disclosures when polling unchanged data.
-      const changed = JSON.stringify(projects) !== JSON.stringify(state.projects);
+      if (silent && refreshBlocked('projects-grid')) return;
+      // Unchanged data leaves every node alone, so focus and open disclosures survive a poll.
+      const changed = JSON.stringify(projects) !== JSON.stringify(state.projects) || !state.projectsRendered;
       state.projects = projects;
-      if (!silent || changed) { renderProjects(); fillProjectSelect(); }
+      if (changed) { state.projectsRendered = true; renderProjects(); fillProjectSelect(); }
       renderSummary(); if (state.currentView === 'reports') setReportsProjectLabel(); if (state.currentView === 'agent-sessions') setAgentSessionsProjectLabel(); if (state.currentView === 'digest') setDigestProjectLabel();
     }
     catch (error) { if (!silent) { setState($('projects-state'), errorMessage(error), false, true); } }
     finally { state.fetching.delete('projects'); }
   }
 
+  // Shows a status panel; an identical panel is left untouched.
   function setState(target, message, loading = false, error = false) {
-    clear(target); target.className = `state-panel${error ? ' error' : ''}`; show(target, true);
-    if (loading) add(target, el('span', 'spinner')); add(target, el('span', '', message));
+    setClass(target, `state-panel${error ? ' error' : ''}`); show(target, true);
+    const same = target.childNodes.length === target.children.length && target.children.length === (loading ? 2 : 1)
+      && target.lastElementChild.tagName === 'SPAN' && target.lastElementChild.textContent === text(message) && (!loading || target.firstElementChild.classList.contains('spinner'));
+    if (same) return;
+    clear(target); if (loading) add(target, el('span', 'spinner')); add(target, el('span', '', message));
   }
 
   function renderProjects() {
-    const target = $('projects-grid'); clear(target);
-    if (!state.projects.length) { show(target, false); setState($('projects-state'), 'No projects yet. Create one to give agents a place to work.', false); return; }
+    const target = $('projects-grid');
+    if (!state.projects.length) { reconcile(target, []); show(target, false); setState($('projects-state'), 'No projects yet. Create one to give agents a place to work.', false); return; }
     show($('projects-state'), false); show(target, true);
-    state.projects.forEach((project) => {
-      const card = el('article', 'project-card'); const name = el('h3', '', project.name || 'Unnamed project');
-      const repo = el('p', 'repo', project.repository_url || 'Repository not configured');
-      const projectId = text(project.id);
-      const idLabel = el('p', 'project-id', `Project ID · ${projectId || 'Unavailable'}`);
-      const header = el('div', 'project-card-header');
-      const settings = el('button', 'button project-settings-button'); settings.type = 'button';
-      const gear = el('span', '', '⚙'); gear.setAttribute('aria-hidden', 'true'); add(settings, gear);
-      settings.setAttribute('aria-label', `Project settings for ${project.name || projectId}`);
-      settings.title = 'Project settings'; settings.addEventListener('click', () => openProjectSettings(project.id));
-      add(header, name); add(header, settings);
-      const footer = el('div', 'project-card-footer');
-      add(footer, el('span', 'project-meta', project.target_branch ? `Branch · ${project.target_branch}` : 'Branch not set'));
-      const open = el('button', 'project-open', 'Open tasks →'); open.type = 'button';
-      open.setAttribute('aria-label', `Open tasks for ${project.name || projectId}`);
-      open.addEventListener('click', () => openProject(project.id));
-      card.addEventListener('click', (event) => {
-        if (event.target.closest('button, a, details, input, select, textarea')) return;
-        const selection = window.getSelection();
-        if (selection && !selection.isCollapsed && (card.contains(selection.anchorNode) || card.contains(selection.focusNode))) return;
-        openProject(project.id);
-      });
-      add(footer, open); add(card, header); add(card, repo); add(card, idLabel); add(card, footer); add(target, card);
-    });
+    reconcile(target, state.projects.map((project) => ({ key: project.id, sig: sig(project), build: () => projectCard(project) })));
   }
 
+  function projectCard(project) {
+    const card = el('article', 'project-card'); const name = el('h3', '', project.name || 'Unnamed project');
+    const repo = el('p', 'repo', project.repository_url || 'Repository not configured');
+    const projectId = text(project.id);
+    const idLabel = el('p', 'project-id', `Project ID · ${projectId || 'Unavailable'}`);
+    const header = el('div', 'project-card-header');
+    const settings = el('button', 'button project-settings-button'); settings.type = 'button';
+    const gear = el('span', '', '⚙'); gear.setAttribute('aria-hidden', 'true'); add(settings, gear);
+    settings.setAttribute('aria-label', `Project settings for ${project.name || projectId}`);
+    settings.title = 'Project settings'; settings.addEventListener('click', () => openProjectSettings(project.id));
+    add(header, name); add(header, settings);
+    const footer = el('div', 'project-card-footer');
+    add(footer, el('span', 'project-meta', project.target_branch ? `Branch · ${project.target_branch}` : 'Branch not set'));
+    const open = el('button', 'project-open', 'Open tasks →'); open.type = 'button';
+    open.setAttribute('aria-label', `Open tasks for ${project.name || projectId}`);
+    open.addEventListener('click', () => openProject(project.id));
+    card.addEventListener('click', (event) => {
+      if (event.target.closest('button, a, details, input, select, textarea')) return;
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed && (card.contains(selection.anchorNode) || card.contains(selection.focusNode))) return;
+      openProject(project.id);
+    });
+    add(footer, open); add(card, header); add(card, repo); add(card, idLabel); add(card, footer);
+    return card;
+  }
+
+  // Keeps the three project selects in step with state.projects, touching only the options that changed.
   function fillProjectSelect() {
-    const select = $('project-select'); if (!select) return; const current = state.projectId; clear(select);
-    add(select, el('option', '', 'Choose a project')).value = '';
-    state.projects.forEach((project) => { const option = el('option', '', project.name || project.id); option.value = text(project.id); add(select, option); });
-    select.value = state.projects.some((project) => text(project.id) === current) ? current : '';
-    const archive = $('archive-project-select'); if (archive) { const prior=archive.value; clear(archive); add(archive,el('option','','Choose a project')).value=''; state.projects.forEach(project=>{const option=el('option','',project.name||project.id);option.value=text(project.id);add(archive,option);}); archive.value=state.projects.some(project=>text(project.id)===prior)?prior:(state.projects.some(project=>text(project.id)===current)?current:''); }
+    const current = state.projectId, known = (id) => state.projects.some((project) => text(project.id) === id);
+    const options = optionItems([['', 'Choose a project'], ...state.projects.map((project) => [text(project.id), project.name || project.id])]);
+    const select = $('project-select');
+    if (select) { reconcile(select, options); setProp(select, 'value', known(current) ? current : ''); }
+    const archive = $('archive-project-select');
+    if (archive) { const prior = archive.value; reconcile(archive, options); setProp(archive, 'value', known(prior) ? prior : known(current) ? current : ''); }
     fillSharedProject();
   }
 
@@ -410,20 +508,21 @@
     state.projectId = text(id); state.selectedTaskId = '';
     setText($('project-heading'), `${project.name || 'Unnamed project'} settings`);
     setText($('project-repository'), `${project.repository_url || 'Repository not configured'} · ${project.target_branch || 'Branch not set'}`);
-    const binding = $('project-binding-content'); clear(binding);
     const snippet = `service_url = ${JSON.stringify(location.origin)}\nproject_id = ${JSON.stringify(state.projectId)}`;
-    add(binding, el('code', 'binding-snippet', snippet));
-    const download = el('button', 'button subtle', 'Download'); download.type = 'button';
-    download.addEventListener('click', () => {
-      const file = new Blob([snippet], {type: 'application/toml;charset=utf-8'});
-      const url = URL.createObjectURL(file);
-      const link = el('a'); link.href = url; link.download = '.agent-coordinator.toml';
-      add(document.body, link); link.click(); link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setText(download, 'Downloaded');
-      window.setTimeout(() => setText(download, 'Download'), 1600);
+    patchSection($('project-binding-content'), sig(snippet), (binding) => {
+      add(binding, el('code', 'binding-snippet', snippet));
+      const download = el('button', 'button subtle', 'Download'); download.type = 'button';
+      download.addEventListener('click', () => {
+        const file = new Blob([snippet], {type: 'application/toml;charset=utf-8'});
+        const url = URL.createObjectURL(file);
+        const link = el('a'); link.href = url; link.download = '.agent-coordinator.toml';
+        add(document.body, link); link.click(); link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setText(download, 'Downloaded');
+        window.setTimeout(() => setText(download, 'Download'), 1600);
+      });
+      add(binding, download);
     });
-    add(binding, download);
     showView('project'); $('project-heading').focus();
     loadIntegrationOwner(state.projectId);
   }
@@ -504,6 +603,7 @@
         if (requestedProjectId !== state.projectId || state.requestSeq.tasks !== requestId) return;
         allTasks.push(...listData(page)); cursor = page?.next_cursor || null;
       } while (cursor);
+      if (silent && refreshBlocked('tasks-list')) return;
       const queueTasks = allTasks.filter((task) => taskStatus(task) !== 'done');
       const changed = !state.taskQueueLoaded || JSON.stringify(state.queueTasks) !== JSON.stringify(queueTasks);
       state.taskQueueLoaded = true;
@@ -532,7 +632,7 @@
         completed.push(...listData(page).filter((task) => taskStatus(task) === 'done'));
         cursor = page?.next_cursor || null;
       } while (cursor && requestedProjectId === state.projectId);
-      if (requestedProjectId !== state.projectId) return;
+      if (requestedProjectId !== state.projectId || (silent && refreshBlocked('tasks-list'))) return;
       const changed = !state.completedLoaded || JSON.stringify(state.completedTasks) !== JSON.stringify(completed);
       state.completedLoaded = true; state.completedTasks = completed;
       state.completedPageIndex = Math.min(state.completedPageIndex, Math.max(0, Math.ceil(completed.length / state.taskPageSize) - 1));
@@ -549,12 +649,12 @@
     const selected = state.currentView === 'archived' ? 'archived' : state.taskView === 'completed' ? 'completed' : 'queue';
     [['queue', 'task-queue-tab'], ['completed', 'completed-tasks-tab'], ['archived', 'archived-tasks-tab']].forEach(([view, id]) => {
       const tab = $(id), active = selected === view;
-      tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
+      setAttr(tab, 'aria-selected', String(active)); setProp(tab, 'tabIndex', active ? 0 : -1);
     });
-    $('tasks-view').setAttribute('aria-labelledby', selected === 'completed' ? 'completed-tasks-tab' : 'task-queue-tab');
+    setAttr($('tasks-view'), 'aria-labelledby', selected === 'completed' ? 'completed-tasks-tab' : 'task-queue-tab');
     const completed = state.taskView === 'completed';
     show($('status-filter-label'), !completed);
-    $('tasks-search').value = state.taskSearch[completed ? 'completed' : 'queue'];
+    setProp($('tasks-search'), 'value', state.taskSearch[completed ? 'completed' : 'queue']);
     setText($('tasks-heading'), completed ? 'Completed tasks' : 'Task queue');
     const project = state.projects.find((item) => text(item.id) === state.projectId);
     setText($('tasks-subtitle'), project?.name ? `${project.name} · ${completed ? 'completed tasks' : 'current work queue'}` : completed ? 'Completed tasks' : 'Current work queue');
@@ -582,64 +682,74 @@
     showTaskPage(count - 1);
   }
 
+  // Page-number buttons for a paginated list; `current` is disabled and marked, `select(index)` opens a page.
+  function pageButtons(target, count, current, select) {
+    reconcile(target, Array.from({ length: count }, (_, index) => ({ key: index, sig: sig(index === current), build: () => {
+      const page = actionButton(String(index + 1), () => select(index), false); page.classList.add('pagination-page');
+      page.setAttribute('aria-current', index === current ? 'page' : 'false'); page.disabled = index === current; return page;
+    } })));
+  }
+
   function renderTaskPagination() {
     const completed = state.taskView === 'completed';
     const count = completed ? Math.ceil(searchedCompletedTasks().length / state.taskPageSize) : state.taskPages.length;
     const current = completed ? state.completedPageIndex : state.taskPageIndex;
-    $('tasks-page-size').value = String(state.taskPageSize);
-    show($('task-pagination'), Boolean(count)); $('tasks-first-page').disabled = !current; $('tasks-previous-page').disabled = !current;
-    $('tasks-next-page').disabled = completed ? state.inflightCompleted || current + 1 >= count : Boolean(state.inflight.tasks) || current + 1 >= count;
-    $('tasks-last-page').disabled = completed ? state.inflightCompleted || current + 1 >= count : Boolean(state.inflight.tasks) || current + 1 >= count;
-    const numbers = $('tasks-page-numbers'); clear(numbers);
-    for (let index = 0; index < count; index++) { const page = actionButton(String(index + 1), () => showTaskPage(index), false); page.classList.add('pagination-page'); page.setAttribute('aria-current', index === current ? 'page' : 'false'); page.disabled = index === current; add(numbers, page); }
+    setProp($('tasks-page-size'), 'value', String(state.taskPageSize));
+    show($('task-pagination'), Boolean(count)); setProp($('tasks-first-page'), 'disabled', !current); setProp($('tasks-previous-page'), 'disabled', !current);
+    const atEnd = completed ? state.inflightCompleted || current + 1 >= count : Boolean(state.inflight.tasks) || current + 1 >= count;
+    setProp($('tasks-next-page'), 'disabled', atEnd); setProp($('tasks-last-page'), 'disabled', atEnd);
+    pageButtons($('tasks-page-numbers'), count, current, (index) => showTaskPage(index));
   }
 
   function renderTasks() {
-    const target = $('tasks-list'); clear(target); const filter = $('status-filter').value;
+    const target = $('tasks-list'); const filter = $('status-filter').value;
     const tasks = state.tasks;
     const pageCount = state.taskView === 'completed' ? Math.ceil(searchedCompletedTasks().length / state.taskPageSize) : state.taskPages.length;
     const pageIndex = state.taskView === 'completed' ? state.completedPageIndex : state.taskPageIndex;
     const taskTotal = state.taskView === 'completed' ? searchedCompletedTasks().length : state.queueTasks.filter((task) => (filter === 'all' || taskStatus(task) === filter) && taskMatchesSearch(task, state.taskSearch.queue)).length;
     renderTaskPagination(); setText($('tasks-page-status'), pageCount ? `Page ${pageIndex + 1} of ${taskTotal} tasks` : '');
     if (!tasks.length) {
-      show(target, false);
+      reconcile(target, []); show(target, false);
       const searching = Boolean(state.taskSearch[state.taskView === 'completed' ? 'completed' : 'queue'].trim());
       const empty = state.taskView === 'completed' ? (state.inflightCompleted ? 'Loading completed tasks…' : state.completedTasks.length && searching ? 'No completed tasks match this search.' : 'No completed tasks in this project yet.') : state.queueTasks.length ? (searching ? 'No tasks match this search or status filter.' : 'No tasks match this status filter.') : 'No tasks in this project yet. Create the first task.';
       setState($('tasks-state'), empty, state.taskView === 'completed' && state.inflightCompleted); return;
     }
     show($('tasks-state'), false); show(target, true);
-    tasks.forEach((task) => {
-      const status = taskStatus(task);
-      const completed = state.taskView === 'completed';
-      const row = el('article', `task-row${completed ? ' completed-task-row' : ''} ${status}`);
-      row.setAttribute('role', completed ? 'group' : 'button'); row.setAttribute('tabindex', '0');
-      row.setAttribute('aria-label', `Open task ${task.title || task.id}`);
-      const open = () => openTask(task.id);
-      row.addEventListener('click', (event) => {
-        const selection = window.getSelection();
-        if (selection && !selection.isCollapsed && (row.contains(selection.anchorNode) || row.contains(selection.focusNode))) return;
-        open();
-      });
-      row.addEventListener('keydown', (event) => {
-        if (event.target.closest('button')) return;
-        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
-      });
-      if (completed) {
-        const archive = taskIconButton('Archive completed task and move it to Archived Tasks', 'archive', (event) => {
-          event.stopPropagation(); archiveCompletedTask(task);
-        });
-        archive.addEventListener('keydown', event => event.stopPropagation());
-        add(row, archive);
-      }
-      const title = el('span', 'task-main'); add(title, el('span', 'task-title', task.title || 'Untitled task'));
-      const identity = el('span', 'task-queue-id'); add(identity, el('span', '', 'Task ID · ')); add(identity, el('span', 'task-id-value', task.id));
-      const created = el('time', 'task-created project-meta', `Created ${formatDate(task.created_at)}`);
-      if (task.created_at && !Number.isNaN(new Date(task.created_at).getTime())) created.dateTime = task.created_at;
-      const meta = el('span', 'task-meta');
-      const badge = el('span', `status-badge ${status}`, displayStatus(status)); add(meta, badge);
-      const description = el('span', 'task-description', task.description || 'No description');
-      add(row, title); add(row, identity); add(row, created); add(row, meta); add(row, description); add(target, row);
+    const completed = state.taskView === 'completed';
+    reconcile(target, tasks.map((task) => ({ key: task.id, sig: sig(completed, task), build: () => taskRow(task, completed) })));
+  }
+
+  function taskRow(task, completed) {
+    const status = taskStatus(task);
+    const row = el('article', `task-row${completed ? ' completed-task-row' : ''} ${status}`);
+    row.setAttribute('role', completed ? 'group' : 'button'); row.setAttribute('tabindex', '0');
+    row.setAttribute('aria-label', `Open task ${task.title || task.id}`);
+    const open = () => openTask(task.id);
+    row.addEventListener('click', (event) => {
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed && (row.contains(selection.anchorNode) || row.contains(selection.focusNode))) return;
+      open();
     });
+    row.addEventListener('keydown', (event) => {
+      if (event.target.closest('button')) return;
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+    });
+    if (completed) {
+      const archive = taskIconButton('Archive completed task and move it to Archived Tasks', 'archive', (event) => {
+        event.stopPropagation(); archiveCompletedTask(task);
+      });
+      archive.addEventListener('keydown', event => event.stopPropagation());
+      add(row, archive);
+    }
+    const title = el('span', 'task-main'); add(title, el('span', 'task-title', task.title || 'Untitled task'));
+    const identity = el('span', 'task-queue-id'); add(identity, el('span', '', 'Task ID · ')); add(identity, el('span', 'task-id-value', task.id));
+    const created = el('time', 'task-created project-meta', `Created ${formatDate(task.created_at)}`);
+    if (task.created_at && !Number.isNaN(new Date(task.created_at).getTime())) created.dateTime = task.created_at;
+    const meta = el('span', 'task-meta');
+    const badge = el('span', `status-badge ${status}`, displayStatus(status)); add(meta, badge);
+    const description = el('span', 'task-description', task.description || 'No description');
+    add(row, title); add(row, identity); add(row, created); add(row, meta); add(row, description);
+    return row;
   }
 
   function removeCompletedTask(projectId, taskId) {
@@ -665,35 +775,38 @@
     const requestedProjectId = state.projectId; const requestedTaskId = state.selectedTaskId; const requestKey = `${requestedProjectId}/${requestedTaskId}`;
     if (!requestedProjectId || !requestedTaskId || state.inflight.detail?.key === requestKey) return;
     const requestId = ++state.requestSeq.detail; state.inflight.detail = { key: requestKey, requestId };
-    if (!silent) { show($('task-detail-content'), false); setState($('task-detail-state'), 'Loading task…', true); }
+    // Only a task that is not already on screen shows the loading panel; a reload of the shown task patches in place.
+    if (!silent && state.detailKey !== requestKey) { show($('task-detail-content'), false); setState($('task-detail-state'), 'Loading task…', true); }
     try {
       const data = (await request(`/api/v1/projects/${encodeURIComponent(requestedProjectId)}/tasks/${encodeURIComponent(requestedTaskId)}`)).data;
       if (requestedProjectId !== state.projectId || requestedTaskId !== state.selectedTaskId || state.requestSeq.detail !== requestId) return;
-      state.detail = data; renderTaskDetail();
+      if (silent && refreshBlocked('task-detail-content')) return;
+      state.detail = data; state.detailKey = requestKey; renderTaskDetail(silent);
     }
     catch (error) { if (requestedProjectId === state.projectId && requestedTaskId === state.selectedTaskId && state.requestSeq.detail === requestId && !silent) setState($('task-detail-state'), errorMessage(error), false, true); }
     finally { if (state.inflight.detail?.requestId === requestId) state.inflight.detail = null; }
   }
 
-  function openTask(id, origin = 'tasks') { state.selectedTaskId = text(id); state.detailOrigin = origin; showView('task-detail'); loadTaskDetail(); }
+  function openTask(id, origin = 'tasks') { state.selectedTaskId = text(id); state.detailOrigin = origin; setTaskDetailCopyFeedback('', ''); showView('task-detail'); loadTaskDetail(); }
   async function loadArchivedTasks() {
     const projectId = $('archive-project-select').value || state.projectId;
-    if (!projectId) { show($('archived-pagination'), false); setText($('archived-state'), 'Choose a project to load archived tasks.'); show($('archived-state'), true); show($('archived-list'), false); return; }
-    $('archive-project-select').value = projectId;
-    if (state.archivedProjectId !== projectId) { state.archivedProjectId = projectId; state.archivedPageIndex = 0; state.archivedTasks = []; $('archived-search').value = ''; }
-    show($('archived-pagination'), false);
-    setText($('archived-state'), 'Loading archived tasks…'); show($('archived-state'), true); show($('archived-list'), false);
+    if (!projectId) { show($('archived-pagination'), false); setState($('archived-state'), 'Choose a project to load archived tasks.'); reconcile($('archived-list'), []); show($('archived-list'), false); return; }
+    setProp($('archive-project-select'), 'value', projectId);
+    if (state.archivedProjectId !== projectId) { state.archivedProjectId = projectId; state.archivedPageIndex = 0; state.archivedTasks = []; state.archivedLoaded = false; $('archived-search').value = ''; reconcile($('archived-list'), []); }
+    // Cached rows stay on screen while the refresh runs; only a first load shows the loading panel.
+    if (!state.archivedLoaded) { show($('archived-pagination'), false); setState($('archived-state'), 'Loading archived tasks…'); show($('archived-list'), false); }
     try {
       const tasks = []; let cursor = null;
       do { const params=new URLSearchParams({limit:'200'}); if(cursor) params.set('cursor',cursor); const page=(await request(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/archived?${params}`)).data; tasks.push(...listData(page)); cursor=page?.next_cursor||null; } while(cursor && projectId === ($('archive-project-select').value || state.projectId));
       if (projectId !== ($('archive-project-select').value || state.projectId)) return;
-      state.archivedTasks = tasks;
-      renderArchivedTasks();
-    } catch(error) { setText($('archived-state'),errorMessage(error)); show($('archived-state'),true); }
+      const changed = !state.archivedLoaded || JSON.stringify(tasks) !== JSON.stringify(state.archivedTasks);
+      state.archivedTasks = tasks; state.archivedLoaded = true;
+      if (changed) renderArchivedTasks();
+    } catch(error) { if (!state.archivedLoaded) { setState($('archived-state'),errorMessage(error), false, true); } else setGlobalAlert(errorMessage(error)); }
   }
 
   function renderArchivedTasks() {
-    const target = $('archived-list'); clear(target);
+    const target = $('archived-list');
     const archivedTasks = searchedArchivedTasks();
     const pageCount = Math.ceil(archivedTasks.length / state.taskPageSize);
     state.archivedPageIndex = Math.min(state.archivedPageIndex, Math.max(0, pageCount - 1));
@@ -701,8 +814,8 @@
     const pageTasks = archivedTasks.slice(start, start + state.taskPageSize);
     renderArchivedPagination();
     setText($('archived-page-status'), pageCount ? `Page ${state.archivedPageIndex + 1} of ${archivedTasks.length} tasks` : '');
-    if (!pageTasks.length) { setText($('archived-state'), state.archivedTasks.length ? 'No archived tasks match this search.' : 'No archived tasks in this project.'); show(target, false); return; }
-    pageTasks.forEach(task => {
+    if (!pageTasks.length) { setState($('archived-state'), state.archivedTasks.length ? 'No archived tasks match this search.' : 'No archived tasks in this project.'); reconcile(target, []); show(target, false); return; }
+    reconcile(target, pageTasks.map(task => ({ key: task.id, sig: sig(task), build: () => {
       const row = el('article', `task-row archived-task-row ${task.lifecycle}`);
       row.setAttribute('role', 'button'); row.setAttribute('tabindex', '0'); row.setAttribute('aria-label', `Open archived task ${task.title || task.id}`);
       const open = () => { state.projectId = state.archivedProjectId; openTask(task.id, 'archived'); };
@@ -711,22 +824,19 @@
       const title = el('span', 'task-title', task.title || 'Untitled task');
       const meta = el('span', 'task-meta', `Archived · ${displayStatus(task.lifecycle)}`);
       const description = el('span', 'task-description', task.description || 'No description');
-      add(row, title); add(row, meta); add(row, description); add(target, row);
-    });
+      add(row, title); add(row, meta); add(row, description);
+      return row;
+    } })));
     show($('archived-state'), false); show(target, true);
   }
 
   function renderArchivedPagination() {
     const count = Math.ceil(searchedArchivedTasks().length / state.taskPageSize), current = state.archivedPageIndex;
     show($('archived-pagination'), Boolean(count));
-    $('archived-first-page').disabled = !current; $('archived-previous-page').disabled = !current;
-    $('archived-next-page').disabled = current + 1 >= count; $('archived-last-page').disabled = current + 1 >= count;
-    $('archived-page-size').value = String(state.taskPageSize);
-    const numbers = $('archived-page-numbers'); clear(numbers);
-    for (let index = 0; index < count; index++) {
-      const page = actionButton(String(index + 1), () => { state.archivedPageIndex = index; renderArchivedTasks(); }, false);
-      page.classList.add('pagination-page'); page.setAttribute('aria-current', index === current ? 'page' : 'false'); page.disabled = index === current; add(numbers, page);
-    }
+    setProp($('archived-first-page'), 'disabled', !current); setProp($('archived-previous-page'), 'disabled', !current);
+    setProp($('archived-next-page'), 'disabled', current + 1 >= count); setProp($('archived-last-page'), 'disabled', current + 1 >= count);
+    setProp($('archived-page-size'), 'value', String(state.taskPageSize));
+    pageButtons($('archived-page-numbers'), count, current, (index) => { state.archivedPageIndex = index; renderArchivedTasks(); });
   }
 
   function selectTaskDetailText(id) {
@@ -735,7 +845,7 @@
     const range = document.createRange(); range.selectNodeContents(source); selection.removeAllRanges(); selection.addRange(range);
   }
   function setTaskDetailCopyFeedback(message, kind) {
-    const target = $('detail-copy-feedback'); target.className = `task-detail-copy-feedback ${kind || ''}`; setText(target, message); show(target, Boolean(message));
+    const target = $('detail-copy-feedback'); setClass(target, `task-detail-copy-feedback ${kind || ''}`); setText(target, message); show(target, Boolean(message));
   }
   async function copyTaskDetailValue(button, label, sourceId) {
     const value = button.dataset.copyValue;
@@ -744,67 +854,80 @@
     catch (_) { selectTaskDetailText(sourceId); setTaskDetailCopyFeedback(`Clipboard access was unavailable. ${label} is selected; copy it with your browser.`, 'fallback'); }
   }
 
-  function renderTaskDetail() {
+  // Task fields that the operator action buttons read; a change to any other field leaves them alone.
+  const TASK_ACTION_FIELDS = ['id', 'title', 'description', 'acceptance_criteria', 'priority', 'kind', 'lifecycle', 'work_status', 'status', 'archived_at', 'activity_kind', 'current_attempt_id', 'human_delivered', 'revision', 'blocked_reason', 'depends_on', 'dependencies', 'objective_id', 'parent_objective_id'];
+  const pick = (source, fields) => Object.fromEntries(fields.filter((field) => source && field in source).map((field) => [field, source[field]]));
+
+  // Patches each section of the task page from `state.detail`. Sections own their signatures, so the
+  // title, brief and buttons stay put while, say, only the checkpoint trail grows.
+  function renderTaskDetail(quiet = false) {
     const data = state.detail || {}; const task = data.task || data; const project = state.projects.find((item) => text(item.id) === state.projectId);
     const title = task.title || 'Untitled task'; const taskId = text(task.id || state.selectedTaskId);
     setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), title); setText($('detail-task-id-value'), taskId); setText($('detail-task-revision'), task.revision || 1); setText($('detail-description'), task.description || 'No description provided.');
-    $('copy-task-name').dataset.copyValue = title; $('copy-task-id').dataset.copyValue = taskId; setTaskDetailCopyFeedback('', '');
-    const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); badge.className = `status-badge ${status}`; setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
-    const humanDelivered = $('detail-human-delivered'); show(humanDelivered, Boolean(task.human_delivered)); humanDelivered.title = 'A human delivers this task. Supervisors never receive or claim it.';
+    setData($('copy-task-name'), 'copyValue', title); setData($('copy-task-id'), 'copyValue', taskId);
+    const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); setClass(badge, `status-badge ${status}`); setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
+    const humanDelivered = $('detail-human-delivered'); show(humanDelivered, Boolean(task.human_delivered)); setAttr(humanDelivered, 'title', 'A human delivers this task. Supervisors never receive or claim it.');
     const readOnly = Boolean(task.archived_at || ['done', 'completed'].includes(status));
-    $('task-attachment-files').disabled = readOnly || Boolean(state.mutation || state.attachmentBusy);
-    $('upload-task-attachments').disabled = readOnly || Boolean(state.mutation || state.attachmentBusy);
-    $('retry-task-attachments').disabled = readOnly || Boolean(state.mutation || state.attachmentBusy);
+    setProp($('task-attachment-files'), 'disabled', readOnly || Boolean(state.mutation || state.attachmentBusy));
+    setProp($('upload-task-attachments'), 'disabled', readOnly || Boolean(state.mutation || state.attachmentBusy));
+    setProp($('retry-task-attachments'), 'disabled', readOnly || Boolean(state.mutation || state.attachmentBusy));
     $('task-attachments-card').classList.toggle('task-attachments-readonly', readOnly);
-    const criteria = $('acceptance-list'); clear(criteria); const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
-    if (!items.length) add(criteria, el('li', 'muted', 'No acceptance criteria recorded.')); else items.forEach((item) => add(criteria, el('li', '', item)));
+    const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
+    reconcile($('acceptance-list'), items.length ? items.map((item, index) => ({ key: index, sig: sig(item), build: () => el('li', '', item) })) : [{ key: 'none', sig: '', build: () => el('li', 'muted', 'No acceptance criteria recorded.') }]);
     renderTaskActions(data, task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
     show($('task-detail-state'), false); show($('task-detail-content'), true);
-    loadTaskAttachments(state.projectId, taskId);
+    loadTaskAttachments(state.projectId, taskId, false, quiet);
   }
 
   function renderLease(data, task) {
-    const target = $('lease-content'); clear(target); const attempts = Array.isArray(data.attempts) ? data.attempts : []; const current = attempts.find((attempt) => attempt.id === task.current_attempt_id);
+    const attempts = Array.isArray(data.attempts) ? data.attempts : []; const current = attempts.find((attempt) => attempt.id === task.current_attempt_id);
+    let view;
     if (!current) {
       const status = taskStatus(task);
-      const message = task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.';
-      add(target, el('p', 'muted', message)); return;
+      view = { message: task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.' };
+    } else {
+      const remaining = taskStatus(task) === 'recovery_required' ? 'Ownership ended; recovery required' : current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
+      view = { rows: [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]] };
     }
-    const dl = el('dl'); const remaining = taskStatus(task) === 'recovery_required' ? 'Ownership ended; recovery required' : current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
-    [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]].forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, el('dd', '', value)); add(dl, line); }); add(target, dl);
+    // The signature is the rendered text, so a lease that ticks within the same displayed minute changes nothing.
+    patchSection($('lease-content'), sig(view), (target) => {
+      if (view.message) { add(target, el('p', 'muted', view.message)); return; }
+      const dl = el('dl'); view.rows.forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, el('dd', '', value)); add(dl, line); }); add(target, dl);
+    });
   }
 
   // Says why the task was canceled, archived, restored or deleted, by whom and when, and links
   // a canceled task to its replacement and a replacement back to the tasks it replaced. Events
   // recorded before reasons were kept show no reason rather than a guessed one.
   function renderLifecycle(data) {
-    const target = $('lifecycle-content'); clear(target);
     const events = Array.isArray(data.lifecycle_events) ? data.lifecycle_events : []; const replaces = Array.isArray(data.replaces) ? data.replaces : [];
     show($('lifecycle-card'), Boolean(events.length || replaces.length));
     const verbs = {canceled: 'Canceled', archived: 'Archived', restored: 'Restored', deleted: 'Deleted'};
     const taskLink = (id, label) => { const link = el('button', 'button text-button', label || id); link.type = 'button'; link.addEventListener('click', () => openTask(id)); return link; };
-    events.forEach((event) => {
-      const item = el('div', 'lifecycle-event');
-      add(item, el('p', '', `${verbs[event.action] || displayStatus(event.action)} by ${event.actor_name || event.actor_id || 'unknown'} on ${formatDate(event.created_at)}${event.reason ? `: ${event.reason}` : ' (no reason was recorded)'}`));
-      if (event.replacement_task_id) { const line = el('p', 'lifecycle-replacement', 'Replaced by '); add(line, taskLink(event.replacement_task_id, `task ${event.replacement_task_id}`)); add(item, line); }
-      add(target, item);
-    });
-    replaces.forEach((old) => {
-      const item = el('div', 'lifecycle-event'); const line = el('p', '', 'Replaces '); add(line, taskLink(old.task_id, old.title || old.task_id));
-      add(line, document.createTextNode(` (canceled by ${old.actor_name || old.actor_id || 'unknown'} on ${formatDate(old.canceled_at)}${old.reason ? `: ${old.reason}` : ''})`)); add(item, line); add(target, item);
-    });
+    reconcile($('lifecycle-content'), [
+      ...events.map((event, index) => ({ key: `event:${event.id ?? `${index}:${event.action}:${event.created_at}`}`, sig: sig(event), build: () => {
+        const item = el('div', 'lifecycle-event');
+        add(item, el('p', '', `${verbs[event.action] || displayStatus(event.action)} by ${event.actor_name || event.actor_id || 'unknown'} on ${formatDate(event.created_at)}${event.reason ? `: ${event.reason}` : ' (no reason was recorded)'}`));
+        if (event.replacement_task_id) { const line = el('p', 'lifecycle-replacement', 'Replaced by '); add(line, taskLink(event.replacement_task_id, `task ${event.replacement_task_id}`)); add(item, line); }
+        return item;
+      } })),
+      ...replaces.map((old) => ({ key: `replaces:${old.task_id}`, sig: sig(old), build: () => {
+        const item = el('div', 'lifecycle-event'); const line = el('p', '', 'Replaces '); add(line, taskLink(old.task_id, old.title || old.task_id));
+        add(line, document.createTextNode(` (canceled by ${old.actor_name || old.actor_id || 'unknown'} on ${formatDate(old.canceled_at)}${old.reason ? `: ${old.reason}` : ''})`)); add(item, line);
+        return item;
+      } }))
+    ]);
   }
 
   function formatLease(expires) { const remaining = new Date(expires).getTime() - Date.now(); return `${Math.max(0, Math.round(remaining / 60000))} min remaining`; }
 
   function attachmentStatus(message, error = false) {
-    const target = $('task-attachments-state'); setText(target, message); target.className = error ? 'inline-alert error' : 'muted';
+    const target = $('task-attachments-state'); setText(target, message); setClass(target, error ? 'inline-alert error' : 'muted');
   }
 
   function renderTaskAttachments(records, pending, hasMore = false) {
-    const list = $('task-attachments-list'); clear(list);
-    if (!records.length) add(list, el('p', 'muted', 'No files are attached to this task yet.'));
-    records.forEach((record) => {
+    const list = $('task-attachments-list');
+    const items = records.map((record) => ({ key: `record:${record.id}`, sig: sig(record), build: () => {
       const entry = el('div', 'task-attachment-entry');
       add(entry, el('strong', '', record.display_name || 'Attachment'));
       add(entry, el('p', 'muted', `${record.media_type || 'Unknown type'} · ${record.size_bytes ?? 'Unknown'} bytes · ${displayStatus(record.availability || record.state || 'unknown')}`));
@@ -821,36 +944,43 @@
           }
         } catch (_) { /* Keep invalid links as metadata only. */ }
       }
-      add(list, entry);
-    });
-    if (hasMore) add(list, el('p', 'muted', 'More records are available through Browse history.'));
+      return entry;
+    } }));
+    if (!records.length) items.push({ key: 'none', sig: '', build: () => el('p', 'muted', 'No files are attached to this task yet.') });
+    if (hasMore) items.push({ key: 'more', sig: '', build: () => el('p', 'muted', 'More records are available through Browse history.') });
+    reconcile(list, items);
     const retry = $('retry-task-attachments');
-    retry.hidden = !pending.length;
+    show(retry, pending.length > 0);
     const task = state.detail?.task || state.detail || {};
-    retry.disabled = Boolean(state.attachmentBusy || state.mutation || task.archived_at || ['done', 'completed'].includes(taskStatus(task)));
-    retry.textContent = pending.length === 1 ? 'Retry pending upload' : `Retry ${pending.length} pending uploads`;
+    setProp(retry, 'disabled', Boolean(state.attachmentBusy || state.mutation || task.archived_at || ['done', 'completed'].includes(taskStatus(task))));
+    setText(retry, pending.length === 1 ? 'Retry pending upload' : `Retry ${pending.length} pending uploads`);
   }
 
-  async function loadTaskAttachments(projectId, taskId, force = false) {
+  // Loads the task's attachment records. A quiet reload (a poll of the task page) refetches without
+  // announcing it and keeps what is shown if the fetch fails.
+  async function loadTaskAttachments(projectId, taskId, force = false, quiet = false) {
     const key = `${projectId}/${taskId}`, requestedActor = actorId();
-    if (!force && state.attachmentTaskKey === key && state.attachmentsLoaded) return;
-    state.attachmentTaskKey = key; state.attachmentsLoaded = false;
+    const loaded = state.attachmentTaskKey === key && state.attachmentsLoaded;
+    if (!force && !quiet && loaded) return;
+    if (quiet && !loaded) return;
+    state.attachmentTaskKey = key; if (!quiet) state.attachmentsLoaded = false;
     const requestId = ++state.attachmentRequestSeq;
-    attachmentStatus('Loading task attachments…');
+    if (!quiet) attachmentStatus('Loading task attachments…');
     try {
       const [history, batches] = await Promise.all([
         request(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/history?kind=artifacts&limit=50`),
         readAttachmentBatches()
       ]);
       if (requestId !== state.attachmentRequestSeq || projectId !== state.projectId || taskId !== state.selectedTaskId || requestedActor !== actorId()) return;
+      if (quiet && refreshBlocked('task-detail-content')) return;
       const records = (history.data.items || []).map((item) => item.record).filter(Boolean);
       const pending = batches.filter((batch) => batch.project_id === projectId && batch.task_id === taskId && batch.actor_id === requestedActor);
       renderTaskAttachments(records, pending, Boolean(history.data.next_cursor));
-      attachmentStatus(records.length ? `${records.length} attachment${records.length === 1 ? '' : 's'} available in task history.` : 'No files are attached to this task yet.');
       if (pending.length) attachmentStatus('A saved upload is waiting to finish. Retry uses the saved bytes and request keys.', true);
+      else attachmentStatus(records.length ? `${records.length} attachment${records.length === 1 ? '' : 's'} available in task history.` : 'No files are attached to this task yet.');
       state.attachmentsLoaded = true;
     } catch (error) {
-      if (requestId !== state.attachmentRequestSeq || projectId !== state.projectId || taskId !== state.selectedTaskId || requestedActor !== actorId()) return;
+      if (quiet || requestId !== state.attachmentRequestSeq || projectId !== state.projectId || taskId !== state.selectedTaskId || requestedActor !== actorId()) return;
       state.attachmentsLoaded = false;
       attachmentStatus(`Could not load task attachments: ${errorMessage(error)}`, true);
     }
@@ -972,11 +1102,16 @@
   }
 
   function renderCheckpoints(data) {
-    const target = $('checkpoints-content'); clear(target); let checkpoints = Array.isArray(data.checkpoints) ? data.checkpoints : [];
+    const target = $('checkpoints-content'); let checkpoints = Array.isArray(data.checkpoints) ? data.checkpoints : [];
     if (!checkpoints.length && Array.isArray(data.attempts)) data.attempts.forEach((attempt) => { if (Array.isArray(attempt.checkpoints)) checkpoints = checkpoints.concat(attempt.checkpoints); });
     checkpoints = checkpoints.slice().sort((a, b) => new Date(b.created_at || b.at).getTime() - new Date(a.created_at || a.at).getTime());
-    if (!checkpoints.length) { add(target, el('p', 'muted', 'No checkpoints have been shared yet.')); return; }
-    checkpoints.forEach((point) => { const item = el('div', 'checkpoint'); const top = el('div', 'checkpoint-top'); add(top, el('span', '', point.actor_name || point.owner_id || 'Agent')); add(top, el('time', '', formatDate(point.created_at || point.at))); add(item, top); add(item, el('p', 'checkpoint-summary', point.summary || 'Progress update')); if (point.current_action) add(item, el('p', 'checkpoint-detail', `Current action · ${point.current_action}`)); if (point.next_step) add(item, el('p', 'checkpoint-detail', `Next step · ${point.next_step}`)); if (Array.isArray(point.blockers) && point.blockers.length) add(item, el('p', 'checkpoint-detail', `Blockers · ${point.blockers.join(', ')}`)); add(target, item); });
+    if (!checkpoints.length) { reconcile(target, [{ key: 'none', sig: '', build: () => el('p', 'muted', 'No checkpoints have been shared yet.') }]); return; }
+    reconcile(target, checkpoints.map((point, index) => ({ key: point.id ?? `${index}:${point.attempt_id}:${point.created_at || point.at}`, sig: sig(point), build: () => {
+      const item = el('div', 'checkpoint'); const top = el('div', 'checkpoint-top'); add(top, el('span', '', point.actor_name || point.owner_id || 'Agent')); add(top, el('time', '', formatDate(point.created_at || point.at))); add(item, top); add(item, el('p', 'checkpoint-summary', point.summary || 'Progress update'));
+      if (point.current_action) add(item, el('p', 'checkpoint-detail', `Current action · ${point.current_action}`)); if (point.next_step) add(item, el('p', 'checkpoint-detail', `Next step · ${point.next_step}`));
+      if (Array.isArray(point.blockers) && point.blockers.length) add(item, el('p', 'checkpoint-detail', `Blockers · ${point.blockers.join(', ')}`));
+      return item;
+    } })));
   }
 
   function openDialog(kind) {
@@ -996,36 +1131,67 @@
   function createTask(value) { const projectId = state.projectId; const criteria = value['task-criteria'].split('\n').map((item) => item.trim()).filter(Boolean); startMutation(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, { title: value['task-title'].trim(), description: value['task-description'].trim(), acceptance_criteria: criteria, kind: value['task-kind'], priority: 2, depends_on: [], planned: false }, 'task creation', async () => { if (state.projectId === projectId) await loadTasks(); setGlobalAlert('Task created.', 'success'); }, 'POST', null, { projectId }); }
 
   async function loadCredentials(silent = false) {
-    if (state.actor?.role !== 'admin' || state.fetching.has('credentials')) return; state.fetching.add('credentials'); if (!silent) { show($('credentials-list'), false); setState($('credentials-state'), 'Loading credentials…', true); }
-    try { state.credentials = listData((await request('/api/v1/admin/credentials')).data); renderCredentials(); }
+    if (state.actor?.role !== 'admin' || state.fetching.has('credentials')) return; state.fetching.add('credentials'); if (!silent && !state.credentialsLoaded) { show($('credentials-list'), false); setState($('credentials-state'), 'Loading credentials…', true); }
+    try {
+      const credentials = listData((await request('/api/v1/admin/credentials')).data);
+      if (silent && refreshBlocked('credentials-list')) return;
+      if (state.credentialsLoaded && JSON.stringify(credentials) === JSON.stringify(state.credentials)) return;
+      state.credentials = credentials; state.credentialsLoaded = true; renderCredentials();
+    }
     catch (error) { if (!silent) setState($('credentials-state'), errorMessage(error), false, true); } finally { state.fetching.delete('credentials'); }
   }
 
   function renderCredentials() {
-    const target = $('credentials-list'); clear(target);
-    if (!state.credentials.length) { show(target, false); setState($('credentials-state'), 'No agent credentials have been issued.', false); return; }
+    const target = $('credentials-list');
+    if (!state.credentials.length) { reconcile(target, []); show(target, false); setState($('credentials-state'), 'No agent credentials have been issued.', false); return; }
     show($('credentials-state'), false); show(target, true);
     const offeredReplacement = new Set();
-    state.credentials.forEach(credential => {
-      const row = el('div', 'credential-row'), info = el('div');
-      add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}${credential.class && credential.class !== 'interactive' ? ` · ${credential.class}` : ''}${credential.access === 'read' ? ' · read-only' : ''}`));
-      add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`));
-      if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`));
-      add(row, info);
-      if (!credential.revoked_at) {
-        add(row, actionButton('Rotate', () => rotateCredential(credential)));
-        const revoke = actionButton('Revoke', () => revokeCredential(credential.id)); revoke.className = 'button danger'; add(row, revoke);
-      } else if (credential.principal_id && !offeredReplacement.has(credential.principal_id)) {
-        offeredReplacement.add(credential.principal_id);
-        add(row, actionButton('New token for this agent', () => replaceAgentCredential(credential)));
-      }
-      add(target, row);
-    });
+    reconcile(target, state.credentials.map(credential => {
+      // Only the first revoked credential of an agent offers a replacement, so a row's content depends on the rows before it.
+      const offer = Boolean(credential.revoked_at && credential.principal_id && !offeredReplacement.has(credential.principal_id));
+      if (offer) offeredReplacement.add(credential.principal_id);
+      return { key: credential.id, sig: sig(credential, offer), build: () => {
+        const row = el('div', 'credential-row'), info = el('div');
+        add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}${credential.class && credential.class !== 'interactive' ? ` · ${credential.class}` : ''}${credential.access === 'read' ? ' · read-only' : ''}`));
+        add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`));
+        if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`));
+        add(row, info);
+        if (!credential.revoked_at) {
+          add(row, actionButton('Rotate', () => rotateCredential(credential)));
+          const revoke = actionButton('Revoke', () => revokeCredential(credential.id)); revoke.className = 'button danger'; add(row, revoke);
+        } else if (offer) add(row, actionButton('New token for this agent', () => replaceAgentCredential(credential)));
+        return row;
+      } };
+    }));
     renderMutationState();
   }
   function revokeCredential(id) { startMutation(`/api/v1/admin/credentials/${encodeURIComponent(id)}/revoke`, {}, 'credential revocation', async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); }); }
 
-  function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = setInterval(() => { if (!state.actor || state.mutation) return; if (state.currentView === 'overview') loadProjects(true); else if (state.currentView === 'tasks' && state.taskAutoRefresh) loadTasks(true); else if (state.currentView === 'task-detail') loadTaskDetail(true); else if (state.currentView === 'admin') loadCredentials(true); else if (state.currentView === 'resources' && !state.resourcePagesExtended) loadResources(true); }, 5000); }
+  // Polling and background refreshes (including the auto-refresh checkbox) share these rules: nothing
+  // refreshes while the tab is hidden, a mutation or upload is pending, or a dialog is open, and a region
+  // is left alone while a text field, menu or file chooser inside it has focus. Fields outside the region
+  // (the search box above a list, say) are never touched by its refresh, so they do not block it.
+  const POLL_MS = 5000;
+  function refreshBlocked(regionId = null) {
+    if (document.hidden || state.mutation || state.attachmentBusy || document.querySelector('dialog[open]')) return true;
+    const focused = document.activeElement, region = regionId && $(regionId);
+    return Boolean(region && focused && region.contains(focused) && focused.matches('textarea, select, input:not([type=checkbox]):not([type=radio]):not([type=button])'));
+  }
+  function pollTick() {
+    if (!state.actor || refreshBlocked()) return;
+    if (state.currentView === 'overview') loadProjects(true);
+    else if (state.currentView === 'tasks' && state.taskAutoRefresh) loadTasks(true);
+    else if (state.currentView === 'task-detail') loadTaskDetail(true);
+    else if (state.currentView === 'admin') loadCredentials(true);
+    else if (state.currentView === 'resources' && !state.resourcePagesExtended) loadResources(true);
+  }
+  function stopPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null; }
+  function startPolling() { stopPolling(); if (!document.hidden) state.pollTimer = setInterval(pollTick, POLL_MS); }
+  // A hidden tab stops polling; becoming visible refreshes once at once, then resumes the interval.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { stopPolling(); return; }
+    if (state.actor) { startPolling(); pollTick(); }
+  });
 
   $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
   document.querySelectorAll('button.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); loadClock(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
@@ -1118,55 +1284,60 @@
     if (state.fetching.has('resources')) return;
     state.fetching.add('resources');
     const requestedActor = actorId();
-    if (!silent) setState($('resources-state'), 'Loading resources…', true);
+    if (!silent && !state.resourcesLoaded) setState($('resources-state'), 'Loading resources…', true);
     try {
       const query = append && state.resourceCursor ? `?cursor=${encodeURIComponent(state.resourceCursor)}` : '';
       const page = (await request(`/api/v1/resources${query}`)).data;
       if (!requestedActor || requestedActor !== actorId()) return;
+      if (silent && refreshBlocked('resources-list')) return;
       const items = listData(page);
       state.resourcePagesExtended = append;
       state.resources = append ? [...new Map([...state.resources, ...items].map(item => [item.id, item])).values()] : items;
-      state.resourceCursor = page.next_cursor || null;
-      const target = $('resources-list'); clear(target);
-      state.resources.forEach(resource => {
+      state.resourceCursor = page.next_cursor || null; state.resourcesLoaded = true;
+      reconcile($('resources-list'), state.resources.map(resource => ({ key: resource.id, sig: sig(resource), build: () => {
         const card = el('article', 'card'); add(card, el('h2', '', resource.key));
         add(card, el('p', 'muted', resource.description || 'No description'));
         add(card, el('p', '', `${resource.held_units ?? 0} held / ${resource.capacity} capacity units`));
-        add(card, el('code', 'binding-snippet', resource.id)); add(target, card);
-      });
-      show($('resources-state'), !state.resources.length);
-      if (!state.resources.length) setState($('resources-state'), 'No resources yet. Define a stable key before reserving shared capacity.');
+        add(card, el('code', 'binding-snippet', resource.id));
+        return card;
+      } })));
+      if (state.resources.length) show($('resources-state'), false);
+      else setState($('resources-state'), 'No resources yet. Define a stable key before reserving shared capacity.');
       show($('load-more-resources'), Boolean(state.resourceCursor));
-    } catch (error) { if (requestedActor === actorId()) setState($('resources-state'), errorMessage(error), false, true); }
+    } catch (error) { if (requestedActor === actorId() && !(silent && state.resourcesLoaded)) setState($('resources-state'), errorMessage(error), false, true); }
     finally { state.fetching.delete('resources'); }
   }
 
   function renderJobEvidence(data) {
-    const target = $('job-evidence-content'); clear(target);
+    const target = $('job-evidence-content');
     const evidence = data.job_evidence || {};
     const jobs = Array.isArray(evidence.jobs) ? evidence.jobs : [];
     const reservations = Array.isArray(evidence.reservations) ? evidence.reservations : [];
-    if (evidence.jobs_truncated || evidence.reservations_truncated) add(target, el('p', 'muted', 'Showing up to 50 jobs and 50 reservations, with unresolved evidence first. Use the CLI job and reservation lists to inspect the complete history.'));
-    if (!jobs.length && !reservations.length) { add(target, el('p', 'muted', 'No jobs or resource reservations recorded.')); return; }
-    jobs.forEach(job => {
+    const items = [];
+    if (evidence.jobs_truncated || evidence.reservations_truncated) items.push({ key: 'truncated', sig: '', build: () => el('p', 'muted', 'Showing up to 50 jobs and 50 reservations, with unresolved evidence first. Use the CLI job and reservation lists to inspect the complete history.') });
+    if (!jobs.length && !reservations.length) items.push({ key: 'none', sig: '', build: () => el('p', 'muted', 'No jobs or resource reservations recorded.') });
+    jobs.forEach(job => items.push({ key: `job:${job.id}`, sig: sig(job), build: () => {
       const entry = el('div', 'evidence-entry'); add(entry, el('h3', '', job.label || 'Local job'));
       add(entry, el('p', '', `Producer: ${displayStatus(job.state)} · Observation: ${displayStatus(job.observation_freshness || 'unknown')}`));
       add(entry, el('p', 'muted', `Last observation: ${formatDate(job.last_observed_at)} · Exit: ${job.exit_code ?? 'not reported'}`));
       if (job.inputs_unchanged === false) add(entry, el('p', 'error', 'Source changed during this job; its result does not verify the current checkout.'));
       if (job.reconciled_at) { add(entry, el('p', 'muted', `Operator reconciliation: ${job.reconciliation_reason || 'Recorded'}`)); add(entry, el('p', '', job.reconciliation_evidence || '')); }
-      add(entry, el('code', '', `Job ${job.id} · Producer ${job.producer_id}`)); add(target, entry);
-    });
-    reservations.forEach(reservation => {
+      add(entry, el('code', '', `Job ${job.id} · Producer ${job.producer_id}`));
+      return entry;
+    } }));
+    const human = state.actor?.kind === 'human';
+    reservations.forEach(reservation => items.push({ key: `reservation:${reservation.id}`, sig: sig(reservation, human), build: () => {
       const entry = el('div', 'evidence-entry'); add(entry, el('h3', '', `Resource reservation · ${displayStatus(reservation.state)}`));
       add(entry, el('code', '', reservation.id));
       if (reservation.resolution_evidence) add(entry, el('p', '', `Resolution evidence: ${reservation.resolution_evidence}`));
       (reservation.items || []).forEach(item => add(entry, el('p', 'muted', `${item.key || item.resource_id}: ${item.units} units`)));
-      if (!['released','resolved'].includes(reservation.state) && state.actor?.kind === 'human') {
+      if (!['released','resolved'].includes(reservation.state) && human) {
         const button = el('button', 'button subtle', 'Record resource resolution'); button.type = 'button'; button.dataset.mutation = 'true';
         button.addEventListener('click', () => openResourceResolution(reservation)); add(entry, button);
       }
-      add(target, entry);
-    });
+      return entry;
+    } }));
+    reconcile(target, items);
     renderMutationState();
   }
 
@@ -1301,15 +1472,18 @@
     }, 'POST', onError, { projectId, taskId });
   }
   function renderWorkflow(data) {
-    const target = $('workflow-content'); clear(target); const workflow = data.workflow || {}; const submission = workflow.submission;
-    if (!submission) { add(target, el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.')); return; }
+    const target = $('workflow-content'), items = []; const workflow = data.workflow || {}; const submission = workflow.submission;
+    if (!submission) { reconcile(target, [{ key: 'none', sig: '', build: () => el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.') }]); return; }
+    // The buttons below read the actor, the phase, the blockers and the project's integration setting.
+    const context = sig(state.actor?.kind, actorId(), state.actor?.session_id, workflow.phase, (workflow.blockers || []).length, state.projects.find(project => text(project.id) === state.projectId)?.automatic_integration, submission);
     const guidance = {
       review: 'Work has been submitted for review. The submission is a saved version of the result and its evidence; edits require a new submission. ' + ((workflow.activities || []).some(activity => activity.kind === 'either_review') ? 'An independent agent or a human may take this review. One approval satisfies the review requirement; requesting changes requires a new submission. An agent reserves it by claiming; a human reserves it only when recording the decision. Reserving does not approve the work.' : (workflow.activities || []).some(activity => activity.kind === 'human_review') ? 'Review the evidence below, then start an available human review to approve it or request changes. The review is reserved for you only when you record your decision; closing the form leaves it available.' : 'An independent agent must claim the required review and approve the work or request changes.'),
       integration: 'The submitted code is awaiting integration: an agent must validate the required checks, publish the result, and finalize the task. If shown, Authorize integration gives permission to proceed.',
       revision_needed: 'Changes are needed. An agent must claim the task, revise the work, and submit a new version for review. The previous submission stays in the history.',
       done: 'This submission has completed the required workflow.'
     };
-    if (guidance[workflow.phase]) add(target, el('p', 'inline-alert', guidance[workflow.phase]));
+    if (guidance[workflow.phase]) items.push({ key: 'guidance', sig: sig(workflow.phase, (workflow.activities || []).map(activity => activity.kind)), build: () => el('p', 'inline-alert', guidance[workflow.phase]) });
+    const buildCandidate = () => {
     const candidate = el('div', 'workflow-entry'); add(candidate, el('h3', '', workflow.phase === 'revision_needed' ? 'Previous candidate' : 'Current candidate'));
     add(candidate, el('p', '', submission.summary));
     const details = el('dl');
@@ -1327,17 +1501,22 @@
         view.finish('Reopen for revision', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath()}/tasks/${encodeURIComponent(submission.task_id)}/workflow/reopen`, {submission_id:submission.id, reason:values.get('reason')}, 'candidate revision'); });
       }); add(candidate, reopen);
     }
-    add(target, candidate);
-    (workflow.blockers || []).forEach(item => add(target, el('p', 'inline-alert error', typeof item === 'string' ? item : item.message || item.code)));
+    return candidate;
+    };
+    items.push({ key: 'candidate', sig: context, build: buildCandidate });
+    (workflow.blockers || []).forEach((item, index) => items.push({ key: `blocker:${index}`, sig: sig(item), build: () => el('p', 'inline-alert error', typeof item === 'string' ? item : item.message || item.code) }));
     if (workflow.integration_blocked) {
-      const blocked = workflow.integration_blocked, box = el('div', 'inline-alert error');
-      add(box, el('strong', '', 'Integration blocked'));
-      add(box, el('p', '', [`Report ${displayStatus(blocked.kind)}`, blocked.verdict && `verdict ${blocked.verdict}`, blocked.check_name && `check ${blocked.check_name}`, blocked.target_revision && `target revision ${blocked.target_revision}`].filter(Boolean).join(' · ')));
-      add(box, el('p', 'muted', `Integrator report ${blocked.report_id}`));
-      add(target, box);
+      const blocked = workflow.integration_blocked;
+      items.push({ key: 'integration-blocked', sig: sig(blocked), build: () => {
+        const box = el('div', 'inline-alert error');
+        add(box, el('strong', '', 'Integration blocked'));
+        add(box, el('p', '', [`Report ${displayStatus(blocked.kind)}`, blocked.verdict && `verdict ${blocked.verdict}`, blocked.check_name && `check ${blocked.check_name}`, blocked.target_revision && `target revision ${blocked.target_revision}`].filter(Boolean).join(' · ')));
+        add(box, el('p', 'muted', `Integrator report ${blocked.report_id}`));
+        return box;
+      } });
     }
-    if (workflow.activities_truncated) add(target, el('p', 'muted', 'Showing the latest 100 workflow activities. Older records remain stored.'));
-    (workflow.activities || []).forEach(activity => {
+    if (workflow.activities_truncated) items.push({ key: 'truncated', sig: '', build: () => el('p', 'muted', 'Showing the latest 100 workflow activities. Older records remain stored.') });
+    (workflow.activities || []).forEach(activity => items.push({ key: `activity:${activity.id}`, sig: sig(activity, context), build: () => {
       const entry = el('div', 'workflow-entry'); add(entry, el('h3', '', displayStatus(activity.kind)));
       add(entry, el('p', 'muted', `${displayStatus(activity.status)} · ${activity.id}`));
       if (activity.activity_task_id) { const open = el('button', 'button text-button', 'Inspect activity task and jobs'); open.type = 'button'; open.addEventListener('click', () => openTask(activity.activity_task_id)); add(entry, open); }
@@ -1362,9 +1541,10 @@
           if (activity.intent && !activity.publication_reconciliation) action('Reconcile publication', () => openPublicationReconciliation(activity, submission));
         }
       }
-      add(target, entry);
-    });
-    (workflow.next_actions || []).forEach(action => add(target, el('p', 'muted', typeof action === 'string' ? action : action.message)));
+      return entry;
+    } }));
+    (workflow.next_actions || []).forEach((action, index) => items.push({ key: `next:${index}`, sig: sig(action), build: () => el('p', 'muted', typeof action === 'string' ? action : action.message) }));
+    reconcile(target, items);
     renderMutationState();
   }
   // Opens the review form. With no held `attempt`, the review is claimed only when the
@@ -1541,10 +1721,9 @@
   $('workflow-settings').addEventListener('click', openWorkflowSettings);
 
   function fillSharedProject() {
-    const select = $('shared-project'); clear(select);
-    add(select, el('option', '', 'Choose a project')).value = '';
-    state.projects.forEach(project => { const option = el('option', '', project.name); option.value = project.id; add(select, option); });
-    select.value = state.projectId;
+    const select = $('shared-project');
+    reconcile(select, optionItems([['', 'Choose a project'], ...state.projects.map(project => [text(project.id), project.name])]));
+    setProp(select, 'value', state.projects.some(project => text(project.id) === state.projectId) ? state.projectId : '');
   }
   function sharedWrite(path, body, label, method = 'POST', after = null) {
     const projectId = state.projectId;
@@ -1553,15 +1732,18 @@
       if (after) after(data); else await loadShared();
     }, method, null, {projectId});
   }
+  // Loads one page of the chosen record kind. A reload keeps the cards on screen and patches only the
+  // records that changed; a different project, kind or search starts from an empty list.
   async function loadShared(append = false) {
     const projectId = state.projectId, currentActor = actorId(), kind = $('shared-kind').value;
-    const seq = ++state.sharedSeq;
+    const seq = ++state.sharedSeq, list = $('shared-list');
     show($('context-search'), kind === 'context');
-    if (!append) { state.sharedCursor = null; clear($('shared-list')); }
-    show($('load-more-shared'), false);
-    if (!projectId) { setState($('shared-state'), 'Choose a project to inspect its records.'); return; }
-    if (kind === 'context' && !$('context-query').value.trim()) { setState($('shared-state'), 'Enter search text to retrieve relevant context.'); return; }
-    setState($('shared-state'), 'Loading records…', true);
+    const shown = sig(projectId, kind, kind === 'context' ? [$('context-query').value, $('context-shared').checked] : null);
+    if (!append && state.sharedKey !== shown) { state.sharedKey = shown; state.sharedItems = []; state.sharedRules = undefined; state.sharedLoaded = false; reconcile(list, []); }
+    if (!append) state.sharedCursor = null;
+    if (!projectId) { setState($('shared-state'), 'Choose a project to inspect its records.'); show($('load-more-shared'), false); return; }
+    if (kind === 'context' && !$('context-query').value.trim()) { setState($('shared-state'), 'Enter search text to retrieve relevant context.'); show($('load-more-shared'), false); return; }
+    if (!state.sharedLoaded) { show($('load-more-shared'), false); setState($('shared-state'), 'Loading records…', true); }
     const query = new URLSearchParams({limit:'50'});
     if (append && state.sharedCursor) query.set('cursor', state.sharedCursor);
     if (kind === 'context') { query.set('q', $('context-query').value); query.set('include_shared', String($('context-shared').checked)); query.set('budget', '65536'); }
@@ -1569,15 +1751,17 @@
       const page = (await request(`${projectPath(projectId)}/${kind}?${query}`)).data;
       if (seq !== state.sharedSeq || projectId !== state.projectId || currentActor !== actorId()) return;
       const items = listData(page);
-      items.forEach(item => renderSharedRecord(item, kind));
+      state.sharedItems = append ? [...state.sharedItems, ...items] : items; state.sharedLoaded = true;
+      if (kind === 'context') state.sharedRules = page.policy?.rules;
+      reconcile(list, [
+        ...(kind === 'context' && state.sharedRules !== undefined ? [{ key: 'rules', sig: sig(state.sharedRules), build: () => { const rules = el('details', 'card'); add(rules, el('summary', '', 'Current binding project rules')); add(rules, el('pre', '', state.sharedRules)); return rules; } }] : []),
+        ...state.sharedItems.map((item, index) => ({ key: `${kind}:${(item.record || item).id ?? index}`, sig: sig(item, kind, projectId), build: () => renderSharedRecord(item, kind) }))
+      ]);
       state.sharedCursor = page.next_cursor || null;
       show($('load-more-shared'), Boolean(state.sharedCursor));
-      show($('shared-state'), !items.length && !append);
-      if (!items.length && !append) setState($('shared-state'), page.instructions_complete === false ? 'The context budget cannot include all binding rules. Increase the budget before relying on this packet.' : 'No matching records.');
-      setText($('shared-freshness'), `Read ${new Date().toLocaleTimeString()}. Refresh to inspect changes.${page.truncated ? ' Results were bounded; narrow the search for more context.' : ''}`);
-      if (kind === 'context' && page.policy?.rules !== undefined) {
-        const rules = el('details', 'card'); add(rules, el('summary', '', 'Current binding project rules')); add(rules, el('pre', '', page.policy.rules)); $('shared-list').prepend(rules);
-      }
+      if (state.sharedItems.length || append) show($('shared-state'), false);
+      else setState($('shared-state'), page.instructions_complete === false ? 'The context budget cannot include all binding rules. Increase the budget before relying on this packet.' : 'No matching records.');
+      setText($('shared-freshness'), `Read ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}. Refresh to inspect changes.${page.truncated ? ' Results were bounded; narrow the search for more context.' : ''}`);
       renderMutationState();
     } catch (error) { if (seq === state.sharedSeq && currentActor === actorId()) setState($('shared-state'), errorMessage(error), false, true); }
   }
@@ -1618,7 +1802,8 @@
       if (record.external_url) { try { const url = new URL(record.external_url); if (url.protocol === 'https:' && !url.username && !url.password) { const link = el('a', 'button subtle', 'Open external evidence'); link.href = url.href; link.rel = 'noopener noreferrer'; link.target = '_blank'; add(actions, link); } } catch (_) { /* Show unusable links as metadata only. */ } }
       add(card, el('p', 'muted', `${record.size_bytes ?? 'Unknown'} bytes · ${record.sha256 || 'No content digest'}${record.kind === 'external_link' ? ' · External availability is not verified by the service.' : ''}`));
     }
-    add(card, actions); add($('shared-list'), card);
+    add(card, actions);
+    return card;
   }
   function lessonDialog(existing = null) {
     if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
@@ -1792,11 +1977,12 @@
   async function loadIntegrationOwner(projectId) {
     const summary = $('integration-owner-summary');
     show($('integration-owner-button'), state.actor?.kind === 'human');
-    setText(summary, 'Reading the current integration owner…');
+    // The line already shown for this project stays until the reread replaces it.
+    if (summary.dataset.project !== projectId) setText(summary, 'Reading the current integration owner…');
     try {
       const project = (await request(`${projectPath(projectId)}/orientation`)).data.project;
-      if (projectId === state.projectId) setText(summary, ownerLine(project));
-    } catch (error) { if (projectId === state.projectId) setText(summary, `The current integration owner could not be read: ${errorMessage(error)}`); }
+      if (projectId === state.projectId) { setText(summary, ownerLine(project)); setData(summary, 'project', projectId); }
+    } catch (error) { if (projectId === state.projectId) { setText(summary, `The current integration owner could not be read: ${errorMessage(error)}`); delete summary.dataset.project; } }
   }
   // Reads the live policy, then opens the owner dialog for a human operator.
   async function openIntegrationOwner() {
@@ -1866,25 +2052,29 @@
   // Loads and shows the digest, then records the read; a superseded response is dropped.
   async function loadDigest() {
     const projectId = state.projectId, seq = ++state.digestSeq;
-    clear($('digest-content')); setState($('digest-state'), 'Loading the digest…', true);
+    if (state.digestProjectId !== projectId) { state.digestProjectId = projectId; state.digestLoaded = false; reconcile($('digest-content'), []); }
+    if (!state.digestLoaded) setState($('digest-state'), 'Loading the digest…', true);
     try {
       const digest = (await request(`${projectPath(projectId)}/digest`)).data;
       if (seq !== state.digestSeq || projectId !== state.projectId) return;
-      renderDigest(digest);
+      renderDigest(digest); state.digestLoaded = true;
       try { await request(`${projectPath(projectId)}/digest/read`, { method: 'POST', body: {}, idempotencyKey: newKey() }); }
       catch (error) { if (seq === state.digestSeq) setState($('digest-state'), `Showing the digest, but recording the read failed: ${errorMessage(error)}`, false, true); }
     } catch (error) { if (seq === state.digestSeq && projectId === state.projectId) setState($('digest-state'), errorMessage(error), false, true); }
   }
   function renderDigest(digest) {
-    const content = $('digest-content'), hri = digest.hri || {}, proceeded = digest.proceeded_decisions || [], pending = digest.pending_reversible_decisions || [];
-    const section = (title, items, line) => {
-      const card = add(content, el('article', 'card report-card')); add(card, el('h2', '', `${title} (${items.length})`));
+    const hri = digest.hri || {}, proceeded = digest.proceeded_decisions || [], pending = digest.pending_reversible_decisions || [];
+    const section = (key, title, items, line) => ({ key, sig: sig(title, items), build: () => {
+      const card = el('article', 'card report-card'); add(card, el('h2', '', `${title} (${items.length})`));
       if (!items.length) add(card, el('p', 'muted', 'None.'));
       items.forEach(item => add(card, el('p', '', line(item))));
-    };
-    section(`Proceeded on their recommendation in the last ${digest.window_hours} hours`, proceeded, item => `${text(item.question)} → ${text(item.proceeded_with)} at ${formatDate(item.proceeded_at)}. Reopen decision ${text(item.decision_id)} to undo.`);
-    section('Will proceed on their own', pending, item => `${text(item.question)} → ${text(item.recommendation)} at ${formatDate(item.proceeds_at)}`);
-    section('Human-required interventions', hri.items || [], item => `${text(item.code)}: ${text(item.title || item.summary)}`);
+      return card;
+    } });
+    reconcile($('digest-content'), [
+      section('proceeded', `Proceeded on their recommendation in the last ${digest.window_hours} hours`, proceeded, item => `${text(item.question)} → ${text(item.proceeded_with)} at ${formatDate(item.proceeded_at)}. Reopen decision ${text(item.decision_id)} to undo.`),
+      section('pending', 'Will proceed on their own', pending, item => `${text(item.question)} → ${text(item.recommendation)} at ${formatDate(item.proceeds_at)}`),
+      section('hri', 'Human-required interventions', hri.items || [], item => `${text(item.code)}: ${text(item.title || item.summary)}`)
+    ]);
     setState($('digest-state'), digest.last_read_at ? `Last read ${formatDate(digest.last_read_at)} (before this visit).` : 'This digest had not been read before this visit.');
   }
   function openAgentSessions() {
@@ -1896,20 +2086,22 @@
     const project = state.projects.find(item => text(item.id) === state.projectId);
     setText($('agent-sessions-project-label'), project?.name || 'Project');
   }
-  // Loads the sessions active in the chosen window; a superseded response is dropped.
+  // Loads the sessions active in the chosen window; a superseded response is dropped. Cards stay on
+  // screen during a reload and only the sessions whose data changed are rebuilt.
   async function loadAgentSessions() {
     const projectId = state.projectId, seq = ++state.agentSessionsSeq;
-    clear($('agent-sessions-list')); setState($('agent-sessions-state'), 'Loading sessions…', true);
+    if (state.agentSessionsProjectId !== projectId) { state.agentSessionsProjectId = projectId; state.agentSessionsLoaded = false; reconcile($('agent-sessions-list'), []); }
+    if (!state.agentSessionsLoaded) setState($('agent-sessions-state'), 'Loading sessions…', true);
     const query = new URLSearchParams({active_within_hours: $('agent-sessions-window').value});
     try {
       const page = (await request(`${projectPath(projectId)}/sessions?${query}`)).data;
-      if (seq === state.agentSessionsSeq && projectId === state.projectId) renderAgentSessions(page);
+      if (seq === state.agentSessionsSeq && projectId === state.projectId) { state.agentSessionsLoaded = true; renderAgentSessions(page); }
     } catch (error) { if (seq === state.agentSessionsSeq && projectId === state.projectId) setState($('agent-sessions-state'), errorMessage(error), false, true); }
   }
   // Renders one card per session, the empty-window message, or a truncation note.
   function renderAgentSessions(page) {
     const items = page.items || [];
-    items.forEach(session => add($('agent-sessions-list'), agentSessionCard(session)));
+    reconcile($('agent-sessions-list'), items.map(session => ({ key: session.session_id, sig: sig(session), build: () => agentSessionCard(session) })));
     if (!items.length) setState($('agent-sessions-state'), NO_AGENT_SESSIONS);
     else if (page.truncated) setState($('agent-sessions-state'), `Showing the ${items.length} most recently active sessions; narrow the window to see fewer.`);
     else show($('agent-sessions-state'), false);
@@ -1958,17 +2150,19 @@
     const project = state.projects.find(item => text(item.id) === state.projectId);
     setText($('reports-project-label'), project?.name || 'Project');
   }
-  // Loads one page of reports, newest first, replacing or extending the list.
+  // Loads one page of reports, newest first, replacing or extending the list. A reload keeps the cards on
+  // screen and patches only the ones that changed; a different project starts from an empty list.
   async function loadReports(append = false) {
     const projectId = state.projectId, seq = ++state.reportsSeq;
-    if (!append) { state.reportsCursor = null; clear($('reports-list')); }
-    show($('load-more-reports'), false); setState($('reports-state'), 'Loading reports…', true);
+    if (state.reportsProjectId !== projectId) { state.reportsProjectId = projectId; state.reports = []; state.reportsLoaded = false; reconcile($('reports-list'), []); }
+    if (!append) state.reportsCursor = null;
+    if (!state.reportsLoaded) { show($('load-more-reports'), false); setState($('reports-state'), 'Loading reports…', true); }
     const query = new URLSearchParams({limit:'50'});
     if ($('reports-filter').value === 'open') query.set('open', 'true');
     if (append && state.reportsCursor) query.set('before', state.reportsCursor);
     try {
       const page = (await request(`${projectPath(projectId)}/integrator/reports?${query}`)).data;
-      if (seq === state.reportsSeq && projectId === state.projectId) renderReports(page);
+      if (seq === state.reportsSeq && projectId === state.projectId) renderReports(page, append);
     } catch (error) { if (seq === state.reportsSeq) reportsLoadFailed(error, append); }
   }
   // Shows a load error; a failed next page keeps its cursor so Load more can retry.
@@ -1976,11 +2170,13 @@
     setState($('reports-state'), errorMessage(error), false, true);
     show($('load-more-reports'), Boolean(append && state.reportsCursor));
   }
-  // Appends a page of report cards and shows the next-page control.
-  function renderReports(page) {
-    const list = $('reports-list'); (page.items || []).forEach(report => add(list, reportCard(report)));
+  // Patches the report cards and shows the next-page control.
+  function renderReports(page, append = false) {
+    state.reports = append ? [...state.reports, ...(page.items || [])] : (page.items || []); state.reportsLoaded = true;
+    const human = state.actor?.kind === 'human';
+    reconcile($('reports-list'), state.reports.map(report => ({ key: report.id, sig: sig(report, human), build: () => reportCard(report) })));
     state.reportsCursor = page.next_before || null; show($('load-more-reports'), Boolean(state.reportsCursor));
-    if (list.childElementCount) { show($('reports-state'), false); return; }
+    if (state.reports.length) { show($('reports-state'), false); return; }
     setState($('reports-state'), $('reports-filter').value === 'open' ? 'No open reports. Nothing from the integrator is waiting for a person.' : 'The integrator has not recorded any reports for this project.');
   }
   // One report: kind, state, identities, raw details and the resolve action.
@@ -2054,19 +2250,23 @@
     if (error.code === 'report_already_resolved' && projectId === state.projectId && state.currentView === 'reports') loadReports();
   }
   function renderTaskActions(data, task) {
-    const target = $('task-operator-actions'); clear(target);
+    const target = $('task-operator-actions'), items = [];
     const completionPending = data.workflow?.submission && data.workflow.phase !== 'revision_needed';
+    const ownAttempt = (data.attempts || []).find(item => item.id === task.current_attempt_id);
+    // Every button closes over the task, so they are rebuilt together, and only when something they use changed.
+    const context = sig(pick(task, TASK_ACTION_FIELDS), pick(data, ['depends_on', 'dependencies']), Boolean(completionPending), ownAttempt && pick(ownAttempt, ['id', 'owner_id', 'session_id', 'state', 'mode', 'generation']), state.actor?.kind, actorId(), state.actor?.session_id);
+    const push = (key, build) => items.push({ key, sig: context, build });
     if (state.actor?.kind === 'human' && !task.activity_kind && !task.current_attempt_id) {
-      if (task.archived_at) add(target, actionButton('Restore archived task', () => taskLifecycle(task,'restore','Restore this task to the main task queue? Its lifecycle state and history will be preserved.')));
+      if (task.archived_at) push('restore', () => actionButton('Restore archived task', () => taskLifecycle(task,'restore','Restore this task to the main task queue? Its lifecycle state and history will be preserved.')));
       else {
-        if (['open','planned','canceled'].includes(task.lifecycle)) add(target, taskIconButton('Archive task', 'archive', () => taskLifecycle(task,'archive','Archive this task? It will leave the main task queue and remain available in Archived tasks.')));
-        if (['open','planned'].includes(task.lifecycle)) add(target, taskIconButton('Cancel task', 'cancel', () => taskLifecycle(task,'cancel','Cancel this task? It will be deleted from the task queue, or archived if it has attempt, workflow, objective, or dependency history or a replacement.')));
-        if (['planned','canceled'].includes(task.lifecycle)) add(target, actionButton('Delete task', () => taskLifecycle(task,'delete','Remove this task from task views? This is a soft delete that retains task and audit history. The service refuses if attempts, workflow, objective, or dependency history exist.')));
+        if (['open','planned','canceled'].includes(task.lifecycle)) push('archive', () => taskIconButton('Archive task', 'archive', () => taskLifecycle(task,'archive','Archive this task? It will leave the main task queue and remain available in Archived tasks.')));
+        if (['open','planned'].includes(task.lifecycle)) push('cancel', () => taskIconButton('Cancel task', 'cancel', () => taskLifecycle(task,'cancel','Cancel this task? It will be deleted from the task queue, or archived if it has attempt, workflow, objective, or dependency history or a replacement.')));
+        if (['planned','canceled'].includes(task.lifecycle)) push('delete', () => actionButton('Delete task', () => taskLifecycle(task,'delete','Remove this task from task views? This is a soft delete that retains task and audit history. The service refuses if attempts, workflow, objective, or dependency history exist.')));
       }
     }
-    if (state.actor?.kind === 'human' && !task.activity_kind && !task.archived_at && ['open','planned'].includes(task.lifecycle)) add(target, actionButton(task.human_delivered ? 'Return to supervisors' : 'Mark human-delivered', () => taskHumanDelivery(task)));
-    if (!task.archived_at && !['done', 'completed'].includes(taskStatus(task)) && !completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, taskIconButton('Edit task', 'edit', () => editTask(task, data)));
-    if (!completionPending && !task.activity_kind && task.lifecycle === 'open' && !task.current_attempt_id && task.blocked_reason) add(target, taskIconButton('Resolve blocker', 'resolve', () => {
+    if (state.actor?.kind === 'human' && !task.activity_kind && !task.archived_at && ['open','planned'].includes(task.lifecycle)) push('human-delivery', () => actionButton(task.human_delivered ? 'Return to supervisors' : 'Mark human-delivered', () => taskHumanDelivery(task)));
+    if (!task.archived_at && !['done', 'completed'].includes(taskStatus(task)) && !completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) push('edit', () => taskIconButton('Edit task', 'edit', () => editTask(task, data)));
+    if (!completionPending && !task.activity_kind && task.lifecycle === 'open' && !task.current_attempt_id && task.blocked_reason) push('unblock', () => taskIconButton('Resolve blocker', 'resolve', () => {
       const projectId = state.projectId, taskId = task.id;
       const view = workflowDialog('Resolve saved blocker', 'Use this after the problem that stopped work has been fixed. Record what changed and how you checked it. This clears the saved blocker so an agent can claim the task when its other requirements are met.');
       add(view.form, el('h3', '', 'What stopped work'));
@@ -2076,16 +2276,16 @@
       view.help(reason, 'Resolution evidence', 'Write the concrete fix and the observation, check result, or link that confirms work can resume. Use your actual evidence, not the example. This records the resolution in task history; it does not approve submitted work or mark the task complete.');
       view.finish('Record resolution', (values, dialog) => { dialog.close(); startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/unblock`, {expected_revision:task.revision,reason:values.get('reason')}, 'blocker resolution', () => loadTaskDetail(), 'POST', null, {projectId,taskId}); });
     }));
-    if (taskStatus(task) === 'recovery_required' && !task.activity_kind) add(target, actionButton('Inspect for recovery', () => claimRecovery(task)));
-    const attempt = (data.attempts || []).find(item => item.id === task.current_attempt_id);
+    if (taskStatus(task) === 'recovery_required' && !task.activity_kind) push('recovery', () => actionButton('Inspect for recovery', () => claimRecovery(task)));
+    const attempt = ownAttempt;
     if (attempt && attempt.owner_id === actorId() && attempt.session_id === state.actor?.session_id && attempt.state === 'active' && taskStatus(task) !== 'recovery_required') {
-      if (attempt.mode === 'recovery') add(target, actionButton('Review recovery evidence', () => recoveryEvidence(task, attempt)));
-      add(target, actionButton('Renew my ownership', () => workflowMutation(`${projectPath()}/attempts/${encodeURIComponent(attempt.id)}/renew`, {generation:attempt.generation}, 'ownership renewal')));
-      add(target, actionButton('Release with handoff', () => releaseOwnedAttempt(attempt)));
+      if (attempt.mode === 'recovery') push('recovery-evidence', () => actionButton('Review recovery evidence', () => recoveryEvidence(task, attempt)));
+      push('renew', () => actionButton('Renew my ownership', () => workflowMutation(`${projectPath()}/attempts/${encodeURIComponent(attempt.id)}/renew`, {generation:attempt.generation}, 'ownership renewal')));
+      push('release', () => actionButton('Release with handoff', () => releaseOwnedAttempt(attempt)));
     }
-    if (task.objective_id) add(target, actionButton('View objective children', () => showObjective(task.objective_id), false));
-    if (task.parent_objective_id) add(target, actionButton('View parent objective', () => showObjective(task.parent_objective_id), false));
-    renderMutationState();
+    if (task.objective_id) push('objective', () => actionButton('View objective children', () => showObjective(task.objective_id), false));
+    if (task.parent_objective_id) push('parent-objective', () => actionButton('View parent objective', () => showObjective(task.parent_objective_id), false));
+    reconcile(target, items); renderMutationState();
   }
   function taskHumanDelivery(task) {
     const projectId=state.projectId, taskId=task.id, mark=!task.human_delivered;
@@ -2200,15 +2400,14 @@
     const projectId = state.projectId, currentActor = actorId();
     const view = workflowDialog('Project objectives', 'Each objective is a general task with its own acceptance criteria. Required child tasks must complete before its own work and review can finish.');
     add(view.form, actionButton('New objective', () => { view.dialog.close(); objectiveDialog(); }));
-    const list = add(view.form,el('div')), more = actionButton('Load more objectives', () => load(true), false); add(view.form,more); let cursor = null, busy = false;
+    const list = add(view.form,el('div')), more = actionButton('Load more objectives', () => load(true), false); add(view.form,more); let cursor = null, busy = false, found = [];
     async function load(append = false) {
       if (busy) return; busy = true; more.disabled = true;
       try {
         const page = (await request(`${projectPath(projectId)}/objectives?limit=50${append && cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
         if (!view.dialog.isConnected || actorId() !== currentActor) return;
-        if (!append) clear(list);
-        for (const item of page.items || []) add(list,actionButton(`${item.title || item.id} · Required children ${item.completed_required_child_count}/${item.required_child_count} · ${displayStatus(item.work_status)}`, () => { view.dialog.close(); showObjective(item.id || item.task_id); },false));
-        if (!append && !(page.items || []).length) add(list,el('p','muted','No objectives yet.'));
+        found = append ? [...found, ...(page.items || [])] : (page.items || []);
+        reconcile(list, found.length ? found.map(item => ({ key: item.id || item.task_id, sig: sig(item), build: () => actionButton(`${item.title || item.id} · Required children ${item.completed_required_child_count}/${item.required_child_count} · ${displayStatus(item.work_status)}`, () => { view.dialog.close(); showObjective(item.id || item.task_id); },false) })) : [{ key: 'none', sig: '', build: () => el('p','muted','No objectives yet.') }]);
         cursor = page.next_cursor; show(more, Boolean(cursor));
       } catch (error) { add(list,el('p','error',errorMessage(error))); }
       finally { busy = false; more.disabled = false; }
@@ -2264,8 +2463,8 @@
     try {
       const page = (await request(`/api/v1/admin/operators${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
       if (actorId() !== currentActor || state.actor?.role !== 'admin') return;
-      if (!append) clear(target);
-      for (const operator of page.items || []) {
+      state.operators = append ? [...state.operators, ...(page.items || [])] : (page.items || []);
+      const items = state.operators.map(operator => ({ key: `operator:${operator.id}`, sig: sig(operator), build: () => {
         const row = el('div','credential-row'); add(row,el('span','',`${operator.name} · ${displayStatus(operator.role)} · ${operator.enabled ? 'Enabled' : 'Disabled'}`));
         add(row,actionButton('Change access', () => {
           const view = workflowDialog(`Access for ${operator.name}`, 'Access changes end this account’s existing browser sessions. The last enabled administrator must remain enabled with administrator access.');
@@ -2273,10 +2472,11 @@
           selectField(view,'enabled','Account access',operator.enabled,[['true','Enabled'],['false','Disabled']]);
           view.finish('Save access', (values, dialog) => { dialog.close(); startMutation(`/api/v1/admin/operators/${encodeURIComponent(operator.id)}/access`, {expected_revision:operator.revision,role:values.get('role'),enabled:values.get('enabled') === 'true'},'account access',async data => { if (operator.id === actorId() && data.sessions_revoked) { signOutLocal(); showLoginError('Access updated. Sign in again if your account remains enabled.'); } else await loadOperators(); }); });
         }));
-        add(row,actionButton('Browser sessions', () => browserSessions(operator.id,operator.name),false)); add(target,row);
-      }
-      target.querySelector('[data-more-operators]')?.remove();
-      if (page.next_cursor) { const more = actionButton('Load more accounts', () => { more.disabled = true; loadOperators(true,page.next_cursor); },false); more.dataset.moreOperators = 'true'; add(target,more); }
+        add(row,actionButton('Browser sessions', () => browserSessions(operator.id,operator.name),false));
+        return row;
+      } }));
+      if (page.next_cursor) items.push({ key: 'more', sig: sig(page.next_cursor), build: () => { const more = actionButton('Load more accounts', () => { more.disabled = true; loadOperators(true,page.next_cursor); },false); more.dataset.moreOperators = 'true'; return more; } });
+      reconcile(target, items);
       renderMutationState();
     } catch (error) { setGlobalAlert(errorMessage(error)); }
   }
@@ -2319,19 +2519,19 @@
   }
   function browserSessions(principalId, name) {
     const currentActor = actorId(), view = workflowDialog(`Browser sessions for ${name}`, 'Revoking a session signs out that browser. This does not replace or recreate task ownership.');
-    const list = add(view.form,el('div')), more = actionButton('Load more sessions', () => load(true),false); add(view.form,more); let cursor = null, busy = false;
+    const list = add(view.form,el('div')), more = actionButton('Load more sessions', () => load(true),false); add(view.form,more); let cursor = null, busy = false, sessions = [];
     async function load(append = false) {
       if (busy) return; busy = true; more.disabled = true;
       try {
         const page = (await request(`/api/v1/browser-sessions?principal_id=${encodeURIComponent(principalId)}${append && cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
         if (!view.dialog.isConnected || actorId() !== currentActor) return;
-        if (!append) clear(list);
-        for (const session of page.items || []) {
+        sessions = append ? [...sessions, ...(page.items || [])] : (page.items || []);
+        reconcile(list, sessions.map(session => ({ key: session.id, sig: sig(session), build: () => {
           const row = el('div','shared-card'); add(row,el('p','',`${session.current ? 'This browser' : session.id} · Created ${formatDate(session.created_at)} · Expires ${formatDate(session.expires_at)}`));
           if (session.revoked_at) add(row,el('p','muted',`Revoked ${formatDate(session.revoked_at)}`));
           else add(row,actionButton('Revoke session', () => startMutation(`/api/v1/browser-sessions/${encodeURIComponent(session.id)}/revoke`,{},'browser session revocation',async () => { if (session.current) { view.dialog.close(); signOutLocal(); } else await load(); })));
-          add(list,row);
-        }
+          return row;
+        } })));
         cursor = page.next_cursor; show(more,Boolean(cursor)); renderMutationState();
       } catch (error) { add(list,el('p','error',errorMessage(error))); }
       finally { busy = false; more.disabled = false; }
@@ -2380,19 +2580,22 @@
     try {
       const data = (await request('/api/v1/admin/clock')).data;
       if (sequence !== clockSequence || currentActor !== actorId()) return;
-      const target = $('clock-status'); clear(target);
+      const target = $('clock-status');
       const paused = data.clock_state.status !== 'ready';
-      add(target, el('p', '', paused
-        ? 'Coordination is paused because the server clock moved backward. Correct and verify the host clock before reconciling this incident. Expired ownership and preserved holds still require recovery.'
-        : 'No unresolved server clock incident. Task leases use protected server time.'));
-      recordDetails(target, 'Clock status and incident evidence', data);
-      if (paused) add(target, actionButton('Reconcile corrected clock', () => {
+      const items = [
+        { key: 'summary', sig: sig(paused), build: () => el('p', '', paused
+          ? 'Coordination is paused because the server clock moved backward. Correct and verify the host clock before reconciling this incident. Expired ownership and preserved holds still require recovery.'
+          : 'No unresolved server clock incident. Task leases use protected server time.') },
+        { key: 'evidence', sig: sig(data), build: () => { const holder = el('div'); recordDetails(holder, 'Clock status and incident evidence', data); return holder; } }
+      ];
+      if (paused) items.push({ key: 'reconcile', sig: sig(data.clock_state.incident_id), build: () => actionButton('Reconcile corrected clock', () => {
         const view = workflowDialog('Reconcile server clock', 'Record how trustworthy server time was restored. The service checks its stored time boundary before clearing this pause; old ownership is not revived.');
         view.field('reason','Clock correction evidence').maxLength = 2000;
         view.finish('Record clock reconciliation', (values, dialog) => {
           dialog.close(); startMutation('/api/v1/admin/clock/reconcile', {incident_id:data.clock_state.incident_id,reason:values.get('reason')}, 'clock reconciliation', restoredMutationCallbacks('clock_change'));
         });
-      }));
+      }) });
+      reconcile(target, items);
       renderMutationState();
     } catch (error) { if (sequence === clockSequence && currentActor === actorId()) setGlobalAlert(errorMessage(error)); }
   }
@@ -2406,25 +2609,25 @@
     try {
       const data = (await request(`/api/v1/admin/restore?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
       if (sequence !== restoreSequence || currentActor !== actorId()) return;
-      if (!cursor) { clear(target); clear(list); }
       const service = data.service_state, restoreId = service.restore_id;
       if (!cursor) {
-        add(target, el('p', '', service.coordination_state === 'restore_reconciliation'
+        const items = [{ key: 'summary', sig: sig(service.coordination_state), build: () => el('p', '', service.coordination_state === 'restore_reconciliation'
           ? 'Coordination is paused after restore. Inspect preserved holds, stop the old installation, and reconcile work since the snapshot before resuming.'
-          : 'No restore reconciliation is required. Clock, task ownership, and physical resource checks still apply.'));
+          : 'No restore reconciliation is required. Clock, task ownership, and physical resource checks still apply.') }];
         if (data.restore) {
-          add(target, el('p', 'muted', `${data.restore.inspected}/${data.restore.required_inspections} preserved holds inspected · Old installation ${data.restore.old_installation_fenced ? 'fenced' : 'not yet confirmed stopped'} · Snapshot gap ${data.restore.post_snapshot_gap_reconciled ? 'reconciled' : 'not yet reconciled'}`));
-          recordDetails(target, 'Restore record and reconciliation evidence', data.restore);
+          items.push({ key: 'progress', sig: sig(data.restore.inspected, data.restore.required_inspections, data.restore.old_installation_fenced, data.restore.post_snapshot_gap_reconciled), build: () => el('p', 'muted', `${data.restore.inspected}/${data.restore.required_inspections} preserved holds inspected · Old installation ${data.restore.old_installation_fenced ? 'fenced' : 'not yet confirmed stopped'} · Snapshot gap ${data.restore.post_snapshot_gap_reconciled ? 'reconciled' : 'not yet reconciled'}`) });
+          items.push({ key: 'record', sig: sig(data.restore), build: () => { const holder = el('div'); recordDetails(holder, 'Restore record and reconciliation evidence', data.restore); return holder; } });
         }
         if (service.coordination_state === 'restore_reconciliation') {
-          if (!data.restore?.old_installation_fenced) add(target, actionButton('Record old installation stopped', () => restoreEvidence(restoreId, 'old-installation-fenced', 'Old installation stopped', 'Record how the original service was stopped or fenced so it cannot grant competing ownership.')));
-          if (!data.restore?.post_snapshot_gap_reconciled) add(target, actionButton('Record work since the snapshot', () => restoreEvidence(restoreId, 'post-snapshot-gap', 'Reconcile the snapshot gap', 'Compare source checkpoints, publications, jobs, and completed work after the snapshot. Record what was lost, recovered, or remains uncertain.')));
-          add(target, actionButton('Resume coordination', () => restoreEvidence(restoreId, 'finish', 'Resume coordination after restore', 'Every preserved hold must have an inspection record, and both installation fencing and the snapshot gap must be documented. Resuming does not release any physical or integration hold.', true)));
+          if (!data.restore?.old_installation_fenced) items.push({ key: 'fence', sig: sig(restoreId), build: () => actionButton('Record old installation stopped', () => restoreEvidence(restoreId, 'old-installation-fenced', 'Old installation stopped', 'Record how the original service was stopped or fenced so it cannot grant competing ownership.')) });
+          if (!data.restore?.post_snapshot_gap_reconciled) items.push({ key: 'gap', sig: sig(restoreId), build: () => actionButton('Record work since the snapshot', () => restoreEvidence(restoreId, 'post-snapshot-gap', 'Reconcile the snapshot gap', 'Compare source checkpoints, publications, jobs, and completed work after the snapshot. Record what was lost, recovered, or remains uncertain.')) });
+          items.push({ key: 'finish', sig: sig(restoreId), build: () => actionButton('Resume coordination', () => restoreEvidence(restoreId, 'finish', 'Resume coordination after restore', 'Every preserved hold must have an inspection record, and both installation fencing and the snapshot gap must be documented. Resuming does not release any physical or integration hold.', true)) });
         }
+        reconcile(target, items);
       }
-      list.querySelector('[data-more-restore]')?.remove();
-      for (const requirement of data.items || []) {
-        const row = add(list, el('div', 'shared-card'));
+      state.restoreItems = cursor ? [...state.restoreItems, ...(data.items || [])] : (data.items || []);
+      const rows = state.restoreItems.map(requirement => ({ key: `hold:${requirement.kind}:${requirement.target_id}`, sig: sig(requirement, service.coordination_state, restoreId), build: () => {
+        const row = el('div', 'shared-card');
         recordDetails(row, `${displayStatus(requirement.kind)} · ${requirement.target_id} · ${requirement.inspected ? 'Inspected' : 'Needs inspection'}`, requirement);
         const evidenceTask = requirement.detail?.task_id || requirement.detail?.subject_task_id || requirement.detail?.activity_task_id;
         if (evidenceTask && requirement.project_id) add(row, actionButton('Open task evidence', () => { state.projectId = requirement.project_id; openTask(evidenceTask); }, false));
@@ -2435,8 +2638,10 @@
           view.field('evidence', 'Inspection evidence').maxLength = 4096;
           view.finish('Save inspection', (values, dialog) => { dialog.close(); startMutation('/api/v1/admin/restore/inspections', {restore_id:restoreId,kind:requirement.kind,target_id:requirement.target_id,disposition:values.get('disposition'),evidence:values.get('evidence')}, 'restore inspection', restoredMutationCallbacks('restore_change')); });
         }));
-      }
-      if (data.next_cursor) { const more = actionButton('Load more preserved holds', () => { more.disabled = true; loadRestore(data.next_cursor); }, false); more.dataset.moreRestore = 'true'; add(list, more); }
+        return row;
+      } }));
+      if (data.next_cursor) rows.push({ key: 'more', sig: sig(data.next_cursor), build: () => { const more = actionButton('Load more preserved holds', () => { more.disabled = true; loadRestore(data.next_cursor); }, false); more.dataset.moreRestore = 'true'; return more; } });
+      reconcile(list, rows);
       renderMutationState();
     } catch (error) { if (sequence === restoreSequence && currentActor === actorId()) { setGlobalAlert(errorMessage(error)); list.querySelector('[data-more-restore]')?.removeAttribute('disabled'); } }
   }
