@@ -352,12 +352,17 @@ async fn apply_revise(
 ) -> Result<(), AppError> {
     let (task, submission): (String, String) = (row.get("task_id"), row.get("submission_id"));
     let (actor, reason): (String, String) = (request.get("requested_by"), request.get("reason"));
+    let code: String = request.get("reason_code");
+    let evidence: Option<String> = request.get("evidence");
     let target = Supersede {
         project: p,
         task: &task,
         submission: &submission,
         actor: &actor,
         reason: &reason,
+        code: Some(&code),
+        moved_by: None,
+        evidence: evidence.as_deref(),
     };
     supersede_submission(&mut m.tx, &target, m.now).await?;
     resolve_revise(m, &submission, "applied", None).await
@@ -578,6 +583,7 @@ async fn apply_integrator_revise(
     m: &mut Mutation,
     case: &ReviseCase<'_>,
     admission: &Admission,
+    evidence: &str,
 ) -> Result<(), AppError> {
     let mut reason = format!("Integrator revise: {}", case.reason_code);
     if let Some(landing) = &admission.serialized_after {
@@ -589,6 +595,9 @@ async fn apply_integrator_revise(
         submission: case.submission,
         actor: &m.actor.id,
         reason: &reason,
+        code: Some(case.reason_code),
+        moved_by: case.moved_by,
+        evidence: Some(evidence),
     };
     supersede_submission(&mut m.tx, &target, m.now).await?;
     integrator_serialize::record(m, case, admission).await
@@ -637,7 +646,7 @@ async fn revise(
         crate::integrator_reverts::ensure_reverted_in_history(&mut m.tx, &p, &input.submission_id)
             .await?;
     }
-    apply_integrator_revise(&mut m, &case, &admission).await?;
+    apply_integrator_revise(&mut m, &case, &admission, &input.evidence).await?;
     let value = revise_value(&input, &task, &admission);
     Ok(response(
         m.finish(value, Some(&p), "submission.reopened", &input.submission_id)

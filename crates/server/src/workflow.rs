@@ -814,6 +814,13 @@ async fn activity_value(
         .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"id":r.get::<String,_>("id"),"canonical_repository_key":r.get::<String,_>("canonical_repository_key"),"target_branch":r.get::<String,_>("target_branch"),"state":r.get::<String,_>("state"),"acquired_at":timestamp(r.get("acquired_at")),"released_at":r.get::<Option<i64>,_>("released_at").map(timestamp),"release_reason":r.get::<Option<String>,_>("release_reason")}));
     let reconciliation=sqlx::query("SELECT disposition,observed_target_revision,observed_target_tree,evidence,actor_id,created_at FROM publication_reconciliations WHERE activity_id=?")
         .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"disposition":r.get::<String,_>("disposition"),"observed_target_revision":r.get::<String,_>("observed_target_revision"),"observed_target_tree":r.get::<String,_>("observed_target_tree"),"evidence":r.get::<String,_>("evidence"),"actor_id":r.get::<String,_>("actor_id"),"created_at":timestamp(r.get("created_at"))}));
+    let cancel_reason = row.get::<Option<String>, _>("cancel_code").map(|code| {
+        let context = row
+            .get::<Option<String>, _>("cancel_context_json")
+            .and_then(|c| serde_json::from_str::<Value>(&c).ok())
+            .unwrap_or(Value::Null);
+        json!({"code":code,"detail":row.get::<Option<String>,_>("cancel_detail"),"context":context,"canceled_at":row.get::<Option<i64>,_>("canceled_at").map(timestamp)})
+    });
     let persisted = row.get::<String, _>("state");
     let derived = if persisted == "active"
         && attempt
@@ -828,7 +835,7 @@ async fn activity_value(
         json!({"id":row.get::<String,_>("id"),"kind":row.get::<String,_>("kind"),"slot":row.get::<i64,_>("slot"),
         "activity_task_id":row.get::<String,_>("activity_task_id"),"subject_task_id":row.get::<String,_>("subject_task_id"),
         "submission_id":row.get::<String,_>("submission_id"),"status":derived,
-        "current_attempt":attempt,"review":review,"authorization":authorization,"intent":intent,"result":result,"publication_reconciliation":reconciliation,"hold":hold}),
+        "current_attempt":attempt,"review":review,"authorization":authorization,"intent":intent,"result":result,"publication_reconciliation":reconciliation,"hold":hold,"cancel_reason":cancel_reason}),
     )
 }
 
@@ -1139,7 +1146,21 @@ pub async fn workflow_snapshot(
             Some(action) => vec![action.to_owned()],
             None => vec!["Authorize if required, then claim the integration activity.".to_owned()],
         },
-        "revision_needed" => vec!["Claim the subject task and prepare a new revision.".to_owned()],
+        "revision_needed" => {
+            let mut actions = vec!["Claim the subject task and prepare a new revision.".to_owned()];
+            let canceled = integration.filter(|a| a["status"] == "canceled");
+            if let Some(reason) = canceled
+                .map(|a| &a["cancel_reason"])
+                .filter(|r| r.is_object())
+            {
+                actions.push(format!(
+                    "The integration was canceled ({}): {} The new revision must address this.",
+                    reason["code"].as_str().unwrap_or_default(),
+                    reason["detail"].as_str().unwrap_or_default(),
+                ));
+            }
+            actions
+        }
         _ => Vec::new(),
     };
     Ok(
@@ -1239,6 +1260,9 @@ async fn reopen(
             submission: &input.submission_id,
             actor: &m.actor.id,
             reason: &input.reason,
+            code: input.reason_code.as_deref(),
+            moved_by: None,
+            evidence: input.evidence.as_deref(),
         },
         m.now,
     )
@@ -1263,6 +1287,159 @@ pub(crate) struct Supersede<'a> {
     pub submission: &'a str,
     pub actor: &'a str,
     pub reason: &'a str,
+    /// The revise reason code, if any (`conflict`, `check_failed`, ...); it
+    /// becomes the cancel code of the activities this cancels.
+    pub code: Option<&'a str>,
+    /// The published result the integrator says moved the target.
+    pub moved_by: Option<&'a str>,
+    pub evidence: Option<&'a str>,
+}
+
+/// Why workflow activities are canceled: a machine-readable code, a
+/// human-readable detail and the revisions involved.
+pub(crate) struct CancelReason {
+    pub code: String,
+    pub detail: String,
+    pub context: Value,
+}
+
+impl CancelReason {
+    fn new(code: &str, detail: &str, context: Value) -> Self {
+        Self {
+            code: code.to_owned(),
+            detail: detail.to_owned(),
+            context,
+        }
+    }
+}
+
+/// The revisions a cancel of this submission's activities involves: the
+/// submission's base and candidate, the target branch and the latest target
+/// revision the integrator observed for it.
+async fn cancel_context(c: &mut SqliteConnection, submission: &str) -> Result<Value, AppError> {
+    let row = sqlx::query(
+        "SELECT target_branch,base_revision,candidate_revision FROM submissions WHERE id=?",
+    )
+    .bind(submission)
+    .fetch_one(&mut *c)
+    .await?;
+    let target_revision: Option<String> = sqlx::query_scalar("SELECT t0 FROM integrator_results WHERE submission_id=? ORDER BY created_at DESC,id DESC LIMIT 1")
+        .bind(submission)
+        .fetch_optional(&mut *c)
+        .await?;
+    Ok(json!({
+        "target_branch": row.get::<Option<String>, _>("target_branch"),
+        "submission_base_revision": row.get::<Option<String>, _>("base_revision"),
+        "candidate_revision": row.get::<Option<String>, _>("candidate_revision"),
+        "target_revision": target_revision,
+    }))
+}
+
+/// The cancel reason of a superseded submission. An integrator `conflict`
+/// that names the result that moved the target is `target_advanced`; one
+/// that does not is `merge_conflict`. Other revise codes carry over, and a
+/// reopen without a code is `manual`.
+async fn supersede_reason(
+    c: &mut SqliteConnection,
+    r: &Supersede<'_>,
+) -> Result<CancelReason, AppError> {
+    let code = match (r.code, r.moved_by) {
+        (Some("conflict"), Some(_)) => "target_advanced",
+        (Some("conflict"), None) => "merge_conflict",
+        (Some(code), _) => code,
+        (None, _) => "manual",
+    };
+    let mut context = cancel_context(c, r.submission).await?;
+    if let Some(moved_by) = r.moved_by {
+        context["moved_by_result_id"] = json!(moved_by);
+        let moved_to: Option<String> =
+            sqlx::query_scalar("SELECT r FROM integrator_results WHERE id=? AND project_id=?")
+                .bind(moved_by)
+                .bind(r.project)
+                .fetch_optional(&mut *c)
+                .await?;
+        context["target_revision"] =
+            json!(moved_to.or(context["target_revision"].as_str().map(str::to_owned)));
+    }
+    if let Some(evidence) = r.evidence {
+        context["evidence"] = json!(evidence);
+    }
+    let detail = match code {
+        "target_advanced" => format!(
+            "The target branch advanced past the submission's base revision; rebase onto the current target. {}",
+            r.reason
+        ),
+        "merge_conflict" => format!(
+            "The candidate conflicts with the target branch; resolve the conflict. {}",
+            r.reason
+        ),
+        _ => r.reason.to_owned(),
+    };
+    Ok(CancelReason {
+        code: code.to_owned(),
+        detail,
+        context,
+    })
+}
+
+/// Cancels the given live activities with `why` and records a
+/// `workflow.activity_canceled` event on the subject task for each integration
+/// activity, so the task's lifecycle history shows the cancel.
+async fn cancel_activities(
+    c: &mut SqliteConnection,
+    ids: &[String],
+    actor: &str,
+    why: &CancelReason,
+    now: i64,
+) -> Result<(), AppError> {
+    for id in ids {
+        let updated = sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=?,cancel_code=?,cancel_detail=?,cancel_context_json=? WHERE id=? AND state IN ('queued','active')")
+            .bind(now).bind(&why.code).bind(&why.detail).bind(why.context.to_string()).bind(id)
+            .execute(&mut *c).await?;
+        if updated.rows_affected() == 0 {
+            continue;
+        }
+        let row = sqlx::query(
+            "SELECT project_id,subject_task_id,kind,slot FROM workflow_activities WHERE id=?",
+        )
+        .bind(id)
+        .fetch_one(&mut *c)
+        .await?;
+        if row.get::<String, _>("kind") != "integration" {
+            continue;
+        }
+        let data = json!({"activity_id":id,"activity_kind":"integration","slot":row.get::<i64,_>("slot"),"actor_id":actor,
+            "reason":{"code":why.code,"detail":why.detail,"context":why.context}});
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,'workflow.activity_canceled',?,?,?)")
+            .bind(row.get::<String, _>("project_id")).bind(actor).bind(row.get::<String, _>("subject_task_id")).bind(data.to_string()).bind(now)
+            .execute(&mut *c).await?;
+    }
+    Ok(())
+}
+
+/// Cancels the submission's activities in one of `states`, except `except`.
+async fn cancel_submission_activities(
+    c: &mut SqliteConnection,
+    submission: &str,
+    except: Option<&str>,
+    states: &[&str],
+    actor: &str,
+    why: &CancelReason,
+    now: i64,
+) -> Result<(), AppError> {
+    let rows = sqlx::query(
+        "SELECT id,kind,state FROM workflow_activities WHERE submission_id=? ORDER BY kind,slot",
+    )
+    .bind(submission)
+    .fetch_all(&mut *c)
+    .await?;
+    let ids: Vec<String> = rows
+        .iter()
+        .filter(|r| Some(r.get::<String, _>("id").as_str()) != except)
+        .filter(|r| states.contains(&r.get::<String, _>("state").as_str()))
+        .map(|r| r.get("id"))
+        .collect();
+    cancel_activities(c, &ids, actor, why, now).await
 }
 
 /// Supersedes the current submission and sends its task back to revision:
@@ -1293,7 +1470,17 @@ pub(crate) async fn supersede_submission(
     .bind(r.task)
     .execute(&mut *c)
     .await?;
-    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND state IN ('queued','active')").bind(now).bind(r.submission).execute(&mut *c).await?;
+    let why = supersede_reason(c, r).await?;
+    cancel_submission_activities(
+        c,
+        r.submission,
+        None,
+        &["queued", "active"],
+        r.actor,
+        &why,
+        now,
+    )
+    .await?;
     sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND state='canceled')")
         .bind(r.submission).execute(&mut *c).await?;
     sqlx::query("UPDATE integration_holds SET state='released',released_by=?,released_at=?,release_reason=? WHERE activity_id IN (SELECT id FROM workflow_activities WHERE submission_id=?) AND state='held'")
@@ -2020,11 +2207,22 @@ async fn release_activity(
     if ctx.kind == "integration" {
         sqlx::query("UPDATE integration_holds SET state='released',released_by=?,released_at=?,release_reason='Integration activity released before publication intent.' WHERE activity_id=? AND state='held'")
             .bind(&m.actor.id).bind(m.now).bind(&ctx.id).execute(&mut *m.tx).await?;
-        sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE id=?")
-            .bind(m.now)
-            .bind(&ctx.id)
-            .execute(&mut *m.tx)
-            .await?;
+        let why = CancelReason {
+            code: "released".to_owned(),
+            detail: format!(
+                "The integration owner released it before publication: {}",
+                input.summary
+            ),
+            context: cancel_context(&mut m.tx, &ctx.submission).await?,
+        };
+        cancel_activities(
+            &mut m.tx,
+            std::slice::from_ref(&ctx.id),
+            &m.actor.id,
+            &why,
+            m.now,
+        )
+        .await?;
         sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id=?")
             .bind(&ctx.activity_task)
             .execute(&mut *m.tx)
@@ -2391,13 +2589,35 @@ async fn review(
         .bind(&ctx.subject_task)
         .execute(&mut *m.tx)
         .await?;
-        sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND id!=? AND state='queued'").bind(m.now).bind(&ctx.submission).bind(&ctx.id).execute(&mut *m.tx).await?;
+        let why = CancelReason {
+            code: "changes_requested".to_owned(),
+            detail: "A review requested changes to this submission.".to_owned(),
+            context: cancel_context(&mut m.tx, &ctx.submission).await?,
+        };
+        cancel_submission_activities(
+            &mut m.tx,
+            &ctx.submission,
+            Some(&ctx.id),
+            &["queued"],
+            &m.actor.id,
+            &why,
+            m.now,
+        )
+        .await?;
         sqlx::query("UPDATE attempts SET state='canceled',ended_at=?,outcome='A concurrent review requested changes.' WHERE id IN (SELECT t.current_attempt_id FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id WHERE wa.submission_id=? AND wa.id!=? AND wa.state='active') AND state='active'")
             .bind(m.now).bind(&ctx.submission).bind(&ctx.id).execute(&mut *m.tx).await?;
         sqlx::query("UPDATE tasks SET current_attempt_id=NULL,lifecycle='canceled',blocked_reason=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND id!=? AND state='active')")
             .bind(&ctx.submission).bind(&ctx.id).execute(&mut *m.tx).await?;
-        sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND id!=? AND state='active'")
-            .bind(m.now).bind(&ctx.submission).bind(&ctx.id).execute(&mut *m.tx).await?;
+        cancel_submission_activities(
+            &mut m.tx,
+            &ctx.submission,
+            Some(&ctx.id),
+            &["active"],
+            &m.actor.id,
+            &why,
+            m.now,
+        )
+        .await?;
         sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND id!=? AND state='canceled')")
             .bind(&ctx.submission).bind(&ctx.id).execute(&mut *m.tx).await?;
         sqlx::query("UPDATE tasks SET blocked_reason=NULL,ready_since=? WHERE id=?")
@@ -2520,8 +2740,18 @@ pub(crate) async fn advance_approved_subject(
     // Reviews still queued are no longer needed once approvals are satisfied.
     sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND kind!='integration' AND state='queued')")
         .bind(submission).execute(&mut *c).await?;
-    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND kind!='integration' AND state='queued'")
-        .bind(now).bind(submission).execute(&mut *c).await?;
+    let why = CancelReason::new(
+        "review_not_needed",
+        "The required approvals were already satisfied.",
+        cancel_context(c, submission).await?,
+    );
+    let queued_reviews: Vec<String> = sqlx::query_scalar("SELECT id FROM workflow_activities WHERE submission_id=? AND kind!='integration' AND state='queued'")
+        .bind(submission).fetch_all(&mut *c).await?;
+    let actor: String = sqlx::query_scalar("SELECT created_by FROM submissions WHERE id=?")
+        .bind(submission)
+        .fetch_one(&mut *c)
+        .await?;
+    cancel_activities(c, &queued_reviews, &actor, &why, now).await?;
     if kind == "general" {
         complete_general_subject(c, project, subject_task, now).await
     } else {
@@ -3030,11 +3260,22 @@ async fn reconcile_publication(
         .bind(m.now).bind(&ctx.activity_task).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE integration_holds SET state='released',released_by=?,released_at=?,release_reason=? WHERE activity_id=? AND state='held'")
         .bind(&m.actor.id).bind(m.now).bind(format!("Human reconciliation: {}",input.disposition)).bind(&ctx.id).execute(&mut *m.tx).await?;
-    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE id=?")
-        .bind(m.now)
-        .bind(&ctx.id)
-        .execute(&mut *m.tx)
-        .await?;
+    let why = CancelReason {
+        code: "publication_reconciled".to_owned(),
+        detail: format!(
+            "A human reconciled the publication as {}; a replacement integration follows.",
+            input.disposition
+        ),
+        context: cancel_context(&mut m.tx, &ctx.submission).await?,
+    };
+    cancel_activities(
+        &mut m.tx,
+        std::slice::from_ref(&ctx.id),
+        &m.actor.id,
+        &why,
+        m.now,
+    )
+    .await?;
     sqlx::query("UPDATE tasks SET lifecycle='canceled',current_attempt_id=NULL,blocked_reason=NULL WHERE id=?").bind(&ctx.activity_task).execute(&mut *m.tx).await?;
     let slot:i64=sqlx::query_scalar("SELECT COALESCE(max(slot),0)+1 FROM workflow_activities WHERE submission_id=? AND kind='integration'").bind(&ctx.submission).fetch_one(&mut *m.tx).await?;
     let s=sqlx::query("SELECT t.id,t.kind,t.title,t.acceptance_json,t.revision,p.policy_revision,p.review_mode,p.automatic_integration FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?").bind(&ctx.subject_task).fetch_one(&mut *m.tx).await?;
@@ -3248,11 +3489,22 @@ async fn agent_reconcile_publication(
         .bind(m.now).bind(&attempt_id).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE integration_holds SET state='released',released_by=?,released_at=?,release_reason=? WHERE activity_id=? AND state='held'")
         .bind(&m.actor.id).bind(m.now).bind(format!("Agent reconciliation: {}", input.disposition)).bind(&ctx.id).execute(&mut *m.tx).await?;
-    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE id=?")
-        .bind(m.now)
-        .bind(&ctx.id)
-        .execute(&mut *m.tx)
-        .await?;
+    let why = CancelReason {
+        code: "publication_reconciled".to_owned(),
+        detail: format!(
+            "An agent reconciled the publication as {} from fresh remote evidence; a replacement integration follows.",
+            input.disposition
+        ),
+        context: cancel_context(&mut m.tx, &ctx.submission).await?,
+    };
+    cancel_activities(
+        &mut m.tx,
+        std::slice::from_ref(&ctx.id),
+        &m.actor.id,
+        &why,
+        m.now,
+    )
+    .await?;
     sqlx::query("UPDATE tasks SET lifecycle='canceled',current_attempt_id=NULL,blocked_reason=NULL WHERE id=?")
         .bind(&ctx.activity_task).execute(&mut *m.tx).await?;
     let slot: i64 = sqlx::query_scalar("SELECT COALESCE(max(slot),0)+1 FROM workflow_activities WHERE submission_id=? AND kind='integration'")

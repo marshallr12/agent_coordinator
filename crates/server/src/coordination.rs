@@ -1131,21 +1131,21 @@ async fn set_human_delivery(
 }
 
 /// The task's recorded lifecycle changes (cancel, archive, restore, delete, external
-/// completion), newest first,
+/// completion, canceled integration activity), newest first,
 /// and the tasks it replaced. Events recorded before reasons were kept carry no data; their
 /// `reason` is null rather than reconstructed.
 async fn lifecycle_history(c: &mut SqliteConnection, p: &str, id: &str) -> Result<Value, AppError> {
-    let rows = sqlx::query("SELECT e.seq,e.kind,e.actor_id,e.data_json,e.created_at,pr.name AS actor_name FROM events e LEFT JOIN principals pr ON pr.id=e.actor_id WHERE e.project_id=? AND e.record_id=? AND e.kind IN ('task.canceled','task.archived','task.restored','task.deleted','task.completed_externally') ORDER BY e.seq DESC LIMIT 20")
+    let rows = sqlx::query("SELECT e.seq,e.kind,e.actor_id,e.data_json,e.created_at,pr.name AS actor_name FROM events e LEFT JOIN principals pr ON pr.id=e.actor_id WHERE e.project_id=? AND e.record_id=? AND e.kind IN ('task.canceled','task.archived','task.restored','task.deleted','task.completed_externally','workflow.activity_canceled') ORDER BY e.seq DESC LIMIT 20")
         .bind(p).bind(id).fetch_all(&mut *c).await?;
     let mut events = Vec::new();
     for r in &rows {
         let data: Value = serde_json::from_str(&r.get::<String, _>("data_json"))?;
         let mut event = json!({
             "seq":r.get::<i64,_>("seq"),
-            "action":r.get::<String,_>("kind").trim_start_matches("task.").to_owned(),
+            "action":r.get::<String,_>("kind").trim_start_matches("task.").trim_start_matches("workflow.").to_owned(),
             "actor_id":data.get("actor_id").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| r.get("actor_id")),
             "actor_name":r.get::<Option<String>,_>("actor_name"),
-            "reason":data.get("reason").cloned().unwrap_or(Value::Null),
+            "reason":data.get("reason").filter(|r| !r.is_object()).cloned().unwrap_or(Value::Null),
             "replacement_task_id":data.get("replacement_task_id").cloned().unwrap_or(Value::Null),
             "created_at":timestamp(r.get("created_at")),
         });
@@ -1153,6 +1153,13 @@ async fn lifecycle_history(c: &mut SqliteConnection, p: &str, id: &str) -> Resul
             if let Some(v) = data.get(key) {
                 event[key] = v.clone();
             }
+        }
+        if let Some(cancel) = data.get("reason").filter(|r| r.is_object()) {
+            event["reason"] = cancel["detail"].clone();
+            event["reason_code"] = cancel["code"].clone();
+            event["context"] = cancel["context"].clone();
+            event["activity_id"] = data["activity_id"].clone();
+            event["activity_kind"] = data["activity_kind"].clone();
         }
         events.push(event);
     }

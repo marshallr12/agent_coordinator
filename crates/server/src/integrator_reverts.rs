@@ -605,6 +605,9 @@ async fn withdraw_candidate(m: &mut Mutation, p: &str, revert: &SqliteRow) -> Re
         submission: &submission,
         actor: &actor,
         reason,
+        code: Some("revert_not_mechanical"),
+        moved_by: None,
+        evidence: None,
     };
     supersede_submission(&mut m.tx, &target, m.now).await
 }
