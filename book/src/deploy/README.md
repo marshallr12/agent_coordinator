@@ -1033,11 +1033,19 @@ sudo update-rc.d agentc-run defaults && sudo service agentc-run start
 
 Re-running `host-setup.sh` rewrites the script but leaves its rc links (and so
 the opt-in) alone.
-`sudo deploy/agentc/sysvinit-check.sh` checks these pieces live on such a host
-without installing the loop: with a fake supervisor it confirms that `insserv`
-accepts the boot order (dry run), that a crash restarts the loop, that a stop
-drains it and kills what is left in its process group, and that cron runs
-`agentc-cron` with an environment file.
+
+Run `sudo deploy/agentc/sysvinit-check.sh` after `host-setup.sh`, whether or not
+you have opted in. It checks these pieces live on such a host without touching
+the real loop: with a fake supervisor it confirms that `insserv` accepts the
+boot order (dry run), that a crash restarts the loop, that a stop drains it and
+kills what is left in its process group, and that cron runs `agentc-cron` with
+an environment file. The fake loop has its own name (`agentc-run-check`),
+pidfile and log, in a temporary directory, so `/etc/init.d/agentc-run`, its rc
+links, `/run/agentc-run.pid` and `/var/log/agentc-run.log` are neither read nor
+changed, even while the real loop runs. The check creates and removes only
+`/etc/init.d/agentc-run-check` (for the `insserv` dry run, which adds no rc
+links) and `/etc/cron.d/agentc-sysvinit-check`, and refuses to start if either
+is left over from an interrupted check.
 
 #### Quiet hours
 

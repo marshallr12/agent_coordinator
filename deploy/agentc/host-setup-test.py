@@ -517,6 +517,116 @@ class SysvRunScript(unittest.TestCase):
         self.assertIn("remove_service agentc-run", bash("declare -f uninstall"))
 
 
+class SysvinitCheck(unittest.TestCase):
+    """sysvinit-check.sh's preflight, insserv dry run and cleanup against a host
+    that has run host-setup (opted in and running), in a temporary root, with
+    stub tools and without root."""
+
+    CHECK = HERE / "sysvinit-check.sh"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.stubs = Path(tmp.name) / "stubs"
+        self.stubs.mkdir()
+        self.root = Path(tmp.name) / "root"
+        for d in ("etc/init.d", "etc/cron.d", "etc/rc2.d", "run", "var/log"):
+            (self.root / d).mkdir(parents=True)
+        # What host-setup and an opt-in leave behind, plus a running loop's files.
+        self.real = [self.root / "etc/init.d/agentc-run", self.root / "run/agentc-run.pid",
+                     self.root / "var/log/agentc-run.log"]
+        self.real[0].write_text(bash("run_sysv_script"))
+        self.real[1].write_text("4242\n")
+        self.real[2].write_text("2026-10-11T00:00:00Z agentc-run: exited 3; restarting in 30s\n")
+        (self.root / "etc/rc2.d/S01agentc-run").symlink_to("../init.d/agentc-run")
+        for tool in ("start-stop-daemon", "cron"):
+            self.stub(tool, "exit 0")
+        self.stub("insserv", f'printf "%s\\n" "$*" >> {self.stubs}/insserv.calls\n'
+                  'grep -q "^# Provides:          agentc-run-check$" "$2" || exit 1\n'
+                  'grep -q "^# Required-Start:.* agentc-firewall agentc-egress$" "$2"')
+
+    def stub(self, name, body):
+        path = self.stubs / name
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(0o755)
+
+    def snapshot(self):
+        """Contents, link targets and mtimes of everything belonging to the real loop."""
+        out = {}
+        for path in self.real + [self.root / "etc/rc2.d/S01agentc-run"]:
+            st = path.lstat()
+            out[str(path)] = (path.readlink() if path.is_symlink() else path.read_bytes(), st.st_mtime_ns, st.st_ino)
+        out["listing"] = sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*"))
+        return out
+
+    def run_check(self, code):
+        script = (f'set -euo pipefail; source "{self.CHECK}"; PATH="{self.stubs}:$PATH"; '
+                  f'id() {{ echo 0; }}; has_systemd() {{ false; }}; INITD_DIR="{self.root}/etc/init.d"; '
+                  f'CRON_DIR="{self.root}/etc/cron.d"; T=$(mktemp -d); set_paths; set_temp_paths; {code}')
+        return run(["bash", "-c", script])
+
+    def test_it_runs_next_to_the_real_loop_and_leaves_it_untouched(self):
+        before = self.snapshot()
+        result = self.run_check("preflight; build_fixture; "
+                                'case "$PIDFILE $LOG" in "$T"/*" $T"/*) ;; *) exit 9;; esac; '
+                                "check_boot_order; cleanup")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS insserv accepts the boot order (dry run)", result.stdout)
+        self.assertEqual(self.snapshot(), before)
+        # insserv was asked about the fake loop's own script, not the real one.
+        self.assertEqual((self.stubs / "insserv.calls").read_text(), f"-n {self.root}/etc/init.d/agentc-run-check\n")
+
+    def test_main_runs_next_to_the_real_loop_in_its_own_order(self):
+        """Runs the script's own main, which sets nothing up beforehand, with the
+        slow start/stop/cron checks replaced by markers."""
+        before = self.snapshot()
+        script = (f'set -euo pipefail; source "{self.CHECK}"; PATH="{self.stubs}:$PATH"; '
+                  f'id() {{ echo 0; }}; has_systemd() {{ false; }}; INITD_DIR="{self.root}/etc/init.d"; '
+                  f'CRON_DIR="{self.root}/etc/cron.d"; TMP_DIR="{self.root}/run"; check_start_and_restart() {{ echo ran-start; }}; '
+                  'check_stop() { echo ran-stop; }; check_cron() { echo ran-cron; }; main')
+        result = run(["bash", "-c", script])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS insserv accepts the boot order (dry run)", result.stdout)
+        for marker in ("ran-start", "ran-stop", "ran-cron", "sysvinit check: all PASS"):
+            self.assertIn(marker, result.stdout)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_the_fixture_shares_no_name_pidfile_or_log_with_the_real_loop(self):
+        result = self.run_check('preflight; build_fixture; cat "$T/$NAME"; cleanup')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("# Provides:          agentc-run-check\n", result.stdout)
+        self.assertNotIn("agentc-run.pid", result.stdout)
+        self.assertNotIn("agentc-run.log", result.stdout)
+        self.assertNotIn("Provides:          agentc-run\n", result.stdout)
+
+    def test_it_refuses_only_for_its_own_leftovers_and_deletes_nothing(self):
+        leftover = self.root / "etc/init.d/agentc-run-check"
+        leftover.write_text("left over")
+        before = self.snapshot()
+        result = self.run_check("preflight")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("agentc-run-check exists", result.stderr)
+        self.assertEqual(self.snapshot()["listing"], before["listing"])
+        self.assertEqual(leftover.read_text(), "left over")
+
+    def test_it_still_performs_the_four_checks(self):
+        text = self.CHECK.read_text()
+        for phrase in ("insserv accepts the boot order", "a crash restarts the loop after the delay",
+                       "stop let the loop drain", "stop killed the leftover launch in the group",
+                       "cron ran agentc-cron with the environment file"):
+            self.assertIn(phrase, text)
+        for step in ("check_boot_order", "check_start_and_restart", "check_stop", "check_cron"):
+            self.assertIn(step, text.split("main() {")[1])
+
+    def test_it_never_names_the_real_loops_paths_outside_comments(self):
+        code = [l for l in self.CHECK.read_text().splitlines() if not l.lstrip().startswith("#")]
+        for real in ("/run/agentc-run.pid", "/var/log/agentc-run.log", "init.d/agentc-run\n", "/etc/init.d/agentc-run "):
+            self.assertFalse(any(real in l + "\n" for l in code), real)
+
+    def test_the_script_parses(self):
+        subprocess.run(["bash", "-n", str(self.CHECK)], check=True)
+
+
 class RunWrapper(unittest.TestCase):
     """agentc-run-sysv against a fake supervisor."""
 
