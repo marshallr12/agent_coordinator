@@ -219,6 +219,25 @@ must be reopened by an operator or revised by an agent (`reason_code`
 `operation_not_permitted` and add `details.required_actor: "human"` and a
 `details.gate` name, or `required_actor: "human"` on the precondition.
 
+**Task origin and admission.** `POST /api/v1/projects/{project_id}/tasks` accepts an optional `admission_class`
+(`revert`, `fix_target`, `deflake` or `refusal_fix`; anything else is a 400).
+Every task view carries `origin` (`human`, `agent` or `service`), `admission_class`
+(or null) and `held_by_budget` (true while a budget-held task is still planned).
+An agent-created task without a class is admitted only while fewer than N
+agent-originated tasks were admitted in the current ISO week (UTC, Monday
+through Sunday) across all projects; otherwise it is created `planned`. The
+creation response then adds `admission`: `origin`, `admission_class`, `held`,
+`weekly_budget` (`limit`, `admitted_this_week`, `week_start`) and, when held,
+`reason`. Objectives are tasks and follow the same rule. Human-created tasks,
+tasks with a class and tasks created `planned` are never held and do not use
+the budget. Service-created reverts (`revert`) and the follow-up of a revise
+that lost to a landed push (`fix_target`) set their class; a re-land is
+created planned without one. An agent's task-definition edit cannot release a
+held task (`details.gate` `admission_budget`); a human's edit with
+`planned: false` can. N defaults to 5 and is set with
+`--agent-task-weekly-budget` or `COORDINATOR_AGENT_TASK_WEEKLY_BUDGET` (0
+through 10000).
+
 `GET /api/v1/projects/{project_id}/digest?hours=N` (default 24, at most 336)
 is the attention-budget summary: `proceeded_decisions` (reversible decisions the
 service answered with their recommendation in the window),
@@ -240,8 +259,11 @@ one item, with `ready_tasks`, `idle_hours`, `threshold_hours`,
 defaults to 6 hours and is set with `--stall-hours` or `COORDINATOR_STALL_HOURS`
 (1 through 336). `--quiet-hours START-END` or `COORDINATOR_QUIET_HOURS`, in UTC
 hours such as `22-07`, removes those hours from the idle clock; they are unset
-by default. Open human-required integrator reports are the other items. The
-digest also reports `last_read_at`, when it was last read (`null` if never).
+by default. Open human-required integrator reports are the other items. The digest
+also carries `held_agent_tasks` (the project's agent-created tasks the weekly
+admission budget held as planned, oldest first: `task_id`, `title`, `priority`,
+`held_at`) and `agent_task_weekly_budget` (`limit`, `week_start`), and
+`last_read_at`, when it was last read (`null` if never).
 Reads are recorded in two ways only. A human opening the digest in the dashboard
 sends `POST /api/v1/projects/{project_id}/digest/read` (`{}`, an idempotent
 mutation; agent credentials get `operation_not_permitted`), and `GET ...digest`

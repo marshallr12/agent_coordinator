@@ -146,6 +146,11 @@ def render_digest(data, ack_url=None):
     for item in data["pending_reversible_decisions"]:
         lines.append(f"  - {item['question']} -> {item['recommendation']} "
                      f"at {item['proceeds_at']} (decision {item['decision_id']})")
+    held = data.get("held_agent_tasks") or []
+    if held:
+        lines += ["", f"Agent tasks held by the weekly budget ({len(held)}):"]
+        for item in held:
+            lines.append(f"  - {item['title']} (task {item['task_id']}; edit it to release it)")
     lines += ["", f"Human-required interventions: {hri['count']} "
                   f"({hri['stalled_tasks']} stalled tasks)"]
     for item in hri["items"]:

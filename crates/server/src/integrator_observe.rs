@@ -335,6 +335,7 @@ async fn create_follow_up(
         .bind(&id).bind(p).bind(&title).bind(&description).bind(acceptance.to_string())
         .bind(subject.get::<String, _>("kind")).bind(priority).bind(m.now).bind(m.now)
         .execute(&mut *m.tx).await?;
+    crate::admission::record_service(m, &id, Some("fix_target")).await?;
     crate::coordination::save_task_revision(m, p, &id).await?;
     Ok(id)
 }

@@ -1,3 +1,4 @@
+pub mod admission;
 pub mod artifacts;
 pub mod attention;
 pub mod auth;

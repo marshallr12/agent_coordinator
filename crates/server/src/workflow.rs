@@ -3592,7 +3592,7 @@ async fn create_activity(
         "integration" => "Publish and validate the exact integrated result",
         _ => "Record a decision for the immutable submission",
     }])?;
-    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,revision,generation,blocked_reason,created_at,ready_since) VALUES(?,?,?,?,?,'general',0,'open',1,0,?,?,?)")
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,revision,generation,blocked_reason,created_at,ready_since,origin) VALUES(?,?,?,?,?,'general',0,'open',1,0,?,?,?,'service')")
         .bind(&task).bind(project).bind(&title).bind(format!("Internal workflow activity for submission {submission}.")).bind(&acceptance)
         .bind(Option::<String>::None).bind(now).bind(now).execute(&mut *c).await?;
     sqlx::query("INSERT INTO task_revisions(project_id,task_id,revision,data_json,actor_id,created_at) \
