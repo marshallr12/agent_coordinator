@@ -1499,7 +1499,13 @@ reads `/etc/agentc/e2e-canary.env` for `E2E_PROJECT`, `E2E_HARNESSES`,
 
 The timer's schedule is `UPDATE_CALENDAR` when host-setup runs (default
 `daily`). host-setup enables the timer only where the end-to-end canary is ready
-(see above); `UPDATE_TIMER=0` installs it but never enables it. `sudo python3 -I
+(see above); `UPDATE_TIMER=0` installs it but never enables it. Before the
+first release that carries an `agentc-host` bundle for the host's architecture
+exists (`releases/latest` answers 404, or the latest release has no such
+asset), an enabled timer is harmless: each run records outcome `no-release` in
+`update.jsonl`, logs one journal line, exits 0 and changes nothing. A malformed
+release answer, a checksum or attestation failure and any other fetch failure
+still exit 2. `sudo python3 -I
 /opt/agentc/bin/agentc-update --check` reports what a run would do and changes
 nothing; `--retry` clears the rejected releases. Each run appends a line to
 `/var/lib/agentc/update.jsonl`.

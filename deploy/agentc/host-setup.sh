@@ -23,7 +23,10 @@
 # installs agentc-update (the root-owned pull updater, deploy/agentc/agentc-update.py)
 # with the agentc-update timer, configured by /etc/agentc/update.env; the timer
 # is enabled once the end-to-end canary is, because a release is promoted only
-# when that canary passes.
+# when that canary passes (UPDATE_TIMER=0 leaves it disabled). Until the
+# repository publishes a release that carries an agentc-host bundle for this
+# host, each timer run finds nothing to install, records outcome no-release in
+# update.jsonl, logs one journal line, exits 0 and changes nothing.
 set -euo pipefail
 
 PREFIX=/opt/agentc
