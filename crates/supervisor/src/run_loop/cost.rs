@@ -12,7 +12,7 @@
 //! ([`settle_review`]), once per session.
 use super::record::LaunchRecord;
 use super::review_cost::ReviewLaunch;
-use super::{Driver, Launch, health};
+use super::{Driver, Launch, health, select, usage};
 use crate::config::Config;
 use crate::estimate;
 use crate::profile::Role;
@@ -219,8 +219,18 @@ pub fn settle(
     launch: &Launch,
     record: &LaunchRecord,
 ) -> String {
-    let digest = digest(&driver.events(launch).unwrap_or_default());
+    let events = driver.events(launch).unwrap_or_default();
+    let digest = digest(&events);
     let now = driver.now_ms();
+    if config.health.selection.mode != select::Mode::Off {
+        usage::record_events(
+            config,
+            Role::Implementer,
+            launch.vendor.harness,
+            &events,
+            now,
+        );
+    }
     if let Some(reset) = digest.exhausted {
         let minutes = i64::try_from(config.health.exhausted_minutes).unwrap_or(i64::MAX);
         let until = reset.unwrap_or(now.saturating_add(minutes.saturating_mul(60_000)));
@@ -249,6 +259,15 @@ pub fn settle_review(config: &Config, launch: &ReviewLaunch, events: &[u8], now:
         return true;
     }
     let digest = digest(events);
+    if config.health.reviewer_selection.mode != select::Mode::Off {
+        let (role, harness) = (Role::Reviewer, launch.vendor.harness);
+        usage::record_events(config, role, harness, events, now);
+        if let Some(reset) = digest.exhausted {
+            let minutes = i64::try_from(config.health.exhausted_minutes).unwrap_or(i64::MAX);
+            let until = reset.unwrap_or(now.saturating_add(minutes.saturating_mul(60_000)));
+            health::mark_exhausted_for(config, role, harness, until);
+        }
+    }
     let costed = priced(
         digest.usage,
         config,
@@ -267,6 +286,7 @@ pub fn settle_review(config: &Config, launch: &ReviewLaunch, events: &[u8], now:
         "cached_input_tokens": usage.cached_input_tokens,
         "output_tokens": usage.output_tokens, "usd": usage.usd,
     });
+    let line = selected(line, launch.choice.as_ref());
     let line = estimated(canary(config, line), &costed);
     let appended = append(config, &line);
     if let Err(error) = &appended {
@@ -368,7 +388,17 @@ fn entry(
         "cached_input_tokens": usage.cached_input_tokens,
         "output_tokens": usage.output_tokens, "usd": usage.usd,
     });
+    let line = selected(line, launch.choice.as_ref());
     estimated(canary(config, line), costed)
+}
+
+/// `line` with the `selection` that chose the vendor (the deciding rule and
+/// the readings it saw), when a selection did.
+fn selected(mut line: Value, choice: Option<&select::Choice>) -> Value {
+    if let Some(choice) = choice {
+        line["selection"] = json!({"rule": choice.rule, "readings": choice.readings});
+    }
+    line
 }
 
 /// `line` with `canary: true` when its `project` is the

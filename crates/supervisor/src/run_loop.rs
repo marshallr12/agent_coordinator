@@ -30,7 +30,9 @@ pub mod renewal;
 pub mod report;
 pub mod review;
 pub mod review_cost;
+pub mod select;
 pub mod unsubmitted;
+pub mod usage;
 
 /// Root's no-symlink file operations below a role directory. They belong to
 /// the Linux host runtime and are named here for the live reviewer side.
@@ -154,6 +156,8 @@ pub struct Launch {
     pub run: PathBuf,
     /// The harness, model and effort it runs with ([`health::admit`]).
     pub vendor: health::Vendor,
+    /// The selection that chose the vendor, when `[health.selection]` is on.
+    pub choice: Option<select::Choice>,
 }
 
 impl Launch {
@@ -179,6 +183,7 @@ impl Launch {
             clone: role.join("clones").join(session_id.to_string()),
             run: role.join("runs").join(session_id.to_string()),
             vendor: health::Vendor::primary(&config.run),
+            choice: None,
         }
     }
 }
@@ -250,6 +255,17 @@ pub trait Driver {
     fn credential_expiry_ms(&self, _harness: Harness) -> Option<i64> {
         None
     }
+    /// Whether `harness`'s pinned binary is installed; a harness that is not
+    /// is never a candidate of [`select`].
+    fn installed(&self, _harness: Harness) -> bool {
+        true
+    }
+    /// The implementer account's usage windows at `harness`, asked of the
+    /// vendor's own interface without spending inference; `None` when it
+    /// has none ([`usage`]).
+    fn poll_usage(&mut self, _harness: Harness) -> Result<Option<Vec<usage::Window>>> {
+        Ok(None)
+    }
     /// Sends the cost ledger's unsent rows to the coordinator after a poll
     /// ([`report`]); a failure is logged and the rows stay unsent. Hosts
     /// that do not report do nothing.
@@ -302,6 +318,9 @@ const MAX_REPORTED_HOLDS: usize = 20;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Skipped {
     pub tasks: Vec<String>,
+    /// The vendor choice behind the launch this poll started, when
+    /// selection is on: the heartbeat names the vendor and why.
+    pub choice: Option<select::Choice>,
 }
 
 /// Polls until stopped (or once), writing the heartbeat after every poll
@@ -393,8 +412,8 @@ pub fn iterate_reporting(driver: &mut impl Driver, config: &Config) -> (Outcome,
     if let Some(reason) = refusal(driver, &config.run) {
         return (Outcome::Refused(reason), skipped);
     }
-    let vendor = match health::admit(driver, config) {
-        Ok(vendor) => vendor,
+    let (vendor, choice) = match health::admit(driver, config) {
+        Ok(admitted) => admitted,
         Err(reason) => return (Outcome::Refused(reason), skipped),
     };
     let strikes = unsubmitted::Strikes::load(config);
@@ -434,9 +453,11 @@ pub fn iterate_reporting(driver: &mut impl Driver, config: &Config) -> (Outcome,
             continue;
         }
         let launch = Launch {
-            vendor,
+            vendor: vendor.clone(),
+            choice: choice.clone(),
             ..Launch::plan(config, project, suggestion)
         };
+        skipped.choice = choice;
         let result = work(driver, config, &launch);
         let outcome = finish(driver, config, &launch, result);
         driver.select(&main);
@@ -749,6 +770,9 @@ pub fn beat_with(path: &Path, iteration: u64, outcome: &Outcome, skipped: &Skipp
         Outcome::Held(reason) => record["hold"] = json!(reason),
         _ => {}
     }
+    if let Some(choice) = &skipped.choice {
+        record["vendor"] = choice_json(choice);
+    }
     write_beat(path, &record)
 }
 
@@ -758,6 +782,23 @@ pub fn beat_with(path: &Path, iteration: u64, outcome: &Outcome, skipped: &Skipp
 /// `last_outcome`, so a refusal that came before the launch is not mistaken
 /// for the host's present state. The next [`beat_with`] drops the entry.
 pub fn beat_busy(path: &Path, role: &str, task: &str) -> Result<()> {
+    beat_busy_with(path, role, task, None)
+}
+
+/// The vendor choice as the heartbeat names it: the harness and model that
+/// run, the deciding rule and the readings it saw.
+fn choice_json(choice: &select::Choice) -> Value {
+    json!({"harness": health::name(choice.vendor.harness), "model": choice.vendor.model,
+           "rule": choice.rule, "readings": choice.readings})
+}
+
+/// [`beat_busy`], also naming the vendor `choice` selected and why.
+pub fn beat_busy_with(
+    path: &Path,
+    role: &str,
+    task: &str,
+    choice: Option<&select::Choice>,
+) -> Result<()> {
     let last: Value = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -767,13 +808,16 @@ pub fn beat_busy(path: &Path, role: &str, task: &str) -> Result<()> {
         .filter(|_| last.get("launch").is_some())
         .or(last["outcome"].as_str())
         .unwrap_or("Idle");
-    let record = json!({"pid": std::process::id(),
+    let mut record = json!({"pid": std::process::id(),
                         "iteration": last["iteration"].as_u64().unwrap_or(0),
                         "at_ms": crate::shadow::now_ms(),
                         "outcome": "Busy",
                         "state": "busy",
                         "last_outcome": previous,
                         "launch": {"role": role, "task": task}});
+    if let Some(choice) = choice {
+        record["launch"]["vendor"] = choice_json(choice);
+    }
     write_beat(path, &record)
 }
 

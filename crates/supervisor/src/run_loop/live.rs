@@ -327,9 +327,12 @@ impl Driver for LiveDriver {
 
     fn heartbeat(&mut self, launch: &Launch) {
         let path = super::heartbeat_path(&self.config);
-        if let Err(error) =
-            super::beat_busy(&path, Role::Implementer.slug(), &launch.suggestion.task)
-        {
+        if let Err(error) = super::beat_busy_with(
+            &path,
+            Role::Implementer.slug(),
+            &launch.suggestion.task,
+            launch.choice.as_ref(),
+        ) {
             eprintln!("agentc-supervisor run: heartbeat: {error:#}");
         }
     }
@@ -340,11 +343,21 @@ impl Driver for LiveDriver {
     }
 
     fn harness_status(&mut self, harness: Harness) -> Result<()> {
-        super::live_health::status(&self.config, self.host.account(), harness)
+        let role = Role::Implementer;
+        super::live_health::status(&self.config, self.host.account(), role, harness)
     }
 
     fn credential_expiry_ms(&self, harness: Harness) -> Option<i64> {
-        super::live_health::expiry_ms(&self.config, harness)
+        super::live_health::expiry_ms(&self.config, Role::Implementer, harness)
+    }
+
+    fn installed(&self, harness: Harness) -> bool {
+        super::live_health::installed(&self.config, harness)
+    }
+
+    fn poll_usage(&mut self, harness: Harness) -> Result<Option<Vec<super::usage::Window>>> {
+        let role = Role::Implementer;
+        super::live_health::poll_usage(&self.config, self.host.account(), role, harness)
     }
 
     fn report_costs(&mut self, config: &Config) {

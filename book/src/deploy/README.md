@@ -997,6 +997,55 @@ After the disk check, each poll admits a claim only when all of these hold:
   (see below). The launch runs, and connects its session, with the chosen
   vendor, which its launch record keeps.
 
+#### Choosing the vendor by remaining usage
+
+By default a launch runs with `[run]` and changes vendor only after a failure,
+as above. With `[health.selection] mode = "usage"` (implementers) or
+`[health.reviewer_selection] mode = "usage"` (reviewers; the two are set
+independently, and each uses its own role's account and credential) the
+supervisor chooses before each claim the vendor whose account has more usage
+left in its current limit window. The existing rules apply first to every
+candidate and are not weakened: kill switch, daily caps, exhausted marks (a
+reviewer's marks are its own, `reviewer-claude` and `reviewer-codex`),
+credential expiry, the sign-in check, and that the harness is installed; a
+vendor they rule out is never chosen. `mode = "claude"` or `"codex"` fixes a
+role to one vendor, which is never switched, not even after a 429. With
+`mode = "off"`, the default, and for a reviewer with no
+`[health.reviewer_selection]`, nothing changes. Each vendor's model and effort
+come from `[health.selection.claude]` / `.codex` (or the reviewer's), else from
+`[run]` or `[health.fallback]` when they name that harness; a vendor with no
+model is not a candidate.
+
+**What each vendor reports.** The supervisor uses only the vendor's own CLI
+or documented interface, as the role, and spends no inference to measure:
+
+| Vendor | Figure | Where it comes from |
+| --- | --- | --- |
+| Codex | `usedPercent`, window length and reset time of the `primary` and `secondary` windows | `codex app-server`, JSON-RPC `account/rateLimits/read`, started as the role with its own `CODEX_HOME`; at most once per `cache_minutes` |
+| Claude | utilization (fraction used) and reset time of the 5-hour and 7-day windows | none on demand: the role's long-lived token cannot read the account's usage endpoint, and the `anthropic-ratelimit-unified-*` headers come only with an inference request. The last `rate_limit_event` in a launch's own event stream carries them; the supervisor keeps the last one a launch of that role wrote |
+
+The reading is the window with the least left. Readings are cached in
+`/var/lib/agentc/usage.json` with the time they were read and the window's
+reset time, so a poll inside `cache_minutes` (default 10) queries no vendor. A
+reading older than `stale_minutes` (default 60), or whose window has reset
+since, counts as unknown, as does a vendor that gives no figure or whose query
+failed.
+
+**The rule**, in order: a vendor known to have less than
+`min_remaining_percent` (default 10) left is passed over while another is
+known to have at least that much; if every remaining candidate has a fresh
+reading, the one with more left wins, readings within one percentage point
+tying; if any is unknown, `order` (default `claude`, `codex`) decides. An
+unknown vendor is neither preferred nor excluded, and the 429 path remains the
+backstop. The heartbeat (the poll's `vendor` entry and the busy `launch.vendor`
+entry), the launch record and the cost ledger's `selection` entry give the
+vendor that ran, the deciding rule (`fixed`, `only_usable`,
+`below_minimum_skipped`, `more_remaining`, `tie_by_order`, `unknown_by_order`)
+and every reading it saw, including the vendors ruled out and why. A reviewer's
+connect identity (`agentc-supervisor-reviewer-<harness>`), its cost row and its
+verdict parsing follow the harness that ran. All settings have in-code
+defaults and appear commented in `supervisor.toml`.
+
 Once a day the loop logs a warning for each credential expiring within
 `[health] expiry_warn_days` (default 14). A Claude token's expiry is its
 `claude-token` file's modification time plus `token_lifetime_days` (default

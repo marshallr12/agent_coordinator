@@ -332,3 +332,171 @@ fn a_kill_switch_that_cannot_be_checked_counts_as_set() {
     );
     assert!(fake.steps.is_empty());
 }
+
+/// A host with a Codex fallback model and `mode` selection for implementers.
+fn selecting(dir: &Path, mode: select::Mode) -> Config {
+    let mut config = with_fallback(dir);
+    config.health.selection.mode = mode;
+    config
+}
+
+/// `percent` of a five-hour window used.
+fn used(percent: f64) -> Vec<usage::Window> {
+    vec![usage::Window {
+        label: "5h".into(),
+        used_percent: percent,
+        resets_at_ms: None,
+    }]
+}
+
+#[test]
+fn with_selection_off_the_vendor_and_the_records_are_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = with_fallback(dir.path());
+    assert_eq!(config.health.selection.mode, select::Mode::Off);
+    let mut fake = Fake::new();
+    fake.usage = vec![(Harness::Claude, used(99.0)), (Harness::Codex, used(0.0))];
+    fake.missing = vec![Harness::Codex];
+    let (outcome, skipped) = iterate_reporting(&mut fake, &config);
+    assert!(matches!(outcome, Outcome::Launched { .. }));
+    assert!(fake.polls.is_empty(), "no vendor is asked for usage");
+    let entry = &ledger(&config)[0];
+    assert_eq!(entry["harness"], "claude");
+    assert!(entry.get("selection").is_none());
+    assert_eq!(skipped.choice, None);
+    let path = dir.path().join("heartbeat.json");
+    beat_with(&path, 1, &outcome, &skipped).unwrap();
+    let beat: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(beat.get("vendor").is_none());
+    assert!(!dir.path().join("usage.json").exists());
+}
+
+#[test]
+fn with_selection_on_the_vendor_with_more_left_runs_and_the_records_say_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = selecting(dir.path(), select::Mode::Usage);
+    let mut fake = Fake::new();
+    fake.now = 1_000_000;
+    fake.usage = vec![(Harness::Claude, used(80.0)), (Harness::Codex, used(10.0))];
+    let (outcome, skipped) = iterate_reporting(&mut fake, &config);
+    assert!(matches!(outcome, Outcome::Launched { .. }), "{outcome:?}");
+    let entry = &ledger(&config)[0];
+    assert_eq!(
+        (&entry["harness"], &entry["model"]),
+        (&json!("codex"), &json!("gpt-5.5"))
+    );
+    assert_eq!(entry["selection"]["rule"], "more_remaining");
+    let readings = entry["selection"]["readings"].to_string();
+    assert!(
+        readings.contains("claude 20% left") && readings.contains("codex 90% left"),
+        "{readings}"
+    );
+    // The poll's heartbeat names the vendor and why.
+    let choice = skipped.choice.clone().unwrap();
+    assert_eq!(choice.vendor.harness, Harness::Codex);
+    let path = dir.path().join("heartbeat.json");
+    beat_with(&path, 1, &outcome, &skipped).unwrap();
+    let beat: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(beat["vendor"]["harness"], "codex");
+    assert_eq!(beat["vendor"]["rule"], "more_remaining");
+    // So does the heartbeat while the launch runs.
+    beat_busy_with(&path, "implementer", "t1", Some(&choice)).unwrap();
+    let busy: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(busy["launch"]["vendor"]["model"], "gpt-5.5");
+    assert!(busy["launch"]["vendor"]["readings"].is_array());
+}
+
+#[test]
+fn a_poll_within_the_cache_period_asks_no_vendor_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = selecting(dir.path(), select::Mode::Usage);
+    let mut fake = Fake::new();
+    fake.now = 1_000_000;
+    fake.usage = vec![(Harness::Codex, used(10.0))];
+    iterate(&mut fake, &config);
+    iterate(&mut fake, &config);
+    assert_eq!(
+        fake.polls,
+        [Harness::Claude, Harness::Codex],
+        "one query per vendor"
+    );
+    assert_eq!(ledger(&config).len(), 2);
+    fake.now += 11 * 60_000;
+    iterate(&mut fake, &config);
+    assert_eq!(
+        fake.polls.len(),
+        4,
+        "asked again once the cache period passed"
+    );
+}
+
+#[test]
+fn unknown_readings_follow_the_order_and_a_429_still_moves_the_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = selecting(dir.path(), select::Mode::Usage);
+    let mut fake = Fake::new();
+    fake.events = rejected(7_200);
+    iterate(&mut fake, &config);
+    fake.events.clear();
+    iterate(&mut fake, &config);
+    let rows = ledger(&config);
+    assert_eq!(
+        rows[0]["harness"], "claude",
+        "no figures: the order decides"
+    );
+    assert_eq!(rows[0]["selection"]["rule"], "unknown_by_order");
+    assert_eq!(rows[1]["harness"], "codex", "the 429 mark rules Claude out");
+    assert_eq!(rows[1]["selection"]["rule"], "only_usable");
+}
+
+#[test]
+fn a_role_fixed_to_one_harness_is_refused_rather_than_switched() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = selecting(dir.path(), select::Mode::Claude);
+    let mut fake = Fake::new();
+    fake.unhealthy = vec![Harness::Claude];
+    let outcome = iterate(&mut fake, &config);
+    assert!(
+        matches!(&outcome, Outcome::Refused(r) if r.contains("claude is not signed in")),
+        "{outcome:?}"
+    );
+    assert!(fake.steps.is_empty());
+    fake.unhealthy.clear();
+    iterate(&mut fake, &config);
+    assert_eq!(ledger(&config)[0]["selection"]["rule"], "fixed");
+}
+
+#[test]
+fn a_vendor_that_is_not_installed_is_not_a_candidate_before_claiming() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = selecting(dir.path(), select::Mode::Usage);
+    let mut fake = Fake::new();
+    fake.missing = vec![Harness::Claude, Harness::Codex];
+    let outcome = iterate(&mut fake, &config);
+    assert!(
+        matches!(&outcome, Outcome::Refused(r) if r.contains("claude is not installed")),
+        "{outcome:?}"
+    );
+    assert!(fake.steps.is_empty());
+}
+
+#[test]
+fn the_launch_record_keeps_the_choice_for_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = selecting(dir.path(), select::Mode::Usage);
+    let mut launch = planned(dir.path());
+    let choice = select::Choice {
+        vendor: config.health.fallback.clone().unwrap(),
+        rule: "tie_by_order".into(),
+        readings: vec!["codex 50% left".into()],
+    };
+    launch.vendor = choice.vendor.clone();
+    launch.choice = Some(choice.clone());
+    let record = LaunchRecord::new(&launch, &Fake::lease(), &on_boot("boot-0"), 0);
+    record.save(&config).unwrap();
+    let loaded = LaunchRecord::load(&config, &launch.session_id).unwrap();
+    assert_eq!(loaded.launch(&config, "p1").choice, Some(choice));
+    let off = Launch::plan(&config, "p1", launch.suggestion.clone());
+    let record = LaunchRecord::new(&off, &Fake::lease(), &on_boot("boot-0"), 0);
+    assert!(!serde_json::to_string(&record).unwrap().contains("choice"));
+}
