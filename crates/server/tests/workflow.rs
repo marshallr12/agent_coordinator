@@ -5114,6 +5114,148 @@ async fn integrator_reports_page_newest_first() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+// The report list filters by kind, check, repository and target branch, each
+// alone and combined with `open` and `task_id`, and pages the filtered set.
+#[tokio::test]
+async fn integrator_reports_filter_by_kind_check_and_target() {
+    let f = Fixture::new().await;
+    let (p, t, _, i) = integrator_task(&f, "integrator-report-filters").await;
+    let task = t["id"].as_str().unwrap();
+    let details = |check: &str, repo: &str, branch: &str| json!({"check_name":check,"repository_url":repo,"target_branch":branch});
+    let rows = [
+        (
+            "a",
+            "flaky",
+            "Unit",
+            "https://example.test/a.git",
+            "main",
+            None,
+        ),
+        (
+            "b",
+            "flaky",
+            "Docs",
+            "https://example.test/a.git",
+            "main",
+            Some(task),
+        ),
+        (
+            "c",
+            "fix_target",
+            "Unit",
+            "https://example.test/b.git",
+            "main",
+            None,
+        ),
+        (
+            "d",
+            "fix_target",
+            "Unit",
+            "https://example.test/a.git",
+            "release",
+            Some(task),
+        ),
+        (
+            "e",
+            "fix_target",
+            "Unit",
+            "https://example.test/a.git",
+            "main",
+            Some(task),
+        ),
+    ];
+    let mut ids = std::collections::HashMap::new();
+    for (key, kind, check, repo, branch, task_id) in rows {
+        let body = json!({"kind":kind,"dedupe_key":key,"task_id":task_id,
+            "details":details(check, repo, branch)});
+        let (status, v) = integrator_post(&f, &i, &p, "reports", body).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        ids.insert(key, v["data"]["id"].as_str().unwrap().to_owned());
+    }
+    let (status, v) = resolve(
+        &f,
+        &f.admin,
+        &p,
+        &json!(ids["e"]),
+        json!({"note":"Handled"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let keys = |v: &Value| -> Vec<String> {
+        let items = v["data"]["items"].as_array().unwrap();
+        items
+            .iter()
+            .map(|r| r["dedupe_key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let list = |query: &str| format!("/api/v1/projects/{p}/integrator/reports?{query}");
+    let repo_a = "repository_url=https://example.test/a.git";
+    let cases = [
+        ("kind=flaky".to_owned(), vec!["b", "a"]),
+        ("kind=fix_target".to_owned(), vec!["e", "d", "c"]),
+        ("kind=privilege_gate".to_owned(), vec![]),
+        ("check_name=Docs".to_owned(), vec!["b"]),
+        ("check_name=Unit".to_owned(), vec!["e", "d", "c", "a"]),
+        ("check_name=Missing".to_owned(), vec![]),
+        (
+            "repository_url=https://example.test/b.git".to_owned(),
+            vec!["c"],
+        ),
+        ("target_branch=release".to_owned(), vec!["d"]),
+        (
+            "kind=fix_target&check_name=Unit&target_branch=main".to_owned(),
+            vec!["e", "c"],
+        ),
+        (format!("{repo_a}&target_branch=main"), vec!["e", "b", "a"]),
+        ("kind=fix_target&open=true".to_owned(), vec!["d", "c"]),
+        (format!("kind=fix_target&task_id={task}"), vec!["e", "d"]),
+        (
+            format!("kind=fix_target&task_id={task}&open=true"),
+            vec!["d"],
+        ),
+        (
+            format!("{repo_a}&target_branch=main&task_id={task}"),
+            vec!["e", "b"],
+        ),
+    ];
+    for (query, want) in cases {
+        let (status, v) = f.call(&f.a, "GET", &list(&query), Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {v}");
+        assert_eq!(keys(&v), want, "{query}");
+    }
+    // A filtered set pages with its own cursor.
+    let (_, first) = f
+        .call(&f.a, "GET", &list("kind=fix_target&limit=2"), Value::Null)
+        .await;
+    assert_eq!(keys(&first), ["e", "d"]);
+    let cursor = first["data"]["next_before"].as_str().unwrap();
+    let (_, rest) = f
+        .call(
+            &f.a,
+            "GET",
+            &list(&format!("kind=fix_target&limit=2&before={cursor}")),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(keys(&rest), ["c"]);
+    assert!(rest["data"]["next_before"].is_null(), "{rest}");
+    // An unknown kind and over-long values are refused.
+    let long = "x".repeat(2049);
+    let bad = [
+        "kind=bogus".to_owned(),
+        "kind=".to_owned(),
+        format!("check_name={}", "x".repeat(513)),
+        format!("target_branch={}", "x".repeat(513)),
+        format!("repository_url={long}"),
+        format!("task_id={}", "x".repeat(101)),
+        "check_name=a%00b".to_owned(),
+    ];
+    for query in bad {
+        let (status, v) = f.call(&f.a, "GET", &list(&query), Value::Null).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {v}");
+    }
+}
+
 // Any authenticated reader shows one report in the shape of a list item; an
 // unknown id or another project's report is not found, and the list filters
 // by task.

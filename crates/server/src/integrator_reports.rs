@@ -45,6 +45,10 @@ const MAX_DETAILS_BYTES: usize = 65_536;
 const DEFAULT_LIST_LIMIT: i64 = 200;
 /// The largest `limit` a list call accepts.
 const MAX_LIST_LIMIT: i64 = 1000;
+/// The longest `check_name` or `target_branch` filter value.
+const MAX_FILTER_BYTES: usize = 512;
+/// The longest `repository_url` filter value.
+const MAX_URL_FILTER_BYTES: usize = 2048;
 /// Open human-required reports listed per `next` call.
 const HUMAN_QUEUE_LIMIT: i64 = 50;
 
@@ -310,8 +314,22 @@ async fn require_project(c: &mut SqliteConnection, p: &str) -> Result<(), AppErr
 struct ListQuery {
     open: Option<bool>,
     task_id: Option<String>,
+    kind: Option<String>,
+    check_name: Option<String>,
+    repository_url: Option<String>,
+    target_branch: Option<String>,
     limit: Option<i64>,
     before: Option<String>,
+}
+
+/// The filters of one report page; a `None` filter keeps every report.
+struct ReportFilter<'a> {
+    open: bool,
+    task_id: Option<&'a str>,
+    kind: Option<&'a str>,
+    check_name: Option<&'a str>,
+    repository_url: Option<&'a str>,
+    target_branch: Option<&'a str>,
 }
 
 impl ListQuery {
@@ -321,6 +339,34 @@ impl ListQuery {
             limit @ 1..=MAX_LIST_LIMIT => Ok(limit),
             _ => Err(AppError::bad_request("limit must be between 1 and 1000.")),
         }
+    }
+
+    /// The page filters, after refusing an unknown kind or an over-long value.
+    fn filter(&self) -> Result<ReportFilter<'_>, AppError> {
+        if let Some(kind) = &self.kind
+            && !KINDS.contains(&kind.as_str())
+        {
+            return Err(AppError::bad_request(
+                "kind is not an integrator report kind.",
+            ));
+        }
+        let texts = [
+            (&self.task_id, "task_id", 100),
+            (&self.check_name, "check_name", MAX_FILTER_BYTES),
+            (&self.repository_url, "repository_url", MAX_URL_FILTER_BYTES),
+            (&self.target_branch, "target_branch", MAX_FILTER_BYTES),
+        ];
+        for (value, name, max) in texts {
+            bounded(value.as_deref().unwrap_or_default(), name, max, false)?;
+        }
+        Ok(ReportFilter {
+            open: self.open.unwrap_or(false),
+            task_id: self.task_id.as_deref(),
+            kind: self.kind.as_deref(),
+            check_name: self.check_name.as_deref(),
+            repository_url: self.repository_url.as_deref(),
+            target_branch: self.target_branch.as_deref(),
+        })
     }
 }
 
@@ -339,24 +385,37 @@ async fn cursor(c: &mut SqliteConnection, p: &str, before: Option<&str>) -> Resu
 }
 
 /// One page of project `p`'s reports, newest first, recorded before
-/// position `before`; only unresolved ones when `open`, only those about
-/// `task_id` when given.
+/// position `before`; only unresolved ones when `open`, and only those that
+/// match every other filter given (the check, repository and branch are the
+/// ones the report's details name).
 async fn report_page(
     c: &mut SqliteConnection,
     p: &str,
-    (open, task_id): (bool, Option<&str>),
+    filter: &ReportFilter<'_>,
     before: i64,
     limit: i64,
 ) -> Result<Vec<Value>, AppError> {
     let rows = sqlx::query(
         "SELECT * FROM integrator_reports WHERE project_id=? \
          AND (?=0 OR resolved_at IS NULL) AND (? IS NULL OR task_id=?) \
+         AND (? IS NULL OR kind=?) \
+         AND (? IS NULL OR json_extract(details_json,'$.check_name')=?) \
+         AND (? IS NULL OR json_extract(details_json,'$.repository_url')=?) \
+         AND (? IS NULL OR json_extract(details_json,'$.target_branch')=?) \
          AND rowid<? ORDER BY rowid DESC LIMIT ?",
     )
     .bind(p)
-    .bind(open)
-    .bind(task_id)
-    .bind(task_id)
+    .bind(filter.open)
+    .bind(filter.task_id)
+    .bind(filter.task_id)
+    .bind(filter.kind)
+    .bind(filter.kind)
+    .bind(filter.check_name)
+    .bind(filter.check_name)
+    .bind(filter.repository_url)
+    .bind(filter.repository_url)
+    .bind(filter.target_branch)
+    .bind(filter.target_branch)
     .bind(before)
     .bind(limit)
     .fetch_all(&mut *c)
@@ -364,7 +423,8 @@ async fn report_page(
     rows.iter().map(report_value).collect()
 }
 
-/// `GET …/integrator/reports?open=true&task_id=<id>&limit=200&before=<id>`:
+/// `GET …/integrator/reports?open=true&task_id=<id>&kind=<kind>&check_name=<name>
+/// &repository_url=<url>&target_branch=<branch>&limit=200&before=<id>`:
 /// the project's reports, newest first, for any reader (the digest, the
 /// dashboard, agents). `next_before` is the cursor of the following page,
 /// or null when this page is the last.
@@ -375,11 +435,11 @@ async fn list_reports(
     Query(query): Query<ListQuery>,
 ) -> Reply {
     let limit = query.limit()?;
+    let filter = query.filter()?;
     let mut c = s.pool.acquire().await?;
     require_project(&mut c, &p).await?;
     let before = cursor(&mut c, &p, query.before.as_deref()).await?;
-    let filter = (query.open.unwrap_or(false), query.task_id.as_deref());
-    let items = report_page(&mut c, &p, filter, before, limit).await?;
+    let items = report_page(&mut c, &p, &filter, before, limit).await?;
     let full = i64::try_from(items.len()).unwrap_or(i64::MAX) == limit;
     let next = full
         .then(|| items.last().map(|r| r["id"].clone()))

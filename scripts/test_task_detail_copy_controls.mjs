@@ -144,7 +144,11 @@ function reportListRoute(url, response) {
   const open = url.searchParams.get('open') === 'true', limit = Number(url.searchParams.get('limit') || 200);
   const newest = [...reports].reverse(), before = url.searchParams.get('before');
   const start = before ? newest.findIndex((report) => report.id === before) + 1 : 0;
-  const items = newest.slice(start).filter((report) => !open || !report.resolved_at).slice(0, limit);
+  const matches = (report) => (!open || !report.resolved_at)
+    && (!url.searchParams.has('kind') || report.kind === url.searchParams.get('kind'))
+    && (!url.searchParams.has('task_id') || report.task_id === url.searchParams.get('task_id'))
+    && ['check_name', 'repository_url', 'target_branch'].every((name) => !url.searchParams.has(name) || report.details[name] === url.searchParams.get(name));
+  const items = newest.slice(start).filter(matches).slice(0, limit);
   return json(response, { project_id: 'fixture-project', items, next_before: items.length === limit ? items.at(-1).id : null });
 }
 
@@ -411,6 +415,96 @@ async function checkLoadMoreFailure(page) {
   assert(reportQueries.at(-1).before === reports[3].id, 'The failed next page used the wrong cursor.');
 }
 
+// Sets a reports filter control the way a person commits it, then waits for the list to be requested.
+async function setReportFilter({ evaluate, waitPage }, id, value) {
+  const before = reportQueries.length;
+  await evaluate(`(() => { const control = document.querySelector('#${id}'); control.value = ${JSON.stringify(value)}; control.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  for (let tries = 0; reportQueries.length === before; tries += 1) {
+    assert(tries < 100, `Changing ${id} did not request the reports.`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  await waitPage("document.querySelector('#reports-state').textContent !== 'Loading reports…'", `reports loaded after changing ${id}`);
+}
+
+// Waits until the listed cards are exactly `ids`.
+const waitReports = ({ waitPage }, ids, what) => waitPage(`JSON.stringify([...document.querySelectorAll('#reports-list .report-card')].map((card) => card.dataset.reportId)) === ${JSON.stringify(JSON.stringify(ids))}`, what);
+
+// Kind, check, repository, target branch and task filters: labelled controls, each sent to the service,
+// combined, reloading page one, carried to further pages, with card facts and a filtered empty state.
+async function checkReportFilters(page) {
+  const { evaluate, waitPage } = page;
+  const about = (id, kind, check, repository, branch, verdict, extra = {}) => fixtureReport(id, kind, { details: { check_name: check, repository_url: repository, target_branch: branch, verdict }, ...extra });
+  const added = [
+    about('filter-a', 'fix_target', 'Coordination checks', 'https://example.test/a.git', 'main', 'target_failing', { task_id: 'task-copy-id-1' }),
+    about('filter-b', 'flaky', 'Documentation checks', 'https://example.test/a.git', 'release', 'rerun_refused'),
+    about('filter-c', 'flaky', 'Coordination checks', 'https://example.test/b.git', 'main', 'rerun_refused'),
+  ];
+  reports.push(...added);
+  const controls = ['reports-filter', 'reports-kind', 'reports-check', 'reports-repository', 'reports-target', 'reports-task'];
+  const labels = await evaluate(`${JSON.stringify(controls)}.map((id) => { const control = document.querySelector('#' + id); return [control.labels.length, control.labels[0]?.textContent.trim().split('\\n')[0], control.offsetWidth > 0 && control.getBoundingClientRect().right <= window.innerWidth]; })`);
+  assert(labels.every(([count, text, visible]) => count === 1 && text && visible), `A reports filter lacks a visible label (${JSON.stringify(labels)}).`);
+  const kinds = await evaluate("[...document.querySelectorAll('#reports-kind option')].map((option) => option.value)");
+  assert(kinds.join() === ',privilege_gate,flaky,fix_target,unreviewed_landing,target_rewritten,ruleset_missing', `The kind filter offers the wrong kinds (${kinds}).`);
+  // Start from page one of every report, so a filter change has a cursor to drop.
+  await setReportFilter(page, 'reports-filter', 'all');
+  await waitPage("document.querySelectorAll('#reports-list .report-card').length === 50 && !document.querySelector('#load-more-reports').hidden", 'first page of all reports');
+  await setReportFilter(page, 'reports-kind', 'flaky');
+  await waitReports(page, ['filter-c', 'filter-b', 'flaky-report'], 'flaky reports');
+  let query = reportQueries.at(-1);
+  assert(query.kind === 'flaky' && !('before' in query) && !('open' in query) && query.limit === '50', `Changing the kind sent ${JSON.stringify(query)}.`);
+  assert(await evaluate("document.querySelector('#load-more-reports').hidden"), 'A filtered list kept Load more from the old filter.');
+  // Facts on the card, taken from the report details.
+  const facts = await evaluate("document.querySelector('[data-report-id=filter-b] .report-facts').textContent");
+  assert(['Check', 'Documentation checks', 'Target branch', 'release', 'Verdict', 'rerun_refused'].every((part) => facts.includes(part)), `Report facts are incomplete: ${facts}`);
+  assert(await evaluate("!document.querySelector('[data-report-id=flaky-report] .report-facts').textContent.includes('Verdict')"), 'A report without details showed an empty verdict.');
+  await setReportFilter(page, 'reports-check', 'Coordination checks');
+  await waitReports(page, ['filter-c'], 'flaky reports of one check');
+  assert(reportQueries.at(-1).kind === 'flaky' && reportQueries.at(-1).check_name === 'Coordination checks', 'Kind and check were not combined.');
+  await setReportFilter(page, 'reports-kind', '');
+  await waitReports(page, ['filter-c', 'filter-a'], 'one check');
+  assert(!('kind' in reportQueries.at(-1)), 'An emptied kind filter was still sent.');
+  await setReportFilter(page, 'reports-check', '');
+  await setReportFilter(page, 'reports-repository', 'https://example.test/a.git');
+  await waitReports(page, ['filter-b', 'filter-a'], 'one repository');
+  assert(reportQueries.at(-1).repository_url === 'https://example.test/a.git', 'The repository filter was not sent.');
+  await setReportFilter(page, 'reports-target', 'release');
+  await waitReports(page, ['filter-b'], 'repository and target branch');
+  assert(reportQueries.at(-1).target_branch === 'release', 'The target branch filter was not sent.');
+  await setReportFilter(page, 'reports-repository', '');
+  await setReportFilter(page, 'reports-target', '');
+  await setReportFilter(page, 'reports-task', ' task-copy-id-1 ');
+  await waitReports(page, ['filter-a'], 'one task');
+  assert(reportQueries.at(-1).task_id === 'task-copy-id-1', 'The task filter was not trimmed and sent.');
+  await setReportFilter(page, 'reports-task', '');
+  // A filter that matches nothing explains itself instead of claiming there are no reports.
+  await setReportFilter(page, 'reports-target', 'no-such-branch');
+  await waitPage("document.querySelector('#reports-state').textContent.includes('match these filters') && !document.querySelector('#reports-state').hidden", 'filtered empty state');
+  assert(await evaluate("document.querySelectorAll('#reports-list .report-card').length") === 0, 'A filter with no match left cards on screen.');
+  await setReportFilter(page, 'reports-target', '');
+  // Combined with the open switch.
+  await setReportFilter(page, 'reports-kind', 'fix_target');
+  await setReportFilter(page, 'reports-filter', 'open');
+  await waitReports(page, ['filter-a'], 'open fix_target reports');
+  assert(reportQueries.at(-1).open === 'true' && reportQueries.at(-1).kind === 'fix_target', 'Open and kind were not combined.');
+  // Further pages keep the filters the first page used, even when a control was edited since.
+  await setReportFilter(page, 'reports-filter', 'all');
+  await waitPage("document.querySelectorAll('#reports-list .report-card').length === 50 && !document.querySelector('#load-more-reports').hidden", 'first page of fix_target reports');
+  await evaluate("document.querySelector('#reports-check').value = 'Edited but not applied'");
+  await evaluate("document.querySelector('#load-more-reports').click()");
+  await waitPage("document.querySelectorAll('#reports-list .report-card').length === 51 && document.querySelector('#load-more-reports').hidden", 'second page of fix_target reports');
+  query = reportQueries.at(-1);
+  assert(query.kind === 'fix_target' && !('check_name' in query) && query.before, `Load more sent ${JSON.stringify(query)}.`);
+  // Phone width: the filters wrap instead of overflowing.
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth && ['reports-kind', 'reports-check', 'reports-repository', 'reports-target', 'reports-task'].every((id) => document.querySelector('#' + id).getBoundingClientRect().right <= window.innerWidth)"), 'The report filters overflow at phone width.');
+  await page.send('Emulation.clearDeviceMetricsOverride');
+  // Leave the view as the other checks expect it: every report, no extra filters.
+  for (const id of ['reports-kind', 'reports-check']) await evaluate(`document.querySelector('#${id}').value = ''`);
+  reports.splice(reports.length - added.length, added.length);
+  await setReportFilter(page, 'reports-filter', 'all');
+  await waitPage("document.querySelectorAll('#reports-list .report-card').length === 50", 'unfiltered reports');
+}
+
 // Integrator reports: open list, resolves, a raced resolve, paging, return.
 async function checkIntegratorReports(page) {
   const { evaluate, waitPage } = page;
@@ -422,6 +516,7 @@ async function checkIntegratorReports(page) {
   await checkNoteResolve(page);
   await checkAlreadyResolved(page);
   await checkReportPaging(page);
+  await checkReportFilters(page);
   await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), 'Integrator reports overflow at phone width.');
   await page.send('Emulation.clearDeviceMetricsOverride');
