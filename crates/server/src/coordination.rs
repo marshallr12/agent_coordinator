@@ -513,6 +513,7 @@ struct Task {
     blocked_reason: Option<String>,
     created_at: i64,
     ready_since: i64,
+    last_progress_at: Option<i64>,
     archived_at: Option<i64>,
     origin: String,
     admission_class: Option<String>,
@@ -538,6 +539,7 @@ struct Task {
 macro_rules! task_sql {($suffix:literal)=>{concat!(
     "WITH visible AS (SELECT t.*, a.state AS attempt_state,a.expires_at AS attempt_expires, ",
     "COALESCE(p.disabled_at IS NULL AND p.id IS NOT NULL AND CASE WHEN a.credential_id IS NULL THEN b.id IS NOT NULL AND b.revoked_at IS NULL AND b.expires_at>? ELSE c.id IS NOT NULL AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>?) AND ag.id IS NOT NULL AND ag.closed_at IS NULL END,0) AS owner_authorized, ",
+    "(SELECT MAX(cp.created_at) FROM checkpoints cp JOIN attempts ca ON ca.id=cp.attempt_id WHERE ca.task_id=t.id) AS last_progress_at, ",
     "(SELECT phase FROM workflow_subjects ws WHERE ws.task_id=t.id) AS workflow_phase, ",
     "(SELECT kind FROM workflow_activities wa WHERE wa.activity_task_id=t.id) AS workflow_activity_kind, ",
     "(SELECT o.task_id FROM objectives o WHERE o.task_id=t.id) AS objective_id, ",
@@ -635,7 +637,7 @@ impl Task {
         "work_status":self.status(now),"blocked_reason":self.blocked_reason,"dependencies_ready":self.dependencies_ready,
         "objective_children_ready":self.objective_children_ready,"decisions_ready":self.decisions_ready,
         "objective_id":self.objective_id,"parent_objective_id":self.parent_objective_id,"parent_objective_required":self.parent_objective_required,
-        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
+        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"last_progress_at":self.last_progress_at.map(timestamp),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
         "origin":self.origin,"admission_class":self.admission_class.as_ref().or(self.budget_exempt.as_ref()),"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned","human_delivered":self.human_delivered,"processing":self.processing});
         if self.workflow_phase.as_deref() == Some("integration") {
             value["precondition_hints"] = json!([{

@@ -1470,6 +1470,95 @@ async fn checkpoints_preserve_deadline_and_release_does_not_complete_code() {
     assert_eq!(result["data"]["task"]["lifecycle"], "open");
 }
 #[tokio::test]
+async fn task_list_reports_last_progress_across_attempts_or_null() {
+    let f = Fixture::new().await;
+    let p = f.project("last-progress").await;
+    let quiet = f.task(&p, "quiet", vec![]).await;
+    let busy = f.task(&p, "busy", vec![]).await;
+    f.ack(&f.a, &p).await;
+    let listed = |items: &Value, task: &Value| {
+        items["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == task["id"])
+            .unwrap()
+            .clone()
+    };
+    let list_path = format!("/api/v1/projects/{p}/tasks");
+    let (_, before) = f
+        .call(&f.a, "GET", &list_path, "list-before", json!({}))
+        .await;
+    assert!(listed(&before, &busy)["last_progress_at"].is_null());
+    let (_, v) = f.claim(&f.a, &p, &busy, "claim-1", "work").await;
+    let (id, g) = attempt(&v);
+    let checkpoint = format!("/api/v1/projects/{p}/attempts/{id}/checkpoints");
+    f.clock.0.fetch_add(60_000, Ordering::SeqCst);
+    assert_eq!(
+        f.call(
+            &f.a,
+            "POST",
+            &checkpoint,
+            "cp-1",
+            json!({"generation":g,"summary":"First"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    f.clock.0.fetch_add(60_000, Ordering::SeqCst);
+    let newest = f.clock.0.load(Ordering::SeqCst);
+    assert_eq!(
+        f.call(
+            &f.a,
+            "POST",
+            &checkpoint,
+            "cp-2",
+            json!({"generation":g,"summary":"Second"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, released) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("/api/v1/projects/{p}/attempts/{id}/release"),
+            "release-1",
+            json!({"generation":g,"summary":"Paused"}),
+        )
+        .await;
+    assert_eq!(released["data"]["task"]["lifecycle"], "open");
+    let (_, after) = f
+        .call(&f.a, "GET", &list_path, "list-after", json!({}))
+        .await;
+    let expected = chrono::DateTime::from_timestamp_millis(newest)
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    assert_eq!(listed(&after, &busy)["last_progress_at"], expected);
+    assert!(listed(&after, &quiet)["last_progress_at"].is_null());
+    // A later attempt with no checkpoint of its own keeps the earlier progress time.
+    let (_, current) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/tasks/{}",
+                busy["id"].as_str().unwrap()
+            ),
+            "show",
+            json!({}),
+        )
+        .await;
+    let (status, v) = f.claim(&f.a, &p, &current["data"], "claim-2", "work").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (_, again) = f
+        .call(&f.a, "GET", &list_path, "list-again", json!({}))
+        .await;
+    assert_eq!(listed(&again, &busy)["last_progress_at"], expected);
+}
+#[tokio::test]
 async fn claims_require_current_instructions_and_policy_delegation_is_separate() {
     let f = Fixture::new().await;
     let p = f.project("policy").await;

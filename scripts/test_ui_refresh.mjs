@@ -29,7 +29,9 @@ const projects = [
   { id: 'p2', name: 'Beta', repository_url: 'https://example.invalid/beta.git', target_branch: 'trunk' },
 ];
 const policy = { id: 'p1', name: 'Alpha', policy_revision: 3, review_mode: 'either', recovery_mode: 'agent', lease_seconds: 600, rules: 'Be careful.', agent_rule_editing: false, automatic_integration: false, allow_subagent_reviews: false, integration_owner: 'agent' };
-const makeTask = (index, workStatus = 'ready') => ({ id: `task-${index}`, title: `Fixture task ${index}`, description: `Description ${index}`, revision: 1, kind: 'code', lifecycle: workStatus === 'done' ? 'done' : 'open', work_status: workStatus, created_at: '2026-10-01T00:00:00Z', acceptance_criteria: [] });
+// The default sort orders by ready_since, so the fixture's ready times keep the queue in index order.
+const readySince = (minutes) => new Date(Date.UTC(2026, 9, 1) + minutes * 60000).toISOString();
+const makeTask = (index, workStatus = 'ready') => ({ id: `task-${index}`, title: `Fixture task ${index}`, description: `Description ${index}`, revision: 1, kind: 'code', lifecycle: workStatus === 'done' ? 'done' : 'open', work_status: workStatus, created_at: '2026-10-01T00:00:00Z', ready_since: readySince(index), last_progress_at: null, acceptance_criteria: [] });
 const tasks = [...Array.from({ length: 40 }, (_, index) => makeTask(index)), makeTask(100, 'done'), makeTask(101, 'done'), makeTask(102, 'done')];
 const archived = [{ ...makeTask(200), lifecycle: 'canceled', archived_at: '2026-10-02T00:00:00Z' }, { ...makeTask(201), lifecycle: 'canceled', archived_at: '2026-10-02T00:00:00Z' }, { ...makeTask(202), lifecycle: 'canceled', archived_at: '2026-10-02T00:00:00Z' }];
 const detail = {
@@ -376,7 +378,7 @@ async function main() {
     await quiet('task queue poll', 'tasks', pollTick('GET /api/v1/projects/p1/tasks'));
     await quiet('task queue navigate away and back', 'tasks', async () => { await click('.nav-item[data-view=overview]'); await waitPage("!document.querySelector('#overview-view').hidden", 'overview'); await click('.nav-item[data-view=tasks]'); await waitPage("!document.querySelector('#tasks-view').hidden", 'tasks'); await sleep(150); });
     await onlyChanged('task queue one task changed', '#tasks-list .task-row', () => { tasks[3] = { ...tasks[3], description: 'A changed description', revision: 2 }; }, pollTick('GET /api/v1/projects/p1/tasks'));
-    await onlyChanged('task queue one task inserted', '#tasks-list .task-row', () => { tasks.splice(5, 0, makeTask(500)); }, pollTick('GET /api/v1/projects/p1/tasks'), 1 + 0);
+    await onlyChanged('task queue one task inserted', '#tasks-list .task-row', () => { tasks.splice(5, 0, { ...makeTask(500), ready_since: readySince(4.5) }); }, pollTick('GET /api/v1/projects/p1/tasks'), 1 + 0);
     tasks.splice(5, 1);
     // A change that shifts the paging rebuilds only the rows that enter the page.
     await evaluate("window.__tag('#tasks-list .task-row')");

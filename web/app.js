@@ -7,10 +7,15 @@
   function savedTaskAutoRefresh() {
     try { return localStorage.getItem(TASK_AUTO_REFRESH_KEY) === 'true'; } catch { return false; }
   }
+  const TASK_SORT_KEY = 'agent-coordinator.task-sort';
+  const TASK_SORTS = ['priority', 'oldest', 'newest', 'longest-ready', 'recent-progress', 'least-recent-progress'];
+  function savedTaskSort() {
+    try { const saved = localStorage.getItem(TASK_SORT_KEY); return TASK_SORTS.includes(saved) ? saved : TASK_SORTS[0]; } catch { return TASK_SORTS[0]; }
+  }
   const state = {
     actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reportsQuery: '', reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
     projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', credentialDownloadUrl: null,
-    taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedProjects: [], archivedProjectsLoaded: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
+    taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskSort: savedTaskSort(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedProjects: [], archivedProjectsLoaded: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
   };
 
@@ -743,7 +748,24 @@
     const needle = query.trim().toLowerCase();
     return !needle || text(task.title).toLowerCase().includes(needle) || text(task.id).toLowerCase().includes(needle);
   }
-  const searchedCompletedTasks = () => state.completedTasks.filter((task) => taskMatchesSearch(task, state.taskSearch.completed));
+  // Sorting uses only fields the task list already returns. A missing or unreadable value sorts last,
+  // and every order falls back to the id so pages never reshuffle between loads.
+  const taskTime = (value) => { const time = value ? Date.parse(value) : NaN; return Number.isNaN(time) ? null : time; };
+  const compareValues = (left, right, descending = false) => {
+    if (left === null || right === null) return left === right ? 0 : left === null ? 1 : -1;
+    return left === right ? 0 : (left < right) === !descending ? -1 : 1;
+  };
+  const taskPriority = (task) => Number.isFinite(task.priority) ? task.priority : null;
+  const TASK_SORT_KEYS = {
+    priority: (a, b) => compareValues(taskPriority(a), taskPriority(b)) || compareValues(taskTime(a.ready_since), taskTime(b.ready_since)),
+    oldest: (a, b) => compareValues(taskTime(a.created_at), taskTime(b.created_at)),
+    newest: (a, b) => compareValues(taskTime(a.created_at), taskTime(b.created_at), true),
+    'longest-ready': (a, b) => compareValues(taskTime(a.ready_since), taskTime(b.ready_since)),
+    'recent-progress': (a, b) => compareValues(taskTime(a.last_progress_at), taskTime(b.last_progress_at), true),
+    'least-recent-progress': (a, b) => compareValues(taskTime(a.last_progress_at), taskTime(b.last_progress_at)),
+  };
+  const sortTasks = (tasks) => [...tasks].sort((a, b) => TASK_SORT_KEYS[state.taskSort](a, b) || compareValues(text(a.id), text(b.id)));
+  const searchedCompletedTasks = () => sortTasks(state.completedTasks.filter((task) => taskMatchesSearch(task, state.taskSearch.completed)));
   const searchedArchivedTasks = () => state.archivedTasks.filter((task) => taskMatchesSearch(task, $('archived-search').value));
 
   function resetTaskPages() {
@@ -769,7 +791,7 @@
 
   function rebuildQueuePages() {
     const filter = $('status-filter').value;
-    const tasks = state.queueTasks.filter((task) => (filter === 'all' || taskStatus(task) === filter) && taskMatchesSearch(task, state.taskSearch.queue));
+    const tasks = sortTasks(state.queueTasks.filter((task) => (filter === 'all' || taskStatus(task) === filter) && taskMatchesSearch(task, state.taskSearch.queue)));
     state.taskPages = [];
     for (let start = 0; start < tasks.length; start += state.taskPageSize) {
       state.taskPages.push({ items: tasks.slice(start, start + state.taskPageSize) });
@@ -1015,6 +1037,10 @@
       add(row, archive);
     }
     const title = el('span', 'task-main'); add(title, el('span', 'task-title', task.title || 'Untitled task'));
+    const progressAt = taskTime(task.last_progress_at);
+    const progress = el('time', 'task-progress project-meta', progressAt === null ? 'No progress yet' : `Last progress ${formatDate(task.last_progress_at)}`);
+    if (progressAt !== null) progress.dateTime = task.last_progress_at;
+    add(title, progress);
     const identity = el('span', 'task-queue-id'); add(identity, el('span', '', 'Task ID · ')); add(identity, el('span', 'task-id-value', task.id));
     const created = el('time', 'task-created project-meta', `Created ${formatDate(task.created_at)}`);
     if (task.created_at && !Number.isNaN(new Date(task.created_at).getTime())) created.dateTime = task.created_at;
@@ -1725,6 +1751,13 @@
     else { state.taskSearch.queue = event.target.value; rebuildQueuePages(); showTaskPage(0); }
   });
   $('archived-search').addEventListener('input', () => { state.archivedPageIndex = 0; renderArchivedTasks(); });
+  setProp($('tasks-sort'), 'value', state.taskSort);
+  $('tasks-sort').addEventListener('change', (event) => {
+    state.taskSort = TASK_SORTS.includes(event.target.value) ? event.target.value : TASK_SORTS[0];
+    try { localStorage.setItem(TASK_SORT_KEY, state.taskSort); } catch { /* The sort still applies for this page. */ }
+    if (state.taskView !== 'completed') rebuildQueuePages();
+    showTaskPage(0);
+  });
   $('status-filter').addEventListener('change', () => { state.taskPageIndex = 0; rebuildQueuePages(); showTaskPage(0); });
   $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else showView('tasks'); }); [['task-detail-heading', 'Task name'], ['detail-task-id-value', 'Task ID']].forEach(([id, label]) => { const source = $(id); source.addEventListener('click', () => copyTaskDetailValue(source, label)); source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); copyTaskDetailValue(source, label); } }); }); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation(`/api/v1/admin/agents`, { name: input.value.trim(), class: $('agent-class').value, access: $('agent-access').value }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
   $('refresh-archive').addEventListener('click',loadArchivedTasks); $('archive-project-select').addEventListener('change',loadArchivedTasks);

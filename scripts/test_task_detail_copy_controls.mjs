@@ -27,6 +27,8 @@ const tasks = Array.from({ length: 30 }, (_, index) => ({
   ...task,
   id: index ? `task-copy-id-${index}` : task.id,
   title: index ? `Fixture task ${index + 1}` : task.title,
+  // The default queue sort orders by ready_since, so these keep the queue in fixture order.
+  ready_since: new Date(Date.UTC(2026, 9, 1) + index * 60000).toISOString(),
 }));
 const kindPatches = [];
 const uploadedAttachments = new Map();
