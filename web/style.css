@@ -549,3 +549,11 @@ div.compare-diff .diff-line { grid-template-columns: 22px minmax(0, 1fr); font-f
 time[datetime] { position: relative; }
 time[datetime]:focus-visible { overflow: visible; }
 time[datetime]:focus-visible::after { content: attr(datetime); position: absolute; left: 0; top: calc(100% + 4px); z-index: 20; width: max-content; max-width: min(320px, 80vw); padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); font-size: 12px; font-weight: 500; white-space: normal; overflow-wrap: anywhere; pointer-events: none; }
+
+.evidence-packet-card { margin-top: 15px; }
+.evidence-packet-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+.evidence-packet-controls .select-label { flex: 1; min-width: min(100%, 220px); }
+.evidence-packet-controls .select-label select { width: 100%; }
+@media (max-width: 620px) { .evidence-packet-controls .button { width: 100%; } }
+.evidence-packet-card .inline-alert { margin: 8px 0 0; }
+.evidence-packet-card ul { margin: 8px 0 0; padding-left: 20px; font-size: 13px; }
