@@ -1019,7 +1019,8 @@
       if (projectId !== state.projectId || currentActor !== actorId()) return;
       const project = orientation.data.project;
       const view = workflowDialog('Binding project rules', 'These instructions govern work on this project. Changing them creates a new policy revision; agents must read and acknowledge it before claiming work.');
-      view.field('rules', 'Rules', project.rules).maxLength = 32768;
+      const rules = view.field('rules', 'Rules', project.rules); rules.maxLength = 32768; rules.required = false;
+      bindingRulesGuidance(rules);
       view.field('provenance', 'Reason and supporting source').maxLength = 4096;
       recordDetails(view.form, 'Policy history — first 50 revisions', history.data);
       view.finish('Save binding rules', (values, dialog) => {
@@ -1078,6 +1079,11 @@
     select.value = String(value); return select;
   }
   function lines(value) { return text(value).split('\n').map(line => line.trim()).filter(Boolean); }
+  function bindingRulesGuidance(control) {
+    const guidance = el('p', 'help-text binding-rules-guidance', 'Binding rules are project-wide instructions that agents must follow. Use them for recurring requirements, such as “Run the workspace tests before submitting code” or “Keep credentials outside the repository.” Put requirements for one task in that task’s description and acceptance criteria. Leave this field empty if no additional project rules are needed. Agents receive these rules with the project instructions; saving changes requires them to read and acknowledge the new policy before claiming work. This text does not run checks or replace the review and integration settings.');
+    guidance.id = `binding-rules-guidance-${++helpSerial}`;
+    control.setAttribute('aria-describedby', guidance.id); control.after(guidance);
+  }
   async function openProjectPolicy() {
     if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
     const projectId = state.projectId, currentActor = actorId();
@@ -1092,6 +1098,7 @@
       selectField(view, 'allow_subagent_reviews', 'Who may perform agent review?', project.allow_subagent_reviews || false, [['false','A separate credential principal'],['true','Also allow a registered, non-contributing subagent']]);
       const lease = view.field('lease_seconds','Ownership lease (seconds)',project.lease_seconds,'input'); lease.type = 'number'; lease.min = '30'; lease.max = '3600';
       const rules = view.field('rules','Binding rules',project.rules); rules.maxLength = 32768; rules.required = false;
+      bindingRulesGuidance(rules);
       view.field('provenance','Reason and supporting source').maxLength = 4096;
       setupFieldHelp(view.form);
       view.finish('Save policy', (values, dialog) => {
