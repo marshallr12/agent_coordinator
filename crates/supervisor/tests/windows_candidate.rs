@@ -8,10 +8,11 @@
 //! elevated), and the child does the work. This is a development check of
 //! the mechanism, not acceptance evidence.
 //!
-//! The candidate's shell is the pinned Git Bash's `bash.exe` and
-//! `msys-2.0.dll`, copied into a tool directory that only the candidate's
-//! package may read: a less-privileged token reads nothing under
-//! `Program Files`.
+//! The candidate's shell is the pinned busybox-w32 (see [`SHELL`]), copied
+//! as `sh.exe` into a tool directory that only the candidate's package may
+//! read: a less-privileged token reads nothing under `Program Files`. Git
+//! Bash, the shell first tried, does not start in an AppContainer, which
+//! `git_bash_does_not_start_in_an_appcontainer` keeps asserting.
 #![cfg(windows)]
 
 use agentc_supervisor::host_runtime::windows::candidate::{
@@ -113,10 +114,6 @@ static ONE_CHILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// reports success.
 fn in_a_new_session(role: &str) {
     let _one = ONE_CHILD.lock().unwrap_or_else(|held| held.into_inner());
-    if !Path::new(GIT_BIN).join("bash.exe").exists() {
-        eprintln!("no Git Bash at {GIT_BIN}; {role} was not checked");
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let report = dir.path().join("report.txt");
     let Some(started) = start_in_new_session(role, &report) else {
@@ -132,21 +129,24 @@ fn in_a_new_session(role: &str) {
     eprintln!("{role}: {said}");
 }
 
-/// Why the two candidate tests do not run: see
-/// [`git_bash_does_not_start_in_an_appcontainer`].
-const NO_SHELL: &str = "needs a shell that starts in an AppContainer; Git Bash does not";
-
-#[test]
-#[ignore = "needs a shell that starts in an AppContainer; Git Bash does not"]
-fn a_reviewers_candidate_runs_commands_in_its_own_package_and_job() {
-    eprintln!("{NO_SHELL}");
-    in_a_new_session("commands");
+/// Runs the child as `role` where the pinned shell is installed, and says
+/// so where it is not: nothing was checked there.
+fn with_the_pinned_shell(role: &str) {
+    if pinned_shell().is_none() {
+        eprintln!("{SHELL} is unset; {role} was not checked");
+        return;
+    }
+    in_a_new_session(role);
 }
 
 #[test]
-#[ignore = "needs a shell that starts in an AppContainer; Git Bash does not"]
+fn a_reviewers_candidate_runs_commands_in_its_own_package_and_job() {
+    with_the_pinned_shell("commands");
+}
+
+#[test]
 fn a_candidate_command_past_its_time_limit_is_stopped_and_repeats_are_refused() {
-    in_a_new_session("time_limit");
+    with_the_pinned_shell("time_limit");
 }
 
 /// The blocker found on 2026-11-14: Git Bash's MSYS2 runtime creates its
@@ -156,6 +156,10 @@ fn a_candidate_command_past_its_time_limit_is_stopped_and_repeats_are_refused() 
 /// test fails and the candidate tests below can be tried again.
 #[test]
 fn git_bash_does_not_start_in_an_appcontainer() {
+    if !Path::new(GIT_BIN).join("bash.exe").exists() {
+        eprintln!("no Git Bash at {GIT_BIN}; it was not checked");
+        return;
+    }
     in_a_new_session("probe");
 }
 
@@ -233,6 +237,133 @@ fn probe() -> String {
     format!("{full} | {less}")
 }
 
+/// Names the pinned POSIX shell's file on this host; unset where the owner
+/// has not installed it.
+const SHELL: &str = "AGENTC_TEST_POSIX_SHELL";
+/// busybox-w32 FRP-6354-g5f09fb446 (BusyBox 1.39.0), the 64-bit Unicode
+/// build `busybox-w64u-FRP-6354-g5f09fb446.exe`.
+const SHELL_SHA256: &str = "36b266923fc5765b42f5f981319f39568498fba60b53ccf26e8fc1e575e2a9a9";
+
+/// The pinned shell's bytes, or `None` where [`SHELL`] is unset. A file with
+/// another hash is never run: callers write these bytes, not the file again.
+fn pinned_shell() -> Option<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let path = PathBuf::from(std::env::var_os(SHELL)?);
+    let bytes = std::fs::read(&path).unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    assert_eq!(hash, SHELL_SHA256, "{} is not the pin", path.display());
+    Some(bytes)
+}
+
+/// What the shell probe runs: a pipeline, a subshell, a command
+/// substitution and a background job that is waited for. Then what Windows
+/// made of the variables the launch set (`LOCALAPPDATA` and `TMP` given,
+/// `TEMP` not given, `PROBE_KEPT` as a variable Windows has no use for), and
+/// whether a value the shell exports reaches a child shell and a program
+/// that is not the shell.
+const SHELL_PROBE: &str = "echo started; echo abc | tr a-c A-C | cat; (exit 3); echo \"sub $?\"; \
+     x=$(echo inner | sed s/inner/captured/); echo \"$x\"; \
+     (sleep 1; echo late > bg) & echo early; wait; echo \"waited $?\"; cat bg; \
+     case \"$LOCALAPPDATA\" in *\\\\Packages\\\\*\\\\AC) echo local-replaced;; *) echo local-kept;; esac; \
+     case \"$TMP\" in *\\\\AC\\\\Temp) echo tmp-replaced;; *) echo tmp-kept;; esac; \
+     case \"$TEMP\" in *\\\\AC\\\\Temp) echo temp-added;; *) echo \"temp=$TEMP\";; esac; \
+     [ -d \"$TMP\" ] && echo temp-directory || echo no-temp-directory; \
+     echo \"other=$PROBE_KEPT\"; \
+     export TMP=C:/zz; sh -c 'echo \"child=$TMP\"'; cmd /c \"echo cmd=%TMP%\"; exit 7";
+/// What it must print, in this order.
+const SHELL_PROBE_SAYS: [&str; 14] = [
+    "started",
+    "ABC",
+    "sub 3",
+    "captured",
+    "early",
+    "waited 0",
+    "late",
+    "local-replaced",
+    "tmp-replaced",
+    "temp-added",
+    "no-temp-directory",
+    "other=as given",
+    "child=C:/zz",
+    "cmd=C:/zz",
+];
+
+/// The pinned shell starts in an AppContainer, full and less privileged,
+/// and runs pipelines, subshells and background jobs there.
+#[test]
+fn the_pinned_shell_runs_in_an_appcontainer() {
+    with_the_pinned_shell("shell_probe");
+}
+
+/// A tool directory only `package` may read besides the owner, holding the
+/// pinned shell as `sh.exe`.
+fn shell_tools(tools: &Path, package: &str) {
+    let owner = token::current_user_sid().unwrap();
+    let list = sddl::shared_source(&owner, &[package]).unwrap();
+    create_directory(tools, &list).unwrap();
+    std::fs::write(tools.join("sh.exe"), pinned_shell().unwrap()).unwrap();
+}
+
+/// The probe's environment: `LOCALAPPDATA` and `TMP` in `work`, no `TEMP`.
+fn probe_environment(tools: &Path, work: &Path) -> std::collections::BTreeMap<String, String> {
+    let root = std::env::var("SystemRoot").unwrap();
+    let work = work.display().to_string();
+    let pairs = [
+        ("PATH", format!("{};{root}\\System32", tools.display())),
+        ("SystemRoot", root),
+        ("LOCALAPPDATA", work.clone()),
+        ("TMP", work.replace('\\', "/")),
+        ("PROBE_KEPT", "as given".to_owned()),
+    ];
+    pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
+}
+
+/// Runs [`SHELL_PROBE`] with the pinned shell in a fresh launch, `less`
+/// privileged or not.
+fn shell_probe_one(trees: &Trees, launcher: &mut Launcher, less: bool) -> String {
+    use agentc_supervisor::host_runtime::windows::process::Command;
+    let id = format!("shell-{less}");
+    let mut spec = trees.launch(&id);
+    spec.less_privileged = less;
+    let prepared = launcher.prepare(&id, spec.clone()).unwrap();
+    let tools = trees.at(&format!("shell-tools-{less}"));
+    shell_tools(&tools, &prepared.package_sid);
+    let shell = tools.join("sh.exe").display().to_string();
+    let log = trees.at(&format!("shell-{less}.log"));
+    let command = Command {
+        argv: vec![shell, "-c".into(), SHELL_PROBE.into()],
+        environment: probe_environment(&tools, &spec.work),
+        directory: spec.work,
+        output: log.clone(),
+    };
+    launcher.start(&id, &command, &[]).unwrap();
+    let patience = std::time::Duration::from_secs(30);
+    let seen = launcher.observe(&id, patience).unwrap();
+    launcher.cleanup(&id).unwrap();
+    probe_result(seen, &log, less)
+}
+
+/// Checks the probe's status and lines and returns them.
+fn probe_result(seen: Seen, log: &Path, less: bool) -> String {
+    let said = std::fs::read_to_string(log).unwrap_or_default();
+    assert_eq!(seen, Seen::Exited(7), "less={less}: {said}");
+    let lines: Vec<&str> = said.lines().map(str::trim).collect();
+    assert_eq!(lines, SHELL_PROBE_SAYS, "less={less}: {said}");
+    format!("less_privileged={less}: {lines:?}")
+}
+
+/// Both shell probes.
+fn shell_probe() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let trees = Trees {
+        root: dir.path().to_owned(),
+    };
+    let mut launcher = Launcher::new().unwrap();
+    let full = shell_probe_one(&trees, &mut launcher, false);
+    let less = shell_probe_one(&trees, &mut launcher, true);
+    format!("{full} | {less}")
+}
+
 /// The child's side. Ignored so that it runs only when a test above starts
 /// it, with its role, in a new logon session.
 #[test]
@@ -246,6 +377,7 @@ fn child_in_a_new_logon_session() {
         "commands" => commands(),
         "time_limit" => time_limit(),
         "probe" => probe(),
+        "shell_probe" => shell_probe(),
         other => panic!("no such role: {other}"),
     });
     let said = match &outcome {
@@ -294,7 +426,7 @@ impl Trees {
         CandidateSpec {
             launch: self.launch("candidate"),
             source: self.at("source"),
-            bash: self.at("tools").join("bash.exe"),
+            shell: self.at("tools").join("sh.exe"),
             path: vec![self.at("tools"), system.into()],
         }
     }
@@ -303,12 +435,7 @@ impl Trees {
 /// Makes the tool directory, readable by `package` alone besides the
 /// owner, and copies the shell into it.
 fn tools(trees: &Trees, package: &str) {
-    let owner = token::current_user_sid().unwrap();
-    let list = sddl::shared_source(&owner, &[package]).unwrap();
-    create_directory(&trees.at("tools"), &list).unwrap();
-    for file in ["bash.exe", "msys-2.0.dll"] {
-        std::fs::copy(Path::new(GIT_BIN).join(file), trees.at("tools").join(file)).unwrap();
-    }
+    shell_tools(&trees.at("tools"), package);
 }
 
 /// One request to `runner` and its answer line.
@@ -375,23 +502,22 @@ fn run_basics(candidate: &candidate::Candidate, trees: &Trees) -> String {
         text(&call)
     );
     assert_eq!((call.truncated, call.note.as_deref()), (false, None));
-    // Git Bash shows Windows paths in its own form, so only the tree is
-    // compared; the credential the runner holds must be empty.
+    // The variables are the candidate's own, the three Windows replaced
+    // among them; the credential the runner holds must be empty.
     let call = candidate
-        .run("echo \"[$HOME][$ANTHROPIC_API_KEY]\"; env")
+        .run("echo \"[$HOME][$TEMP][$TMP][$LOCALAPPDATA][$ANTHROPIC_API_KEY]\"; env")
         .unwrap();
     let shown = text(&call);
-    assert!(
-        shown.contains("candidate-work/home]") && shown.contains("[]"),
-        "{shown}"
-    );
+    let work = trees.at("candidate-work").display().to_string();
+    let own = format!(r"[{work}\home][{work}\tmp][{work}\tmp][{work}\local][]");
+    assert!(shown.contains(&own), "{shown}");
     assert!(
         !shown.contains(SYNTHETIC),
         "the credential reached the candidate"
     );
     assert!(trees.at("candidate-work").exists());
     let call = candidate
-        .run("bash --noprofile --norc -c 'while :; do :; done' & exit 0")
+        .run("sh -c 'while :; do :; done' & exit 0")
         .unwrap();
     assert_eq!(call.status, 0, "{}", text(&call));
     assert_eq!(call.note.as_deref(), Some(LEFT_RUNNING), "{}", text(&call));

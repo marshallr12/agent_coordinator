@@ -130,6 +130,12 @@ impl Job {
     /// empty; true when Windows reports no process left.
     pub fn terminate(&self, patience: Duration) -> bool {
         self.kill();
+        self.empties(patience)
+    }
+
+    /// Waits up to `patience` for the job to empty by itself, killing
+    /// nothing; true when Windows reports no process left.
+    pub fn empties(&self, patience: Duration) -> bool {
         let deadline = Instant::now() + patience;
         loop {
             if self.active() == Some(0) {

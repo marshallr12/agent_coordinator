@@ -7,10 +7,15 @@
 //! commands while the runner keeps answering its driver. A command is the
 //! script [`crate::candidate::form::candidate_script`] makes, written to a
 //! file in the candidate's control directory, which the candidate can read
-//! and not change; Git Bash runs that file, so no command text passes
-//! through a command line. The environment is exact, nothing is inherited
-//! but the log, and the job ends with the command, so nothing a command
-//! started in the background outlives it.
+//! and not change; the pinned shell runs that file, so no command text
+//! passes through a command line. The environment is exact, nothing is
+//! inherited but the log, and the job ends with the command, so nothing a
+//! command started in the background outlives it.
+//!
+//! The shell is a native POSIX shell (busybox-w32's `sh`): Git Bash does not
+//! start in an AppContainer. Windows replaces `LOCALAPPDATA`, `TEMP` and
+//! `TMP` of a process it starts in an AppContainer with the package's own
+//! folders, so the command file sets the three again before the command.
 use super::job::Job;
 use super::launcher::{Detached, LaunchSpec, Launcher, ended_within};
 use super::process::{self, Boundary, Command};
@@ -36,6 +41,12 @@ pub const LIMIT_STATUS: u32 = 252;
 pub const REFUSED_STATUS: u32 = 126;
 /// How long a job is given to empty once its command ended.
 const EMPTY_PATIENCE: Duration = Duration::from_secs(10);
+/// How long a job may take to empty by itself after its command ended
+/// before what is left counts as left running.
+const SETTLE: Duration = Duration::from_secs(2);
+/// The variables Windows replaces in a process it starts in an
+/// AppContainer (observed 2026-11-16); the command file sets them again.
+const REPLACED: [&str; 3] = ["LOCALAPPDATA", "TEMP", "TMP"];
 /// The candidate's writable directories, below its working directory.
 const WRITABLE: [&str; 5] = ["home", "tmp", "cargo", "target", "local"];
 
@@ -49,8 +60,9 @@ pub struct CandidateSpec {
     /// The source tree to create: both packages may read it, the runner's
     /// account fills it.
     pub source: PathBuf,
-    /// The pinned Git Bash.
-    pub bash: PathBuf,
+    /// The pinned POSIX shell: a program that runs the script file given as
+    /// its one argument.
+    pub shell: PathBuf,
     /// The directories of the candidate's `PATH`, in order.
     pub path: Vec<PathBuf>,
 }
@@ -182,6 +194,14 @@ fn environment(spec: &CandidateSpec, root: &str) -> BTreeMap<String, String> {
     pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
 }
 
+/// The text of a command file: an `export` of the [`REPLACED`] variables
+/// with their values from `environment`, then the harness's `command`.
+fn command_file(environment: &BTreeMap<String, String>, command: &str) -> String {
+    use crate::candidate::form::{candidate_script, single_quoted};
+    let set = REPLACED.map(|name| format!("{name}={}", single_quoted(&environment[name])));
+    format!("export {}\n{}\n", set.join(" "), candidate_script(command))
+}
+
 impl Candidate {
     /// The candidate's package SID.
     pub fn package_sid(&self) -> &str {
@@ -208,7 +228,7 @@ impl Candidate {
         let call = format!("call-{}", uuid::Uuid::new_v4().simple());
         let script = self.spec.launch.control.join(format!("{call}.sh"));
         let log = self.spec.launch.control.join(format!("{call}.log"));
-        let text = crate::candidate::form::candidate_script(command);
+        let text = command_file(&self.environment, command);
         std::fs::write(&script, text).context("write the candidate's command file")?;
         let outcome = self.start_and_wait(&script, &log);
         let _ = std::fs::remove_file(&script);
@@ -237,22 +257,21 @@ impl Candidate {
         let status = ended
             .then(|| exit_code(running.process.raw()))
             .transpose()?;
-        let left = ended && job.active().is_some_and(|alive| alive > 0);
+        // The job still counts a process for a moment after the shell
+        // ended, so "left running" is what has not gone after a short wait.
+        // A count Windows will not give reads as left running, the safe way.
+        let left = ended && !job.empties(SETTLE);
         job.terminate(EMPTY_PATIENCE);
         Ok((status, left))
     }
 
-    /// Git Bash running the command file from the source tree, with the
-    /// exact environment and the log as its output.
+    /// The shell running the command file from the source tree, with the
+    /// exact environment and the log as its output. A shell that is neither
+    /// interactive nor a login shell reads no start-up file.
     fn command(&self, script: &Path, log: &Path) -> Command {
         let file = script.display().to_string().replace('\\', "/");
         Command {
-            argv: vec![
-                self.spec.bash.display().to_string(),
-                "--noprofile".into(),
-                "--norc".into(),
-                file,
-            ],
+            argv: vec![self.spec.shell.display().to_string(), file],
             directory: self.spec.source.clone(),
             environment: self.environment.clone(),
             output: log.to_owned(),
@@ -361,8 +380,8 @@ mod tests {
                 work: root.join("cw"),
             },
             source: root.join("src"),
-            bash: r"C:\Program Files\Git\usr\bin\bash.exe".into(),
-            path: vec![r"C:\Program Files\Git\usr\bin".into(), r"C:\tools".into()],
+            shell: r"C:\tools\sh.exe".into(),
+            path: vec![r"C:\tools".into(), r"C:\more tools".into()],
         }
     }
 
@@ -388,10 +407,7 @@ mod tests {
         for name in crate::candidate::UNSET {
             assert!(!environment.contains_key(*name), "{name}");
         }
-        assert_eq!(
-            environment["PATH"],
-            r"C:\Program Files\Git\usr\bin;C:\tools"
-        );
+        assert_eq!(environment["PATH"], r"C:\tools;C:\more tools");
         assert_eq!(environment["TEMP"], r"C:\launches\r1\cw\tmp");
         for value in environment
             .values()
@@ -399,6 +415,18 @@ mod tests {
         {
             assert!(value.starts_with(r"C:\launches\r1\cw\"), "{value}");
         }
+    }
+
+    #[test]
+    fn the_command_file_sets_the_replaced_variables_before_the_command() {
+        let spec = spec(Path::new(r"C:\launches\it's"));
+        let text = command_file(&environment(&spec, r"C:\Windows"), "echo 'a b'");
+        let (exports, command) = text.split_once('\n').unwrap();
+        assert_eq!(
+            exports,
+            r"export LOCALAPPDATA='C:\launches\it'\''s\cw\local' TEMP='C:\launches\it'\''s\cw\tmp' TMP='C:\launches\it'\''s\cw\tmp'"
+        );
+        assert_eq!(command, "eval 'echo '\\''a b'\\''' < /dev/null\n");
     }
 
     #[test]
