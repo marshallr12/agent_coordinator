@@ -292,6 +292,7 @@ async function main() {
 
     // ---- 1. Overview (projects) -------------------------------------------------------------------
     await waitPage("document.querySelector('.autonomy-summary-text')?.textContent.startsWith('HRI')", 'project card autonomy summary');
+    assert(await evaluate("(() => { const b = document.querySelector('#refresh-projects'); return !!b.querySelector('svg') && b.textContent.trim() === '' && b.title === 'Refresh projects' && b.getAttribute('aria-label') === 'Refresh projects'; })()"), 'The overview refresh button must be an icon button with a descriptive tooltip.');
     await quiet('overview refresh button', 'overview', clickAndWait('#refresh-projects', 'GET /api/v1/projects'));
     await quiet('overview poll', 'overview', pollTick('GET /api/v1/projects'));
     await onlyChanged('overview project change', '#projects-grid .project-card', () => { projects[1] = { ...projects[1], name: 'Beta renamed' }; }, pollTick('GET /api/v1/projects'));
