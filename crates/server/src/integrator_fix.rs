@@ -123,9 +123,9 @@ async fn insert_fix_task(
 ) -> Result<String, AppError> {
     let id = uuid::Uuid::new_v4().to_string();
     let (title, description, acceptance) = fix_task_fields(report_id, details);
-    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,'code',?,'open',?,?)")
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since,opened_at) VALUES(?,?,?,?,?,'code',?,'open',?,?,?)")
         .bind(&id).bind(p).bind(&title).bind(&description).bind(acceptance.to_string())
-        .bind(FIX_PRIORITY).bind(m.now).bind(m.now).execute(&mut *m.tx).await?;
+        .bind(FIX_PRIORITY).bind(m.now).bind(m.now).bind(m.now).execute(&mut *m.tx).await?;
     crate::admission::record_service(m, &id, Some("fix_target")).await?;
     crate::coordination::save_task_revision(m, p, &id).await?;
     sqlx::query("INSERT INTO integrator_fix_tasks(task_id,project_id,report_id,repository_url,target_branch,check_name,created_at) VALUES(?,?,?,?,?,?,?)")

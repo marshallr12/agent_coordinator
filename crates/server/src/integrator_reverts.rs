@@ -760,7 +760,7 @@ pub(crate) async fn propose_reland(m: &mut Mutation, p: &str, task: &str) -> Res
     );
     let (description, acceptance) = (reland_description(&revert), reland_acceptance(&revert)?);
     let id = uuid::Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,?,?,'planned',?,?)")
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since,opened_at) VALUES(?,?,?,?,?,?,?,'planned',?,?,NULL)")
         .bind(&id).bind(p).bind(&title).bind(&description).bind(acceptance.to_string())
         .bind(revert.get::<String, _>("kind")).bind(revert.get::<i64, _>("priority")).bind(m.now).bind(m.now)
         .execute(&mut *m.tx).await?;

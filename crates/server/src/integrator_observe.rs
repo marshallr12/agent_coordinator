@@ -334,9 +334,9 @@ async fn create_follow_up(
     let (title, priority, description) = follow_up_fields(&subject, request, row.get("r"));
     let id = uuid::Uuid::new_v4().to_string();
     let acceptance = json!(["The revise request that lost to the landed push is addressed"]);
-    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,?,?,'open',?,?)")
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since,opened_at) VALUES(?,?,?,?,?,?,?,'open',?,?,?)")
         .bind(&id).bind(p).bind(&title).bind(&description).bind(acceptance.to_string())
-        .bind(subject.get::<String, _>("kind")).bind(priority).bind(m.now).bind(m.now)
+        .bind(subject.get::<String, _>("kind")).bind(priority).bind(m.now).bind(m.now).bind(m.now)
         .execute(&mut *m.tx).await?;
     crate::admission::record_service(m, &id, Some("fix_target")).await?;
     crate::coordination::save_task_revision(m, p, &id).await?;

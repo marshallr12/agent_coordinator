@@ -249,9 +249,9 @@ fn revert_fields(n: &NewRevert<'_>) -> (String, String, Value) {
 async fn insert_revert(m: &mut Mutation, n: &NewRevert<'_>) -> Result<String, AppError> {
     let id = uuid::Uuid::new_v4().to_string();
     let (title, description, acceptance) = revert_fields(n);
-    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,blocked_reason,created_at,ready_since) VALUES(?,?,?,?,?,'code',?,'open',?,?,?)")
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,blocked_reason,created_at,ready_since,opened_at) VALUES(?,?,?,?,?,'code',?,'open',?,?,?,?)")
         .bind(&id).bind(n.project).bind(&title).bind(&description).bind(acceptance.to_string())
-        .bind(n.priority).bind(AWAITING_CANDIDATE).bind(m.now).bind(m.now).execute(&mut *m.tx).await?;
+        .bind(n.priority).bind(AWAITING_CANDIDATE).bind(m.now).bind(m.now).bind(m.now).execute(&mut *m.tx).await?;
     crate::admission::record_service(m, &id, Some("revert")).await?;
     save_task_revision(m, n.project, &id).await?;
     sqlx::query("INSERT INTO task_reverts(task_id,project_id,result_id,submission_id,original_task_id,r,reason,evidence_json,review_required,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")

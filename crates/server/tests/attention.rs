@@ -451,6 +451,120 @@ async fn an_idle_queue_with_ready_work_counts_as_a_stall_after_the_threshold() {
 }
 
 #[tokio::test]
+async fn a_planned_task_admitted_late_is_not_stalled_for_the_time_it_was_planned() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-admitted-late").await;
+    let planned = f
+        .create_task(
+            &f.admin,
+            &p,
+            "Parked then admitted",
+            json!({"planned":true}),
+        )
+        .await;
+    assert_eq!(planned["lifecycle"], "planned");
+    // Planned work is not ready work, however long it waits.
+    f.clock.0.fetch_add(10 * HOUR, Ordering::SeqCst);
+    assert_eq!(f.digest(&p).await["hri"]["count"], 0);
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        planned["id"].as_str().unwrap()
+    );
+    let admitted = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &path,
+            json!({"expected_revision":planned["revision"],"title":"Parked then admitted",
+                "description":"","acceptance_criteria":["done"],"priority":2,
+                "depends_on":[],"planned":false}),
+        )
+        .await;
+    assert_eq!(admitted["lifecycle"], "open", "{admitted}");
+    // Ten hours after creation but not a moment after admission: not stalled.
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["count"], 0, "{hri}");
+    f.clock.0.fetch_add(6 * HOUR, Ordering::SeqCst);
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(
+        hri["count"], 0,
+        "exactly the threshold after admission: {hri}"
+    );
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["count"], 1, "{hri}");
+    assert_eq!(hri["items"][0]["code"], "stalled_queue");
+    assert_eq!(hri["items"][0]["idle_hours"], 7);
+}
+
+#[tokio::test]
+async fn the_opened_at_migration_backfills_from_revisions_else_created_at() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-opened-backfill").await;
+    let open = f.task(&p, "Created open").await;
+    let planned = f
+        .create_task(&f.admin, &p, "Created planned", json!({"planned":true}))
+        .await;
+    let still_planned = f
+        .create_task(&f.admin, &p, "Still planned", json!({"planned":true}))
+        .await;
+    f.clock.0.fetch_add(3 * HOUR, Ordering::SeqCst);
+    let admitted_ms = f.clock.0.load(Ordering::SeqCst);
+    f.ok(
+        &f.admin,
+        "PATCH",
+        &format!(
+            "/api/v1/projects/{p}/tasks/{}",
+            planned["id"].as_str().unwrap()
+        ),
+        json!({"expected_revision":planned["revision"],"title":"Created planned","description":"",
+            "acceptance_criteria":["done"],"priority":2,"depends_on":[],"planned":false}),
+    )
+    .await;
+    // A task that never had an open revision falls back to its creation time.
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES('no-revisions',?,'Done','','[]','general',2,'done',12345,12345)")
+        .bind(&p)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    // Re-run the migration against rows that predate the column.
+    let mut connection = f.state.pool.acquire().await.unwrap();
+    sqlx::query("ALTER TABLE tasks DROP COLUMN opened_at")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0048_task_opened_at.sql"))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    let opened = |id: String| {
+        let pool = f.state.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<i64>>("SELECT opened_at FROM tasks WHERE id=?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let created = 1_800_000_000_000;
+    assert_eq!(
+        opened(open["id"].as_str().unwrap().into()).await,
+        Some(created)
+    );
+    assert_eq!(
+        opened(planned["id"].as_str().unwrap().into()).await,
+        Some(admitted_ms)
+    );
+    assert_eq!(
+        opened(still_planned["id"].as_str().unwrap().into()).await,
+        None
+    );
+    assert_eq!(opened("no-revisions".into()).await, Some(12345));
+}
+
+#[tokio::test]
 async fn quiet_hours_do_not_count_toward_the_stall_clock() {
     let f = Fixture::new().await;
     let p = f.project("attention-quiet").await;

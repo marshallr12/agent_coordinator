@@ -387,10 +387,11 @@ async fn create_objective(
         None,
     )
     .await?;
-    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,'general',?,?,?,?)")
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since,opened_at) VALUES(?,?,?,?,?,'general',?,?,?,?,?)")
         .bind(&id).bind(&project).bind(&input.title).bind(&input.description)
         .bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority)
         .bind(admission.lifecycle(input.planned)).bind(mutation.now).bind(mutation.now)
+        .bind((admission.lifecycle(input.planned) == "open").then_some(mutation.now))
         .execute(&mut *mutation.tx).await?;
     crate::admission::record(&mut mutation, &id, &admission).await?;
     sqlx::query("INSERT INTO objectives(project_id,task_id,revision,created_by,created_at,updated_at) VALUES(?,?,1,?,?,?)")

@@ -931,6 +931,207 @@ async fn general_submission_requires_an_independent_reviewer_and_then_completes(
     assert_eq!(lifecycle, "done");
 }
 
+/// `opened_at` is the moment a task became open: null while planned, the
+/// admission time once admitted, and untouched by later edits, dependency
+/// completion and a review that sends the task back for revision.
+#[tokio::test]
+async fn opened_at_is_the_admission_time_and_later_changes_leave_it_alone() {
+    const HOUR: i64 = 3_600_000;
+    let f = Fixture::new().await;
+    let p = f
+        .project("opened-at", "https://example.test/opened.git")
+        .await;
+    let task_path = |t: &Value| format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let stored = |id: String| {
+        let pool = f.state.pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<i64>, i64)>(
+                "SELECT opened_at,ready_since FROM tasks WHERE id=?",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let created_at_ms = f.clock.0.load(Ordering::SeqCst);
+
+    // A task created open is opened when it is created.
+    let prerequisite = f.task(&p, "general", "Prerequisite").await;
+    assert_eq!(prerequisite["opened_at"], prerequisite["created_at"]);
+    assert_eq!(
+        stored(prerequisite["id"].as_str().unwrap().into()).await.0,
+        Some(created_at_ms)
+    );
+
+    // A planned task has no opened_at, on create and on every read.
+    let (status, created) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("/api/v1/projects/{p}/tasks"),
+            json!({"title":"Planned","description":"workflow test","acceptance_criteria":["required behavior verified"],
+                "kind":"general","planned":true,"depends_on":[prerequisite["id"]]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let planned = created["data"].clone();
+    assert_eq!(planned["lifecycle"], "planned");
+    assert!(planned["opened_at"].is_null(), "{planned}");
+    let (_, read) = f
+        .call(&f.admin, "GET", &task_path(&planned), Value::Null)
+        .await;
+    assert!(read["data"]["opened_at"].is_null(), "{read}");
+    let planned_id = planned["id"].as_str().unwrap().to_string();
+
+    // Admission some time after creation records that time, not the creation time.
+    f.clock.0.fetch_add(3 * HOUR, Ordering::SeqCst);
+    let admitted_ms = f.clock.0.load(Ordering::SeqCst);
+    let edit = |t: &Value, title: &str, planned: bool| {
+        json!({"expected_revision":t["revision"],"title":title,"description":"workflow test",
+            "acceptance_criteria":["required behavior verified"],"priority":2,
+            "depends_on":[prerequisite["id"]],"planned":planned})
+    };
+    let (status, admitted) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &task_path(&planned),
+            edit(&planned, "Planned", false),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{admitted}");
+    let admitted = admitted["data"].clone();
+    assert_eq!(admitted["lifecycle"], "open");
+    let opened_at = admitted["opened_at"].clone();
+    assert!(opened_at.is_string(), "{admitted}");
+    assert_ne!(opened_at, admitted["created_at"], "{admitted}");
+    assert_eq!(stored(planned_id.clone()).await.0, Some(admitted_ms));
+    // ready_since is a different value: queue order still uses the creation time.
+    assert_eq!(stored(planned_id.clone()).await.1, created_at_ms);
+    assert_ne!(admitted["ready_since"], opened_at);
+
+    // A later edit leaves it alone.
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let (status, edited) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &task_path(&admitted),
+            edit(&admitted, "Renamed", false),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["data"]["opened_at"], opened_at);
+
+    // Finishing the prerequisite resets ready_since but not opened_at.
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let owner = f.claim(&f.a, &p, &prerequisite, 1).await;
+    let submitted = f
+        .submit(
+            &f.a,
+            &p,
+            &prerequisite,
+            &owner,
+            "general",
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let review = activity(&submitted, "agent_review");
+    let (status, claimed) = f.claim_activity(&f.b, &p, review, 1, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let (status,done)=f.call(&f.b,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/review",review["id"].as_str().unwrap()),json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"acceptance evidence is sufficient","findings":[]})).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    let after_dependency = stored(planned_id.clone()).await;
+    assert_eq!(after_dependency.0, Some(admitted_ms));
+    assert_eq!(after_dependency.1, f.clock.0.load(Ordering::SeqCst));
+
+    // A review that sends the task back for revision leaves it alone too.
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let (_, current) = f
+        .call(&f.admin, "GET", &task_path(&admitted), Value::Null)
+        .await;
+    let current = current["data"].clone();
+    let owner = f.claim(&f.a, &p, &current, 1).await;
+    let submitted = f
+        .submit(
+            &f.a, &p, &current, &owner, "general", 1, None, None, None, None,
+        )
+        .await;
+    let review = activity(&submitted, "agent_review");
+    let (status, claimed) = f.claim_activity(&f.b, &p, review, 1, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let (status,changed)=f.call(&f.b,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/review",review["id"].as_str().unwrap()),json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"changes_requested","summary":"revision required","findings":[{"severity":"required","remedy":"fix the identified issue","evidence":"reviewed exact submission"}]})).await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(changed["data"]["work_status"], "ready");
+    let (_, reread) = f
+        .call(&f.admin, "GET", &task_path(&admitted), Value::Null)
+        .await;
+    assert_eq!(reread["data"]["opened_at"], opened_at, "{reread}");
+    let after_review = stored(planned_id.clone()).await;
+    assert_eq!(after_review.0, Some(admitted_ms));
+    assert_eq!(after_review.1, f.clock.0.load(Ordering::SeqCst));
+
+    // Blocking the task and unblocking it resets ready_since but not opened_at.
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let (_, current) = f
+        .call(&f.admin, "GET", &task_path(&admitted), Value::Null)
+        .await;
+    let current = current["data"].clone();
+    let owner = f.claim(&f.a, &p, &current, 1).await;
+    let (status, released) = f
+        .call(&f.a, "POST", &format!("/api/v1/projects/{p}/attempts/{}/release", owner["id"].as_str().unwrap()),
+            json!({"generation":owner["generation"],"summary":"Needs a resource that does not exist yet.","blocked":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{released}");
+    let (_, blocked) = f
+        .call(&f.admin, "GET", &task_path(&admitted), Value::Null)
+        .await;
+    assert!(blocked["data"]["blocked_reason"].is_string(), "{blocked}");
+    assert_eq!(blocked["data"]["opened_at"], opened_at, "{blocked}");
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let (status, unblocked) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{}/unblock", task_path(&admitted)),
+            json!({"expected_revision":blocked["data"]["revision"],"reason":"The resource was created."}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{unblocked}");
+    assert!(
+        unblocked["data"]["task"]["blocked_reason"].is_null(),
+        "{unblocked}"
+    );
+    assert_eq!(
+        unblocked["data"]["task"]["opened_at"], opened_at,
+        "{unblocked}"
+    );
+    let after_unblock = stored(planned_id.clone()).await;
+    assert_eq!(after_unblock.0, Some(admitted_ms));
+    assert_eq!(after_unblock.1, f.clock.0.load(Ordering::SeqCst));
+
+    // Returning the task to planned clears it; the next admission records its own time.
+    let (_, current) = f
+        .call(&f.admin, "GET", &task_path(&admitted), Value::Null)
+        .await;
+    let current = current["data"].clone();
+    let (status, replanned) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &task_path(&current),
+            edit(&current, "Renamed", true),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{replanned}");
+    assert!(replanned["data"]["opened_at"].is_null(), "{replanned}");
+}
+
 #[tokio::test]
 async fn task_processing_distinguishes_queued_active_and_lapsed_review_and_live_work() {
     let f = Fixture::new().await;
