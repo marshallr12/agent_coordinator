@@ -5,8 +5,10 @@
 //! own clone at the candidate revision, gets no coordinator credential, and
 //! is removed with its `$RUN` once its final output has been read.
 use super::binding::{self, Binding};
+use super::health::Vendor;
 use super::live::{self, mirror};
 use super::review::{self, Review, ReviewClaim, ReviewDriver, Strikes};
+use super::review_cost::{self, ReviewLaunch};
 use super::rooted;
 use crate::clone;
 use crate::config::Config;
@@ -163,12 +165,12 @@ impl LiveReviewer {
             let head = format!("refs/heads/{}", self.config.run.branch);
             return clone::git_output(&mirror, &["rev-parse", "--verify", &head]);
         };
-        let refspec = format!("+{reference}:{}", review_branch(claim));
+        let refspec = format!("+{reference}:{}", review_branch(claim.session));
         clone::git_output(
             &mirror,
             &["fetch", "--no-tags", "--quiet", "origin", &refspec],
         )?;
-        let commit = format!("{}^{{commit}}", review_branch(claim));
+        let commit = format!("{}^{{commit}}", review_branch(claim.session));
         let fetched = clone::git_output(&mirror, &["rev-parse", "--verify", &commit])?;
         ensure!(
             fetched == revision,
@@ -237,6 +239,37 @@ impl LiveReviewer {
         Ok(())
     }
 
+    /// The record of the launch `claim` is about to start.
+    fn recorded(&self, review: &Review, claim: &ReviewClaim) -> ReviewLaunch {
+        ReviewLaunch {
+            session: claim.session,
+            project: self.project.clone(),
+            task: review.subject.clone(),
+            activity: review.activity.clone(),
+            attempt: claim.attempt.clone(),
+            vendor: Vendor::primary(&self.config.run),
+            boot_id: super::record::boot_id(),
+            recorded_ms: now_ms(),
+        }
+    }
+
+    /// The harness's event stream, `$RUN/events.jsonl`, read as root without
+    /// following the reviewer's symlinks; `None` when the launch wrote none.
+    fn events(&self, paths: &Paths) -> Option<Vec<u8>> {
+        let relative = paths.relative(&paths.run).ok()?.join("events.jsonl");
+        rooted::read(&paths.role, &relative, self.account.uid, MAX_OUTPUT).ok()
+    }
+
+    /// Records the ended launch's cost and, once it is in the ledger, removes
+    /// the launch's clone, run and record; a failure keeps them for recovery.
+    fn settle(&self, launch: &ReviewLaunch, paths: &Paths) {
+        let events = self.events(paths);
+        if review_cost::settle(&self.config, launch, events.as_deref(), now_ms()) {
+            self.discard(paths, launch.session);
+            ReviewLaunch::remove(&self.config, &launch.session);
+        }
+    }
+
     /// Codex's last-message file or Claude's event stream, read as root
     /// without following the reviewer's symlinks.
     fn final_output(&self, paths: &Paths) -> Result<String> {
@@ -265,7 +298,7 @@ impl LiveReviewer {
     }
 
     /// Removes the review's clone, `$RUN` and mirror branch.
-    fn discard(&self, paths: &Paths, claim: &ReviewClaim) {
+    fn discard(&self, paths: &Paths, session: Uuid) {
         for path in [&paths.clone, &paths.run] {
             let removed = paths
                 .relative(path)
@@ -274,7 +307,7 @@ impl LiveReviewer {
                 eprintln!("agentc-supervisor run: review cleanup: {error:#}");
             }
         }
-        let branch = review_branch(claim);
+        let branch = review_branch(session);
         let _ = clone::git_output(&mirror(&self.config), &["update-ref", "-d", &branch]);
     }
 
@@ -347,9 +380,26 @@ impl ReviewDriver for LiveReviewer {
 
     fn run_reviewer(&mut self, review: &Review, claim: &ReviewClaim) -> Result<String> {
         let paths = Paths::new(&self.config, claim.session);
-        let output = self.launch(review, claim, &paths);
-        self.discard(&paths, claim);
+        let launch = self.recorded(review, claim);
+        let saved = launch
+            .save(&self.config)
+            .context("record the review launch");
+        let output = saved.and_then(|()| self.launch(review, claim, &paths));
+        self.settle(&launch, &paths);
         output
+    }
+
+    fn recover(&mut self) {
+        let boot = super::record::boot_id();
+        let events = |launch: &ReviewLaunch| {
+            let paths = Paths::new(&self.config, launch.session);
+            self.events(&paths)
+        };
+        let discard = |launch: &ReviewLaunch| {
+            let paths = Paths::new(&self.config, launch.session);
+            self.discard(&paths, launch.session);
+        };
+        review_cost::recover(&self.config, &boot, now_ms(), events, discard);
     }
 
     /// Posts the decision; the CLI adds the generation and submission.
@@ -490,9 +540,14 @@ fn verdict_home(config: &Config) -> PathBuf {
     config.state_dir.join("verdict").join("home")
 }
 
+/// Milliseconds since the epoch.
+fn now_ms() -> i64 {
+    i64::try_from(crate::shadow::now_ms()).unwrap_or(i64::MAX)
+}
+
 /// The mirror branch a review's candidate is fetched into.
-fn review_branch(claim: &ReviewClaim) -> String {
-    format!("refs/heads/agentc-review/{}", claim.session)
+fn review_branch(session: Uuid) -> String {
+    format!("refs/heads/agentc-review/{session}")
 }
 
 /// Refuses a verdict home that is not a root-owned directory closed to

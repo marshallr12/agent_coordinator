@@ -25,6 +25,7 @@ mod live_review;
 pub mod record;
 pub mod renewal;
 pub mod review;
+pub mod review_cost;
 #[cfg(target_os = "linux")]
 mod rooted;
 
@@ -339,6 +340,9 @@ pub fn refusal(driver: &impl Driver, settings: &RunConfig) -> Option<String> {
 /// reviewer's daily cap allows it; without a side it only reports reviewer
 /// work it cannot take.
 pub fn review_hook(driver: &mut impl Driver, config: &Config) {
+    if let Some(reviewer) = driver.reviewer() {
+        reviewer.recover();
+    }
     if let Err(reason) = health::capped(config, Role::Reviewer, driver.now_ms()) {
         eprintln!("agentc-supervisor run: no review: {reason}");
         return;

@@ -4,8 +4,11 @@
 //! `<state_dir>/costs.jsonl` against its task, session and attempt, and
 //! adds the figure to the attempt's handoff summary. Claude reports its own
 //! dollar cost; Codex usage is priced with the `[shadow]` price table. The
-//! same events reveal a 429, which marks the vendor exhausted.
+//! same events reveal a 429, which marks the vendor exhausted. A reviewer
+//! launch's cost is recorded the same way ([`settle_review`]), once per
+//! session.
 use super::record::LaunchRecord;
+use super::review_cost::ReviewLaunch;
 use super::{Driver, Launch, health};
 use crate::config::Config;
 use crate::estimate;
@@ -151,6 +154,38 @@ pub fn settle(
         eprintln!("agentc-supervisor run: record cost: {error:#}");
     }
     note(&usage)
+}
+
+/// Records a finished reviewer launch's cost in the ledger against its task
+/// and session, unless the ledger already holds that session's reviewer row.
+/// Returns whether the ledger now holds it.
+pub fn settle_review(config: &Config, launch: &ReviewLaunch, events: &[u8], now: i64) -> bool {
+    if recorded(config, Role::Reviewer, &launch.session.to_string()) {
+        return true;
+    }
+    let usage = priced(digest(events).usage, config, &launch.vendor.model);
+    let line = json!({
+        "at_ms": now, "role": Role::Reviewer.slug(), "project": launch.project,
+        "task": launch.task, "session": launch.session,
+        "attempt": launch.attempt, "harness": health::name(launch.vendor.harness),
+        "model": launch.vendor.model, "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "output_tokens": usage.output_tokens, "usd": usage.usd,
+    });
+    let appended = append(config, &line);
+    if let Err(error) = &appended {
+        eprintln!("agentc-supervisor run: record review cost: {error:#}");
+    }
+    appended.is_ok()
+}
+
+/// Whether the ledger holds a row of `role` for `session`.
+fn recorded(config: &Config, role: Role, session: &str) -> bool {
+    let text = std::fs::read_to_string(ledger(config)).unwrap_or_default();
+    let mut lines = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok());
+    lines.any(|e| e["role"] == role.slug() && e["session"] == session)
 }
 
 /// `usage` with dollars from the price table when the harness gave none.
