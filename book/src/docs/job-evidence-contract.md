@@ -25,6 +25,9 @@ POST `.../reservations/{r}/resolve` `{reason,evidence}`: explicit human resoluti
 of an uncertain physical resource, retaining provenance and affected job history.
 GET `/api/v1/projects/{p}/reservations`: bounded cursor list with derived held /
 recovery-required status. Never free holds on observer/lease/session loss.
+GET `/api/v1/resources/{r}/reservations`: the same reservations across projects for
+one resource, newest first, with `project_name` and `task_title`, a `cursor`/`limit`
+page and an optional `state=held` filter (see the API contract).
 
 POST `/api/v1/projects/{p}/attempts/{a}/jobs`:
 `{generation,job_id,producer_id,runner_instance_id,workstation_id,label,
