@@ -127,6 +127,7 @@ class E2ETests(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.token = self.dir / "token"
         self.token.write_text(TOKEN + "\n")
+        self.token.chmod(0o600)
         self.results = self.dir / "results.jsonl"
         self.ledger = self.dir / "costs.jsonl"
         self.clock = Clock()
