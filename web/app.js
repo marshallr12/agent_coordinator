@@ -1396,7 +1396,9 @@
       const failed = error => { delete view.form.dataset.recording; showDialogError(view, error); };
       // A request that could not start runs neither callback, so it is reported like a failure.
       const notStarted = () => new ApiError('The request could not start: another request may still be running, or this browser could not save it. Try again.', 0, 'mutation_not_started', null, false);
-      if (attempt) { if (!recordHumanReview(activity, attempt, review, done, failed)) failed(notStarted()); }
+      // A kept attempt the service no longer honours (lease expired, released or superseded) is forgotten, so the next submit claims afresh instead of retrying the dead attempt forever.
+      const reused = error => { if (!error?.uncertain && ['lease_expired', 'ownership_lost'].includes(error?.code)) attempt = null; failed(error); };
+      if (attempt) { if (!recordHumanReview(activity, attempt, review, done, reused)) failed(notStarted()); }
       else if (!claimHumanReview(activity, submission, held => {
         // A claim this form could not give back is kept and reused by the next retry instead of claiming again.
         const keep = () => { attempt = held; };
