@@ -74,6 +74,31 @@ pub enum Recovery {
     Ended,
 }
 
+/// What a cleanup found to remove. A cleanup that succeeds without
+/// finding anything says so, so a record of it does not claim a removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removed {
+    /// Nothing of the launch existed at the host.
+    Nothing,
+    /// What the launch held at the host was removed.
+    Launch,
+}
+
+impl Removed {
+    /// `Launch` when anything `existed` before the cleanup removed it.
+    pub fn when(existed: bool) -> Self {
+        if existed { Self::Launch } else { Self::Nothing }
+    }
+
+    /// The word a ledger records: `nothing` or `launch`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Nothing => "nothing",
+            Self::Launch => "launch",
+        }
+    }
+}
+
 /// The operating-system side of one launch at a time.
 pub trait HostRuntime {
     /// Makes the launch's source tree and run directory, owned by the role,
@@ -93,8 +118,9 @@ pub trait HostRuntime {
     /// Judges a saved record at `now_ms` (milliseconds since the epoch)
     /// without starting anything.
     fn recover(&self, record: &LaunchRecord, now_ms: i64) -> Recovery;
-    /// Removes the launch's source tree and run directory.
-    fn cleanup(&mut self, launch: &Launch) -> Result<()>;
+    /// Removes the launch's source tree and run directory, and says
+    /// whether there was anything to remove.
+    fn cleanup(&mut self, launch: &Launch) -> Result<Removed>;
 }
 
 /// The runtime of a host with no backend: it prepares and starts nothing,
@@ -136,7 +162,7 @@ impl HostRuntime for Refusing {
         Recovery::MayBeRunning
     }
 
-    fn cleanup(&mut self, _launch: &Launch) -> Result<()> {
+    fn cleanup(&mut self, _launch: &Launch) -> Result<Removed> {
         bail!("nothing is removed: {}", self.reason)
     }
 }

@@ -317,7 +317,7 @@ fn settle(driver: &mut impl Driver, config: &Config, record: &mut LaunchRecord) 
         return;
     }
     match driver.host().cleanup(&launch) {
-        Ok(()) => LaunchRecord::remove(config, &record.session_id),
+        Ok(_) => LaunchRecord::remove(config, &record.session_id),
         Err(error) => eprintln!("agentc-supervisor run: recovery cleanup: {error:#}"),
     }
 }

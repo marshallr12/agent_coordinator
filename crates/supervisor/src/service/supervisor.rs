@@ -274,7 +274,7 @@ mod tests {
     use super::super::stand_in::{Ledger, Recorded, judge};
     use super::*;
     use crate::config::Config;
-    use crate::host_runtime::{LaunchIdentity, Observation, Recovery, StartIntent};
+    use crate::host_runtime::{LaunchIdentity, Observation, Recovery, Removed, StartIntent};
     use crate::run_loop::record::LaunchRecord;
     use crate::run_loop::{Outcome, heartbeat_path, iterate, run};
     use std::cell::Cell;
@@ -346,9 +346,9 @@ mod tests {
             self.recovery
         }
 
-        fn cleanup(&mut self, _launch: &Launch) -> Result<()> {
+        fn cleanup(&mut self, _launch: &Launch) -> Result<Removed> {
             self.cleaned += 1;
-            Ok(())
+            Ok(Removed::Launch)
         }
     }
 

@@ -11,7 +11,8 @@
 //!    close, forbids breakaway, bounds processes and memory, restricts the
 //!    user interface.
 //! 4. **Private desktop** ([`desktop`]) in a window station the launcher
-//!    made; a station it did not make is refused.
+//!    made, or one Windows made for the launcher's process alone
+//!    ([`adoption`]); any other station is refused.
 //! 5. **Explicit inheritance** ([`process`]). An exact environment and an
 //!    explicit handle list.
 //!
@@ -32,6 +33,7 @@
 //! No provider harness is supported on Windows yet, so what a launch runs
 //! comes from a [`Planner`] the caller supplies; nothing in this crate
 //! builds a harness launch for it.
+pub mod adoption;
 pub mod desktop;
 pub mod job;
 pub mod journal;
@@ -52,7 +54,7 @@ pub mod sys;
 pub mod text;
 pub mod token;
 
-use super::{HostRuntime, LaunchIdentity, Observation, Recovery, StartIntent};
+use super::{HostRuntime, LaunchIdentity, Observation, Recovery, Removed, StartIntent};
 use crate::run_loop::Launch;
 use crate::run_loop::record::LaunchRecord;
 use anyhow::{Context, Result};
@@ -174,21 +176,28 @@ impl<P: Planner> HostRuntime for WindowsHost<P> {
     /// Ends the launch, deletes its desktop and profile, and removes its
     /// two directories. A launch of an earlier runtime has only its
     /// directories left to remove here.
-    fn cleanup(&mut self, launch: &Launch) -> Result<()> {
+    fn cleanup(&mut self, launch: &Launch) -> Result<Removed> {
         let id = launch.session_id.to_string();
-        if self.launcher.held().contains(&id) {
+        let held = self.launcher.held().contains(&id);
+        if held {
             self.launcher.cleanup(&id)?;
         }
         self.planned.remove(&launch.session_id);
         let (spec, _) = self.planner.plan(launch)?;
+        let mut existed = held;
         for directory in [&spec.control, &spec.work] {
-            match std::fs::remove_dir_all(directory) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    Err(error).with_context(|| format!("remove {}", directory.display()))?;
-                }
-                _ => {}
-            }
+            existed |= remove_tree(directory)?;
         }
-        Ok(())
+        Ok(Removed::when(existed))
+    }
+}
+
+/// Removes `directory` and everything below it; false when it was not
+/// there.
+fn remove_tree(directory: &std::path::Path) -> Result<bool> {
+    match std::fs::remove_dir_all(directory) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("remove {}", directory.display())),
     }
 }

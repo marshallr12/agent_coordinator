@@ -141,6 +141,89 @@ caught because the handle's real path leaves the root. Creation and deletion
 inside worker-writable trees need handle-relative operations; that is proposed
 and untested.
 
+### The station of a runner that is a service
+
+Task `7f6f242d-716b-47a9-9a66-3be547b7e64f`. Layer 4 above makes the logon
+session's unnamed window station and refuses one that exists. The phase 4c
+machine run (task `62d9942f`) showed what that means under the Service
+Control Manager: a service's logon session already has its station,
+`Service-0x0-<logon session>$`, when the service's first instruction runs, so
+creation fails with `ERROR_ALREADY_EXISTS` and every launch was refused with
+`station_not_ours`. This section records how the runner gets a station whose
+access list it controls, and what was considered.
+
+| Mechanism | What it would establish | What it needs | Verdict |
+| --- | --- | --- | --- |
+| **Take over the session's station after verifying it** | The same as a station the launcher made, from the moment its access list is rewritten: only the runner's account and the packages of its live launches may open it. Nothing about what was in it before | Nothing at installation and no privilege: the checks and the rewrite are the runner's own | **Chosen and implemented.** Demonstrated in a service-like logon session; **not demonstrated under the Service Control Manager** |
+| A named station made by an administrator at installation | A station no other program was ever attached to | A window station exists only while a handle to it is open, so installation cannot leave one behind. A privileged process would have to make it at every boot, keep it open and grant the runner the right to rewrite its access list: a new elevated component | Not chosen, not tried |
+| A logon session per launch | A station per launch, so separate clipboards and atom tables: the only mechanism here that would | The runner would create logon sessions, which needs credentials for the account or the privilege to act as part of the operating system. Either changes what the role runner holds | Not chosen, not tried. It stays the route to a station per launch |
+| Keep refusing | Nothing new | The runner could not be a service; it would have to be started in a logon session without a station, which is not a boot-time service | Rejected: it gives up phase 4 |
+
+**The chosen mechanism** (`host_runtime::windows::adoption`). When the
+station already exists, the launcher opens it with every right and uses it
+only if Windows confirms all of the following. Otherwise it refuses with
+`station_not_ours`, as before, and the refusal's text names the fact that was
+missing. A refused station is not changed.
+
+1. Its name is the one Windows gives the unnamed station of this process's
+   own logon session, read from the process token.
+2. It is the station this process runs in. Windows attaches a service's
+   process to its session's station at start; on an interactive desktop a
+   process runs in `WinSta0`, so the session station some other program made
+   there is refused by this fact alone.
+3. Its owner is the runner's account, the system or administrators. An
+   owner can always rewrite an access list.
+4. No other process is in the logon session. A process there could hold a
+   handle that the rewrite below does not take away. Processes are listed
+   and each one's token is read; a process Windows will not let the runner
+   open is taken to belong to another account.
+
+The launcher then replaces the station's access list with its own, the
+runner's account alone, and sets the low integrity label a launch needs to
+use the station. It reads the list back and refuses unless Windows reports
+exactly that list. From then on the station is handled like one the launcher
+made: a launch's package is added for the launch's life and removed at
+cleanup.
+
+**What this does not establish**, beyond what layer 4 already leaves open:
+
+- Anything about the station's contents from before the rewrite. A process
+  that was in the session and has exited may have left atoms or clipboard
+  data. Under the Service Control Manager the session belongs to the
+  service's virtual account, so that would be an earlier process of the
+  runner itself.
+- The desktop Windows made in the station (`Default`). Its access list is
+  Windows' own and is not rewritten. A launch's package is not on it, and
+  no launch has tried to open it.
+- A process of the runner's own account that refuses the runner access to
+  itself would not be counted in fact 4. Such a process already has
+  everything the runner's account has.
+- A station per launch. Launches of one runner still share one station.
+
+**Demonstrated or not.**
+
+| Claim | State |
+| --- | --- |
+| A station made before the launcher ran, in a logon session where the runner's process is alone and attached to it, is taken over; Windows then reports that the station and the launch's desktop admit only the runner's account and that launch's package; a launch runs in it and its exit code comes back; cleanup takes the package off again | **Demonstrated** on MiniAir on 2026-11-11 by the `windows_station` test, in a new logon session of the test's account (network-only credentials, nothing elevated). The test's process makes the station first, with Windows' default access list, the way something other than the launcher would |
+| A station the process does not run in, and a session with a second process, are refused; the station's access list is unchanged and no launch directory or journal entry is left | **Demonstrated** by the same test |
+| On an interactive desktop the launcher still refuses | **Demonstrated** by `windows_runner`, `windows_host` and `windows_service` in the owner's desktop session |
+| Under the Service Control Manager: that Windows lets the service's account open its station with every right, who owns that station, that the service's process is alone in its logon session, and that the rewrite and the label succeed on a station Windows made | **Not demonstrated.** Each is checked at adoption and a missing one refuses with its reason. Step 6 of the phase 4c owner runbook is where it shows |
+
+The mechanism needs no installation step and no privilege, so the runbook's
+installation steps are unchanged; its step 6 says what to expect now.
+
+**A refused or failed prepare leaves nothing.** The 4c run also showed that
+the runner made a launch's two directories before the station step and left
+them when that step was refused. The launcher now removes every directory a
+prepare made when a later step of that prepare fails or is refused, and the
+runner removes them too when the journal entry cannot be written, so nothing
+exists that the journal does not name. Only directories that prepare itself
+created are removed, each as the empty directory it still is. The host
+runtime's `cleanup` now says whether it found anything to remove, and the
+stand-in's ledger records it: `"removed": "launch"`, or `"removed":
+"nothing"` when nothing of the launch existed at the runner. A prepare that
+fails is recorded as `prepare_result` with its reason.
+
 ## Service identities and filesystem
 
 Use separate least-privilege virtual service accounts for `AgentcSupervisor`,
@@ -356,7 +439,8 @@ layer of the [launch boundary](#launch-boundary).
 | --- | --- |
 | `profile` | A disposable AppContainer profile per launch and its capability SIDs. An existing profile is never adopted |
 | `job` | An unnamed Job Object: kill on close, no breakaway, process and memory limits, every user-interface restriction, no error dialogs |
-| `desktop` | The logon session's window station, made by the launcher, and a private desktop per launch |
+| `desktop` | The logon session's window station, made by the launcher or taken over once verified, and a private desktop per launch |
+| `adoption` | The facts Windows must confirm before an existing station is taken over, and the read-back of a station's or desktop's access list |
 | `process` | Creation with the job list, the security capabilities, the handle list and, for a less-privileged token, the all-application-packages opt-out; an exact environment block; suspended start, read-back, resume |
 | `token` | The read-back: AppContainer flag, package SID and `WIN://NOALLAPPPKG` |
 | `reader` | The handle-based reader, and directory creation with a complete access list |
@@ -370,8 +454,10 @@ on Windows, and nothing in the crate builds a harness launch.
 
 It differs from the prototype in four ways, each stricter or equal.
 
-- A window station the launcher did not make is **refused**. The prototype
-  opened it and reported a failed row.
+- A window station the launcher did not make is **refused**, unless
+  Windows confirms it was made for the launcher's process alone
+  ([the station of a runner that is a service](#the-station-of-a-runner-that-is-a-service)).
+  The prototype opened any station and reported a failed row.
 - A launch's control and working directories are **created with a complete,
   protected access list**: the launcher's account, the system, administrators
   and the launch's package. The prototype added an entry to what the parent
@@ -395,7 +481,7 @@ names an operation and typed arguments; none is a command line for a shell.
 | Request | Effect |
 | --- | --- |
 | `identity` | The runner's account and the owner identity of its jobs |
-| `prepare` | Profile, both directories, desktop; a journal entry |
+| `prepare` | Profile, both directories, desktop; a journal entry. A prepare that fails or is refused removes what it made |
 | `hold_file` | Opens a file with an inheritable handle the runner keeps |
 | `start` | Starts a process; only its log and the listed held handles are inherited |
 | `observe`, `request_stop`, `terminate` | As in the interface |
@@ -438,7 +524,13 @@ launcher runs, as before.
 - `cargo test -p agentc-supervisor` on Windows runs the unit tests of every
   module and two integration tests, `windows_runner` and `windows_host`.
   Where another program made the session's window station, as on an
-  interactive desktop, those two check the refusal and nothing else.
+  interactive desktop, those two check the refusal, and that it left no
+  launch directory, and nothing else.
+- `windows_station` starts itself again in a new logon session of the same
+  account, where the station exists before the launcher runs, and checks
+  the take-over, the two refusals and what each leaves; see
+  [the station of a runner that is a service](#the-station-of-a-runner-that-is-a-service).
+  A host without the secondary logon service skips it and says so.
 - The portable tests in `windows-containment-probe-test.py` drive the
   driver's side of the runner protocol against a stand-in runner.
 - The workspace builds on native Windows. Unix-only code is behind
@@ -634,7 +726,7 @@ what a launch runs comes from a `Planner`, as with `WindowsHost`.
 | `observe` | `observe` with no wait | Running |
 | `request_stop`, `terminate` | The same | Logged; the launch is not taken to have ended |
 | `recover` | `recover`, then `observe` for a launch the runner holds | May be running |
-| `cleanup` | `recover`, then `cleanup` or `reclaim` with `remove_directories` | Nothing is removed |
+| `cleanup` | `recover`, then `cleanup` or `reclaim` with `remove_directories`; a launch the journal does not name is reported as nothing to remove | Nothing is removed |
 
 `recover` calls a recorded launch ended in three cases only: the runner's
 journal does not name it and has no unreadable entry; Windows says an earlier
@@ -809,12 +901,18 @@ Corrections from the run:
    `heartbeat.json` says `state: "stopped"` with the reason that no harness
    is supported; no pipe client appears in the runner's log. Record the
    token privileges and groups of both service processes.
-6. **Can the runner launch at all as a service?** This is the first real
-   unknown: the launcher refuses a window station it did not make, and a
-   service account's logon session may already have one. Enable the
-   stand-in with the probe fixture, queue one item, and watch the ledger. If
-   the launch is refused with `station_not_ours`, stop: that is a finding for
-   a new task, not something to configure around.
+6. **Can the runner launch at all as a service?** A service's logon
+   session already has a window station. Since task `7f6f242d` the launcher
+   takes it over once
+   [Windows confirms it is the runner's alone](#the-station-of-a-runner-that-is-a-service);
+   that needs no installation step and has not run under the Service Control
+   Manager. Enable the stand-in with the probe fixture, queue one item, and
+   watch the ledger. Expect one `prepare`, a `start` and an exit. If the
+   launch is refused with `station_not_ours`, record the `prepare_result`
+   line, whose text names the fact Windows did not confirm, check that
+   `stand-in-launches` is empty and that the `cleanup` line says
+   `"removed": "nothing"`, and stop: that is a finding for a new task, not
+   something to configure around.
 7. **Lifecycle rounds**, each with fresh queued items, each ended by
    `stand-in-judge` on the ledger and by a check that no fixture process, no
    AppContainer profile of the run and no launch directory is left:
@@ -1582,6 +1680,10 @@ Still unverified, and never to be read as passed:
   account;
 - clipboard and atom separation between launches of one account, which share
   a window station;
+- the take-over of a service's window station under the Service Control
+  Manager: it is demonstrated only in a service-like logon session, and what
+  a station Windows made for a service lets the service's account do is
+  [not shown](#the-station-of-a-runner-that-is-a-service);
 - behavior when the firewall service itself is stopped (the rounds covered
   disabled profiles only), and any launch-specific filter policy, which
   does not exist;

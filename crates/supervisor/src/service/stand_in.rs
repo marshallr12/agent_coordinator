@@ -12,7 +12,9 @@
 //!
 //! An item is offered until it is claimed and never again, whatever became
 //! of the claim, so a restart cannot launch it a second time.
-use crate::host_runtime::{HostRuntime, LaunchIdentity, Observation, Recovery, StartIntent};
+use crate::host_runtime::{
+    HostRuntime, LaunchIdentity, Observation, Recovery, Removed, StartIntent,
+};
 use crate::run_loop::Launch;
 use crate::run_loop::lease::Lease;
 use crate::run_loop::record::LaunchRecord;
@@ -226,10 +228,17 @@ impl<H: HostRuntime> Recorded<H> {
 }
 
 impl<H: HostRuntime> HostRuntime for Recorded<H> {
+    /// A prepare that fails is recorded with its reason, which for a
+    /// refusal names what the runner could not confirm.
     fn prepare(&mut self, launch: &Launch) -> Result<StartIntent> {
         let session = launch.session_id.to_string();
         (self.ledger).append("prepare", json!({"session": session}))?;
-        self.inner.prepare(launch)
+        let prepared = self.inner.prepare(launch);
+        if let Err(error) = &prepared {
+            let outcome = json!({"ok": false, "error": format!("{error:#}")});
+            self.note("prepare_result", &session, outcome);
+        }
+        prepared
     }
 
     /// The start is recorded before it is asked for and refused if it
@@ -279,10 +288,16 @@ impl<H: HostRuntime> HostRuntime for Recorded<H> {
         judged
     }
 
-    fn cleanup(&mut self, launch: &Launch) -> Result<()> {
+    /// The ledger says what the cleanup removed: `launch`, or `nothing`
+    /// when nothing of the launch existed at the host. A failed cleanup
+    /// removed nothing that is known, and its reason is recorded.
+    fn cleanup(&mut self, launch: &Launch) -> Result<Removed> {
         let cleaned = self.inner.cleanup(launch);
-        let session = launch.session_id.to_string();
-        self.note("cleanup", &session, json!({"ok": cleaned.is_ok()}));
+        let outcome = match &cleaned {
+            Ok(removed) => json!({"ok": true, "removed": removed.name()}),
+            Err(error) => json!({"ok": false, "error": format!("{error:#}")}),
+        };
+        self.note("cleanup", &launch.session_id.to_string(), outcome);
         cleaned
     }
 }
@@ -394,6 +409,78 @@ mod tests {
             .unwrap();
         file.write_all(b"{\"event\": \"cla\n").unwrap();
         assert_eq!(names(&ledger.events()), ["claim", "release", "unreadable"]);
+    }
+
+    /// A host whose cleanup answers what it is told to and nothing else.
+    struct Cleans(Option<Removed>);
+
+    impl HostRuntime for Cleans {
+        fn prepare(&mut self, _launch: &Launch) -> Result<StartIntent> {
+            anyhow::bail!("not prepared here")
+        }
+
+        fn start(&mut self, _launch: &Launch) -> Result<LaunchIdentity> {
+            anyhow::bail!("not started here")
+        }
+
+        fn observe(&mut self, _launch: &Launch) -> Observation {
+            Observation::Running
+        }
+
+        fn request_stop(&mut self, _launch: &Launch) {}
+
+        fn terminate(&mut self, _launch: &Launch) {}
+
+        fn recover(&self, _record: &LaunchRecord, _now_ms: i64) -> Recovery {
+            Recovery::MayBeRunning
+        }
+
+        fn cleanup(&mut self, _launch: &Launch) -> Result<Removed> {
+            self.0.context("the runner could not be asked")
+        }
+    }
+
+    #[test]
+    fn the_ledger_says_what_a_cleanup_removed_and_claims_nothing_for_a_refused_prepare() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::at(&dir.path().join("ledger.jsonl"));
+        let suggestion = crate::run_loop::Suggestion {
+            task: "t".into(),
+            revision: 1,
+            title: String::new(),
+        };
+        let launch = Launch::plan(&crate::config::Config::default(), "p", suggestion);
+        for answer in [Some(Removed::Nothing), Some(Removed::Launch), None] {
+            let mut host = Recorded::new(Cleans(answer), Ledger::at(&ledger.path));
+            assert!(host.prepare(&launch).is_err(), "a refused prepare");
+            assert_eq!(host.cleanup(&launch).ok(), answer);
+        }
+        let refusals = |event: &Value| event["event"] == "prepare_result";
+        let refused: Vec<Value> = ledger.events().into_iter().filter(refusals).collect();
+        assert_eq!(refused.len(), 3);
+        assert_eq!(refused[0]["error"], "not prepared here");
+        let cleanups: Vec<Value> = (ledger.events().into_iter())
+            .filter(|event| event["event"] == "cleanup")
+            .collect();
+        let seen = |i: usize, field: &str| cleanups[i][field].clone();
+        assert_eq!(
+            (seen(0, "ok"), seen(0, "removed")),
+            (json!(true), json!("nothing"))
+        );
+        assert_eq!(
+            (seen(1, "ok"), seen(1, "removed")),
+            (json!(true), json!("launch"))
+        );
+        assert_eq!(
+            (seen(2, "ok"), seen(2, "removed")),
+            (json!(false), Value::Null)
+        );
+        assert!(
+            seen(2, "error")
+                .as_str()
+                .unwrap()
+                .contains("could not be asked")
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ use agentc_supervisor::host_runtime::windows::job::Limits;
 use agentc_supervisor::host_runtime::windows::launcher::{LaunchSpec, STOP_MARKER};
 use agentc_supervisor::host_runtime::windows::process::Command;
 use agentc_supervisor::host_runtime::windows::{Planner, WindowsHost};
-use agentc_supervisor::host_runtime::{HostRuntime, Observation, Recovery, StartIntent};
+use agentc_supervisor::host_runtime::{HostRuntime, Observation, Recovery, Removed, StartIntent};
 use agentc_supervisor::run_loop::lease::Lease;
 use agentc_supervisor::run_loop::record::LaunchRecord;
 use agentc_supervisor::run_loop::{Launch, Suggestion};
@@ -109,6 +109,9 @@ fn the_loop_interface_runs_stops_and_recovers_a_contained_launch() {
             );
             eprintln!("another program made this session's window station; refusal checked");
             assert!(host.start(&quick).is_err());
+            let left = std::fs::read_dir(dir.path()).unwrap().count();
+            assert_eq!(left, 0, "a refused prepare leaves no launch directory");
+            assert_eq!(host.cleanup(&quick).unwrap(), Removed::Nothing);
             return;
         }
     };
@@ -136,8 +139,12 @@ fn runs_to_its_exit(host: &mut impl HostRuntime, quick: &Launch, intent: &StartI
     saved.identify(&identity);
     assert!(identity.pid > 0 && identity.started.unwrap() > 0);
     assert_eq!(exit_code(host, quick, 30), Some(3));
-    host.cleanup(quick).unwrap();
-    host.cleanup(quick).unwrap();
+    assert_eq!(host.cleanup(quick).unwrap(), Removed::Launch);
+    assert_eq!(
+        host.cleanup(quick).unwrap(),
+        Removed::Nothing,
+        "already gone"
+    );
 }
 
 /// A launch that never exits is asked to stop (the marker appears), is

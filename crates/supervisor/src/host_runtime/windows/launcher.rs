@@ -94,6 +94,38 @@ struct Slot {
     watched: Option<Handle>,
 }
 
+/// The directories made so far for a launch that is not prepared yet.
+/// Dropping it removes them again, newest first, unless [`Made::keep`] was
+/// called: a guard, so every early return of the preparation undoes them.
+#[derive(Default)]
+struct Made(Vec<PathBuf>);
+
+impl Made {
+    /// Creates `path` with the access list `sddl` and remembers it. A
+    /// directory that already exists is an error and is not remembered, so
+    /// only what this launch made is ever removed.
+    fn directory(&mut self, path: &Path, sddl: &str) -> Result<()> {
+        create_directory(path, sddl)?;
+        self.0.push(path.to_owned());
+        Ok(())
+    }
+
+    /// The launch is prepared: its directories stay.
+    fn keep(mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for Made {
+    /// Nothing has run in these directories, so each is empty and is
+    /// removed as such; nothing below it is followed or deleted.
+    fn drop(&mut self) {
+        for directory in self.0.iter().rev() {
+            let _ = std::fs::remove_dir(directory);
+        }
+    }
+}
+
 /// The launches of one account's logon session.
 pub struct Launcher {
     owner: String,
@@ -126,7 +158,8 @@ impl Launcher {
         &self.owner
     }
 
-    /// The station, made on first use; an existing one is refused.
+    /// The station, made on first use; an existing one is taken over only
+    /// when Windows made it for this process alone, and refused otherwise.
     fn station(&mut self) -> Result<&mut Station> {
         if self.station.is_none() {
             self.station = Some(Station::create(&self.owner)?);
@@ -148,6 +181,7 @@ impl Launcher {
             "launch {id} is already prepared"
         );
         let capabilities = Capabilities::named(&spec.capabilities)?;
+        let job_owner = job_owner()?;
         let profile = Profile::create(&spec.profile)?;
         let desktop = match self.furnish(&spec, &profile) {
             Ok(desktop) => desktop,
@@ -159,7 +193,7 @@ impl Launcher {
         let prepared = Prepared {
             package_sid: profile.sid_text().to_owned(),
             desktop: desktop.name().to_owned(),
-            job_owner: job_owner()?,
+            job_owner,
         };
         let slot = Slot {
             spec,
@@ -176,13 +210,17 @@ impl Launcher {
     }
 
     /// The launch's directories, each with its complete access list, and
-    /// its desktop in the launcher's station.
+    /// its desktop in the launcher's station. A directory made here is
+    /// removed again when a later step fails or is refused.
     fn furnish(&mut self, spec: &LaunchSpec, profile: &Profile) -> Result<Desktop> {
         let (owner, package) = (self.owner.clone(), profile.sid_text());
-        create_directory(&spec.control, &sddl::control_directory(&owner, package)?)?;
-        create_directory(&spec.work, &sddl::work_directory(&owner, package)?)?;
+        let mut made = Made::default();
+        made.directory(&spec.control, &sddl::control_directory(&owner, package)?)?;
+        made.directory(&spec.work, &sddl::work_directory(&owner, package)?)?;
         let label = format!("agentc-{}", uuid::Uuid::new_v4().simple());
-        Desktop::create(self.station()?, package, &label)
+        let desktop = Desktop::create(self.station()?, package, &label)?;
+        made.keep();
+        Ok(desktop)
     }
 
     /// Opens `path` for reading with an inheritable handle the launcher
