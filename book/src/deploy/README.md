@@ -402,12 +402,19 @@ own socket directory, read-only, so it cannot reach another launch's helper.
 
 Codex launches are not sandboxed this way: they run in the host namespace as
 the implementer account, which is in every implementer socket directory's
-group. A Codex implementer can therefore connect to the helper of any other
-implementer launch running at the same time, if it learns that launch's
-session id (each run's `.state-started` file holds it), and publish its own
-commit to that launch's candidate ref first. Run Codex implementers one at a
-time, or only alongside launches whose candidates may be rejected on that
-ground.
+group, so file permissions alone would let a Codex implementer reach the
+helper of any other implementer launch running at the same time (each run's
+`.state-started` file holds its session id). The helper therefore serves only
+its own launch: for every connection it reads the client's process id from
+the socket (`SO_PEERCRED`) and walks the parent ids in `/proc` up to the
+`launch-root` that spawned it, refusing any other client with "connection is
+not from this helper's launch" before minting a token or reading the request.
+Leftover processes stay inside that tree, since `launch` is their subreaper. A
+client whose process id or ancestry cannot be read is refused. The check names
+the client process at connect time; with no pidfd for the peer on the
+supported kernels, a client that exits and whose process id is reused by a
+process of the launch in between is not excluded, which a separate launch
+cannot arrange on purpose.
 
 Every harness, Codex included, starts with `no_new_privs`, so no setuid,
 setgid or file-capability binary can raise its privileges. The `launch`
