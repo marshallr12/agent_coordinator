@@ -122,6 +122,7 @@ async function main() {
     // Before any passkey exists the sign-in page offers to set one up.
     await waitPage("!document.querySelector('#login-view').hidden", 'sign-in page');
     assert(await evaluate("!document.querySelector('#passkey-login').hidden && !document.querySelector('#passkey-setup-row').hidden"), 'The sign-in page does not offer passkey sign-in and setup.');
+    assert(await evaluate("!document.querySelector('#passkey-signin').disabled"), 'The Sign in with a passkey button is disabled before sign-in.');
 
     // Sign in with the password; the My account dialog offers to create a passkey.
     await evaluate(`(() => { document.querySelector('#username').value = 'admin'; document.querySelector('#password').value = ${JSON.stringify(PASSWORD)}; document.querySelector('#login-form button[type=submit]').click(); })()`);
@@ -145,6 +146,7 @@ async function main() {
     // Signed out: the passkey, not the password, signs back in.
     assert(await evaluate("document.querySelector('#password').value === ''"), 'The password field is not empty after sign-out.');
     assert(await evaluate("document.querySelector('#passkey-setup-row').hidden"), 'The sign-in page still offers setup although a passkey exists.');
+    assert(await evaluate("!document.querySelector('#passkey-signin').disabled"), 'The Sign in with a passkey button is disabled after sign-out.');
     await click('Sign in with a passkey');
     await waitPage("!document.querySelector('#dashboard-view').hidden", 'dashboard after passkey sign-in');
     assert(await evaluate("document.querySelector('#account-button').textContent === 'admin'"), 'Passkey sign-in did not sign in the administrator.');

@@ -2005,12 +2005,16 @@
     show($('passkey-login'), passkeysSupported());
     show($('passkey-setup-row'), !passkeyHinted());
   }
+  let passkeyAttempt = null;
   async function signInWithPasskey(automatic = false) {
-    if (state.passkeyBusy || state.mutation) return;
-    state.passkeyBusy = true; showLoginError(''); setProp($('passkey-signin'), 'disabled', true);
+    if (state.mutation) return;
+    // The automatic attempt at page load never disables the button: a click cancels its prompt and starts a normal one.
+    if (passkeyAttempt) { if (automatic || !passkeyAttempt.automatic) return; passkeyAttempt.controller.abort(); }
+    const attempt = { automatic, controller: new AbortController() }; passkeyAttempt = attempt;
+    showLoginError(''); if (!automatic) setProp($('passkey-signin'), 'disabled', true);
     try {
       const options = (await request('/api/v1/auth/passkey-login/options', { method: 'POST', body: {} })).data;
-      const credential = await navigator.credentials.get({ publicKey: { ...options.public_key, challenge: b64uToBytes(options.public_key.challenge) } });
+      const credential = await navigator.credentials.get({ publicKey: { ...options.public_key, challenge: b64uToBytes(options.public_key.challenge) }, signal: attempt.controller.signal });
       const answer = credential.response;
       const body = { challenge_id: options.challenge_id, credential: { id: credential.id, response: { clientDataJSON: bytesToB64u(answer.clientDataJSON), authenticatorData: bytesToB64u(answer.authenticatorData), signature: bytesToB64u(answer.signature), userHandle: answer.userHandle ? bytesToB64u(answer.userHandle) : null } } };
       applySession((await request('/api/v1/auth/passkey-login', { method: 'POST', body })).data);
@@ -2019,7 +2023,7 @@
       if (ceremonyCancelled(error)) { if (!automatic) { show($('passkey-setup-row'), true); showLoginError('No passkey was used. If you have not set one up on this device, sign in with your password and create one, or use the link below.'); } }
       else if (error instanceof ApiError) showLoginError(error.status === 401 ? 'That passkey was not accepted. Try again or sign in with your password.' : errorMessage(error));
       else showLoginError('The passkey could not be used on this device.');
-    } finally { state.passkeyBusy = false; setProp($('passkey-signin'), 'disabled', false); }
+    } finally { if (passkeyAttempt === attempt) passkeyAttempt = null; if (!automatic) setProp($('passkey-signin'), 'disabled', false); }
   }
   // Asks this browser for a new passkey on the signed-in account and saves it. Resolves once the request is on its way.
   async function createPasskey(name = '') {
