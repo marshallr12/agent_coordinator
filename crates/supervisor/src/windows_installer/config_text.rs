@@ -1,12 +1,13 @@
 //! The generated `supervisor.toml`. The installer manages a fixed set of
 //! entries: the service names, their directories and pipes, each other's
-//! SIDs, the remote, the push App and the stand-in. It writes one only when
-//! its value is not the in-code default, so a default installation's file
-//! holds the SIDs and the remote and little else. Every other entry is the
-//! owner's: it is kept as found, though comments are not.
+//! SIDs, the remote, the push App, the stand-in and the coordinator. It
+//! writes one only when its value is not the in-code default, so a default
+//! installation's file holds the SIDs and the remote and little else. Every
+//! other entry is the owner's: it is kept as found, though comments are not.
 use super::model::{Inputs, Layout, Role, Sids};
 use crate::config::Config;
 use crate::service::broker_settings::{EgressSettings, PublicationSettings};
+use crate::service::coordinator::CoordinatorSettings;
 use crate::service::settings::ServiceSettings;
 use crate::service::supervisor::SupervisorSettings;
 use anyhow::{Context, Result};
@@ -44,6 +45,7 @@ const MANAGED: [(&str, &[&str]); 4] = [
             "authority_pipe",
             "publication_broker_sid",
             "stand_in",
+            "coordinator",
         ],
     ),
     (
@@ -185,7 +187,28 @@ fn supervisor(layout: &Layout, inputs: &Inputs, sids: &Sids) -> SupervisorSettin
     settings.stand_in.queue_dir = PathBuf::from(layout.state(r"stand-in\queue"));
     settings.stand_in.ledger = PathBuf::from(layout.state(r"stand-in\ledger.jsonl"));
     settings.stand_in.launch_root = PathBuf::from(layout.state(r"runner\stand-in-launches"));
+    settings.coordinator = coordinator(layout, inputs);
     settings
+}
+
+/// The coordinator the owner asked for, with its files where the layout
+/// puts them; each path is written only when it is not the in-code default.
+/// Without a coordinator every entry is the default, so nothing of it is
+/// written whatever the layout.
+fn coordinator(layout: &Layout, inputs: &Inputs) -> CoordinatorSettings {
+    if !inputs.coordinator() {
+        return CoordinatorSettings::default();
+    }
+    CoordinatorSettings {
+        enabled: true,
+        service_url: inputs.coordinator_url.clone(),
+        project_id: inputs.coordinator_project.clone(),
+        cli: PathBuf::from(layout.cli()),
+        directory: PathBuf::from(layout.coordinator_dir()),
+        fixture: inputs.coordinator_fixture.clone(),
+        launch_root: PathBuf::from(layout.coordinator_launch_root()),
+        ledger: PathBuf::from(layout.state(r"supervisor\ledger.jsonl")),
+    }
 }
 
 /// The egress broker serves the runner and must not reach the push key.

@@ -9,15 +9,18 @@
 //! decides which client a service's named pipe may serve. [`settings`] holds
 //! the runner service's configuration and [`broker_settings`] the brokers',
 //! and [`quiet`] keeps a failure that repeats from filling the service's
-//! log.
+//! log. [`coordinator`] is the supervisor service's work from a
+//! coordinator project; it runs the coordinator CLI as a child process,
+//! which is the only operating-system call here.
 //!
-//! None of it calls an operating system, so it is tested the same way
+//! The rest calls no operating system, so it is tested the same way
 //! everywhere. The Windows Service Control Manager binding, the named pipe
 //! and the runner service (`host_runtime::windows`) only feed it facts and
 //! carry out what it decides.
 pub mod authority;
 pub mod broker_settings;
 pub mod control;
+pub mod coordinator;
 pub mod drain;
 pub mod lifecycle;
 pub mod pipe_policy;

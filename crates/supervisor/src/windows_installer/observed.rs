@@ -52,17 +52,18 @@ pub enum ProfileState {
     Loaded,
 }
 
-/// This run's key file, as far as the installer could tell.
+/// This run's file for a secret, the key or the coordinator credential, as
+/// far as the installer could tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeySource {
-    /// No key file was given.
+    /// No file was given.
     NotGiven,
     /// The file cannot be used; the reason names the path and never what
     /// the file holds.
     Unreadable(String),
     /// A plain file the installer can read.
     Readable {
-        /// Whether the installed key already holds the same bytes.
+        /// Whether the installed secret already holds the same bytes.
         installed: bool,
     },
 }
@@ -73,8 +74,8 @@ pub struct Observed {
     /// Whether this process is elevated. When it is not, nothing else was
     /// looked at.
     pub elevated: bool,
-    /// Every modeled directory, and the key file, that could be looked at
-    /// without passing through something refused.
+    /// Every modeled directory, and the key and credential files, that
+    /// could be looked at without passing through something refused.
     pub paths: BTreeMap<String, PathState>,
     /// Every modeled service: how it is registered, or `None`.
     pub services: BTreeMap<String, Option<ServiceState>>,
@@ -90,6 +91,10 @@ pub struct Observed {
     pub update_open: bool,
     /// This run's key file.
     pub key_source: KeySource,
+    /// This run's coordinator credential file.
+    pub credential_source: KeySource,
+    /// The installed coordinator CLI's SHA-256 in hex, when there is one.
+    pub cli_sha256: Option<String>,
 }
 
 impl Observed {
@@ -105,6 +110,8 @@ impl Observed {
             releases: None,
             update_open: false,
             key_source: KeySource::NotGiven,
+            credential_source: KeySource::NotGiven,
+            cli_sha256: None,
         }
     }
 

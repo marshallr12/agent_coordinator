@@ -8,9 +8,12 @@ for the abandoned WSL host approach. Its first phase, task
 `a9126e52-654c-4b26-8a7d-7748261d2c4a`, delivered this design and the
 containment prototype; the [delivery phases](#delivery-phases-and-gates)
 table lists every later phase and its task. The installed services have run
-only an acceptance stand-in, never a coordinator loop or a provider harness;
-the [step 7d gap report](#step-7d-host-acceptance-gap-report-2026-11-25)
-says, row by row, what is demonstrated and what is left. This chapter does
+an acceptance stand-in and, since
+[step 8a](#step-8a-the-coordinator-loop-on-the-installed-host-2026-11-27), a
+coordinator loop whose launches run a probe fixture, but never a provider
+harness; the [step 7d gap report](#step-7d-host-acceptance-gap-report-2026-11-25)
+says, row by row, what is demonstrated and what is left, and step 8a which of
+its rows it closed. This chapter does
 not claim that a production Windows sandbox is implemented. The
 [current implementation](implementation-status.md) remains authoritative. The
 Linux backend remains supported.
@@ -1616,6 +1619,180 @@ corrections made since: the steps that admit by SHA-256 (5e and 5f, not 5a
 and 5e), the requests step 6b refused, and the phase 4c power-loss round.
 Its bundle section also says a job of step 7d packed it, where the producer
 was the parent attempt's job.
+
+#### Step 8a: the coordinator loop on the installed host (2026-11-27)
+
+Task `69a4a809-05a6-43e4-8cc9-2494b11e8b38`, on MiniAir (Windows 11 Pro
+10.0.26300).
+
+**What was built.** With `[windows_supervisor.coordinator]` enabled, the
+supervisor service runs the platform-neutral `run_loop` driver over the
+remote host runtime with a coordinator project as its source of work, in
+place of the stand-in. It reads `next` and task details over HTTPS and
+claims, renews, checkpoints and releases through the pinned coordinator CLI,
+in a session of each launch's own, as a supervised agent principal of its
+own. The CLI runs as the supervisor's account with its state (session proofs
+and mutation journals) in `supervisor\coordinator\state`. Its token is read
+from `supervisor\coordinator\credentials.toml`, which only the system, the
+administrators and, to read, the supervisor can open, and it reaches only
+the CLI processes the supervisor starts, in their environment.
+`windows-host install`, `status` and `uninstall` manage the credential, the
+CLI (known by its SHA-256) and the directory; the
+[installation chapter](windows-installation.md) has the flags. The workload
+is still the probe fixture, which never submits, so the supervisor holds a
+task after any release it makes itself (`supervisor\unsubmitted.json`). A
+release after a recovery or a drain counts no strike, so such a task is
+launched once more. The stand-in stays as a test driver only, and the two are
+never the source of work together. The hold is a `[run]` setting that only
+the coordinator mode turns on, so Linux is unchanged. The commits, on `main`
+at `8e48f51`, are `81dd8b1`, `cc471ec`, `4737cd2`, `1837498`, `6a75481` and
+`dc1457b`; the last names each claim, renewal, checkpoint and release in the
+supervisor's `service.log`.
+
+**Builds and evidence.** Run 1 used the release build of
+`6a754814f786eb2cea196e19bd817dc04cf183a8` (SHA-256
+`14375b94965dbc123fef760f8b21ff82fcd33baac380f7c1e1c8c4a5b40793dd`) and run 2
+that of `dc1457bc898eb2b4865b2caa7e0ad114880a82af`
+(`252091b5081449bbc046856d5e4fc90a0ae542e163536cdcfb804a08a18f6fe3`), each
+built with rustc 1.99.1 from a clean detached worktree, with the same probe
+fixture (`f670c8f37956e8f120991346e45492a3753773dbc76c3ebb8d69aea36bd68e4d`).
+The evidence is coordinator artifact `6cc1fb20-9035-4cbb-86df-b57632af6249`,
+pinned, one zip of 268 107 bytes with SHA-256
+`cef59cfe48b399f3b7793ed0a727f3bc68fe84cad12d1ccc9d74f0216373e958`: every
+step's log with each command, its output and its exit code, the installer's
+reports, the service logs, ledgers, holds and installer journals collected
+after each round, the coordinator's history of the round tasks, the reboot's
+system events, the baselines, the Linux gate's log, the expected outcomes
+written before each run, and the scripts. Run 1's logs are below
+`evidence/run1-6a75481/`, run 2's below `evidence/`. It was packed by
+registered job `8949a373-810c-4e78-86d5-0331e55320ea` from a copy of the kit
+in which the owner's account name and e-mail are replaced with `OWNER`
+(`SANITIZED.txt` lists the six files that changed), then downloaded again and
+its hash checked. No log copies the coordinator directory; it is shown only
+by name, size and access list. Times here are UTC.
+
+**Who ran what.** The agent ran the kit's scripts from the owner's elevated
+Claude Code session. It ran each step that registered, started, stopped or
+deleted services, restarted Windows or created test tasks only after the
+owner's go-ahead. The owner issued the supervisor's credential and named its
+file; the agent passed the path to `install` and never opened it. Each round
+had a fresh task in the project `canary-miniair`, created by the agent's own
+CLI session (never with the supervisor's credential) and not
+human-delivered. In the reboot round the owner waited at the sign-in screen,
+signed in with a PIN and ran the second half in their own elevated console
+from a launcher in the Downloads folder. Both uninstalls were run by the
+agent from its own shell at the owner's request, so the `whoami /priv` they
+record is that shell's: take-ownership and restore present and disabled.
+
+**Run 1, build `6a75481`, 2026-11-27 03:42 to 18:32.**
+
+| Round | Result |
+| --- | --- |
+| Install and start | **Passed**: no push App; a second `install` applied nothing and `status` had nothing pending; the credential's access list is the system and administrators with full control and the supervisor with read, the coordinator directory grants the supervisor modify, and the CLI is beside the binary with the manifest's SHA-256; each running service's token held exactly `SeChangeNotifyPrivilege` and `SeImpersonatePrivilege` |
+| Probe (`cbeeb2b6`) | **Passed**: `claim start start_result exited:0 checkpoint release cleanup`; the launch ran as the runner's SID in a less-privileged AppContainer, read both its controls, and was refused (error 5) the credential, the binding, the CLI's state, the coordinator directory and the supervisor's state directory; the task was held |
+| Lifecycle (`7db3b5a9`) | **In part**: the ledger and the task's coordinator history showed `claim start start_result renew renew exited:0 checkpoint release cleanup`, but the supervisor's `service.log` named only the launch's outcome and the holds. Fixed in `dc1457b` and run again in run 2 |
+| Supervisor crash (`2145bc6c`) | **Passed**: killed 10 s into a 180 s launch and restarted by Windows; `recover:may_be_running` while the fixture ran, then `recover:ended`, a checkpoint and a release within the 600 s lease; the same task was claimed and launched once more, exited 0, was released and held; two sessions that never overlapped, and the judge found no problem |
+| Runner crash (`e136e0ae`) | **Passed**: the fixture died with the runner's job; the supervisor traced `gone checkpoint release cleanup`, the release counted a strike, and the task was held after one session |
+| Reboot (`6a6a54a0`) | **Passed**, below |
+| Uninstall | **Passed**, below. The kit expected exit 0 where `uninstall` documents exit 1 while a service profile is pending: a kit error |
+
+*Reboot.* Automatic restart sign-on was off (owner opt-out 1) and
+`install --start auto` had set the four services to start automatically. A
+300 s launch was claimed at 17:08:48. The kit ran `shutdown.exe` at
+17:09:27 with a 60 s delay, and the launch renewed at 17:09:49. Preshutdown
+asked the launch to stop at 17:10:37 and ended it at 17:11:07
+(`stop_requested`, `terminate`), the runner logged `stopped: every launch is
+confirmed ended`, nothing was released, and Windows went down at 17:11:26.
+It booted at 17:11:36, 162 s after the first half saved its state and within
+the lease. The four services ran from 17:11:59 to 17:12:06. The
+first interactive sign-in was at 17:15:20, 224 s after boot (logon type 11,
+the owner's PIN, one console session in `quser`). Before it, the supervisor
+had traced `recover:ended`, saved a checkpoint and released the attempt with
+`ended=false` at 17:12:07, then claimed the same task again at 17:12:11 and
+launched it once; that launch renewed four times, exited 0 and was released
+at 17:17:13, and the task was held. The task's coordinator history shows the
+same two attempts, each claimed, renewed, checkpointed and released by the
+supervisor's principal. The judge found no problem and nothing was left;
+`install --start demand` set the services back. The branch where the lease
+runs out first, a release refused as `ended=true` and a task needing
+recovery, was not reached.
+
+*Uninstall.* With the four running, `uninstall` removed the services,
+`C:\Program Files\agentc` and `C:\ProgramData\agentc`, including the CLI's
+state, which the administrators could not list until it was reclaimed. It
+left nothing, found no launch profile, and exited 1 with the four service
+profiles pending, still loaded; its notes say the coordinator token stays
+valid until it is revoked. Earlier, after the reboot had unloaded them,
+`uninstall --service-prefix agentc-t4ef6add034` removed the four profiles
+that a gated native update test had left and exited 0 with nothing pending:
+the restart-and-run-again path.
+
+**Run 2, build `dc1457b`, 2026-11-27 19:27 to 20:26.** The before baseline
+equalled run 1's after baseline.
+
+| Round | Result |
+| --- | --- |
+| Install and start | **Passed**, as in run 1 |
+| Run 1's tasks | **Finding**: the new supervisor at once claimed the five run 1 tasks, still open in the project, one per poll. Each was claimed once, ran the probe fixture (exit 0), was checkpointed, released with `ended=false` and held. The holds live in the host's `unsubmitted.json`, which the uninstall had removed. On the owner's choice the supervisor was stopped, the five tasks were canceled through the CLI, and the supervisor was started again and stayed idle (`evidence/old-tasks-log.txt`) |
+| Probe (`f42046b4`) | **Passed**, as in run 1 |
+| Lifecycle (`e45091ed`) | **Passed**: `claim start start_result renew renew exited:0 checkpoint release cleanup`; `service.log` names the claim, both renewals, the checkpoint (`ok=true`) and the release (`ended=false`) of attempt `406bf1e6`; the task's coordinator events are `attempt.claimed`, two `attempt.renewed`, `attempt.checkpointed` and `attempt.released`, each by the supervisor's principal |
+| Uninstall and end | **Passed**: exit 1 with only the four loaded service profiles pending and nothing left; the coordinator directory and the CLI's state are gone; the after baseline equals the before one in every field, the `.wslconfig` digest, the absent machine `wsl.conf` and the WSL distribution list included |
+
+**Tests.** On Windows at `dc1457b`, `cargo clippy --workspace --all-targets`
+is clean and 624 of the supervisor library's 630 tests pass. The six that
+fail are environmental and fail the same way at older commits: five because
+the Claude Code shell runs elevated, so the pipe or directory under test is
+owned by the administrators (`pipe_client` twice, `remote` once,
+`state_directory` twice), and the host-setup block test because
+`host-setup.sh` is checked out with CRLF line endings at this base. The
+gated installer and update tests passed at `6a75481` with the owner's
+consent. The Linux gate at `dc1457b`, in a fresh clone in WSL, passed:
+formatting, Clippy, 1536 tests, the build, both smoke tests and the eleven
+deploy tests.
+
+**Step 8a's criteria.**
+
+| Criterion | State | How |
+| --- | --- | --- |
+| 1. The installed supervisor runs `run_loop` against the coordinator: claims a test task, has the runner start a fixture launch, renews, checkpoints and releases, in the service log, the ledger and the task's history; the stand-in only a test driver | **Demonstrated on the installed host** | Run 2's lifecycle round; run 1's showed the ledger and the history |
+| 2. The credential, session proofs and journals in a directory only the supervisor, the system and administrators open; launches refused it (probe with a positive control); install, status and uninstall manage it without printing it | **Demonstrated on the installed host** | The access lists in both installs' logs; both probe rounds; no log holds the credential's bytes and its file was passed only by path |
+| 3. Supervisor crash, runner crash and reboot during a claimed launch reconciled with coordinator authority: no duplicate launch, no false completion, the attempt resumed or released as the recovery contract says; Linux unchanged | **Demonstrated on the installed host**, at `6a75481` | Run 1's crash and reboot rounds: two sessions of a task never overlapped, every release was accepted and none completed a task. `dc1457b` adds only log lines. A lease that runs out during a restart was not reached on the host; the Linux gate passes |
+| 4. Windows native tests, the Linux gate and the pinned mdBook checks on the exact candidate; this record | **In part** | The Linux gate passes at `dc1457b`, and the registered gate and the pinned mdBook checks on the candidate are recorded with its submission, as is a registered run of the supervisor crate's Windows tests that skips the six environmental tests named under *Tests*: those fail in an elevated shell at older commits too and are not counted as passes. The gated installer and update tests, which register services, ran at `6a75481` only; the candidate does not change the installer |
+
+**The step 7d rows that named 8a.** No coordinator loop had run, so parent
+criterion 3's coordinator contracts were exercised only by the stand-in. Now
+the installed services claimed, renewed, checkpointed and released real
+coordinator attempts, and settled each crash and the reboot against them
+(criterion 3, and the reconciliation in criterion 6). The loop's own
+credential, which criterion 7 and the `check_push_key` row left to 8a, is
+stored as criterion 2 above says; launch credentials are **8c** and provider
+credentials **8d**.
+
+**What 8a leaves:**
+
+- Only the probe fixture ran. A provider harness is **8d**, coordinator
+  credentials for launches **8c**.
+- A release after a recovery or a drain launches the task once more. With a
+  harness that is the resume (**8d**); with the fixture it is one more
+  launch.
+- The reboot was a planned restart within the lease. A lapsed lease, power
+  loss and network loss on this host are **8h**.
+- The egress broker's start check refuses to run if it can open the push key,
+  but the list it checks does not name the coordinator credential. The
+  credential's access list keeps that account out; the check does not show
+  it. **8h** probes the credential from the installed services.
+- Holds are kept on the host only, so an uninstall forgets them and a
+  reinstalled host claims every open task again (run 2). Close a fixture
+  task on the coordinator once its round is done. No step changes this yet.
+- `--no-coordinator` leaves the credential, the CLI and its state on disk
+  until `uninstall`. No step changes this yet.
+- A release older than 8a cannot read a manifest that names a coordinator;
+  run `install --no-coordinator` before going back to one. No step changes
+  this; the installation chapter says so.
+- The four service profiles of run 2 stay loaded on MiniAir until a restart
+  and another `uninstall`, and the supervisor's coordinator token stays
+  valid until the owner revokes it.
+- MiniAir is the only machine.
 
 ## Local broker contracts
 
@@ -3664,7 +3841,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Steps 5a to 5f done**; the phase is complete when task `9cf04a5c`'s review and integration are. It first **closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim) and step 5e (the readiness check and the fixture checks), whose native tests pass. In step 5f, an owner-attended run [inside a contained reviewer launch](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17) sent a Bash command from native Claude Code 2.1.326 in the recorded form through the prefix and the shim into the candidate. The capability record now admits only that build. No Windows driver calls the record, so no product Claude launch runs on Windows. The [items still open](#phase-5-steps) include the process a job still counts after the shell ends |
 | 6 | Egress and publication brokers | Phase 3 | Steps 6a, 6b and 6c implemented (task `13ae81c1`); step 6d implemented and run by the owner on MiniAir on 2026-11-20 (task `daa42f71`): both brokers served a launch as services under their own virtual accounts, and publication pushed to the real remote with a per-push token. Task `f71179f5` followed on 2026-11-22: the installed supervisor and runner services made a stand-in launch that both installed brokers admitted, launches made by the installed runner were refused the push key and the publication broker's directories, and a closed launch's repository is removed ([follow-up](#step-6d-follow-up-the-services-own-launches-2026-11-22)). No harness has used either broker; see [phase 6 steps](#phase-6-steps) |
 | 7 | Idempotent installer, update/rollback/uninstall, then a host acceptance gap report; the real coordinator loop, a harness driver, WFP, resource caps and quiet hours are a later phase 8 (owner decision of 2026-11-23) | Phases 4 to 6 | Step 7a implemented (task `ddeb5d76`): `agentc-supervisor windows-host install` and `status`, a desired-state model with a platform-neutral plan, and a Windows backend over the Service Control Manager. Step 7b implemented (task `2064cf54`): `update`, `rollback` and `uninstall`, each stage journaled, driven natively with the runner in the test process and once against four throwaway services Windows started. Step 7c (task `012ff9f2`) ran the owner-attended installer acceptance on MiniAir on 2026-11-24 from `1f4ecdc`: install and drift repair, a stand-in launch through both installed brokers with a candidate push, the stop, runner-stop, crash, logoff and reboot-without-logon rounds, the three updates and the uninstall **passed**, and the machine was left as the run found it; see [step 7c](#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24). **No Windows host is admitted**: no coordinator loop or provider harness ran. Step 7d (task `748f6c3a`) wrote the [gap report](#step-7d-host-acceptance-gap-report-2026-11-25) on 2026-11-25: no parity row and no parent criterion is demonstrated in full. **Phase 7 is complete for the installer only**, when step 7d's review and integration are; see [phase 7 steps](#phase-7-steps) |
-| 8 | The real coordinator loop, the role-account question, coordinator credentials for launches, a provider harness driver, WFP, resource caps and quiet hours, pinned tool profiles with a hardened clone and the browser checks, the workspace build in a launch, and the full host acceptance | Phase 7 | **Planned**: steps 8a to 8i are planned, human-delivered tasks; see [phase 8 steps](#phase-8-steps). Only step 8h's acceptance, if every row passes, can admit a host |
+| 8 | The real coordinator loop, the role-account question, coordinator credentials for launches, a provider harness driver, WFP, resource caps and quiet hours, pinned tool profiles with a hardened clone and the browser checks, the workspace build in a launch, and the full host acceptance | Phase 7 | **In progress**: step 8a ran the coordinator loop on the installed host ([step 8a](#step-8a-the-coordinator-loop-on-the-installed-host-2026-11-27)); steps 8b to 8i are planned, human-delivered tasks; see [phase 8 steps](#phase-8-steps). Only step 8h's acceptance, if every row passes, can admit a host |
 
 No intermediate phase is production acceptance. Independent review and guarded
 integration complete each task; only the final acceptance can admit a host.

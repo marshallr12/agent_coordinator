@@ -4,7 +4,7 @@
 //! a repair touches only what drifted.
 use super::access::{ADMINISTRATORS, SYSTEM};
 use super::config_text;
-use super::model::{Desired, ServiceSpec};
+use super::model::{Desired, KeySpec, ServiceSpec};
 use super::observed::{KeySource, Observed, PathState, ServiceState};
 use super::release::Releases;
 use serde::Serialize;
@@ -17,7 +17,7 @@ use std::fmt;
 pub enum Action {
     /// Make a directory with its access list.
     CreateDirectory { path: String },
-    /// Replace a directory's or the key's access list.
+    /// Replace the access list of a directory, the key or the credential.
     SetAccessList { path: String },
     /// Copy the binary into the program directory.
     InstallBinary,
@@ -29,6 +29,10 @@ pub enum Action {
     WriteConfig { entries: Vec<String> },
     /// Copy the push App's key from this run's key file.
     InstallKey,
+    /// Copy the coordinator credential from this run's credential file.
+    InstallCredential,
+    /// Copy the coordinator CLI from this run's CLI file.
+    InstallCli,
     /// Register a service, stopped.
     CreateService { service: String },
     /// Set a service's command line.
@@ -91,6 +95,19 @@ pub enum Refusal {
     KeySource(String),
     /// A key is wanted, none is installed and no key file was given.
     NoKeySource(String),
+    /// This run's coordinator credential file cannot be used.
+    CredentialSource(String),
+    /// A credential is wanted, none is installed and no file was given.
+    NoCredentialSource(String),
+    /// This run's coordinator CLI file cannot be used.
+    CliSource(String),
+    /// The installed coordinator CLI is not the one the manifest records,
+    /// and no CLI file was given to put it right.
+    CliDiffers {
+        path: String,
+        installed: String,
+        wanted: String,
+    },
     /// The configuration is not one the services could load.
     ConfigUnreadable(String),
     /// The installed binary is another release: replacing it is an update.
@@ -119,6 +136,29 @@ impl fmt::Display for Refusal {
                     "no key is installed at {path} and no --key-source was given"
                 )
             }
+            Self::CredentialSource(reason) => {
+                write!(
+                    f,
+                    "the coordinator credential file cannot be used: {reason}"
+                )
+            }
+            Self::NoCredentialSource(path) => write!(
+                f,
+                "no coordinator credential is installed at {path} and no \
+                 --coordinator-credential-source was given"
+            ),
+            Self::CliSource(reason) => {
+                write!(f, "the coordinator CLI file cannot be used: {reason}")
+            }
+            Self::CliDiffers {
+                path,
+                installed,
+                wanted,
+            } => write!(
+                f,
+                "the coordinator CLI at {path} has SHA-256 {installed}, not the recorded \
+                 {wanted}, and no --coordinator-cli-source was given"
+            ),
             Self::ConfigUnreadable(reason) => write!(
                 f,
                 "the configuration cannot be loaded, so it is left alone: {reason}"
@@ -150,7 +190,8 @@ pub fn plan(desired: &Desired, observed: &Observed) -> Result<Vec<Change>, Vec<R
     let mut changes = Vec::new();
     directories(desired, observed, &mut changes);
     files(desired, observed, &mut changes);
-    key(desired, observed, &mut changes);
+    secrets(desired, observed, &mut changes);
+    cli(desired, observed, &mut changes);
     for service in &desired.services {
         service_changes(service, observed.service(&service.name), &mut changes);
     }
@@ -167,9 +208,13 @@ pub(super) fn refusals(desired: &Desired, observed: &Observed) -> Vec<Refusal> {
         let state = observed.path(&directory.path);
         found.extend(directory_refusal(&directory.path, &directory.owners, state));
     }
-    found.extend(key_refusals(desired, observed));
+    let key = (desired.key.as_ref(), &observed.key_source);
+    found.extend(secret_refusals(key, observed, &KEY));
+    let credential = (desired.credential.as_ref(), &observed.credential_source);
+    found.extend(secret_refusals(credential, observed, &CREDENTIAL));
     found.extend(config_refusal(desired, observed));
     found.extend(binary_refusal(desired, observed));
+    found.extend(cli_refusal(desired, observed));
     found.extend(release_refusals(desired, observed));
     found
 }
@@ -210,14 +255,38 @@ pub(super) fn directory_refusal(
     }
 }
 
-/// Why the key or this run's key file cannot be used, if either cannot.
-fn key_refusals(desired: &Desired, observed: &Observed) -> Vec<Refusal> {
-    let Some(key) = &desired.key else {
+/// A secret file the model wants, the key or the credential, if it wants
+/// one, and what this run's file for it is like.
+type Secret<'a> = (Option<&'a KeySpec>, &'a KeySource);
+
+/// The refusals of one kind of secret file that name it.
+struct SecretRefusals {
+    /// None is installed and no file was given; given the installed path.
+    missing: fn(String) -> Refusal,
+    /// This run's file cannot be used; given the reason.
+    unusable: fn(String) -> Refusal,
+}
+
+/// The push App's key's.
+const KEY: SecretRefusals = SecretRefusals {
+    missing: Refusal::NoKeySource,
+    unusable: Refusal::KeySource,
+};
+/// The coordinator credential's.
+const CREDENTIAL: SecretRefusals = SecretRefusals {
+    missing: Refusal::NoCredentialSource,
+    unusable: Refusal::CredentialSource,
+};
+
+/// Why a secret file or this run's file for it cannot be used, if either
+/// cannot.
+fn secret_refusals(secret: Secret, observed: &Observed, kind: &SecretRefusals) -> Vec<Refusal> {
+    let (Some(spec), source) = secret else {
         return Vec::new();
     };
-    let path = || key.path.clone();
+    let path = || spec.path.clone();
     let mut found = Vec::new();
-    match (observed.path(&key.path), &observed.key_source) {
+    match (observed.path(&spec.path), source) {
         (PathState::Link, _) => found.push(Refusal::Link(path())),
         (PathState::Directory { .. }, _) => found.push(Refusal::NotAFile(path())),
         (PathState::File { owner, .. }, _) if !trusted(owner, &[]) => {
@@ -227,11 +296,11 @@ fn key_refusals(desired: &Desired, observed: &Observed) -> Vec<Refusal> {
                 owner,
             });
         }
-        (PathState::Missing, KeySource::NotGiven) => found.push(Refusal::NoKeySource(path())),
+        (PathState::Missing, KeySource::NotGiven) => found.push((kind.missing)(path())),
         _ => {}
     }
-    if let KeySource::Unreadable(reason) = &observed.key_source {
-        found.push(Refusal::KeySource(reason.clone()));
+    if let KeySource::Unreadable(reason) = source {
+        found.push((kind.unusable)(reason.clone()));
     }
     found
 }
@@ -249,6 +318,21 @@ fn binary_refusal(desired: &Desired, observed: &Observed) -> Option<Refusal> {
     (*installed != desired.binary_sha256).then(|| Refusal::BinaryDiffers {
         installed: installed.clone(),
         wanted: desired.binary_sha256.clone(),
+    })
+}
+
+/// The coordinator CLI is installed from a file this run was given: one
+/// that is not the CLI the manifest records, with no file to put it right,
+/// is the owner's to fix, as another release's binary is.
+fn cli_refusal(desired: &Desired, observed: &Observed) -> Option<Refusal> {
+    let cli = desired.cli.as_ref()?;
+    if cli.source.is_some() || observed.cli_sha256.as_ref() == Some(&cli.sha256) {
+        return None;
+    }
+    Some(Refusal::CliDiffers {
+        path: cli.path.clone(),
+        installed: observed.cli_sha256.clone().unwrap_or_else(|| "none".into()),
+        wanted: cli.sha256.clone(),
     })
 }
 
@@ -305,31 +389,59 @@ fn files(desired: &Desired, observed: &Observed, changes: &mut Vec<Change>) {
     }
 }
 
-/// The key is copied when it is missing or this run's file differs from
-/// it, and its access list is put right when it differs.
-fn key(desired: &Desired, observed: &Observed, changes: &mut Vec<Change>) {
-    let Some(key) = &desired.key else { return };
-    let state = observed.path(&key.path);
-    let differs = observed.key_source == KeySource::Readable { installed: false };
+/// The key's changes, then the credential's.
+fn secrets(desired: &Desired, observed: &Observed, changes: &mut Vec<Change>) {
+    let key = (desired.key.as_ref(), &observed.key_source);
+    secret(key, observed, Action::InstallKey, "key", changes);
+    let credential = (desired.credential.as_ref(), &observed.credential_source);
+    let install = Action::InstallCredential;
+    secret(credential, observed, install, "credential", changes);
+}
+
+/// A secret file, the key or the credential (`what`), is copied by
+/// `install` when it is missing or this run's file differs from it, and
+/// its access list is put right when it differs.
+fn secret(
+    secret: Secret,
+    observed: &Observed,
+    install: Action,
+    what: &str,
+    changes: &mut Vec<Change>,
+) {
+    let (Some(spec), source) = secret else { return };
+    let state = observed.path(&spec.path);
+    let differs = *source == KeySource::Readable { installed: false };
     if *state == PathState::Missing || differs {
-        let detail = "copy this run's key file; its bytes are never shown";
-        return push(changes, Action::InstallKey, detail.into());
+        let detail = format!("copy this run's {what} file; its bytes are never shown");
+        return push(changes, install, detail);
     }
     if let PathState::File { access, .. } = state
-        && *access != key.access
+        && *access != spec.access
     {
         let detail = format!(
             "found {}; wanted {}",
             access.describe(),
-            key.access.describe()
+            spec.access.describe()
         );
         push(
             changes,
             Action::SetAccessList {
-                path: key.path.clone(),
+                path: spec.path.clone(),
             },
             detail,
         );
+    }
+}
+
+/// The coordinator CLI is copied when the installed one is missing or is
+/// not the one the manifest records; [`cli_refusal`] has refused the host
+/// when no CLI file was given.
+fn cli(desired: &Desired, observed: &Observed, changes: &mut Vec<Change>) {
+    let Some(cli) = &desired.cli else { return };
+    if observed.cli_sha256.as_ref() != Some(&cli.sha256) {
+        let found = observed.cli_sha256.as_deref().unwrap_or("none");
+        let detail = format!("found SHA-256 {found}; wanted {}", cli.sha256);
+        push(changes, Action::InstallCli, detail);
     }
 }
 

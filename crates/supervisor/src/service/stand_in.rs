@@ -361,9 +361,15 @@ impl<H: HostRuntime> HostRuntime for Recorded<H> {
 /// What [`judge`] has gathered from the ledger so far, by session.
 #[derive(Default)]
 struct Reading {
+    /// Whether the work came from a coordinator, which offers a released
+    /// task again: a task may then start more than once, but never while
+    /// an earlier launch of it is unreleased.
+    coordinator: bool,
     problems: Vec<String>,
     /// How often each task was asked to start.
     starts: BTreeMap<String, u32>,
+    /// Each task's launches asked to start and not yet released.
+    open: BTreeMap<String, BTreeSet<String>>,
     /// Sessions asked to start, in the order they were.
     asked: Vec<String>,
     /// Sessions whose launch is known to have ended.
@@ -379,16 +385,15 @@ impl Reading {
         let session = event["session"].as_str().unwrap_or("").to_owned();
         match event["event"].as_str() {
             Some("unreadable") => (self.problems).push("the ledger has an unreadable line".into()),
-            Some("start") => {
-                let task = event["task"].as_str().unwrap_or("").to_owned();
-                *self.starts.entry(task).or_default() += 1;
-                self.asked.push(session);
-            }
+            Some("start") => self.start(event, session),
             Some("release") => {
                 if self.asked.contains(&session) && !self.ended.contains(&session) {
                     let problem = format!("{session} was released before its launch ended");
                     self.problems.push(problem);
                 }
+                self.open
+                    .values_mut()
+                    .for_each(|open| _ = open.remove(&session));
                 self.released.insert(session);
             }
             Some("cleanup") if event["ok"] == true => {
@@ -401,13 +406,31 @@ impl Reading {
         }
     }
 
+    /// Takes in a start of `session`'s launch. From a coordinator, a start
+    /// of a task whose earlier launch is not yet released is a problem.
+    fn start(&mut self, event: &Value, session: String) {
+        let task = event["task"].as_str().unwrap_or("").to_owned();
+        *self.starts.entry(task.clone()).or_default() += 1;
+        let open = self.open.entry(task.clone()).or_default();
+        if self.coordinator && !open.is_empty() {
+            let earlier = open.iter().cloned().collect::<Vec<_>>().join(", ");
+            let problem = format!("{task} was started again before {earlier} was released");
+            self.problems.push(problem);
+        }
+        open.insert(session.clone());
+        self.asked.push(session);
+    }
+
     /// The problems, with those only the whole ledger shows: a task
-    /// started more than once, and a launch asked to start that was never
-    /// released or never cleaned up.
+    /// started more than once (from the stand-in, which offers each item
+    /// once), and a launch asked to start that was never released or never
+    /// cleaned up.
     fn problems(mut self) -> Vec<String> {
         let twice = self.starts.iter().filter(|(_, count)| **count > 1);
         let twice = twice.map(|(task, count)| format!("{task} was launched {count} times"));
-        self.problems.extend(twice.collect::<Vec<_>>());
+        if !self.coordinator {
+            self.problems.extend(twice.collect::<Vec<_>>());
+        }
         for session in &self.asked {
             if !self.released.contains(session) {
                 (self.problems).push(format!("{session} was started and never released"));
@@ -442,7 +465,23 @@ fn ended_by(event: &Value) -> bool {
 ///   (a cleanup that found nothing to remove counts).
 /// - A line that cannot be read, since it may hide any of the above.
 pub fn judge(events: &[Value]) -> Vec<String> {
-    let mut reading = Reading::default();
+    judge_reading(Reading::default(), events)
+}
+
+/// As [`judge`], for a ledger whose work came from a coordinator, which
+/// offers a released task again: instead of a task started more than once,
+/// a task started again while an earlier launch of it was not yet released
+/// is a problem.
+pub fn judge_coordinator(events: &[Value]) -> Vec<String> {
+    let reading = Reading {
+        coordinator: true,
+        ..Reading::default()
+    };
+    judge_reading(reading, events)
+}
+
+/// What `reading` finds once it has taken in every event.
+fn judge_reading(mut reading: Reading, events: &[Value]) -> Vec<String> {
     for event in events {
         reading.take(event);
     }

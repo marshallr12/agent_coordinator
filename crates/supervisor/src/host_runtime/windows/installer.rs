@@ -11,6 +11,7 @@
 pub mod access;
 pub mod files;
 pub mod profiles;
+pub mod reclaim;
 pub mod services;
 pub mod tokens;
 
@@ -62,13 +63,14 @@ impl WindowsHost {
         reader::create_directory(Path::new(path), &spec.access.creation_sddl()?)
     }
 
-    /// Sets the access list of the modeled directory or key at `path`.
+    /// Sets the access list of the modeled directory, key or credential at
+    /// `path`.
     fn secure(desired: &Desired, path: &str) -> Result<()> {
         if let Some(directory) = desired.directory(path) {
             return access::set(path, &directory.access);
         }
-        let key = desired.key.as_ref().filter(|key| key.path == path);
-        access::set(path, &key.context("no such path in the model")?.access)
+        let secret = desired.secret(path).context("no such path in the model")?;
+        access::set(path, &secret.access)
     }
 
     /// Writes the configuration: the owner's entries with the managed ones
@@ -85,6 +87,22 @@ impl WindowsHost {
         let key = desired.key.as_ref().context("no key in the model")?;
         let source = key.source.as_deref().context("no key file was given")?;
         files::install_key(source, &key.path, &key.access.creation_sddl()?)
+    }
+
+    /// Copies this run's coordinator credential file into place under the
+    /// credential's access list, as the key is copied.
+    fn install_credential(desired: &Desired) -> Result<()> {
+        let spec = desired.credential.as_ref().context("no credential")?;
+        let source = spec.source.as_deref().context("no credential file")?;
+        files::install_key(source, &spec.path, &spec.access.creation_sddl()?)
+    }
+
+    /// Copies this run's coordinator CLI file into the program directory,
+    /// whose access list it inherits, as the binary does.
+    fn install_cli(desired: &Desired) -> Result<()> {
+        let cli = desired.cli.as_ref().context("no CLI in the model")?;
+        let source = cli.source.as_deref().context("no CLI file was given")?;
+        files::copy_file(source, &cli.path)
     }
 
     /// Makes one change to a registered service.
@@ -146,6 +164,8 @@ impl Host for WindowsHost {
             }
             Action::WriteConfig { .. } => Self::write_config(desired),
             Action::InstallKey => Self::install_key(desired),
+            Action::InstallCredential => Self::install_credential(desired),
+            Action::InstallCli => Self::install_cli(desired),
             other => {
                 let name = other.service().context("a change without a target")?;
                 let spec = desired
@@ -193,6 +213,10 @@ impl Machine for WindowsHost {
 
     fn remove_tree(&mut self, path: &str) -> Result<Vec<String>> {
         files::remove_tree(path)
+    }
+
+    fn reclaim_tree(&mut self, path: &str) -> Result<Vec<String>> {
+        reclaim::reclaim_tree(path)
     }
 
     fn delete_service(&mut self, name: &str) -> Result<()> {

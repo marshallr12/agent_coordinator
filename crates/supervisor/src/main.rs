@@ -97,11 +97,15 @@ enum Commands {
     },
     /// Judge the ledger of an acceptance stand-in run: print what it shows
     /// went wrong as JSON, and exit non-zero when anything did or when the
-    /// ledger holds no event.
+    /// ledger holds no event. With --coordinator, the ledger is of a
+    /// supervisor that took its work from a coordinator, which may offer a
+    /// released task again.
     #[command(hide = true)]
     StandInJudge {
         #[arg(long)]
         ledger: PathBuf,
+        #[arg(long)]
+        coordinator: bool,
     },
     /// Inside a launch's network namespace: relay each loopback `ip:port`
     /// to its host socket, run the command and return its exit code.
@@ -172,9 +176,10 @@ enum Commands {
 enum HostCommand {
     /// Register the four services, stopped, each under its own virtual
     /// account; make the state tree; write the configuration; and copy the
-    /// push App's key, if one is given. Only what differs from an installed
-    /// host is changed, so a second run changes nothing. What it is told is
-    /// recorded, so a later run needs no arguments.
+    /// push App's key, if one is given, and a coordinator's CLI and
+    /// credential, if a coordinator is given. Only what differs from an
+    /// installed host is changed, so a second run changes nothing. What it
+    /// is told is recorded, so a later run needs no arguments.
     Install(InstallArgs),
     /// Report what `install` would change, and what each running service's
     /// token holds. It changes nothing and exits non-zero unless the
@@ -283,6 +288,62 @@ struct InstallArgs {
     /// Turn the acceptance stand-in off again.
     #[arg(long)]
     no_stand_in: bool,
+    #[command(flatten)]
+    coordinator: CoordinatorArgs,
+}
+
+/// What `windows-host install` can be told about a coordinator project as
+/// the supervisor's source of work. The origin, project, credential, CLI
+/// and command go together on the install that enables it; a later run
+/// needs only what it changes.
+#[cfg(windows)]
+#[derive(Args)]
+struct CoordinatorArgs {
+    /// The coordinator's https:// origin.
+    #[arg(long)]
+    coordinator_url: Option<String>,
+    /// The coordinator project the supervisor claims from.
+    #[arg(long)]
+    coordinator_project: Option<String>,
+    /// The supervisor's coordinator credential file, as downloaded. It is
+    /// copied, never moved or shown, to a directory only the supervisor's
+    /// account can read.
+    #[arg(long)]
+    coordinator_credential_source: Option<String>,
+    /// The pinned coordinator CLI (`agent-coordinator.exe`). It is copied
+    /// beside the binary and its SHA-256 recorded; the installer never
+    /// runs it.
+    #[arg(long)]
+    coordinator_cli_source: Option<String>,
+    /// The command every coordinator launch runs, as its arguments. The
+    /// installer writes it down and never runs it. Give it last:
+    /// everything after it, hyphens included, is the command.
+    #[arg(long, num_args = 1.., allow_hyphen_values = true)]
+    coordinator_fixture: Option<Vec<String>>,
+    /// Turn the coordinator off again.
+    #[arg(long, conflicts_with_all = [
+        "coordinator_url",
+        "coordinator_project",
+        "coordinator_credential_source",
+        "coordinator_cli_source",
+        "coordinator_fixture",
+    ])]
+    no_coordinator: bool,
+}
+
+#[cfg(windows)]
+impl CoordinatorArgs {
+    /// What this run's coordinator arguments change.
+    fn overrides(&self) -> agentc_supervisor::windows_installer::coordinator::Overrides {
+        agentc_supervisor::windows_installer::coordinator::Overrides {
+            url: self.coordinator_url.clone(),
+            project: self.coordinator_project.clone(),
+            credential_source: self.coordinator_credential_source.clone(),
+            cli_source: self.coordinator_cli_source.clone(),
+            fixture: self.coordinator_fixture.clone(),
+            off: self.no_coordinator,
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -301,6 +362,7 @@ impl InstallArgs {
             key_source: self.key_source.clone(),
             start: self.start.map(start),
             stand_in_fixture: self.stand_in_fixture.clone().or(off),
+            coordinator: self.coordinator.overrides(),
         }
     }
 }
@@ -488,7 +550,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         #[cfg(windows)]
         Commands::WindowsHost { .. } => unreachable!("dispatched before loading config"),
-        Commands::StandInJudge { ledger } => return stand_in_judge(&ledger),
+        Commands::StandInJudge {
+            ledger,
+            coordinator,
+        } => return stand_in_judge(&ledger, coordinator),
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
             println!("{}", serde_json::to_string_pretty(&shadow::report(&log)?)?);
@@ -660,11 +725,15 @@ fn windows_candidate_shell(command: &Commands) -> Option<u32> {
 
 /// Judges a stand-in ledger. An empty or missing ledger is an error, not
 /// a clean run: it shows nothing either way.
-fn stand_in_judge(ledger: &std::path::Path) -> Result<ExitCode> {
-    use agentc_supervisor::service::stand_in::{Ledger, judge};
+fn stand_in_judge(ledger: &std::path::Path, coordinator: bool) -> Result<ExitCode> {
+    use agentc_supervisor::service::stand_in::{Ledger, judge, judge_coordinator};
     let events = Ledger::at(ledger).events();
     anyhow::ensure!(!events.is_empty(), "{} holds no event", ledger.display());
-    Ok(report(&judge(&events)))
+    let problems = match coordinator {
+        true => judge_coordinator(&events),
+        false => judge(&events),
+    };
+    Ok(report(&problems))
 }
 
 /// Prints preflight problems as JSON; non-zero exit when any exist.
@@ -754,4 +823,52 @@ fn report_costs(config: &config::Config, path: Option<&std::path::Path>) -> Resu
 #[cfg(not(target_os = "linux"))]
 fn report_costs(_config: &config::Config, _path: Option<&std::path::Path>) -> Result<()> {
     anyhow::bail!("report-costs requires Linux")
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::{Cli, Commands, HostCommand};
+    use agentc_supervisor::windows_installer::coordinator::Overrides;
+    use clap::Parser;
+
+    /// The coordinator overrides `windows-host install` parses from `args`.
+    fn coordinator(args: &[&str]) -> Result<Overrides, clap::Error> {
+        let argv = ["agentc-supervisor", "windows-host", "install"];
+        let cli = Cli::try_parse_from(argv.iter().chain(args))?;
+        let Commands::WindowsHost {
+            command: HostCommand::Install(install),
+        } = cli.command
+        else {
+            panic!("not an install");
+        };
+        Ok(install.coordinator.overrides())
+    }
+
+    #[test]
+    fn install_parses_the_coordinator_flags_and_no_coordinator_takes_none_of_them() {
+        let given = coordinator(&[
+            "--coordinator-url",
+            "https://coordinator.example.test",
+            "--coordinator-cli-source",
+            r"C:\cli.exe",
+            "--coordinator-fixture",
+            r"C:\fixture.exe",
+            "--exit",
+        ])
+        .unwrap();
+        assert_eq!(
+            given.url.as_deref(),
+            Some("https://coordinator.example.test")
+        );
+        assert_eq!(given.cli_source.as_deref(), Some(r"C:\cli.exe"));
+        assert_eq!(given.fixture.unwrap(), [r"C:\fixture.exe", "--exit"]);
+        assert!(coordinator(&["--no-coordinator"]).unwrap().off);
+        let both = ["--no-coordinator", "--coordinator-project", "p"];
+        assert!(coordinator(&both).is_err());
+        // A fixture takes everything after it, so a second fixture flag is
+        // part of the first command; `Inputs::validate` refuses the stand-in
+        // and a coordinator together.
+        let fixtures = ["--stand-in-fixture", "a", "--coordinator-fixture", "b"];
+        assert!(coordinator(&fixtures).unwrap().fixture.is_none());
+    }
 }

@@ -7,12 +7,15 @@
 //! preshutdown request ends it. The loop's own drain and recovery do the
 //! rest; while it drains, the service keeps reporting a rising checkpoint.
 //!
-//! It holds no launch. With the acceptance stand-in enabled, launches are
-//! requests to the role runner service over its pipe
-//! ([`super::remote::RemoteHost`]) and run the configured fixture command.
-//! Without it the service claims nothing, because no provider harness is
-//! supported on Windows; it still writes its heartbeat, and it never opens
-//! the runner's pipe.
+//! It holds no launch. With the acceptance stand-in or a coordinator
+//! project enabled (never both), launches are requests to the role runner
+//! service over its pipe ([`super::remote::RemoteHost`]) and run the
+//! configured fixture command. The stand-in's work comes from a local
+//! queue; a coordinator's from its project, claimed with the supervisor's
+//! own credential ([`crate::service::coordinator`]). With neither the
+//! service claims nothing, because no provider harness is supported on
+//! Windows; it still writes its heartbeat, and it never opens the runner's
+//! pipe.
 use super::authority_pipe::AuthorityServer;
 use super::job::Limits;
 use super::launcher::LaunchSpec;
@@ -22,12 +25,15 @@ use super::scm::{self, Host};
 use super::sys::check;
 use super::text::wide;
 use crate::config::Config;
-use crate::host_runtime::Refusing;
+use crate::host_runtime::{HostRuntime, Refusing};
 use crate::run_loop::Launch;
-use crate::service::authority::Authority;
+use crate::service::authority::{AttemptReader, Authority};
+use crate::service::coordinator::{Access, CoordinatorSettings, CoordinatorWork, Reader};
 use crate::service::lifecycle::Report;
 use crate::service::stand_in::{Ledger, Recorded, StandIn, StandInSettings};
-use crate::service::supervisor::{LoopDriver, NO_HARNESS, NoHarness, Pace, SupervisorSettings};
+use crate::service::supervisor::{
+    LoopDriver, NO_HARNESS, NoHarness, Pace, SupervisorSettings, Work,
+};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -68,6 +74,8 @@ fn serve(config: &Config, host: &Host) -> Result<bool> {
     let pace = ServicePace::new(host, &settings);
     if settings.stand_in.enabled {
         with_stand_in(&config, &settings, host, pace)?;
+    } else if settings.coordinator.enabled {
+        with_coordinator(&config, &settings, host, pace)?;
     } else {
         without_harness(&config, host, pace)?;
     }
@@ -75,19 +83,25 @@ fn serve(config: &Config, host: &Host) -> Result<bool> {
     Ok(true)
 }
 
-/// The loop's configuration: this service's state directory and, for the
-/// stand-in, no hold on launches that end without a submission, since a
-/// stand-in launch never submits.
+/// The loop's configuration: this service's state directory and, while
+/// launches run a fixture, holds fitted to a launch that never submits.
+/// The stand-in's queue offers each item once, so it needs no hold. A
+/// coordinator offers a released task again, so each task is held after
+/// one launch the loop released, however it ended short of a drain (`next`
+/// then leaves it out): a fixture never submits, and one that fails must
+/// not have its task claimed again on every poll. No total hold, since
+/// every fixture launch is one.
 fn loop_config(config: &Config, settings: &SupervisorSettings) -> Config {
     let mut config = Config {
         state_dir: settings.state_dir.clone(),
         ..config.clone()
     };
+    let run = &mut config.run;
     if settings.stand_in.enabled {
-        (
-            config.run.empty_exit_limit,
-            config.run.empty_exit_total_limit,
-        ) = (0, 0);
+        (run.empty_exit_limit, run.empty_exit_total_limit) = (0, 0);
+    } else if settings.coordinator.enabled {
+        (run.empty_exit_limit, run.empty_exit_total_limit) = (1, 0);
+        run.hold_every_release = true;
     }
     config
 }
@@ -102,11 +116,48 @@ fn with_stand_in(
     let stand_in = &settings.stand_in;
     let ledger = Ledger::at(&stand_in.ledger);
     let link = PipeLink::new(&settings.runner_pipe, &settings.runner_sid);
-    let remote = RemoteHost::new(Fixture(stand_in.clone()), link);
+    let remote = RemoteHost::new(Fixture::stand_in(stand_in), link);
     let recorded = Recorded::new(remote, ledger.clone());
     let work = StandIn::new(&stand_in.queue_dir, ledger.clone());
     let driver = LoopDriver::new(recorded, work, pace, host.shared_signal());
-    let authority = Arc::new(Authority::new(Box::new(ledger)));
+    run_with_authority(driver, settings, Box::new(ledger), config)
+}
+
+/// Runs the loop with work from the coordinator project and launches at
+/// the runner. The authority pipe reads each attempt from the coordinator.
+fn with_coordinator(
+    config: &Config,
+    settings: &SupervisorSettings,
+    host: &Host,
+    pace: ServicePace<'_>,
+) -> Result<()> {
+    let coordinator = &settings.coordinator;
+    let access = Access::open(coordinator)?;
+    let api = Arc::new(access.api()?);
+    let ledger = Ledger::at(&coordinator.ledger);
+    let link = PipeLink::new(&settings.runner_pipe, &settings.runner_sid);
+    let remote = RemoteHost::new(Fixture::coordinator(coordinator), link);
+    let recorded = Recorded::new(remote, ledger.clone());
+    let (project, cli) = (&coordinator.project_id, access.cli(coordinator));
+    let work = CoordinatorWork::new(project, api.clone(), cli, ledger);
+    let driver = LoopDriver::new(recorded, work, pace, host.shared_signal());
+    run_with_authority(
+        driver,
+        settings,
+        Box::new(Reader::new(project, api)),
+        config,
+    )
+}
+
+/// Runs the loop over `driver`, serving the authority pipe from `reader`
+/// meanwhile when a publication broker is configured.
+fn run_with_authority<H: HostRuntime, W: Work, P: Pace>(
+    driver: LoopDriver<H, W, P>,
+    settings: &SupervisorSettings,
+    reader: Box<dyn AttemptReader>,
+    config: &Config,
+) -> Result<()> {
+    let authority = Arc::new(Authority::new(reader));
     let _served = match settings.publication_broker() {
         Some(broker) => Some(AuthorityService::start(
             settings,
@@ -173,22 +224,42 @@ fn without_harness(config: &Config, host: &Host, pace: ServicePace<'_>) -> Resul
     crate::run_loop::run(&mut driver, config, false)
 }
 
-/// Plans every stand-in launch: the configured fixture command inside a
-/// less-privileged boundary with no capability, in two directories of its
-/// own below the launch root.
-pub struct Fixture(pub StandInSettings);
+/// Plans every fixture launch, the stand-in's or a coordinator's: the
+/// configured fixture command inside a less-privileged boundary with no
+/// capability, in two directories of its own below the launch root.
+pub struct Fixture {
+    argv: Vec<String>,
+    launch_root: PathBuf,
+}
 
 impl Fixture {
+    /// The stand-in's fixture and launch root.
+    pub fn stand_in(settings: &StandInSettings) -> Self {
+        Self {
+            argv: settings.fixture.clone(),
+            launch_root: settings.launch_root.clone(),
+        }
+    }
+
+    /// A coordinator project's fixture and launch root.
+    pub fn coordinator(settings: &CoordinatorSettings) -> Self {
+        Self {
+            argv: settings.fixture.clone(),
+            launch_root: settings.launch_root.clone(),
+        }
+    }
+
     /// The launch's directory called `kind`.
     fn directory(&self, launch: &Launch, kind: &str) -> PathBuf {
         let name = format!("{}-{kind}", launch.session_id);
-        self.0.launch_root.join(name)
+        self.launch_root.join(name)
     }
 }
 
 impl super::Planner for Fixture {
     /// The same plan for the same launch, so a restarted supervisor names
-    /// the same directories.
+    /// the same directories. Every fixture launch's profile has the
+    /// stand-in's prefix, which the installer's leftover sweep knows.
     fn plan(&self, launch: &Launch) -> Result<(LaunchSpec, Command)> {
         let work = self.directory(launch, "work");
         let spec = LaunchSpec {
@@ -200,7 +271,7 @@ impl super::Planner for Fixture {
             work: work.clone(),
         };
         let command = Command {
-            argv: self.0.fixture.clone(),
+            argv: self.argv.clone(),
             directory: work.clone(),
             environment: environment(),
             output: work.join("output.log"),
@@ -314,7 +385,7 @@ mod tests {
             launch_root: PathBuf::from(r"C:\launches"),
             ..StandInSettings::default()
         };
-        let (fixture, launch) = (Fixture(settings), launch());
+        let (fixture, launch) = (Fixture::stand_in(&settings), launch());
         let (spec, command) = fixture.plan(&launch).unwrap();
         assert!(spec.less_privileged && spec.capabilities.is_empty());
         let id = launch.session_id.to_string();
@@ -356,6 +427,30 @@ mod tests {
             stand_in.run.empty_exit_total_limit,
         );
         assert_eq!(limits, (0, 0));
+        settings.stand_in.enabled = false;
+        settings.coordinator.enabled = true;
+        let coordinator = loop_config(&Config::default(), &settings);
+        let limits = (
+            coordinator.run.empty_exit_limit,
+            coordinator.run.empty_exit_total_limit,
+        );
+        assert_eq!(limits, (1, 0));
+        assert!(coordinator.run.hold_every_release);
+        assert!(!stand_in.run.hold_every_release && !plain.run.hold_every_release);
+    }
+
+    #[test]
+    fn a_coordinator_launch_runs_its_own_fixture_below_its_own_launch_root() {
+        let settings = CoordinatorSettings {
+            fixture: vec!["probe.exe".into()],
+            launch_root: PathBuf::from(r"C:\fixture-launches"),
+            ..CoordinatorSettings::default()
+        };
+        let launch = launch();
+        let (spec, command) = Fixture::coordinator(&settings).plan(&launch).unwrap();
+        assert!(spec.work.starts_with(r"C:\fixture-launches"));
+        assert!(spec.profile.starts_with("agentc.standin."));
+        assert_eq!(command.argv, ["probe.exe"]);
     }
 
     #[test]

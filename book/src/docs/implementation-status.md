@@ -258,6 +258,19 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   with a hardened clone and the browser checks, the workspace build inside
   a launch, and the full host acceptance.
 
+- Phase 8 step 8a runs the coordinator loop in the installed Windows
+  supervisor service: with `[windows_supervisor.coordinator]` enabled it
+  claims, renews, checkpoints and releases a coordinator project's tasks
+  through the pinned CLI, as an agent principal of its own whose credential
+  and CLI state only the supervisor's account, the system and the
+  administrators can open, and has the installed runner launch a fixture
+  for each; `windows-host` installs and removes the credential and the CLI.
+  On MiniAir the installed services ran it on 2026-11-26 and 27 through
+  probe, lifecycle, supervisor-crash, runner-crash, reboot and uninstall
+  rounds. The workload is still the fixture: no provider harness runs on
+  Windows. See
+  [step 8a](windows-host-design.md#step-8a-the-coordinator-loop-on-the-installed-host-2026-11-27).
+
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
   isolated tmpfs; the host harness directory stays hidden. Invalid paths,

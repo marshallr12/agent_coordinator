@@ -2,8 +2,9 @@
 //! at a time, and decides each on a fresh observation: a refusal that
 //! appears part-way stops it, and nothing is ever applied to a host that
 //! was only checked earlier. [`status`] observes and changes nothing.
+use super::coordinator;
 use super::journal::{Journal, Stage};
-use super::model::{Desired, Inputs, Layout, Overrides, ServiceSpec};
+use super::model::{Desired, Inputs, KeySpec, Layout, Overrides, ServiceSpec};
 use super::observed::{KeySource, Observed, PathState, ProfileState, ServiceState};
 use super::plan::{self, Action, Change, Refusal};
 use anyhow::{Context, Result, bail};
@@ -22,8 +23,9 @@ pub trait Host {
     fn sha256(&self, path: &str) -> Result<Option<String>>;
     /// How the service called `name` is registered, when it is.
     fn service(&self, name: &str) -> Result<Option<ServiceState>>;
-    /// Whether the key file `source` can be used, and whether the key at
-    /// `installed` already holds the same bytes.
+    /// Whether the secret file `source`, a key or a coordinator credential,
+    /// can be used, and whether the one at `installed` already holds the
+    /// same bytes.
     fn key_source(&self, source: &str, installed: Option<&str>) -> KeySource;
     /// The names of every privilege the token of `process` holds.
     fn privileges(&self, process: u32) -> Result<Vec<String>>;
@@ -56,6 +58,12 @@ pub trait Machine: Host {
     /// without taking ownership of anything, and returns each path that
     /// could not be removed with why. Nothing there is no error.
     fn remove_tree(&mut self, path: &str) -> Result<Vec<String>>;
+    /// Gives the tree at `path` to the administrators, with an access list
+    /// of the system and administrators only, never through a link, and
+    /// returns each path that could not be taken with why. Only `uninstall`
+    /// calls it, and only on the coordinator CLI's session state, which the
+    /// CLI locks to the supervisor's account.
+    fn reclaim_tree(&mut self, path: &str) -> Result<Vec<String>>;
     /// Deletes the registered service `name`; one that is not registered,
     /// or is already marked for deletion, is done.
     fn delete_service(&mut self, name: &str) -> Result<()>;
@@ -172,30 +180,51 @@ fn open(desired: &Desired, seen: &Observed, path: &str) -> bool {
     adoptable(desired, path, seen.path(path))
 }
 
-/// Reads the binary's digest, the configuration, the manifest and the
-/// key's state, each only from a directory that may be used.
+/// Reads the binary's and the CLI's digests, the configuration, the
+/// manifest and the key's and the credential's state, each only from a
+/// directory that may be used.
 fn observe_files(host: &dyn Host, desired: &Desired, seen: &mut Observed) -> Result<()> {
     let layout = &desired.layout;
     if open(desired, seen, &layout.program_dir) {
         seen.binary_sha256 = host.sha256(&layout.binary())?;
         seen.config = host.text(&layout.config())?;
+        if let Some(cli) = &desired.cli {
+            seen.cli_sha256 = host.sha256(&cli.path)?;
+        }
     }
     if open(desired, seen, &layout.installer_dir()) {
         seen.manifest = host.text(&layout.manifest())?;
         seen.releases = host.text(&layout.releases())?;
         seen.update_open = host.text(&layout.update_record())?.is_some();
     }
-    let Some(key) = &desired.key else {
-        return Ok(());
-    };
-    if open(desired, seen, &layout.key_dir()) {
-        seen.paths.insert(key.path.clone(), host.path(&key.path)?);
-    }
-    let installed = matches!(seen.path(&key.path), PathState::File { .. }).then_some(&*key.path);
-    if let Some(source) = &key.source {
-        seen.key_source = host.key_source(source, installed);
-    }
+    let (key, credential) = (desired.key.as_ref(), desired.credential.as_ref());
+    seen.key_source = observe_secret(host, desired, seen, key, &layout.key_dir())?;
+    let directory = layout.coordinator_dir();
+    seen.credential_source = observe_secret(host, desired, seen, credential, &directory)?;
     Ok(())
+}
+
+/// Looks at the secret file `spec` names when its `directory` may be used,
+/// and returns what this run's file for it is like: not given when the
+/// model wants no such secret or no file was given.
+fn observe_secret(
+    host: &dyn Host,
+    desired: &Desired,
+    seen: &mut Observed,
+    spec: Option<&KeySpec>,
+    directory: &str,
+) -> Result<KeySource> {
+    let Some(spec) = spec else {
+        return Ok(KeySource::NotGiven);
+    };
+    if open(desired, seen, directory) {
+        seen.paths.insert(spec.path.clone(), host.path(&spec.path)?);
+    }
+    let installed = matches!(seen.path(&spec.path), PathState::File { .. }).then_some(&*spec.path);
+    Ok(match &spec.source {
+        Some(source) => host.key_source(source, installed),
+        None => KeySource::NotGiven,
+    })
 }
 
 /// The inputs the host's manifest records, or `None` when there is none;
@@ -232,7 +261,9 @@ pub fn recorded_inputs(host: &dyn Host, layout: &Layout) -> Result<Option<Inputs
 
 /// `windows-host install`: makes the machine a host laid out as `layout`,
 /// from what the manifest records and what this run's `overrides` say
-/// instead. `binary_sha256` is the digest of the binary to install.
+/// instead. `binary_sha256` is the digest of the binary to install; the
+/// digest of this run's coordinator CLI file, when one is given, is
+/// recorded in the manifest.
 pub fn install_from(
     host: &mut dyn Host,
     layout: Layout,
@@ -240,11 +271,19 @@ pub fn install_from(
     binary_sha256: String,
     journal: &mut Journal,
 ) -> Result<Report> {
-    let inputs = match recorded(host, &layout)? {
+    let mut inputs = match recorded(host, &layout)? {
         Ok(inputs) => inputs.unwrap_or_default().with(overrides),
         Err(refusals) => return Ok(Report::refused(texts(&refusals))),
     };
+    let sources = &overrides.coordinator;
+    if let Err(refusal) = coordinator::record_cli(&*host, sources, &mut inputs) {
+        return Ok(Report::refused(texts(&[refusal])));
+    }
     let desired = Desired::new(layout, inputs, binary_sha256, overrides.key_source.clone())?;
+    let desired = desired.with_sources(
+        sources.credential_source.clone(),
+        sources.cli_source.clone(),
+    );
     install(host, &desired, journal)
 }
 
