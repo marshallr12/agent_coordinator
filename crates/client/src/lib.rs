@@ -26,6 +26,7 @@ pub enum HttpMethod {
     Get,
     Post,
     Patch,
+    Delete,
 }
 
 impl HttpMethod {
@@ -34,11 +35,12 @@ impl HttpMethod {
             Self::Get => Method::GET,
             Self::Post => Method::POST,
             Self::Patch => Method::PATCH,
+            Self::Delete => Method::DELETE,
         }
     }
 
     pub fn is_mutation(&self) -> bool {
-        matches!(self, Self::Post | Self::Patch)
+        matches!(self, Self::Post | Self::Patch | Self::Delete)
     }
 }
 
