@@ -132,7 +132,7 @@
               <div class="toolbar">
                 <label class="select-label" for="project-select">Project<select id="project-select"><option value="">Choose a project</option></select></label>
                 <label id="status-filter-label" class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
-                <label class="select-label search-label" for="tasks-search">Search<input id="tasks-search" type="search" placeholder="Search task names" autocomplete="off"></label>
+                <label class="select-label search-label" for="tasks-search">Search<input id="tasks-search" type="search" placeholder="Search task names or ids" autocomplete="off"></label>
               </div>
               <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
               <div id="tasks-list" class="tasks-list" hidden></div>
@@ -152,7 +152,7 @@
 
             <section id="archived-view" class="page-view" role="tabpanel" aria-labelledby="archived-tasks-tab" tabindex="0" hidden>
               <div class="page-heading"><div><p class="eyebrow">Task history</p><h1 id="archived-heading">Archived tasks</h1><p id="archived-subtitle" class="muted">Archived work is kept separately from the task queue.</p></div></div>
-              <div class="toolbar"><label class="select-label" for="archive-project-select">Project<select id="archive-project-select"><option value="">Choose a project</option></select></label><label class="select-label search-label" for="archived-search">Search<input id="archived-search" type="search" placeholder="Search task names" autocomplete="off"></label><button id="refresh-archive" class="button subtle" type="button">Refresh</button></div>
+              <div class="toolbar"><label class="select-label" for="archive-project-select">Project<select id="archive-project-select"><option value="">Choose a project</option></select></label><label class="select-label search-label" for="archived-search">Search<input id="archived-search" type="search" placeholder="Search task names or ids" autocomplete="off"></label><button id="refresh-archive" class="button subtle" type="button">Refresh</button></div>
               <div id="archived-state" class="state-panel" role="status">Choose a project to load archived tasks.</div><div id="archived-list" class="tasks-list" hidden></div>
               <div id="archived-pagination" class="tasks-footer" aria-label="Archived task pagination" hidden>
                 <button id="archived-first-page" class="button subtle pagination-icon" type="button" aria-label="First page">⏮</button>

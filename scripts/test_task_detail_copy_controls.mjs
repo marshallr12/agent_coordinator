@@ -512,13 +512,20 @@ async function visibleTitles({ evaluate }, listId) {
   return evaluate(`[...document.querySelectorAll('#${listId} .task-row .task-title')].map((node) => node.textContent)`);
 }
 
-// Text search on the task name, for the queue, completed and archived views.
+// Text search on the task name or id, for the queue, completed and archived views.
 async function checkTaskSearch(page) {
   const { evaluate } = page;
   // Task queue: 30 "Fixture task N" rows plus the original task, case-insensitively.
   await typeSearch(page, 'tasks-search', 'COPY THIS');
   let titles = await visibleTitles(page, 'tasks-list');
   assert(titles.length === 1 && titles[0] === task.title, `Queue search returned ${JSON.stringify(titles)}.`);
+  // Task id: a substring of one id, then a complete id.
+  await typeSearch(page, 'tasks-search', 'ID-123');
+  titles = await visibleTitles(page, 'tasks-list');
+  assert(titles.length === 1 && titles[0] === task.title, `Queue id substring search returned ${JSON.stringify(titles)}.`);
+  await typeSearch(page, 'tasks-search', 'task-copy-id-7');
+  titles = await visibleTitles(page, 'tasks-list');
+  assert(titles.length === 1 && titles[0] === 'Fixture task 8', `Queue full id search returned ${JSON.stringify(titles)}.`);
   await typeSearch(page, 'tasks-search', 'Fixture task 2');
   titles = await visibleTitles(page, 'tasks-list');
   assert(titles.length === 11 && titles.every((title) => title.includes('Fixture task 2')), `Queue prefix search returned ${titles.length} tasks.`);
