@@ -5,9 +5,11 @@
 //! never file contents.
 use crate::push_helper::files::open_beneath;
 use anyhow::{Context, Result, ensure};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::time::SystemTime;
 
 /// The largest credential file read.
 pub const MAX_CREDENTIALS: u64 = 64 * 1024;
@@ -48,6 +50,54 @@ pub fn write(base: &Path, relative: &Path, contents: &[u8], uid: u32, gid: u32) 
     file.write_all(contents)?;
     std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
     Ok(file.sync_all()?)
+}
+
+/// The modification time of `relative` below `base`, which must be a
+/// regular file owned by `owner`. The file is opened `O_PATH`, so nothing is
+/// read and a FIFO cannot block.
+pub fn modified(base: &Path, relative: &Path, owner: u32) -> Result<SystemTime> {
+    let shown = base.join(relative);
+    let file = open_beneath(base, relative, libc::O_PATH, 0)
+        .with_context(|| format!("open {} without following symlinks", shown.display()))?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.uid() == owner,
+        "{} must be a regular file owned by uid {owner}",
+        shown.display()
+    );
+    Ok(metadata.modified()?)
+}
+
+/// Whether `relative` below `base` is a regular file, opened `O_PATH`
+/// without following a symlink at any component.
+pub fn is_regular(base: &Path, relative: &Path) -> bool {
+    let file = open_beneath(base, relative, libc::O_PATH, 0);
+    file.and_then(|file| file.metadata())
+        .is_ok_and(|metadata| metadata.is_file())
+}
+
+/// Removes the tree at `relative` below `base` (if any) without following a
+/// symlink at any component: its parent is opened beneath `base`, and the
+/// tree is removed through `/proc/self/fd/<parent>`, which names that open
+/// directory rather than re-walking role-owned names. `remove_dir_all`
+/// itself never follows a symlink inside the tree or at its top.
+pub fn remove_tree(base: &Path, relative: &Path) -> Result<()> {
+    let shown = base.join(relative);
+    let (Some(parent), Some(name)) = (relative.parent(), relative.file_name()) else {
+        anyhow::bail!("{} has no parent below {}", shown.display(), base.display());
+    };
+    let directory = match open_beneath(base, parent, libc::O_PATH | libc::O_DIRECTORY, 0) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        opened => opened
+            .with_context(|| format!("open {} without following symlinks", shown.display()))?,
+    };
+    let path = Path::new("/proc/self/fd")
+        .join(directory.as_raw_fd().to_string())
+        .join(name);
+    match std::fs::remove_dir_all(&path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        removed => removed.with_context(|| format!("remove {}", shown.display())),
+    }
 }
 
 #[cfg(test)]
@@ -105,5 +155,42 @@ mod tests {
         assert!(write(&base, Path::new("real/file.toml"), b"x", uid, gid).is_err());
         write(&base, Path::new("real/new"), b"x", uid, gid).unwrap();
         assert_eq!(fs::read(base.join("real/new")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn modification_times_need_the_owner_and_no_symlinks() {
+        let (_dir, base) = base();
+        std::os::unix::fs::symlink(base.join("real"), base.join("dir")).unwrap();
+        assert!(modified(&base, Path::new("real/file.toml"), me()).is_ok());
+        assert!(modified(&base, Path::new("real/file.toml"), me() + 1).is_err());
+        assert!(modified(&base, Path::new("dir/file.toml"), me()).is_err());
+        assert!(modified(&base, Path::new("real"), me()).is_err());
+    }
+
+    #[test]
+    fn markers_are_regular_files_reached_without_symlinks() {
+        let (_dir, base) = base();
+        std::os::unix::fs::symlink(base.join("real"), base.join("dir")).unwrap();
+        std::os::unix::fs::symlink(base.join("real/file.toml"), base.join("link")).unwrap();
+        assert!(is_regular(&base, Path::new("real/file.toml")));
+        for name in ["dir/file.toml", "link", "real", "real/missing"] {
+            assert!(!is_regular(&base, Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn tree_removal_never_follows_symlinks() {
+        let (_dir, base) = base();
+        fs::create_dir_all(base.join("runs/s1/inner")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("runs/s1/inner/out")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("runs/s2")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("linked")).unwrap();
+        assert!(remove_tree(&base, Path::new("linked/file.toml")).is_err());
+        remove_tree(&base, Path::new("runs/s2")).unwrap();
+        remove_tree(&base, Path::new("runs/s1")).unwrap();
+        remove_tree(&base, Path::new("runs/gone")).unwrap();
+        remove_tree(&base, Path::new("missing/gone")).unwrap();
+        assert!(!base.join("runs/s1").exists() && !base.join("runs/s2").exists());
+        assert_eq!(fs::read(base.join("real/file.toml")).unwrap(), b"token");
     }
 }

@@ -1,0 +1,63 @@
+{
+  "data": {
+    "claim": {
+      "attempt": {
+        "created_at": "2027-01-15T08:00:00.000Z",
+        "ended_at": null,
+        "expires_at": "2027-01-15T08:10:00.000Z",
+        "generation": 1,
+        "id": "64b8dc86-d996-435e-b5ff-7231098a8f9e",
+        "last_heartbeat_at": "2027-01-15T08:00:00.000Z",
+        "last_progress_at": "2027-01-15T08:00:00.000Z",
+        "mode": "work",
+        "outcome": null,
+        "owner_id": "d38ca7f5-d8d1-4028-b589-78e6026aa243",
+        "project_id": "9a4a04cc-cd6c-4049-b95a-6e633148a538",
+        "session_id": "ac4ba7cb-8d9a-4465-98a4-d67f4d89267c",
+        "state": "active",
+        "task_id": "feed074d-f86a-49e2-935e-64f092098239"
+      },
+      "lease_remaining_ms": 600000,
+      "task": {
+        "acceptance_criteria": [
+          "Required behavior verified"
+        ],
+        "activity_kind": null,
+        "archived_at": null,
+        "blocked_reason": null,
+        "created_at": "2027-01-15T08:00:00.000Z",
+        "current_attempt_id": "64b8dc86-d996-435e-b5ff-7231098a8f9e",
+        "decisions_ready": true,
+        "dependencies_ready": true,
+        "description": "Test task",
+        "generation": 1,
+        "id": "feed074d-f86a-49e2-935e-64f092098239",
+        "kind": "code",
+        "lifecycle": "open",
+        "objective_children_ready": true,
+        "objective_id": null,
+        "parent_objective_id": null,
+        "parent_objective_required": null,
+        "precondition_hints": [],
+        "preconditions": [
+          {
+            "code": "active_owner",
+            "message": "A live authorized attempt currently owns this task."
+          }
+        ],
+        "priority": 2,
+        "project_id": "9a4a04cc-cd6c-4049-b95a-6e633148a538",
+        "ready_since": "2027-01-15T08:00:00.000Z",
+        "revision": 1,
+        "title": "task",
+        "work_status": "in_progress"
+      }
+    },
+    "next_actions": [
+      "Prepare/register a separate worktree before code changes; checkpoint and renew ownership."
+    ],
+    "renew_after_seconds": 60
+  },
+  "request_id": "8ed3224b-b9d1-465e-8def-eb3fa250ca38",
+  "server_time": "2026-10-06T22:08:35.688073768+00:00"
+}

@@ -4,6 +4,11 @@
 //! the role account. `launch-root` itself runs as root, as by hand. Root's
 //! own reads and writes below the role's directories go through `rooted`;
 //! instruction files come from the root-owned mirror, never the clone.
+//! SIGTERM and SIGINT set a flag the loop polls, so it drains rather than
+//! dies; `launch-root` runs in its own process group, which the drain
+//! signals as a whole.
+use super::lease::Lease;
+use super::record::{self, LaunchRecord};
 use super::{Driver, Launch, rooted};
 use crate::clone;
 use crate::config::Config;
@@ -13,9 +18,15 @@ use anyhow::{Context, Result, ensure};
 use coordinator_client::CoordinatorClient;
 use serde::Deserialize;
 use serde_json::Value;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Set by SIGTERM or SIGINT: stop claiming, drain the launch and exit.
+static STOP: AtomicBool = AtomicBool::new(false);
+/// The CLI's exit code for an HTTP 409: the attempt is no longer active.
+const CONFLICT_EXIT: i32 = 5;
 /// The repository binding the mirror's branch carries.
 #[derive(Deserialize)]
 struct Binding {
@@ -34,13 +45,29 @@ pub struct LiveDriver {
     account: Account,
     /// The mirror revision the current launch was cloned at.
     revision: String,
+    /// The running `launch-root`, if any.
+    child: Option<Child>,
 }
 
 /// Runs the live loop as root until stopped (or once).
 pub fn run(config: &Config, config_path: Option<&Path>, once: bool) -> Result<()> {
     accounts::require_root(accounts::effective_uid())?;
     let mut driver = LiveDriver::new(config, config_path)?;
+    on_stop_requests();
     super::run(&mut driver, config, once)
+}
+
+/// Records SIGTERM and SIGINT in [`STOP`] instead of dying.
+fn on_stop_requests() {
+    extern "C" fn request_stop(_signal: libc::c_int) {
+        STOP.store(true, Ordering::SeqCst);
+    }
+    let handler = request_stop as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        // SAFETY: the handler only stores to an atomic, which is
+        // async-signal-safe.
+        unsafe { libc::signal(signal, handler) };
+    }
 }
 
 impl LiveDriver {
@@ -50,6 +77,7 @@ impl LiveDriver {
         let spec = format!("{}:.agent-coordinator.toml", config.run.branch);
         let text = clone::git_output(&mirror(config), &["show", &spec])?;
         let binding: Binding = toml::from_str(&text).context("parse the mirror's binding")?;
+        install_binding(config, &text)?;
         let account = Account::lookup(Role::Implementer.user(config))?;
         let credentials = read_credentials(config, &account)?;
         let shown = role_dir(config).join(CREDENTIALS);
@@ -66,6 +94,7 @@ impl LiveDriver {
             project: binding.project_id,
             account,
             revision: String::new(),
+            child: None,
         })
     }
 
@@ -78,17 +107,7 @@ impl LiveDriver {
         cwd: &Path,
         launch: &Launch,
     ) -> Result<Vec<u8>> {
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .current_dir(cwd)
-            .env_clear()
-            .stdin(Stdio::null());
-        command.envs(role_env(&self.config, launch));
-        accounts::run_as(&mut command, &self.account);
-        let output = command
-            .output()
-            .with_context(|| format!("run {}", program.display()))?;
+        let output = self.run_role(program, args, cwd, launch, b"")?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         ensure!(
             output.status.success(),
@@ -97,6 +116,44 @@ impl LiveDriver {
             stderr.trim()
         );
         Ok(output.stdout)
+    }
+
+    /// Runs `program args` as the implementer in `cwd` with `input` on its
+    /// standard input and returns its output, whatever its exit.
+    fn run_role(
+        &self,
+        program: &Path,
+        args: &[String],
+        cwd: &Path,
+        launch: &Launch,
+        input: &[u8],
+    ) -> Result<Output> {
+        let mut command = Command::new(program);
+        command.args(args).current_dir(cwd).env_clear();
+        command.envs(role_env(&self.config, launch));
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        accounts::run_as(&mut command, &self.account);
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("run {}", program.display()))?;
+        child.stdin.take().context("stdin")?.write_all(input)?;
+        Ok(child.wait_with_output()?)
+    }
+
+    /// Runs the coordinator CLI as the implementer in the launch's clone,
+    /// with the launch's session, and returns its JSON stdout.
+    fn cli(&self, launch: &Launch, args: &[String]) -> Result<Value> {
+        let cli = self.config.bin_dir.join("agent-coordinator");
+        let stdout = self.as_role(&cli, args, &launch.clone, launch)?;
+        serde_json::from_slice(&stdout).context("the CLI printed no JSON")
+    }
+
+    /// `relative` below the implementer's directory: `$RUN` or the clone.
+    fn below_role(&self, path: &Path) -> Result<PathBuf> {
+        Ok(path.strip_prefix(role_dir(&self.config))?.to_owned())
     }
 
     /// `agentc-supervisor` arguments: `--config`, `subcommand`, then `rest`.
@@ -110,27 +167,26 @@ impl LiveDriver {
     /// Writes `contents` to a new role-owned mode 0600 file at `name` in
     /// the launch's `$RUN`, refusing symlinks on the way.
     fn write_run_file(&self, launch: &Launch, name: &str, contents: &[u8]) -> Result<()> {
-        let base = role_dir(&self.config);
-        let relative = launch.run.strip_prefix(&base)?.join(name);
+        let relative = self.below_role(&launch.run)?.join(name);
         let (uid, gid) = (self.account.uid, self.account.gid);
-        rooted::write(&base, &relative, contents, uid, gid)
+        rooted::write(&role_dir(&self.config), &relative, contents, uid, gid)
     }
+}
 
-    /// One instruction file at the cloned revision, read from the mirror as
-    /// a blob of bounded size and truncated for the prompt.
-    fn instruction(&self, name: &str) -> Option<String> {
-        let object = format!("{}:{name}", self.revision);
-        let mirror = mirror(&self.config);
-        let size: usize = clone::git_output(&mirror, &["cat-file", "-s", &object])
-            .ok()?
-            .parse()
-            .ok()?;
-        if size > MAX_BLOB {
-            return None;
-        }
-        let text = clone::git_output(&mirror, &["cat-file", "blob", &object]).ok()?;
-        Some(truncate(text, super::MAX_INSTRUCTION_BYTES))
+/// One instruction file at `revision`, read from `mirror` as a blob of
+/// bounded size and truncated for the prompt. A symlink's blob is its target
+/// path, so nothing outside the repository is ever read.
+fn instruction(mirror: &Path, revision: &str, name: &str) -> Option<String> {
+    let object = format!("{revision}:{name}");
+    let size: usize = clone::git_output(mirror, &["cat-file", "-s", &object])
+        .ok()?
+        .parse()
+        .ok()?;
+    if size > MAX_BLOB {
+        return None;
     }
+    let text = clone::git_output(mirror, &["cat-file", "blob", &object]).ok()?;
+    Some(truncate(text, super::MAX_INSTRUCTION_BYTES))
 }
 
 impl Driver for LiveDriver {
@@ -178,10 +234,14 @@ impl Driver for LiveDriver {
     }
 
     fn instructions(&mut self, _launch: &Launch) -> Vec<(String, String)> {
-        let found = super::INSTRUCTION_FILES.iter();
-        found
-            .filter_map(|name| Some(((*name).to_owned(), self.instruction(name)?)))
-            .collect()
+        let mirror = mirror(&self.config);
+        let read = |name: &&str| {
+            Some((
+                (*name).to_owned(),
+                instruction(&mirror, &self.revision, name)?,
+            ))
+        };
+        super::INSTRUCTION_FILES.iter().filter_map(read).collect()
     }
 
     fn install_prompt(&mut self, launch: &Launch, prompt: &str) -> Result<()> {
@@ -191,34 +251,164 @@ impl Driver for LiveDriver {
 
     /// Connects the launch's session and claims the task with the pinned CLI,
     /// which acknowledges the current orientation first.
-    fn claim(&mut self, launch: &Launch) -> Result<String> {
-        let cli = self.config.bin_dir.join("agent-coordinator");
+    fn claim(&mut self, launch: &Launch) -> Result<Lease> {
         let harness = format!("--harness=agentc-supervisor-{:?}", self.config.run.harness);
         let connect = ["--json".into(), "connect".into(), harness.to_lowercase()];
-        self.as_role(&cli, &connect, &launch.clone, launch)?;
+        self.cli(launch, &connect)?;
         let s = &launch.suggestion;
         let claim = ["--json", "claim", &format!("--task={}", s.task)].map(String::from);
         let revision = format!("--revision={}", s.revision);
-        let args = [&claim[..], &[revision]].concat();
-        let stdout = self.as_role(&cli, &args, &launch.clone, launch)?;
-        Ok(attempt_id(&stdout))
+        Lease::parse(&self.cli(launch, &[&claim[..], &[revision]].concat())?)
     }
 
-    /// Runs `launch-root` as root and returns its exit code.
-    fn launch(&mut self, launch: &Launch) -> Result<i32> {
+    /// Spawns `launch-root` as root in a process group of its own.
+    fn start(&mut self, launch: &Launch) -> Result<(u32, Option<u64>)> {
+        use std::os::unix::process::CommandExt;
         let args = self.supervisor_args("launch-root", spec_flags(&self.config, launch));
         let program = crate::relay::program(&self.config);
-        let status = Command::new(&program)
-            .args(&args)
-            .stdin(Stdio::null())
-            .status()?;
-        Ok(status.code().unwrap_or(-1))
+        let mut command = Command::new(&program);
+        command.args(&args).stdin(Stdio::null()).process_group(0);
+        let child = command.spawn().context("spawn launch-root")?;
+        let pid = child.id();
+        self.child = Some(child);
+        Ok((pid, record::start_ticks(pid)))
+    }
+
+    /// Reaps `launch-root` once it has exited; a wait error keeps waiting.
+    fn exited(&mut self) -> Option<i32> {
+        let status = match self.child.as_mut()?.try_wait() {
+            Ok(status) => status?,
+            Err(error) => {
+                eprintln!("agentc-supervisor run: wait for launch-root: {error}");
+                return None;
+            }
+        };
+        self.child = None;
+        Some(status.code().unwrap_or(-1))
+    }
+
+    /// Signals `launch-root`'s process group while it is unreaped, so the
+    /// group id cannot have been reused.
+    fn signal(&mut self, kill: bool) {
+        let Some(group) = self
+            .child
+            .as_ref()
+            .and_then(|c| libc::pid_t::try_from(c.id()).ok())
+        else {
+            return;
+        };
+        let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
+        // SAFETY: kill takes plain integers and touches no memory.
+        unsafe { libc::kill(-group, signal) };
+    }
+
+    /// The modification time of `$RUN/events.jsonl`, the harness's event
+    /// stream, which `launch` creates as the implementer. The agent could
+    /// touch it, but renewal stays bounded by the budget and the service's
+    /// `max_attempt_seconds`.
+    fn last_event_ms(&self, launch: &Launch) -> Option<i64> {
+        let relative = self.below_role(&launch.run).ok()?.join("events.jsonl");
+        let modified =
+            rooted::modified(&role_dir(&self.config), &relative, self.account.uid).ok()?;
+        let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+        i64::try_from(since.as_millis()).ok()
+    }
+
+    fn renew(&mut self, launch: &Launch, lease: &Lease) -> Result<Lease> {
+        let args = ["--json", "renew", &format!("--attempt={}", lease.attempt)];
+        let generation = format!("--generation={}", lease.generation);
+        let args = [&args.map(String::from)[..], &[generation]].concat();
+        Lease::parse(&self.cli(launch, &args)?)
+    }
+
+    /// Releases through the CLI with the handoff on standard input; a 409
+    /// means the agent already submitted or released the attempt.
+    fn release(&mut self, launch: &Launch, lease: &Lease, summary: &str) -> Result<()> {
+        let cli = self.config.bin_dir.join("agent-coordinator");
+        let args = [
+            "--json".into(),
+            "release".into(),
+            format!("--attempt={}", lease.attempt),
+            format!("--generation={}", lease.generation),
+            "--input=-".into(),
+        ];
+        let input = serde_json::to_vec(&serde_json::json!({"summary": summary}))?;
+        let output = self.run_role(&cli, &args, &launch.clone, launch, &input)?;
+        let code = output.status.code();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        ensure!(
+            output.status.success() || code == Some(CONFLICT_EXIT),
+            "release failed: {}",
+            stderr.trim()
+        );
+        Ok(())
+    }
+
+    fn boot_id(&self) -> String {
+        record::boot_id()
+    }
+
+    fn may_be_alive(&self, launch: &LaunchRecord) -> bool {
+        let now = self.now_ms();
+        record::may_be_alive(launch, &record::boot_id(), record::start_ticks, now)
+    }
+
+    fn has_marker(&self, launch: &Launch, name: &str) -> bool {
+        let base = role_dir(&self.config);
+        let relative = self.below_role(&launch.run).map(|run| run.join(name));
+        relative.is_ok_and(|relative| rooted::is_regular(&base, &relative))
+    }
+
+    /// Removes the clone and `$RUN` without following a role-owned symlink.
+    fn discard(&mut self, launch: &Launch) -> Result<()> {
+        let base = role_dir(&self.config);
+        for path in [&launch.clone, &launch.run] {
+            rooted::remove_tree(&base, &self.below_role(path)?)?;
+        }
+        Ok(())
+    }
+
+    fn now_ms(&self) -> i64 {
+        i64::try_from(crate::shadow::now_ms()).unwrap_or(i64::MAX)
+    }
+
+    fn pause(&mut self, duration: std::time::Duration) {
+        std::thread::sleep(duration);
+    }
+
+    fn stopping(&self) -> bool {
+        STOP.load(Ordering::SeqCst)
     }
 }
 
 /// The host mirror clones come from, `<state_dir>/mirror.git`.
 fn mirror(config: &Config) -> PathBuf {
     config.state_dir.join("mirror.git")
+}
+
+/// The root-owned copy of the mirror's repository binding that every role
+/// CLI command uses, `<state_dir>/coordinator-binding.toml`.
+fn binding_path(config: &Config) -> PathBuf {
+    config.state_dir.join("coordinator-binding.toml")
+}
+
+/// Writes the mirror's binding to [`binding_path`] (root-owned, mode 0644 so
+/// the role can read it), replacing it atomically. Renewals and releases
+/// then never read the clone's role-writable `.agent-coordinator.toml`.
+fn install_binding(config: &Config, text: &str) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let path = binding_path(config);
+    let temp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&temp);
+    let mut options = std::fs::OpenOptions::new();
+    let mut file = options
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&temp)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    file.write_all(text.as_bytes())?;
+    std::fs::rename(&temp, &path).with_context(|| format!("replace {}", path.display()))
 }
 
 /// The implementer's coordinator credential file, relative to its role
@@ -241,15 +431,6 @@ fn read_credentials(config: &Config, account: &Account) -> Result<Vec<u8>> {
         account.uid,
         rooted::MAX_CREDENTIALS,
     )
-}
-
-/// The attempt id in the CLI's claim response, or `unknown`.
-fn attempt_id(stdout: &[u8]) -> String {
-    let body: Value = serde_json::from_slice(stdout).unwrap_or_default();
-    let id = ["/data/claim/attempt/id", "/claim/attempt/id"]
-        .iter()
-        .find_map(|pointer| body.pointer(pointer)?.as_str());
-    id.unwrap_or("unknown").to_owned()
 }
 
 /// `text` cut to at most `max` bytes on a character boundary.
@@ -287,6 +468,10 @@ fn role_env(config: &Config, launch: &Launch) -> Vec<(&'static str, String)> {
             coordinator_home(launch).display().to_string(),
         ),
         ("AGENT_COORDINATOR_SESSION", launch.session_id.to_string()),
+        (
+            "AGENT_COORDINATOR_REPO_CONFIG",
+            binding_path(config).display().to_string(),
+        ),
     ];
     if config.run.allow_insecure_loopback {
         env.push(("AGENT_COORDINATOR_ALLOW_INSECURE_LOOPBACK", "true".into()));
@@ -357,13 +542,87 @@ mod tests {
         assert!(env.contains(&("AGENT_COORDINATOR_SESSION", session)));
         assert!(env.contains(&("HTTPS_PROXY", "http://127.0.0.1:3128".into())));
         assert!(env.iter().all(|(name, _)| !name.contains("TOKEN")));
+        let binding = "/var/lib/agentc/coordinator-binding.toml".to_owned();
+        assert!(env.contains(&("AGENT_COORDINATOR_REPO_CONFIG", binding)));
     }
 
     #[test]
-    fn attempt_ids_come_from_the_claim_response() {
-        let body = br#"{"data":{"claim":{"attempt":{"id":"a1"}}}}"#;
-        assert_eq!(attempt_id(body), "a1");
-        assert_eq!(attempt_id(b"not json"), "unknown");
+    fn the_lease_comes_from_captured_claim_and_renew_responses() {
+        let claim: Value =
+            serde_json::from_str(include_str!("fixtures/claim-response.json")).unwrap();
+        let lease = Lease::parse(&claim).unwrap();
+        assert_eq!(lease.attempt, "64b8dc86-d996-435e-b5ff-7231098a8f9e");
+        assert_eq!((lease.generation, lease.renew_after_seconds), (1, 60));
+        assert_eq!(lease.progress_age_ms, 0);
+        let renew: Value =
+            serde_json::from_str(include_str!("fixtures/renew-response.json")).unwrap();
+        let renewed = Lease::parse(&renew).unwrap();
+        assert_eq!(
+            (renewed.attempt, renewed.progress_age_ms),
+            (lease.attempt, 500_000)
+        );
+        assert!(Lease::parse(&serde_json::json!({"data": {"claim": null}})).is_err());
+    }
+
+    /// Runs `git args` in `dir`, failing the test on error.
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn instructions_come_from_bounded_mirror_blobs_never_symlink_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, mirror) = (dir.path().join("work"), dir.path().join("mirror.git"));
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, "outside-secret").unwrap();
+        git(dir.path(), &["init", "--quiet", "work"]);
+        std::os::unix::fs::symlink(&secret, work.join("AGENTS.md")).unwrap();
+        std::fs::write(work.join("CONTRIBUTING.md"), "x".repeat(MAX_BLOB + 1)).unwrap();
+        std::fs::write(work.join("README.md"), "Run the gate.").unwrap();
+        git(&work, &["add", "."]);
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
+        git(
+            &work,
+            &[&identity[..], &["commit", "--quiet", "-m", "i"]].concat(),
+        );
+        git(
+            dir.path(),
+            &["clone", "--quiet", "--bare", "work", "mirror.git"],
+        );
+        let head = clone::git_output(&mirror, &["rev-parse", "HEAD"]).unwrap();
+        let linked = instruction(&mirror, &head, "AGENTS.md").unwrap();
+        assert_eq!(linked, secret.display().to_string());
+        assert_eq!(instruction(&mirror, &head, "CONTRIBUTING.md"), None);
+        assert_eq!(
+            instruction(&mirror, &head, "README.md").unwrap(),
+            "Run the gate."
+        );
+        assert_eq!(instruction(&mirror, &head, "MISSING.md"), None);
+    }
+
+    #[test]
+    fn the_binding_copy_is_world_readable_and_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            state_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        install_binding(&config, "old").unwrap();
+        install_binding(&config, "project_id = \"p\"").unwrap();
+        let path = binding_path(&config);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "project_id = \"p\""
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
     }
 
     #[test]

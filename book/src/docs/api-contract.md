@@ -636,6 +636,14 @@ Checkpointing does not implicitly renew ownership. The CLI may explicitly perfor
 both operations and must report each outcome. This avoids a retry of an old
 checkpoint appearing to grant a fresh lease.
 
+A project policy may set `max_attempt_seconds` (0, the default, is no limit;
+otherwise 600–604800, changed only by a human). No claim, workflow activity
+claim, renewal or job-reporter renewal sets an attempt's lease past its
+creation plus that limit, and once the lease already ends at
+the limit a renewal is refused with `409 attempt_duration_exceeded`: record a
+checkpoint and release with a handoff. Continuation claims that keep the same owner across attempts
+are not implemented yet.
+
 Submitting code includes a candidate repository/base/commit/tree identity and
 check evidence. Review submission names the immutable reviewed submission and
 decision. Integration submission names the target before/after revisions,

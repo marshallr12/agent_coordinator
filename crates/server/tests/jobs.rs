@@ -1039,3 +1039,55 @@ async fn recovery_owner_can_release_an_old_terminal_reservation() {
         .await;
     assert_eq!(status, StatusCode::OK, "{resolution}");
 }
+
+#[tokio::test]
+async fn reporter_renewal_never_extends_past_the_maximum_attempt_duration() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("reporter-cap").await;
+    let (_, attempt, generation) = fixture.claimed(&fixture.a, &project, "capped job").await;
+    sqlx::query("UPDATE projects SET max_attempt_seconds=900 WHERE id=?")
+        .bind(&project)
+        .execute(&fixture.state.pool)
+        .await
+        .unwrap();
+    fixture
+        .checkout(&fixture.a, &project, &attempt, generation)
+        .await;
+    let resource = fixture.resource("device/capped", 1).await;
+    let units = json!([{"resource_id":resource,"units":1}]);
+    let (_, reservation) = fixture
+        .reserve(&fixture.a, &project, &attempt, generation, units)
+        .await;
+    let reservation = reservation["data"]["id"].as_str().unwrap();
+    let registered = fixture
+        .job(
+            &fixture.a,
+            &project,
+            &attempt,
+            generation,
+            reservation,
+            3600,
+        )
+        .await;
+    let path = format!("/api/v1/reporters/{}/renew", registered.reporter);
+    let body = json!({"generation":generation});
+    fixture.clock.0.fetch_add(500_000, Ordering::SeqCst);
+    let (status, capped) = fixture
+        .reporter(&registered.token(), "POST", &path, "capped", body.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{capped}");
+    assert_eq!(capped["data"]["lease_remaining_ms"], 400_000);
+    fixture.clock.0.fetch_add(399_000, Ordering::SeqCst);
+    let (status, refused) = fixture
+        .reporter(&registered.token(), "POST", &path, "past", body)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "attempt_duration_exceeded");
+    let (created, expires): (i64, i64) =
+        sqlx::query_as("SELECT created_at,expires_at FROM attempts WHERE id=?")
+            .bind(&attempt)
+            .fetch_one(&fixture.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(expires - created, 900_000);
+}

@@ -1,7 +1,7 @@
 //! Durable producer observations and globally shared resource reservations.
 use crate::{
     auth::{Actor, Auth, PROOF_HEADER, SESSION_HEADER, digest},
-    coordination::{Attempt, owned},
+    coordination::{Attempt, capped_renewal, owned},
     error::AppError,
     mutation::Mutation,
     response,
@@ -1494,11 +1494,13 @@ async fn reporter_renew(
         value["replayed"] = json!(true);
         return Ok(response(value));
     }
-    let lease_seconds: i64 = sqlx::query_scalar("SELECT lease_seconds FROM projects WHERE id=?")
-        .bind(&project)
-        .fetch_one(&mut *mutation.tx)
-        .await?;
+    let (lease_seconds, max_attempt_seconds): (i64, i64) =
+        sqlx::query_as("SELECT lease_seconds,max_attempt_seconds FROM projects WHERE id=?")
+            .bind(&project)
+            .fetch_one(&mut *mutation.tx)
+            .await?;
     let extension = (mutation.now + lease_seconds * 1000).min(row.get("renew_until"));
+    let extension = capped_renewal(extension, max_attempt_seconds, &current)?;
     let expires_at = current.expires_at.max(extension);
     sqlx::query("UPDATE attempts SET expires_at=?,last_heartbeat_at=? WHERE id=?")
         .bind(expires_at)

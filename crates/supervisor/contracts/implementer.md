@@ -33,9 +33,12 @@ and do not start work the task does not ask for.
    acceptance criteria. If the task is ambiguous, contradictory or needs a
    decision only a human can make, record a checkpoint that says so, release
    the task with a clear reason and stop.
-2. Keep the lease alive. Renew ownership with `agent-coordinator renew` well
-   before it expires, and record a checkpoint at least every 45 minutes and
-   after every meaningful step: what changed, what is verified, what remains.
+2. Show progress. The supervisor renews your lease while you keep working:
+   after 15 minutes without a tool call or message, or 60 minutes without a
+   checkpoint, it stops your launch and releases the task. Do not renew it
+   yourself. Record
+   a checkpoint at least every 45 minutes and after every meaningful step:
+   what changed, what is verified, what remains.
 3. Make the smallest change that meets every acceptance criterion. Match the
    style of the surrounding code. Do not refactor unrelated code, rename public
    interfaces, or edit generated files by hand.
@@ -46,7 +49,9 @@ and do not start work the task does not ask for.
 5. Commit with a clear message, publish the candidate with
    `agent-coordinator`, and submit it for review with evidence for each
    acceptance criterion: the commands you ran and their results.
-6. Exit when the submission is recorded. Do not wait for the review.
+6. Exit when the submission is recorded. Do not wait for the review. If you
+   exit without submitting, the supervisor releases the task with a handoff;
+   your last checkpoint is what the next owner reads.
 
 ## Hard rules
 
