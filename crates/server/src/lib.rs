@@ -27,6 +27,7 @@ pub mod mutation;
 pub mod next;
 pub mod objectives;
 pub mod operator_access;
+pub mod password_reset;
 pub mod project_sessions;
 mod recovery_evidence;
 pub mod restore;
@@ -67,6 +68,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(next::routes())
         .merge(attention::routes())
         .merge(account_email::routes())
+        .merge(password_reset::routes())
         .merge(integrator::routes())
         .merge(integrator_authority::routes())
         .merge(integrator_observe::routes())
@@ -145,7 +147,8 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
             ));
     let login = parts.method == Method::POST && parts.uri.path() == "/api/v1/auth/login";
     let ack_link = attention::is_ack_link(&parts.method, parts.uri.path());
-    let verify_link = account_email::is_verify_link(&parts.method, parts.uri.path());
+    let verify_link = account_email::is_verify_link(&parts.method, parts.uri.path())
+        || password_reset::is_recovery_request(&parts.method, parts.uri.path());
     let mut result = if parts.uri.path().starts_with("/api/v1/reporters/") {
         match jobs::ReporterAuth::authenticate(&parts, &state).await {
             Ok(auth) => {

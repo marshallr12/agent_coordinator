@@ -122,8 +122,34 @@ Tokens are 256 random bits, stored only as a SHA-256 hash, and appear only in th
 email. The message is sent after the database transaction commits; the outcome is
 recorded as `sent_at` or a short `send_error` code (`mail_not_configured`,
 `send_failed`), never relay output. A failed send is retried by asking for another
-link. The address is never used to sign in or to recover a password; recovery stays
-with the host command until a later task adds it.
+link. The address is never used to sign in.
+
+### Password recovery by email
+
+The sign-in page offers **Forgot password?** beneath **Sign in**. It asks for an
+email address and calls `POST /api/v1/auth/password/forgot` with `{"email":"..."}`
+(no credential; the request must carry the service origin). The reply is always
+`{"requested":true}` when the address is well formed, whether or not an account has
+it, so the form cannot be used to discover accounts. Each enabled human account
+whose **verified** address matches (compared without regard to case) receives a
+random single-use token, stored only as a SHA-256 hash, and one message lists a
+link for every such account. An unverified address never receives a reset link.
+Requests are limited to five a minute per address, and an account gets at most one
+message a minute; a newer link cancels every earlier one.
+
+- `GET /api/v1/auth/password/reset?token=` needs no credential and shows a form
+  naming the account, so mail scanners that fetch the link change nothing.
+- `POST /api/v1/auth/password/reset` takes the form fields `token`, `password` and
+  `confirmation` (12 to 1024 bytes, matching). A rejected password shows the form
+  again and leaves the link usable. Success replaces the password, signs the account
+  out of every browser session, cancels its other links, and records
+  `operator_password_reset`.
+
+A link expires one hour after it is issued, or when the password is reset, whichever
+comes first, and it also stops working if a newer link is issued, the account's
+address changes or becomes unverified, or the account is disabled. An unknown, used,
+replaced or expired token produces an "expired" page. The message is sent after the
+database transaction commits; a failed send is logged and the person asks again.
 
 The service sends through an SMTP relay it is configured with:
 `COORDINATOR_SMTP_HOST`, `COORDINATOR_SMTP_PORT` (587 for `starttls`, the default,

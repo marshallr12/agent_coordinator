@@ -292,7 +292,7 @@ fn session_cookie(headers: &HeaderMap, state: &AppState) -> Result<Option<String
     }
     Ok(found)
 }
-fn require_origin(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> {
+pub(crate) fn require_origin(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> {
     if one_header(headers, "origin")? != Some(state.config.public_origin.as_str()) {
         return Err(AppError::forbidden(
             "Browser changes must originate from the configured service origin.",

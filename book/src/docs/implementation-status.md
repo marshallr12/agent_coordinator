@@ -294,8 +294,10 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   changed in **My account**, verified through a single-use 24-hour link sent by
   the configured SMTP relay, with a resend action (one minute apart) that
   invalidates earlier links. Existing administrators were recorded as verified
-  with `marshall.rosenstein@gmail.com` by migration 42. Not yet implemented:
-  email-based password reset, and sign-in is not gated on verification. Live
+  with `marshall.rosenstein@gmail.com` by migration 42. Sign-in is not
+  gated on verification. A **Forgot password?** link on the sign-in page mails a
+  single-use link, valid for one hour, to a verified address; it opens a page that
+  sets a new password and signs the account out everywhere (migration 43). Live
   delivery through Gmail has not been exercised from CI; it needs the relay
   settings in `service.env.example` and a human-delivered check.
 - Full policy editing, planned-task admission, inspected human recovery and blocker

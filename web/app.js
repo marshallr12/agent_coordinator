@@ -409,7 +409,7 @@
     catch (error) { show($('loading-view'), false); show($('dashboard-view'), false); show($('login-view'), true); if (error.status && error.status !== 401) showLoginError(errorMessage(error)); }
   }
 
-  function showLoginError(message) { const target = $('login-error'); setText(target, message); show(target, Boolean(message)); }
+  function showLoginError(message, kind = 'error') { const target = $('login-error'); target.classList.toggle('error', kind === 'error'); target.classList.toggle('success', kind === 'success'); setText(target, message); show(target, Boolean(message)); }
 
   function showView(view) {
     state.currentView = view;
@@ -1315,6 +1315,17 @@
     if (state.actor) { startPolling(); pollTick(); }
   });
 
+  function showForgot(open) { show($('login-form'), !open); show($('forgot-link').parentElement, !open); show($('forgot-form'), open); showLoginError(''); if (open) { $('forgot-email').value = ''; $('forgot-email').focus(); } else $('username').focus(); }
+  $('forgot-link').addEventListener('click', () => showForgot(true));
+  $('forgot-back').addEventListener('click', () => showForgot(false));
+  $('forgot-form').addEventListener('submit', async (event) => {
+    event.preventDefault(); const email = $('forgot-email').value.trim(); const button = event.submitter;
+    if (!email) { showLoginError('Enter your email address.'); return; }
+    showLoginError(''); if (button) button.disabled = true;
+    try { await request('/api/v1/auth/password/forgot', { method: 'POST', body: { email } }); showForgot(false); showLoginError('If that address is verified on an account, a reset link is on its way. It works once and expires in 1 hour.', 'success'); }
+    catch (error) { showLoginError(errorMessage(error)); }
+    finally { if (button) button.disabled = false; }
+  });
   $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); applyRoute(location.hash); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
   document.querySelectorAll('button.nav-item').forEach((button) => button.addEventListener('click', () => { enterTopLevel(button.dataset.view); }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));

@@ -70,9 +70,9 @@ the design while still supporting a distinct file if one exists.
 - Source-worktree/build-directory bundle storage and a hosted source repository.
 - Required model APIs, embeddings, semantic deduplication, or a custom workflow DSL.
 - Multiple active coordinator servers, database clustering, and project ACLs.
-- Email/chat/push integrations, public account registration, and email-dependent
-  account recovery. (Superseded in part: account email verification through an
-  SMTP relay was added later; see the
+- Email/chat/push integrations and public account registration.
+  (Superseded in part: account email verification and email-based password reset
+  through an SMTP relay were added later; see the
   [operator access contract](operator-access-contract.md#account-email-addresses).)
 - Automatic rewrites of existing project/global hooks or automatic migration of
   SithBit/Submission into the running service.
