@@ -84,9 +84,8 @@ BACKUP_REPOSITORY/
 
 Each snapshot directory is self-contained and immutable. The first release does
 not deduplicate bytes across snapshots, so capacity planning must use the
-reported `snapshot_bytes` and `retained_bytes`. At maximum retention the union
-usually contains up to 53 complete copies because the newest daily snapshot also
-belongs to an hourly bucket.
+reported `snapshot_bytes` and `retained_bytes`. At maximum retention the
+repository holds 5 complete copies after each backup.
 
 Creation and retention take an exclusive operating-system lock on
 `BACKUP_REPOSITORY/.lock`. Verification and restore take a shared lock when the
@@ -146,11 +145,15 @@ one recovered client on the release host.
 
 After successful publication, retention sorts completed snapshots by their
 recorded UTC timestamp. It keeps the newest successful snapshot in each of the
-newest 24 represented UTC hour buckets and the newest successful snapshot in each
-of the newest 30 represented UTC day buckets. The retained set is the union. A
-corrupt manifest or completion marker aborts retention before deletion. Removal
-is restricted to complete snapshot directories outside that union and occurs
-under the exclusive repository lock.
+newest 5 represented UTC day buckets and nothing else. Backups still run
+hourly, so each new snapshot replaces the current day's earlier one and the
+newest retained copy is at most an hour old. A corrupt manifest or completion
+marker aborts retention before deletion. Removal is restricted to complete
+snapshot directories outside the retained set and occurs under the exclusive
+repository lock.
+
+The operator chose this rule on 2026-11-11. It replaces the earlier union of
+24 hourly and 30 daily buckets, whose 53 full copies filled a 30-GB disk.
 
 ## Fresh-path restore
 

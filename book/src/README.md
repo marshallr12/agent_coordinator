@@ -155,7 +155,8 @@ Use the implementation-status document above to see which parts are available.
 The packaged server passed the 20-project, 50-session, 100,000-historical-task
 target at 50 requests/second for 30 minutes under a shared two-CPU/4-GiB/no-swap
 limit. See the acceptance evidence above for measurements and scope. Backup examples run
-hourly, retaining 24 hourly and 30 daily copies, with documented off-server copying
+hourly, retaining the newest copy of each of the 5 most recent days, with
+documented off-server copying
 and a one-hour restore target. The disposable local restore rehearsal passed;
 full operator-led recovery and an actual off-server destination remain installation checks.
 

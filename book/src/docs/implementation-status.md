@@ -453,7 +453,8 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   review/integration activities, with bounded pages and scoped insertion snapshots.
 - Linux systemd and Caddy examples, locked dependencies, and Linux/Windows CI.
 - Online SQLite/artifact backups with exact digest and database verification,
-  self-contained snapshots, 24 hourly/30 daily retention, and hourly systemd units.
+  self-contained snapshots, retention of the newest snapshot of each of the 5
+  most recent days, and hourly systemd units.
 - Fresh-directory restore invalidates credentials, passwords, sessions, reporters,
   ownership, and integration authorization before publication. A pause requires
   hold inspections, old-installation fencing, and post-snapshot gap reconciliation.

@@ -92,16 +92,12 @@ uses a nonblocking exclusive lock and defers while a backup is selecting bytes;
 the backup does not keep a database writer transaction open while copying blobs.
 Do not replace this with a filesystem copy of the live database that omits its WAL.
 
-Retention keeps the union of:
+Retention keeps the latest completed snapshot in each of the newest 5
+represented UTC-day buckets, and removes every other complete snapshot.
 
-- the latest completed snapshot in each of the newest 24 represented UTC-hour
-  buckets; and
-- the latest completed snapshot in each of the newest 30 represented UTC-day
-  buckets.
-
-Multiple manual backups in one hour do not consume multiple hourly buckets. An
-hour or day without a successful backup does not create a fictitious retained
-copy. Snapshot directories are self-contained, so pruning one does not remove
+Several backups in one day consume one bucket: each replaces that day's
+earlier snapshot. A day without a successful backup does not create a
+fictitious retained copy. Snapshot directories are self-contained, so pruning one does not remove
 bytes needed by another retained snapshot.
 
 ## Verify and copy a snapshot off-server

@@ -28,8 +28,8 @@ const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const FORMAT_VERSION: u32 = 1;
 // Schema 12 introduced the version-1 self-contained snapshot format.
 const MIN_SUPPORTED_SNAPSHOT_SCHEMA: i64 = 12;
-const HOURLY_BUCKETS: usize = 24;
-const DAILY_BUCKETS: usize = 30;
+// Retention keeps the newest snapshot of each of this many represented UTC days.
+const DAILY_BUCKETS: usize = 5;
 const MAX_REPOSITORY_SNAPSHOTS: usize = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -806,6 +806,8 @@ async fn schema_version(pool: &SqlitePool) -> anyhow::Result<i64> {
         .context("Could not read snapshot schema version.")
 }
 
+/// Removes every complete snapshot that retention does not keep and reports
+/// what is left. Unreadable metadata fails before anything is deleted.
 fn apply_retention(
     repository: &Path,
     started: std::time::Instant,
@@ -829,20 +831,7 @@ fn apply_retention(
         candidates.push((manifest.created_at_ms, path, manifest));
     }
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
-    let mut keep = HashSet::new();
-    let mut hours = HashSet::new();
-    let mut days = HashSet::new();
-    for (created, path, _) in &candidates {
-        let instant = DateTime::<Utc>::from_timestamp_millis(*created)
-            .ok_or_else(|| anyhow!("Snapshot timestamp is outside the supported range."))?;
-        let hour = instant.format("%Y-%m-%dT%H").to_string();
-        let day = instant.format("%Y-%m-%d").to_string();
-        let keep_hour = hours.len() < HOURLY_BUCKETS && hours.insert(hour);
-        let keep_day = days.len() < DAILY_BUCKETS && days.insert(day);
-        if keep_hour || keep_day {
-            keep.insert(path.clone());
-        }
-    }
+    let keep = newest_of_each_day(&candidates)?;
     let mut result = RetentionResult::default();
     for (_, path, _) in candidates {
         check_deadline(started, "Backup retention")?;
@@ -860,6 +849,24 @@ fn apply_retention(
     }
     sync_directory(&snapshots)?;
     Ok(result)
+}
+
+/// Chooses the snapshots retention keeps: the newest one of each of the
+/// newest `DAILY_BUCKETS` represented UTC days. `candidates` must already be
+/// sorted newest first, so the first snapshot seen for a day is that day's
+/// newest. A day without a snapshot takes no bucket.
+fn newest_of_each_day(candidates: &[(i64, PathBuf, Manifest)]) -> anyhow::Result<HashSet<PathBuf>> {
+    let mut keep = HashSet::new();
+    let mut days = HashSet::new();
+    for (created, path, _) in candidates {
+        let instant = DateTime::<Utc>::from_timestamp_millis(*created)
+            .ok_or_else(|| anyhow!("Snapshot timestamp is outside the supported range."))?;
+        let day = instant.format("%Y-%m-%d").to_string();
+        if days.len() < DAILY_BUCKETS && days.insert(day) {
+            keep.insert(path.clone());
+        }
+    }
+    Ok(keep)
 }
 
 fn read_manifest_metadata(snapshot: &Path) -> anyhow::Result<Manifest> {
