@@ -39,6 +39,10 @@ struct Fake {
     /// From when renewals fail, and how: the attempt ended (`Some`) or a
     /// transient failure (`None`).
     renew_fails: Option<(i64, Option<renewal::AttemptEnded>)>,
+    /// When failing renewals recover; `None` never.
+    renew_heals: Option<i64>,
+    /// The cadence every claim grants, in seconds.
+    renew_after_seconds: u64,
     /// The attempt's state as the task detail reports it; `None` is unreadable.
     attempt_state: Option<String>,
     /// The projects the host serves, the main one first, and the selected one.
@@ -83,6 +87,8 @@ impl Fake {
             unhealthy: Vec::new(),
             expiry: None,
             renew_fails: None,
+            renew_heals: None,
+            renew_after_seconds: 60,
             attempt_state: None,
             projects: vec!["p1"],
             selected: "p1",
@@ -174,7 +180,10 @@ impl Driver for Fake {
         self.steps.push(format!("claim:{}", launch.suggestion.task));
         self.claimed_in.push(launch.project.clone());
         anyhow::ensure!(!self.fail_claim, "claim_conflict");
-        Ok(Self::lease())
+        Ok(Lease {
+            renew_after_seconds: self.renew_after_seconds,
+            ..Self::lease()
+        })
     }
 
     fn register(&mut self, launch: &Launch, lease: &Lease) -> Result<()> {
@@ -225,6 +234,7 @@ impl Driver for Fake {
         self.renewals.push(self.now);
         if let Some((from, ended)) = &self.renew_fails
             && self.now >= *from
+            && self.renew_heals.is_none_or(|at| self.now < at)
         {
             return Err(ended
                 .clone()

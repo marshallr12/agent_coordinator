@@ -810,8 +810,10 @@ counts as success and is not released (its cost is still recorded), while
 any other ended attempt gets the usual release with the reason in its
 handoff. Every other renewal failure (a network error, a 5xx, an unresolved
 CLI journal) is logged with the CLI's exit code, error code and bounded
-message, and retried at the next cadence under the same gates. A host suspend counts as
-elapsed time: after a suspend longer than 15 minutes the launch is drained
+message, and retried under the same gates after a short backoff: 30 seconds,
+doubling for each consecutive failure, capped at 5 minutes and at the cadence,
+and reset by the next successful renewal. No retry runs once the launch drains.
+A host suspend counts as elapsed time: after a suspend longer than 15 minutes the launch is drained
 on resume (its lease has usually lapsed during the suspend anyway). A project
 can also cap attempts on the service with the policy's `max_attempt_seconds`.
 

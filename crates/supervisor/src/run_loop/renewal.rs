@@ -4,7 +4,7 @@
 //! fallback. A refusal that means the attempt is no longer this launch's to
 //! renew (it was submitted, released, expired or handed to another session)
 //! becomes an [`AttemptEnded`], which [`super::lease::supervise`] answers
-//! by draining the launch; every other failure is retried as before.
+//! by draining the launch; every other failure is retried after a short backoff.
 use serde_json::Value;
 use std::fmt;
 use std::process::Output;
