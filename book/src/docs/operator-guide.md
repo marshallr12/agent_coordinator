@@ -187,6 +187,26 @@ review or integration is pinned to its original roster revision, and an active
 integration hold must be finished or reconciled before the service permits a
 roster change.
 
+### Who a failing required check is blamed on
+
+When a required check fails on a candidate's result and fails again on a rerun,
+the integrator decides whether the candidate or the target branch is at fault by
+looking at the same check on the target tip. Only a pass on the tip that
+**started after the check first failed on the candidate** sends the task back to
+its author (`check_failed`). A check can depend on data outside the commit, such
+as an advisory database, a toolchain or a runner image, so a pass from before
+that data changed proves nothing. When the tip's only pass is older, the
+integrator reruns just that check's job on the tip (at most twice per result) and
+waits for the new attempt, as it already waits while the tip's run is going. If
+the fresh attempt fails, the integrator raises a `fix_target` report with verdict
+`target_failing` and skips the task until the tip moves or the check passes there;
+the author is not asked to revise. If it passes, the author is asked to revise as
+before. If the rerun is refused (for example the App lacks `actions: write`) or
+leaves no result, the report's verdict is `target_unverified`.
+
+The `fix_target` report's `target_result` and the `check_failed` evidence name the
+tip's run, attempt and completion time that the decision relied on.
+
 ### Durable candidate checkpoints
 
 Before `submissions code` records a candidate, the native client pushes its

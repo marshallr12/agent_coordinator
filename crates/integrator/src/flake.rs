@@ -1,9 +1,12 @@
 //! The pure part of flake attribution (p4-design §3 step 6; plan-final
 //! "Reproducible flake attribution"): how a check-run conclusion counts,
 //! what a check's attempts on R decide, and whom a reproduced failure is
-//! attributed to given the same check on the target tip X. The loop that
+//! attributed to given the same check on the target tip X, whose pass only
+//! counts when it started after R's first failure (an older pass may predate
+//! a change outside the commit). The loop that
 //! acts on these verdicts is in `attribution.rs`.
 use crate::checks::{ACTIONS_APP_ID, CheckRun, RosterCheck};
+use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 
 /// Reruns requested per (result, run) before a check that keeps ending
@@ -55,11 +58,25 @@ impl CheckAttempts {
         self.attempts.iter().map(run_outcome).collect()
     }
 
+    /// When the earliest failed attempt started; `None` when no failure
+    /// has a usable start time.
+    pub(crate) fn first_failure_started(&self) -> Option<DateTime<Utc>> {
+        self.failures()
+            .filter_map(|run| run.started_at.as_deref().and_then(parse_time))
+            .min()
+    }
+
     /// The attempts that failed.
     pub(crate) fn failures(&self) -> impl Iterator<Item = &CheckRun> {
         let attempts = self.attempts.iter();
         attempts.filter(|run| run_outcome(run) == Outcome::Fail)
     }
+}
+
+/// An RFC 3339 time, or `None` when `text` is not one.
+fn parse_time(text: &str) -> Option<DateTime<Utc>> {
+    let time = DateTime::parse_from_rfc3339(text).ok()?;
+    Some(time.with_timezone(&Utc))
 }
 
 /// What one check's attempts on R say; the latest attempt decides, as it
@@ -98,8 +115,14 @@ pub(crate) fn verdict(outcomes: &[Outcome], reruns: u32) -> Verdict {
 /// The same check on the target tip X.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OnTarget {
-    /// Its latest attempt with a pass or fail result passed.
+    /// Its latest attempt with a pass or fail result passed, and started
+    /// after R's first failure of the check.
     Passed(CheckRun),
+    /// Its latest attempt with a pass or fail result passed, but started
+    /// before R's first failure (or at an unknown time): data outside the
+    /// commit may have changed since, so the pass proves nothing yet.
+    /// `latest` is the newest attempt, which is no longer running.
+    Stale { passed: CheckRun, latest: CheckRun },
     /// Its latest attempt with a pass or fail result failed.
     Failed(CheckRun),
     /// No attempt has a result yet, but one is still running.
@@ -111,8 +134,10 @@ pub(crate) enum OnTarget {
 /// Who a reproduced failure on R is attributed to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Blame {
-    /// The check passed on X: the candidate broke it.
+    /// The check passed on X after R first failed: the candidate broke it.
     Author,
+    /// The check passed on X only before R first failed: X needs a rerun.
+    Refresh,
     /// The check fails on X as well.
     Target,
     /// X's run has not finished; a later cycle decides.
@@ -125,6 +150,7 @@ pub(crate) enum Blame {
 pub(crate) fn blame(on_target: &OnTarget) -> Blame {
     match on_target {
         OnTarget::Passed(_) => Blame::Author,
+        OnTarget::Stale { .. } => Blame::Refresh,
         OnTarget::Failed(_) => Blame::Target,
         OnTarget::Running => Blame::Wait,
         OnTarget::Unknown => Blame::Unverified,
@@ -172,15 +198,35 @@ pub(crate) fn attempts_by_check(
 }
 
 /// `check` on `sha`: its latest attempt with a pass or fail result, else
-/// whether one is still running.
-pub(crate) fn on_target(runs: &[CheckRun], check: &RosterCheck, sha: &str) -> OnTarget {
+/// whether one is still running. A pass counts only when it started after
+/// `failed_since`, the start of R's first failure of the check; an older
+/// pass is `Stale`, or `Running` while a newer attempt is going.
+pub(crate) fn on_target(
+    runs: &[CheckRun],
+    check: &RosterCheck,
+    sha: &str,
+    failed_since: Option<DateTime<Utc>>,
+) -> OnTarget {
     let mine = runs_of(runs, check, sha);
     let decided = mine
         .iter()
         .rev()
         .find(|run| run.conclusion.is_some() && run_outcome(run) != Outcome::NoResult);
+    let fresh = |run: &CheckRun| {
+        let started = run.started_at.as_deref().and_then(parse_time);
+        started.zip(failed_since).is_some_and(|(s, f)| s > f)
+    };
     match decided {
-        Some(run) if run_outcome(run) == Outcome::Pass => OnTarget::Passed(run.clone()),
+        Some(run) if run_outcome(run) == Outcome::Pass && fresh(run) => {
+            OnTarget::Passed(run.clone())
+        }
+        Some(run) if run_outcome(run) == Outcome::Pass => match mine.last() {
+            Some(latest) if latest.conclusion.is_some() => OnTarget::Stale {
+                passed: run.clone(),
+                latest: latest.clone(),
+            },
+            _ => OnTarget::Running,
+        },
         Some(run) => OnTarget::Failed(run.clone()),
         None if mine.iter().any(|run| run.conclusion.is_none()) => OnTarget::Running,
         None => OnTarget::Unknown,
@@ -214,6 +260,9 @@ mod tests {
             head_sha: "r".into(),
             workflow_path: path.into(),
             conclusion: conclusion.map(str::to_owned),
+            job_id: None,
+            started_at: None,
+            completed_at: None,
         }
     }
 
@@ -263,6 +312,11 @@ mod tests {
         assert_eq!(blame(&OnTarget::Passed(passed.clone())), Blame::Author);
         assert_eq!(blame(&OnTarget::Failed(passed)), Blame::Target);
         assert_eq!(blame(&OnTarget::Running), Blame::Wait);
+        let stale = OnTarget::Stale {
+            passed: run("a", CI, 1, 1, Some("success")),
+            latest: run("a", CI, 1, 1, Some("success")),
+        };
+        assert_eq!(blame(&stale), Blame::Refresh);
         assert_eq!(blame(&OnTarget::Unknown), Blame::Unverified);
     }
 
@@ -273,11 +327,15 @@ mod tests {
         let cancelled = run("a", CI, 1, 2, Some("cancelled"));
         let running = run("a", CI, 1, 3, None);
         let runs = [failed.clone(), cancelled.clone(), running.clone()];
-        assert_eq!(on_target(&runs, &check, "r"), OnTarget::Failed(failed));
+        assert_eq!(
+            on_target(&runs, &check, "r", None),
+            OnTarget::Failed(failed)
+        );
         let runs = [cancelled.clone(), running];
-        assert_eq!(on_target(&runs, &check, "r"), OnTarget::Running);
-        assert_eq!(on_target(&[cancelled], &check, "r"), OnTarget::Unknown);
-        assert_eq!(on_target(&[], &check, "r"), OnTarget::Unknown);
+        assert_eq!(on_target(&runs, &check, "r", None), OnTarget::Running);
+        let runs = [cancelled];
+        assert_eq!(on_target(&runs, &check, "r", None), OnTarget::Unknown);
+        assert_eq!(on_target(&[], &check, "r", None), OnTarget::Unknown);
     }
 
     #[test]
@@ -303,6 +361,75 @@ mod tests {
             Some("success"),
         )];
         assert!(attempts_by_check(&elsewhere, &[wanted("a")], "r").is_none());
-        assert_eq!(on_target(&elsewhere, &wanted("a"), "r"), OnTarget::Unknown);
+        let target = on_target(&elsewhere, &wanted("a"), "r", None);
+        assert_eq!(target, OnTarget::Unknown);
+    }
+
+    /// `run` started at `started` (RFC 3339).
+    fn started(mut run: CheckRun, started: &str) -> CheckRun {
+        run.started_at = Some(started.into());
+        run
+    }
+
+    fn at(text: &str) -> Option<DateTime<Utc>> {
+        parse_time(text)
+    }
+
+    #[test]
+    fn a_pass_on_the_target_counts_only_when_it_started_after_the_failure() {
+        let check = wanted("a");
+        let since = at("2026-10-14T08:00:00Z");
+        let old = started(run("a", CI, 1, 1, Some("success")), "2026-10-14T07:21:00Z");
+        let target = on_target(std::slice::from_ref(&old), &check, "r", since);
+        let stale = OnTarget::Stale {
+            passed: old.clone(),
+            latest: old.clone(),
+        };
+        assert_eq!(target, stale, "a pass before the failure is stale");
+        let fresh = started(run("a", CI, 1, 2, Some("success")), "2026-10-14T09:00:00Z");
+        let runs = [old.clone(), fresh.clone()];
+        let target = on_target(&runs, &check, "r", since);
+        assert_eq!(target, OnTarget::Passed(fresh), "the newer pass counts");
+        let rerun = started(run("a", CI, 1, 2, None), "2026-10-14T09:00:00Z");
+        let runs = [old.clone(), rerun];
+        let target = on_target(&runs, &check, "r", since);
+        assert_eq!(target, OnTarget::Running, "a rerun in progress is awaited");
+        let failed = started(run("a", CI, 1, 2, Some("failure")), "2026-10-14T09:00:00Z");
+        let runs = [old.clone(), failed.clone()];
+        let target = on_target(&runs, &check, "r", since);
+        assert_eq!(target, OnTarget::Failed(failed));
+    }
+
+    #[test]
+    fn a_pass_without_a_usable_time_is_stale() {
+        let check = wanted("a");
+        let untimed = run("a", CI, 1, 1, Some("success"));
+        let runs = std::slice::from_ref(&untimed);
+        let since = at("2026-10-14T08:00:00Z");
+        assert!(matches!(
+            on_target(runs, &check, "r", since),
+            OnTarget::Stale { .. }
+        ));
+        let timed = started(untimed, "2026-10-14T09:00:00Z");
+        let runs = std::slice::from_ref(&timed);
+        assert!(matches!(
+            on_target(runs, &check, "r", None),
+            OnTarget::Stale { .. }
+        ));
+        assert_eq!(parse_time("yesterday"), None);
+    }
+
+    #[test]
+    fn the_first_failure_is_the_earliest_started_failed_attempt() {
+        let attempts = vec![
+            started(run("a", CI, 1, 2, Some("failure")), "2026-10-14T09:00:00Z"),
+            started(run("a", CI, 1, 1, Some("failure")), "2026-10-14T08:00:00Z"),
+            started(run("a", CI, 1, 3, Some("success")), "2026-10-14T07:00:00Z"),
+        ];
+        let check = CheckAttempts {
+            check: wanted("a"),
+            attempts,
+        };
+        assert_eq!(check.first_failure_started(), at("2026-10-14T08:00:00Z"));
     }
 }

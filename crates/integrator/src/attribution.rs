@@ -10,13 +10,18 @@
 //! (`fix_target`, verdict `target_failing`) or X has no result for it
 //! (`fix_target`, verdict `target_unverified`) the subject is skipped until
 //! X moves or X's check passes, and while X's run is still going the gate
-//! waits. A check that [`MAX_RERUNS`] reruns leave undecided, or a rerun
+//! waits. X's pass counts only when it started after R's first failure of
+//! the check: an older one may predate a change outside the commit (an
+//! advisory database, a toolchain or runner image), so that job is rerun on
+//! X (at most [`MAX_RERUNS`] times per result; a refused rerun leaves X
+//! unverified, one that only means the run is going waits) and the fresh
+//! result attributes. The report names the X result relied on. A check that [`MAX_RERUNS`] reruns leave undecided, or a rerun
 //! request the checks source refuses, skips the subject with a `flaky`
 //! report; a refusal that only means the run is still going waits instead.
 //! A cycle polls R's checks once (and X's only for a reproduced failure)
 //! and never waits for a rerun: a requested rerun keeps the gate at
 //! `ChecksPending` until a newer attempt of its run appears and completes.
-use crate::checks::{CheckRun, ChecksSource, RosterCheck};
+use crate::checks::{CheckRun, ChecksSource};
 use crate::flake::{
     Blame, CheckAttempts, MAX_RERUNS, OnTarget, Verdict, blame, latest_attempts, on_target, verdict,
 };
@@ -148,18 +153,22 @@ impl<C: ChecksSource> Integrator<C> {
     /// Blames the author when any reproduced failure passed on X; waits
     /// while X's run is going; otherwise reports target problems and skips.
     async fn attribute_reproduced(
-        &self,
+        &mut self,
         job: &Job,
         result: &ResultRecord,
         reproduced: &[&CheckAttempts],
     ) -> Result<Step> {
         let (mut author, mut target, mut waiting) = (Vec::new(), Vec::new(), false);
         for check in reproduced {
-            let x = self.target_state(job, &check.check).await?;
-            match blame(&x) {
+            let x = self.target_state(job, check).await?;
+            let blamed = match blame(&x) {
+                Blame::Refresh => self.refresh_target(job, result, &x).await?,
+                blamed => blamed,
+            };
+            match blamed {
                 Blame::Author => author.push(author_evidence(job, result, check, &x)),
                 Blame::Wait => waiting = true,
-                blame => target.push(self.target_failure(job, result, check, blame).await),
+                blamed => target.push(self.target_failure(job, result, check, &x, blamed).await),
             }
         }
         if !author.is_empty() {
@@ -190,14 +199,52 @@ impl<C: ChecksSource> Integrator<C> {
         self.revise(job, ("check_failed", evidence), cite).await
     }
 
-    /// The same check on the target tip X (one poll of X).
-    async fn target_state(&self, job: &Job, check: &RosterCheck) -> Result<OnTarget> {
-        let wanted = std::slice::from_ref(check);
+    /// The same check on the target tip X (one poll of X), whose pass
+    /// counts only when it started after R's first failure of the check.
+    async fn target_state(&self, job: &Job, check: &CheckAttempts) -> Result<OnTarget> {
+        let wanted = std::slice::from_ref(&check.check);
         let runs = self
             .checks
             .check_runs(job.repo.as_ref(), &job.x, wanted)
             .await?;
-        Ok(on_target(&runs, check, &job.x))
+        let since = check.first_failure_started();
+        Ok(on_target(&runs, &check.check, &job.x, since))
+    }
+
+    /// Asks for a fresh result of a check whose only pass on X is stale:
+    /// reruns its newest job on X once per attempt, at most [`MAX_RERUNS`]
+    /// times per result, and waits for the new attempt. A refused rerun
+    /// leaves X unverified unless it only means the run is going.
+    async fn refresh_target(
+        &mut self,
+        job: &Job,
+        result: &ResultRecord,
+        x: &OnTarget,
+    ) -> Result<Blame> {
+        let OnTarget::Stale { latest, .. } = x else {
+            return Ok(Blame::Wait);
+        };
+        let rerun = self.state.rerun_of(&result.id, latest.run_id);
+        if rerun.count > 0 && rerun.attempt >= latest.run_attempt {
+            return Ok(Blame::Wait);
+        }
+        if rerun.count >= MAX_RERUNS {
+            return Ok(Blame::Unverified);
+        }
+        if let Err(error) = self.checks.rerun_job(job.repo.as_ref(), latest).await {
+            eprintln!(
+                "agentc-integrator: {}: rerun of run {} on target {} for R {}: {error:#}",
+                job.project, latest.run_id, job.x, result.r
+            );
+            return Ok(if still_running(&error) {
+                Blame::Wait
+            } else {
+                Blame::Unverified
+            });
+        }
+        self.state
+            .record_rerun(&result.id, latest.run_id, latest.run_attempt)?;
+        Ok(Blame::Wait)
     }
 
     /// Reports a reproduced failure that is not the author's and returns
@@ -207,10 +254,11 @@ impl<C: ChecksSource> Integrator<C> {
         job: &Job,
         result: &ResultRecord,
         check: &CheckAttempts,
+        x: &OnTarget,
         blame: Blame,
     ) -> String {
-        let (verdict, on_target) = target_verdict(blame);
-        let report = fix_target_report(job, result, check, verdict);
+        let (verdict, on_target) = target_verdict(x, blame);
+        let report = fix_target_report(job, result, check, x, verdict);
         self.report_best_effort(&job.project, report).await;
         format!(
             "{verdict}: {} failed on R {} and {on_target} on target {}",
@@ -250,11 +298,33 @@ fn undecided_reason(result: &ResultRecord, checks: &[&CheckAttempts]) -> String 
 
 /// The report verdict for a failure that is not the author's, and what the
 /// check did on X.
-fn target_verdict(blame: Blame) -> (&'static str, &'static str) {
-    match blame {
-        Blame::Unverified => ("target_unverified", "has no result"),
+fn target_verdict(x: &OnTarget, blame: Blame) -> (&'static str, &'static str) {
+    match (blame, x) {
+        (Blame::Unverified, OnTarget::Stale { .. }) => {
+            ("target_unverified", "has no pass since R first failed")
+        }
+        (Blame::Unverified, _) => ("target_unverified", "has no result"),
         _ => ("target_failing", "fails too"),
     }
+}
+
+/// "run N attempt M completed T" for evidence text.
+fn result_label(run: &CheckRun) -> String {
+    let completed = run.completed_at.as_deref().unwrap_or("at an unknown time");
+    format!("{} completed {completed}", run_label(run))
+}
+
+/// The X result an attribution relied on, for report details: the run id,
+/// attempt, conclusion and completion time, and whether it is a stale pass.
+fn target_result(x: &OnTarget) -> Value {
+    let (run, stale) = match x {
+        OnTarget::Passed(run) | OnTarget::Failed(run) => (run, false),
+        OnTarget::Stale { passed, .. } => (passed, true),
+        OnTarget::Running | OnTarget::Unknown => return Value::Null,
+    };
+    json!({"run_id": run.run_id, "run_attempt": run.run_attempt,
+        "conclusion": run.conclusion, "started_at": run.started_at,
+        "completed_at": run.completed_at, "stale": stale})
 }
 
 /// The run id, attempt and conclusion of each run, for report details.
@@ -274,7 +344,7 @@ fn run_label(run: &CheckRun) -> String {
 }
 
 /// The `check_failed` evidence for one check: the failed attempts on R that
-/// reproduce it and the passing run on X.
+/// reproduce it and the passing run on X it relied on.
 fn author_evidence(
     job: &Job,
     result: &ResultRecord,
@@ -283,7 +353,7 @@ fn author_evidence(
 ) -> String {
     let failed: Vec<String> = check.failures().map(run_label).collect();
     let passing = match x {
-        OnTarget::Passed(run) => run_label(run),
+        OnTarget::Passed(run) => result_label(run),
         _ => String::new(),
     };
     format!(
@@ -323,6 +393,7 @@ fn fix_target_report(
     job: &Job,
     result: &ResultRecord,
     check: &CheckAttempts,
+    x: &OnTarget,
     verdict: &str,
 ) -> NewReport {
     let target = job.target_key();
@@ -336,6 +407,6 @@ fn fix_target_report(
         "target_branch": job.item.target_branch, "x": job.x,
         "check_name": check.check.check_name, "identity": check.check.identity,
         "result_id": result.id, "r": result.r, "failed_on_r": attempt_list(check.failures()),
-        "blocks_subject": true});
+        "target_result": target_result(x), "blocks_subject": true});
     target_report("fix_target", key, details)
 }
