@@ -4,8 +4,9 @@
 //!   hours proceeds with the recommendation ([`sweep_timed_out_decisions`]).
 //! * The digest lists what proceeded on its own, what is about to, and the
 //!   human-required interventions (HRI): open human-required integrator
-//!   reports, stalled tasks (`repeated_attempt_failures`) and a stalled queue
-//!   (`no_progress`: ready work and no task progress for the stall threshold).
+//!   reports, stalled tasks (`repeated_attempt_failures`), a stalled queue
+//!   (`no_progress`: ready work and no task progress for the stall threshold)
+//!   and workflow activities whose attempt lease lapsed (`lease_lapsed`).
 //! * The digest also lists the agent tasks the weekly admission budget held
 //!   (see [`crate::admission`]).
 //! * Canary tasks (`admission_class: "canary"`) are not counted: they are
@@ -900,6 +901,49 @@ pub(crate) async fn stalled_tasks(
         .collect())
 }
 
+/// Workflow activities still `active` whose current attempt lapsed (its lease
+/// ran out or it is no longer active), oldest lease first. The persisted state
+/// never changes: the activity reads `recovery_required` at read time, and an
+/// integration hold or publication intent it keeps stays for guarded
+/// reconciliation. Evaluated by query, so rows that lapsed before this release
+/// are listed too.
+pub(crate) async fn lapsed_activities(
+    c: &mut SqliteConnection,
+    project: &str,
+    now: i64,
+) -> Result<Vec<Value>, AppError> {
+    let rows = sqlx::query(
+        "SELECT wa.id,wa.kind,wa.subject_task_id,wa.activity_task_id,t.title,a.expires_at,\
+         EXISTS(SELECT 1 FROM integration_holds h WHERE h.activity_id=wa.id AND h.state='held') AS held,\
+         EXISTS(SELECT 1 FROM publication_intents i WHERE i.activity_id=wa.id) AS intent \
+         FROM workflow_activities wa JOIN tasks t ON t.id=wa.subject_task_id \
+         JOIN tasks at ON at.id=wa.activity_task_id JOIN attempts a ON a.id=at.current_attempt_id \
+         WHERE wa.project_id=? AND wa.state='active' AND t.lifecycle='open' \
+         AND t.budget_exempt IS NULL AND (a.state!='active' OR a.expires_at<=?) \
+         ORDER BY a.expires_at,wa.id LIMIT ?",
+    )
+    .bind(project)
+    .bind(now)
+    .bind(DIGEST_LIMIT)
+    .fetch_all(&mut *c)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            json!({"code": "activity_lease_lapsed", "rule": "lease_lapsed",
+                   "required_actor": "human",
+                   "activity_id": row.get::<String, _>("id"),
+                   "activity_kind": row.get::<String, _>("kind"),
+                   "activity_task_id": row.get::<String, _>("activity_task_id"),
+                   "task_id": row.get::<String, _>("subject_task_id"),
+                   "title": row.get::<String, _>("title"),
+                   "lease_expired_at": timestamp(row.get("expires_at")),
+                   "target_held": row.get::<bool, _>("held"),
+                   "publication_intent": row.get::<bool, _>("intent")})
+        })
+        .collect())
+}
+
 /// One item when the project holds ready work (open, unblocked, unowned, past
 /// its dependencies and not waiting on review or integration) and nothing
 /// moved on any task (a claim, checkpoint, submission, review or integration
@@ -1069,6 +1113,9 @@ async fn digest(
     let held = held_agent_tasks(&mut c, &project).await?;
     let mut items = stalled_tasks(&mut c, &project).await?;
     let stalled = items.len();
+    let lapsed = lapsed_activities(&mut c, &project, now).await?;
+    let lapsed_activities = lapsed.len();
+    items.extend(lapsed);
     let queue = stalled_queue(&mut c, &project, now, &state.config).await?;
     let stalled_queue = usize::from(queue.is_some());
     items.extend(queue);
@@ -1137,7 +1184,7 @@ async fn digest(
             "week_start": timestamp(crate::admission::week_start(now)),
         },
         "hri": {"count": items.len(), "stalled_tasks": stalled,
-                "stalled_queue": stalled_queue, "parked_tasks": parked_tasks,
+                "lapsed_activities": lapsed_activities, "stalled_queue": stalled_queue, "parked_tasks": parked_tasks,
                 "items": items},
     })))
 }

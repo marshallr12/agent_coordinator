@@ -2007,6 +2007,147 @@ async fn intent_only_crash_retains_hold_until_human_reconciliation_creates_repla
 }
 
 #[tokio::test]
+async fn expired_integration_attempt_reports_recovery_and_keeps_hold_and_intent() {
+    let f = Fixture::new().await;
+    let (p, t, submitted) =
+        code_integration(&f, "expired-integration", "expired-integration").await;
+    let integration = activity(&submitted, "integration").clone();
+    let id = integration["id"].as_str().unwrap();
+    let (_, claimed) = f.claim_activity(&f.c, &p, &integration, 2, 1).await;
+    let attempt = claimed["data"]["attempt"].clone();
+    f.checkout(&f.c, &p, &attempt, CANDIDATE).await;
+    let (status,v)=f.call(&f.c,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{id}/publication-intent"),json!({"generation":attempt["generation"],"submission_id":integration["submission_id"],"observed_target_revision":BASE,"observed_target_tree":BASE_TREE,"result_revision":RESULT,"result_tree":RESULT_TREE})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (_, live) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(live["data"]["work_status"], "integrating", "{live}");
+    f.clock.0.fetch_add(600_000, Ordering::SeqCst);
+    // The persisted row stays active: recovery is evaluated when the lease is read.
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM workflow_activities WHERE id=?")
+            .bind(id)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap(),
+        "active"
+    );
+    let subject = t["id"].as_str().unwrap();
+    let (_, detail) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/workflow-activities/{id}"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(detail["data"]["status"], "recovery_required", "{detail}");
+    let (_, workflow) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{subject}/workflow"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(
+        workflow["data"]["work_status"], "recovery_required",
+        "{workflow}"
+    );
+    assert_eq!(
+        activity(&workflow["data"], "integration")["status"],
+        "recovery_required"
+    );
+    let (_, task) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{subject}"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(task["data"]["work_status"], "recovery_required", "{task}");
+    let (_, list) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks"),
+            Value::Null,
+        )
+        .await;
+    let listed = list["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == subject)
+        .unwrap();
+    assert_eq!(listed["work_status"], "recovery_required", "{list}");
+    let (_, orientation) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/orientation"),
+            Value::Null,
+        )
+        .await;
+    let oriented = orientation["data"]["workflow_subjects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["task"]["id"] == subject)
+        .unwrap();
+    assert_eq!(
+        oriented["task"]["work_status"], "recovery_required",
+        "{oriented}"
+    );
+    assert_eq!(oriented["workflow"]["work_status"], "recovery_required");
+    let (status, digest) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/digest"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{digest}");
+    assert_eq!(digest["data"]["hri"]["lapsed_activities"], 1, "{digest}");
+    let lapsed = digest["data"]["hri"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == "activity_lease_lapsed")
+        .unwrap();
+    assert_eq!(lapsed["activity_id"], id);
+    assert_eq!(lapsed["task_id"], subject);
+    assert_eq!(lapsed["target_held"], true);
+    assert_eq!(lapsed["publication_intent"], true);
+    // The hold and the publication intent are preserved for guarded reconciliation.
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM integration_holds WHERE activity_id=?")
+            .bind(id)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap(),
+        "held"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM publication_intents WHERE activity_id=?"
+        )
+        .bind(id)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn agent_reconciliation_requires_stopped_publisher_and_exact_fresh_remote_evidence() {
     let f = Fixture::new().await;
     let (p, _t, submitted) = code_integration(&f, "agent-reconcile", "agent-reconcile").await;

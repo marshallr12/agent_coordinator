@@ -306,8 +306,8 @@ is the attention-budget summary: `proceeded_decisions` (reversible decisions the
 service answered with their recommendation in the window; each lists
 `affected_task_ids` and `affected_tasks`, the same tasks as `task_id` and `title`),
 `pending_reversible_decisions` (with `proceeds_at`), and `hri`, the
-human-required interventions: `count`, `stalled_tasks`, `stalled_queue`,
-`parked_tasks` and `items`. Two stall rules exist, and each stall item names the rule that fired in
+human-required interventions: `count`, `stalled_tasks`, `lapsed_activities`,
+`stalled_queue`, `parked_tasks` and `items`. Two stall rules exist, and each stall item names the rule that fired in
 `rule`. `repeated_attempt_failures` (code `stalled_task`, counted in
 `stalled_tasks`): a task is stalled when it is open and its last three attempts
 all ended (released, blocked, expired or canceled) without a submission.
@@ -323,7 +323,12 @@ one item, with `ready_tasks`, `idle_hours`, `threshold_hours`,
 defaults to 6 hours and is set with `--stall-hours` or `COORDINATOR_STALL_HOURS`
 (1 through 336). `--quiet-hours START-END` or `COORDINATOR_QUIET_HOURS`, in UTC
 hours such as `22-07`, removes those hours from the idle clock; they are unset
-by default. A task the revise limit parks is a human-required item too, so that
+by default. A workflow activity whose attempt lease lapsed while the activity is still `active` is a
+human-required item with code `activity_lease_lapsed` and rule `lease_lapsed` (counted in
+`lapsed_activities`): `activity_id`, `activity_kind`, `activity_task_id`, `task_id` (the
+subject), `title`, `lease_expired_at`, `target_held` and `publication_intent`. The activity
+reads `recovery_required` everywhere it is shown; its integration hold and publication intent
+are kept for guarded reconciliation, never released or discarded by the lapse. A task the revise limit parks is a human-required item too, so that
 a task agents may no longer claim or revise is not left waiting unseen. Every open,
 non-canary task with `REVISE_LIMIT` (3) agent revises not serialized after a landing,
 or `SERIALIZED_REVISE_CAP` (6) agent revises of any kind, in the last 24 hours is
