@@ -210,17 +210,24 @@ impl Fixture {
         .await
     }
 
+    async fn decision_body(&self, project: &str, task: &Value, reversible: bool) -> Value {
+        json!({"question":"Rename the flag?","options":["Rename","Keep"],
+            "rationale":"Either is easy to undo","required_actor":"human",
+            "affected_tasks":[{"task_id":task["id"],"task_revision":task["revision"]}],
+            "policy_revision":self.policy(project).await,"environment":"test",
+            "conditions":"Nothing ships before review","recommendation":"Rename",
+            "reversible":reversible})
+    }
+
+    /// A decision a human opened: only a human may make one both reversible
+    /// and human-required.
     async fn reversible_decision(&self, project: &str, task: &Value, reversible: bool) -> Value {
+        let body = self.decision_body(project, task, reversible).await;
         self.ok(
-            &self.a,
+            &self.admin,
             "POST",
             &format!("/api/v1/projects/{project}/decisions"),
-            json!({"question":"Rename the flag?","options":["Rename","Keep"],
-                "rationale":"Either is easy to undo","required_actor":"human",
-                "affected_tasks":[{"task_id":task["id"],"task_revision":task["revision"]}],
-                "policy_revision":self.policy(project).await,"environment":"test",
-                "conditions":"Nothing ships before review","recommendation":"Rename",
-                "reversible":reversible}),
+            body,
         )
         .await
     }
@@ -284,6 +291,82 @@ async fn an_unanswered_reversible_decision_proceeds_after_a_day_and_is_in_the_di
     assert_eq!(listed["proceeded_with"], "Rename");
     assert_eq!(listed["affected_task_ids"][0], task["id"]);
     assert_eq!(digest["pending_reversible_decisions"], json!([]));
+}
+
+#[tokio::test]
+async fn an_agent_cannot_open_a_reversible_human_decision_but_a_human_can() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-agent-reversible").await;
+    let task = f.task(&p, "Rename the flag").await;
+    let path = format!("/api/v1/projects/{p}/decisions");
+
+    let body = f.decision_body(&p, &task, true).await;
+    let (status, refused) = f.call(&f.a, "POST", &path, body.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    let mut either = body.clone();
+    either["required_actor"] = json!("either");
+    f.ok(&f.a, "POST", &path, either).await;
+    let mut irreversible = body.clone();
+    irreversible["reversible"] = json!(false);
+    f.ok(&f.a, "POST", &path, irreversible).await;
+
+    let human = f.ok(&f.admin, "POST", &path, body).await;
+    assert_eq!(human["reversible"], true);
+    assert_eq!(human["required_actor"], "human");
+
+    let reopen = json!({"expected_generation":1,"rationale":"Scope looked stale",
+        "affected_tasks":[{"task_id":task["id"],"task_revision":task["revision"]}],
+        "policy_revision":f.policy(&p).await,"environment":"test",
+        "conditions":"Nothing ships before review"});
+    let reopen_path = format!("{path}/{}/reopen", human["id"].as_str().unwrap());
+    let (status, refused) = f.call(&f.a, "POST", &reopen_path, reopen.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    let reopened = f.ok(&f.admin, "POST", &reopen_path, reopen).await;
+    assert_eq!(reopened["generation"], 2);
+}
+
+#[tokio::test]
+async fn the_sweep_skips_a_human_decision_an_agent_opened() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-sweep-skip").await;
+    let task = f.task(&p, "Rename the flag").await;
+    let human = f.reversible_decision(&p, &task, true).await;
+    let agent_made = f.reversible_decision(&p, &task, true).await;
+    // Rows from before the service refused this: the cycle was opened by an
+    // agent, as when an agent created or last reopened the decision.
+    sqlx::query("DROP TRIGGER decision_cycles_immutable_update")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE decision_cycles SET opened_by=? WHERE decision_id=?")
+        .bind(&f.a.principal)
+        .bind(agent_made["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+
+    f.clock.0.fetch_add(DAY, Ordering::SeqCst);
+    let digest = f.digest(&p).await;
+    let pending = digest["pending_reversible_decisions"].as_array().unwrap();
+    assert_eq!(pending.len(), 1, "{digest}");
+    assert_eq!(pending[0]["decision_id"], human["id"]);
+    let swept = coordinator_server::attention::sweep_timed_out_decisions(&f.state)
+        .await
+        .unwrap();
+    assert_eq!(swept, vec![human["id"].as_str().unwrap().to_owned()]);
+    let skipped = f
+        .ok(
+            &f.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/decisions/{}",
+                agent_made["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(skipped["status"], "pending", "{skipped}");
 }
 
 #[tokio::test]

@@ -311,7 +311,10 @@ async fn record_human_ship(
 /// [`DECISION_TIMEOUT_MS`] with its recommendation. The answer is an `allow`
 /// flagged `timed_out`, attributed to the principal that asked. Decisions
 /// whose scope went stale or whose own expiry passed are left alone: the
-/// recommendation was made about a different scope. Returns the ids answered.
+/// recommendation was made about a different scope. A decision that requires a
+/// human is answered only when a human created or last reopened it, so an
+/// agent can never run out the clock on a reserved decision. Returns the ids
+/// answered.
 pub async fn sweep_timed_out_decisions(state: &AppState) -> anyhow::Result<Vec<String>> {
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
     let clock = state.sample_clock(&mut tx).await?;
@@ -334,6 +337,8 @@ pub async fn sweep_timed_out_decisions(state: &AppState) -> anyhow::Result<Vec<S
          c.policy_revision,c.expires_at FROM decisions d \
          JOIN decision_cycles c ON c.decision_id=d.id AND c.generation=d.current_generation \
          WHERE d.reversible=1 AND d.recommendation IS NOT NULL AND c.created_at<=? \
+         AND (d.required_actor<>'human' OR EXISTS(SELECT 1 FROM principals o \
+         WHERE o.id=c.opened_by AND o.kind='human')) \
          AND NOT EXISTS(SELECT 1 FROM decision_answers a WHERE a.decision_id=d.id \
          AND a.generation=d.current_generation) \
          ORDER BY c.created_at,d.id LIMIT ?",
@@ -526,6 +531,8 @@ async fn digest(
         "SELECT d.id,d.question,d.recommendation,c.created_at FROM decisions d \
          JOIN decision_cycles c ON c.decision_id=d.id AND c.generation=d.current_generation \
          WHERE d.project_id=? AND d.reversible=1 AND d.recommendation IS NOT NULL \
+         AND (d.required_actor<>'human' OR EXISTS(SELECT 1 FROM principals o \
+         WHERE o.id=c.opened_by AND o.kind='human')) \
          AND NOT EXISTS(SELECT 1 FROM decision_answers a WHERE a.decision_id=d.id \
          AND a.generation=d.current_generation) AND (c.expires_at IS NULL OR c.expires_at>?) \
          ORDER BY c.created_at,d.id LIMIT ?",
