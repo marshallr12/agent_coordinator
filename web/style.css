@@ -269,6 +269,8 @@ a.nav-item { text-decoration: none; }
 #admin-content > .card { margin-bottom: 15px; }
 #restore-status > .button { margin: 0 8px 10px 0; }
 .credential-row > :first-child { min-width: 0; overflow-wrap: anywhere; }
+#operators-list .credential-actions { gap: 10px; }
+#operators-list .task-action-icon { width: 36px; min-width: 36px; height: 36px; min-height: 36px; border-radius: 50%; }
 @media (max-width: 620px) {
   .credential-row { flex-wrap: wrap; }
   .credential-row > :first-child { flex-basis: 100%; }
