@@ -331,6 +331,9 @@ mod tests {
         assert_eq!(command.directory, spec.work);
         let names: Vec<&String> = command.environment.keys().collect();
         assert_eq!(names, ["LOCALAPPDATA", "SystemRoot"]);
+        // It is given no coordinator credential, so no digest is sent.
+        let credentials = fixture.coordinator_credentials(&launch).unwrap();
+        assert!(credentials.is_empty(), "{} credentials", credentials.len());
         // The same launch always gets the same plan.
         assert_eq!(fixture.plan(&launch).unwrap().0, spec);
         let other = fixture.plan(&self::launch()).unwrap().0;

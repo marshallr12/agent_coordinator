@@ -80,6 +80,14 @@ pub fn checked_digests(digests: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The SHA-256 digest (lowercase hex) of the coordinator credential
+/// `token`, as `agent-coordinator` and the Linux launch root compute it:
+/// the form [`checked_digests`] accepts.
+pub fn credential_digest(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
 impl Grant {
     /// The grant of `launch`, which works as `role`, runs as `account` and
     /// carries `package` (both SID text). `generation` is the least
@@ -172,6 +180,15 @@ pub trait Handler: Send + Sync {
     fn refused(&self, launch: &str, refusal: &Refusal) {
         eprintln!("agentc-supervisor: broker pipe of {launch}: {refusal}");
     }
+
+    /// Hears that `launch` was closed: its pipe is gone and none of its
+    /// sessions is being served any more. A launch opened again while it
+    /// is open is not closed in this sense. Nothing by default.
+    fn closed(&self, _launch: &str) {}
+
+    /// Hears that the broker is going, once every launch is closed.
+    /// Nothing by default.
+    fn stopped(&self) {}
 }
 
 /// What the threads of one launch's pipe share to learn that it is closing.
@@ -281,7 +298,7 @@ impl Broker {
             grant.package
         );
         let generation = self.next_generation(&grant)?;
-        self.close(&grant.launch)?;
+        self.shut(&grant.launch)?;
         let grant = Arc::new(Grant {
             generation,
             ..grant
@@ -293,8 +310,22 @@ impl Broker {
     }
 
     /// Stops serving `launch`: its grant goes, a session still going ends
-    /// and its pipe is gone once this returns. False when it is not open.
+    /// and its pipe is gone once this returns, and the handler then hears
+    /// that the launch closed. False when it is not open.
     pub fn close(&mut self, launch: &str) -> Result<bool> {
+        let shut = self.shut(launch);
+        if !matches!(shut, Ok(false)) {
+            self.handler.closed(launch);
+        }
+        shut
+    }
+
+    /// Ends `launch`'s sessions and removes its grant and pipe without
+    /// telling the handler: what [`Broker::open`] does to a launch it is
+    /// about to serve again. Its threads have ended once this returns,
+    /// whether or not waking them was reported to work. False when the
+    /// launch is not open.
+    fn shut(&mut self, launch: &str) -> Result<bool> {
         let Some(server) = self.open.remove(launch) else {
             return Ok(false);
         };
@@ -377,13 +408,15 @@ impl Broker {
 }
 
 impl Drop for Broker {
-    /// Closes every launch, so no thread outlives the broker.
+    /// Closes every launch, so no thread outlives the broker, and then
+    /// tells the handler that the broker is going.
     fn drop(&mut self) {
         for launch in self.launches() {
             if let Err(error) = self.close(&launch) {
                 eprintln!("agentc-supervisor: broker pipe of {launch}: {error:#}");
             }
         }
+        self.handler.stopped();
     }
 }
 
@@ -463,6 +496,8 @@ mod tests {
     struct Recorder {
         served: Mutex<Vec<Grant>>,
         refused: Mutex<Vec<Refusal>>,
+        /// Each launch the broker said closed, then `stopped` once it went.
+        ended: Mutex<Vec<String>>,
     }
 
     impl Handler for Recorder {
@@ -481,6 +516,16 @@ mod tests {
         /// Keeps the refusal so a test can assert why a client was refused.
         fn refused(&self, _launch: &str, refusal: &Refusal) {
             self.refused.lock().unwrap().push(refusal.clone());
+        }
+
+        /// Keeps the launch's id.
+        fn closed(&self, launch: &str) {
+            self.ended.lock().unwrap().push(launch.to_owned());
+        }
+
+        /// Keeps the word `stopped`.
+        fn stopped(&self) {
+            self.ended.lock().unwrap().push("stopped".to_owned());
         }
     }
 
@@ -526,6 +571,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         false
+    }
+
+    #[test]
+    fn a_credential_s_digest_is_its_sha_256_in_the_form_a_grant_accepts() {
+        let digest = credential_digest("abc");
+        let known = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(digest, known);
+        assert!(checked_digests(&[digest]).is_ok());
     }
 
     #[test]
@@ -595,6 +648,25 @@ mod tests {
         let asked = broker.open(grant(&id, PACKAGE, 40)).unwrap();
         assert_eq!(asked.generation(), 40, "a higher generation asked for");
         assert_eq!(broker.launches(), [id]);
+    }
+
+    #[test]
+    fn the_handler_hears_of_each_close_and_of_the_stop_but_not_of_a_reopening() {
+        let recorder = Arc::new(Recorder::default());
+        let (mut broker, first, second) = (broker(&recorder), launch(), launch());
+        broker.open(grant(&first, PACKAGE, 1)).unwrap();
+        broker.open(grant(&first, PACKAGE, 1)).unwrap();
+        broker.open(grant(&second, OTHER_PACKAGE, 1)).unwrap();
+        assert!(recorder.ended.lock().unwrap().is_empty(), "nothing closed");
+        assert!(broker.close(&first).unwrap());
+        assert!(!broker.close(&first).unwrap(), "closed twice");
+        assert_eq!(
+            *recorder.ended.lock().unwrap(),
+            std::slice::from_ref(&first)
+        );
+        drop(broker);
+        let ended = recorder.ended.lock().unwrap().clone();
+        assert_eq!(ended, [first, second, "stopped".to_owned()]);
     }
 
     #[test]

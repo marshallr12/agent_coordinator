@@ -24,7 +24,7 @@
 //! A failure that repeats is logged once and then about once a minute with
 //! a count ([`Quiet`]), not at every look.
 use super::Planner;
-use super::broker::Role;
+use super::broker::{Role, checked_digests, credential_digest};
 use super::pipe_client::Client;
 use super::process::Command;
 use crate::host_runtime::{
@@ -33,10 +33,10 @@ use crate::host_runtime::{
 use crate::run_loop::Launch;
 use crate::run_loop::record::LaunchRecord;
 use crate::service::quiet::Quiet;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -201,6 +201,20 @@ impl<P: Planner, L: Link> RemoteHost<P, L> {
         }
     }
 
+    /// The digests of the coordinator credentials the plan gives `launch`,
+    /// in order and without repeats, as the runner accepts them. An empty
+    /// credential, or more credentials than a grant may carry, refuses the
+    /// launch rather than leaving one out of the secret scan.
+    fn credential_digests(&self, launch: &Launch) -> Result<Vec<String>> {
+        let tokens = self.planner.coordinator_credentials(launch)?;
+        let empty = tokens.iter().any(String::is_empty);
+        ensure!(!empty, "a coordinator credential of the launch is empty");
+        let digests: BTreeSet<String> = tokens.iter().map(|t| credential_digest(t)).collect();
+        let digests: Vec<String> = digests.into_iter().collect();
+        checked_digests(&digests)?;
+        Ok(digests)
+    }
+
     /// Whether the root of a launch the runner holds has been seen to end.
     fn root_exited(&self, id: &str) -> bool {
         let observed = self.call(json!({ "op": "observe", "launch": id, "wait_ms": 0 }));
@@ -215,13 +229,21 @@ impl<P: Planner, L: Link> HostRuntime for RemoteHost<P, L> {
     /// role and the task, which names the launch's candidate ref at the
     /// publication broker. A [`Launch`] carries no coordinator attempt or
     /// generation, so none is sent: the supervisor's own authority record
-    /// ([`crate::service::authority`]) holds them.
+    /// ([`crate::service::authority`]) holds them. The digests of the
+    /// coordinator credentials the plan gives the launch go with it as
+    /// `known_digests`, which the runner journals and the publication
+    /// broker's secret scan refuses; a launch given none sends no such
+    /// field.
     fn prepare(&mut self, launch: &Launch) -> Result<StartIntent> {
         let (spec, command) = self.planner.plan(launch)?;
+        let digests = self.credential_digests(launch)?;
         let mut request = Self::about("prepare", launch);
         request["spec"] = serde_json::to_value(&spec)?;
         request["role"] = json!(Role::Implementer);
         request["task"] = json!(launch.suggestion.task);
+        if !digests.is_empty() {
+            request["known_digests"] = json!(digests);
+        }
         let answer = self.call(request)?;
         let text = |field: &str| answer[field].as_str().map(str::to_owned);
         let intent = StartIntent {
@@ -353,6 +375,7 @@ mod crash_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::super::broker::MAX_KNOWN_DIGESTS;
     use super::super::job::Limits;
     use super::super::launcher::LaunchSpec;
     use super::super::pipe::{Accepted, Line, Pipe};
@@ -491,6 +514,75 @@ mod tests {
         }
         assert_eq!(asked[1]["argv"], json!(["fixture.exe", "run"]));
         assert_eq!(asked[1]["launch"], launch.session_id.to_string());
+    }
+
+    /// [`Fixed`]'s plan for a launch that is given `0` as its coordinator
+    /// credentials.
+    struct Given(Vec<String>);
+
+    impl Planner for Given {
+        fn plan(&self, launch: &Launch) -> Result<(LaunchSpec, Command)> {
+            Fixed.plan(launch)
+        }
+
+        fn coordinator_credentials(&self, _launch: &Launch) -> Result<Vec<String>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// What a host whose launches are given `tokens` asks at `prepare`, or
+    /// why it asked nothing.
+    fn prepared_with(tokens: &[&str]) -> Result<Vec<Value>> {
+        let fake = Fake::default();
+        let given = Given(tokens.iter().map(|t| t.to_string()).collect());
+        let mut host = RemoteHost::new(given, fake.clone());
+        let prepared = host.prepare(&launch());
+        let asked = fake.0.borrow().asked.clone();
+        match prepared {
+            Ok(_) => Ok(asked),
+            Err(error) => {
+                assert!(asked.is_empty(), "asked {asked:?} and then refused");
+                Err(error)
+            }
+        }
+    }
+
+    #[test]
+    fn a_launch_given_no_coordinator_credential_sends_no_digests() {
+        let ((mut host, fake), launch) = (host(), launch());
+        host.prepare(&launch).unwrap();
+        let asked = fake.0.borrow().asked.clone();
+        assert!(asked[0].get("known_digests").is_none(), "{}", asked[0]);
+        let none = prepared_with(&[]).unwrap();
+        assert!(none[0].get("known_digests").is_none(), "{}", none[0]);
+    }
+
+    #[test]
+    fn the_digests_of_a_launch_s_coordinator_credentials_go_with_its_prepare() {
+        let asked = prepared_with(&["token-b", "token-a", "token-b"]).unwrap();
+        let mut expected = ["token-a", "token-b"].map(credential_digest);
+        expected.sort();
+        assert_eq!(asked[0]["known_digests"], json!(expected));
+        assert_eq!(
+            expected[0].len(),
+            64,
+            "a SHA-256 digest in hexadecimal: {expected:?}"
+        );
+        assert!(!asked[0].to_string().contains("token-"), "{}", asked[0]);
+    }
+
+    #[test]
+    fn an_empty_credential_and_too_many_refuse_the_launch_before_the_runner_is_asked() {
+        let empty = prepared_with(&["token-a", ""]).unwrap_err();
+        assert!(format!("{empty:#}").contains("empty"), "{empty:#}");
+        let many: Vec<String> = (0..=MAX_KNOWN_DIGESTS).map(|n| format!("t{n}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let refused = prepared_with(&many).unwrap_err();
+        assert!(format!("{refused:#}").contains("at most"), "{refused:#}");
+        assert!(
+            prepared_with(&many[1..]).is_ok(),
+            "the most a grant carries"
+        );
     }
 
     #[test]

@@ -260,6 +260,50 @@ fn a_publication_broker_with_an_app_needs_a_key_it_can_sign_with() {
     assert!(publication(&without_app).is_ok());
 }
 
+/// A launch's repository as a broker that crashed left it below `work`:
+/// protected for Owner Rights and the system only, as
+/// `coordinator_local::private_directory` sets it, holding a read-only file.
+fn left_by_a_crash(work: &std::path::Path, launch: &str) -> std::path::PathBuf {
+    let repository = work.join(launch);
+    std::fs::create_dir_all(repository.join("objects")).unwrap();
+    let object = repository.join("objects").join("pack");
+    std::fs::write(&object, b"x").unwrap();
+    let mut read_only = std::fs::metadata(&object).unwrap().permissions();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&object, read_only).unwrap();
+    let grants = ["*S-1-3-4:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"];
+    let protected = std::process::Command::new("icacls")
+        .arg(&repository)
+        .args(["/inheritance:r", "/grant"])
+        .args(grants)
+        .output()
+        .unwrap();
+    assert!(protected.status.success(), "{protected:?}");
+    repository
+}
+
+#[test]
+fn a_starting_publication_broker_removes_what_a_crash_left_in_its_work_root() {
+    use agentc_supervisor::host_runtime::windows::broker_service::publication;
+    use agentc_supervisor::service::broker_settings::PublicationSettings;
+    let dir = tempfile::tempdir().unwrap();
+    let me = token::current_user_sid().unwrap();
+    let settings = PublicationSettings {
+        state_dir: dir.path().join("publication"),
+        runner_sid: me.clone(),
+        supervisor_sid: me,
+        remote: "https://github.com/owner/repository.git".into(),
+        ..PublicationSettings::default()
+    };
+    let work = settings.work_root();
+    let left = ["one", "two"].map(|launch| left_by_a_crash(&work, launch));
+    assert!(!icacls(&left[0]).contains("Administrators"), "not as left");
+    let handler = publication(&settings).unwrap();
+    let remaining: Vec<_> = std::fs::read_dir(&work).unwrap().flatten().collect();
+    assert!(remaining.is_empty(), "the start left {remaining:?}");
+    drop(handler);
+}
+
 #[test]
 fn the_publication_broker_drops_variables_that_weaken_a_push() {
     use agentc_supervisor::host_runtime::windows::broker_service::weakens_a_push;

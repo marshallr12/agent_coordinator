@@ -85,6 +85,17 @@ use uuid::Uuid;
 pub trait Planner {
     /// The boundary and the command for `launch`.
     fn plan(&self, launch: &Launch) -> Result<(LaunchSpec, Command)>;
+
+    /// The coordinator credentials (token text) the plan gives `launch`,
+    /// in its environment or in files it can read. The remote host sends
+    /// their digests with the launch's `prepare` ([`remote`]), so the
+    /// publication broker's secret scan refuses a candidate that adds one
+    /// of them. A planner that gives a launch such a credential must name
+    /// it here. None by default: no Windows launch is given a coordinator
+    /// credential yet.
+    fn coordinator_credentials(&self, _launch: &Launch) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Runs launches on Windows through one [`Launcher`].

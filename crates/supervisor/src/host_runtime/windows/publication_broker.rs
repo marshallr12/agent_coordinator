@@ -29,6 +29,16 @@
 //! After the reply the broker reads and discards what the client still
 //! sends until it leaves or falls quiet, because disconnecting a pipe
 //! discards what the client has not read.
+//!
+//! A launch's private repository lives below the work root only while the
+//! launch is open. The broker removes it when the launch is closed
+//! ([`Handler::closed`]), and removes whatever is left below the work root
+//! when it stops and when it starts ([`Publication::sweep`]): what a crash,
+//! a kill or a failed removal left behind. A launch's turn ([`Turn`]) is
+//! held while its repository is removed, so one whose push is under way is
+//! kept, and a push cannot begin in a repository that is going. A launch
+//! opened again while it is open keeps its repository, and with it the
+//! record of the commit it published.
 use super::authority_pipe::AuthorityRoute;
 use super::broker::{Grant, Halt, Handler, Role};
 use super::pipe::{Received, Session};
@@ -219,6 +229,36 @@ impl Publication {
         }
     }
 
+    /// Removes everything below the work root except the repository of a
+    /// launch whose push is under way, and logs each outcome. Run when the
+    /// broker starts, before it serves any launch, and when it stops. A
+    /// work root that is not there, or cannot be listed, has nothing to
+    /// remove; the latter is logged.
+    pub fn sweep(&self) {
+        let entries = match std::fs::read_dir(&self.work_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) => return log_removal("*", &format!("not listed: {error}")),
+        };
+        for entry in entries.flatten() {
+            self.discard(&entry.file_name().to_string_lossy());
+        }
+    }
+
+    /// Removes what the work root holds under `name` (a launch's private
+    /// repository) unless that launch's push is under way, and logs the
+    /// outcome. The launch's turn is held meanwhile.
+    fn discard(&self, name: &str) {
+        let Some(_turn) = Turn::take(&self.busy, name) else {
+            return log_removal(name, "kept: a push is under way");
+        };
+        match remove_entry(&self.work_root.join(name)) {
+            Ok(true) => log_removal(name, "removed"),
+            Ok(false) => {}
+            Err(error) => log_removal(name, &format!("not removed: {error}")),
+        }
+    }
+
     /// The task `grant`'s launch publishes for, or why it may not publish
     /// at all: only an implementer launch with a task may.
     fn permitted(grant: &Grant) -> std::result::Result<&str, PushRefusal> {
@@ -244,6 +284,42 @@ impl Handler for Publication {
         outcome?;
         drain(session, halt)
     }
+
+    /// Removes the closed launch's private repository. The broker has
+    /// ended the launch's sessions by now, so none of its pushes runs.
+    fn closed(&self, launch: &str) {
+        self.discard(launch);
+    }
+
+    /// Removes what is still below the work root: a repository whose
+    /// removal failed when its launch closed.
+    fn stopped(&self) {
+        self.sweep();
+    }
+}
+
+/// Removes the file, directory tree or link at `path`, never following a
+/// link; false when nothing was there.
+fn remove_entry(path: &std::path::Path) -> io::Result<bool> {
+    let kind = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.file_type(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if kind.is_dir() {
+        std::fs::remove_dir_all(path)?;
+    } else {
+        // A junction or a link to a directory is removed as a directory.
+        std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))?;
+    }
+    Ok(true)
+}
+
+/// One JSON line saying what became of the entry `name` below the work
+/// root.
+fn log_removal(name: &str, outcome: &str) {
+    let line = serde_json::json!({"publication": name, "repository": outcome});
+    eprintln!("{line}");
 }
 
 /// A launch's turn to push, given back when dropped.

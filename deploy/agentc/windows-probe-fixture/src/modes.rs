@@ -20,6 +20,8 @@ pub fn dispatch(arguments: &[String]) -> i32 {
     match words.as_slice() {
         ["launch", name, control, work] => launch(name, Path::new(control), Path::new(work)),
         ["network", control, work] => network(Path::new(control), Path::new(work)),
+        ["brokers", spec, drop] => brokers(Path::new(spec), Path::new(drop), &launch_name()),
+        ["brokers", spec, drop, name] => brokers(Path::new(spec), Path::new(drop), name),
         ["child", package_sid] => child(package_sid),
         ["sleeper", seconds] => sleeper(seconds),
         ["memhog", ceiling_mb] => memhog(ceiling_mb),
@@ -67,6 +69,41 @@ fn network(control: &Path, work: &Path) -> i32 {
         Ok(()) => 0,
         Err(_) => 5,
     }
+}
+
+/// One broker round for the launch `name`: what it reaches of the host's
+/// brokers and of the files only they may use (`checks::brokers`), after
+/// the facts of its own token. The rows go to standard output and to
+/// `NAME.txt` in `drop`, a directory that outlives the launch's own.
+fn brokers(spec: &Path, drop: &Path, name: &str) -> i32 {
+    let Ok(text) = fs::read_to_string(spec) else {
+        return 3;
+    };
+    let Ok(spec) = Spec::parse(&text) else {
+        return 4;
+    };
+    let mut report = Report::default();
+    report.value("launch", name);
+    let account = checks::token::user_sid();
+    report.value("token.user_sid", &account.unwrap_or_else(|e| e.to_string()));
+    checks::token::run(&mut report);
+    if let Err(message) = checks::brokers::run(&spec, name, &mut report) {
+        report.value("fixture.error", &message);
+    }
+    let rows = report.render();
+    print!("{rows}");
+    match fs::write(drop.join(format!("{name}.txt")), &rows) {
+        Ok(()) => 0,
+        Err(_) => 5,
+    }
+}
+
+/// The launch's id as its working directory spells it: a launch runs in
+/// `<id>-work`.
+fn launch_name() -> String {
+    let directory = std::env::current_dir().unwrap_or_default();
+    let name = directory.file_name().unwrap_or_default().to_string_lossy();
+    name.strip_suffix("-work").unwrap_or(&name).to_owned()
 }
 
 /// Reads the spec and gathers every row.
