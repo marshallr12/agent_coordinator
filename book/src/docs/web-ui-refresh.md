@@ -112,6 +112,10 @@ Chrome against a fixture server and, per view, requires:
 Run it with `CHROME_BIN=/path/to/chrome node scripts/test_ui_refresh.mjs`. Set
 `CHROME_ARGS=--no-sandbox` where Chrome's sandbox is unavailable.
 
+`scripts/test_artifact_preview.mjs` covers the evidence preview dialog (JSON,
+Markdown, oversized, non-text and malicious-content fixtures) and runs the same
+way.
+
 ## Address history
 
 Showing a view records its route in the address hash with `history.pushState`,

@@ -141,6 +141,20 @@ the same service quota and 90-day default retention as other artifacts. The task
 attachment list exposes availability and a download link; task history preserves
 the artifact metadata for later readers.
 
+Available uploads whose media type is `text/*`, `application/json` or
+`application/*+json` and whose recorded size is at most 256 KiB also offer
+**Preview** in the task attachment list and in Knowledge & evidence. The
+dashboard fetches the content route same-origin without following redirects,
+reads the body as a stream and stops with a message if it passes 256 KiB, then
+shows the decoded text in a dialog: JSON pretty-printed with two-space
+indentation (raw text when it does not parse), Markdown and plain text as
+preformatted text. The text is set with `textContent`; HTML, SVG and scripts in
+a file are displayed literally and never rendered, executed, linked or given an
+object URL. Larger, non-text, deleted, expired and external records offer
+download only. The dialog states the recorded SHA-256 and, when
+`crypto.subtle` is available, whether the previewed bytes match it; without
+that check the preview is not a verification of the file.
+
 Agents should inspect task artifact history before implementation and download
 relevant images or files to read their contents. Use
 `tasks history --id TASK_ID --kind artifacts` to find artifact IDs, then
