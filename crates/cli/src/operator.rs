@@ -26,6 +26,16 @@ pub(crate) enum PolicyCommand {
     History(ListArgs),
 }
 
+#[derive(Subcommand)]
+pub(crate) enum TaskDefinitionGrantCommand {
+    /// List active and revoked grants in the bound project.
+    List,
+    /// Create a human-managed grant from a JSON request file.
+    Create(InputArgs),
+    /// Revoke a grant using its current revision in a JSON request file.
+    Revoke(RecordInput),
+}
+
 pub(crate) fn project_path(context: &ContextData, suffix: &str) -> String {
     format!("/api/v1/projects/{}/{}", context.binding.project_id, suffix)
 }
@@ -111,6 +121,26 @@ pub(crate) async fn policy(
                 &list_query(args),
             )
             .await
+        }
+    }
+}
+
+pub(crate) async fn task_definition_grants(
+    cli: &Cli,
+    context: &ContextData,
+    command: &TaskDefinitionGrantCommand,
+) -> std::result::Result<Value, Failure> {
+    let path = project_path(context, "task-definition-grants");
+    match command {
+        TaskDefinitionGrantCommand::List => get(cli, context, &path, &[]).await,
+        TaskDefinitionGrantCommand::Create(input) => {
+            let body = read_json(&input.input).map_err(Failure::invalid)?;
+            mutate(cli, context, &path, body, true).await
+        }
+        TaskDefinitionGrantCommand::Revoke(args) => {
+            validate_segment("grant id", &args.id).map_err(Failure::invalid)?;
+            let body = read_json(&args.input).map_err(Failure::invalid)?;
+            mutate(cli, context, &format!("{path}/{}", args.id), body, true).await
         }
     }
 }

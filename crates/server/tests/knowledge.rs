@@ -117,6 +117,18 @@ impl Fixture {
         value["data"].clone()
     }
 
+    async fn grant_task_definition_editing(&self, project: &str) {
+        let (status, value) = self
+            .call(
+                &self.admin,
+                "POST",
+                &format!("/api/v1/projects/{project}/task-definition-grants"),
+                json!({"target_kind":"principal","agent_principal_id":self.agent.principal}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+    }
+
     async fn acknowledge(&self, project: &str, policy_revision: i64) {
         let (status, value) = self
             .call(
@@ -169,6 +181,7 @@ async fn task_context_scopes_the_search_index_without_searching_project_metadata
         .await;
     assert_eq!(status, StatusCode::OK);
     assert!(metadata["data"]["items"].as_array().unwrap().is_empty());
+    f.grant_task_definition_editing(&source).await;
     let (status, _) = f.call(&f.agent, "PATCH",
         &format!("/api/v1/projects/{source}/tasks/{}", task["id"].as_str().unwrap()),
         json!({"expected_revision":1,"title":"Replaced search text","description":"Updated content",
@@ -461,6 +474,7 @@ async fn decisions_require_typed_current_allow_and_preserve_reopen_history() {
     .unwrap();
     drop(connection);
 
+    fixture.grant_task_definition_editing(&project).await;
     let (status, edited) = fixture
         .call(
             &fixture.agent,

@@ -163,6 +163,26 @@ pub struct TaskEdit {
     pub planned: bool,
 }
 
+/// Human-managed authority for an agent principal or role to edit task definitions.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskDefinitionGrantInput {
+    pub target_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_principal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<String>,
+}
+
+/// Revision-checked revocation of a human-managed task-definition grant.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskDefinitionGrantRevoke {
+    pub expected_revision: i64,
+}
+
 pub fn timestamp(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .unwrap_or(chrono::DateTime::UNIX_EPOCH)

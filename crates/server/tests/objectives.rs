@@ -117,6 +117,18 @@ impl Fixture {
         value["data"].clone()
     }
 
+    async fn grant_task_definition_editing(&self, project: &str, agent: &Caller) {
+        let (status, value) = self
+            .call(
+                &self.admin,
+                "POST",
+                &format!("/api/v1/projects/{project}/task-definition-grants"),
+                json!({"target_kind":"principal","agent_principal_id":agent.principal}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+    }
+
     async fn objective(&self, project: &str, title: &str, children: Vec<Value>) -> Value {
         let (status, value) = self
             .call(
@@ -485,9 +497,12 @@ async fn objective_scope_is_project_local_and_combined_dag_cycles_are_rejected()
         .objective(&project, "Cycle parent", Vec::new())
         .await;
     let child = fixture.task(&project, "Cycle child").await;
+    fixture
+        .grant_task_definition_editing(&project, &fixture.reviewer)
+        .await;
     let (status, edited) = fixture
         .call(
-            &fixture.owner,
+            &fixture.reviewer,
             "PATCH",
             &format!("/api/v1/projects/{project}/tasks/{}", child["id"].as_str().unwrap()),
             json!({"expected_revision":1,"title":child["title"],"description":"objective route test",

@@ -1013,6 +1013,9 @@ checks and the same exact-request mutation journal as claims.
 agent-coordinator tasks show --id TASK_ID
 agent-coordinator tasks edit --id TASK_ID --input revised-task.json
 agent-coordinator tasks history --id TASK_ID --kind attempts --limit 50
+agent-coordinator task-definition-grants list
+agent-coordinator task-definition-grants create --input grant.json
+agent-coordinator task-definition-grants revoke --id GRANT_ID --input revoke.json
 agent-coordinator policy show
 agent-coordinator policy history --limit 50
 agent-coordinator policy edit --input revised-policy.json
@@ -1032,6 +1035,14 @@ Task edits provide `expected_revision`, `title`, `description`,
 `acceptance_criteria`, `priority`, `depends_on`, and `planned`. Only unowned open or
 planned tasks may be edited, subject to workflow and policy checks. Changing
 `planned` to false admits work; it does not bypass dependencies or objective gates.
+
+Task-definition grants are project-scoped and default-deny. A principal grant
+contains `{"target_kind":"principal","agent_principal_id":"AGENT_ID"}`; the
+explicit role grant is `{"target_kind":"role","agent_role":"agent"}` and
+therefore covers every valid agent in the project. Revocation input is
+`{"expected_revision":N}`. The service enforces the same administrator-only
+grant management and agent contributor-safety checks for CLI, REST, MCP, and the
+dashboard; a grant never authorizes policy or review changes.
 
 Objective creation provides a title, description, acceptance criteria, priority,
 planned flag, and `children` entries containing `task_id` and `required`. Child

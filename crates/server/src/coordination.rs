@@ -44,6 +44,20 @@ fn admin_or_operator(actor: &crate::auth::Actor) -> Result<(), AppError> {
     }
     Ok(())
 }
+fn task_definition_grant_input(input: &TaskDefinitionGrantInput) -> Result<(), AppError> {
+    match input.target_kind.as_str() {
+        "principal" if input.agent_principal_id.is_some() && input.agent_role.is_none() => Ok(()),
+        "role"
+            if input.agent_principal_id.is_none()
+                && input.agent_role.as_deref() == Some("agent") =>
+        {
+            Ok(())
+        }
+        _ => Err(AppError::bad_request(
+            "A task-definition grant targets either one agent principal or the agent role.",
+        )),
+    }
+}
 fn session(actor: &crate::auth::Actor) -> Result<&str, AppError> {
     actor.session_id.as_deref().ok_or_else(|| {
         AppError::forbidden("Connect a harness session before claiming or changing owned work.")
@@ -62,6 +76,14 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/projects/{project}/tasks/{task}",
             get(task_detail).patch(edit_task),
+        )
+        .route(
+            "/api/v1/projects/{project}/task-definition-grants",
+            get(task_definition_grants).post(create_task_definition_grant),
+        )
+        .route(
+            "/api/v1/projects/{project}/task-definition-grants/{grant}",
+            post(revoke_task_definition_grant),
         )
         .route(
             "/api/v1/projects/{project}/tasks/{task}/unblock",
@@ -569,6 +591,128 @@ async fn create_task(
         m.finish(value, Some(&p), "task.created", &id).await?,
     ))
 }
+async fn task_definition_grants(
+    State(s): State<AppState>,
+    _auth: Auth,
+    Path(p): Path<String>,
+) -> Reply {
+    let mut connection = s.pool.acquire().await?;
+    project(&mut connection, &p).await?;
+    let items = sqlx::query("SELECT id,target_kind,agent_principal_id,agent_role,created_by,created_at,revoked_by,revoked_at,revision FROM task_definition_grants WHERE project_id=? ORDER BY created_at,id")
+        .bind(&p).fetch_all(&s.pool).await?.into_iter().map(|row| json!({
+            "id":row.get::<String,_>("id"), "target_kind":row.get::<String,_>("target_kind"),
+            "agent_principal_id":row.get::<Option<String>,_>("agent_principal_id"), "agent_role":row.get::<Option<String>,_>("agent_role"),
+            "created_by":row.get::<String,_>("created_by"), "created_at":timestamp(row.get("created_at")),
+            "revoked_by":row.get::<Option<String>,_>("revoked_by"), "revoked_at":row.get::<Option<i64>,_>("revoked_at").map(timestamp), "revision":row.get::<i64,_>("revision")
+        })).collect::<Vec<_>>();
+    Ok(response(json!({"items":items})))
+}
+
+async fn create_task_definition_grant(
+    State(s): State<AppState>,
+    auth: Auth,
+    Path(p): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<TaskDefinitionGrantInput>, JsonRejection>,
+) -> Reply {
+    let input = payload(body)?;
+    task_definition_grant_input(&input)?;
+    let mut m = Mutation::begin(
+        &s,
+        &auth,
+        &headers,
+        &format!("POST /api/v1/projects/{p}/task-definition-grants"),
+        &input,
+    )
+    .await?;
+    crate::auth::admin(&m.actor)?;
+    project(&mut m.tx, &p).await?;
+    if let Some(v) = m.replay {
+        return Ok(response(v));
+    }
+    if let Some(principal) = &input.agent_principal_id {
+        let valid: i64 = sqlx::query_scalar("SELECT count(*) FROM principals WHERE id=? AND kind='agent' AND role='agent' AND disabled_at IS NULL").bind(principal).fetch_one(&mut *m.tx).await?;
+        if valid == 0 {
+            return Err(AppError::bad_request(
+                "The grant target must be an enabled agent principal.",
+            ));
+        }
+    }
+    let active: i64 = sqlx::query_scalar("SELECT count(*) FROM task_definition_grants WHERE project_id=? AND target_kind=? AND agent_principal_id IS ? AND agent_role IS ? AND revoked_at IS NULL")
+        .bind(&p).bind(&input.target_kind).bind(&input.agent_principal_id).bind(&input.agent_role).fetch_one(&mut *m.tx).await?;
+    if active != 0 {
+        return Err(AppError::conflict(
+            "grant_exists",
+            "This active task-definition grant already exists.",
+        ));
+    }
+    let id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO task_definition_grants(id,project_id,target_kind,agent_principal_id,agent_role,created_by,created_at) VALUES(?,?,?,?,?,?,?)")
+        .bind(&id).bind(&p).bind(&input.target_kind).bind(&input.agent_principal_id).bind(&input.agent_role).bind(&m.actor.id).bind(m.now).execute(&mut *m.tx).await?;
+    let value = json!({"id":id.clone(),"target_kind":input.target_kind,"agent_principal_id":input.agent_principal_id,"agent_role":input.agent_role,"created_by":m.actor.id,"created_at":timestamp(m.now),"revision":1});
+    Ok(response(
+        m.finish(value, Some(&p), "task_definition_grant.created", &id)
+            .await?,
+    ))
+}
+
+async fn revoke_task_definition_grant(
+    State(s): State<AppState>,
+    auth: Auth,
+    Path((p, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<TaskDefinitionGrantRevoke>, JsonRejection>,
+) -> Reply {
+    let input = payload(body)?;
+    if input.expected_revision <= 0 {
+        return Err(AppError::bad_request("expected_revision must be positive."));
+    }
+    let mut m = Mutation::begin(
+        &s,
+        &auth,
+        &headers,
+        &format!("POST /api/v1/projects/{p}/task-definition-grants/{id}"),
+        &input,
+    )
+    .await?;
+    crate::auth::admin(&m.actor)?;
+    project(&mut m.tx, &p).await?;
+    if let Some(v) = m.replay {
+        return Ok(response(v));
+    }
+    let row = sqlx::query(
+        "SELECT revision,revoked_at FROM task_definition_grants WHERE project_id=? AND id=?",
+    )
+    .bind(&p)
+    .bind(&id)
+    .fetch_optional(&mut *m.tx)
+    .await?
+    .ok_or_else(AppError::not_found)?;
+    if row.get::<i64, _>("revision") != input.expected_revision {
+        return Err(AppError::conflict(
+            "revision_conflict",
+            "Read the latest grant before revoking it.",
+        ));
+    }
+    if row.get::<Option<i64>, _>("revoked_at").is_some() {
+        return Err(AppError::conflict(
+            "grant_revoked",
+            "This grant is already revoked.",
+        ));
+    }
+    sqlx::query("UPDATE task_definition_grants SET revoked_by=?,revoked_at=?,revision=revision+1 WHERE id=?").bind(&m.actor.id).bind(m.now).bind(&id).execute(&mut *m.tx).await?;
+    let revoked_at = timestamp(m.now);
+    Ok(response(
+        m.finish(
+            json!({"id":id.clone(),"revoked_at":revoked_at,"revision":input.expected_revision+1}),
+            Some(&p),
+            "task_definition_grant.revoked",
+            &id,
+        )
+        .await?,
+    ))
+}
+
 async fn edit_task(
     State(s): State<AppState>,
     auth: Auth,
@@ -610,35 +754,66 @@ async fn edit_task(
             "Only unowned open or planned tasks can be edited. Preserve active work and reconcile it first.",
         ));
     }
+    let mut agent_grant = None;
     if m.actor.kind == "agent" {
+        session(&m.actor)?;
+        agent_grant = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM task_definition_grants WHERE project_id=? AND revoked_at IS NULL \
+             AND ((target_kind='principal' AND agent_principal_id=?) OR (target_kind='role' AND agent_role=?)) \
+             ORDER BY target_kind,id LIMIT 1",
+        )
+        .bind(&p)
+        .bind(&m.actor.id)
+        .bind(&m.actor.role)
+        .fetch_optional(&mut *m.tx)
+        .await?;
+        if agent_grant.is_none() {
+            return Err(AppError::forbidden(
+                "A human administrator must grant this agent task-definition editing authority for this project.",
+            ));
+        }
         let previous_dependencies: Vec<String> = sqlx::query_scalar(
             "SELECT prerequisite_id FROM task_dependencies WHERE task_id=? ORDER BY prerequisite_id",
         ).bind(&id).fetch_all(&mut *m.tx).await?;
         let mut requested_dependencies = input.depends_on.clone();
         requested_dependencies.sort();
-        let acceptance_changed = serde_json::from_str::<Vec<String>>(&current.acceptance_json)?
-            != input.acceptance_criteria
+        let definition_changed = current.title != input.title
+            || serde_json::from_str::<Vec<String>>(&current.acceptance_json)?
+                != input.acceptance_criteria
             || current.description != input.description
-            || previous_dependencies != requested_dependencies;
-        if acceptance_changed
+            || previous_dependencies != requested_dependencies
+            || current.priority != input.priority
+            || (current.lifecycle == "planned") != input.planned;
+        if definition_changed
             && sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM task_contributors WHERE task_id=?",
+                "SELECT count(*) FROM task_contributors WHERE task_id=? AND principal_id=?",
             )
             .bind(&id)
+            .bind(&m.actor.id)
             .fetch_one(&mut *m.tx)
             .await?
                 > 0
-            && !project(&mut m.tx, &p).await?.agent_rule_editing
         {
             return Err(AppError::forbidden(
-                "A human must change acceptance requirements after work has begun, unless this project explicitly delegates rule editing. Do not weaken criteria to make a submission pass.",
+                "A human must change a task definition after this agent has contributed to it. Delegation never permits self-related requirement changes.",
             ));
         }
     }
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
     sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,revision=revision+1 WHERE id=?")
         .bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority).bind(if input.planned{"planned"}else{"open"}).bind(&id).execute(&mut *m.tx).await?;
-    let value = save_task_revision(&mut m, &p, &id).await?;
+    let mut value = save_task_revision(&mut m, &p, &id).await?;
+    if let Some(grant_id) = agent_grant {
+        value["task_definition_grant_id"] = json!(&grant_id);
+        sqlx::query("UPDATE task_revisions SET data_json=? WHERE task_id=? AND revision=?")
+            .bind(value.to_string())
+            .bind(&id)
+            .bind(current.revision + 1)
+            .execute(&mut *m.tx)
+            .await?;
+        sqlx::query("INSERT INTO task_definition_revision_grants(project_id,task_id,revision,grant_id) VALUES(?,?,?,?)")
+            .bind(&p).bind(&id).bind(current.revision + 1).bind(grant_id).execute(&mut *m.tx).await?;
+    }
     Ok(response(
         m.finish(value, Some(&p), "task.edited", &id).await?,
     ))

@@ -498,7 +498,7 @@ async fn dependency_cycles_rollback_edits_and_blocked_tasks_are_not_claimed() {
     let edit = json!({"expected_revision":1,"title":"changed","description":"","acceptance_criteria":["done"],"priority":2,"depends_on":[t2["id"]],"planned":false});
     let (status, _) = f
         .call(
-            &f.a,
+            &f.admin,
             "PATCH",
             &format!("/api/v1/projects/{p}/tasks/{}", t1["id"].as_str().unwrap()),
             "cycle",
@@ -728,4 +728,127 @@ async fn acceptance_changes_after_work_require_a_human_or_explicit_delegation() 
             .0,
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn task_definition_grants_are_scoped_revocable_and_preserve_contributor_safety() {
+    let f = Fixture::new().await;
+    let p = f.project("definition grants").await;
+    let t = f.task(&p, "editable by delegate", vec![]).await;
+    let path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let edit = json!({"expected_revision":1,"title":"revised","description":"Test task","acceptance_criteria":["verified"],"priority":2,"depends_on":[],"planned":false});
+    assert_eq!(
+        f.call(&f.b, "PATCH", &path, "default-deny", edit.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    let grants = format!("/api/v1/projects/{p}/task-definition-grants");
+    let grant_body = json!({"target_kind":"principal","agent_principal_id":f.b.principal});
+    let (status, grant) = f
+        .call(&f.admin, "POST", &grants, "grant-b", grant_body.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{grant}");
+    let (_, replay) = f
+        .call(&f.admin, "POST", &grants, "grant-b", grant_body)
+        .await;
+    assert_eq!(replay["data"]["id"], grant["data"]["id"]);
+    assert_eq!(
+        f.call(&f.b, "PATCH", &path, "granted-edit", edit.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    let revoke = format!("{}/{}", grants, grant["data"]["id"].as_str().unwrap());
+    assert_eq!(
+        f.call(
+            &f.admin,
+            "POST",
+            &revoke,
+            "revoke-b",
+            json!({"expected_revision":1})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let other = f.task(&p, "denied after revoke", vec![]).await;
+    let other_path = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        other["id"].as_str().unwrap()
+    );
+    assert_eq!(f.call(&f.b, "PATCH", &other_path, "revoked-deny", json!({"expected_revision":1,"title":"nope","description":"Test task","acceptance_criteria":["verified"],"priority":2,"depends_on":[],"planned":false})).await.0, StatusCode::FORBIDDEN);
+
+    let (status, role_grant) = f
+        .call(
+            &f.admin,
+            "POST",
+            &grants,
+            "grant-agent-role",
+            json!({"target_kind":"role","agent_role":"agent"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{role_grant}");
+    let role_task = f.task(&p, "editable by delegated role", vec![]).await;
+    let role_path = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        role_task["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        f.call(
+            &f.b,
+            "PATCH",
+            &role_path,
+            "role-edit",
+            json!({"expected_revision":1,"title":"role revised","description":"Test task","acceptance_criteria":["verified"],"priority":2,"depends_on":[],"planned":false}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let isolated = f.project("definition grant isolation").await;
+    let isolated_task = f.task(&isolated, "not delegated here", vec![]).await;
+    assert_eq!(
+        f.call(
+            &f.b,
+            "PATCH",
+            &format!("/api/v1/projects/{isolated}/tasks/{}", isolated_task["id"]),
+            "cross-project-deny",
+            json!({"expected_revision":1,"title":"nope","description":"Test task","acceptance_criteria":["verified"],"priority":2,"depends_on":[],"planned":false}),
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+
+    f.ack(&f.b, &p).await;
+    let (status, claim) = f.claim(&f.b, &p, &other, "contributor-claim", "work").await;
+    assert_eq!(status, StatusCode::OK);
+    let (attempt_id, generation) = attempt(&claim);
+    assert_eq!(
+        f.call(
+            &f.b,
+            "POST",
+            &format!("/api/v1/projects/{p}/attempts/{attempt_id}/release"),
+            "contributor-release",
+            json!({"generation":generation,"summary":"saved"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, renewed) = f
+        .call(
+            &f.admin,
+            "POST",
+            &grants,
+            "renew-b",
+            json!({"target_kind":"principal","agent_principal_id":f.b.principal}),
+        )
+        .await;
+    assert_eq!(renewed["data"]["agent_principal_id"], f.b.principal);
+    assert_eq!(f.call(&f.b, "PATCH", &other_path, "contributor-deny", json!({"expected_revision":1,"title":"nope","description":"changed","acceptance_criteria":["weaker"],"priority":2,"depends_on":[],"planned":false})).await.0, StatusCode::FORBIDDEN);
 }

@@ -71,6 +71,11 @@ enum Command {
         #[command(subcommand)]
         command: operator::PolicyCommand,
     },
+    /// Inspect or administer project-scoped task-definition editing grants.
+    TaskDefinitionGrants {
+        #[command(subcommand)]
+        command: operator::TaskDefinitionGrantCommand,
+    },
     /// Search bounded project context and explicitly shared knowledge.
     Context(shared::ContextArgs),
     /// Read and revise shared lessons, facts, and historical context.
@@ -954,6 +959,9 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
         Command::McpClient(args) => mcp_client::launch(cli, &context, args).await,
         Command::Objectives { command } => operator::objectives(cli, &context, command).await,
         Command::Policy { command } => operator::policy(cli, &context, command).await,
+        Command::TaskDefinitionGrants { command } => {
+            operator::task_definition_grants(cli, &context, command).await
+        }
         Command::Connect(args) => connect(cli, &context, args).await,
         Command::Projects { command } => match command {
             ProjectsCommand::List(args) => finish(
