@@ -230,6 +230,212 @@ async fn canceling_a_task_with_history_archives_it() {
     assert_eq!(shown["data"]["lifecycle_events"][0]["action"], "canceled");
     assert!(dependent["id"].is_string());
 }
+const DELIVERED: &str = "24a7f3dd8da404b86fcfe5e81a730f98982438d8";
+
+fn external_completion(revision: i64, checks: Value) -> Value {
+    json!({"expected_revision":revision,"delivered_revision":DELIVERED,"target_branch":"main","reason":"Landed by scripts/ship.py because it touches .github/workflows.","checks":checks})
+}
+
+#[tokio::test]
+async fn a_human_completes_a_task_delivered_outside_the_coordinator() {
+    let f = Fixture::new().await;
+    let p = f.project("external-completion").await;
+    sqlx::query("INSERT INTO workflow_policies(project_id,revision,canonical_repository_key,required_checks_json,updated_by,updated_at) VALUES(?,1,'example.com/test/repo',?,(SELECT id FROM principals LIMIT 1),1)")
+        .bind(&p)
+        .bind(r#"[{"identity":"Coordination checks","version":"v1","environment":"ci"},{"identity":"Documentation checks","version":"v1","environment":"ci"}]"#)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let task = f.task(&p, "Deploy-scripts CI job", vec![]).await;
+    set_origin(&f, &task, "agent").await;
+    let id = task["id"].as_str().unwrap();
+    let dependent = f.task(&p, "Needs it", vec![id.to_owned()]).await;
+    let path = format!("/api/v1/projects/{p}/tasks/{id}");
+    let both = json!([{"identity":"Coordination checks","conclusion":"success"},{"identity":"Documentation checks","conclusion":"success"}]);
+
+    // Each refusal leaves the task open at the same revision.
+    let missing = external_completion(
+        1,
+        json!([{"identity":"Coordination checks","conclusion":"success"}]),
+    );
+    let (status, v) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{path}/complete-external"),
+            "missing",
+            missing,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "required_check_missing");
+    let failed = json!([{"identity":"Coordination checks","conclusion":"success"},{"identity":"Documentation checks","conclusion":"failure"}]);
+    let (status, v) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{path}/complete-external"),
+            "failed",
+            external_completion(1, failed),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let mut elsewhere = external_completion(1, both.clone());
+    elsewhere["target_branch"] = json!("feature");
+    let (status, v) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{path}/complete-external"),
+            "branch",
+            elsewhere,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "target_branch_mismatch");
+    let mut short = external_completion(1, both.clone());
+    short["delivered_revision"] = json!("24a7f3d");
+    let (status, _) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{path}/complete-external"),
+            "short",
+            short,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, v) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{path}/complete-external"),
+            "stale",
+            external_completion(9, both.clone()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "task_revision_changed");
+
+    let (status, done) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{path}/complete-external"),
+            "complete",
+            external_completion(1, both),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["data"]["lifecycle"], "done");
+    let (lifecycle, revision, archived, deleted): (String, i64, Option<i64>, Option<i64>) =
+        sqlx::query_as("SELECT lifecycle,revision,archived_at,deleted_at FROM tasks WHERE id=?")
+            .bind(id)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!((lifecycle.as_str(), revision), ("done", 2));
+    assert!(archived.is_none() && deleted.is_none());
+    let (status, shown) = f.call(&f.admin, "GET", &path, "", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{shown}");
+    assert_eq!(shown["data"]["lifecycle"], "done");
+    let event = &shown["data"]["lifecycle_events"][0];
+    assert_eq!(event["action"], "completed_externally");
+    assert_eq!(event["delivered_revision"], DELIVERED);
+    assert_eq!(event["target_branch"], "main");
+    assert_eq!(event["checks"].as_array().unwrap().len(), 2);
+    let ready: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tasks WHERE id=? AND lifecycle='open'")
+            .bind(dependent["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(ready, 1);
+
+    // A task that is already done cannot be completed again.
+    let (status, v) = f.call(&f.admin, "POST", &format!("{path}/complete-external"), "again", external_completion(2, json!([{"identity":"Coordination checks","conclusion":"success"},{"identity":"Documentation checks","conclusion":"success"}]))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "task_lifecycle_invalid");
+}
+
+#[tokio::test]
+async fn an_agent_cannot_complete_a_task_externally_even_when_delegated() {
+    let f = Fixture::new().await;
+    let p = f.project("external-completion-agent").await;
+    let checks = json!([{"identity":"Coordination checks","conclusion":"success"}]);
+    for origin in ["agent", "service", "human"] {
+        let (path, revision) = ready_for(&f, &p, "cancel", origin).await;
+        let (status, v) = f
+            .call(
+                &f.a,
+                "POST",
+                &format!("{path}/complete-external"),
+                &format!("agent-{origin}"),
+                external_completion(revision, checks.clone()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{origin}: {v}");
+        assert_eq!(
+            v["error"]["details"]["gate"], "task_external_completion",
+            "{origin}: {v}"
+        );
+    }
+    let change = json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"Read all evidence","agent_rule_editing":true,"automatic_integration":true});
+    let (status, v) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &format!("/api/v1/projects/{p}/policy"),
+            "delegate",
+            change,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (path, revision) = ready_for(&f, &p, "cancel", "agent").await;
+    let (status, v) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("{path}/complete-external"),
+            "delegated",
+            external_completion(revision, checks),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM tasks WHERE id=?")
+        .bind(path.rsplit('/').next().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(lifecycle, "open");
+}
+
+#[tokio::test]
+async fn external_completion_waits_for_the_owner_to_release_the_task() {
+    let f = Fixture::new().await;
+    let p = f.project("external-completion-owned").await;
+    let t = f.task(&p, "owned", vec![]).await;
+    f.ack(&f.a, &p).await;
+    let (status, v) = f.claim(&f.a, &p, &t, "claim", "work").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let body = external_completion(
+        1,
+        json!([{"identity":"Coordination checks","conclusion":"success"}]),
+    );
+    let (status, v) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{path}/complete-external"),
+            "owned",
+            body,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "task_attempt_protected");
+}
+
 async fn set_origin(f: &Fixture, task: &Value, origin: &str) {
     sqlx::query("UPDATE tasks SET origin=?,lifecycle='open',budget_held_at=NULL WHERE id=?")
         .bind(origin)

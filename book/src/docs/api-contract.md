@@ -796,7 +796,7 @@ guards reject content that is inappropriate for the task kind or obsolete input.
 
 | Surface | Operations and behavior |
 | --- | --- |
-| Tasks | Create, get/list, revision-checked edit/admit, dependencies, cancel, supersede; no unrestricted status write |
+| Tasks | Create, get/list, revision-checked edit/admit, dependencies, cancel, supersede, human-only `complete-external` for work delivered outside the coordinator; no unrestricted status write |
 | Jobs | Register before local launch; append authorized observations; report producer terminal status; inspect without relaunching |
 | Artifacts | Explicit bounded upload, authenticated metadata/download, authorized deletion with retained tombstone; external link registration |
 | Knowledge | Create/search/get, revision-checked correction and supersession, usefulness feedback, explicit rule adoption under current delegated permission |

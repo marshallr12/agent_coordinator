@@ -320,7 +320,43 @@ task revision, project policy revision, workflow-policy roster, approvals,
 authorization, intent/result, exact remote observation, source-bound job receipts,
 activity authority, and quiescence of both subject and integration tasks. It then
 atomically completes the integration activity and subject task, closes the global
-hold, and makes dependencies eligible. There is no generic completion endpoint.
+hold, and makes dependencies eligible. The only other completion path is the
+human-only external delivery below; there is no generic or agent completion endpoint.
+
+## Tasks delivered outside the coordinator
+
+Some changes cannot go through review and integration: a task that touches
+privileged paths (for example `.github/workflows`) is landed by its owner with
+`scripts/ship.py`, which fast-forwards `main` to a commit whose required checks are
+already green. Submitting that commit afterwards would send an already-published
+change through review and an integrator publication that is a no-op, and canceling
+the task would record the delivered work as `canceled`. Use the external completion
+instead, so the task ends `done` and counts as done in digests.
+
+`POST /api/v1/projects/{project}/tasks/{task}/complete-external` takes
+`{expected_revision, delivered_revision, target_branch, reason, checks}`:
+`delivered_revision` is the full revision on the target branch that contains the
+delivered change, `target_branch` must equal the project's target branch,
+`reason` says how it was delivered, and `checks` is a list of
+`{identity, conclusion}` results read on that exact revision. Every `conclusion`
+must be `success`, and when the project has a workflow policy every roster check
+identity must be cited (`required_check_missing`). The task must be open, at
+`expected_revision`, with no current attempt and no active review or integration
+work; release or recover the attempt first (`task_attempt_protected`,
+`task_workflow_protected`). The task becomes `done` (not archived or deleted),
+its dependents become eligible, and the revision, branch, check results, reason and
+acting human are kept in the `task.completed_externally` event, which task history
+shows as the `completed_externally` lifecycle event.
+
+This is an exception to the rule above that the service accepts no caller-authored
+assertion about checks, because the service cannot reach the repository: it
+**records the human's attestation** that the revision is on the target branch and
+that its checks passed; it does not verify either. It is a labelled human gate
+(`task_external_completion`). Agent sessions are always refused, whatever the task's
+origin or the project's delegation, so an agent cannot use it to skip review of an
+ordinary candidate. Use it only after confirming, from the remote, that
+`delivered_revision` is an ancestor of the target branch tip and that the required
+checks succeeded on it. An ordinary candidate still needs review and integration.
 
 ## Local worktree cleanup after completion
 

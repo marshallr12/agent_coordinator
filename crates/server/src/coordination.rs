@@ -95,6 +95,10 @@ pub fn routes() -> Router<AppState> {
             post(cancel_task),
         )
         .route(
+            "/api/v1/projects/{project}/tasks/{task}/complete-external",
+            post(complete_task_externally),
+        )
+        .route(
             "/api/v1/projects/{project}/preconditions/{target}",
             get(inspect_preconditions),
         )
@@ -903,16 +907,158 @@ async fn lifecycle_change(
     ))
 }
 
-/// The task's recorded lifecycle changes (cancel, archive, restore, delete), newest first,
+/// One required check's result on the delivered revision, as the human read it.
+#[derive(Deserialize, Serialize)]
+struct ExternalCheckResult {
+    identity: String,
+    conclusion: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ExternalCompletionInput {
+    expected_revision: i64,
+    /// Full revision on the target branch that contains the delivered change.
+    delivered_revision: String,
+    target_branch: String,
+    /// What was delivered and how (for example `scripts/ship.py`).
+    reason: String,
+    /// The required-check results on `delivered_revision`.
+    checks: Vec<ExternalCheckResult>,
+}
+
+/// Complete an open task whose change its owner already landed on the target branch
+/// outside the coordinator (`scripts/ship.py` for privileged paths). The service cannot
+/// reach the repository, so it records the human's attestation of the revision and the
+/// check results rather than observing them. Only a human may use it: an agent's
+/// candidate must go through review and integration.
+async fn complete_task_externally(
+    State(s): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Path((p, id)): Path<(String, String)>,
+    input: Result<Json<ExternalCompletionInput>, JsonRejection>,
+) -> Reply {
+    let input = payload(input)?;
+    crate::workflow::revision(&input.delivered_revision, "delivered_revision")?;
+    bounded(&input.target_branch, "target_branch", 255, true)?;
+    bounded(&input.reason, "reason", 4096, true)?;
+    if input.checks.is_empty() || input.checks.len() > 100 {
+        return Err(AppError::bad_request("Cite 1–100 required-check results."));
+    }
+    for check in &input.checks {
+        bounded(&check.identity, "check identity", 255, true)?;
+        if check.conclusion != "success" {
+            return Err(AppError::bad_request(
+                "Every cited required check must have conclusion success on the delivered revision.",
+            ));
+        }
+    }
+    let operation = format!("POST /api/v1/projects/{p}/tasks/{id}/complete-external");
+    let mut m = Mutation::begin(&s, &auth, &headers, &operation, &input).await?;
+    if m.actor.kind != "human" {
+        return Err(AppError::human_gate(
+            "task_external_completion",
+            "Only an authenticated human operator can complete a task delivered outside the coordinator; an agent's candidate goes through review and integration.",
+        ));
+    }
+    if let Some(v) = m.replay {
+        return Ok(response(v));
+    }
+    let proj = project(&mut m.tx, &p).await?;
+    if input.target_branch != proj.target_branch {
+        return Err(AppError::conflict(
+            "target_branch_mismatch",
+            "The delivered revision must be on the project's target branch.",
+        ));
+    }
+    let roster: Option<String> =
+        sqlx::query_scalar("SELECT required_checks_json FROM workflow_policies WHERE project_id=?")
+            .bind(&p)
+            .fetch_optional(&mut *m.tx)
+            .await?;
+    if let Some(roster) = roster {
+        let roster: Value = serde_json::from_str(&roster)?;
+        for required in roster.as_array().into_iter().flatten() {
+            let identity = required["identity"].as_str().unwrap_or_default();
+            if !input.checks.iter().any(|c| c.identity == identity) {
+                return Err(AppError::conflict(
+                    "required_check_missing",
+                    "Cite a result for every required check in the workflow policy roster.",
+                ));
+            }
+        }
+    }
+    let row = sqlx::query("SELECT lifecycle,revision,current_attempt_id,archived_at FROM tasks WHERE project_id=? AND id=? AND deleted_at IS NULL")
+        .bind(&p).bind(&id).fetch_optional(&mut *m.tx).await?.ok_or_else(AppError::not_found)?;
+    if row.get::<Option<i64>, _>("archived_at").is_some() {
+        return Err(AppError::conflict(
+            "task_archived",
+            "Restore this task before changing its lifecycle.",
+        ));
+    }
+    if row.get::<i64, _>("revision") != input.expected_revision {
+        return Err(AppError::conflict(
+            "task_revision_changed",
+            "The task changed. Reload it before applying this lifecycle action.",
+        ));
+    }
+    if row.get::<String, _>("lifecycle") != "open" {
+        return Err(AppError::conflict(
+            "task_lifecycle_invalid",
+            "Only an open task can be completed as delivered externally.",
+        ));
+    }
+    if row.get::<Option<String>, _>("current_attempt_id").is_some() {
+        return Err(AppError::conflict(
+            "task_attempt_protected",
+            "Release or resolve the current attempt before changing task lifecycle.",
+        ));
+    }
+    let protected: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM workflow_activities wa WHERE wa.subject_task_id=? AND wa.state IN ('queued','active','recovery_required')) + (SELECT count(*) FROM workflow_subjects ws WHERE ws.task_id=? AND ws.phase IN ('review','integration')) + (SELECT count(*) FROM workflow_activities wa WHERE wa.activity_task_id=?)")
+        .bind(&id).bind(&id).bind(&id).fetch_one(&mut *m.tx).await?;
+    if protected > 0 {
+        return Err(AppError::conflict(
+            "task_workflow_protected",
+            "Resolve active review or integration work before changing task lifecycle.",
+        ));
+    }
+    sqlx::query(
+        "UPDATE tasks SET lifecycle='done',blocked_reason=NULL,revision=revision+1 WHERE id=?",
+    )
+    .bind(&id)
+    .execute(&mut *m.tx)
+    .await?;
+    sqlx::query("UPDATE workflow_subjects SET phase='done',updated_at=? WHERE task_id=? AND phase='revision_needed'")
+        .bind(m.now)
+        .bind(&id)
+        .execute(&mut *m.tx)
+        .await?;
+    crate::workflow::ready_dependents(&mut m.tx, &id, m.now).await?;
+    let result = json!({"id":id,"lifecycle":"done","completed_externally":true,"delivered_revision":input.delivered_revision,"target_branch":input.target_branch,"checks":input.checks,"reason":input.reason});
+    let event_data = json!({"reason":input.reason,"actor_id":m.actor.id,"delivered_revision":input.delivered_revision,"target_branch":input.target_branch,"checks":input.checks});
+    Ok(response(
+        m.finish_with_event_data(
+            result,
+            &event_data,
+            Some(&p),
+            "task.completed_externally",
+            &id,
+        )
+        .await?,
+    ))
+}
+
+/// The task's recorded lifecycle changes (cancel, archive, restore, delete, external
+/// completion), newest first,
 /// and the tasks it replaced. Events recorded before reasons were kept carry no data; their
 /// `reason` is null rather than reconstructed.
 async fn lifecycle_history(c: &mut SqliteConnection, p: &str, id: &str) -> Result<Value, AppError> {
-    let rows = sqlx::query("SELECT e.seq,e.kind,e.actor_id,e.data_json,e.created_at,pr.name AS actor_name FROM events e LEFT JOIN principals pr ON pr.id=e.actor_id WHERE e.project_id=? AND e.record_id=? AND e.kind IN ('task.canceled','task.archived','task.restored','task.deleted') ORDER BY e.seq DESC LIMIT 20")
+    let rows = sqlx::query("SELECT e.seq,e.kind,e.actor_id,e.data_json,e.created_at,pr.name AS actor_name FROM events e LEFT JOIN principals pr ON pr.id=e.actor_id WHERE e.project_id=? AND e.record_id=? AND e.kind IN ('task.canceled','task.archived','task.restored','task.deleted','task.completed_externally') ORDER BY e.seq DESC LIMIT 20")
         .bind(p).bind(id).fetch_all(&mut *c).await?;
     let mut events = Vec::new();
     for r in &rows {
         let data: Value = serde_json::from_str(&r.get::<String, _>("data_json"))?;
-        events.push(json!({
+        let mut event = json!({
             "seq":r.get::<i64,_>("seq"),
             "action":r.get::<String,_>("kind").trim_start_matches("task.").to_owned(),
             "actor_id":data.get("actor_id").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| r.get("actor_id")),
@@ -920,7 +1066,13 @@ async fn lifecycle_history(c: &mut SqliteConnection, p: &str, id: &str) -> Resul
             "reason":data.get("reason").cloned().unwrap_or(Value::Null),
             "replacement_task_id":data.get("replacement_task_id").cloned().unwrap_or(Value::Null),
             "created_at":timestamp(r.get("created_at")),
-        }));
+        });
+        for key in ["delivered_revision", "target_branch", "checks"] {
+            if let Some(v) = data.get(key) {
+                event[key] = v.clone();
+            }
+        }
+        events.push(event);
     }
     let replaced = sqlx::query("SELECT e.record_id,e.actor_id,e.created_at,json_extract(e.data_json,'$.reason') AS reason,t.title,pr.name AS actor_name FROM events e JOIN tasks t ON t.id=e.record_id LEFT JOIN principals pr ON pr.id=e.actor_id WHERE e.project_id=? AND e.kind='task.canceled' AND json_extract(e.data_json,'$.replacement_task_id')=? AND t.deleted_at IS NULL AND t.lifecycle='canceled' ORDER BY e.seq DESC LIMIT 20")
         .bind(p).bind(id).fetch_all(&mut *c).await?;
