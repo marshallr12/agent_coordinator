@@ -1620,3 +1620,173 @@ async fn a_claim_never_outlasts_the_maximum_attempt_duration() {
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
     assert_eq!(refused["error"]["code"], "attempt_duration_exceeded");
 }
+
+#[tokio::test]
+async fn lifecycle_events_keep_the_reason_actor_and_replacement() {
+    let f = Fixture::new().await;
+    let p = f.project("lifecycle-reasons").await;
+    let (old_path, old) = task_with_origin(&f, &p, "old", "agent").await;
+    let (_, new) = task_with_origin(&f, &p, "new", "agent").await;
+    let (old_id, new_id) = (old["id"].as_str().unwrap(), new["id"].as_str().unwrap());
+    let body = json!({"expected_revision":1,"reason":"Superseded by a better plan.","replacement_task_id":new_id});
+    let (status, v) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("{old_path}/cancel"),
+            "cancel-old",
+            body,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = f.call(&f.a, "GET", &old_path, "", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let events = v["data"]["lifecycle_events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{v}");
+    assert_eq!(events[0]["action"], "canceled");
+    assert_eq!(events[0]["actor_id"], f.a.principal);
+    assert_eq!(events[0]["reason"], "Superseded by a better plan.");
+    assert_eq!(events[0]["replacement_task_id"], new_id);
+    assert!(events[0]["actor_name"].is_string(), "{v}");
+    assert!(v["data"]["replaces"].as_array().unwrap().is_empty());
+    let (status, v) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{new_id}"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let replaces = v["data"]["replaces"].as_array().unwrap();
+    assert_eq!(replaces.len(), 1, "{v}");
+    assert_eq!(replaces[0]["task_id"], old_id);
+    assert_eq!(replaces[0]["title"], "old");
+    assert_eq!(replaces[0]["reason"], "Superseded by a better plan.");
+    let (status, v) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("{old_path}/history?kind=events&limit=50"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let canceled = v["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["record"]["kind"] == "task.canceled")
+        .unwrap_or_else(|| panic!("{v}"));
+    let data = &canceled["record"]["data"];
+    assert_eq!(data["reason"], "Superseded by a better plan.");
+    assert_eq!(data["replacement_task_id"], new_id);
+    assert_eq!(data["actor_id"], f.a.principal);
+    // Archive and restore keep their reasons and carry no replacement.
+    let archive = json!({"expected_revision":2,"reason":"Tidy up."});
+    let (status, v) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("{old_path}/archive"),
+            "arch",
+            archive,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (_, v) = f.call(&f.a, "GET", &old_path, "", json!({})).await;
+    let events = v["data"]["lifecycle_events"].as_array().unwrap();
+    assert_eq!(events[0]["action"], "archived");
+    assert_eq!(events[0]["reason"], "Tidy up.");
+    assert!(events[0]["replacement_task_id"].is_null());
+    assert_eq!(events[1]["action"], "canceled");
+}
+
+#[tokio::test]
+async fn lifecycle_reason_backfill_copies_only_from_surviving_receipts() {
+    use sqlx::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let migrations = dir.path().join("schema35");
+    std::fs::create_dir(&migrations).unwrap();
+    for m in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 35)
+    {
+        let name = format!("{:04}_{}.sql", m.version, m.description.replace(' ', "_"));
+        std::fs::write(migrations.join(name), m.sql.as_str().as_bytes()).unwrap();
+    }
+    let database = dir.path().join("upgrade.sqlite3");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&database)
+        .create_if_missing(true)
+        .foreign_keys(false);
+    let mut old = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::migrate::Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&mut old)
+        .await
+        .unwrap();
+    let op = |action: &str, task: &str| format!("POST /api/v1/projects/p1/tasks/{task}/{action}");
+    // (operation, key, receipt result, receipt time, compaction time)
+    let cases = [
+        (
+            op("cancel", "t1"),
+            "k1",
+            r#"{"reason":"Replaced.","replacement_task_id":"t2"}"#,
+            10,
+            None,
+        ),
+        (
+            op("archive", "t1"),
+            "k2",
+            r#"{"reason":"Tidy.","replacement_task_id":null}"#,
+            20,
+            None,
+        ),
+        (op("cancel", "t3"), "k3", "null", 30, Some(99)),
+    ];
+    for (operation, key, json, at, compacted) in &cases {
+        sqlx::query("INSERT INTO mutation_receipts(principal_id,operation,key,fingerprint,result_json,created_at,authority_epoch,compacted_at) VALUES('u1',?,?,'f',?,?,'initial',?)")
+            .bind(operation).bind(key).bind(json).bind(at).bind(compacted).execute(&mut old).await.unwrap();
+    }
+    for (kind, task, at) in [
+        ("task.canceled", "t1", 10),
+        ("task.archived", "t1", 20),
+        ("task.canceled", "t3", 30),
+        ("task.deleted", "t4", 40),
+    ] {
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES('p1','u1',?,?,'{}',?)")
+            .bind(kind).bind(task).bind(at).execute(&mut old).await.unwrap();
+    }
+    old.close().await.unwrap();
+    let state = AppState::open(Config {
+        database_path: database,
+        public_origin: "http://127.0.0.1:8080".into(),
+        allow_insecure_loopback: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT record_id||kind,data_json FROM events WHERE project_id='p1' ORDER BY seq",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    let data: Vec<Value> = rows
+        .iter()
+        .map(|r| serde_json::from_str(&r.1).unwrap())
+        .collect();
+    assert_eq!(
+        data[0],
+        json!({"reason":"Replaced.","actor_id":"u1","replacement_task_id":"t2"})
+    );
+    assert_eq!(data[1], json!({"reason":"Tidy.","actor_id":"u1"}));
+    assert_eq!(data[2], json!({}), "a compacted receipt is not used");
+    assert_eq!(data[3], json!({}), "no receipt, no invented data");
+}
