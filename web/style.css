@@ -326,6 +326,15 @@ a.nav-item { text-decoration: none; }
 #shared-view .toolbar, .report-filters { flex-wrap: wrap; }
 .report-filters .select-label { flex: 1 1 190px; }
 .report-filters .select-label input { width: 100%; }
+.filter-bar { flex-wrap: wrap; align-items: end; }
+.filter-bar .select-label { flex: 1 1 150px; min-width: 0; }
+.filter-bar .checkbox-label { flex: 1 1 100%; font-size: 13px; }
+.record-chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .5rem 0 0; }
+.record-chip { display: inline-flex; align-items: center; min-height: 25px; padding: 4px 9px; border: 0; border-radius: 999px; color: var(--navy); background: var(--pill-bg); font-size: 11px; font-weight: 800; overflow-wrap: anywhere; }
+.record-chip.scope-chip { color: var(--pill-run-ink); background: var(--pill-run-bg); }
+button.record-chip { cursor: pointer; color: var(--pill-ready-ink); background: var(--teal-soft); }
+button.record-chip:hover { background: var(--hover-ghost); }
+button.record-chip:focus-visible { outline: 3px solid var(--teal); outline-offset: 1px; }
 #shared-view .toolbar-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
 #shared-view .toolbar-actions .button { width: 38px; margin-left: 0; }
 .shared-records .record-actions .task-action-icon { display: inline-grid; place-items: center; }

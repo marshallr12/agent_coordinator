@@ -87,7 +87,7 @@ is outside every view.
 | Autonomy | `loadAutonomy`: open, window select, **Refresh** | Cleared and rebuilt | Any figure of a card; a source that fails shows its error in its own card | Cards keyed by section; signature is the card's source data |
 | Project card autonomy summary | `loadAutonomySummary` after each project load, at most once a minute per project | Not shown | Counts, last canary, today's cost | Text patched in place; the card is not rebuilt |
 | Connected sessions | `loadAgentSessions`: open, window select, **Refresh** | Cleared and rebuilt | A session's activity and held attempts | Cards keyed by session id |
-| Knowledge & evidence | `loadShared`: open, selects, **Refresh**, **Load more**, search, post-mutation | Cleared and rebuilt, discarding history a person had expanded | Record fields; the rules text of a context search | Cards keyed by kind and record id; expanded history survives while the record is unchanged |
+| Knowledge & evidence | `loadShared`: open, selects, filters, tag chips, **Refresh**, **Load more**, search, post-mutation | Cleared and rebuilt, discarding history a person had expanded | Record fields, tags and scope; the rules text of a context search | Cards keyed by kind and record id; expanded history survives while the record is unchanged. A changed project, record kind or filter (tag, kind, status, include-shared; or search text, task, component, environment, version) starts a fresh list; **Load more** keeps the filters of the list on screen |
 | Resources | `loadResources`: open, **Refresh**, poll, **Load more**, create | Cleared and rebuilt every card | Held units, description; resources added | Cards keyed by resource id |
 | Access: credentials | `loadCredentials`: open, **Refresh**, poll, post-mutation | Cleared and rebuilt every row | Revocation, rotation, new credentials | Rows keyed by credential id (signature also records whether the row offers a replacement) |
 | Access: operators | `loadOperators`: open, **Refresh**, **Load more**, post-mutation | Cleared and rebuilt | Role, enabled, revision | Rows keyed by operator id |
@@ -126,6 +126,17 @@ or page falls back to the overview and replaces the hash. Dialog state is not
 part of the route. `scripts/test_deep_links.mjs` clicks through ten views,
 walks back and forward through them, and opens a task link directly; it runs
 the same way as `scripts/test_ui_refresh.mjs`.
+
+## Knowledge filters
+
+`scripts/test_knowledge_filters.mjs` verifies the Knowledge & evidence filters in
+a fixture-backed browser: the lessons tag, kind, status and include-shared
+controls and the context task, component, environment and version inputs send
+the matching `GET .../knowledge` and `GET .../context` parameters (empty values
+are omitted), tag and scope chips render as text and a tag chip applies its tag
+filter, and any filter change restarts pagination while **Load more** stays
+within the displayed filter. It runs the same way as
+`scripts/test_ui_refresh.mjs`.
 
 ## Status indicators
 
