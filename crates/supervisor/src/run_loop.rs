@@ -190,6 +190,9 @@ pub trait Driver {
     fn last_event_ms(&self, launch: &Launch) -> Option<i64>;
     /// Renews the attempt in the launch's session.
     fn renew(&mut self, launch: &Launch, lease: &Lease) -> Result<Lease>;
+    /// The launch attempt's state (`active`, `submitted`, `released`, ...)
+    /// from the task detail; `None` when it cannot be read.
+    fn attempt_state(&mut self, launch: &Launch, lease: &Lease) -> Option<String>;
     /// Releases the attempt in the launch's session with a handoff
     /// `summary`; an attempt that is no longer active counts as released.
     fn release(&mut self, launch: &Launch, lease: &Lease, summary: &str) -> Result<()>;
@@ -385,13 +388,31 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
     let result = (record.save(config).context("record the launch"))
         .and_then(|()| run_claimed(driver, config, launch, &mut record, lease));
     let cost = record::settle_cost(driver, config, launch, &mut record);
-    if result.as_ref().is_ok_and(|ended| ended.submitted) {
+    if submitted(driver, launch, &record, &result) {
         record::mark_submitted(config, &mut record);
     } else {
         let summary = handoff(&result, &cost);
         record::release(driver, config, launch, &mut record, &summary);
     }
     result.map(|ended| ended.code)
+}
+
+/// Whether the agent submitted the attempt: a refused renewal showed it, or
+/// the attempt's state says so once the launch exited by itself. A launch
+/// that never ran (`Err`) cannot have submitted.
+fn submitted(
+    driver: &mut impl Driver,
+    launch: &Launch,
+    record: &LaunchRecord,
+    result: &Result<lease::Ended>,
+) -> bool {
+    let Ok(ended) = result else {
+        return false;
+    };
+    ended.submitted
+        || driver
+            .attempt_state(launch, &record.lease())
+            .is_some_and(|state| state == "submitted")
 }
 
 /// Registers the claimed attempt's checkout and installs the prompt that

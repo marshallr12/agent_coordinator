@@ -11,7 +11,7 @@ use super::binding::{self, Binding};
 use super::lease::Lease;
 use super::live_review::LiveReviewer;
 use super::record::{self, LaunchRecord};
-use super::renewal::{AttemptEnded, CliError, attempt_state};
+use super::renewal::{self, AttemptEnded, CliError, attempt_state};
 use super::review::ReviewDriver;
 use super::{Driver, Launch, rooted};
 use crate::clone;
@@ -155,7 +155,7 @@ impl LiveDriver {
     }
 
     /// The launch attempt's state from its task's detail, if readable.
-    fn attempt_state(&self, launch: &Launch, lease: &Lease) -> Option<String> {
+    fn read_attempt_state(&self, launch: &Launch, lease: &Lease) -> Option<String> {
         let (project, task) = (&self.binding.project_id, &launch.suggestion.task);
         let path = format!("/api/v1/projects/{project}/tasks/{task}");
         let call = crate::shadow::get_data(&self.client, &path, &[]);
@@ -376,6 +376,12 @@ impl Driver for LiveDriver {
             state,
         }
         .into())
+    }
+
+    /// Reads the attempt's state, once more if the first read fails: an
+    /// unreadable state must not make a submitted attempt look unsubmitted.
+    fn attempt_state(&mut self, launch: &Launch, lease: &Lease) -> Option<String> {
+        renewal::retry_once(|| self.read_attempt_state(launch, lease))
     }
 
     /// Releases through the CLI with the handoff on standard input; a 409

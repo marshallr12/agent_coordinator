@@ -34,6 +34,42 @@ fn a_submitted_attempt_drains_the_launch_without_a_release() {
 }
 
 #[test]
+fn a_launch_that_exits_after_submitting_is_not_released() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fake = Fake::new();
+    fake.attempt_state = Some("submitted".into());
+    let outcome = iterate(&mut fake, &config(dir.path()));
+    let launched = Outcome::Launched {
+        task: "t1".into(),
+        exit_code: 0,
+    };
+    assert_eq!(outcome, launched);
+    assert!(
+        !fake.steps.contains(&"release".to_owned()),
+        "{:?}",
+        fake.steps
+    );
+    assert!(fake.releases.is_empty(), "{:?}", fake.releases);
+    assert!(LaunchRecord::load_all(&config(dir.path())).is_empty());
+    assert_eq!(
+        (left(dir.path(), "clones"), left(dir.path(), "runs")),
+        (0, 0)
+    );
+}
+
+#[test]
+fn a_launch_that_exits_with_its_attempt_unsubmitted_is_released() {
+    for state in [Some("active"), None] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = Fake::new();
+        fake.attempt_state = state.map(String::from);
+        iterate(&mut fake, &config(dir.path()));
+        assert_eq!(fake.steps[5..], ["start", "release"], "{state:?}");
+        assert!(fake.releases[0].contains("the launch exited with code 0"));
+    }
+}
+
+#[test]
 fn an_attempt_ended_otherwise_drains_and_releases_with_the_reason() {
     let dir = tempfile::tempdir().unwrap();
     let mut fake = ended_at_minute_3("expired");

@@ -37,6 +37,8 @@ struct Fake {
     /// From when renewals fail, and how: the attempt ended (`Some`) or a
     /// transient failure (`None`).
     renew_fails: Option<(i64, Option<renewal::AttemptEnded>)>,
+    /// The attempt's state as the task detail reports it; `None` is unreadable.
+    attempt_state: Option<String>,
 }
 
 impl Fake {
@@ -67,6 +69,7 @@ impl Fake {
             unhealthy: Vec::new(),
             expiry: None,
             renew_fails: None,
+            attempt_state: None,
         }
     }
 
@@ -171,6 +174,10 @@ impl Driver for Fake {
             progress_age_ms: self.now - self.checkpoint_at,
             ..lease.clone()
         })
+    }
+
+    fn attempt_state(&mut self, _launch: &Launch, _lease: &Lease) -> Option<String> {
+        self.attempt_state.clone()
     }
 
     fn release(&mut self, _launch: &Launch, lease: &Lease, summary: &str) -> Result<()> {

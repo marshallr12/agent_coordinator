@@ -247,8 +247,8 @@ fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
         ("NO_PROXY".into(), "127.0.0.1,localhost".into()),
         ("no_proxy".into(), "127.0.0.1,localhost".into()),
         // The role's in-launch gate skips, with a note, the tests that need
-        // the real Bubblewrap or host resources a launch lacks; CI's required
-        // checks run them before the integrator lands anything.
+        // the real Bubblewrap or host resources a launch lacks; the project's
+        // required checks run them before the integrator lands anything.
         (NESTED_SANDBOX_ENV.into(), "1".into()),
     ];
     for name in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {

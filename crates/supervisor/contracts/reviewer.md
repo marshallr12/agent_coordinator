@@ -30,9 +30,9 @@ release anything.
    `AGENTC_TEST_NESTED_SANDBOX=1`, so tests that need the real Bubblewrap,
    user namespaces or host resources the sandbox lacks print
    `note: skipping <test>` and pass without running. Those skips are
-   expected, not failures: CI's required checks run the skipped tests, and
-   the integrator requires those checks green on the integrated revision
-   before it lands anything. Judge "full gate green" by the in-launch gate:
+   expected, not failures: the project's required checks run the skipped
+   tests, and the integrator requires those checks green on the integrated
+   revision before it lands anything. Judge "full gate green" by the in-launch gate:
    every command succeeds, with each nested skip reported as skipped. A skip
    the change adds without a real sandbox limitation is a finding.
 
