@@ -1,0 +1,18 @@
+# Workload and adversarial fixture for ../windows-containment-probe.py.
+#
+# The probe copies this crate into a disposable launch directory, then builds
+# and tests it inside the Windows launch boundary. It has no dependencies, so
+# the contained build needs no network, registry cache or vendored sources; the
+# committed lockfile and `--locked` keep it that way.
+[package]
+name = "agentc-windows-probe-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "fixture"
+path = "src/main.rs"
+
+# Deliberately not a member of the repository workspace.
+[workspace]
