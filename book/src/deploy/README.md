@@ -785,7 +785,11 @@ Each poll it:
 7. removes the clone and the run directory once the run is terminal (or never
    started), then the record; a started run without a terminal record is kept
    for recovery;
-8. rewrites `/var/lib/agentc/heartbeat.json` (poll count, time, outcome).
+8. rewrites `/var/lib/agentc/heartbeat.json` (poll count, time, outcome) after
+   every poll, and every 30 seconds while an implementer or reviewer launch
+   runs, adding `"launch": {"role", "task"}` (the poll count and outcome stay
+   those of the last finished poll). A heartbeat older than the canary's 300
+   seconds therefore means a hung or stopped supervisor, not a long launch.
 
 Renewal is progress-gated. At the service's `renew_after_seconds` cadence the
 loop renews only while `launch-root` is alive, `$RUN/events.jsonl` (the
