@@ -178,6 +178,19 @@ fn runs_of(runs: &[CheckRun], check: &RosterCheck, sha: &str) -> Vec<CheckRun> {
     mine
 }
 
+/// The latest attempt of each wanted check on `sha` that has not completed.
+pub(crate) fn unfinished_runs(
+    runs: &[CheckRun],
+    wanted: &[RosterCheck],
+    sha: &str,
+) -> Vec<CheckRun> {
+    wanted
+        .iter()
+        .filter_map(|check| runs_of(runs, check, sha).pop())
+        .filter(|run| run.conclusion.is_none())
+        .collect()
+}
+
 /// The completed attempts of every wanted check on `sha`, or `None` while
 /// any check has no run yet or its latest attempt is still running.
 pub(crate) fn attempts_by_check(

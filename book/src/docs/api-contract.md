@@ -515,6 +515,15 @@ reports and only a human resolves one.
   for it is `receipt_conflict`. The response names the deciding run for that
   check and workflow blob: the latest attempt of the latest run.
 
+- `POST /api/v1/projects/{project_id}/integrator/check-progress` with
+  `{result_id, head_sha, runs:[{check_name, status, run_id?, run_attempt?,
+  started_at?}]}` replaces the result's snapshot of required check runs that are
+  still `queued` or `in_progress` (at most 100; completed runs are receipts).
+  `head_sha` must equal `r` (`progress_head_mismatch`) and every `check_name`
+  must be in the result's roster (`progress_check_not_required`). The snapshot
+  and its time feed the `processing` object that task lists and details show for
+  a `waiting_integration` task (see the workflow specification); it grants no
+  authority, owner or lease, and the integrator posts it best-effort on each poll.
 - `POST /api/v1/projects/{project_id}/integrator/push-authority` with
   `{result_id}` authorizes pushing `r`. It refuses `checks_not_passed` (details
   list `pending` and `failed` roster checks) unless every roster check has a

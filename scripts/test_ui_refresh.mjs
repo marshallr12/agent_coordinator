@@ -373,6 +373,8 @@ async function main() {
     await click('#back-to-projects'); await waitPage("!document.querySelector('#overview-view').hidden", 'overview');
     await click('.project-open');
     await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 25", 'task queue');
+    // The blockers summary loads its digest and reports after the queue; let it settle before watching for changes.
+    await waitPage("document.querySelector('#blockers-groups').children.length > 0", 'blockers summary');
     await evaluate("(() => { const box = document.querySelector('#tasks-auto-refresh'); box.checked = true; box.dispatchEvent(new Event('change', { bubbles: true })); })()");
     await quiet('task queue refresh button', 'tasks', clickAndWait('#refresh-tasks', '/p1/tasks?'));
     await quiet('task queue poll', 'tasks', pollTick('GET /api/v1/projects/p1/tasks'));

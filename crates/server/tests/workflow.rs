@@ -7198,3 +7198,337 @@ async fn task_kind_change_protects_current_submission_even_after_reopening() {
     let (status, unchanged) = f.call(&f.admin, "PATCH", &path, edit).await;
     assert_eq!(status, StatusCode::OK, "{unchanged}");
 }
+
+/// The subject task's `processing` as the task list and the task details show it.
+async fn integration_processing(f: &Fixture, p: &str, t: &Value) -> (Value, Value, Value) {
+    let id = t["id"].as_str().unwrap();
+    let (status, list) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let row = list["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == id)
+        .unwrap_or_else(|| panic!("task {id} is listed: {list}"))
+        .clone();
+    let (status, detail) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{id}"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        row["processing"], detail["data"]["processing"],
+        "list and details agree"
+    );
+    (
+        row["work_status"].clone(),
+        row["processing"].clone(),
+        detail["data"].clone(),
+    )
+}
+
+/// Posts the integrator's snapshot of unfinished runs of the roster check.
+async fn check_progress(
+    f: &Fixture,
+    i: &Caller,
+    p: &str,
+    result: &str,
+    runs: Value,
+) -> (StatusCode, Value) {
+    integrator_post(
+        f,
+        i,
+        p,
+        "check-progress",
+        json!({"result_id":result,"head_sha":R,"runs":runs}),
+    )
+    .await
+}
+
+/// The integrator polls the queue, which is its heartbeat.
+async fn heartbeat(f: &Fixture, i: &Caller, p: &str) {
+    let (status, v) = f
+        .call(
+            i,
+            "GET",
+            &format!("/api/v1/projects/{p}/integrator/queue"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn integration_status_shows_queued_running_and_publishing_work() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "integration-status").await;
+    heartbeat(&f, &i, &p).await;
+    let (status, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (status, processing),
+        (json!("waiting_integration"), Value::Null),
+        "no result is pinned yet"
+    );
+    let result = pinned_result(&f, &i, &p, &integration["submission_id"], T0).await;
+    let (_, processing, detail) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (processing["stage"].clone(), processing["active"].clone()),
+        (json!("awaiting_checks"), json!(false))
+    );
+    assert_eq!(
+        processing["holders"],
+        json!([]),
+        "no agent owner is invented"
+    );
+    assert_eq!(processing["result_id"], result);
+    assert_eq!(processing["result_revision"], R);
+    assert_eq!(
+        processing["candidate_revision"],
+        "2222222222222222222222222222222222222222"
+    );
+    assert_eq!(processing["submission_id"], integration["submission_id"]);
+    assert_eq!(detail["lifecycle"], "open");
+    assert!(
+        detail["current_attempt_id"].is_null(),
+        "no owner or lease is created"
+    );
+    let queued = json!([{"check_name":CHECK,"status":"queued","run_id":901,"run_attempt":1}]);
+    let (status, v) = check_progress(&f, &i, &p, &result, queued).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (_, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (processing["stage"].clone(), processing["active"].clone()),
+        (json!("verification_queued"), json!(false)),
+        "queued is not running: {processing}"
+    );
+    assert_eq!(
+        processing["checks"],
+        json!({"total":1,"passed":0,"failed":0,"running":0,"queued":1,"pending":0})
+    );
+    let running = json!([{"check_name":CHECK,"status":"in_progress","run_id":901,"run_attempt":1,"started_at":"2027-01-15T08:00:00Z"}]);
+    check_progress(&f, &i, &p, &result, running).await;
+    let (_, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (processing["stage"].clone(), processing["active"].clone()),
+        (json!("verifying"), json!(true))
+    );
+    assert_eq!(processing["check_runs"][0]["state"], "running");
+    assert_eq!(processing["check_runs"][0]["run_id"], 901);
+    assert_eq!(
+        processing["check_runs"][0]["started_at"],
+        "2027-01-15T08:00:00Z"
+    );
+    // The snapshot ages out: an old report alone is unknown, never running.
+    f.clock.0.fetch_add(200_000, Ordering::SeqCst);
+    let (_, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (processing["stage"].clone(), processing["active"].clone()),
+        (json!("verification_unknown"), json!(false))
+    );
+    // A fresh snapshot without a fresh heartbeat is unknown as well.
+    let running = json!([{"check_name":CHECK,"status":"in_progress","run_id":901,"run_attempt":1}]);
+    check_progress(&f, &i, &p, &result, running).await;
+    assert_eq!(
+        integration_processing(&f, &p, &t).await.1["stage"],
+        "verification_unknown"
+    );
+    heartbeat(&f, &i, &p).await;
+    assert_eq!(
+        integration_processing(&f, &p, &t).await.1["stage"],
+        "verifying"
+    );
+    // The run completes: receipts decide and nothing is unfinished.
+    receipt(&f, &i, &p, &result, 901, "success").await;
+    check_progress(&f, &i, &p, &result, json!([])).await;
+    let (_, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (processing["stage"].clone(), processing["active"].clone()),
+        (json!("checks_passed"), json!(false))
+    );
+    assert_eq!(processing["checks"]["passed"], 1);
+    // Push authority is the publication window.
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(
+        (status, v["data"]["granted"].clone()),
+        (StatusCode::OK, json!(true)),
+        "{v}"
+    );
+    let (_, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (processing["stage"].clone(), processing["active"].clone()),
+        (json!("publishing"), json!(true))
+    );
+    assert!(processing["authority_expires_at"].is_string());
+    f.clock.0.fetch_add(601_000, Ordering::SeqCst);
+    let (_, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (processing["stage"].clone(), processing["active"].clone()),
+        (json!("publication_unconfirmed"), json!(false))
+    );
+    // The observation ends it: the task is complete and nothing is processing.
+    let (status, v) = observe(&f, &i, &p, &result, R, "contained").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!((status, processing), (json!("done"), Value::Null));
+}
+
+#[tokio::test]
+async fn integration_status_ignores_failed_stale_superseded_and_mismatched_evidence() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "integration-evidence").await;
+    heartbeat(&f, &i, &p).await;
+    let result = pinned_result(&f, &i, &p, &integration["submission_id"], T0).await;
+    let running = json!([{"check_name":CHECK,"status":"in_progress","run_id":901,"run_attempt":1,"started_at":"2027-01-15T08:00:00Z"}]);
+    // Progress binds to R and to the roster, only the integrator writes it, and completed runs are receipts.
+    let wrong_head = integrator_post(
+        &f,
+        &i,
+        &p,
+        "check-progress",
+        json!({"result_id":result,"head_sha":T0,"runs":running}),
+    )
+    .await;
+    assert_eq!(
+        (wrong_head.0, wrong_head.1["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("progress_head_mismatch"))
+    );
+    let other = json!([{"check_name":"Unrequired","status":"queued","run_id":1,"run_attempt":1}]);
+    let (status, v) = check_progress(&f, &i, &p, &result, other).await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("progress_check_not_required"))
+    );
+    let completed = json!([{"check_name":CHECK,"status":"completed","run_id":901,"run_attempt":1}]);
+    assert_eq!(
+        check_progress(&f, &i, &p, &result, completed).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, _) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("/api/v1/projects/{p}/integrator/check-progress"),
+            json!({"result_id":result,"head_sha":R,"runs":[]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        integration_processing(&f, &p, &t).await.1["stage"],
+        "awaiting_checks",
+        "refused snapshots change nothing"
+    );
+    // A failed deciding run is shown as failed; a newer rerun in progress supersedes it.
+    check_progress(&f, &i, &p, &result, running.clone()).await;
+    receipt(&f, &i, &p, &result, 900, "failure").await;
+    assert_eq!(
+        integration_processing(&f, &p, &t).await.1["stage"],
+        "verifying",
+        "run 901 is newer than failed run 900"
+    );
+    check_progress(&f, &i, &p, &result, json!([])).await;
+    let (_, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (processing["stage"].clone(), processing["active"].clone()),
+        (json!("checks_failed"), json!(false))
+    );
+    assert_eq!(processing["checks"]["failed"], 1);
+    // A snapshot older than the failed run it would hide is not newer evidence.
+    let older = json!([{"check_name":CHECK,"status":"in_progress","run_id":800,"run_attempt":1}]);
+    check_progress(&f, &i, &p, &result, older).await;
+    assert_eq!(
+        integration_processing(&f, &p, &t).await.1["stage"],
+        "checks_failed"
+    );
+    // Evidence for another candidate revision never shows this task as running.
+    check_progress(&f, &i, &p, &result, running).await;
+    assert_eq!(
+        integration_processing(&f, &p, &t).await.1["stage"],
+        "verifying"
+    );
+    sqlx::query(
+        "UPDATE integrator_results SET c='9999999999999999999999999999999999999999' WHERE id=?",
+    )
+    .bind(&result)
+    .execute(&f.state.pool)
+    .await
+    .unwrap();
+    let (status, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (status, processing),
+        (json!("waiting_integration"), Value::Null),
+        "mismatched candidate"
+    );
+    sqlx::query(
+        "UPDATE integrator_results SET c='2222222222222222222222222222222222222222' WHERE id=?",
+    )
+    .bind(&result)
+    .execute(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        integration_processing(&f, &p, &t).await.1["stage"],
+        "verifying"
+    );
+    sqlx::query("UPDATE integrator_check_progress SET head_sha=? WHERE result_id=?")
+        .bind(T0)
+        .bind(&result)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        integration_processing(&f, &p, &t).await.1["stage"],
+        "checks_failed",
+        "a snapshot for another revision is ignored"
+    );
+    // A superseded submission is not the current candidate.
+    sqlx::query("UPDATE submissions SET superseded_at=1 WHERE id=?")
+        .bind(integration["submission_id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(integration_processing(&f, &p, &t).await.1, Value::Null);
+}
+
+#[tokio::test]
+async fn integration_status_is_absent_for_agent_owned_integration() {
+    let f = Fixture::new().await;
+    let (p, t, integration) = integrating_code_task(&f, "integration-legacy").await;
+    let (status, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (status, processing),
+        (json!("waiting_integration"), Value::Null)
+    );
+    let i = integrator_caller(&f).await;
+    let (status, v) = integrator_post(
+        &f,
+        &i,
+        &p,
+        "check-progress",
+        json!({"result_id":"missing","head_sha":R,"runs":[]}),
+    )
+    .await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("integration_owned_by_agents")),
+        "{integration}"
+    );
+    let (status, claimed) = f.claim_activity(&f.c, &p, &integration, 2, 1).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let (status, processing, _) = integration_processing(&f, &p, &t).await;
+    assert_eq!(
+        (status, processing),
+        (json!("integrating"), Value::Null),
+        "the agent path keeps its own state"
+    );
+}

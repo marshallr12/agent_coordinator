@@ -212,6 +212,19 @@ pub struct Receipt {
     pub conclusion: String,
 }
 
+/// A required check run still queued or in progress on R, as the
+/// integrator's latest poll saw it (`POST …/integrator/check-progress`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ProgressRun {
+    pub check_name: String,
+    /// `queued` until the job starts, then `in_progress`.
+    pub status: &'static str,
+    pub run_id: i64,
+    pub run_attempt: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+}
+
 /// Attested tip ancestry relative to a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ancestry {
@@ -370,6 +383,26 @@ impl Service {
         let body = json!(receipt);
         self.post(project, "receipts", &body, &body_key("receipt", &body, ""))
             .await
+    }
+
+    /// Replaces the result's snapshot of unfinished required check runs. A
+    /// poll posts it with the time as `nonce`, so an unchanged snapshot is a
+    /// fresh observation and not a replay of the last one.
+    pub async fn record_progress(
+        &self,
+        project: &str,
+        result: &ResultRecord,
+        runs: &[ProgressRun],
+        nonce: &str,
+    ) -> Result<Reply<Value>> {
+        let body = json!({"result_id": result.id, "head_sha": result.r, "runs": runs});
+        self.post(
+            project,
+            "check-progress",
+            &body,
+            &body_key("progress", &body, nonce),
+        )
+        .await
     }
 
     /// Asks for push authority; `data.granted` may be false (back to review).

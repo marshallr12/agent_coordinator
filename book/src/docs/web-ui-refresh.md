@@ -146,6 +146,21 @@ work in both the task list and the task detail, live updates without a reload,
 tooltips on focus, and reduced motion. Run it with
 `CHROME_BIN=/path/to/chrome node scripts/test_status_indicators.mjs`.
 
+`scripts/test_integration_status.mjs` covers the integrator's activity on a
+`waiting_integration` task, in the same fixture-backed way. The badge reads
+Verification Queued, Verifying, Checks Passed, Checks Failed, Verification
+Unknown, Publishing or Publication Unconfirmed; only Verifying and Publishing
+animate, and the tooltip names the required-check counts and says no agent owns
+the work. The status filter and counts still follow `work_status`. A row links
+the integrator's result revision to its checks page through the forge-link
+helper only for a recognised repository and a full revision, and the link does
+not open the task. Evidence whose stage does not belong to the task's status
+(done, blocked, ready again) shows nothing. The task details add an
+**Integrator** entry with the candidate and result revisions, the integrator's
+last report time and each required check's state. Unchanged refreshes make no
+DOM mutation and a transition repaints only its own row. Run it with
+`CHROME_BIN=/path/to/chrome node scripts/test_integration_status.mjs`.
+
 ## Blockers summary
 
 The task queue opens with a **Blockers** card. It groups the loaded queue by the
