@@ -1416,7 +1416,7 @@ fn checkout_value(r: &sqlx::sqlite::SqliteRow) -> Value {
     json!({"attempt_id":r.get::<String,_>("attempt_id"),"workstation_id":r.get::<String,_>("workstation_id"),"identity":r.get::<String,_>("identity"),"path":r.get::<String,_>("path"),"branch":r.get::<String,_>("branch"),"base_revision":r.get::<String,_>("base_revision"),"created_at":timestamp(r.get("created_at"))})
 }
 fn checkpoint_value(r: &sqlx::sqlite::SqliteRow) -> Value {
-    json!({"id":r.get::<String,_>("id"),"attempt_id":r.get::<String,_>("attempt_id"),"summary":r.get::<String,_>("summary"),"current_action":r.get::<String,_>("current_action"),"next_step":r.get::<String,_>("next_step"),"blockers":serde_json::from_str::<Value>(&r.get::<String,_>("blockers_json")).unwrap_or(Value::Null),"created_at":timestamp(r.get("created_at"))})
+    json!({"id":r.get::<String,_>("id"),"attempt_id":r.get::<String,_>("attempt_id"),"summary":r.get::<String,_>("summary"),"current_action":r.get::<String,_>("current_action"),"next_step":r.get::<String,_>("next_step"),"blockers":serde_json::from_str::<Value>(&r.get::<String,_>("blockers_json")).unwrap_or(Value::Null),"revision":r.get::<Option<String>,_>("revision"),"created_at":timestamp(r.get("created_at"))})
 }
 async fn attempt_detail(
     State(s): State<AppState>,
@@ -1844,15 +1844,15 @@ async fn add_checkpoint(
         .await?;
     }
     let checkpoint_id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO checkpoints(id,project_id,attempt_id,summary,current_action,next_step,blockers_json,created_at) VALUES(?,?,?,?,?,?,?,?)")
-        .bind(&checkpoint_id).bind(p).bind(id).bind(&input.summary).bind(&input.current_action).bind(&input.next_step).bind(serde_json::to_string(&input.blockers)?).bind(m.now).execute(&mut *m.tx).await?;
+    sqlx::query("INSERT INTO checkpoints(id,project_id,attempt_id,summary,current_action,next_step,blockers_json,created_at,revision) VALUES(?,?,?,?,?,?,?,?,?)")
+        .bind(&checkpoint_id).bind(p).bind(id).bind(&input.summary).bind(&input.current_action).bind(&input.next_step).bind(serde_json::to_string(&input.blockers)?).bind(m.now).bind(&input.revision).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE attempts SET last_progress_at=? WHERE id=?")
         .bind(m.now)
         .bind(id)
         .execute(&mut *m.tx)
         .await?;
     Ok(
-        json!({"id":checkpoint_id,"attempt_id":id,"summary":input.summary,"current_action":input.current_action,"next_step":input.next_step,"blockers":input.blockers,"contributor_session_ids":input.contributor_session_ids,"created_at":timestamp(m.now)}),
+        json!({"id":checkpoint_id,"attempt_id":id,"summary":input.summary,"current_action":input.current_action,"next_step":input.next_step,"blockers":input.blockers,"contributor_session_ids":input.contributor_session_ids,"revision":input.revision,"created_at":timestamp(m.now)}),
     )
 }
 async fn checkpoint(
@@ -1872,6 +1872,7 @@ async fn checkpoint(
     for b in &input.blockers {
         bounded(b, "blocker", 2048, true)?;
     }
+    crate::recovery_evidence::validate_revision(input.revision.as_deref(), "revision")?;
     let mut m = Mutation::begin(
         &s,
         &auth,
@@ -1929,6 +1930,7 @@ async fn release(
             generation: input.generation,
             summary: input.summary.clone(),
             contributor_session_ids: vec![],
+            revision: None,
             current_action: String::new(),
             next_step: String::new(),
             blockers: if input.blocked {
@@ -1973,14 +1975,15 @@ async fn recovery_resolution(
 ) -> Reply {
     let input = payload(body)?;
     bounded(&input.summary, "summary", 8192, true)?;
-    if !["resume", "restart"].contains(&input.disposition.as_str())
-        || !input.saved_work_checked
-        || !input.running_jobs_checked
-    {
+    if !["resume", "restart"].contains(&input.disposition.as_str()) {
         return Err(AppError::bad_request(
-            "Recovery must inspect saved work and running jobs before choosing resume or restart. Release as blocked if inspection is incomplete.",
+            "Recovery disposition must be resume or restart. Release as blocked if inspection is incomplete.",
         ));
     }
+    crate::recovery_evidence::validate_revision(
+        input.fetched_revision.as_deref(),
+        "fetched_revision",
+    )?;
     let mut m = Mutation::begin(
         &s,
         &auth,
@@ -2002,6 +2005,7 @@ async fn recovery_resolution(
         ));
     }
     crate::jobs::ensure_attempt_quiescent(&mut m.tx, &p, &a.task_id).await?;
+    let evidence = crate::recovery_evidence::establish(&mut m.tx, &a, &input).await?;
     add_checkpoint(
         &mut m,
         &p,
@@ -2011,6 +2015,7 @@ async fn recovery_resolution(
             summary: input.summary.clone(),
             current_action: format!("Recovery disposition: {}", input.disposition),
             contributor_session_ids: vec![],
+            revision: None,
             next_step: "Prepare an isolated checkout before continuing.".into(),
             blockers: vec![],
         },
@@ -2023,7 +2028,7 @@ async fn recovery_resolution(
     let updated = attempt(&mut m.tx, &p, &id).await?;
     Ok(response(
         m.finish(
-            json!({"attempt":updated.value(),"disposition":input.disposition}),
+            json!({"attempt":updated.value(),"disposition":input.disposition,"evidence":evidence.label()}),
             Some(&p),
             "recovery.resolved",
             &id,

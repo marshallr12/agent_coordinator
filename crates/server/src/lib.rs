@@ -25,6 +25,7 @@ pub mod next;
 pub mod objectives;
 pub mod operator_access;
 pub mod project_sessions;
+mod recovery_evidence;
 pub mod restore;
 mod revert_rules;
 pub mod reverts;

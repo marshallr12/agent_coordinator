@@ -366,6 +366,13 @@ agent-coordinator checkpoint --attempt attempt-id --generation 2 --input checkpo
 agent-coordinator release --attempt attempt-id --generation 2 --input release.json
 ```
 
+`checkpoint --push-wip` first pushes the prepared worktree's clean commit to the
+create-only ref `refs/agent-coordinator/candidates/wip/<attempt>/<sha>` (with the
+same secret scan and readback as a code submission), then records that SHA as
+the checkpoint's `revision`. A configured candidate push helper refuses this
+explicit ref. A recorded revision lets a later recovery be verified by the
+service instead of by local attestations.
+
 ## Worktrees
 
 Before changing code, prepare and register a separate clean worktree. The CLI
@@ -954,6 +961,12 @@ agent-coordinator recovery resolve \
 }
 ```
 
+When the expired attempt's latest checkpoint recorded a `revision`, fetch its
+WIP ref and send the fetched SHA as `fetched_revision` instead of the two
+`*_checked` attestations; the service verifies it equals the recorded SHA
+(`recovery_revision_mismatch` otherwise) and returns
+`"evidence": "service_verified"`. A legacy checkpoint without a revision still
+needs both attestations and returns `"evidence": "local_attestation"`.
 Use the disposition and inspection fields required by the current service
 orientation and attempt detail. Recovery does not cancel or restart jobs and
 does not clear a resource merely because an observer or lease expired.
