@@ -202,6 +202,73 @@ mod tests {
         assert_eq!(row["at_ms"], 99);
     }
 
+    /// Claude `assistant` events as a launch killed before its result leaves
+    /// them: one message of 1 000 000 output tokens, reported twice.
+    fn killed() -> Vec<u8> {
+        let usage = json!({"input_tokens": 10, "cache_creation_input_tokens": 5,
+            "cache_read_input_tokens": 20, "output_tokens": 1_000_000});
+        let event = json!({"type": "assistant", "message": {"id": "m1", "usage": usage}});
+        format!("{event}\n{event}").into_bytes()
+    }
+
+    #[test]
+    fn a_killed_reviewer_launch_is_estimated_from_its_assistant_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        assert!(settle(
+            &config,
+            &launch(Uuid::new_v4(), 0),
+            Some(&killed()),
+            5
+        ));
+        let [row] = &rows(&config)[..] else {
+            panic!("{:?}", rows(&config));
+        };
+        assert_eq!(row["role"], Role::Reviewer.slug());
+        assert_eq!(
+            (
+                row["input_tokens"].as_u64(),
+                row["cached_input_tokens"].as_u64()
+            ),
+            (Some(15), Some(20))
+        );
+        assert_eq!(
+            (row["output_tokens"].as_u64(), row["usd"].as_f64()),
+            (Some(1_000_000), Some(20.0))
+        );
+        assert_eq!(row["usd_estimated"], true);
+    }
+
+    #[test]
+    fn a_result_costed_row_is_not_marked_estimated() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        assert!(settle(
+            &config,
+            &launch(Uuid::new_v4(), 0),
+            Some(&result(1.0)),
+            5
+        ));
+        assert!(rows(&config)[0].get("usd_estimated").is_none());
+    }
+
+    #[test]
+    fn a_killed_reviewers_estimate_counts_toward_its_daily_cap() {
+        use super::super::health::{self, DAY_MS};
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(dir.path());
+        config.health.reviewer_daily_usd = 2.0;
+        let now = 10 * DAY_MS;
+        assert!(settle(
+            &config,
+            &launch(Uuid::new_v4(), 0),
+            Some(&killed()),
+            now
+        ));
+        let refusal = health::capped(&config, Role::Reviewer, now + 1).unwrap_err();
+        assert!(refusal.contains("rev spent $20.00"), "{refusal}");
+    }
+
     #[test]
     fn settling_the_same_launch_twice_counts_it_once() {
         let dir = tempfile::tempdir().unwrap();

@@ -892,6 +892,16 @@ a launch that ended while no loop watched it, before removing its run, under
 the vendor its record names; the record notes that the cost is in the ledger,
 so a retried release never counts it twice.
 
+A Claude launch that was killed before it wrote its `result` event (a reviewer
+that reached its time limit, an implementer stopped after its drain period)
+has no reported total. Its row instead sums the usage of the launch's
+`assistant` events (a message repeated across content blocks counts once),
+prices it from the default or `[shadow.prices]` table, and carries
+`"usd_estimated": true`; `usd` stays `null` when the model has no price. The
+estimate counts toward the role's daily cap like any other row, and the
+handoff's cost sentence ends "estimated". A launch with a `result` event is
+costed exactly as before and its row has no `usd_estimated` field.
+
 A reviewer launch's cost is recorded the same way, as one `role` `rev` row
 (task under review, reviewer session, tokens, dollars) once the launch ends,
 so the reviewer's `[health] reviewer_daily_usd` cap counts it. The loop keeps a
@@ -964,8 +974,8 @@ hold the review for its lease. After `[run] review_attempts` (default 3)
 failed verdicts in a row for one submission, the loop stops claiming it and
 logs why, until it restarts. The clone, run and mirror branch are removed
 after every review. No review is taken while the reviewer has reached `[health]
-reviewer_daily_usd` (default 50) in the ledger below; reviewer launches do not
-record their cost there yet, so today that cap counts no reviewer spend.
+reviewer_daily_usd` (default 50) in the ledger below, which counts reviewer
+launches' cost.
 
 `--once` polls a single time. Recovery claims, continuation claims for work
 longer than `max_attempt_seconds` and the other-vendor audit sample are not

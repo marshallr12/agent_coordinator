@@ -163,6 +163,37 @@ fn every_finished_launch_records_its_cost_against_the_task() {
 }
 
 #[test]
+fn a_killed_launch_without_a_result_is_estimated_and_counts_toward_the_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path());
+    config.health.implementer_daily_usd = 2.0;
+    config.run.harness = Harness::Claude;
+    config.run.model = "claude-opus-5-5".into();
+    let mut fake = Fake::new();
+    let usage = json!({"input_tokens": 10, "cache_creation_input_tokens": 5,
+        "cache_read_input_tokens": 900, "output_tokens": 1_000_000});
+    fake.events = json!({"type": "assistant", "message": {"id": "m1", "usage": usage}}).to_string();
+    iterate(&mut fake, &config);
+    let entry = &ledger(&config)[0];
+    assert_eq!(
+        (&entry["input_tokens"], &entry["output_tokens"]),
+        (&json!(15), &json!(1_000_000))
+    );
+    assert_eq!(entry["usd_estimated"], true);
+    assert_eq!(entry["usd"], 20.0);
+    assert!(
+        fake.releases[0].contains("estimated)."),
+        "{:?}",
+        fake.releases
+    );
+    let outcome = iterate(&mut fake, &config);
+    assert!(
+        matches!(&outcome, Outcome::Refused(r) if r.contains("cap")),
+        "{outcome:?}"
+    );
+}
+
+#[test]
 fn the_daily_cap_refuses_claims_once_spent() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(dir.path());
