@@ -1589,3 +1589,143 @@ async fn a_human_report_about_a_canary_task_is_not_counted_in_the_digest() {
     assert_eq!(hri["items"][0]["report"]["task_id"], real["id"], "{hri}");
     assert_eq!(hri["items"][0]["task_title"], "Real work", "{hri}");
 }
+
+impl Fixture {
+    /// Records agent revises of `task` at `times` (each reopening its own
+    /// submission, the last one current) the way the limits count them;
+    /// `serialized` lists the indexes the integrator recorded as serialized.
+    async fn seed_revises(&self, project: &str, task: &Value, times: &[i64], serialized: &[usize]) {
+        let task_id = task["id"].as_str().unwrap();
+        let now = self.clock.0.load(Ordering::SeqCst);
+        for (n, at) in times.iter().enumerate() {
+            let (attempt, submission) = (Uuid::new_v4().to_string(), Uuid::new_v4().to_string());
+            sqlx::query("INSERT INTO attempts(id,project_id,task_id,owner_id,session_id,credential_id,generation,state,mode,expires_at,last_heartbeat_at,last_progress_at,created_at,ended_at,outcome,task_revision,policy_revision) VALUES(?,?,?,?,?,?,?,'submitted','work',?,?,?,?,?,'submitted',1,1)")
+                .bind(&attempt).bind(project).bind(task_id).bind(&self.a.principal).bind(&self.a.session).bind(&self.a._credential)
+                .bind(n as i64 + 1).bind(now).bind(now).bind(now).bind(at - 2).bind(at - 1)
+                .execute(&self.state.pool).await.unwrap();
+            sqlx::query("INSERT INTO submissions(id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,workflow_policy_revision,summary,acceptance_evidence_json,handoff,created_by,contributor_session_id,created_at,superseded_at) VALUES(?,?,?,?,'general',1,1,0,'done','[]','handoff',?,?,?,?)")
+                .bind(&submission).bind(project).bind(task_id).bind(&attempt).bind(&self.a.principal).bind(&self.a.session)
+                .bind(at - 1).bind((n + 1 < times.len()).then_some(*at))
+                .execute(&self.state.pool).await.unwrap();
+            sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,'submission.reopened',?,'{}',?)")
+                .bind(project).bind(&self.a.principal).bind(&submission).bind(at)
+                .execute(&self.state.pool).await.unwrap();
+            if serialized.contains(&n) {
+                sqlx::query("INSERT INTO integrator_revises(submission_id,task_id,reason_code,serialized_after,revised_at) VALUES(?,?,'conflict',?,?)")
+                    .bind(&submission).bind(task_id).bind(task_id).bind(at)
+                    .execute(&self.state.pool).await.unwrap();
+            }
+        }
+    }
+
+    /// The `revise_limit_reached` items of the project's digest `hri` and of
+    /// `next`'s human queue.
+    async fn parked_items(&self, project: &str) -> (Value, Vec<Value>, Vec<Value>) {
+        let hri = self.digest(project).await["hri"].clone();
+        let pick = |items: &Value| {
+            items
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["code"] == "revise_limit_reached")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let digest_items = pick(&hri["items"]);
+        let queue_items = pick(&self.next(&self.a, project).await["human_queue_items"]);
+        (hri, digest_items, queue_items)
+    }
+}
+
+#[tokio::test]
+async fn a_task_parked_by_three_revises_is_a_human_item_until_the_window_passes() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-parked").await;
+    let task = f.task(&p, "Fix the merge").await;
+    let now = f.clock.0.load(Ordering::SeqCst);
+    let times = [now - 3 * HOUR, now - 2 * HOUR, now - HOUR];
+    f.seed_revises(&p, &task, &times, &[]).await;
+
+    let (hri, items, queue) = f.parked_items(&p).await;
+    assert_eq!(
+        (hri["count"].clone(), hri["parked_tasks"].clone()),
+        (json!(1), json!(1)),
+        "{hri}"
+    );
+    assert_eq!(items.len(), 1, "{hri}");
+    let item = &items[0];
+    assert_eq!(item["required_actor"], "human", "{item}");
+    assert_eq!(item["task_id"], task["id"], "{item}");
+    assert_eq!(item["title"], "Fix the merge", "{item}");
+    assert_eq!(item["revise_count"], 3, "{item}");
+    assert_eq!(item["park_reason"], "subject_parked", "{item}");
+    assert_eq!(
+        item["parked_at"],
+        coordinator_core::timestamp(times[2]),
+        "{item}"
+    );
+    let leaves = coordinator_core::timestamp(times[0] + DAY);
+    assert_eq!(item["oldest_revise_leaves_window_at"], leaves, "{item}");
+    assert_eq!(item["unparks_at"], leaves, "{item}");
+    assert_eq!(queue, items, "next lists the same parked item");
+
+    // Still parked until the oldest revise leaves the window, then gone; the idle queue
+    // is a separate stall item, so only the parked count is compared.
+    f.clock.0.store(times[0] + DAY - 1, Ordering::SeqCst);
+    let (hri, items, queue) = f.parked_items(&p).await;
+    assert_eq!(
+        (hri["parked_tasks"].clone(), items.len(), queue.len()),
+        (json!(1), 1, 1),
+        "{hri}"
+    );
+    f.clock.0.store(times[0] + DAY, Ordering::SeqCst);
+    let (hri, items, queue) = f.parked_items(&p).await;
+    assert_eq!(
+        (hri["parked_tasks"].clone(), items.len(), queue.len()),
+        (json!(0), 0, 0),
+        "{hri}"
+    );
+}
+
+#[tokio::test]
+async fn serialized_revises_park_a_task_only_at_the_cap() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-parked-cap").await;
+    let below = f.task(&p, "Five rebases").await;
+    let capped = f.task(&p, "Six rebases").await;
+    let now = f.clock.0.load(Ordering::SeqCst);
+    let times: Vec<i64> = (0..6).map(|n| now - (6 - n) * HOUR).collect();
+    let all: Vec<usize> = (0..6).collect();
+    f.seed_revises(&p, &below, &times[..5], &all[..5]).await;
+    f.seed_revises(&p, &capped, &times, &all).await;
+    let (hri, items, queue) = f.parked_items(&p).await;
+    assert_eq!(hri["count"], 1, "{hri}");
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["task_id"], capped["id"], "{items:?}");
+    assert_eq!(items[0]["park_reason"], "serialized_cap", "{items:?}");
+    assert_eq!(items[0]["revise_count"], 6, "{items:?}");
+    assert_eq!(items[0]["counted_revises_24h"], 0, "{items:?}");
+    let leaves = coordinator_core::timestamp(times[0] + DAY);
+    assert_eq!(items[0]["unparks_at"], leaves, "{items:?}");
+    assert_eq!(queue, items);
+}
+
+#[tokio::test]
+async fn a_parked_canary_task_is_never_a_human_item() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-parked-canary").await;
+    let canary = f
+        .create_task(&f.canary, &p, "Canary", json!({"admission_class":"canary"}))
+        .await;
+    let now = f.clock.0.load(Ordering::SeqCst);
+    f.seed_revises(
+        &p,
+        &canary,
+        &[now - 3 * HOUR, now - 2 * HOUR, now - HOUR],
+        &[],
+    )
+    .await;
+    let (hri, items, queue) = f.parked_items(&p).await;
+    assert_eq!(hri["count"], 0, "{hri}");
+    assert!(items.is_empty() && queue.is_empty(), "{hri}");
+}

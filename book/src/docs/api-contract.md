@@ -285,8 +285,8 @@ is the attention-budget summary: `proceeded_decisions` (reversible decisions the
 service answered with their recommendation in the window; each lists
 `affected_task_ids` and `affected_tasks`, the same tasks as `task_id` and `title`),
 `pending_reversible_decisions` (with `proceeds_at`), and `hri`, the
-human-required interventions: `count`, `stalled_tasks`, `stalled_queue` and
-`items`. Two stall rules exist, and each stall item names the rule that fired in
+human-required interventions: `count`, `stalled_tasks`, `stalled_queue`,
+`parked_tasks` and `items`. Two stall rules exist, and each stall item names the rule that fired in
 `rule`. `repeated_attempt_failures` (code `stalled_task`, counted in
 `stalled_tasks`): a task is stalled when it is open and its last three attempts
 all ended (released, blocked, expired or canceled) without a submission.
@@ -302,7 +302,19 @@ one item, with `ready_tasks`, `idle_hours`, `threshold_hours`,
 defaults to 6 hours and is set with `--stall-hours` or `COORDINATOR_STALL_HOURS`
 (1 through 336). `--quiet-hours START-END` or `COORDINATOR_QUIET_HOURS`, in UTC
 hours such as `22-07`, removes those hours from the idle clock; they are unset
-by default. Open human-required integrator reports are the other items; each
+by default. A task the revise limit parks is a human-required item too, so that
+a task agents may no longer claim or revise is not left waiting unseen. Every open,
+non-canary task with `REVISE_LIMIT` (3) agent revises not serialized after a landing,
+or `SERIALIZED_REVISE_CAP` (6) agent revises of any kind, in the last 24 hours is
+listed with code `revise_limit_reached` (counted in `parked_tasks`), `required_actor:
+"human"`, `task_id`, `title`, `park_reason` (`subject_parked` or `serialized_cap`),
+`revise_count` (the revises that count toward the limit that parks it),
+`counted_revises_24h`, `agent_revises_24h`, `parked_at` (when the revise that
+reached the limit was made), `oldest_revise_leaves_window_at` (when the oldest
+counted revise leaves the 24-hour window) and `unparks_at` (when the task is
+released if no further revise is made). The item is computed on demand by the same
+rule that refuses agent claims and revises, so it disappears once the task is no
+longer parked. Open human-required integrator reports are the other items; each
 carries `task_title`, the title of the task its report names (`null` when it names
 none). Wherever the digest text mentions a task, the title comes first and the id
 follows in parentheses. The digest
@@ -357,7 +369,9 @@ itself (acknowledging current instructions); `human_queue` counts inspected
 candidates that only a human can unblock, and `skipped` counts every blocking
 precondition code seen. For every role, `human_queue_items` lists the project's open integrator
 reports that need a human, each with `required_actor: "human"`, the report kind
-as `gate`, the report and its resolve `call`. With no action,
+as `gate`, the report and its resolve `call`. It also lists, after the reports, the project's
+open non-canary tasks the revise limit parks, as the digest's `revise_limit_reached`
+items below. With no action,
 `retry_after_seconds` suggests a poll interval. Read-access credentials may call it, so a shadow supervisor can log
 what it would launch without holding write authority.
 

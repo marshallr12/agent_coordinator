@@ -7,7 +7,8 @@
 //! template. Caller-local steps (such as acknowledging the current
 //! instructions) are reported separately instead of disqualifying work, and
 //! candidates only a human can unblock are counted as the human queue. Open
-//! integrator reports that need a human are listed as `human_queue_items`.
+//! integrator reports that need a human, and tasks the revise limit parked,
+//! are listed as `human_queue_items`.
 use crate::{auth::Actor, auth::Auth, error::AppError, response, state::AppState};
 use axum::{
     Json, Router,
@@ -26,6 +27,8 @@ type Reply = Result<Json<Value>, AppError>;
 const CANDIDATE_LIMIT: i64 = 50;
 /// Poll interval suggested when nothing is eligible.
 const RETRY_AFTER_SECONDS: i64 = 30;
+/// Parked tasks `human_queue_items` lists besides the integrator reports.
+const PARKED_ITEM_LIMIT: usize = 50;
 /// Unmet codes the caller can clear itself right before claiming.
 const CALLER_LOCAL: &[&str] = &["instructions_required"];
 
@@ -140,8 +143,9 @@ async fn next(
             .into_value(role),
         Role::Integrator => integrator_next(&mut c, &p, &auth.actor).await?,
     };
-    body["human_queue_items"] =
-        json!(crate::integrator_reports::human_queue_items(&mut c, &p).await?);
+    let mut human_items = crate::integrator_reports::human_queue_items(&mut c, &p).await?;
+    human_items.extend(crate::autonomy::parked_items(&mut c, &p, now, PARKED_ITEM_LIMIT).await?);
+    body["human_queue_items"] = json!(human_items);
     Ok(response(body))
 }
 
