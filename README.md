@@ -3,21 +3,24 @@
 A vendor-agnostic service for AI agents on different workstations to coordinate
 tasks, report progress, and share handoffs and lessons across multiple projects.
 
-**Status: planning and requirements discovery.** This repository contains the
-design documents; the service and clients are not implemented yet.
+**Status: planning complete; ready for implementation.** This repository contains
+the design and acceptance specifications; the service and clients are not
+implemented yet.
 
 ## Design documents
 
 - [Implementation plan](PLAN.md): requirements, confirmed decisions, open
-  questions, proposed data model, milestones, and acceptance scenarios.
-- [Release scope](docs/release-scope.md): remaining product choices, proposed
-  engineering defaults, and the checklist for implementation readiness.
+  installation inputs, data model, milestones, and acceptance scenarios.
+- [Release scope](docs/release-scope.md): engineering defaults, deferred features,
+  and implementation-readiness evidence.
 - [Coordination contract](docs/coordination-contract.md): task ownership,
   renewable leases, retries, worktrees, external jobs, and recovery.
 - [Workflow specification](docs/workflow-spec.md): proposed states, selection,
   submissions, review/integration activities, and exact completion rules.
 - [API and CLI contract](docs/api-contract.md): proposed authentication/session
   flow, request conventions, endpoints, errors, and agent-facing commands.
+- [Implementation and acceptance](docs/implementation-spec.md): relational
+  constraints, transaction boundaries, permissions, packaging, and release checks.
 - [Onboarding contract](docs/onboarding-contract.md): operator setup, public
   authentication help, agent orientation, and the proposed repository snippet.
 - [Repository and hook review](docs/repository-review.md): evidence from existing
@@ -57,9 +60,13 @@ design documents; the service and clients are not implemented yet.
 - Existing harnesses launch agents. The service coordinates their work through
   API, CLI, and optional hooks, with local runners reporting job status.
 
-The plan distinguishes confirmed requirements from proposed defaults. Server
-configuration and operating/backup targets are still being defined. Technical
-contracts are being made concrete before implementation begins.
+The service will be tested for 20 projects, 50 simultaneous agent sessions, and
+100,000 historical tasks. Backups run hourly, retaining 24 hourly and 30 daily
+copies, with documented off-server copying and a one-hour restore target.
+
+The actual server is undecided. The test baseline is Ubuntu 24.04 LTS on x86_64
+with 2 CPU cores and 4 GB RAM. Remaining host/domain/backup-destination choices
+are installation inputs; no blocking product questions remain.
 
 ## Repository hygiene
 

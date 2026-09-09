@@ -75,6 +75,13 @@ creation and account recovery use a host-local command, never public enrollment.
 All issued agent tokens have agent identity; an agent token cannot record a human
 approval even when a human operator created it.
 
+Credential issuance displays a newly generated token once. Its mutation receipt
+retains the issued credential ID and metadata, never a replayable token value.
+If the issuing response is lost, replay returns the original issuance identity
+with `secret_unavailable` and instructions to revoke that unused credential and
+issue a replacement. It cannot silently create a second token or claim the old
+secret can be recovered from its verifier.
+
 For a harness session, the client generates and saves a session ID and a random
 session proof before `POST /api/v1/sessions`. Send the proof in
 `X-Coordinator-Session-Proof`; store only its verifier on the service. Return the
@@ -139,7 +146,10 @@ CLI equivalents are `tasks list`, `claim --task <id> --revision <n>`, and
 ## Attempt operations
 
 All paths below are under `/api/v1/projects/{project_id}`. Attempts have their
-own IDs and ownership generation; input must name the expected generation.
+own IDs and ownership generation; ownership-dependent input must name the
+expected generation. Authorized historical reads/late notes do not require a
+live ownership grant. Human review uses browser authentication and CSRF with a
+human-owned review attempt; it does not require an agent-token session proof.
 
 | Operation | Endpoint | Required content |
 | --- | --- | --- |

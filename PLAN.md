@@ -1,8 +1,8 @@
 # Agent coordination service: discovery and implementation plan
 
-Status: requirements discovery. This is a planning document, not an approved
-implementation specification. Recommendations below remain provisional until the
-relevant questions are resolved with the operator.
+Status: planning complete; ready for implementation. Product choices have been
+resolved with the operator. Engineering defaults are identified separately from
+confirmed requirements and will be validated during implementation.
 
 Revised 2026-09-09 after reviewing SithBit, Submission, their memory, and local
 and global hooks. See [the evidence report](docs/repository-review.md).
@@ -14,8 +14,9 @@ project without independently selecting the same task. Preserve task outcomes,
 handoffs, and useful lessons so subsequent agents can work from shared context.
 Remain independent of agent vendors, model providers, and Git hosting providers.
 
-The current request covers planning and clarification. Implementation begins
-after requirements are sufficiently defined and the operator requests it.
+The current request covers planning and clarification. The design is now
+sufficiently defined to implement. No service/client implementation or deployment
+has been performed as part of this planning goal.
 
 ## Requirements supplied by the operator
 
@@ -53,9 +54,16 @@ after requirements are sufficiently defined and the operator requests it.
   human approval, in addition to publishing and correcting shared lessons.
 - Store bounded log/report uploads in the service and source checkpoints in Git
   remotes; also support artifact links. Source-worktree bundles are not required.
+- Test the first release for up to 20 projects, 50 simultaneous agent sessions,
+  and 100,000 historical tasks across the service.
+- Provide hourly backups, retaining 24 hourly and 30 daily copies, documented
+  off-server copying, and a one-hour restore target.
+- The production host is undecided. Use Ubuntu 24.04 LTS, x86_64, 2 CPU cores,
+  and 4 GB RAM as the engineering test baseline, not a selected production host.
 - Existing orientation and work records include AGENTS.md / CLAUDE.md,
   HANDOFF.md, BACKLOG.md, and DURABLE-RECORD.md. The request also mentions
-  BACKOFF.md; confirm whether this is a separate record or means BACKLOG.md.
+  BACKOFF.md; support it as an additional configurable import filename without
+  requiring it to mean the same thing as BACKLOG.md.
 - Agents discover work, obtain ownership, report progress and health, and record
   completion results through the service.
 - Other agents can distinguish active long-running work from potentially
@@ -82,7 +90,8 @@ after requirements are sufficiently defined and the operator requests it.
 
 ## Proposed foundation
 
-These are design proposals, not settled product decisions.
+These engineering choices implement the confirmed requirements. Tunable defaults
+are specified in the linked contracts and acceptance plan.
 
 1. A central HTTP service owns coordination state. Workstations use an API;
    they never access a shared SQLite database file directly.
@@ -111,8 +120,8 @@ These are design proposals, not settled product decisions.
     pushes, deployments, or other actions outside its own database.
 11. Keep searchable lessons with provenance and revision history. Distinguish
     agent observations from policy adopted by a human or an authorized agent.
-    Relevant context
-    should fit a bounded response instead of dumping every historical record.
+    Relevant context should fit a bounded response instead of dumping every
+    historical record.
 12. Return useful next actions and recovery instructions with API responses,
     particularly for authentication failures, conflicts, and expired leases.
 13. Treat implementation, verification, review, integration, and deployment as
@@ -125,7 +134,7 @@ These are design proposals, not settled product decisions.
 The proposed ownership and recovery contract is developed further in
 [docs/coordination-contract.md](docs/coordination-contract.md). It deliberately
 defines the selected agent-driven recovery and integrated-completion rules.
-Lease timing and the precise reviewer-independence check remain to be specified.
+Lease timing and reviewer separation are specified as engineering defaults there.
 Password accounts, separate agent API tokens, and project-configurable agent or
 human review are confirmed.
 
@@ -135,9 +144,11 @@ command is a proposed interface and is not implemented yet.
 
 The engineering draft in [docs/workflow-spec.md](docs/workflow-spec.md) specifies
 task lifecycles, derived work statuses, activity eligibility, and completion
-transactions. Product decisions still marked open are not assumed by that draft.
+transactions, consistent with the confirmed product decisions.
 The proposed wire interface is in [docs/api-contract.md](docs/api-contract.md),
 including agent sessions, claim/renewal examples, and actionable error responses.
+Persistence constraints, operation permissions, and release checks are in
+[docs/implementation-spec.md](docs/implementation-spec.md).
 
 ## Decision log
 
@@ -160,21 +171,21 @@ including agent sessions, claim/renewal examples, and actionable error responses
 | Integration authority | Agents integrate when policy/review/checks allow; projects may require human authorization | **Confirmed by operator, 2026-09-09** |
 | Knowledge autonomy | Agents maintain lessons; projects may also delegate binding-rule changes without human approval | **Confirmed by operator, 2026-09-09** |
 | Artifact storage | Bounded service uploads for logs/reports, Git remotes for source checkpoints, optional artifact links | **Confirmed by operator, 2026-09-09** |
-| Initial operating size | 20 projects, 50 simultaneous agent sessions, 100,000 historical tasks | Open; question sent |
-| Server baseline | Ubuntu 24.04 LTS, x86_64, 2 CPU cores, 4 GB RAM | Open; question sent |
-| Backup/recovery targets | Hourly backups; 24 hourly and 30 daily copies; documented off-server copying; one-hour restore target | Open; question sent |
+| Initial operating size | 20 projects, 50 simultaneous agent sessions, 100,000 historical tasks | **Confirmed by operator, 2026-09-09** |
+| Server baseline | Ubuntu 24.04 LTS, x86_64, 2 CPU cores, 4 GB RAM | **Engineering default; operator's production host is undecided** |
+| Backup/recovery targets | Hourly backups; 24 hourly and 30 daily copies; documented off-server copying; one-hour restore target | **Confirmed by operator, 2026-09-09** |
 
-Repository evidence supports these proposals but does not settle the unanswered
-preferences. In particular, a policy or permission recorded for a past task in a
-reference project is not a new permission for this service or a future task.
+Repository evidence informed these choices. A policy or permission recorded for
+a past task in a reference project is not a new permission for this service or
+a future task.
 
 ## Multiple-project operation
 
 Confirmed scope: a single deployment can coordinate SithBit, Submission, and
 other projects concurrently. All authenticated users and agents can access all
 projects. Projects separate work context, not audiences. Administrative actions
-and attempt ownership still need their own operation-level permission rules;
-the exact roles remain to be finalized.
+and attempt ownership follow the operation-level permission matrix in
+[implementation-spec.md](docs/implementation-spec.md).
 
 - Every task, attempt, decision, evidence record, and project-specific lesson
   belongs to an explicit project. Claims use the repository's project binding
@@ -270,7 +281,8 @@ The evidence IDs below refer to [the review report](docs/repository-review.md).
 
 ## Proposed minimum data model
 
-Exact fields, indexes, permission checks, and retention remain to be specified.
+Relational constraints, indexes, permissions, transactions, and retention defaults
+are specified in [implementation-spec.md](docs/implementation-spec.md).
 
 | Record | Purpose |
 | --- | --- |
@@ -340,19 +352,24 @@ The browser should make these questions easy to answer:
 Decision prompts must explain the tradeoff without requiring prior session
 shorthand. The service should expose actionable failures and retain answers.
 
-## Further questions to resolve
+## Implementation readiness
 
-The remaining interview is consolidated in
-[docs/release-scope.md](docs/release-scope.md). Product questions now concern
-expected operating size, the server baseline, and backup/recovery targets. It also proposes
-engineering defaults so routine implementation choices do not each require a
-separate question. Adapt questions to earlier answers and retain the distinction
-between a proposed default and a confirmed requirement.
+No blocking product questions remain. [docs/release-scope.md](docs/release-scope.md)
+records engineering defaults, deferred features, and readiness evidence. The
+production hostname, final host, off-server backup destination, and credentials
+are installation inputs, and are not required to build and test the service.
+
+The planning output includes the architecture and data model, transaction and
+authority rules, workflow/API contracts, native-client behavior, permissions,
+migration, shared knowledge, artifact handling, and measurable release checks.
+Generated OpenAPI schemas, executable examples, migrations, and automated tests
+belong to the implementation milestones below; the documents do not claim they
+already exist.
 
 ## Proposed implementation milestones
 
-Finalize the remaining product decisions and API/schema contracts before coding.
-Each milestone should leave an executable slice with the stated evidence.
+Implement against the linked contracts. Each milestone leaves an executable
+slice with the stated evidence and matching generated API/CLI documentation.
 
 1. **Service, persistence, and access:** Rust/Axum server, SQLite migrations,
    principal/operation permissions, public authentication help, authenticated

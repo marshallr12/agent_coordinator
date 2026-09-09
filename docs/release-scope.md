@@ -1,18 +1,19 @@
-# First-release scope and remaining decisions
+# First-release scope and implementation readiness
 
-Status: planning. Confirmed choices are in [PLAN.md](../PLAN.md). This document
-separates remaining product choices from engineering defaults the implementer
-can specify without a separate interview question for every field or timeout.
+Status: planning complete. Confirmed choices are in [PLAN.md](../PLAN.md).
+Engineering defaults remain distinguishable from operator-selected requirements;
+they will be validated through implementation and release testing.
 
-## Product choices still needed
+## Operating targets
 
-| Choice | Recommendation | Why the answer matters |
+| Choice | Selected target | Status |
 | --- | --- | --- |
-| Initial operating size | Establish expected projects, concurrent sessions, and stored history | Sets measurable load and pagination targets |
-| Operations | Establish supported server OS/architecture, backup frequency/retention, and acceptable downtime | Sets packaging and recovery acceptance targets |
+| Initial operating size | 20 projects, 50 simultaneous agent sessions, 100,000 historical tasks | Confirmed |
+| Backups | Hourly, retaining 24 hourly and 30 daily copies; documented off-server copying | Confirmed |
+| Restore | One-hour target in the documented recovery exercise | Confirmed |
+| Server baseline | Ubuntu 24.04 LTS, x86_64, 2 CPU cores, 4 GB RAM | Engineering default; production host undecided |
 
-Capacity, server-baseline, and backup/recovery questions have been presented.
-Installation as a native Linux systemd service,
+No blocking product questions remain. Native Linux systemd installation,
 HTTPS, all-project access, authentication method, agent task creation/claiming,
 worktree isolation, recovery mode, and integrated completion are already settled.
 Linux and native Windows clients, HTTP API/web/CLI interfaces, and configurable
@@ -57,22 +58,40 @@ For Markdown input, treat BACKOFF.md as a configurable additional filename.
 Support BACKLOG.md directly. This avoids making a possible filename typo block
 the design while still supporting a distinct file if one exists.
 
-## Required specification before coding
+## Explicitly deferred features
 
-1. Resolve the product choices above and explicitly list deferred features.
-2. Review the task/activity states, ownership transitions, reviewer independence,
-   recovery permissions, and completion guards in
-   [workflow-spec.md](workflow-spec.md) and
-   [coordination-contract.md](coordination-contract.md).
-3. Expand [api-contract.md](api-contract.md) into matching request/response
-   schemas and complete HTTP/CLI examples, including authentication help,
-   resume, claim conflicts, and expired authority.
-4. Define database constraints and transaction boundaries, including revision
-   races, interrupted requests, and resource recovery holds.
-5. Define local worktree/job handling on selected platforms and the practical
-   limits of coordinating processes that the service does not control.
-6. Define the first-run operator flow, backup/restore procedure, and a measurable
-   two-workstation acceptance exercise.
+- MCP and interactive TUI clients.
+- Remote launching/supervision of agent harnesses and arbitrary server-run jobs.
+- Shared editable checkouts for independent implementation tasks.
+- Source-worktree/build-directory bundle storage and a hosted source repository.
+- Required model APIs, embeddings, semantic deduplication, or a custom workflow DSL.
+- Multiple active coordinator servers, database clustering, and project ACLs.
+- Email/chat/push integrations, public account registration, and email-dependent
+  account recovery.
+- Automatic rewrites of existing project/global hooks or automatic migration of
+  SithBit/Submission into the running service.
+
+## Readiness evidence and implementation work
+
+| Requirement for a complete plan | Design artifact |
+| --- | --- |
+| Confirmed product choices and milestone order | [PLAN.md](../PLAN.md) |
+| Workflow states and completion guards | [workflow-spec.md](workflow-spec.md) |
+| Ownership, recovery, worktrees, jobs, evidence, knowledge | [coordination-contract.md](coordination-contract.md) |
+| Authentication/session flow, endpoints, errors, CLI conventions | [api-contract.md](api-contract.md) |
+| Database constraints, transactions, permissions, packaging, acceptance | [implementation-spec.md](implementation-spec.md) |
+| First-run operator/agent workflow, native clients, backup/restore | [onboarding-contract.md](onboarding-contract.md) |
+| Revisions justified by real project workflows and hooks | [repository-review.md](repository-review.md) |
+
+During implementation, derive OpenAPI schemas and executable Linux/PowerShell
+examples from the shared request/response types; implement migrations and
+automated tests alongside each milestone. These deliverables are specified work,
+not unfinished product questions or claims of an existing implementation.
+
+The final host, public hostname, TLS configuration, off-server backup destination,
+and initial credentials will be supplied during installation. Local acceptance
+uses isolated repositories, disposable databases, test credentials, and the
+documented baseline. Production access is not needed to implement the service.
 
 Implementation readiness means these contracts agree and have testable outcomes.
 It does not require selecting every crate version, cosmetic UI detail, or table

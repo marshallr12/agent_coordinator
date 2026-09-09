@@ -1,7 +1,7 @@
 # Proposed workflow specification
 
-Status: design draft. This specifies engineering behavior beneath the confirmed
-product choices in [PLAN.md](../PLAN.md). Projects can permit automatic integration
+Status: implementation design; not implemented. This specifies behavior beneath
+the confirmed product choices in [PLAN.md](../PLAN.md). Projects can permit automatic integration
 or require human authorization, and can delegate binding-rule changes to agents.
 The service stores bounded logs/reports; source checkpoints remain in Git remotes.
 
@@ -70,7 +70,7 @@ guarantee that separately worded outcomes never overlap.
 
 Normal dependency edges require the prerequisite task to be `done`. Cancellation
 and supersession produce an explicit blocker and replacement reference; they do
-not silently satisfy the old edge. Human-authorized dependency edits retain
+not silently satisfy the old edge. Authorized dependency edits retain
 history. Objectives cannot complete until required children and their own
 acceptance criteria are satisfied. Reject parent and dependency cycles, including
 concurrent edits that would create a cycle only when combined.
@@ -180,5 +180,5 @@ A new policy revision prevents new claims/submissions from silently following
 the old policy. Existing attempts receive a policy-changed next action and can
 checkpoint or relinquish safely; they must reconcile before taking a newly
 restricted action. Historical approvals remain tied to their original policy.
-The service records the authorized actor's resolution instead of silently grandfathering
-or retroactively rewriting every in-progress task.
+The service records the authorized actor's resolution instead of silently
+grandfathering or retroactively rewriting every in-progress task.

@@ -1,11 +1,12 @@
 # Agent and operator onboarding contract
 
-Status: proposed interface, not implemented. Public HTTPS, service-authoritative
+Status: implementation design, not implemented. Public HTTPS, service-authoritative
 records, access to all projects for every authenticated caller, local password
 accounts for people, and revocable API tokens for agents are confirmed. The
 server runs as a native Linux service under systemd; CLI and job-reporter clients
-support Linux and native Windows. Reverse-proxy configuration and some operation
-roles remain open. CLI spelling below is a proposal.
+support Linux and native Windows. Operation roles are specified in
+[implementation-spec.md](implementation-spec.md). CLI spelling below is the
+planned interface and will be verified against the implementation.
 
 ## Repository binding and workstation credentials
 
@@ -30,8 +31,9 @@ bindings help route requests; the service still performs authorization itself.
 
 The public API and browser interface use HTTPS. The selected native Linux
 deployment runs Axum under systemd. Terminate TLS at a reverse proxy and keep the
-Axum listener private; the proxy remains to be selected. Trust forwarded
-scheme/client headers only from configured proxies. Clients validate the service certificate;
+Axum listener private. Use Caddy for the documented baseline; an existing proxy
+can use the same HTTP upstream contract. Trust forwarded scheme/client headers
+only from configured proxies. Clients validate the service certificate;
 the documented normal workflow must not require disabling certificate checks.
 
 Credentials travel in authentication headers or the login request body, never
@@ -62,18 +64,20 @@ Run it under a dedicated unprivileged service account; keep configuration under
 Use a local filesystem for SQLite. One active service process owns coordination;
 this first-release design does not include active/active server replication.
 
-Use Caddy as the proposed documented proxy, while retaining a standard HTTP
+Use Caddy as the documented default proxy, while retaining a standard HTTP
 upstream for an existing alternative. Caddy can obtain and renew certificates
 for an appropriately configured public hostname; DNS, network reachability, and
 persistent certificate storage are deployment prerequisites. See the
 [official automatic HTTPS documentation](https://caddyserver.com/docs/automatic-https).
-The final hostname and Linux distribution are installation inputs, not project
-IDs or assumptions embedded in application code.
+The final hostname and production Linux distribution are installation inputs,
+not project IDs or assumptions embedded in application code. The test baseline
+is Ubuntu 24.04 LTS on x86_64 with 2 CPU cores and 4 GB RAM.
 
 Provide a database-aware backup command suitable for a systemd timer, based on
 [SQLite's online backup facility](https://sqlite.org/backup.html). Do not document
-copying only a live database file while ignoring its WAL. Backup retention,
-off-host copying, and acceptable recovery time/data loss need operator choices.
+copying only a live database file while ignoring its WAL. The operator selected
+hourly backups, 24 hourly and 30 daily retained copies, documented off-server
+copying, and a one-hour restore target.
 The selected log/report uploads require the backup manifest to cover their storage
 and referenced digests as well as database records.
 
@@ -88,9 +92,67 @@ Restoring an older backup is an explicit maintenance operation. It must invalida
 pre-restore sessions and attempt authority, preserve uncertain-job resource holds,
 and require credential/account reconciliation before public access resumes.
 Restoring old authentication tables must not silently reactivate a subsequently
-revoked credential or account. The implementation contract must specify a new
-authority epoch and a host-local recovery flow, including reissuing agent tokens
-when the post-backup revocation history cannot be recovered.
+revoked credential or account. Use the restore procedure below, including a new
+authority epoch and host-local account/credential recovery.
+
+### Backup and restore procedure
+
+The systemd backup timer starts an hourly snapshot job under a single-job lock.
+The command creates a consistent SQLite backup and an artifact manifest listing
+the finalized files referenced by that snapshot. Preserve referenced immutable
+artifact bytes while the snapshot is being assembled: artifact deletion/garbage
+collection must respect the active backup hold. Do not keep a database writer
+transaction open while copying files.
+
+Store immutable artifact blobs by digest within the backup repository so retained
+snapshots can share identical bytes. Each snapshot has its own database image,
+manifest, schema/service versions, timestamps, digests, and completion marker.
+Only publish the completion marker after database integrity and all referenced
+file digests are verified. A partial snapshot is never counted as a usable backup.
+Retain the most recent 24 hourly snapshots plus one successful snapshot for each
+of the most recent 30 days. Prune shared blobs only when no retained snapshot
+references them. Insufficient space or a failed backup leaves prior usable
+snapshots intact and raises a visible operator alert.
+
+Document copying the completed backup repository to an operator-selected server
+or storage destination, with authentication/encryption supplied by that transfer
+mechanism. Include manifests, database images, and referenced blobs. Copying only
+the manifest is insufficient. Track local snapshot time separately from the
+operator's verified off-server copy time. Hourly local backups do not establish
+one-hour data-loss protection against host loss unless off-server copying also
+meets that schedule. The destination and its credentials are installation inputs.
+
+The restore procedure is:
+
+1. Stop the service and keep public access in maintenance mode. Preserve the
+   current damaged state separately; select a completed compatible snapshot.
+2. Verify its database and artifact digests, then restore into a staging data
+   directory with the service account's permissions. Reject incomplete snapshots.
+3. Generate a fresh authority epoch. In the restored database, revoke all agent
+   tokens/reporters/browser sessions, invalidate agent sessions and attempts,
+   and suspend restored human accounts pending reconciliation. Treat known
+   in-flight jobs/resources as uncertain, retaining their recovery holds.
+4. A host-local recovery command establishes a fresh administrator credential.
+   That administrator explicitly reconciles people and issues fresh agent
+   credentials. Never re-enable a restored password/token just because its
+   historical record predates a revocation.
+5. Check schema/readiness, atomically promote the staged data directory while
+   the service is stopped, start the service, and verify new authentication and
+   old-credential rejection before restoring public access.
+6. Agents reconnect with fresh credentials, inspect saved work and jobs, and use
+   the normal recovery workflow. Reconcile actual Git targets before admitting
+   conflicting integration work; a restored database can lag external effects.
+
+Measure the one-hour restore target from starting this documented procedure on
+an available compatible host with access to a completed backup and the operator's
+host credentials, through restored service availability and one recovered client.
+Include data verification/copying and credential recovery in the exercise. New
+server procurement and recovery of unavailable off-server storage are external
+dependencies; record them explicitly in a real incident. Restoring task data
+does not promise that all formerly running workstation jobs finish within an hour.
+
+Ordinary service restarts do not rotate the restore epoch or reset credentials.
+They preserve stored lease deadlines; elapsed downtime can cause normal expiry.
 
 ## First connection without authentication
 
@@ -111,8 +173,8 @@ Example human message:
 > workstation. Configure the issued credential in the local client, then retry
 > the connection. Keep the credential out of this conversation and repository.
 
-The initial-administrator flow will follow the selected server installation
-method. People use local password accounts. Public help must work before login,
+Initial administrator setup uses the host-local installation command. People use
+local password accounts. Public help must work before login,
 but cannot include project names, users, tasks, permission grants, or credential
 values.
 Authentication failure is not an instruction to continue selecting work offline.
@@ -122,7 +184,7 @@ Authentication failure is not an instruction to continue selecting work offline.
 Proposed normal sequence:
 
 1. Set up the service and its first administrator using the selected installation
-   method. Initial administrator creation must not be an unauthenticated public
+method. Initial administrator creation must not be an unauthenticated public
    operation available after setup.
 2. Create a project and assign its stable ID and repository binding.
 3. Configure project workflow and completion requirements.
@@ -164,8 +226,8 @@ Two sessions using one workstation credential must not accidentally share task
 authority. A session needs a locally protected resume credential, and
 ownership-dependent requests must authenticate that session as well as its
 principal. Compaction/resume reuses session identity; starting another harness
-creates a new session. The exact wire format is an implementation detail to
-specify in the API contract.
+creates a new session. The wire format is specified in
+[api-contract.md](api-contract.md).
 
 Credential revocation invalidates dependent session authority. It does not prove
 that a local job stopped or release an uncertain shared resource. The task enters

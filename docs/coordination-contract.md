@@ -1,8 +1,8 @@
 # Proposed coordination contract
 
-Status: provisional design, supporting [the discovery plan](../PLAN.md).
-No pending operator decision is treated as accepted here. This document defines
-candidate correctness rules that can support the different policy choices.
+Status: implementation design, supporting [the plan](../PLAN.md). No runtime
+implementation exists yet. This document defines correctness rules for the
+selected policies and identifies tunable engineering defaults.
 
 Revised after [the repository/hook review](repository-review.md). The operator
 has confirmed separate worktrees per implementation task and one integration
@@ -58,7 +58,8 @@ A **lease** grants temporary authority over an attempt. Its deadline is set by
 the service. An opaque attempt ID and an increasing ownership generation identify
 the grant; neither substitutes for authentication. Session authorization must
 prevent two sessions using the same workstation credential from silently acting
-as one another. The credential/session mechanism remains an open design choice.
+as one another. The credential/session mechanism is specified in
+[api-contract.md](api-contract.md).
 
 At most one current attempt can own a task. Task state and current-attempt linkage
 must agree within the same transaction. Generic task edits cannot bypass this
