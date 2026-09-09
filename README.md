@@ -26,6 +26,8 @@ design documents; the service and clients are not implemented yet.
 - One service instance will support multiple projects simultaneously.
 - Workstations connect over public HTTPS. Every authenticated person and agent
   has access to every project.
+- The server runs as a native Linux service under systemd, behind an HTTPS
+  reverse proxy.
 - People sign in with local password accounts; agents use revocable API tokens.
 - The service owns the current task, handoff, and lesson records, with Markdown
   import and export.
@@ -34,12 +36,15 @@ design documents; the service and clients are not implemented yet.
 - Agents will authenticate, claim tasks atomically, renew ownership, and record
   outcomes and shared knowledge through a vendor-neutral interface.
 - Agents can create and claim tasks; each project configures required review.
+- Another agent can recover expired work after checking saved work and running
+  jobs; projects may require manual recovery. Code tasks finish after required
+  review, target-branch integration, and validation of the integrated result.
 - Existing harnesses launch agents. The service coordinates their work through
   API, CLI, and optional hooks, with local runners reporting job status.
 
 The plan distinguishes confirmed requirements from proposed defaults. Server
-packaging, operation roles, recovery policy, completion rules, and client
-platforms are still being defined.
+configuration, operation roles, reviewer requirements, and client platforms are
+still being defined.
 
 ## Repository hygiene
 

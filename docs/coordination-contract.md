@@ -9,6 +9,10 @@ has confirmed separate worktrees per implementation task and one integration
 step at a time into the target branch for the first release, and simultaneous
 support for multiple projects in one service instance.
 
+Agent-driven recovery after checking saved work and running jobs is confirmed,
+with a per-project manual alternative. Code-task completion requires applicable
+review, target-branch integration, and validation of the integrated result.
+
 ## Project boundaries
 
 Project identity is explicit in claims, sessions' work context, and every
@@ -79,9 +83,12 @@ rule or overwrite an active attempt's ownership.
    and checkpoints as history. A late agent may need a separate recovery-note
    operation, if selected for the release; such a note cannot complete current
    work, extend a lease, or unblock dependent tasks.
-7. Completion saves the result, handoff, referenced/new lessons, attempt outcome,
-   and chosen task transition in one transaction. Whether that transition means
-   awaiting review or done remains a project-policy decision.
+7. Submission saves the result, handoff, referenced/new lessons, attempt outcome,
+   and chosen task transition in one transaction. An implementation submission
+   advances to required review or integration; it cannot mark the code task
+   done. Overall completion requires the configured review, integration, and
+   validation of the integrated result. Non-code tasks use their applicable
+   acceptance requirements.
 
 Task revisions should protect editable descriptions and acceptance criteria
 against lost updates independently of attempt generations. If acceptance criteria
@@ -111,6 +118,30 @@ The coordinator cannot fence arbitrary Git commands; actual branch updates still
 need the Git-side concurrency check and compliant local workflow. Remote hosting
 APIs are optional, so the core stores who reported/verified each revision and how,
 rather than presenting client-reported merges as independently verified facts.
+
+### Avoid circular completion requirements
+
+A submitted implementation and a completed deliverable are separate facts. If
+overall completion includes review and integration, those activities must become
+eligible from the submitted candidate and applicable review evidence. They
+cannot wait for the implementation task's overall `done` state: that task is
+itself waiting for their results.
+
+Ordinary task dependencies mean the prerequisite's required outcome is complete.
+Workflow activities instead reference an immutable submission ID and candidate
+revision. A review accepts or rejects that submission; integration consumes its
+accepted evidence. These are explicit workflow relationships, not an exception
+that silently treats unfinished prerequisites as done.
+
+If the candidate changes, create a new submission. Previous reviews and checks
+remain historical and do not automatically apply to it. The readiness check
+and integration transaction must agree on the current submission, required
+policy revision, candidate revision, and observed target revision.
+
+Non-code tasks can finish against their own acceptance evidence without a Git
+integration step. A parent objective waits for required children and its own
+criteria; it does not create artificial worktrees or branches. The final state
+names must preserve the selected distinction between submission and completion.
 
 ## External jobs and evidence
 
@@ -211,10 +242,25 @@ resume events reconcile existing session/attempt/job IDs first. They cannot
 implicitly claim additional work. A compact/resume hook must not fast-forward a
 checkout underneath an active mutation or check of that checkout.
 
-Expiration detection is mandatory for the requested service. What happens next is
-still open: automatic requeue, an agent-driven recovery claim, human release, or
-a per-project policy. The last checkpoint and artifact location should accompany
-any recovery candidate so its next owner can inspect prior work before repeating it.
+Expiration makes a task a recovery candidate, rather than immediately ready for
+fresh implementation. Under the selected default, another agent may atomically
+claim recovery authority. A project may instead require operator release before
+that recovery claim. Both modes retain the expired attempt and its checkpoints.
+
+The recovery packet includes prior submissions, worktree/branch and published
+revision references, known jobs, observation freshness, and resource holds. The
+recovering agent checks what has already been delivered, which saved work is
+accessible, and whether prior jobs can still interfere. It records a disposition:
+resume saved work, reconcile already-delivered work, restart with a reason, or
+remain blocked awaiting an observation or operator decision.
+
+Recovery inspection is distinct from permission to start conflicting work. An
+unreachable workstation or a missing heartbeat does not prove its jobs stopped.
+An unresolved external job keeps its conflicting resource reserved. A recovery
+attempt may continue only when the selected action's resource and evidence
+requirements are satisfied. Expiry of a recovery attempt permits another recovery
+claim; it does not clear those holds. Deadlines and ownership generations prevent
+two recovery agents from both recording an authoritative disposition.
 
 Disconnected clients must not start new coordinated work. While a previously
 granted lease is still valid, behavior depends on the final offline-work policy.
@@ -246,6 +292,8 @@ before promising stronger end-to-end guarantees.
 | Operator revokes access during a task | Future calls and result replays respect revocation; task disposition follows an explicit recovery policy |
 | Two implementations register the same editable checkout | Refuse the second registration; require a separate worktree |
 | Two integrations target the same branch | Only one holds the integration reservation; the next rechecks the target revision |
+| A code task waits for its own review and integration | Those activities become eligible from its submission; no circular wait for the task's overall completion |
+| A candidate changes after review approval | Preserve old evidence and require review/check applicability to the new submission |
 | A job observer dies while its producer continues | Record observation loss, preserve job identity, and reconnect before considering a restart |
 | A task lease expires while its job occupies a shared fixture | Prevent conflicting resource reuse until recovery resolves the producer's state |
 | A hook reports success after a failed formatter/check | Advisory hook success does not satisfy verification evidence |

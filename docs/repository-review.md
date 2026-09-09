@@ -268,5 +268,8 @@ authoritative records with Markdown import/export, and access to every project
 for every authenticated person and agent. Those decisions supersede the earlier
 proposal for project-specific access grants. People will use local password
 accounts and agents will use revocable API tokens. Agents create and claim tasks
-autonomously, with required review configured per project. Exact server
-installation, recovery, and completion rules remain to be settled.
+autonomously, with required review configured per project. The selected server
+installation is native Linux under systemd behind an HTTPS reverse proxy.
+Expired work permits agent-driven recovery after inspecting saved work and jobs,
+with a per-project manual alternative. Code tasks finish after required review,
+target-branch integration, and validation of the integrated result.

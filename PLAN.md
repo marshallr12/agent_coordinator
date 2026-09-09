@@ -24,6 +24,8 @@ after requirements are sufficiently defined and the operator requests it.
 - One service instance must coordinate **multiple projects simultaneously**,
   with agents working on different projects at the same time.
 - Workstations connect over the **public internet using HTTPS**.
+- Install the server as a native Linux service managed by systemd, behind an
+  HTTPS reverse proxy.
 - The service is the **authoritative record** for tasks, handoffs, and lessons,
   with Markdown import and export.
 - **Every authenticated person and agent has access to every project.**
@@ -32,6 +34,11 @@ after requirements are sufficiently defined and the operator requests it.
   issued, revocable API tokens.
 - Agents can create and claim tasks autonomously; each project configures
   whether completion requires review.
+- An expired task can be recovered by another agent after checking saved work
+  and still-running jobs. Projects can instead require manual recovery.
+- Code tasks count as complete and unblock dependencies only after required
+  review, integration into the target branch, and validation of the integrated
+  result.
 - The service coordinates existing harnesses through API, CLI, and optional
   hooks. Local runners report jobs; remote agent launch/supervision is out of
   scope for the first release.
@@ -105,8 +112,9 @@ These are design proposals, not settled product decisions.
 
 The proposed ownership and recovery contract is developed further in
 [docs/coordination-contract.md](docs/coordination-contract.md). It deliberately
-leaves takeover policy, lease timing, and the details of review and completion
-open. Password accounts and separate agent API tokens are confirmed.
+defines the selected agent-driven recovery and integrated-completion rules.
+Lease timing and reviewer permissions remain open. Password accounts and separate
+agent API tokens are confirmed.
 
 The proposed first-connection flow and short repository snippet are in
 [docs/onboarding-contract.md](docs/onboarding-contract.md). Its example CLI
@@ -124,9 +132,12 @@ command is a proposed interface and is not implemented yet.
 | Agent autonomy | Agents create and claim tasks; each project configures required review | **Confirmed by operator, 2026-09-09** |
 | Working-directory arrangement | Separate worktree per implementation task; serialize integration into the target branch | **Confirmed by operator, 2026-09-09** |
 | Coordination boundary | Coordinate existing harnesses through API, CLI, optional hooks; local runners report jobs | **Confirmed by operator, 2026-09-09** |
-| Server installation | Linux Docker Compose deployment with HTTPS proxy and persistent SQLite storage | Open; question sent |
-| Expired-task recovery | Agent-driven recovery after checking prior work/jobs; manual mode configurable per project | Open; question sent |
-| Overall completion | Required review, integration into target branch, and validation of integrated result | Open; question sent |
+| Server installation | Native Linux service managed by systemd, behind an HTTPS reverse proxy | **Confirmed by operator, 2026-09-09** |
+| Expired-task recovery | Agent-driven recovery after checking prior work/jobs; manual mode configurable per project | **Confirmed by operator, 2026-09-09** |
+| Overall completion | Required review, integration into target branch, and validation of integrated result | **Confirmed by operator, 2026-09-09** |
+| Client platforms | Linux and native Windows | Open; question sent |
+| Initial interfaces | HTTP API, web dashboard, and CLI with JSON output; defer MCP/TUI | Open; question sent |
+| Review authority | Per-project choice of independent agent, human, or both; independent agent default | Open; question sent |
 
 Repository evidence supports these proposals but does not settle the unanswered
 preferences. In particular, a policy or permission recorded for a past task in a
@@ -307,8 +318,9 @@ shorthand. The service should expose actionable failures and retain answers.
 
 Ask in focused rounds, adapting later questions to earlier answers.
 
-- Deployment environment, operating systems, expected projects/concurrent
-  agents, installation method, recovery and backup expectations.
+- Supported Linux distribution/architecture, expected projects/concurrent agents,
+  resource limits, and backup/recovery expectations. Native systemd installation
+  behind an HTTPS reverse proxy is confirmed.
 - Whether native web UI and CLI both belong in the initial release; whether
   MCP or a TUI is needed immediately.
 - Workstation operating systems and optional harness adapters to ship initially.
@@ -316,15 +328,15 @@ Ask in focused rounds, adapting later questions to earlier answers.
 - Administrative roles, password/token lifecycle, and initial administrator
   setup. Local password accounts, agent API tokens, and all-project access are
   confirmed.
-- Meaning of completion: local edits, published commits, review acceptance,
-  or integration into a target branch; who performs integration and review.
+- Who performs integration and review. Code-task completion after required
+  review, integration, and integrated-result validation is confirmed.
 - Task dependencies, priorities, parent/child work, eligibility, agent
   capabilities, and whether overlapping files/components need reservations.
 - Whether tasks are mostly imported/prepared in advance or independently
   discovered by agents. Atomic claims prevent duplicate ownership of one task;
   separate tasks describing the same work need additional deduplication rules.
-- Expired-work recovery policy, heartbeat mechanism, timing defaults, long
-  tool calls, disconnected operation, and human escalation.
+- Heartbeat mechanism, timing defaults, long tool calls, disconnected operation,
+  and escalation. Agent-driven recovery with a project manual mode is confirmed.
 - Rules for agent changes to shared instructions, lessons, task scope,
   cancellation, and reprioritization. Autonomous task creation and claiming are
   confirmed; required review is configurable per project.

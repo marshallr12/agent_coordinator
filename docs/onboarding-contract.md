@@ -3,7 +3,8 @@
 Status: proposed interface, not implemented. Public HTTPS, service-authoritative
 records, access to all projects for every authenticated caller, local password
 accounts for people, and revocable API tokens for agents are confirmed. Exact
-hosting setup and operation roles remain open. CLI spelling below is a proposal.
+reverse-proxy configuration and operation roles remain open. The server will run
+as a native Linux service under systemd. CLI spelling below is a proposal.
 
 ## Repository binding and workstation credentials
 
@@ -26,10 +27,10 @@ bindings help route requests; the service still performs authorization itself.
 
 ## Public HTTPS deployment
 
-The public API and browser interface use HTTPS. A proposed deployment terminates
-TLS at a reverse proxy and keeps the Axum listener private; the exact hosting
-environment and proxy remain to be selected. Trust forwarded scheme/client
-headers only from configured proxies. Clients validate the service certificate;
+The public API and browser interface use HTTPS. The selected native Linux
+deployment runs Axum under systemd. Terminate TLS at a reverse proxy and keep the
+Axum listener private; the proxy remains to be selected. Trust forwarded
+scheme/client headers only from configured proxies. Clients validate the service certificate;
 the documented normal workflow must not require disabling certificate checks.
 
 Credentials travel in authentication headers or the login request body, never
@@ -49,6 +50,46 @@ Task and lesson content renders as text or sanitized Markdown, with raw active
 HTML disabled. Public setup help provides orientation, not remote execution.
 Service-internal management actions require the selected administrative role,
 even though all authenticated callers can access all projects.
+
+### Native Linux installation proposal
+
+Ship a versioned release containing the Rust server, CLI, database migrations,
+embedded browser assets, a systemd unit, and example proxy configuration. The
+installed service should not require a source checkout or frontend build tools.
+Run it under a dedicated unprivileged service account; keep configuration under
+`/etc/agent-coordinator` and writable data under `/var/lib/agent-coordinator`.
+Use a local filesystem for SQLite. One active service process owns coordination;
+this first-release design does not include active/active server replication.
+
+Use Caddy as the proposed documented proxy, while retaining a standard HTTP
+upstream for an existing alternative. Caddy can obtain and renew certificates
+for an appropriately configured public hostname; DNS, network reachability, and
+persistent certificate storage are deployment prerequisites. See the
+[official automatic HTTPS documentation](https://caddyserver.com/docs/automatic-https).
+The final hostname and Linux distribution are installation inputs, not project
+IDs or assumptions embedded in application code.
+
+Provide a database-aware backup command suitable for a systemd timer, based on
+[SQLite's online backup facility](https://sqlite.org/backup.html). Do not document
+copying only a live database file while ignoring its WAL. Backup retention,
+off-host copying, and acceptable recovery time/data loss need operator choices.
+If artifact uploads are included, the backup manifest must cover their storage
+and referenced digests as well as database records.
+
+An upgrade checks schema compatibility, creates a verified backup, applies
+migrations under exclusive maintenance access, and verifies readiness before
+accepting work. Running jobs remain on workstations; service maintenance cannot
+declare them stopped. Document the expected coordination outage and lease
+recovery behavior. Do not automatically roll back the binary across an
+incompatible database migration.
+
+Restoring an older backup is an explicit maintenance operation. It must invalidate
+pre-restore sessions and attempt authority, preserve uncertain-job resource holds,
+and require credential/account reconciliation before public access resumes.
+Restoring old authentication tables must not silently reactivate a subsequently
+revoked credential or account. The implementation contract must specify a new
+authority epoch and a host-local recovery flow, including reissuing agent tokens
+when the post-backup revocation history cannot be recovered.
 
 ## First connection without authentication
 
