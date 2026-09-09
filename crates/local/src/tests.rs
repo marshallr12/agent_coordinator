@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -15,6 +15,8 @@ use super::*;
 
 struct MockService {
     origin: String,
+    identities: Arc<Mutex<Option<(JobIdentities, String, String)>>>,
+    requests: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -26,16 +28,37 @@ impl Drop for MockService {
 
 impl MockService {
     async fn start(delay_from_request: Option<usize>) -> Result<Self> {
+        Self::start_with_statuses(delay_from_request, None, None).await
+    }
+
+    async fn start_with_renew_status(
+        delay_from_request: Option<usize>,
+        renew_status: Option<u16>,
+    ) -> Result<Self> {
+        Self::start_with_statuses(delay_from_request, renew_status, None).await
+    }
+
+    async fn start_with_statuses(
+        delay_from_request: Option<usize>,
+        renew_status: Option<u16>,
+        observation_status: Option<u16>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let requests = Arc::new(AtomicUsize::new(0));
         let request_counter = requests.clone();
+        let identities = Arc::new(Mutex::new(None::<(JobIdentities, String, String)>));
+        let response_identities = identities.clone();
+        let request_lines = Arc::new(Mutex::new(Vec::new()));
+        let recorded_lines = request_lines.clone();
         let task = tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
                 let sequence = request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let response_identities = response_identities.clone();
+                let recorded_lines = recorded_lines.clone();
                 tokio::spawn(async move {
                     let mut bytes = Vec::new();
                     let mut buffer = [0_u8; 4096];
@@ -74,22 +97,55 @@ impl MockService {
                         .next()
                         .unwrap_or_default()
                         .to_owned();
+                    recorded_lines.lock().unwrap().push(first_line.clone());
+                    let status = if first_line.contains("/renew ") {
+                        renew_status.unwrap_or(200)
+                    } else if first_line.contains("/observations ") {
+                        observation_status.unwrap_or(200)
+                    } else {
+                        200
+                    };
                     let data = if first_line.starts_with("GET ") {
+                        let (identities, source_revision, source_tree) =
+                            response_identities.lock().unwrap().clone().unwrap();
                         json!({
-                            "job": {},
-                            "reporter": {"launch_allowed": true, "lease_remaining_ms": 60_000}
+                            "job": {
+                                "id": identities.job_id,
+                                "producer_id": identities.producer_id,
+                                "runner_instance_id": identities.runner_instance_id,
+                                "source_revision": source_revision,
+                                "source_tree": source_tree
+                            },
+                            "reporter": {
+                                "id": identities.reporter_id,
+                                "launch_allowed": true,
+                                "lease_remaining_ms": 60_000
+                            }
                         })
                     } else {
                         json!({})
                     };
-                    let body = json!({
-                        "data": data,
-                        "request_id": Uuid::new_v4().to_string(),
-                        "server_time": "2026-09-09T12:00:00Z"
-                    })
+                    let body = if (200..300).contains(&status) {
+                        json!({
+                            "data": data,
+                            "request_id": Uuid::new_v4().to_string(),
+                            "server_time": "2026-09-09T12:00:00Z"
+                        })
+                    } else {
+                        json!({
+                            "error": {"code":"renewal_denied", "message":"renewal denied"},
+                            "request_id": Uuid::new_v4().to_string(),
+                            "server_time": "2026-09-09T12:00:00Z"
+                        })
+                    }
                     .to_string();
+                    let reason = match status {
+                        200 => "OK",
+                        409 => "Conflict",
+                        _ => "Forbidden",
+                    };
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
                         body
                     );
@@ -99,8 +155,33 @@ impl MockService {
         });
         Ok(Self {
             origin: format!("http://{address}"),
+            identities,
+            requests: request_lines,
             task,
         })
+    }
+
+    fn bind(&self, identities: &JobIdentities, source: &SourceSnapshot) {
+        *self.identities.lock().unwrap() = Some((
+            identities.clone(),
+            source.revision.clone(),
+            source.tree.clone(),
+        ));
+    }
+
+    fn request_count(&self, fragment: &str) -> usize {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.contains(fragment))
+            .count()
+    }
+
+    fn replace_job_identity(&self) {
+        let mut binding = self.identities.lock().unwrap();
+        let (identities, _, _) = binding.as_mut().unwrap();
+        identities.job_id = Uuid::new_v4().to_string();
     }
 }
 
@@ -116,6 +197,17 @@ impl Fixture {
         sleep_ms: u64,
         output_bytes: usize,
         log_limit: u64,
+    ) -> Result<Self> {
+        Self::new_with_renewal(service, sleep_ms, output_bytes, log_limit, None, None)
+    }
+
+    fn new_with_renewal(
+        service: &MockService,
+        sleep_ms: u64,
+        output_bytes: usize,
+        log_limit: u64,
+        harness: Option<ProcessIdentity>,
+        renewal: Option<RenewalConfig>,
     ) -> Result<Self> {
         let temp = tempfile::Builder::new()
             .prefix("coordinator local spaces ")
@@ -142,6 +234,7 @@ impl Fixture {
             runner_instance_id: Uuid::new_v4().to_string(),
             reporter_id: Uuid::new_v4().to_string(),
         };
+        service.bind(&identities, &source);
         let marker = temp.path().join("producer started.txt");
         let state_file = temp.path().join("job state with spaces").join("state.json");
         let mut environment = BTreeMap::new();
@@ -170,7 +263,7 @@ impl Fixture {
             },
             source: source.clone(),
             log_limit_bytes: log_limit,
-            harness: None,
+            harness,
         })?;
         record_registration(
             &state_file,
@@ -178,7 +271,7 @@ impl Fixture {
                 &service.origin,
                 true,
                 format!("acr_{}.{}", identities.reporter_id, "a".repeat(64)),
-                None,
+                renewal,
             )?,
         )?;
         Ok(Self {
@@ -213,6 +306,34 @@ fn git(directory: &Path, args: &[&str]) -> Result<String> {
         bail!("test Git command failed");
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn spawn_test_process(marker: &Path, sleep_ms: u64) -> Result<std::process::Child> {
+    let mut command = Command::new(std::env::current_exe()?.canonicalize()?);
+    command
+        .args(["--exact", "tests::producer_helper", "--nocapture"])
+        .env_clear()
+        .env("LOCAL_GUARDIAN_TEST_MARKER", marker)
+        .env("LOCAL_GUARDIAN_TEST_SLEEP_MS", sleep_ms.to_string())
+        .env("LOCAL_GUARDIAN_TEST_OUTPUT_BYTES", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(command.spawn()?)
+}
+
+async fn wait_for_path(path: &Path) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("{} was not created", path.display()))?;
+    Ok(())
 }
 
 #[test]
@@ -414,6 +535,117 @@ async fn torn_journal_tail_is_repaired_before_a_launch_intent_is_appended() -> R
         GuardianOutcome::ObservedUnknown
     );
     assert!(!fixture.marker.exists());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn harness_exit_stops_renewal_while_job_observations_continue() -> Result<()> {
+    let service = MockService::start(None).await?;
+    let harness_temp = tempfile::tempdir()?;
+    let harness_marker = harness_temp.path().join("harness started");
+    let mut harness = spawn_test_process(&harness_marker, 10_000)?;
+    wait_for_path(&harness_marker).await?;
+    let harness_identity = capture_process_identity(harness.id())?.context("harness identity")?;
+    let fixture = Fixture::new_with_renewal(
+        &service,
+        2_800,
+        0,
+        0,
+        Some(harness_identity),
+        Some(RenewalConfig {
+            generation: 7,
+            renew_after_seconds: 1,
+            renew_until: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+        }),
+    )?;
+    let state_file = fixture.state_file.clone();
+    let guardian = tokio::spawn(async move { run_guardian(&state_file, GuardianMode::Run).await });
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while service.request_count("/renew ") == 0 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await?;
+    harness.kill()?;
+    harness.wait()?;
+    let renewals_at_exit = service.request_count("/renew ");
+    assert!(renewals_at_exit >= 1);
+    assert_eq!(guardian.await??, GuardianOutcome::Completed);
+    assert_eq!(service.request_count("/renew "), renewals_at_exit);
+    assert!(service.request_count("/observations ") >= 3);
+    assert_eq!(inspect_job(&fixture.state_file)?.phase, JobPhase::Succeeded);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renewal_denial_does_not_disable_later_terminal_observation() -> Result<()> {
+    let service = MockService::start_with_renew_status(None, Some(403)).await?;
+    let harness = capture_process_identity(std::process::id())?.context("test harness identity")?;
+    let fixture = Fixture::new_with_renewal(
+        &service,
+        2_200,
+        0,
+        0,
+        Some(harness),
+        Some(RenewalConfig {
+            generation: 8,
+            renew_after_seconds: 1,
+            renew_until: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+        }),
+    )?;
+    assert_eq!(
+        run_guardian(&fixture.state_file, GuardianMode::Run).await?,
+        GuardianOutcome::Completed
+    );
+    assert_eq!(service.request_count("/renew "), 1);
+    assert!(service.request_count("/observations ") >= 3);
+    let summary = inspect_job(&fixture.state_file)?;
+    assert_eq!(summary.phase, JobPhase::Succeeded);
+    assert!(!summary.reporting_disabled);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_observation_conflict_does_not_starve_eligible_renewal() -> Result<()> {
+    let service = MockService::start_with_statuses(None, None, Some(409)).await?;
+    let harness = capture_process_identity(std::process::id())?.context("test harness identity")?;
+    let fixture = Fixture::new_with_renewal(
+        &service,
+        1_600,
+        0,
+        0,
+        Some(harness),
+        Some(RenewalConfig {
+            generation: 9,
+            renew_after_seconds: 1,
+            renew_until: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+        }),
+    )?;
+    assert_eq!(
+        run_guardian(&fixture.state_file, GuardianMode::Run).await?,
+        GuardianOutcome::Completed
+    );
+    assert!(service.request_count("/renew ") >= 1);
+    let summary = inspect_job(&fixture.state_file)?;
+    assert_eq!(summary.phase, JobPhase::Succeeded);
+    assert!(summary.pending_observations >= 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mismatched_launch_authority_identity_never_starts_producer() -> Result<()> {
+    let service = MockService::start(None).await?;
+    let fixture = Fixture::new(&service, 0, 0, 0)?;
+    service.replace_job_identity();
+    assert_eq!(
+        run_guardian(&fixture.state_file, GuardianMode::Run).await?,
+        GuardianOutcome::Completed
+    );
+    assert!(!fixture.marker.exists());
+    assert_eq!(
+        inspect_job(&fixture.state_file)?.phase,
+        JobPhase::NotStarted
+    );
     Ok(())
 }
 

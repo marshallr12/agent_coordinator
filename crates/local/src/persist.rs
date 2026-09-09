@@ -74,9 +74,10 @@ pub(crate) fn load(paths: &JobPaths) -> Result<StoredJob> {
 pub(crate) fn save(paths: &JobPaths, state: &StoredJob) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(state).context("encode local job state")?;
     let temporary = paths.directory.join(format!(
-        ".state-{}-{}.tmp",
+        ".state-{}-{}-{}.tmp",
         std::process::id(),
-        state.revision
+        state.revision,
+        uuid::Uuid::new_v4()
     ));
     let mut file = protected_create_new(&temporary)?;
     if let Err(error) = (|| -> io::Result<()> {

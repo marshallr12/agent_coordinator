@@ -679,11 +679,37 @@ async fn check_launch_authority(state: &StoredJob) -> Result<LaunchAuthority> {
             response.status
         )));
     }
-    let reporter = response
-        .body
-        .get("data")
-        .and_then(|data| data.get("reporter"))
-        .context("launch-authority response omitted reporter")?;
+    let Some(data) = response.body.get("data") else {
+        return Ok(LaunchAuthority::Uncertain(
+            "launch-authority response omitted data".into(),
+        ));
+    };
+    let Some(job) = data.get("job") else {
+        return Ok(LaunchAuthority::Uncertain(
+            "launch-authority response omitted job identity".into(),
+        ));
+    };
+    let Some(reporter) = data.get("reporter") else {
+        return Ok(LaunchAuthority::Uncertain(
+            "launch-authority response omitted reporter identity".into(),
+        ));
+    };
+    let identity_matches = job.get("id").and_then(Value::as_str)
+        == Some(state.identities.job_id.as_str())
+        && job.get("producer_id").and_then(Value::as_str)
+            == Some(state.identities.producer_id.as_str())
+        && job.get("runner_instance_id").and_then(Value::as_str)
+            == Some(state.identities.runner_instance_id.as_str())
+        && reporter.get("id").and_then(Value::as_str)
+            == Some(state.identities.reporter_id.as_str());
+    let source_matches = job.get("source_revision").and_then(Value::as_str)
+        == Some(state.source.revision.as_str())
+        && job.get("source_tree").and_then(Value::as_str) == Some(state.source.tree.as_str());
+    if !identity_matches || !source_matches {
+        return Ok(LaunchAuthority::Denied(
+            "The service reporter is bound to different local job or source identities.".into(),
+        ));
+    }
     let launch_allowed = reporter
         .get("launch_allowed")
         .and_then(Value::as_bool)
@@ -896,12 +922,15 @@ async fn flush_reports(paths: &persist::JobPaths, state: &mut StoredJob) -> Resu
                         .reporting_disabled = true;
                 }
                 persist_state(paths, state)?;
-                return Ok(());
+                if matches!(response.status, 401 | 403) {
+                    return Ok(());
+                }
+                break;
             }
             Err(error) => {
                 state.last_report_error = Some(error.to_string());
                 persist_state(paths, state)?;
-                return Ok(());
+                break;
             }
         }
     }
@@ -980,9 +1009,6 @@ async fn maybe_renew(
                 let reporter = state.reporter.as_mut().expect("reporter exists");
                 reporter.renewal = None;
                 reporter.pending_renewal = None;
-                if matches!(response.status, 401 | 403) {
-                    reporter.reporting_disabled = true;
-                }
             }
         }
         Err(error) => state.last_report_error = Some(error.to_string()),
@@ -1126,6 +1152,19 @@ fn validate_initialize(input: &InitializeJob) -> Result<()> {
     }
     if input.log_limit_bytes > MAX_LOG_BYTES {
         bail!("log limit exceeds the 64 MiB local maximum");
+    }
+    let working_directory = input
+        .command
+        .working_directory
+        .canonicalize()
+        .context("resolve producer working directory")?;
+    let checkout = input
+        .source
+        .checkout
+        .canonicalize()
+        .context("resolve source checkout")?;
+    if working_directory != checkout {
+        bail!("producer working directory must be the registered source checkout");
     }
     for (name, value) in [
         ("job_id", &input.identities.job_id),
