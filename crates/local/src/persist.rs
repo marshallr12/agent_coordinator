@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -95,7 +95,20 @@ pub(crate) fn save(paths: &JobPaths, state: &StoredJob) -> Result<()> {
 }
 
 pub(crate) fn append_event(paths: &JobPaths, event: &JournalEvent) -> Result<()> {
-    let mut file = protected_open(&paths.journal, true)?;
+    let mut file = protected_open(&paths.journal, false)?;
+    let mut existing = Vec::new();
+    file.read_to_end(&mut existing)
+        .context("inspect local job journal tail")?;
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        let valid_length = existing
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        file.set_len(valid_length as u64)
+            .context("repair interrupted local job journal tail")?;
+    }
+    file.seek(SeekFrom::End(0))
+        .context("seek local job journal")?;
     serde_json::to_writer(&mut file, event).context("encode local job journal entry")?;
     file.write_all(b"\n").context("append local job journal")?;
     file.sync_all().context("sync local job journal")?;

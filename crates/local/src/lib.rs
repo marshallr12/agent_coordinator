@@ -39,6 +39,11 @@ pub struct JobIdentities {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// An exact foreground producer invocation.
+///
+/// The program must remain attached for the full lifetime of the registered
+/// producer. A launcher that exits after starting a detached descendant cannot
+/// supply terminal evidence for that descendant and requires separate recovery.
 pub struct CommandSpec {
     pub program: PathBuf,
     #[serde(default)]
@@ -249,11 +254,12 @@ struct TerminalEvidence {
     summary: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum JournalKind {
     Initialized,
     Registered {
+        reporter: StoredReporter,
         observation: PendingObservation,
     },
     LaunchIntent,
@@ -273,7 +279,7 @@ enum JournalKind {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct JournalEvent {
     revision: u64,
     at_ms: i64,
@@ -430,7 +436,15 @@ pub fn record_registration(
         .last()
         .expect("registered observation was just enqueued")
         .clone();
-    commit_event(&paths, &mut state, JournalKind::Registered { observation })?;
+    let journal_reporter = state.reporter.clone().expect("reporter was just installed");
+    commit_event(
+        &paths,
+        &mut state,
+        JournalKind::Registered {
+            reporter: journal_reporter,
+            observation,
+        },
+    )?;
     Ok(summary(&paths, &state))
 }
 
@@ -553,12 +567,21 @@ async fn launch_and_watch(
         }
     };
     let pid = child.id();
+    let mut log_drains = Vec::new();
     if state.log_limit_bytes > 0 {
         if let Some(stdout) = child.stdout.take() {
-            spawn_log_drain(stdout, paths.stdout.clone(), state.log_limit_bytes);
+            log_drains.push(spawn_log_drain(
+                stdout,
+                paths.stdout.clone(),
+                state.log_limit_bytes,
+            ));
         }
         if let Some(stderr) = child.stderr.take() {
-            spawn_log_drain(stderr, paths.stderr.clone(), state.log_limit_bytes);
+            log_drains.push(spawn_log_drain(
+                stderr,
+                paths.stderr.clone(),
+                state.log_limit_bytes,
+            ));
         }
     }
     let process = process::capture(pid)?;
@@ -595,6 +618,9 @@ async fn launch_and_watch(
     loop {
         flush_reports(paths, state).await?;
         if let Some(status) = child.try_wait().context("observe local producer")? {
+            for drain in &log_drains {
+                let _ = drain.recv_timeout(Duration::from_secs(2));
+            }
             let exit_code = status.code().unwrap_or(platform_interrupted_exit_code());
             let evidence = TerminalEvidence {
                 phase: if status.success() {
@@ -653,8 +679,12 @@ async fn check_launch_authority(state: &StoredJob) -> Result<LaunchAuthority> {
             response.status
         )));
     }
-    let data = response.body.get("data").unwrap_or(&response.body);
-    let launch_allowed = data
+    let reporter = response
+        .body
+        .get("data")
+        .and_then(|data| data.get("reporter"))
+        .context("launch-authority response omitted reporter")?;
+    let launch_allowed = reporter
         .get("launch_allowed")
         .and_then(Value::as_bool)
         .context("launch-authority response omitted launch_allowed")?;
@@ -663,7 +693,7 @@ async fn check_launch_authority(state: &StoredJob) -> Result<LaunchAuthority> {
             "The service reported that launch authority is no longer valid.".into(),
         ));
     }
-    let remaining = data
+    let remaining = reporter
         .get("lease_remaining_ms")
         .and_then(Value::as_i64)
         .context("launch-authority response omitted lease_remaining_ms")?;
@@ -988,8 +1018,12 @@ fn recover_inner(paths: &persist::JobPaths) -> Result<(StoredJob, bool)> {
         state.revision = event.revision;
         match &event.event {
             JournalKind::LaunchIntent => state.phase = JobPhase::LaunchIntent,
-            JournalKind::Registered { observation } => {
+            JournalKind::Registered {
+                reporter,
+                observation,
+            } => {
                 state.phase = JobPhase::Registered;
+                state.reporter = Some(reporter.clone());
                 restore_observation(&mut state, observation);
             }
             JournalKind::ProducerStarted {
@@ -1154,23 +1188,27 @@ fn prepare_logs(paths: &persist::JobPaths, limit: u64) -> Result<()> {
     Ok(())
 }
 
-fn spawn_log_drain<R>(mut source: R, path: PathBuf, limit: u64)
+fn spawn_log_drain<R>(mut source: R, path: PathBuf, limit: u64) -> std::sync::mpsc::Receiver<()>
 where
     R: Read + Send + 'static,
 {
+    let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let Ok(mut destination) = persist::protected_log(&path) else {
             let _ = std::io::copy(&mut source, &mut std::io::sink());
+            let _ = finished_tx.send(());
             return;
         };
         let mut written = 0_u64;
         let mut buffer = [0_u8; 16 * 1024];
         loop {
             let Ok(count) = source.read(&mut buffer) else {
+                let _ = finished_tx.send(());
                 return;
             };
             if count == 0 {
                 let _ = destination.sync_all();
+                let _ = finished_tx.send(());
                 return;
             }
             let remaining = limit.saturating_sub(written) as usize;
@@ -1182,6 +1220,7 @@ where
             }
         }
     });
+    finished_rx
 }
 
 fn now_ms() -> i64 {
@@ -1211,6 +1250,9 @@ fn platform_interrupted_exit_code() -> i32 {
 fn platform_interrupted_exit_code() -> i32 {
     -1
 }
+
+#[cfg(test)]
+mod tests;
 
 #[cfg(not(any(unix, windows)))]
 fn platform_interrupted_exit_code() -> i32 {

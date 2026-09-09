@@ -141,8 +141,7 @@ fn capture_platform(pid: u32) -> Result<Option<ProcessIdentity>> {
 fn capture_platform(pid: u32) -> Result<Option<ProcessIdentity>> {
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        STILL_ACTIVE,
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -162,13 +161,11 @@ fn capture_platform(pid: u32) -> Result<Option<ProcessIdentity>> {
     let mut user = creation;
     let success =
         unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
-    let mut exit_code = 0;
-    let exit_success = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
     unsafe { CloseHandle(handle) };
-    if success == 0 || exit_success == 0 {
+    if success == 0 {
         return Err(io::Error::last_os_error()).context("read Windows process identity");
     }
-    if exit_code != STILL_ACTIVE {
+    if exit.dwLowDateTime != 0 || exit.dwHighDateTime != 0 {
         return Ok(None);
     }
     let ticks = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
