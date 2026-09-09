@@ -171,7 +171,7 @@ fn prepare_at_path(request: PrepareRequest<'_>, path: &Path) -> Result<Preparati
                 OsString::from("add"),
                 OsString::from("-b"),
                 intent.branch.clone().into(),
-                destination.as_os_str().to_owned(),
+                git_compatible_path(&destination)?.into_os_string(),
                 intent.base_revision.clone().into(),
             ],
         )?;
@@ -428,11 +428,53 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let working_directory = git_compatible_path(repository)?;
     Command::new("git")
         .args(args)
-        .current_dir(repository)
+        .current_dir(&working_directory)
         .output()
         .with_context(|| format!("run Git in {}", repository.display()))
+}
+
+#[cfg(not(windows))]
+fn git_compatible_path(path: &Path) -> Result<PathBuf> {
+    Ok(path.to_path_buf())
+}
+
+#[cfg(windows)]
+fn git_compatible_path(path: &Path) -> Result<PathBuf> {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Ok(path.to_path_buf());
+    };
+    let mut compatible = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut value = OsString::from(r"\\");
+            value.push(server);
+            value.push(r"\");
+            value.push(share);
+            PathBuf::from(value)
+        }
+        Prefix::Verbatim(_) | Prefix::DeviceNS(_) => {
+            bail!(
+                "Git cannot use the Windows device path {}; choose a drive or UNC path",
+                path.display()
+            )
+        }
+        Prefix::Disk(_) | Prefix::UNC(_, _) => return Ok(path.to_path_buf()),
+    };
+    for component in components {
+        match component {
+            Component::Prefix(_) => bail!("invalid Windows path {}", path.display()),
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => compatible.push(".."),
+            Component::Normal(value) => compatible.push(value),
+        }
+    }
+    Ok(compatible)
 }
 
 fn safe_stderr(output: &Output) -> String {
@@ -682,5 +724,25 @@ mod tests {
         )
         .unwrap();
         assert!(current_snapshot(&prepared).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn converts_verbatim_drive_and_unc_paths_for_git() {
+        assert_eq!(
+            git_compatible_path(Path::new(r"\\?\C:\source checkout\repository")).unwrap(),
+            PathBuf::from(r"C:\source checkout\repository")
+        );
+        assert_eq!(
+            git_compatible_path(Path::new(r"\\?\UNC\server\shared directory\repository")).unwrap(),
+            PathBuf::from(r"\\server\shared directory\repository")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_unsupported_verbatim_git_paths() {
+        assert!(git_compatible_path(Path::new(r"\\?\GLOBALROOT\Device\HarddiskVolume1")).is_err());
+        assert!(git_compatible_path(Path::new(r"\\.\C:\repository")).is_err());
     }
 }
