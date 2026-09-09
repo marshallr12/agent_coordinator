@@ -1,0 +1,194 @@
+use sqlx::{
+    ConnectOptions, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::sync::Semaphore;
+
+#[derive(Clone)]
+pub struct Config {
+    pub database_path: PathBuf,
+    pub listen: SocketAddr,
+    pub public_origin: String,
+    pub allow_insecure_loopback: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            database_path: "data/coordinator.sqlite3".into(),
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            public_origin: "https://localhost".into(),
+            allow_insecure_loopback: false,
+        }
+    }
+}
+
+impl Config {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.listen.ip().is_loopback(),
+            "The service listener must be loopback; expose HTTPS through the reverse proxy."
+        );
+        let origin = url::Url::parse(&self.public_origin)?;
+        anyhow::ensure!(
+            origin.username().is_empty()
+                && origin.password().is_none()
+                && origin.path() == "/"
+                && origin.query().is_none()
+                && origin.fragment().is_none()
+                && origin.host_str().is_some(),
+            "public_origin must be an origin without credentials, path, query, or fragment."
+        );
+        anyhow::ensure!(
+            self.public_origin == origin.origin().ascii_serialization(),
+            "public_origin must use canonical scheme://host[:port] form without a trailing slash."
+        );
+        let local_origin = match origin.host() {
+            Some(url::Host::Domain(name)) => name == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        };
+        anyhow::ensure!(
+            origin.scheme() == "https"
+                || (origin.scheme() == "http" && local_origin && self.allow_insecure_loopback),
+            "HTTPS is required. Development HTTP requires --allow-insecure-loopback and a loopback origin."
+        );
+        Ok(())
+    }
+    pub(crate) fn secure_cookie(&self) -> bool {
+        self.public_origin.starts_with("https://")
+    }
+}
+
+pub trait Clock: Send + Sync {
+    fn now_ms(&self) -> i64;
+}
+pub struct SystemClock;
+impl Clock for SystemClock {
+    fn now_ms(&self) -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: SqlitePool,
+    pub config: Config,
+    pub clock: Arc<dyn Clock>,
+    pub(crate) login_limits: Arc<Mutex<LoginLimits>>,
+    pub(crate) password_workers: Arc<Semaphore>,
+    pub(crate) dummy_password_hash: Arc<String>,
+}
+
+impl AppState {
+    pub fn now(&self) -> i64 {
+        self.clock.now_ms()
+    }
+    pub async fn open(config: Config) -> anyhow::Result<Self> {
+        config.validate()?;
+        if config.database_path != std::path::Path::new(":memory:") {
+            if let Some(parent) = config
+                .database_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+            {
+                let mut builder = std::fs::DirBuilder::new();
+                builder.recursive(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    builder.mode(0o700);
+                }
+                builder.create(parent)?;
+            }
+            if let Ok(metadata) = std::fs::symlink_metadata(&config.database_path) {
+                anyhow::ensure!(
+                    metadata.is_file() && !metadata.file_type().is_symlink(),
+                    "Database path must be a regular file."
+                );
+            }
+            let mut file = std::fs::OpenOptions::new();
+            file.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                file.mode(0o600);
+            }
+            let db = file.open(&config.database_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                db.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            drop(db);
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(&config.database_path)
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Full)
+            .busy_timeout(Duration::from_secs(5))
+            .disable_statement_logging();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(
+                if config.database_path == std::path::Path::new(":memory:") {
+                    1
+                } else {
+                    8
+                },
+            )
+            .connect_with(options)
+            .await?;
+        sqlx::migrate!("./migrations").run(&pool).await?;
+        let dummy_password_hash = crate::auth::hash_password(crate::auth::secret()).await?;
+        Ok(Self {
+            pool,
+            config,
+            clock: Arc::new(SystemClock),
+            login_limits: Arc::new(Mutex::new(LoginLimits::default())),
+            password_workers: Arc::new(Semaphore::new(2)),
+            dummy_password_hash: Arc::new(dummy_password_hash),
+        })
+    }
+}
+
+/// Monotonic time avoids clock adjustments bypassing limits. The global budget
+/// also bounds work across invented usernames and untrusted proxy headers.
+#[derive(Default)]
+pub(crate) struct LoginLimits {
+    global: Option<(Instant, u32)>,
+    names: HashMap<String, (Instant, u32)>,
+}
+impl LoginLimits {
+    pub(crate) fn admit(&mut self, username: &str) -> bool {
+        let now = Instant::now();
+        self.names
+            .retain(|_, (started, _)| now.duration_since(*started) < Duration::from_secs(60));
+        let global = self.global.get_or_insert((now, 0));
+        if now.duration_since(global.0) >= Duration::from_secs(60) {
+            *global = (now, 0);
+        }
+        if global.1 >= 30 {
+            return false;
+        }
+        global.1 += 1;
+        if !self.names.contains_key(username) && self.names.len() >= 1024 {
+            return false;
+        }
+        let count = self.names.entry(username.to_owned()).or_insert((now, 0));
+        if count.1 >= 5 {
+            return false;
+        }
+        count.1 += 1;
+        true
+    }
+}

@@ -1,0 +1,10 @@
+# Replace this hostname with the same HTTPS origin used in service.env.
+coordinator.example.com {
+    encode zstd gzip
+    request_body {
+        max_size 256KB
+    }
+    reverse_proxy 127.0.0.1:8080
+    # Keep access logs disabled: URLs may accidentally contain caller secrets.
+    # The service ignores forwarded identity, scheme, and client IP headers.
+}
