@@ -1,1 +1,124 @@
-<!doctype html><title>Agent Coordinator</title><main>Implementation in progress</main>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Agent Coordinator · Operations</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <div id="app" class="app-shell">
+      <section id="login-view" class="login-view" aria-labelledby="login-title" hidden>
+        <div class="login-card">
+          <div class="brand-mark" aria-hidden="true">AC</div>
+          <p class="eyebrow">Agent Coordinator</p>
+          <h1 id="login-title">Keep agent work moving.</h1>
+          <p class="muted login-copy">Sign in to see projects, task ownership, and the latest checkpoint trail.</p>
+          <div id="login-error" class="inline-alert error" role="alert" hidden></div>
+          <form id="login-form" novalidate>
+            <label for="username">Username</label>
+            <input id="username" name="username" autocomplete="username" required>
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+            <button class="button primary full-width" type="submit">Sign in</button>
+          </form>
+          <p class="login-footnote">Credentials stay with the coordinator service. This browser stores no token.</p>
+        </div>
+      </section>
+
+      <div id="loading-view" class="loading-view" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>Restoring your coordinator session…</span>
+      </div>
+
+      <div id="dashboard-view" hidden>
+        <header class="topbar">
+          <div class="topbar-inner">
+            <button id="brand-button" class="brand-button" type="button" aria-label="Go to overview">
+              <span class="brand-mark small" aria-hidden="true">AC</span>
+              <span><strong>Agent Coordinator</strong><small>Operations console</small></span>
+            </button>
+            <div class="topbar-actions">
+              <span id="actor-chip" class="actor-chip"></span>
+              <button id="logout-button" class="button ghost" type="button">Sign out</button>
+            </div>
+          </div>
+        </header>
+
+        <div class="design-banner" role="note">
+          <span class="banner-icon" aria-hidden="true">✦</span>
+          <span><strong>Foundation stage.</strong> Projects, ownership, leases, and checkpoints are available now. Review and integration arrive in a later milestone.</span>
+        </div>
+
+        <div id="global-alert" class="global-alert" role="status" aria-live="polite" hidden></div>
+        <main id="main-content" class="main-layout">
+          <aside class="sidebar" aria-label="Primary navigation">
+            <nav>
+              <button class="nav-item active" data-view="overview" type="button"><span aria-hidden="true">⌂</span> Overview</button>
+              <button class="nav-item" data-view="tasks" type="button"><span aria-hidden="true">☷</span> Tasks</button>
+              <button class="nav-item" data-view="admin" id="admin-nav" type="button"><span aria-hidden="true">⚿</span> Access</button>
+            </nav>
+            <div class="sidebar-note">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span><strong>Service connected</strong><small id="last-sync">Syncing…</small></span>
+            </div>
+          </aside>
+
+          <div class="content-column">
+            <section id="overview-view" class="page-view" aria-labelledby="overview-heading">
+              <div class="page-heading">
+                <div><p class="eyebrow">Workspace</p><h1 id="overview-heading">Project overview</h1><p class="muted">A quiet view of what is ready, active, and waiting.</p></div>
+                <button id="new-project-button" class="button primary" type="button"><span aria-hidden="true">＋</span> New project</button>
+              </div>
+              <div id="overview-summary" class="summary-grid" aria-label="Workspace summary"></div>
+              <div class="section-heading"><div><h2>Projects</h2><p class="muted">Select a project to open its task queue.</p></div><button id="refresh-projects" class="button subtle" type="button">Refresh</button></div>
+              <div id="projects-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Loading projects…</span></div>
+              <div id="projects-grid" class="project-grid" hidden></div>
+            </section>
+
+            <section id="tasks-view" class="page-view" aria-labelledby="tasks-heading" hidden>
+              <div class="page-heading">
+                <div><p class="eyebrow">Execution</p><h1 id="tasks-heading">Task queue</h1><p id="tasks-subtitle" class="muted">Choose a project to inspect its work.</p></div>
+                <button id="new-task-button" class="button primary" type="button" disabled><span aria-hidden="true">＋</span> New task</button>
+              </div>
+              <div class="toolbar">
+                <label class="select-label" for="project-select">Project<select id="project-select"><option value="">Choose a project</option></select></label>
+                <label class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="open">Open</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="blocked">Blocked</option><option value="submitted">Submitted</option><option value="done">Done</option></select></label>
+                <button id="refresh-tasks" class="button subtle" type="button" disabled>Refresh</button>
+              </div>
+              <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
+              <div id="tasks-list" class="tasks-list" hidden></div>
+            </section>
+
+            <section id="task-detail-view" class="page-view" aria-labelledby="task-detail-heading" hidden>
+              <div class="detail-back-row"><button id="back-to-tasks" class="button text-button" type="button">← Back to tasks</button></div>
+              <div id="task-detail-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Loading task…</span></div>
+              <div id="task-detail-content" hidden>
+                <div class="page-heading detail-heading"><div><p id="detail-project-label" class="eyebrow"></p><h1 id="task-detail-heading"></h1><p id="detail-task-id" class="muted"></p></div><span id="detail-status" class="status-badge"></span></div>
+                <div class="detail-grid">
+                  <article class="card detail-card"><div class="card-header"><h2>Task brief</h2><span id="detail-kind" class="meta-pill"></span></div><p id="detail-description" class="detail-description"></p><h3>Acceptance criteria</h3><ul id="acceptance-list" class="criteria-list"></ul></article>
+                  <article class="card lease-card"><div class="card-header"><h2>Ownership</h2><span class="live-label"><span class="status-dot"></span> Live</span></div><div id="lease-content"></div></article>
+                </div>
+                <article class="card checkpoints-card"><div class="card-header"><div><h2>Checkpoint trail</h2><p class="muted">Progress shared by the active or previous attempt.</p></div></div><div id="checkpoints-content"></div></article>
+              </div>
+            </section>
+
+            <section id="admin-view" class="page-view" aria-labelledby="admin-heading" hidden>
+              <div class="page-heading"><div><p class="eyebrow">Administration</p><h1 id="admin-heading">Access & credentials</h1><p class="muted">Issue a coordinator credential for an agent and revoke it when its work ends.</p></div></div>
+              <div id="admin-denied" class="state-panel" role="status" hidden>Admin access is limited to administrator accounts.</div>
+              <div id="admin-content">
+                <div class="admin-grid">
+                  <article class="card issue-card"><div class="card-header"><div><h2>Issue agent credential</h2><p class="muted">The token is shown once and clears when you dismiss it.</p></div></div><div id="issue-feedback" class="inline-alert" role="status" hidden></div><form id="issue-form"><label for="agent-name">Agent name</label><input id="agent-name" name="agent-name" placeholder="e.g. build-runner" required maxlength="120"><button class="button primary" type="submit">Issue credential</button></form><div id="token-reveal" class="token-reveal" hidden><div class="token-reveal-header"><strong>Copy this token now</strong><button id="clear-token" class="icon-button" type="button" aria-label="Clear token">×</button></div><code id="issued-token"></code><button id="copy-token" class="button subtle" type="button">Copy token</button></div></article>
+                  <article class="card credentials-card"><div class="card-header"><div><h2>Issued credentials</h2><p class="muted">Revoked credentials cannot create new sessions.</p></div><button id="refresh-credentials" class="button subtle" type="button">Refresh</button></div><div id="credentials-state" class="state-panel compact" role="status"><span class="spinner" aria-hidden="true"></span><span>Loading credentials…</span></div><div id="credentials-list" hidden></div></article>
+                </div>
+              </div>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
