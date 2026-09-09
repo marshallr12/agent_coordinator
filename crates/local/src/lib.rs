@@ -198,6 +198,7 @@ pub struct JobSummary {
     pub pending_observations: usize,
     pub reporting_disabled: bool,
     pub last_report_error: Option<String>,
+    pub last_local_summary: Option<String>,
     pub stdout_log: PathBuf,
     pub stderr_log: PathBuf,
 }
@@ -305,6 +306,8 @@ struct StoredJob {
     pending_observations: Vec<PendingObservation>,
     last_running_observation_ms: Option<i64>,
     last_report_error: Option<String>,
+    #[serde(default)]
+    last_local_summary: Option<String>,
 }
 
 pub fn capture_process_identity(pid: u32) -> Result<Option<ProcessIdentity>> {
@@ -369,6 +372,7 @@ pub fn initialize_launch_state(input: InitializeJob) -> Result<JobSummary> {
         pending_observations: Vec::new(),
         last_running_observation_ms: None,
         last_report_error: None,
+        last_local_summary: None,
     };
     persist::save(&paths, &state)?;
     persist::append_event(
@@ -517,7 +521,17 @@ async fn launch_and_watch(
                 flush_reports(paths, state).await?;
                 return Err(error);
             }
-            prepare_logs(paths, state.log_limit_bytes)?;
+            if let Err(error) = prepare_logs(paths, state.log_limit_bytes) {
+                let evidence = TerminalEvidence {
+                    phase: JobPhase::NotStarted,
+                    exit_code: None,
+                    inputs_unchanged: inputs_unchanged(&state.source),
+                    summary: "Protected local logs could not be initialized before launch.".into(),
+                };
+                apply_terminal(paths, state, evidence)?;
+                flush_reports(paths, state).await?;
+                return Err(error);
+            }
             state.phase = JobPhase::LaunchIntent;
             commit_event(paths, state, JournalKind::LaunchIntent)?;
             if std::time::Instant::now() >= deadline {
@@ -793,6 +807,7 @@ fn set_unknown(
 ) -> Result<()> {
     state.phase = JobPhase::Unknown;
     state.inputs_unchanged = unchanged;
+    state.last_local_summary = Some(message.into());
     enqueue_observation(
         state,
         JobPhase::Unknown,
@@ -824,6 +839,7 @@ fn apply_terminal(
     state.phase = evidence.phase;
     state.exit_code = evidence.exit_code;
     state.inputs_unchanged = Some(evidence.inputs_unchanged);
+    state.last_local_summary = Some(evidence.summary.clone());
     enqueue_observation(
         state,
         evidence.phase,
@@ -1069,15 +1085,17 @@ fn recover_inner(paths: &persist::JobPaths) -> Result<(StoredJob, bool)> {
                 state.phase = evidence.phase;
                 state.exit_code = evidence.exit_code;
                 state.inputs_unchanged = Some(evidence.inputs_unchanged);
+                state.last_local_summary = Some(evidence.summary.clone());
                 restore_observation(&mut state, observation);
             }
             JournalKind::Unknown {
                 inputs_unchanged,
+                summary,
                 observation,
-                ..
             } => {
                 state.phase = JobPhase::Unknown;
                 state.inputs_unchanged = *inputs_unchanged;
+                state.last_local_summary = Some(summary.clone());
                 restore_observation(&mut state, observation);
             }
             JournalKind::Initialized => {}
@@ -1137,6 +1155,7 @@ fn summary(paths: &persist::JobPaths, state: &StoredJob) -> JobSummary {
             .as_ref()
             .is_some_and(|reporter| reporter.reporting_disabled),
         last_report_error: state.last_report_error.clone(),
+        last_local_summary: state.last_local_summary.clone(),
         stdout_log: paths.stdout.clone(),
         stderr_log: paths.stderr.clone(),
     }

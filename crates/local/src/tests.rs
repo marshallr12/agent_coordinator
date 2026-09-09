@@ -303,8 +303,9 @@ async fn wait_for_fixture_start(
         "still running".into()
     };
     bail!(
-        "producer did not start; phase={:?}, last_report_error={:?}, guardian={guardian_result}",
+        "producer did not start; phase={:?}, local_summary={:?}, last_report_error={:?}, guardian={guardian_result}",
         summary.phase,
+        summary.last_local_summary,
         summary.last_report_error
     )
 }
@@ -662,6 +663,27 @@ async fn mismatched_launch_authority_identity_never_starts_producer() -> Result<
         inspect_job(&fixture.state_file)?.phase,
         JobPhase::NotStarted
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn log_initialization_failure_is_durable_and_never_starts_producer() -> Result<()> {
+    let service = MockService::start(None).await?;
+    let fixture = Fixture::new(&service, 0, 0, 1_024)?;
+    let initial = inspect_job(&fixture.state_file)?;
+    fs::create_dir(&initial.stdout_log)?;
+    assert!(
+        run_guardian(&fixture.state_file, GuardianMode::Run)
+            .await
+            .is_err()
+    );
+    let summary = inspect_job(&fixture.state_file)?;
+    assert_eq!(summary.phase, JobPhase::NotStarted);
+    assert_eq!(
+        summary.last_local_summary.as_deref(),
+        Some("Protected local logs could not be initialized before launch.")
+    );
+    assert!(!fixture.marker.exists());
     Ok(())
 }
 
