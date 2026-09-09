@@ -1,5 +1,7 @@
 mod config;
+mod job_state;
 mod state;
+mod worktree;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -62,10 +64,176 @@ enum Command {
     Checkpoint(AttemptInputArgs),
     /// Release an attempt without marking its task complete.
     Release(AttemptInputArgs),
+    /// Prepare and register a separate clean Git worktree.
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommand,
+    },
+    /// List and reserve named shared resources.
+    Resources {
+        #[command(subcommand)]
+        command: ResourcesCommand,
+    },
+    /// Inspect or release reservations held by attempts.
+    Reservations {
+        #[command(subcommand)]
+        command: ReservationsCommand,
+    },
+    /// Run and inspect durable local jobs.
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
+    /// Record an explicit recovery inspection and disposition.
+    Recovery {
+        #[command(subcommand)]
+        command: RecoveryCommand,
+    },
     /// Send a bounded API request. POST requests use durable mutation state.
     Request(RequestArgs),
     /// Retry the exact pending mutation and its saved idempotency key.
     Retry,
+    #[command(name = "__job-guardian", hide = true)]
+    JobGuardian(JobGuardianArgs),
+}
+
+#[derive(Subcommand)]
+enum WorktreeCommand {
+    /// Create a new worktree and register it to the current attempt.
+    Prepare(WorktreePrepareArgs),
+}
+
+#[derive(Args)]
+struct WorktreePrepareArgs {
+    #[arg(long)]
+    attempt: String,
+    #[arg(long)]
+    generation: u64,
+    /// Existing clean checkout of the configured repository.
+    #[arg(long, default_value = ".")]
+    source: PathBuf,
+    /// New worktree directory. Its parent must already exist.
+    #[arg(long)]
+    path: PathBuf,
+    /// New local branch for this attempt.
+    #[arg(long)]
+    branch: String,
+    /// Commit-ish to resolve and check out exactly.
+    #[arg(long)]
+    base: String,
+}
+
+#[derive(Subcommand)]
+enum ResourcesCommand {
+    /// List resources configured by human administrators.
+    List(ListArgs),
+    /// Atomically reserve the complete resource set in a JSON file.
+    Reserve(AttemptInputArgs),
+    /// Release a reservation after all attached jobs are terminal.
+    Release(ReservationReleaseArgs),
+}
+
+#[derive(Subcommand)]
+enum ReservationsCommand {
+    /// List reservations and their held or recovery-required state.
+    List(ListArgs),
+    /// Release a reservation after all attached jobs are terminal.
+    Release(ReservationReleaseArgs),
+}
+
+#[derive(Args)]
+struct ReservationReleaseArgs {
+    #[arg(long)]
+    reservation: String,
+    #[arg(long)]
+    generation: u64,
+    #[arg(long)]
+    reason: String,
+}
+
+#[derive(Subcommand)]
+enum JobsCommand {
+    /// List remotely registered jobs without starting anything.
+    List(ListArgs),
+    /// Inspect one remotely registered job without starting anything.
+    Status(JobStatusArgs),
+    /// Register and start one durable local producer.
+    Run(JobRunArgs),
+    /// Reattach reporting to an existing local producer; never launches one.
+    Reconnect(JobLocalArgs),
+    /// Inspect protected local job state; never launches one.
+    Inspect(JobLocalArgs),
+}
+
+#[derive(Args)]
+struct JobStatusArgs {
+    #[arg(long)]
+    job: String,
+}
+
+#[derive(Args)]
+struct JobLocalArgs {
+    #[arg(long)]
+    job: String,
+}
+
+#[derive(Args)]
+struct JobRunArgs {
+    #[arg(long)]
+    attempt: String,
+    #[arg(long)]
+    generation: u64,
+    #[arg(long)]
+    reservation: String,
+    /// Prepared worktree registered for the attempt.
+    #[arg(long)]
+    checkout: PathBuf,
+    /// JSON file containing label, program, argv, and optional environment/log limit.
+    #[arg(long)]
+    input: PathBuf,
+    /// Maximum seconds of delegated attempt renewal; zero disables renewal.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=3600))]
+    renew_for_seconds: u16,
+    /// Harness PID whose exact process lifetime bounds delegated renewal.
+    #[arg(long)]
+    watch_pid: Option<u32>,
+}
+
+#[derive(Args)]
+struct JobGuardianArgs {
+    #[arg(long)]
+    state_file: PathBuf,
+    #[arg(long, value_enum)]
+    mode: GuardianModeArg,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum GuardianModeArg {
+    Run,
+    Observe,
+}
+
+impl From<GuardianModeArg> for coordinator_local::GuardianMode {
+    fn from(value: GuardianModeArg) -> Self {
+        match value {
+            GuardianModeArg::Run => Self::Run,
+            GuardianModeArg::Observe => Self::Observe,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum RecoveryCommand {
+    /// Inspect an attempt and its saved work/job evidence without changing it.
+    Inspect(RecoveryInspectArgs),
+    /// Record inspected saved-work/job evidence and its explicit disposition.
+    Resolve(AttemptInputArgs),
+}
+
+#[derive(Args)]
+struct RecoveryInspectArgs {
+    #[arg(long)]
+    attempt: String,
 }
 
 #[derive(Args)]
@@ -109,6 +277,9 @@ struct ListArgs {
 
 #[derive(Args)]
 struct ClaimArgs {
+    /// Claim ordinary work or inspect an expired attempt for recovery.
+    #[arg(long, value_enum, default_value = "work")]
+    mode: ClaimMode,
     /// Claim the next eligible task.
     #[arg(long, conflicts_with = "task", required_unless_present = "task")]
     next: bool,
@@ -118,6 +289,21 @@ struct ClaimArgs {
     /// Required current task revision when --task is used.
     #[arg(long, requires = "task")]
     revision: Option<u64>,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum ClaimMode {
+    Work,
+    Recovery,
+}
+
+impl ClaimMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Work => "work",
+            Self::Recovery => "recovery",
+        }
+    }
 }
 
 #[derive(Args)]
@@ -431,6 +617,12 @@ fn scalar(value: &Value) -> String {
 }
 
 async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
+    if let Command::JobGuardian(args) = &cli.command {
+        let outcome = coordinator_local::run_guardian(&args.state_file, args.mode.into())
+            .await
+            .map_err(Failure::temporary)?;
+        return serde_json::to_value(outcome).map_err(Failure::invalid);
+    }
     let context = build_context(cli).await?;
     match &cli.command {
         Command::Connect(args) => connect(cli, &context, args).await,
@@ -487,9 +679,657 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
                 attempt_path(&context, &args.attempt, "release").map_err(Failure::invalid)?;
             mutate(cli, &context, &path, body, true).await
         }
+        Command::Worktree { command } => match command {
+            WorktreeCommand::Prepare(args) => prepare_worktree(cli, &context, args).await,
+        },
+        Command::Resources { command } => match command {
+            ResourcesCommand::List(args) => finish(
+                context
+                    .client
+                    .get_query("/api/v1/resources", &list_query(args), None)
+                    .await,
+            ),
+            ResourcesCommand::Reserve(args) => {
+                let body = input_with_generation(&args.input, args.generation)
+                    .map_err(Failure::invalid)?;
+                let path = attempt_path(&context, &args.attempt, "reservations")
+                    .map_err(Failure::invalid)?;
+                mutate(cli, &context, &path, body, true).await
+            }
+            ResourcesCommand::Release(args) => release_reservation(cli, &context, args).await,
+        },
+        Command::Reservations { command } => match command {
+            ReservationsCommand::List(args) => {
+                let path = format!(
+                    "/api/v1/projects/{}/reservations",
+                    context.binding.project_id
+                );
+                let optional = optional_state(cli, &context)?;
+                let session = optional.as_ref().map(|(_, _, state)| &state.session);
+                finish(
+                    context
+                        .client
+                        .get_query(&path, &list_query(args), session)
+                        .await,
+                )
+            }
+            ReservationsCommand::Release(args) => release_reservation(cli, &context, args).await,
+        },
+        Command::Jobs { command } => jobs_command(cli, &context, command).await,
+        Command::Recovery { command } => match command {
+            RecoveryCommand::Inspect(args) => {
+                validate_segment("attempt", &args.attempt).map_err(Failure::invalid)?;
+                let path = format!(
+                    "/api/v1/projects/{}/attempts/{}",
+                    context.binding.project_id, args.attempt
+                );
+                let optional = optional_state(cli, &context)?;
+                let session = optional.as_ref().map(|(_, _, state)| &state.session);
+                finish(context.client.get(&path, session).await)
+            }
+            RecoveryCommand::Resolve(args) => {
+                let body = input_with_generation(&args.input, args.generation)
+                    .map_err(Failure::invalid)?;
+                let path = attempt_path(&context, &args.attempt, "recovery-resolution")
+                    .map_err(Failure::invalid)?;
+                mutate(cli, &context, &path, body, true).await
+            }
+        },
         Command::Request(args) => request(cli, &context, args).await,
         Command::Retry => retry(cli, &context).await,
+        Command::JobGuardian(_) => unreachable!("guardian handled before loading credentials"),
     }
+}
+
+async fn release_reservation(
+    cli: &Cli,
+    context: &ContextData,
+    args: &ReservationReleaseArgs,
+) -> std::result::Result<Value, Failure> {
+    validate_segment("reservation", &args.reservation).map_err(Failure::invalid)?;
+    if args.reason.trim().is_empty() {
+        return Err(Failure::invalid("--reason must not be empty"));
+    }
+    let path = format!(
+        "/api/v1/projects/{}/reservations/{}/release",
+        context.binding.project_id, args.reservation
+    );
+    mutate(
+        cli,
+        context,
+        &path,
+        json!({"generation": args.generation, "reason": args.reason}),
+        true,
+    )
+    .await
+}
+
+async fn prepare_worktree(
+    cli: &Cli,
+    context: &ContextData,
+    args: &WorktreePrepareArgs,
+) -> std::result::Result<Value, Failure> {
+    validate_segment("attempt", &args.attempt).map_err(Failure::invalid)?;
+    let (_session_lock, session_path, mut state) = load_required_state(cli, context)?;
+    let attempt_path = format!(
+        "/api/v1/projects/{}/attempts/{}",
+        context.binding.project_id, args.attempt
+    );
+    let attempt_response = context
+        .client
+        .get(&attempt_path, Some(&state.session))
+        .await
+        .map_err(client_failure)?;
+    let attempt_body = require_success(attempt_response)?;
+    require_current_work_attempt(&attempt_body, args.generation)?;
+    let project = bound_project(context, Some(&state.session)).await?;
+    let repository_url = project
+        .get("repository_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::temporary("project response omitted repository_url"))?;
+
+    let prepared = worktree::prepare(worktree::PrepareRequest {
+        service_origin: &context.origin,
+        project_id: &context.binding.project_id,
+        attempt_id: &args.attempt,
+        generation: args.generation,
+        repository_url,
+        source: &args.source,
+        destination: &args.path,
+        branch: &args.branch,
+        base: &args.base,
+    })
+    .map_err(Failure::invalid)?;
+    let identity = prepared
+        .git_dir_identity
+        .as_ref()
+        .and_then(|path| path.to_str())
+        .ok_or_else(|| Failure::invalid("resolved Git directory is not valid UTF-8"))?;
+    let local_path = prepared
+        .destination
+        .to_str()
+        .ok_or_else(|| Failure::invalid("worktree path is not valid UTF-8"))?;
+    let body = json!({
+        "generation": args.generation,
+        "workstation_id": state.workstation_id,
+        "identity": identity,
+        "path": local_path,
+        "branch": prepared.branch,
+        "base_revision": prepared.base_revision,
+        "clean": true
+    });
+    let register_path = format!(
+        "/api/v1/projects/{}/attempts/{}/checkout",
+        context.binding.project_id, args.attempt
+    );
+    if let Some(existing) = attempt_body.pointer("/data/checkout") {
+        let matches = [
+            "workstation_id",
+            "identity",
+            "path",
+            "branch",
+            "base_revision",
+        ]
+        .iter()
+        .all(|field| existing.get(field) == body.get(field));
+        if !matches {
+            return Err(Failure::local(
+                5,
+                "checkout_registered",
+                "the attempt already has a different registered checkout",
+                false,
+            ));
+        }
+        if let Some(pending) = &state.pending {
+            if pending.method != HttpMethod::Post
+                || pending.path != register_path
+                || pending.body != body
+                || !pending.include_session_id
+            {
+                return Err(Failure::invalid(format!(
+                    "an earlier mutation is unresolved ({}); run `agent-coordinator retry`",
+                    pending.path
+                )));
+            }
+            state.pending = None;
+            state::save(&session_path, &state).map_err(Failure::invalid)?;
+        }
+        return Ok(json!({
+            "data": {
+                "worktree": prepared,
+                "registration": existing,
+                "reconciled": true
+            }
+        }));
+    }
+    let response = persist_and_send(
+        context,
+        &session_path,
+        &mut state,
+        HttpMethod::Post,
+        &register_path,
+        body,
+        true,
+    )
+    .await?;
+    let remote = require_success(response)?;
+    Ok(json!({
+        "data": {
+            "worktree": prepared,
+            "registration": data(&remote)
+        },
+        "response": remote
+    }))
+}
+
+fn require_current_work_attempt(body: &Value, generation: u64) -> std::result::Result<(), Failure> {
+    let data = body.get("data").unwrap_or(body);
+    let attempt = data.get("attempt").unwrap_or(data);
+    if attempt.get("generation").and_then(Value::as_u64) != Some(generation) {
+        return Err(Failure::local(
+            5,
+            "stale_generation",
+            "the attempt generation no longer matches",
+            false,
+        ));
+    }
+    if attempt.get("state").and_then(Value::as_str) != Some("active")
+        || attempt.get("mode").and_then(Value::as_str) != Some("work")
+        || data.get("authority_valid").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(Failure::local(
+            5,
+            "ownership_not_current",
+            "the attempt is not a current owned work attempt; no local Git state was changed",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+async fn bound_project(
+    context: &ContextData,
+    session: Option<&SessionAuth>,
+) -> std::result::Result<Value, Failure> {
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut query = vec![("limit", "200".to_owned())];
+        if let Some(value) = &cursor {
+            query.push(("cursor", value.clone()));
+        }
+        let response = context
+            .client
+            .get_query("/api/v1/projects", &query, session)
+            .await
+            .map_err(client_failure)?;
+        let body = require_success(response)?;
+        let page = body.get("data").unwrap_or(&body);
+        if let Some(project) = page
+            .get("items")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("id").and_then(Value::as_str) == Some(&context.binding.project_id)
+                })
+            })
+        {
+            return Ok(project.clone());
+        }
+        cursor = page
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if cursor.is_none() {
+            return Err(Failure::local(
+                5,
+                "project_binding_missing",
+                "the repository's bound project is not available from this service",
+                false,
+            ));
+        }
+    }
+}
+
+async fn jobs_command(
+    cli: &Cli,
+    context: &ContextData,
+    command: &JobsCommand,
+) -> std::result::Result<Value, Failure> {
+    match command {
+        JobsCommand::List(args) => {
+            let path = format!("/api/v1/projects/{}/jobs", context.binding.project_id);
+            let optional = optional_state(cli, context)?;
+            let session = optional.as_ref().map(|(_, _, state)| &state.session);
+            finish(
+                context
+                    .client
+                    .get_query(&path, &list_query(args), session)
+                    .await,
+            )
+        }
+        JobsCommand::Status(args) => remote_job(context, cli, &args.job).await,
+        JobsCommand::Run(args) => run_job(cli, context, args).await,
+        JobsCommand::Reconnect(args) => {
+            validate_segment("job", &args.job).map_err(Failure::invalid)?;
+            let intent = job_state::load_by_job(&args.job).map_err(Failure::invalid)?;
+            validate_local_job_binding(context, &intent)?;
+            let summary =
+                coordinator_local::inspect_job(&intent.state_file).map_err(Failure::invalid)?;
+            let executable = env::current_exe().map_err(Failure::invalid)?;
+            coordinator_local::start_guardian(
+                &executable,
+                &intent.state_file,
+                coordinator_local::GuardianMode::Observe,
+            )
+            .map_err(Failure::temporary)?;
+            Ok(json!({
+                "data": {
+                    "job": summary,
+                    "guardian_started": true,
+                    "mode": "observe"
+                }
+            }))
+        }
+        JobsCommand::Inspect(args) => {
+            validate_segment("job", &args.job).map_err(Failure::invalid)?;
+            let intent = job_state::load_by_job(&args.job).map_err(Failure::invalid)?;
+            validate_local_job_binding(context, &intent)?;
+            let summary =
+                coordinator_local::inspect_job(&intent.state_file).map_err(Failure::invalid)?;
+            serde_json::to_value(json!({"data":{"job":summary}})).map_err(Failure::invalid)
+        }
+    }
+}
+
+fn validate_local_job_binding(
+    context: &ContextData,
+    intent: &job_state::RunIntent,
+) -> std::result::Result<(), Failure> {
+    if intent.service_origin != context.origin || intent.project_id != context.binding.project_id {
+        return Err(Failure::invalid(
+            "local job state does not belong to the repository's bound project and service",
+        ));
+    }
+    Ok(())
+}
+
+async fn remote_job(
+    context: &ContextData,
+    cli: &Cli,
+    job_id: &str,
+) -> std::result::Result<Value, Failure> {
+    validate_segment("job", job_id).map_err(Failure::invalid)?;
+    let path = format!(
+        "/api/v1/projects/{}/jobs/{job_id}",
+        context.binding.project_id
+    );
+    let optional = optional_state(cli, context)?;
+    let session = optional.as_ref().map(|(_, _, state)| &state.session);
+    finish(context.client.get(&path, session).await)
+}
+
+async fn run_job(
+    cli: &Cli,
+    context: &ContextData,
+    args: &JobRunArgs,
+) -> std::result::Result<Value, Failure> {
+    validate_segment("attempt", &args.attempt).map_err(Failure::invalid)?;
+    validate_segment("reservation", &args.reservation).map_err(Failure::invalid)?;
+    if (args.renew_for_seconds > 0) != args.watch_pid.is_some() {
+        return Err(Failure::invalid(
+            "--renew-for-seconds and --watch-pid must be supplied together",
+        ));
+    }
+    let (_session_lock, session_path, mut session) = load_required_state(cli, context)?;
+    if let Some(pending) = &session.pending {
+        return Err(Failure::invalid(format!(
+            "an earlier mutation is unresolved ({}); run `agent-coordinator retry` before starting or resuming a job",
+            pending.path
+        )));
+    }
+    let attempt_path = format!(
+        "/api/v1/projects/{}/attempts/{}",
+        context.binding.project_id, args.attempt
+    );
+    let attempt_response = context
+        .client
+        .get(&attempt_path, Some(&session.session))
+        .await
+        .map_err(client_failure)?;
+    let attempt_body = require_success(attempt_response)?;
+    require_current_work_attempt(&attempt_body, args.generation)?;
+
+    let prepared =
+        worktree::load_for_attempt(&context.origin, &context.binding.project_id, &args.attempt)
+            .map_err(Failure::invalid)?;
+    let requested_checkout = std::fs::canonicalize(&args.checkout).map_err(Failure::invalid)?;
+    if requested_checkout != prepared.destination {
+        return Err(Failure::invalid(
+            "--checkout does not match the saved worktree for this attempt",
+        ));
+    }
+    if prepared.generation != args.generation {
+        return Err(Failure::local(
+            5,
+            "stale_generation",
+            "the prepared worktree belongs to a different attempt generation",
+            false,
+        ));
+    }
+    let checkout = attempt_body
+        .pointer("/data/checkout")
+        .or_else(|| attempt_body.get("checkout"))
+        .ok_or_else(|| {
+            Failure::local(
+                5,
+                "checkout_not_registered",
+                "register the prepared worktree before starting a job",
+                false,
+            )
+        })?;
+    if checkout.get("path").and_then(Value::as_str) != prepared.destination.to_str() {
+        return Err(Failure::local(
+            5,
+            "checkout_mismatch",
+            "the attempt's registered checkout does not match the prepared local worktree",
+            false,
+        ));
+    }
+    let (source_revision, source_tree) =
+        worktree::current_snapshot(&prepared).map_err(Failure::invalid)?;
+    let input = job_state::read_program(&args.input).map_err(Failure::invalid)?;
+    let harness = match args.watch_pid {
+        Some(pid) => Some(
+            coordinator_local::capture_process_identity(pid)
+                .map_err(Failure::invalid)?
+                .ok_or_else(|| {
+                    Failure::invalid("--watch-pid is not the exact identity of a running process")
+                })?,
+        ),
+        None => None,
+    };
+    let mut intent = job_state::load_or_create(job_state::NewRunIntent {
+        service_origin: &context.origin,
+        project_id: &context.binding.project_id,
+        session_id: &session.session.id,
+        attempt_id: &args.attempt,
+        generation: args.generation,
+        reservation_id: &args.reservation,
+        checkout: &prepared.destination,
+        source_revision: &source_revision,
+        source_tree: &source_tree,
+        input: input.clone(),
+        renew_for_seconds: args.renew_for_seconds,
+        watch_pid: args.watch_pid,
+        job_id: Uuid::new_v4().to_string(),
+        producer_id: Uuid::new_v4().to_string(),
+        runner_instance_id: Uuid::new_v4().to_string(),
+        reporter_id: Uuid::new_v4().to_string(),
+        reporter_proof: random_secret().map_err(Failure::invalid)?,
+    })
+    .map_err(Failure::invalid)?
+    .0;
+
+    let summary = if intent.initialized {
+        if !intent.state_file.is_file() {
+            return Err(Failure::local(
+                5,
+                "local_job_state_missing",
+                "the durable job journal is missing; the producer may already have run, so it will not be launched again",
+                false,
+            ));
+        }
+        coordinator_local::inspect_job(&intent.state_file).map_err(Failure::invalid)?
+    } else {
+        let initialized =
+            coordinator_local::initialize_launch_state(coordinator_local::InitializeJob {
+                state_file: intent.state_file.clone(),
+                identities: coordinator_local::JobIdentities {
+                    job_id: intent.job_id.clone(),
+                    producer_id: intent.producer_id.clone(),
+                    runner_instance_id: intent.runner_instance_id.clone(),
+                    reporter_id: intent.reporter_id.clone(),
+                },
+                command: coordinator_local::CommandSpec {
+                    program: input.program.clone(),
+                    args: input.argv.clone(),
+                    working_directory: prepared.destination.clone(),
+                    environment: input.environment.clone(),
+                },
+                source: coordinator_local::SourceSnapshot {
+                    checkout: prepared.destination.clone(),
+                    revision: source_revision.clone(),
+                    tree: source_tree.clone(),
+                },
+                log_limit_bytes: input.log_limit_bytes,
+                harness,
+            })
+            .map_err(Failure::invalid)?;
+        job_state::mark_initialized(&mut intent).map_err(Failure::invalid)?;
+        initialized
+    };
+
+    let remote = if summary.registered {
+        reconcile_remote_job(context, &session.session, &intent).await?
+    } else {
+        register_job(context, &session_path, &mut session, &intent).await?
+    };
+    let summary = coordinator_local::inspect_job(&intent.state_file).map_err(Failure::invalid)?;
+    if !summary.registered {
+        return Err(Failure::local(
+            5,
+            "job_registration_incomplete",
+            "the local job is not durably bound to its scoped reporter",
+            true,
+        ));
+    }
+    let executable = env::current_exe().map_err(Failure::invalid)?;
+    coordinator_local::start_guardian(
+        &executable,
+        &intent.state_file,
+        coordinator_local::GuardianMode::Run,
+    )
+    .map_err(Failure::temporary)?;
+    Ok(json!({
+        "data": {
+            "job": summary,
+            "remote_job": data(&remote),
+            "guardian_started": true,
+            "mode": "run"
+        },
+        "response": remote
+    }))
+}
+
+async fn register_job(
+    context: &ContextData,
+    session_path: &Path,
+    session: &mut SessionState,
+    intent: &job_state::RunIntent,
+) -> std::result::Result<Value, Failure> {
+    let path = attempt_path(context, &intent.attempt_id, "jobs").map_err(Failure::invalid)?;
+    let body = json!({
+        "generation": intent.generation,
+        "job_id": intent.job_id,
+        "producer_id": intent.producer_id,
+        "runner_instance_id": intent.runner_instance_id,
+        "workstation_id": session.workstation_id,
+        "label": intent.input.label,
+        "source_revision": intent.source_revision,
+        "source_tree": intent.source_tree,
+        "reservation_id": intent.reservation_id,
+        "reporter_id": intent.reporter_id,
+        "reporter_proof": intent.reporter_proof,
+        "renew_for_seconds": intent.renew_for_seconds
+    });
+    let desired = PendingMutation {
+        key: Uuid::new_v4().to_string(),
+        method: HttpMethod::Post,
+        path,
+        body,
+        include_session_id: true,
+    };
+    match &session.pending {
+        Some(existing)
+            if existing.method == desired.method
+                && existing.path == desired.path
+                && existing.body == desired.body
+                && existing.include_session_id == desired.include_session_id => {}
+        _ => {
+            session.set_pending(desired).map_err(Failure::invalid)?;
+            state::save(session_path, session).map_err(Failure::invalid)?;
+        }
+    }
+    let response = send_saved_policy(context, session_path, session, false).await?;
+    let remote = require_success(response)?;
+    record_job_registration(context, intent, &remote)?;
+    reconcile_remote_job(context, &session.session, intent).await?;
+    session.pending = None;
+    state::save(session_path, session).map_err(Failure::invalid)?;
+    Ok(remote)
+}
+
+fn record_job_registration(
+    context: &ContextData,
+    intent: &job_state::RunIntent,
+    response: &Value,
+) -> std::result::Result<(), Failure> {
+    let data = response.get("data").unwrap_or(response);
+    let reporter = data.get("reporter").ok_or_else(|| {
+        Failure::temporary("job registration response omitted reporter authority")
+    })?;
+    if reporter.get("id").and_then(Value::as_str) != Some(&intent.reporter_id) {
+        return Err(Failure::temporary(
+            "job registration response named a different reporter",
+        ));
+    }
+    let renewal = if intent.renew_for_seconds == 0 {
+        None
+    } else {
+        Some(coordinator_local::RenewalConfig {
+            generation: intent.generation as i64,
+            renew_after_seconds: data
+                .get("renew_after_seconds")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    Failure::temporary("job registration response omitted renew_after_seconds")
+                })?,
+            renew_until: reporter
+                .get("renew_until")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Failure::temporary("job registration response omitted renew_until"))?
+                .to_owned(),
+        })
+    };
+    let bearer = format!("acr_{}.{}", intent.reporter_id, intent.reporter_proof);
+    coordinator_local::record_registration(
+        &intent.state_file,
+        coordinator_local::ReporterRegistration::new(
+            &context.origin,
+            context.client.origin().starts_with("http://"),
+            bearer,
+            renewal,
+        )
+        .map_err(Failure::invalid)?,
+    )
+    .map_err(Failure::invalid)?;
+    Ok(())
+}
+
+async fn reconcile_remote_job(
+    context: &ContextData,
+    session: &SessionAuth,
+    intent: &job_state::RunIntent,
+) -> std::result::Result<Value, Failure> {
+    let path = format!(
+        "/api/v1/projects/{}/jobs/{}",
+        context.binding.project_id, intent.job_id
+    );
+    let response = context
+        .client
+        .get(&path, Some(session))
+        .await
+        .map_err(client_failure)?;
+    let body = require_success(response)?;
+    let data = body.get("data").unwrap_or(&body);
+    let job = data.get("job").unwrap_or(data);
+    for (name, expected) in [
+        ("id", intent.job_id.as_str()),
+        ("producer_id", intent.producer_id.as_str()),
+        ("source_revision", intent.source_revision.as_str()),
+        ("source_tree", intent.source_tree.as_str()),
+        ("reservation_id", intent.reservation_id.as_str()),
+    ] {
+        if job.get(name).and_then(Value::as_str) != Some(expected) {
+            return Err(Failure::local(
+                5,
+                "job_identity_mismatch",
+                format!("remote job does not match saved local {name}"),
+                false,
+            ));
+        }
+    }
+    Ok(body)
 }
 
 async fn build_context(cli: &Cli) -> std::result::Result<ContextData, Failure> {
@@ -696,7 +1536,7 @@ async fn claim(
     }
 
     let mut body = Map::new();
-    body.insert("mode".into(), Value::String("work".into()));
+    body.insert("mode".into(), Value::String(args.mode.as_str().to_owned()));
     body.insert(
         "policy_revision".into(),
         Value::Number(orientation.policy_revision.into()),
@@ -766,8 +1606,27 @@ async fn retry(cli: &Cli, context: &ContextData) -> std::result::Result<Value, F
             "this harness session has no pending mutation",
         ));
     }
-    let pending_path = state.pending.as_ref().map(|pending| pending.path.clone());
-    let response = send_saved(context, &path, &mut state).await?;
+    let pending = state.pending.clone().expect("checked above");
+    let pending_path = Some(pending.path.clone());
+    let job_intent = if is_job_registration(&pending.path) {
+        let job_id = pending
+            .body
+            .get("job_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Failure::invalid("saved job registration omitted job_id"))?;
+        Some(job_state::load_by_job(job_id).map_err(Failure::invalid)?)
+    } else {
+        None
+    };
+    let response = send_saved_policy(context, &path, &mut state, job_intent.is_none()).await?;
+    if response.is_success()
+        && let Some(intent) = &job_intent
+    {
+        record_job_registration(context, intent, &response.body)?;
+        reconcile_remote_job(context, &state.session, intent).await?;
+        state.pending = None;
+        state::save(&path, &state).map_err(Failure::invalid)?;
+    }
     if response.is_success()
         && pending_path
             .as_deref()
@@ -777,6 +1636,10 @@ async fn retry(cli: &Cli, context: &ContextData) -> std::result::Result<Value, F
         state::save(&path, &state).map_err(Failure::invalid)?;
     }
     require_success(response)
+}
+
+fn is_job_registration(path: &str) -> bool {
+    path.starts_with("/api/v1/projects/") && path.contains("/attempts/") && path.ends_with("/jobs")
 }
 
 async fn mutate(
@@ -828,16 +1691,24 @@ async fn persist_and_send(
     body: Value,
     include_session_id: bool,
 ) -> std::result::Result<ApiResponse, Failure> {
-    state
-        .set_pending(PendingMutation {
-            key: Uuid::new_v4().to_string(),
-            method,
-            path: path.to_owned(),
-            body,
-            include_session_id,
-        })
-        .map_err(Failure::invalid)?;
-    state::save(session_path, state).map_err(Failure::invalid)?;
+    let desired = PendingMutation {
+        key: Uuid::new_v4().to_string(),
+        method,
+        path: path.to_owned(),
+        body,
+        include_session_id,
+    };
+    match &state.pending {
+        Some(existing)
+            if existing.method == desired.method
+                && existing.path == desired.path
+                && existing.body == desired.body
+                && existing.include_session_id == desired.include_session_id => {}
+        _ => {
+            state.set_pending(desired).map_err(Failure::invalid)?;
+            state::save(session_path, state).map_err(Failure::invalid)?;
+        }
+    }
     send_saved(context, session_path, state).await
 }
 
@@ -845,6 +1716,15 @@ async fn send_saved(
     context: &ContextData,
     session_path: &Path,
     state: &mut SessionState,
+) -> std::result::Result<ApiResponse, Failure> {
+    send_saved_policy(context, session_path, state, true).await
+}
+
+async fn send_saved_policy(
+    context: &ContextData,
+    session_path: &Path,
+    state: &mut SessionState,
+    clear_success: bool,
 ) -> std::result::Result<ApiResponse, Failure> {
     let pending = state
         .pending
@@ -869,7 +1749,8 @@ async fn send_saved(
             return Err(client_failure(error));
         }
     };
-    if mutation_response_is_definitive(response.status) {
+    if mutation_response_is_definitive(response.status) && (clear_success || !response.is_success())
+    {
         state.pending = None;
         state::save(session_path, state).map_err(Failure::invalid)?;
     }

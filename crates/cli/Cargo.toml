@@ -9,6 +9,7 @@ name = "agent-coordinator"
 path = "src/main.rs"
 [dependencies]
 coordinator-client = { path = "../client" }
+coordinator-local = { path = "../local" }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
