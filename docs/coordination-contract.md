@@ -143,6 +143,37 @@ integration step. A parent objective waits for required children and its own
 criteria; it does not create artificial worktrees or branches. The final state
 names must preserve the selected distinction between submission and completion.
 
+## Review policy and independence
+
+Projects can require agent review, human review, both, or disable required review.
+The selected default is independent agent review. Review requirements are pinned
+to a versioned policy and an immutable submission. A review records the actor,
+session when applicable, candidate revision, findings, decision, and check
+evidence inspected. The service rejects a review of an obsolete submission as an
+approval of the current one.
+
+Proposed independence rule: an agent reviewer uses a separate review session
+and attempt, with no recorded contribution to the candidate under review. It
+may use the same model vendor or workstation; neither determines independence.
+A separately configured reviewer principal can provide additional separation,
+but rotating a token alone does not make the implementer an independent reviewer.
+Retain contributor attribution across recovery attempts and resubmissions.
+The protocol enforces recorded separation; it cannot prove a model's reasoning
+was independent or detect falsely declared agent-session lineage.
+
+Human approval must be recorded by an authenticated human principal. An agent
+can request it and attach context, but cannot submit a human decision on that
+person's behalf. For a project requiring both types, each required approval must
+apply to the same current submission. A missing reviewer leaves the work waiting
+with a clear reason; it does not silently weaken the policy.
+
+Review findings have stable IDs and severity, a concrete remedy, and resolution
+evidence. Rejection returns the implementation to a revision-needed state without
+deleting prior submissions. Required unresolved findings prevent integration;
+fixing the code creates a new submission and invalidates old approval
+applicability. The exact number of required reviewers and escalation thresholds
+are configuration defaults to specify before implementation.
+
 ## External jobs and evidence
 
 A test, build, or deployment run is a **job**, separate from an agent attempt.

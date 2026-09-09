@@ -10,6 +10,8 @@ design documents; the service and clients are not implemented yet.
 
 - [Implementation plan](PLAN.md): requirements, confirmed decisions, open
   questions, proposed data model, milestones, and acceptance scenarios.
+- [Release scope](docs/release-scope.md): remaining product choices, proposed
+  engineering defaults, and the checklist for implementation readiness.
 - [Coordination contract](docs/coordination-contract.md): task ownership,
   renewable leases, retries, worktrees, external jobs, and recovery.
 - [Onboarding contract](docs/onboarding-contract.md): operator setup, public
@@ -23,6 +25,9 @@ design documents; the service and clients are not implemented yet.
 - Rust with Axum and SQLite is the preferred service stack.
 - The web interface should use vanilla JavaScript and modern CSS, with Alpine.js
   where useful.
+- The first release includes an HTTP API, web dashboard, and CLI with readable
+  and JSON output. The CLI and local job reporter support Linux and native
+  Windows. MCP and a TUI are deferred.
 - One service instance will support multiple projects simultaneously.
 - Workstations connect over public HTTPS. Every authenticated person and agent
   has access to every project.
@@ -36,6 +41,8 @@ design documents; the service and clients are not implemented yet.
 - Agents will authenticate, claim tasks atomically, renew ownership, and record
   outcomes and shared knowledge through a vendor-neutral interface.
 - Agents can create and claim tasks; each project configures required review.
+- Review can require an independent agent, a human, or both; independent agent
+  review is the default.
 - Another agent can recover expired work after checking saved work and running
   jobs; projects may require manual recovery. Code tasks finish after required
   review, target-branch integration, and validation of the integrated result.
@@ -43,8 +50,8 @@ design documents; the service and clients are not implemented yet.
   API, CLI, and optional hooks, with local runners reporting job status.
 
 The plan distinguishes confirmed requirements from proposed defaults. Server
-configuration, operation roles, reviewer requirements, and client platforms are
-still being defined.
+configuration, integration permissions, shared-knowledge rules, artifact storage,
+and operating targets are still being defined.
 
 ## Repository hygiene
 

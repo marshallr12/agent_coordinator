@@ -42,6 +42,11 @@ after requirements are sufficiently defined and the operator requests it.
 - The service coordinates existing harnesses through API, CLI, and optional
   hooks. Local runners report jobs; remote agent launch/supervision is out of
   scope for the first release.
+- The CLI and local job reporter support Linux and native Windows.
+- The first release includes the HTTP API, web dashboard, and CLI with
+  human-readable and JSON output. MCP and TUI interfaces are deferred.
+- Each project can require independent agent review, human review, or both;
+  the default review mode is independent agent review.
 - Existing orientation and work records include AGENTS.md / CLAUDE.md,
   HANDOFF.md, BACKLOG.md, and DURABLE-RECORD.md. The request also mentions
   BACKOFF.md; confirm whether this is a separate record or means BACKLOG.md.
@@ -77,8 +82,8 @@ These are design proposals, not settled product decisions.
    they never access a shared SQLite database file directly.
 2. Provide a versioned JSON API with complete request/response examples and
    concise, versioned agent instructions. A CLI can expose the same operations
-   in both human-readable and JSON formats. MCP support is a separate scope
-   decision; core functionality should not require it.
+   in both human-readable and JSON formats. MCP and TUI support are deferred;
+   core functionality does not require either.
 3. Claiming a task atomically verifies eligibility and records ownership in one
    database transaction. Listing work does not reserve it. Both “claim this
    task” and “claim next eligible task” can use the same eligibility rules.
@@ -113,8 +118,9 @@ These are design proposals, not settled product decisions.
 The proposed ownership and recovery contract is developed further in
 [docs/coordination-contract.md](docs/coordination-contract.md). It deliberately
 defines the selected agent-driven recovery and integrated-completion rules.
-Lease timing and reviewer permissions remain open. Password accounts and separate
-agent API tokens are confirmed.
+Lease timing and the precise reviewer-independence check remain to be specified.
+Password accounts, separate agent API tokens, and project-configurable agent or
+human review are confirmed.
 
 The proposed first-connection flow and short repository snippet are in
 [docs/onboarding-contract.md](docs/onboarding-contract.md). Its example CLI
@@ -135,9 +141,12 @@ command is a proposed interface and is not implemented yet.
 | Server installation | Native Linux service managed by systemd, behind an HTTPS reverse proxy | **Confirmed by operator, 2026-09-09** |
 | Expired-task recovery | Agent-driven recovery after checking prior work/jobs; manual mode configurable per project | **Confirmed by operator, 2026-09-09** |
 | Overall completion | Required review, integration into target branch, and validation of integrated result | **Confirmed by operator, 2026-09-09** |
-| Client platforms | Linux and native Windows | Open; question sent |
-| Initial interfaces | HTTP API, web dashboard, and CLI with JSON output; defer MCP/TUI | Open; question sent |
-| Review authority | Per-project choice of independent agent, human, or both; independent agent default | Open; question sent |
+| Client platforms | Linux and native Windows | **Confirmed by operator, 2026-09-09** |
+| Initial interfaces | HTTP API, web dashboard, and CLI with JSON output; defer MCP/TUI | **Confirmed by operator, 2026-09-09** |
+| Review authority | Per-project choice of independent agent, human, or both; independent agent default | **Confirmed by operator, 2026-09-09** |
+| Integration authority | Agents integrate when policy/review/checks allow; projects may require human authorization | Open; question sent |
+| Knowledge autonomy | Agents maintain project/common lessons; humans approve binding project rules | Open; question sent |
+| Artifact storage | Bounded service uploads for logs/reports, Git remotes for source checkpoints, optional artifact links | Open; question sent |
 
 Repository evidence supports these proposals but does not settle the unanswered
 preferences. In particular, a policy or permission recorded for a past task in a
@@ -294,9 +303,10 @@ SDK. These are conventional records exposed through one API and CLI.
 
 ## Operator interface proposal
 
-Recommend both a CLI and a web interface in the first release. The CLI supports
-human-readable and JSON output; the web interface uses vanilla JavaScript and
-CSS, adding Alpine.js only where it removes complexity. A TUI remains optional.
+The operator selected both a CLI and a web interface in the first release. The
+CLI supports human-readable and JSON output on Linux and native Windows; the web
+interface uses vanilla JavaScript and CSS, adding Alpine.js only where it removes
+complexity. MCP and a TUI are deferred.
 
 The browser should make these questions easy to answer:
 
@@ -316,39 +326,13 @@ shorthand. The service should expose actionable failures and retain answers.
 
 ## Further questions to resolve
 
-Ask in focused rounds, adapting later questions to earlier answers.
-
-- Supported Linux distribution/architecture, expected projects/concurrent agents,
-  resource limits, and backup/recovery expectations. Native systemd installation
-  behind an HTTPS reverse proxy is confirmed.
-- Whether native web UI and CLI both belong in the initial release; whether
-  MCP or a TUI is needed immediately.
-- Workstation operating systems and optional harness adapters to ship initially.
-  Remote launch/supervision is out of scope; worktree isolation is confirmed.
-- Administrative roles, password/token lifecycle, and initial administrator
-  setup. Local password accounts, agent API tokens, and all-project access are
-  confirmed.
-- Who performs integration and review. Code-task completion after required
-  review, integration, and integrated-result validation is confirmed.
-- Task dependencies, priorities, parent/child work, eligibility, agent
-  capabilities, and whether overlapping files/components need reservations.
-- Whether tasks are mostly imported/prepared in advance or independently
-  discovered by agents. Atomic claims prevent duplicate ownership of one task;
-  separate tasks describing the same work need additional deduplication rules.
-- Heartbeat mechanism, timing defaults, long tool calls, disconnected operation,
-  and escalation. Agent-driven recovery with a project manual mode is confirmed.
-- Rules for agent changes to shared instructions, lessons, task scope,
-  cancellation, and reprioritization. Autonomous task creation and claiming are
-  confirmed; required review is configurable per project.
-- Default completion/review/integration rules and which actor may record or
-  verify each type of evidence; lifecycle permissions must be explicit.
-- Lesson retrieval across projects, correction/supersession, promotion into
-  common lessons or policy, sensitive content, and retention. All authenticated
-  callers can access every project's lessons.
-- Markdown migration format and whether BACKOFF.md is a separate input.
-- Required result evidence, artifact links versus uploads, notifications, and
-  search/reporting needs.
-- Boundaries of the first release and observable acceptance criteria.
+The remaining interview is consolidated in
+[docs/release-scope.md](docs/release-scope.md). It covers client platforms,
+interfaces, review/integration authority, shared knowledge, recoverable artifacts,
+expected operating size, and operational requirements. It also proposes
+engineering defaults so routine implementation choices do not each require a
+separate question. Adapt questions to earlier answers and retain the distinction
+between a proposed default and a confirmed requirement.
 
 ## Proposed implementation milestones
 

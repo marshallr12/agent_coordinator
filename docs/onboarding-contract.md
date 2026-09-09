@@ -2,9 +2,10 @@
 
 Status: proposed interface, not implemented. Public HTTPS, service-authoritative
 records, access to all projects for every authenticated caller, local password
-accounts for people, and revocable API tokens for agents are confirmed. Exact
-reverse-proxy configuration and operation roles remain open. The server will run
-as a native Linux service under systemd. CLI spelling below is a proposal.
+accounts for people, and revocable API tokens for agents are confirmed. The
+server runs as a native Linux service under systemd; CLI and job-reporter clients
+support Linux and native Windows. Reverse-proxy configuration and some operation
+roles remain open. CLI spelling below is a proposal.
 
 ## Repository binding and workstation credentials
 
@@ -140,7 +141,8 @@ operation, and a missing/mismatched project binding have distinct remedies.
 Keep a principal's identity separate from its credentials. Revoking a token must
 preserve attribution on tasks, reviews, and lessons. Multiple tokens may belong
 to one agent principal, with workstation labels and individual revocation; a
-new token or session does not create an independent reviewer identity.
+new token alone does not establish reviewer independence. A review records its
+actual principal and session separately from the credential used to authenticate.
 
 An administrator creates people and agent principals. There is no public
 self-registration. Agent credentials cannot create administrators, issue their
@@ -176,6 +178,36 @@ delivery as infrastructure. The browser supports password changes, session
 revocation, and token issuance/revocation for authorized people. Password changes
 invalidate existing browser sessions; agent-token revocation is a separate,
 explicit operation.
+
+## Linux and native Windows client contract
+
+Distribute native client binaries. Windows users must not need WSL, Bash, or a
+Unix process supervisor to connect, claim work, or report a job. Git operations
+use the locally installed Git executable and existing authentication. The
+coordinator never needs the workstation's Git private keys on its server.
+
+Give every substantive CLI operation a JSON output mode and a way to read
+structured input from a file or standard input. Document both PowerShell and
+Linux-shell examples without making correctness depend on complex shell quoting.
+Failures have stable exit codes and structured remedies; never turn a failed
+child command into a successful job report.
+
+Keep credential and session files outside repositories. Use the selected OS
+credential facility or explicitly protected local storage, including permissions
+on Linux and ACLs on Windows. Headless Linux installations must have a supported
+noninteractive mechanism. Do not require desktop keyring prompts during a task.
+
+Identify a checkout using workstation identity and resolved Git/worktree metadata.
+Paths are displayed in the workstation's native form, including Windows drive
+letters and spaces. Path strings alone cannot prove two checkouts are separate.
+Keep process instance identity distinct from its numeric PID so PID reuse cannot
+make a new process appear to be an old running job.
+
+The local reporter observes explicitly registered local jobs and reconnects to
+their durable records. It does not accept remote shell-execution requests. A
+platform-specific observer that cannot determine process state reports unknown,
+retains its last evidence, and requests reconciliation rather than inventing a
+terminal status.
 
 ## Authenticated orientation
 
