@@ -270,7 +270,6 @@
     if (append && !state.taskCursor) return;
     const requestId = ++state.requestSeq.tasks;
     const cursorBefore = state.taskCursor;
-    const hadLoadedPages = silent && Boolean(cursorBefore) && state.tasks.length > 0;
     state.inflight.tasks = { projectId: requestedProjectId, requestId };
     const project = state.projects.find((item) => text(item.id) === requestedProjectId);
     setText($('tasks-subtitle'), project?.name ? `${project.name} · current work queue` : 'Current work queue');
@@ -281,8 +280,9 @@
       const page = (await request(`/api/v1/projects/${encodeURIComponent(requestedProjectId)}/tasks${query}`)).data;
       if (requestedProjectId !== state.projectId || state.requestSeq.tasks !== requestId) return;
       const items = listData(page);
-      if (append) state.tasks = state.tasks.concat(items);
-      else if (hadLoadedPages) { const byId = new Map(state.tasks.map((item) => [text(item.id), item])); items.forEach((item) => byId.set(text(item.id), item)); state.tasks = Array.from(byId.values()); }
+      if (append) { const byId = new Map(state.tasks.map((item) => [text(item.id), item])); items.forEach((item) => byId.set(text(item.id), item)); state.tasks = Array.from(byId.values()); }
+      // A refresh re-reads page one and drops appended pages so stale snapshots
+      // never contribute to the live summary or get mixed into a later cursor.
       else state.tasks = items;
       state.taskCursor = page?.next_cursor || null;
       renderTasks(); renderSummary();
@@ -334,7 +334,7 @@
     const target = $('lease-content'); clear(target); const attempts = Array.isArray(data.attempts) ? data.attempts : []; const current = attempts.find((attempt) => attempt.id === task.current_attempt_id) || attempts.find((attempt) => !attempt.closed_at && !['closed', 'released', 'expired'].includes(attempt.state));
     if (!current) {
       const status = taskStatus(task);
-      const message = task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded', 'submitted'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : 'No active lease. This task is available for eligible work.';
+      const message = task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : 'No active lease. This task is available for eligible work.';
       add(target, el('p', 'muted', message)); return;
     }
     const dl = el('dl'); const remaining = current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
