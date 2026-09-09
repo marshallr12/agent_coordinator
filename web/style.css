@@ -111,6 +111,8 @@ textarea { min-height: 108px; resize: vertical; }
 .select-label select { display: block; margin-top: 4px; padding: 8px 10px; font-size: 13px; }
 .toolbar .button { margin-left: auto; }
 .tasks-list { display: grid; gap: 9px; }
+.tasks-footer { min-height: 42px; padding-top: 16px; display: flex; align-items: center; justify-content: center; gap: 12px; }
+.tasks-footer .muted { font-size: 12px; }
 .task-row { width: 100%; padding: 16px 18px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; text-align: left; }
 .task-row:hover { border-color: #a9c5ca; box-shadow: 0 4px 12px rgba(29, 50, 63, .04); }
 .task-title { display: block; overflow: hidden; color: var(--navy); font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }

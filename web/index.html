@@ -70,7 +70,7 @@
             <section id="overview-view" class="page-view" aria-labelledby="overview-heading">
               <div class="page-heading">
                 <div><p class="eyebrow">Workspace</p><h1 id="overview-heading">Project overview</h1><p class="muted">A quiet view of what is ready, active, and waiting.</p></div>
-                <button id="new-project-button" class="button primary" type="button"><span aria-hidden="true">＋</span> New project</button>
+                <button id="new-project-button" class="button primary" data-mutation="true" type="button"><span aria-hidden="true">＋</span> New project</button>
               </div>
               <div id="overview-summary" class="summary-grid" aria-label="Workspace summary"></div>
               <div class="section-heading"><div><h2>Projects</h2><p class="muted">Select a project to open its task queue.</p></div><button id="refresh-projects" class="button subtle" type="button">Refresh</button></div>
@@ -81,7 +81,7 @@
             <section id="tasks-view" class="page-view" aria-labelledby="tasks-heading" hidden>
               <div class="page-heading">
                 <div><p class="eyebrow">Execution</p><h1 id="tasks-heading">Task queue</h1><p id="tasks-subtitle" class="muted">Choose a project to inspect its work.</p></div>
-                <button id="new-task-button" class="button primary" type="button" disabled><span aria-hidden="true">＋</span> New task</button>
+                <button id="new-task-button" class="button primary" data-mutation="true" type="button" disabled><span aria-hidden="true">＋</span> New task</button>
               </div>
               <div class="toolbar">
                 <label class="select-label" for="project-select">Project<select id="project-select"><option value="">Choose a project</option></select></label>
@@ -90,6 +90,7 @@
               </div>
               <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
               <div id="tasks-list" class="tasks-list" hidden></div>
+              <div class="tasks-footer"><button id="load-more-tasks" class="button subtle" type="button" hidden>Load more tasks</button><span id="tasks-page-status" class="muted" aria-live="polite"></span></div>
             </section>
 
             <section id="task-detail-view" class="page-view" aria-labelledby="task-detail-heading" hidden>

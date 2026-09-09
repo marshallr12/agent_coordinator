@@ -6,8 +6,11 @@
   const state = {
     actor: null, csrfToken: null, projects: [], tasks: [], credentials: [],
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null,
-    mutation: null, fetching: new Set(), pollTimer: null, lastSync: null
+    taskCursor: null, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
+    requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, pollTimer: null, lastSync: null
   };
+
+  const PENDING_MUTATION_KEY = 'agent-coordinator.pending-mutation';
 
   class ApiError extends Error {
     constructor(message, status, code, details, uncertain = false) {
@@ -49,8 +52,30 @@
     return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   };
 
+  const actorId = () => text(state.actor?.id || state.actor?.principal_id);
+  const mutationOperation = (path, method) => {
+    if (method === 'POST' && path === '/api/v1/projects') return 'create_project';
+    if (method === 'POST' && /\/projects\/[^/]+\/tasks$/.test(path)) return 'create_task';
+    if (method === 'POST' && path === '/api/v1/admin/agents') return 'issue_credential';
+    if (method === 'POST' && /\/admin\/credentials\/[^/]+\/revoke$/.test(path)) return 'revoke_credential';
+    if (method === 'POST' && path === '/api/v1/auth/logout') return 'logout';
+    return null;
+  };
+  const sanitizeForSession = (value) => {
+    if (Array.isArray(value)) return value.map(sanitizeForSession);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !/(password|token|secret|proof|csrf)/i.test(key)).map(([key, item]) => [key, sanitizeForSession(item)]));
+  };
+  function persistMutation(mutation) {
+    if (!mutation.operation || !actorId()) return;
+    try { sessionStorage.setItem(PENDING_MUTATION_KEY, JSON.stringify({ actor_id: actorId(), operation: mutation.operation, path: mutation.path, method: mutation.method, key: mutation.key, body: sanitizeForSession(mutation.body), context: mutation.context || {} })); }
+    catch (_) { /* Storage can be disabled; in-memory retry remains available. */ }
+  }
+  function clearPersistedMutation() { try { sessionStorage.removeItem(PENDING_MUTATION_KEY); } catch (_) { /* no-op */ } }
+  function readPersistedMutation() { try { const raw = sessionStorage.getItem(PENDING_MUTATION_KEY); return raw ? JSON.parse(raw) : null; } catch (_) { clearPersistedMutation(); return null; } }
+
   async function request(path, options = {}) {
-    if (!path.startsWith('/')) throw new Error('API requests must use a same-origin path');
+    if (!path.startsWith('/') || path.startsWith('//') || path.includes('\\') || path.includes('://')) throw new Error('API requests must use a same-origin path');
     const method = options.method || 'GET';
     const headers = new Headers({ Accept: 'application/json', ...(options.headers || {}) });
     if (options.body !== undefined) {
@@ -107,29 +132,31 @@
     setGlobalAlert(`Saving ${mutation.label}…`, 'success');
     try {
       const result = await request(mutation.path, { method: mutation.method, body: mutation.body, idempotencyKey: mutation.key });
-      state.mutation = null; renderMutationState(); setGlobalAlert('', 'success');
+      state.mutation = null; clearPersistedMutation(); renderMutationState(); setGlobalAlert('', 'success');
       try { await mutation.onSuccess(result.data); }
       catch (error) { setGlobalAlert(`Saved, but the latest view could not refresh: ${errorMessage(error)}`, 'error'); }
     } catch (error) {
       mutation.inFlight = false;
-      if (error.code === 'authentication_required' || error.status === 401) { state.mutation = null; signOutLocal(); if (mutation.onError) mutation.onError(error); }
-      else if (error.uncertain) { state.mutation = mutation; setGlobalAlert(`${mutation.label} may still be processing. The original request is retained for a safe retry.`, 'error', true); if (mutation.onError) mutation.onError(error); }
-      else { state.mutation = null; if (mutation.onError) mutation.onError(error); else setGlobalAlert(errorMessage(error), 'error'); }
+      if (error.code === 'authentication_required' || error.status === 401) { state.mutation = null; clearPersistedMutation(); signOutLocal(); if (mutation.onError) mutation.onError(error); }
+      else if (error.uncertain && mutation.operation) { state.mutation = mutation; setGlobalAlert(`${mutation.label} may still be processing. The original request is retained for a safe retry.`, 'error', true); if (mutation.onError) mutation.onError(error); }
+      else if (error.uncertain) { state.mutation = null; if (mutation.onError) mutation.onError(new ApiError('Sign-in may still be processing. Try again after checking the session.', error.status, error.code, error.details, false)); else setGlobalAlert(errorMessage(error), 'error'); }
+      else { state.mutation = null; clearPersistedMutation(); if (mutation.onError) mutation.onError(error); else setGlobalAlert(errorMessage(error), 'error'); }
       renderMutationState();
     }
   }
 
-  function startMutation(path, body, label, onSuccess, method = 'POST', onError = null) {
+  function startMutation(path, body, label, onSuccess, method = 'POST', onError = null, context = {}) {
     if (state.mutation) return;
-    state.mutation = { path, body, label, method, key: newKey(), onSuccess, onError, inFlight: false };
+    const operation = mutationOperation(path, method);
+    state.mutation = { path, body, label, method, key: newKey(), operation, context, onSuccess, onError, inFlight: false };
+    if (operation && actorId()) persistMutation(state.mutation);
     executeMutation(state.mutation);
   }
 
   function renderMutationState() {
     const busy = Boolean(state.mutation);
-    document.querySelectorAll('form button[type="submit"]').forEach((button) => { button.disabled = busy && state.mutation.inFlight; });
-    if ($('logout-button')) $('logout-button').disabled = busy && state.mutation.inFlight;
-    if ($('copy-token')) $('copy-token').disabled = busy && state.mutation.inFlight;
+    document.querySelectorAll('form button[type="submit"], [data-mutation="true"]').forEach((button) => { button.disabled = busy; });
+    if ($('logout-button')) $('logout-button').disabled = busy;
   }
 
   function applySession(data) {
@@ -144,14 +171,16 @@
 
   function signOutLocal() {
     state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
-    state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
+    state.credentials = []; state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
+    clearPersistedMutation();
+    setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); show($('credentials-list'), false);
     if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null;
     show($('dashboard-view'), false); show($('loading-view'), false); show($('login-view'), true);
     $('login-form')?.reset(); $('username')?.focus();
   }
 
   async function restoreSession() {
-    try { const result = await request('/api/v1/me'); applySession(result.data); await loadProjects(); startPolling(); }
+    try { const result = await request('/api/v1/me'); applySession(result.data); restorePendingMutation(); await loadProjects(); startPolling(); }
     catch (error) { show($('loading-view'), false); show($('dashboard-view'), false); show($('login-view'), true); if (error.status && error.status !== 401) showLoginError(errorMessage(error)); }
   }
 
@@ -162,6 +191,25 @@
     ['overview', 'tasks', 'task-detail', 'admin'].forEach((name) => show($(`${name}-view`), name === view));
     document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (view === 'task-detail' && button.dataset.view === 'tasks')));
     if (view === 'tasks') $('project-select')?.focus();
+  }
+
+  function restoredMutationCallbacks(operation, context = {}) {
+    if (operation === 'create_project') return async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); };
+    if (operation === 'create_task') return async () => { state.projectId = context.projectId || state.projectId; await loadTasks(); setGlobalAlert('Task created.', 'success'); };
+    if (operation === 'issue_credential') return async (data) => { showToken(data?.token); await loadCredentials(); setIssueFeedback('Credential issued. If the token is unavailable, revoke this credential and issue a replacement.', 'success'); };
+    if (operation === 'revoke_credential') return async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); };
+    if (operation === 'logout') return async () => signOutLocal();
+    return null;
+  }
+
+  function restorePendingMutation() {
+    const saved = readPersistedMutation();
+    if (!saved) return;
+    if (!actorId() || saved.actor_id !== actorId() || !saved.operation || !saved.path || !saved.key || !restoredMutationCallbacks(saved.operation, saved.context)) { clearPersistedMutation(); return; }
+    state.projectId = saved.context?.projectId || state.projectId;
+    state.mutation = { path: saved.path, body: saved.body || {}, label: `${displayStatus(saved.operation)}`, method: saved.method || 'POST', key: saved.key, operation: saved.operation, context: saved.context || {}, onSuccess: restoredMutationCallbacks(saved.operation, saved.context), onError: null, inFlight: false };
+    renderMutationState();
+    setGlobalAlert(`A previous ${state.mutation.label.toLowerCase()} may still be processing. Review the result, then retry with the retained request if needed.`, 'error', true);
   }
 
   function renderSummary() {
@@ -207,22 +255,40 @@
     select.value = state.projects.some((project) => text(project.id) === current) ? current : '';
   }
 
-  function openProject(id) { state.projectId = text(id); $('project-select').value = state.projectId; $('new-task-button').disabled = false; $('refresh-tasks').disabled = false; showView('tasks'); loadTasks(); }
+  function openProject(id) { state.projectId = text(id); state.taskCursor = null; state.tasks = []; $('project-select').value = state.projectId; $('new-task-button').disabled = false; $('refresh-tasks').disabled = false; showView('tasks'); loadTasks(); }
 
-  async function loadTasks(silent = false) {
-    if (!state.projectId || state.fetching.has('tasks')) return;
-    state.fetching.add('tasks'); const project = state.projects.find((item) => text(item.id) === state.projectId);
+  async function loadTasks(silent = false, append = false) {
+    const requestedProjectId = state.projectId;
+    if (!requestedProjectId || (state.inflight.tasks?.projectId === requestedProjectId)) return;
+    if (append && !state.taskCursor) return;
+    const requestId = ++state.requestSeq.tasks;
+    const cursorBefore = state.taskCursor;
+    const hadLoadedPages = silent && Boolean(cursorBefore) && state.tasks.length > 0;
+    state.inflight.tasks = { projectId: requestedProjectId, requestId };
+    const project = state.projects.find((item) => text(item.id) === requestedProjectId);
     setText($('tasks-subtitle'), project?.name ? `${project.name} · current work queue` : 'Current work queue');
-    if (!silent) { show($('tasks-list'), false); setState($('tasks-state'), 'Loading tasks…', true); }
-    try { state.tasks = listData((await request(`/api/v1/projects/${encodeURIComponent(state.projectId)}/tasks`)).data); renderTasks(); renderSummary(); }
-    catch (error) { if (!silent) setState($('tasks-state'), errorMessage(error), false, true); }
-    finally { state.fetching.delete('tasks'); }
+    if (!silent && !append) { state.taskCursor = null; state.tasks = []; show($('tasks-list'), false); setState($('tasks-state'), 'Loading tasks…', true); }
+    if (append) { $('load-more-tasks').disabled = true; setText($('tasks-page-status'), 'Loading more tasks…'); }
+    const query = append && cursorBefore ? `?cursor=${encodeURIComponent(cursorBefore)}` : '';
+    try {
+      const page = (await request(`/api/v1/projects/${encodeURIComponent(requestedProjectId)}/tasks${query}`)).data;
+      if (requestedProjectId !== state.projectId || state.requestSeq.tasks !== requestId) return;
+      const items = listData(page);
+      if (append) state.tasks = state.tasks.concat(items);
+      else if (hadLoadedPages) { const byId = new Map(state.tasks.map((item) => [text(item.id), item])); items.forEach((item) => byId.set(text(item.id), item)); state.tasks = Array.from(byId.values()); }
+      else state.tasks = items;
+      state.taskCursor = page?.next_cursor || null;
+      renderTasks(); renderSummary();
+    }
+    catch (error) { if (requestedProjectId === state.projectId && state.requestSeq.tasks === requestId && !silent) setState($('tasks-state'), errorMessage(error), false, true); }
+    finally { if (state.inflight.tasks?.requestId === requestId) state.inflight.tasks = null; if (state.projectId === requestedProjectId) $('load-more-tasks').disabled = false; }
   }
 
   function renderTasks() {
     const target = $('tasks-list'); clear(target); const filter = $('status-filter').value;
     const tasks = filter === 'all' ? state.tasks : state.tasks.filter((task) => taskStatus(task) === filter);
-    if (!tasks.length) { show(target, false); setState($('tasks-state'), state.tasks.length ? 'No tasks match this status filter.' : 'No tasks in this project yet. Create the first task.', false); return; }
+    const loadMore = $('load-more-tasks'); show(loadMore, Boolean(state.taskCursor)); loadMore.disabled = Boolean(state.inflight.tasks); setText($('tasks-page-status'), state.taskCursor ? `Showing ${state.tasks.length} loaded tasks` : state.tasks.length ? `${state.tasks.length} task${state.tasks.length === 1 ? '' : 's'}` : '');
+    if (!tasks.length) { show(target, false); setState($('tasks-state'), state.tasks.length ? 'No tasks match this status filter. Load more to search the rest of the queue.' : 'No tasks in this project yet. Create the first task.', false); return; }
     show($('tasks-state'), false); show(target, true);
     tasks.forEach((task) => {
       const row = el('button', 'task-row'); row.type = 'button'; row.addEventListener('click', () => openTask(task.id));
@@ -232,11 +298,17 @@
   }
 
   async function loadTaskDetail(silent = false) {
-    if (!state.projectId || !state.selectedTaskId || state.fetching.has('detail')) return;
-    state.fetching.add('detail'); if (!silent) { show($('task-detail-content'), false); setState($('task-detail-state'), 'Loading task…', true); }
-    try { state.detail = (await request(`/api/v1/projects/${encodeURIComponent(state.projectId)}/tasks/${encodeURIComponent(state.selectedTaskId)}`)).data; renderTaskDetail(); }
-    catch (error) { if (!silent) setState($('task-detail-state'), errorMessage(error), false, true); }
-    finally { state.fetching.delete('detail'); }
+    const requestedProjectId = state.projectId; const requestedTaskId = state.selectedTaskId; const requestKey = `${requestedProjectId}/${requestedTaskId}`;
+    if (!requestedProjectId || !requestedTaskId || state.inflight.detail?.key === requestKey) return;
+    const requestId = ++state.requestSeq.detail; state.inflight.detail = { key: requestKey, requestId };
+    if (!silent) { show($('task-detail-content'), false); setState($('task-detail-state'), 'Loading task…', true); }
+    try {
+      const data = (await request(`/api/v1/projects/${encodeURIComponent(requestedProjectId)}/tasks/${encodeURIComponent(requestedTaskId)}`)).data;
+      if (requestedProjectId !== state.projectId || requestedTaskId !== state.selectedTaskId || state.requestSeq.detail !== requestId) return;
+      state.detail = data; renderTaskDetail();
+    }
+    catch (error) { if (requestedProjectId === state.projectId && requestedTaskId === state.selectedTaskId && state.requestSeq.detail === requestId && !silent) setState($('task-detail-state'), errorMessage(error), false, true); }
+    finally { if (state.inflight.detail?.requestId === requestId) state.inflight.detail = null; }
   }
 
   function openTask(id) { state.selectedTaskId = text(id); showView('task-detail'); loadTaskDetail(); }
@@ -253,7 +325,11 @@
 
   function renderLease(data, task) {
     const target = $('lease-content'); clear(target); const attempts = Array.isArray(data.attempts) ? data.attempts : []; const current = attempts.find((attempt) => attempt.id === task.current_attempt_id) || attempts.find((attempt) => !attempt.closed_at && !['closed', 'released', 'expired'].includes(attempt.state));
-    if (!current) { add(target, el('p', 'muted', 'No active lease. This task is available for eligible work.')); return; }
+    if (!current) {
+      const status = taskStatus(task);
+      const message = task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded', 'submitted'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : 'No active lease. This task is available for eligible work.';
+      add(target, el('p', 'muted', message)); return;
+    }
     const dl = el('dl'); const remaining = current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
     [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(current.state || 'active')], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]].forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, el('dd', '', value)); add(dl, line); }); add(target, dl);
   }
@@ -282,7 +358,7 @@
   }
 
   function createProject(value) { startMutation('/api/v1/projects', { name: value['project-name'].trim(), repository_url: value['repository-url'].trim(), target_branch: value['target-branch'].trim() }, 'project creation', async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); }); }
-  function createTask(value) { const criteria = value['task-criteria'].split('\n').map((item) => item.trim()).filter(Boolean); startMutation(`/api/v1/projects/${encodeURIComponent(state.projectId)}/tasks`, { title: value['task-title'].trim(), description: value['task-description'].trim(), acceptance_criteria: criteria, kind: value['task-kind'], priority: 2, depends_on: [], planned: false }, 'task creation', async () => { await loadTasks(); setGlobalAlert('Task created.', 'success'); }); }
+  function createTask(value) { const projectId = state.projectId; const criteria = value['task-criteria'].split('\n').map((item) => item.trim()).filter(Boolean); startMutation(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, { title: value['task-title'].trim(), description: value['task-description'].trim(), acceptance_criteria: criteria, kind: value['task-kind'], priority: 2, depends_on: [], planned: false }, 'task creation', async () => { if (state.projectId === projectId) await loadTasks(); setGlobalAlert('Task created.', 'success'); }, 'POST', null, { projectId }); }
 
   async function loadCredentials(silent = false) {
     if (state.actor?.role !== 'admin' || state.fetching.has('credentials')) return; state.fetching.add('credentials'); if (!silent) { show($('credentials-list'), false); setState($('credentials-state'), 'Loading credentials…', true); }
@@ -290,7 +366,7 @@
     catch (error) { if (!silent) setState($('credentials-state'), errorMessage(error), false, true); } finally { state.fetching.delete('credentials'); }
   }
 
-  function renderCredentials() { const target = $('credentials-list'); clear(target); if (!state.credentials.length) { show(target, false); setState($('credentials-state'), 'No agent credentials have been issued.', false); return; } show($('credentials-state'), false); show(target, true); state.credentials.forEach((credential) => { const row = el('div', 'credential-row'); const info = el('div'); add(info, el('div', 'credential-name', credential.name || credential.principal_name || credential.id)); add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`)); if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`)); add(row, info); if (!credential.revoked_at) { const revoke = el('button', 'button danger', 'Revoke'); revoke.type = 'button'; revoke.addEventListener('click', () => revokeCredential(credential.id)); add(row, revoke); } add(target, row); }); }
+  function renderCredentials() { const target = $('credentials-list'); clear(target); if (!state.credentials.length) { show(target, false); setState($('credentials-state'), 'No agent credentials have been issued.', false); return; } show($('credentials-state'), false); show(target, true); state.credentials.forEach((credential) => { const row = el('div', 'credential-row'); const info = el('div'); add(info, el('div', 'credential-name', credential.name || credential.principal_name || credential.id)); add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`)); if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`)); add(row, info); if (!credential.revoked_at) { const revoke = el('button', 'button danger', 'Revoke'); revoke.type = 'button'; revoke.dataset.mutation = 'true'; revoke.addEventListener('click', () => revokeCredential(credential.id)); add(row, revoke); } add(target, row); }); renderMutationState(); }
   function revokeCredential(id) { startMutation(`/api/v1/admin/credentials/${encodeURIComponent(id)}/revoke`, {}, 'credential revocation', async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); }); }
 
   function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = setInterval(() => { if (!state.actor || state.mutation) return; if (state.currentView === 'overview') loadProjects(true); else if (state.currentView === 'tasks') loadTasks(true); else if (state.currentView === 'task-detail') loadTaskDetail(true); else if (state.currentView === 'admin') loadCredentials(true); }, 5000); }
@@ -299,7 +375,7 @@
   $('logout-button').addEventListener('click', () => startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()));
   document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') loadCredentials(); }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
-  $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
+  $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
   $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback('Credential issued.', 'success'); }); });
   function showToken(token) { setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
   function setIssueFeedback(message, kind) { const target = $('issue-feedback'); target.className = `inline-alert ${kind}`; setText(target, message); show(target, true); }
