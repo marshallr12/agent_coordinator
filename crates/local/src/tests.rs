@@ -376,6 +376,30 @@ fn producer_helper() {
     std::thread::sleep(Duration::from_millis(sleep_ms));
 }
 
+#[test]
+fn windows_git_paths_remove_supported_verbatim_prefixes() {
+    fn normalize(value: &str) -> Option<String> {
+        let encoded = value.encode_utf16().collect::<Vec<_>>();
+        normalize_windows_git_path_wide(&encoded)
+            .map(|path| String::from_utf16(&path).expect("test path remains UTF-16"))
+    }
+
+    assert_eq!(
+        normalize(r"\\?\C:\checkout with spaces\数据"),
+        Some(r"C:\checkout with spaces\数据".into())
+    );
+    assert_eq!(
+        normalize(r"\\?\unc\server\share\checkout with spaces"),
+        Some(r"\\server\share\checkout with spaces".into())
+    );
+    assert_eq!(
+        normalize(r"C:\checkout with spaces"),
+        Some(r"C:\checkout with spaces".into())
+    );
+    assert_eq!(normalize(r"\\?\Volume{identity}\checkout"), None);
+    assert_eq!(normalize(r"\\.\PIPE\coordinator"), None);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeated_run_does_not_spawn_twice_and_inspect_is_nonblocking() -> Result<()> {
     let service = MockService::start(None).await?;

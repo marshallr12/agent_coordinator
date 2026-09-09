@@ -1216,9 +1216,10 @@ fn validate_reporter_token(reporter_id: &str, token: &str) -> Result<()> {
 }
 
 fn git_output(checkout: &Path, arguments: &[&str]) -> Result<String> {
+    let git_checkout = git_compatible_path(checkout)?;
     let output = Command::new("git")
         .args(arguments)
-        .current_dir(checkout)
+        .current_dir(git_checkout)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -1229,6 +1230,61 @@ fn git_output(checkout: &Path, arguments: &[&str]) -> Result<String> {
     String::from_utf8(output.stdout)
         .context("Git returned a non-UTF-8 source identity")
         .map(|value| value.trim().to_owned())
+}
+
+#[cfg(windows)]
+fn git_compatible_path(path: &Path) -> Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let normalized = normalize_windows_git_path_wide(&encoded)
+        .context("source checkout uses a Windows device path unsupported by Git")?;
+    Ok(PathBuf::from(OsString::from_wide(&normalized)))
+}
+
+#[cfg(not(windows))]
+fn git_compatible_path(path: &Path) -> Result<PathBuf> {
+    Ok(path.to_path_buf())
+}
+
+#[cfg(any(test, windows))]
+fn normalize_windows_git_path_wide(path: &[u16]) -> Option<Vec<u16>> {
+    const BACKSLASH: u16 = b'\\' as u16;
+    const COLON: u16 = b':' as u16;
+    const QUESTION: u16 = b'?' as u16;
+    const DOT: u16 = b'.' as u16;
+
+    let is_prefix = |marker| path.starts_with(&[BACKSLASH, BACKSLASH, marker, BACKSLASH]);
+    if is_prefix(DOT) {
+        return None;
+    }
+    if !is_prefix(QUESTION) {
+        return Some(path.to_vec());
+    }
+
+    let remainder = &path[4..];
+    if remainder.len() >= 3
+        && ((b'A' as u16..=b'Z' as u16).contains(&remainder[0])
+            || (b'a' as u16..=b'z' as u16).contains(&remainder[0]))
+        && remainder[1] == COLON
+        && remainder[2] == BACKSLASH
+    {
+        return Some(remainder.to_vec());
+    }
+    if remainder.len() >= 4
+        && remainder[..3]
+            .iter()
+            .copied()
+            .zip([b'U' as u16, b'N' as u16, b'C' as u16])
+            .all(|(actual, expected)| actual == expected || actual == expected + 32)
+        && remainder[3] == BACKSLASH
+    {
+        let mut normalized = vec![BACKSLASH, BACKSLASH];
+        normalized.extend_from_slice(&remainder[4..]);
+        return Some(normalized);
+    }
+    None
 }
 
 fn inputs_unchanged(snapshot: &SourceSnapshot) -> bool {
