@@ -140,6 +140,12 @@ pub(crate) fn protected_log(path: &Path) -> Result<File> {
     protected_open(path, true)
 }
 
+pub(crate) fn reset_log(path: &Path) -> Result<()> {
+    protected_open(path, false)?
+        .set_len(0)
+        .with_context(|| format!("reset protected log {}", path.display()))
+}
+
 fn protected_open(path: &Path, append: bool) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).append(append);

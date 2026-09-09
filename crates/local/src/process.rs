@@ -28,7 +28,6 @@ pub(crate) fn spawn_producer(command: &CommandSpec, capture_logs: bool) -> Resul
         .args(&command.args)
         .current_dir(&command.working_directory)
         .env_clear()
-        .envs(&command.environment)
         .stdin(Stdio::null())
         .stdout(if capture_logs {
             Stdio::piped()
@@ -40,7 +39,9 @@ pub(crate) fn spawn_producer(command: &CommandSpec, capture_logs: bool) -> Resul
         } else {
             Stdio::null()
         });
-    configure_detached(&mut child);
+    copy_platform_environment(&mut child);
+    child.envs(&command.environment);
+    configure_producer(&mut child);
     child.spawn().context("launch local producer")
 }
 
@@ -63,15 +64,15 @@ pub(crate) fn spawn_guardian_process(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    copy_guardian_environment(&mut command);
-    configure_detached(&mut command);
+    copy_platform_environment(&mut command);
+    configure_guardian(&mut command);
     command
         .spawn()
         .context("start detached local job guardian")?;
     Ok(())
 }
 
-fn copy_guardian_environment(command: &mut Command) {
+fn copy_platform_environment(command: &mut Command) {
     const ALLOWED: &[&str] = &[
         "PATH",
         "SystemRoot",
@@ -90,20 +91,35 @@ fn copy_guardian_environment(command: &mut Command) {
 }
 
 #[cfg(unix)]
-fn configure_detached(command: &mut Command) {
+fn configure_producer(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
 
 #[cfg(windows)]
-fn configure_detached(command: &mut Command) {
+fn configure_producer(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_producer(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn configure_guardian(command: &mut Command) {
+    configure_producer(command);
+}
+
+#[cfg(windows)]
+fn configure_guardian(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
     command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 }
 
 #[cfg(not(any(unix, windows)))]
-fn configure_detached(_command: &mut Command) {}
+fn configure_guardian(_command: &mut Command) {}
 
 #[cfg(target_os = "linux")]
 fn capture_platform(pid: u32) -> Result<Option<ProcessIdentity>> {

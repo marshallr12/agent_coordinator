@@ -1175,7 +1175,8 @@ fn validate_initialize(input: &InitializeJob) -> Result<()> {
         Uuid::parse_str(value).with_context(|| format!("{name} must be a UUID"))?;
     }
     for name in input.command.environment.keys() {
-        if name.to_ascii_uppercase().starts_with("AGENT_COORDINATOR_") {
+        let normalized = name.to_ascii_uppercase();
+        if normalized.starts_with("AGENT_COORDINATOR_") || normalized.starts_with("COORDINATOR_") {
             bail!("coordinator credential and session environment may not enter a local job");
         }
     }
@@ -1220,9 +1221,7 @@ fn prepare_logs(paths: &persist::JobPaths, limit: u64) -> Result<()> {
         return Ok(());
     }
     for path in [&paths.stdout, &paths.stderr] {
-        persist::protected_log(path)?
-            .set_len(0)
-            .context("reset bounded local producer log")?;
+        persist::reset_log(path)?;
     }
     Ok(())
 }

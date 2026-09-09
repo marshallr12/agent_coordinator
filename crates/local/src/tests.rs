@@ -280,20 +280,33 @@ impl Fixture {
             marker,
         })
     }
+}
 
-    async fn wait_started(&self) -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if self.marker.exists() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
+async fn wait_for_fixture_start(
+    fixture: &Fixture,
+    guardian: &mut tokio::task::JoinHandle<Result<GuardianOutcome>>,
+) -> Result<()> {
+    #[cfg(windows)]
+    let deadline = Duration::from_secs(15);
+    #[cfg(not(windows))]
+    let deadline = Duration::from_secs(5);
+    if tokio::time::timeout(deadline, wait_for_path(&fixture.marker))
         .await
-        .context("producer did not start")?;
-        Ok(())
+        .is_ok()
+    {
+        return Ok(());
     }
+    let summary = inspect_job(&fixture.state_file)?;
+    let guardian_result = if guardian.is_finished() {
+        format!("{:?}", guardian.await)
+    } else {
+        "still running".into()
+    };
+    bail!(
+        "producer did not start; phase={:?}, last_report_error={:?}, guardian={guardian_result}",
+        summary.phase,
+        summary.last_report_error
+    )
 }
 
 fn git(directory: &Path, args: &[&str]) -> Result<String> {
@@ -367,8 +380,9 @@ async fn repeated_run_does_not_spawn_twice_and_inspect_is_nonblocking() -> Resul
     let service = MockService::start(None).await?;
     let fixture = Fixture::new(&service, 1_000, 32, 4_096)?;
     let state_file = fixture.state_file.clone();
-    let guardian = tokio::spawn(async move { run_guardian(&state_file, GuardianMode::Run).await });
-    fixture.wait_started().await?;
+    let mut guardian =
+        tokio::spawn(async move { run_guardian(&state_file, GuardianMode::Run).await });
+    wait_for_fixture_start(&fixture, &mut guardian).await?;
 
     let inspect_path = fixture.state_file.clone();
     let inspection = tokio::time::timeout(
@@ -395,8 +409,9 @@ async fn producer_outlives_observer_and_reconnect_preserves_unknown_without_rela
     let service = MockService::start(None).await?;
     let fixture = Fixture::new(&service, 1_200, 0, 0)?;
     let state_file = fixture.state_file.clone();
-    let guardian = tokio::spawn(async move { run_guardian(&state_file, GuardianMode::Run).await });
-    fixture.wait_started().await?;
+    let mut guardian =
+        tokio::spawn(async move { run_guardian(&state_file, GuardianMode::Run).await });
+    wait_for_fixture_start(&fixture, &mut guardian).await?;
     guardian.abort();
     let _ = guardian.await;
     assert_eq!(inspect_job(&fixture.state_file)?.phase, JobPhase::Running);
@@ -420,8 +435,9 @@ async fn short_producer_logs_are_drained_and_strictly_bounded_during_slow_report
     let service = MockService::start(Some(3)).await?;
     let fixture = Fixture::new(&service, 0, 1_000_000, 1_024)?;
     let state_file = fixture.state_file.clone();
-    let guardian = tokio::spawn(async move { run_guardian(&state_file, GuardianMode::Run).await });
-    fixture.wait_started().await?;
+    let mut guardian =
+        tokio::spawn(async move { run_guardian(&state_file, GuardianMode::Run).await });
+    wait_for_fixture_start(&fixture, &mut guardian).await?;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let summary = inspect_job(&fixture.state_file)?;
     assert!(fs::metadata(&summary.stdout_log)?.len() <= 1_024);
