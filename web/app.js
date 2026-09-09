@@ -193,10 +193,17 @@
     if (view === 'tasks') $('project-select')?.focus();
   }
 
+  function issuedCredentialFeedback(data) {
+    const credentialId = data?.credential_id || data?.id || 'the issued credential';
+    if (data?.secret_unavailable) return `This issuance was replayed, but its token cannot be recovered. Revoke ${credentialId}, then issue a replacement with a fresh agent name.`;
+    if (!data?.token) return `The token was not returned. Revoke ${credentialId}, then issue a replacement with a fresh agent name.`;
+    return 'Credential issued. Copy the token now; it will not be shown again.';
+  }
+
   function restoredMutationCallbacks(operation, context = {}) {
     if (operation === 'create_project') return async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); };
     if (operation === 'create_task') return async () => { state.projectId = context.projectId || state.projectId; await loadTasks(); setGlobalAlert('Task created.', 'success'); };
-    if (operation === 'issue_credential') return async (data) => { showToken(data?.token); await loadCredentials(); setIssueFeedback('Credential issued. If the token is unavailable, revoke this credential and issue a replacement.', 'success'); };
+    if (operation === 'issue_credential') return async (data) => { showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); };
     if (operation === 'revoke_credential') return async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); };
     if (operation === 'logout') return async () => signOutLocal();
     return null;
@@ -376,7 +383,7 @@
   document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') loadCredentials(); }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
-  $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback('Credential issued.', 'success'); }); });
+  $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); }); });
   function showToken(token) { setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
   function setIssueFeedback(message, kind) { const target = $('issue-feedback'); target.className = `inline-alert ${kind}`; setText(target, message); show(target, true); }
   $('clear-token').addEventListener('click', () => { setText($('issued-token'), ''); show($('token-reveal'), false); }); $('copy-token').addEventListener('click', async () => { const token = $('issued-token').textContent; if (!token) return; try { await navigator.clipboard.writeText(token); setIssueFeedback('Token copied to clipboard.', 'success'); } catch (_) { setIssueFeedback('Copy was unavailable. Select the token and copy it manually.', 'error'); } });
