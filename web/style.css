@@ -103,6 +103,13 @@ textarea { min-height: 108px; resize: vertical; }
 .project-card:hover { border-color: #a9c5ca; box-shadow: var(--shadow); }
 .project-card h3 { margin: 0 0 5px; color: var(--navy); font-size: 17px; text-transform: none; letter-spacing: normal; }
 .project-card .repo { min-height: 20px; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.project-id { margin: 12px 0 0; overflow-wrap: anywhere; color: var(--navy); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.project-binding { margin-top: 12px; padding-top: 10px; border-top: 1px solid #edf1f2; }
+.project-binding summary { cursor: pointer; color: var(--teal); font-size: 12px; font-weight: 800; }
+.binding-content { margin-top: 10px; }
+.binding-help { margin: 0 0 7px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.binding-snippet { display: block; padding: 9px; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--navy); background: #f5faf9; border: 1px solid #cae9e5; border-radius: 5px; font-size: 11px; line-height: 1.55; }
+.binding-content .button { width: 100%; margin-top: 8px; }
 .project-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 17px; }
 .project-meta { color: var(--muted); font-size: 11px; }
 .project-open { padding: 0; border: 0; background: transparent; color: var(--teal); font-size: 12px; font-weight: 800; }

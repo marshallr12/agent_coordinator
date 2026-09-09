@@ -248,10 +248,26 @@
     show($('projects-state'), false); show(target, true);
     state.projects.forEach((project) => {
       const card = el('article', 'project-card'); const name = el('h3', '', project.name || 'Unnamed project');
-      const repo = el('p', 'repo', project.repository_url || 'Repository not configured'); const footer = el('div', 'project-card-footer');
+      const repo = el('p', 'repo', project.repository_url || 'Repository not configured');
+      const projectId = text(project.id);
+      const idLabel = el('p', 'project-id', `Project ID · ${projectId || 'Unavailable'}`);
+      const binding = document.createElement('details'); binding.className = 'project-binding';
+      const summary = el('summary', '', 'Repository binding');
+      const bindingContent = el('div', 'binding-content');
+      add(bindingContent, el('p', 'binding-help', 'Add this non-secret file as .agent-coordinator.toml before running the agent CLI.'));
+      const snippet = `service_url = ${JSON.stringify(location.origin)}\nproject_id = ${JSON.stringify(projectId)}`;
+      add(bindingContent, el('code', 'binding-snippet', snippet));
+      const copy = el('button', 'button subtle', 'Copy binding'); copy.type = 'button';
+      copy.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(snippet); setText(copy, 'Copied'); }
+        catch (_) { setText(copy, 'Copy unavailable'); }
+        window.setTimeout(() => setText(copy, 'Copy binding'), 1600);
+      });
+      add(bindingContent, copy); add(binding, summary); add(binding, bindingContent);
+      const footer = el('div', 'project-card-footer');
       add(footer, el('span', 'project-meta', project.target_branch ? `Branch · ${project.target_branch}` : 'Branch not set'));
       const open = el('button', 'project-open', 'Open tasks →'); open.type = 'button'; open.addEventListener('click', () => openProject(project.id));
-      add(footer, open); add(card, name); add(card, repo); add(card, footer); add(target, card);
+      add(footer, open); add(card, name); add(card, repo); add(card, idLabel); add(card, binding); add(card, footer); add(target, card);
     });
   }
 
