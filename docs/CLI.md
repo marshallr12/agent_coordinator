@@ -109,8 +109,8 @@ agent-coordinator claim --mode recovery --task expired-task-id --revision 7
 ```
 
 `--mode work` is the default. Recovery mode atomically claims an expired or
-revoked attempt for inspection; it does not permit edits until `recovery
-resolve` records the required saved-work and running-job checks. `--next` can
+revoked attempt for inspection; it does not permit edits until
+`recovery resolve` records the required saved-work and running-job checks. `--next` can
 select the next eligible item in either mode.
 
 Lease and checkpoint operations name the attempt and ownership generation
@@ -209,9 +209,16 @@ commit and tree identities before registration.
 ```json
 {
   "label": "workspace tests",
-  "program": "/usr/bin/cargo",
+  "program": "/home/agent/.cargo/bin/cargo",
   "argv": ["test", "--workspace", "--locked"],
-  "environment": {"CARGO_TERM_COLOR": "never"},
+  "environment": {
+    "PATH": "/home/agent/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/home/agent",
+    "CARGO_HOME": "/home/agent/.cargo",
+    "RUSTUP_HOME": "/home/agent/.rustup",
+    "TMPDIR": "/tmp",
+    "CARGO_TERM_COLOR": "never"
+  },
   "log_limit_bytes": 1048576
 }
 ```
@@ -231,7 +238,15 @@ PowerShell uses the same JSON shape; `program` must be an absolute native path:
   "label": "workspace tests",
   "program": "C:\\Users\\agent\\.cargo\\bin\\cargo.exe",
   "argv": ["test", "--workspace", "--locked"],
-  "environment": {},
+  "environment": {
+    "PATH": "C:\\Users\\agent\\.cargo\\bin;C:\\Windows\\System32",
+    "USERPROFILE": "C:\\Users\\agent",
+    "CARGO_HOME": "C:\\Users\\agent\\.cargo",
+    "RUSTUP_HOME": "C:\\Users\\agent\\.rustup",
+    "SystemRoot": "C:\\Windows",
+    "TEMP": "C:\\Users\\agent\\AppData\\Local\\Temp",
+    "TMP": "C:\\Users\\agent\\AppData\\Local\\Temp"
+  },
   "log_limit_bytes": 1048576
 }
 ```
@@ -251,6 +266,14 @@ the producer receives only the environment explicitly listed in the JSON file.
 `AGENT_COORDINATOR_*` variables are rejected, and raw arguments, environment,
 and logs are never uploaded. Standard output and error are kept in separate,
 bounded, protected local files shown by `jobs inspect`.
+Set `log_limit_bytes` to `0` to discard both streams; the maximum is 67108864
+bytes per stream.
+
+Replace the example environment values with the workstation's actual trusted
+paths. Include everything the program and its child processes require, such as
+`PATH`, the user profile, toolchain directories, temporary directories, and
+Windows `SystemRoot`. Do not copy coordinator token, origin, session, or proof
+variables into this map.
 
 To allow bounded attempt renewal while the job runs, name the exact current
 harness process and a server-limited window:

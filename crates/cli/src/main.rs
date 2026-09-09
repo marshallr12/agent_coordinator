@@ -822,7 +822,7 @@ async fn prepare_worktree(
         "/api/v1/projects/{}/attempts/{}/checkout",
         context.binding.project_id, args.attempt
     );
-    if let Some(existing) = attempt_body.pointer("/data/checkout") {
+    if let Some(existing) = registered_checkout(&attempt_body)? {
         let matches = [
             "workstation_id",
             "identity",
@@ -905,6 +905,19 @@ fn require_current_work_attempt(body: &Value, generation: u64) -> std::result::R
         ));
     }
     Ok(())
+}
+
+fn registered_checkout(body: &Value) -> std::result::Result<Option<&Value>, Failure> {
+    match body
+        .pointer("/data/checkout")
+        .or_else(|| body.get("checkout"))
+    {
+        None | Some(Value::Null) => Ok(None),
+        Some(value @ Value::Object(_)) => Ok(Some(value)),
+        Some(_) => Err(Failure::temporary(
+            "attempt response contained an invalid checkout record",
+        )),
+    }
 }
 
 async fn bound_project(
@@ -1076,17 +1089,14 @@ async fn run_job(
             false,
         ));
     }
-    let checkout = attempt_body
-        .pointer("/data/checkout")
-        .or_else(|| attempt_body.get("checkout"))
-        .ok_or_else(|| {
-            Failure::local(
-                5,
-                "checkout_not_registered",
-                "register the prepared worktree before starting a job",
-                false,
-            )
-        })?;
+    let checkout = registered_checkout(&attempt_body)?.ok_or_else(|| {
+        Failure::local(
+            5,
+            "checkout_not_registered",
+            "register the prepared worktree before starting a job",
+            false,
+        )
+    })?;
     if checkout.get("path").and_then(Value::as_str) != prepared.destination.to_str() {
         return Err(Failure::local(
             5,
@@ -1969,5 +1979,19 @@ mod tests {
         assert_eq!(exit_for_status(409), 5);
         assert_eq!(exit_for_status(422), 6);
         assert_eq!(exit_for_status(503), 7);
+    }
+
+    #[test]
+    fn absent_checkout_accepts_the_service_null_envelope() {
+        assert!(matches!(
+            registered_checkout(&json!({"data":{"checkout":null}})),
+            Ok(None)
+        ));
+        assert!(matches!(registered_checkout(&json!({"data":{}})), Ok(None)));
+        assert!(matches!(
+            registered_checkout(&json!({"data":{"checkout":{"path":"/tmp/worktree"}}})),
+            Ok(Some(_))
+        ));
+        assert!(registered_checkout(&json!({"data":{"checkout":"invalid"}})).is_err());
     }
 }

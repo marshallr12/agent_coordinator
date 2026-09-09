@@ -163,8 +163,8 @@ fn validate_program(input: &ProgramInput) -> Result<()> {
     if !input.program.is_absolute() {
         bail!("job program must be an absolute native path");
     }
-    if input.log_limit_bytes == 0 || input.log_limit_bytes > 100 * 1024 * 1024 {
-        bail!("log_limit_bytes must be between 1 and 104857600");
+    if input.log_limit_bytes > 64 * 1024 * 1024 {
+        bail!("log_limit_bytes must be between 0 and 67108864");
     }
     if input
         .environment
