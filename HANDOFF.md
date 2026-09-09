@@ -1,41 +1,52 @@
 # Implementation handoff — 2026-09-09
 
-The initial executable foundation is in the Rust workspace. Authentication,
-coordination, web, and native CLI work were developed in separate worktrees and
-integrated sequentially. The complete design remains in PLAN.md; product decisions
-are settled and should not be asked again. See docs/implementation-status.md for
-the working subset and BACKLOG.md for next work.
+The job/worktree evidence milestone is implemented on top of the executable
+foundation. The complete design remains in PLAN.md; product decisions are settled.
+See docs/implementation-status.md for the working subset and BACKLOG.md for next
+work: immutable submissions, exact-source checks, independent review, serialized
+integration, and integrated-result validation. Task completion remains unavailable
+until that entire workflow is enforced.
 
-The important coordination invariant is one current attempt per task, enforced
-inside a SQLite immediate write transaction. Revocation and expiry are checked
-after the writer lock. An agent session proof is tied to its issuing credential.
-Release records a handoff but does not finish code work. Completion remains absent
-until review, integration, and integrated validation can be implemented together.
+Agents now prepare isolated worktrees with durable preparation intents and reserve
+named shared capacity before launching a local producer. Jobs have durable producer
+identities, protected journals, bounded local logs, scoped reporters, and optional
+bounded renewal tied to an exact live harness process. Reconnect only observes;
+uncertain launch intent never authorizes a replacement producer. The service never
+runs workstation commands. Supported producer programs keep their work in the
+foreground; detached or external work requires separate inspection before release.
 
-Server regression tests cover concurrent claims, expiry boundaries, dependency
-cycles, revocation, session isolation, inspected recovery, stale mutation replays,
-and restart persistence. Authentication tests exercise HTTP and the host admin
-command. scripts/smoke.py exercises the built service and CLI together with
-disposable accounts and data. The real web page passed sign-in, project/task
-creation, task-detail display, and desktop/mobile layout inspection.
+Physical resource holds survive lease expiry, session closure, credential
+revocation, and observer loss. Task requeue, recovery resolution, and checkout
+changes cannot bypass unresolved evidence. A recovery owner may release an old
+reservation after its jobs have terminal results. Humans may reconcile uncertain
+holds with termination/isolation evidence; this preserves the producer's original
+reported state. The dashboard shows both records separately.
 
-Validation on the integrated foundation: 37 automated tests passed on Linux
-with Rust 1.98.1, workspace Clippy passed with warnings denied, formatting and
-JavaScript syntax checks passed, the locked dependency audit reported no known
-advisories, and the two-harness service/CLI smoke exercise passed. Final browser
-checks also covered a 51-task paginated queue, the Ready/Blocked filters, a blocked
-release handoff with no active owner, persistent project setup disclosures, and
-sign-out. Pagination pauses automatic refresh while additional pages are being
-read; Refresh returns to a current first page.
+Instruction version 2 returns the worktree/resource/job sequence and examples.
+Existing sessions must reconnect and read the new instructions before claiming.
+Use docs/CLI.md for Linux and native Windows commands. The CLI's producer environment
+is explicit and cleared by default; configure the needed toolchain variables and
+never supply coordinator agent credentials to the producer.
 
-Use README.md for build/run/check commands and docs/CLI.md for client enrollment.
+Linux validation: the integrated workspace tests, warnings-denied Clippy, formatting,
+and JavaScript syntax checks pass. The extended service/CLI smoke exercise passes
+worktree reconciliation with spaces, job launch, two reconnects without relaunch,
+live-work release rejection, terminal reporting, and explicit capacity release,
+alongside the original two-harness/two-project coordination checks. The locked
+advisory audit reports no known vulnerabilities.
+
+Browser validation used a disposable database and account: resource creation,
+stale/unknown job evidence, human resource reconciliation without fabricated
+success, released capacity counts, sign-out, and desktop/phone layouts were checked.
+Temporary servers were stopped. No source projects or their histories were changed.
+
+Native Windows validation for this milestone is still being completed. The first
+run found two pre-launch/log-capture failures; do not treat Windows as verified until
+the corrected run passes. The prior foundation run 34398311217 passed Linux,
+native Windows, and the dependency audit.
+
 The service has not been deployed publicly. Host, DNS name, and backup destination
-remain installation choices. CI contains Linux and native Windows jobs; check the
-actual run before treating Windows as verified. The large operating target and
-backup/restore targets have not yet been tested.
-
-Review lessons: a replayed renewal must return current remaining time; lost
-responses cannot authorize a new key; client state needs a per-session process
-lock and durable publication; environment tokens need a trusted origin independent
-of repository configuration. Keep secret issuance responses out of receipts,
-events, browser storage, and CLI diagnostics. See DURABLE-RECORD.md.
+remain installation choices. The 20-project/50-session/100,000-task target, backups,
+restore fencing, retention, and two physical-workstation release exercise remain
+unverified release work. Source inputs must currently be clean committed snapshots;
+logs remain local and service artifact upload is deferred.

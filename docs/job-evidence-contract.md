@@ -21,7 +21,8 @@ recovery-required status. Never free holds on observer/lease/session loss.
 POST `/api/v1/projects/{p}/attempts/{a}/jobs`:
 `{generation,job_id,producer_id,runner_instance_id,workstation_id,label,
 source_revision,source_tree,reservation_id,reporter_id,reporter_proof,
-renew_for_seconds}`. IDs are UUIDs, reporter_proof is client-generated random
+renew_for_seconds}`. Job, producer, runner, reservation and reporter IDs are
+UUIDs; workstation_id matches the stable name from session registration. reporter_proof is client-generated random
 32 bytes encoded hex, persisted before registration. Store only its verifier;
 do not store proof in receipt/event. `renew_for_seconds` 0–3600 (0 disables
 delegated renewal); observation authorization lasts seven days, independently
@@ -49,7 +50,8 @@ exit_code for succeeded/failed; not_started requires an explicit local failure
 before launch; unknown is nonterminal. Observations may continue after attempt
 expiry or session closure while parent credential/principal and reporter remain
 authorized. Never automatically release a hold from an observation.
-POST `.../{id}/renew` `{generation}` caps the normal lease to renew_until and
+POST `.../{id}/renew` `{generation}` caps each renewal extension at renew_until without shortening an
+existing lease, and
 requires current attempt/generation, active parent session, and live deadline.
 A reporter cannot create tasks/sessions, checkpoint, expand scope, or renew its
 own window. Normal bearer credentials cannot impersonate reporter requests.

@@ -793,11 +793,21 @@ async fn register_job(
         ("job_id", &input.job_id),
         ("producer_id", &input.producer_id),
         ("runner_instance_id", &input.runner_instance_id),
-        ("workstation_id", &input.workstation_id),
         ("reservation_id", &input.reservation_id),
         ("reporter_id", &input.reporter_id),
     ] {
         uuid(value, name)?;
+    }
+    if input.workstation_id.is_empty()
+        || input.workstation_id.len() > 128
+        || !input
+            .workstation_id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+    {
+        return Err(AppError::bad_request(
+            "Use the workstation identity registered with this harness session.",
+        ));
     }
     bounded(&input.label, "label", 255, true)?;
     bounded(&input.source_revision, "source_revision", 255, true)?;

@@ -77,6 +77,9 @@ account recovery, additional human administration, and token replacement for an
 existing agent principal remain work. A lost issuance response can recover the
 credential identity, but never its secret: revoke it and enroll a fresh name.
 
+Instruction version 2 includes the implemented worktree/resource/job sequence.
+Existing sessions must fetch and acknowledge the new instructions before new claims.
+
 JSON requests are limited to 256 KiB. Task details return the latest 50 attempts,
 100 checkpoints, 50 checkouts, and bounded job/resource evidence; old records remain stored, with complete history
 pagination still to be added. Mutation receipts replay for 30 days; expired keys

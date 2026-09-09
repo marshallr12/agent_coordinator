@@ -91,9 +91,10 @@ def run():
                     command += ["--input", "-"]
                 result = subprocess.run(command, input=None if body is None else json.dumps(body),
                                         text=True, capture_output=True, env=env, timeout=15)
-                assert result.returncode == expected, f"CLI {args[0]} returned {result.returncode}, expected {expected}."
-                payload = json.loads(result.stdout)
                 assert credentials[index]["token"] not in result.stdout, "Token leaked into CLI output."
+                payload = json.loads(result.stdout)
+                failure = payload.get("error", {})
+                assert result.returncode == expected, f"CLI {args[0]} returned {result.returncode}, expected {expected}: {failure.get('code')} {failure.get('message')}"
                 return payload
 
             for index in range(2):

@@ -1,4 +1,5 @@
 """Local job acceptance scenario used by smoke.py; all files are disposable."""
+import json
 import subprocess
 import sys
 import time
@@ -55,10 +56,12 @@ if not finish.exists():
     sys.exit(19)
 print('producer completed')
 """)
-    cli(owner, "jobs", "run", *ownership, "--reservation", reservation,
-        "--checkout", str(checkout), body={"label": "Smoke producer",
+    job_input = temporary / "job input.json"
+    job_input.write_text(json.dumps({"label": "Smoke producer",
         "program": sys.executable, "argv": [str(producer), str(launches), str(finish)],
-        "environment": {}, "log_limit_bytes": 1048576})
+        "environment": {}, "log_limit_bytes": 1048576}))
+    cli(owner, "jobs", "run", *ownership, "--reservation", reservation,
+        "--checkout", str(checkout), "--input", str(job_input))
     jobs = api(f"/api/v1/projects/{project}/jobs")["items"]
     assert len(jobs) == 1
     job_id = jobs[0]["id"]

@@ -273,7 +273,7 @@ async fn seed(state: &AppState, human: bool, name: &str) -> Caller {
         proof: secret(),
         principal: Uuid::new_v4().to_string(),
         credential: Uuid::new_v4().to_string(),
-        workstation: Uuid::new_v4().to_string(),
+        workstation: format!("build-host-{name}"),
         human,
     };
     sqlx::query(
