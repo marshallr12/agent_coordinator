@@ -5,7 +5,7 @@ use argon2::{
 use axum::{
     Json, Router,
     extract::{FromRequestParts, Path, Query, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts},
+    http::{HeaderMap, HeaderValue, Method, header, request::Parts},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -139,8 +139,14 @@ impl Auth {
                 }
                 _ => return Err(AppError::auth_required()),
             };
-            let allow_closed = parts.method == Method::GET
-                && session.is_some_and(|id| parts.uri.path() == format!("/api/v1/sessions/{id}"));
+            // A closed session may inspect its state or replay closure, but it
+            // cannot authenticate any operation that grants work authority.
+            let allow_closed = session.is_some_and(|id| {
+                (parts.method == Method::GET
+                    && parts.uri.path() == format!("/api/v1/sessions/{id}"))
+                    || (parts.method == Method::POST
+                        && parts.uri.path() == format!("/api/v1/sessions/{id}/close"))
+            });
             Credential::Bearer {
                 token_hash: digest(token),
                 session: supplied_session,
@@ -171,16 +177,16 @@ impl Auth {
         auth.actor = auth
             .verify(&mut *state.pool.acquire().await?, state.now())
             .await?;
-        if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
-            if let Credential::Browser { csrf, .. } = &auth.credential {
-                require_origin(&parts.headers, state)?;
-                if !one_header(&parts.headers, "x-csrf-token")?
-                    .is_some_and(|supplied| constant_eq(supplied, csrf))
-                {
-                    return Err(AppError::forbidden(
-                        "A valid CSRF token is required for browser changes.",
-                    ));
-                }
+        if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS)
+            && let Credential::Browser { csrf, .. } = &auth.credential
+        {
+            require_origin(&parts.headers, state)?;
+            if !one_header(&parts.headers, "x-csrf-token")?
+                .is_some_and(|supplied| constant_eq(supplied, csrf))
+            {
+                return Err(AppError::forbidden(
+                    "A valid CSRF token is required for browser changes.",
+                ));
             }
         }
         Ok(auth)
@@ -250,13 +256,13 @@ fn session_cookie(headers: &HeaderMap, state: &AppState) -> Result<Option<String
             .map_err(|_| AppError::auth_required())?
             .split(';')
         {
-            if let Some((key, value)) = pair.trim().split_once('=') {
-                if key == name {
-                    if found.is_some() || !valid_secret(value) {
-                        return Err(AppError::auth_required());
-                    }
-                    found = Some(value.to_owned());
+            if let Some((key, value)) = pair.trim().split_once('=')
+                && key == name
+            {
+                if found.is_some() || !valid_secret(value) {
+                    return Err(AppError::auth_required());
                 }
+                found = Some(value.to_owned());
             }
         }
     }
@@ -794,12 +800,14 @@ async fn close_session(
     if let Some(replay) = &mutation.replay {
         return Ok(response(replay.clone()));
     }
-    sqlx::query("UPDATE agent_sessions SET closed_at=? WHERE id=? AND credential_id=?")
-        .bind(mutation.now)
-        .bind(&id)
-        .bind(&mutation.actor.credential_id)
-        .execute(&mut *mutation.tx)
-        .await?;
+    sqlx::query(
+        "UPDATE agent_sessions SET closed_at=COALESCE(closed_at,?) WHERE id=? AND credential_id=?",
+    )
+    .bind(mutation.now)
+    .bind(&id)
+    .bind(&mutation.actor.credential_id)
+    .execute(&mut *mutation.tx)
+    .await?;
     Ok(response(
         mutation
             .finish(

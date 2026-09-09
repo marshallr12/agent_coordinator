@@ -30,6 +30,8 @@ only accepts loopback listener addresses and ignores forwarded headers.
    systemd, and enable/start the service. Install Caddy with the matching public
    hostname from `Caddyfile.example`. Permit public HTTPS to Caddy and keep port
    8080 private. Configure DNS and normal certificate issuance for that hostname.
+   Validate the actual configuration with `caddy validate --config /etc/caddy/Caddyfile`
+   before reloading Caddy; see its [request-body size limit documentation](https://caddyserver.com/docs/caddyfile/directives/request_body).
 6. Open the HTTPS site, sign in, and issue a named agent credential. The token
    is displayed once. If that response is lost, retry the same request/key to
    recover the credential identity, revoke it, and issue a replacement under a

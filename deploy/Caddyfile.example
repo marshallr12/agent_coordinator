@@ -2,7 +2,7 @@
 coordinator.example.com {
     encode zstd gzip
     request_body {
-        max_size 256KB
+        max_size 256KiB
     }
     reverse_proxy 127.0.0.1:8080
     # Keep access logs disabled: URLs may accidentally contain caller secrets.
