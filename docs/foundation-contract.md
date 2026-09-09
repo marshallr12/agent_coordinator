@@ -103,6 +103,36 @@ imply completion. Further workflow endpoints remain visibly unavailable in this
 first slice; never provide an unrestricted status=done operation.
 GET /api/v1/projects/{id}/events -> `{items:[...]}`.
 
+Additional implemented routes:
+
+- PATCH `/api/v1/projects/{id}/policy`: full replacement of editable policy
+  fields with `expected_revision`, `review_mode`, `recovery_mode`, `lease_seconds`,
+  `rules`, `agent_rule_editing`, and `automatic_integration`. Delegated agents
+  cannot change the last two permission grants. The review/integration execution
+  workflows remain unavailable in this foundation.
+- PATCH `/api/v1/projects/{id}/tasks/{task_id}`: `expected_revision`, title,
+  description, acceptance_criteria, priority, depends_on, and planned. Only an
+  unowned open/planned task can be edited. There is no generic status edit.
+- POST `.../tasks/{task_id}/unblock`: human-only `{expected_revision,reason}`.
+- GET `.../attempts/{aid}`: attempt, task, current `authority_valid`, current
+  `lease_remaining_ms`, and optional registered checkout metadata.
+- POST `.../attempts/{aid}/checkout`: `{generation,workstation_id,identity,path,
+  branch,base_revision,clean}`. Registers a client-reported separate clean checkout;
+  the service does not execute Git or independently inspect the workstation.
+- POST `.../attempts/{aid}/recovery-resolution`: `{generation,disposition:
+  "resume"|"restart",summary,saved_work_checked:true,running_jobs_checked:true}`.
+  Requires a recovery-mode attempt; only after this inspection may it resume
+  normal work or release back to the queue. Incomplete inspections release blocked.
+
+On a claim replay, `current_authority` reports whether the historical grant still
+holds. The original claim is a receipt, not a fresh countdown. Renewal replay
+returns current remaining time and requires a still-valid owned attempt. Checkpoint,
+checkout, and recovery-resolution replays also require current ownership. Release
+is the intentional exception: its historical receipt remains replayable after
+release, because that operation ends ownership. Every replay reauthenticates.
+All of these observations can become stale; ownership-dependent mutations still
+enforce the current authority transactionally.
+
 All lists `{items:[],next_cursor:null|opaque}`. Errors use stable error envelope.
 The CLI must persist idempotency keys/requests before mutations, never retry an
 uncertain mutation under a new key. New automatic claims are never connect's

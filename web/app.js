@@ -6,7 +6,7 @@
   const state = {
     actor: null, csrfToken: null, projects: [], tasks: [], credentials: [],
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null,
-    taskCursor: null, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
+    taskCursor: null, hasExtraTaskPages: false, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, pollTimer: null, lastSync: null
   };
 
@@ -232,7 +232,14 @@
     if (state.fetching.has('projects')) return;
     state.fetching.add('projects');
     if (!silent) { show($('projects-state'), true); setState($('projects-state'), 'Loading projects…', true); show($('projects-grid'), false); }
-    try { state.projects = listData((await request('/api/v1/projects')).data); renderProjects(); fillProjectSelect(); renderSummary(); }
+    try {
+      const projects = listData((await request('/api/v1/projects')).data);
+      // Preserve focus and open setup disclosures when polling unchanged data.
+      const changed = JSON.stringify(projects) !== JSON.stringify(state.projects);
+      state.projects = projects;
+      if (!silent || changed) { renderProjects(); fillProjectSelect(); }
+      renderSummary();
+    }
     catch (error) { if (!silent) { setState($('projects-state'), errorMessage(error), false, true); } }
     finally { state.fetching.delete('projects'); }
   }
@@ -281,6 +288,8 @@
   function openProject(id) { state.projectId = text(id); state.taskCursor = null; state.tasks = []; $('project-select').value = state.projectId; $('new-task-button').disabled = false; $('refresh-tasks').disabled = false; showView('tasks'); loadTasks(); }
 
   async function loadTasks(silent = false, append = false) {
+    // Keep later pages readable until the operator explicitly refreshes them.
+    if (silent && state.hasExtraTaskPages) return;
     const requestedProjectId = state.projectId;
     if (!requestedProjectId || (state.inflight.tasks?.projectId === requestedProjectId)) return;
     if (append && !state.taskCursor) return;
@@ -300,6 +309,7 @@
       // A refresh re-reads page one and drops appended pages so stale snapshots
       // never contribute to the live summary or get mixed into a later cursor.
       else state.tasks = items;
+      state.hasExtraTaskPages = append;
       state.taskCursor = page?.next_cursor || null;
       renderTasks(); renderSummary();
     }
@@ -310,7 +320,7 @@
   function renderTasks() {
     const target = $('tasks-list'); clear(target); const filter = $('status-filter').value;
     const tasks = filter === 'all' ? state.tasks : state.tasks.filter((task) => taskStatus(task) === filter);
-    const loadMore = $('load-more-tasks'); show(loadMore, Boolean(state.taskCursor)); loadMore.disabled = Boolean(state.inflight.tasks); setText($('tasks-page-status'), state.taskCursor ? `Showing ${state.tasks.length} loaded tasks` : state.tasks.length ? `${state.tasks.length} task${state.tasks.length === 1 ? '' : 's'}` : '');
+    const loadMore = $('load-more-tasks'); show(loadMore, Boolean(state.taskCursor)); loadMore.disabled = Boolean(state.inflight.tasks); setText($('tasks-page-status'), state.hasExtraTaskPages ? `Showing ${state.tasks.length} loaded tasks. Automatic refresh paused; use Refresh for current status.` : state.taskCursor ? `Showing ${state.tasks.length} loaded tasks` : state.tasks.length ? `${state.tasks.length} task${state.tasks.length === 1 ? '' : 's'}` : '');
     if (!tasks.length) { show(target, false); setState($('tasks-state'), state.tasks.length ? 'No tasks match this status filter. Load more to search the rest of the queue.' : 'No tasks in this project yet. Create the first task.', false); return; }
     show($('tasks-state'), false); show(target, true);
     tasks.forEach((task) => {
@@ -347,14 +357,14 @@
   }
 
   function renderLease(data, task) {
-    const target = $('lease-content'); clear(target); const attempts = Array.isArray(data.attempts) ? data.attempts : []; const current = attempts.find((attempt) => attempt.id === task.current_attempt_id) || attempts.find((attempt) => !attempt.closed_at && !['closed', 'released', 'expired'].includes(attempt.state));
+    const target = $('lease-content'); clear(target); const attempts = Array.isArray(data.attempts) ? data.attempts : []; const current = attempts.find((attempt) => attempt.id === task.current_attempt_id);
     if (!current) {
       const status = taskStatus(task);
       const message = task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : 'No active lease. This task is available for eligible work.';
       add(target, el('p', 'muted', message)); return;
     }
     const dl = el('dl'); const remaining = current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
-    [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(current.state || 'active')], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]].forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, el('dd', '', value)); add(dl, line); }); add(target, dl);
+    [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]].forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, el('dd', '', value)); add(dl, line); }); add(target, dl);
   }
 
   function formatLease(expires) { const remaining = new Date(expires).getTime() - Date.now(); return `${Math.max(0, Math.round(remaining / 60000))} min remaining`; }

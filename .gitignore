@@ -9,6 +9,8 @@
 /coverage/
 /playwright-report/
 /test-results/
+__pycache__/
+*.pyc
 
 # Local configuration and credentials. Keep sanitized templates versioned.
 .env
@@ -20,6 +22,8 @@
 /.claude/settings.local.json
 /secrets/
 /credentials/
+credentials.toml
+!credentials.example.toml
 
 # Runtime state, logs, and backups.
 /data/

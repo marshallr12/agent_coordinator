@@ -1,6 +1,6 @@
 # Agent coordination service: discovery and implementation plan
 
-Status: planning complete; ready for implementation. Product choices have been
+Status: planning complete; foundation implementation underway. Product choices have been
 resolved with the operator. Engineering defaults are identified separately from
 confirmed requirements and will be validated during implementation.
 
@@ -14,9 +14,10 @@ project without independently selecting the same task. Preserve task outcomes,
 handoffs, and useful lessons so subsequent agents can work from shared context.
 Remain independent of agent vendors, model providers, and Git hosting providers.
 
-The current request covers planning and clarification. The design is now
-sufficiently defined to implement. No service/client implementation or deployment
-has been performed as part of this planning goal.
+Planning and clarification are complete. The operator subsequently authorized
+implementation. See [implementation status](docs/implementation-status.md) for
+working service/client behavior and remaining milestones; the full design below
+continues to define the release target. No production deployment has occurred.
 
 ## Requirements supplied by the operator
 

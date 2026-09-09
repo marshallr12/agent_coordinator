@@ -3,9 +3,43 @@
 A vendor-agnostic service for AI agents on different workstations to coordinate
 tasks, report progress, and share handoffs and lessons across multiple projects.
 
-**Status: planning complete; ready for implementation.** This repository contains
-the design and acceptance specifications; the service and clients are not
-implemented yet.
+**Status: executable foundation implemented; full release still in development.**
+The Rust service, embedded web dashboard, and native CLI now support authentication,
+multiple projects, task admission, atomic ownership, renewable leases, checkpoints,
+and inspected recovery. [Current implementation and limits](docs/implementation-status.md)
+distinguish working behavior from the complete release design.
+
+## Try the foundation locally
+
+Install Rust 1.94 or newer with a native C build toolchain, then build the locked
+workspace. SQLite is bundled; the dashboard has no separate build or CDN dependency.
+
+```sh
+cargo build --workspace --locked
+target/debug/agent-coordinator-server \
+  --public-origin http://127.0.0.1:8080 --allow-insecure-loopback \
+  init-admin --username admin
+target/debug/agent-coordinator-server \
+  --public-origin http://127.0.0.1:8080 --allow-insecure-loopback serve
+```
+
+Enter a password at the hidden prompt, then open <http://127.0.0.1:8080>. Create a
+project and issue an agent credential under **Access**. The token is displayed once.
+Use [the CLI setup and command guide](docs/CLI.md) to connect each harness with its
+own local session name. Connecting returns instructions and does not claim work.
+For remote use, follow [the Linux/systemd/HTTPS examples](deploy/README.md).
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+python3 scripts/smoke.py
+cargo audit --file Cargo.lock
+```
+
+The smoke exercise uses disposable local accounts and data, and tests two actual
+CLI processes against the server. Install `cargo-audit` separately to run the last
+command. Linux and native Windows client checks are defined in GitHub Actions.
 
 ## Design documents
 
@@ -28,6 +62,9 @@ implemented yet.
   this report refer to the workstation where the review was performed.
 
 ## Direction
+
+The complete release is being built toward the following agreed behavior.
+Use the implementation-status document above to see which parts are available.
 
 - Rust with Axum and SQLite is the preferred service stack.
 - The web interface should use vanilla JavaScript and modern CSS, with Alpine.js
@@ -60,9 +97,10 @@ implemented yet.
 - Existing harnesses launch agents. The service coordinates their work through
   API, CLI, and optional hooks, with local runners reporting job status.
 
-The service will be tested for 20 projects, 50 simultaneous agent sessions, and
-100,000 historical tasks. Backups run hourly, retaining 24 hourly and 30 daily
-copies, with documented off-server copying and a one-hour restore target.
+The release target is 20 projects, 50 simultaneous agent sessions, and 100,000
+historical tasks; those load targets are not yet verified. Planned backups run
+hourly, retaining 24 hourly and 30 daily copies, with documented off-server copying
+and a one-hour restore target. Backup/restore is not in the foundation.
 
 The actual server is undecided. The test baseline is Ubuntu 24.04 LTS on x86_64
 with 2 CPU cores and 4 GB RAM. Remaining host/domain/backup-destination choices
@@ -72,4 +110,4 @@ are installation inputs; no blocking product questions remain.
 
 Build output, runtime databases, local credentials, logs, and agent worktrees
 are ignored. Commit SQL migrations, sanitized configuration examples, shared
-agent guidance, and Cargo.lock when the Rust application is added.
+agent guidance, and Cargo.lock. Never put tokens in a repository binding or URL.

@@ -802,7 +802,13 @@ async fn claim(
         {
             let a = attempt(&mut m.tx, &p, &id).await?;
             let t = task(&mut m.tx, &p, &a.task_id, m.now).await?;
-            v["current_authority"] = json!({"valid":a.state=="active"&&a.expires_at>m.now&&t.owner_authorized&&t.current_attempt_id.as_deref()==Some(&id),"attempt":a.value(),"task_status":t.status(m.now),"lease_remaining_ms":(a.expires_at-m.now).max(0)});
+            let valid = a.state == "active"
+                && a.expires_at > m.now
+                && t.owner_authorized
+                && t.current_attempt_id.as_deref() == Some(&id);
+            let remaining = if valid { a.expires_at - m.now } else { 0 };
+            v["current_authority"] = json!({"valid":valid,"attempt":a.value(),"task_status":t.status(m.now),"lease_remaining_ms":remaining});
+            v["renew_after_seconds"] = json!((remaining / 3000).min(60));
         }
         v["replayed"] = json!(true);
         return Ok(response(v));
@@ -903,6 +909,7 @@ async fn renew(
         // Replaying the recorded renewal must not restart its countdown.
         v["attempt"] = current.value();
         v["lease_remaining_ms"] = json!((current.expires_at - m.now).max(0));
+        v["renew_after_seconds"] = json!(((current.expires_at - m.now).max(0) / 3000).min(60));
         v["replayed"] = json!(true);
         return Ok(response(v));
     }
@@ -916,7 +923,7 @@ async fn renew(
     let a = attempt(&mut m.tx, &p, &id).await?;
     Ok(response(
         m.finish(
-            json!({"attempt":a.value(),"lease_remaining_ms":proj.lease_seconds*1000}),
+            json!({"attempt":a.value(),"lease_remaining_ms":proj.lease_seconds*1000,"renew_after_seconds":(proj.lease_seconds / 3).min(60)}),
             Some(&p),
             "attempt.renewed",
             &id,
