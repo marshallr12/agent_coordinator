@@ -1,0 +1,23 @@
+[package]
+name = "coordinator-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[[bin]]
+name = "agent-coordinator"
+path = "src/main.rs"
+[dependencies]
+coordinator-client = { path = "../client" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+toml = "0.9"
+directories = "6"
+[dev-dependencies]
+tempfile.workspace = true

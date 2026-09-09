@@ -1,0 +1,33 @@
+[package]
+name = "coordinator-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[[bin]]
+name = "agent-coordinator-server"
+path = "src/main.rs"
+[dependencies]
+coordinator-core = { path = "../core" }
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+hex.workspace = true
+getrandom.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+argon2 = "0.5"
+subtle = "2"
+rpassword = "7"
+url = "2"
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true
+tempfile.workspace = true
