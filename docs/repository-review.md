@@ -258,9 +258,15 @@ Recommend supporting both simple tasks and phased objectives in the data model,
 including separate review/integration tasks when policy requires them. During
 this review the operator **confirmed separate worktrees per implementation task,
 with one integration step at a time into the target branch for the first release**.
-Remote process launching remains an open scope decision; a shared-directory
-execution mode is not required for the first release.
+The operator subsequently selected coordination of existing harnesses through
+API, CLI, and optional hooks, with local runners reporting jobs. Remote agent
+launch/supervision and a shared-directory execution mode are not required for
+the first release.
 
-The earlier hosting, authentication, authoritative-record, and autonomy questions
-remain open. These repositories demonstrate workflows to support; they do not
-answer every deployment or product preference on the operator's behalf.
+After this review, the operator also confirmed public HTTPS access, service-
+authoritative records with Markdown import/export, and access to every project
+for every authenticated person and agent. Those decisions supersede the earlier
+proposal for project-specific access grants. People will use local password
+accounts and agents will use revocable API tokens. Agents create and claim tasks
+autonomously, with required review configured per project. Exact server
+installation, recovery, and completion rules remain to be settled.

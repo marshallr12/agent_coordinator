@@ -23,6 +23,18 @@ after requirements are sufficiently defined and the operator requests it.
   a Git repository.
 - One service instance must coordinate **multiple projects simultaneously**,
   with agents working on different projects at the same time.
+- Workstations connect over the **public internet using HTTPS**.
+- The service is the **authoritative record** for tasks, handoffs, and lessons,
+  with Markdown import and export.
+- **Every authenticated person and agent has access to every project.**
+  There are no project-specific access grants in the first release.
+- People use local operator accounts with passwords. Agents use separately
+  issued, revocable API tokens.
+- Agents can create and claim tasks autonomously; each project configures
+  whether completion requires review.
+- The service coordinates existing harnesses through API, CLI, and optional
+  hooks. Local runners report jobs; remote agent launch/supervision is out of
+  scope for the first release.
 - Existing orientation and work records include AGENTS.md / CLAUDE.md,
   HANDOFF.md, BACKLOG.md, and DURABLE-RECORD.md. The request also mentions
   BACKOFF.md; confirm whether this is a separate record or means BACKLOG.md.
@@ -93,20 +105,28 @@ These are design proposals, not settled product decisions.
 
 The proposed ownership and recovery contract is developed further in
 [docs/coordination-contract.md](docs/coordination-contract.md). It deliberately
-leaves takeover policy, lease timing, review requirements, and authentication
-mechanism open for the operator's decisions.
+leaves takeover policy, lease timing, and the details of review and completion
+open. Password accounts and separate agent API tokens are confirmed.
+
+The proposed first-connection flow and short repository snippet are in
+[docs/onboarding-contract.md](docs/onboarding-contract.md). Its example CLI
+command is a proposed interface and is not implemented yet.
 
 ## Decision log
 
 | Decision | Proposed default | Status |
 | --- | --- | --- |
 | Project concurrency | Multiple projects active simultaneously in one service instance | **Confirmed by operator, 2026-09-09** |
-| Project access | Explicit project grants; administrator can manage all projects | Open; question sent |
-| Audience and deployment | One trusted team, one self-hosted server on a private network/VPN | Open |
-| Authoritative records | Service owns tasks, handoffs, lessons; import Markdown and export snapshots | Open |
-| Agent autonomy | Agents create, claim, and submit results; project policy determines review requirement | Open |
+| Project access | Every authenticated person and agent can access every project | **Confirmed by operator, 2026-09-09** |
+| Network exposure | Public internet, using HTTPS | **Confirmed by operator, 2026-09-09** |
+| Authoritative records | Service owns tasks, handoffs, lessons; import Markdown and export snapshots | **Confirmed by operator, 2026-09-09** |
+| Authentication method | Local password accounts and separately issued, revocable agent API tokens | **Confirmed by operator, 2026-09-09** |
+| Agent autonomy | Agents create and claim tasks; each project configures required review | **Confirmed by operator, 2026-09-09** |
 | Working-directory arrangement | Separate worktree per implementation task; serialize integration into the target branch | **Confirmed by operator, 2026-09-09** |
-| Coordination boundary | Coordinate existing harnesses/runners through API, CLI, optional hooks; local runners report jobs | Open; question sent |
+| Coordination boundary | Coordinate existing harnesses through API, CLI, optional hooks; local runners report jobs | **Confirmed by operator, 2026-09-09** |
+| Server installation | Linux Docker Compose deployment with HTTPS proxy and persistent SQLite storage | Open; question sent |
+| Expired-task recovery | Agent-driven recovery after checking prior work/jobs; manual mode configurable per project | Open; question sent |
+| Overall completion | Required review, integration into target branch, and validation of integrated result | Open; question sent |
 
 Repository evidence supports these proposals but does not settle the unanswered
 preferences. In particular, a policy or permission recorded for a past task in a
@@ -115,24 +135,27 @@ reference project is not a new permission for this service or a future task.
 ## Multiple-project operation
 
 Confirmed scope: a single deployment can coordinate SithBit, Submission, and
-other projects concurrently. Whether those projects belong to one trusted group
-or separate teams remains an independent access-control decision.
+other projects concurrently. All authenticated users and agents can access all
+projects. Projects separate work context, not audiences. Administrative actions
+and attempt ownership still need their own operation-level permission rules;
+the exact roles remain to be finalized.
 
 - Every task, attempt, decision, evidence record, and project-specific lesson
   belongs to an explicit project. Claims use the repository's project binding
   or an explicit project argument; there is no service-wide "current project".
-- Project configuration controls its workflow and review requirements. A human,
-  workstation, or credential may be granted access to several projects, with
-  authorization checked for the particular project on each operation.
-- The operator dashboard shows an overview of all authorized projects and
+- Project configuration controls its workflow and review requirements. A
+  credential works across all projects. Each operation checks authentication,
+  any required role/ownership, and consistency of its project/record references.
+- The operator dashboard shows an overview of all projects after login and
   filters into each project's tasks, active work, decisions, and knowledge.
 - Integrations into different repository targets can proceed concurrently.
   A blocked task or resource in one project does not block unrelated projects.
   If projects intentionally share a repository target or physical resource,
   they must share its canonical reservation identity rather than evade its
   concurrency limit through different project names.
-- Project knowledge stays scoped by default; deliberate cross-project sharing
-  must preserve provenance and access rules. The exact sharing policy is open.
+- Knowledge retains its source-project association for relevance and provenance,
+  while every authenticated caller can read across projects. Whether to provide
+  a separate common-lessons collection remains open; it is not an access boundary.
 - Work and long-running checks take place outside database transactions.
   Coordination transactions stay short so an active project does not hold the
   service's database transaction open for the duration of its work.
@@ -216,7 +239,7 @@ Exact fields, indexes, permission checks, and retention remain to be specified.
 | Record | Purpose |
 | --- | --- |
 | Project and repository binding | Stable identity, repository aliases, integration target, local configuration reference |
-| Principal, credential, workstation, session | Authentication, permissions, ownership identity, adapter capabilities; keep secrets out of task data |
+| Principal, credential, workstation, session | Authentication, operation roles, ownership identity, adapter capabilities; all authenticated callers can access all projects |
 | Task, task revision, dependency | Outcome, acceptance criteria, priority, type, parent, readiness, current state |
 | Attempt and lease | One effort's owner, deadline, generation, checkpoints, outcome |
 | Checkout | Host-local path, worktree/branch, base revision, snapshot identity; paths are metadata, not remote access |
@@ -274,7 +297,8 @@ The browser should make these questions easy to answer:
 - What decision, permission, capability, or shared resource is blocking progress?
 - What was integrated, and what remains only on a branch or workstation?
 - Which lessons and rejected approaches apply here, and what supports them?
-- Which credentials, workstation registrations, and project permissions are active?
+- Which credentials and workstation registrations are active, and what operations
+  may each role perform?
 
 Decision prompts must explain the tradeoff without requiring prior session
 shorthand. The service should expose actionable failures and retain answers.
@@ -287,10 +311,11 @@ Ask in focused rounds, adapting later questions to earlier answers.
   agents, installation method, recovery and backup expectations.
 - Whether native web UI and CLI both belong in the initial release; whether
   MCP or a TUI is needed immediately.
-- Whether remote agent launch/supervision is in scope; the proposed default is
-  coordination of existing harnesses. Worktree isolation is already confirmed.
-- Human login method, workstation/agent credentials, revocation, project access
-  boundaries, and initial administrator setup.
+- Workstation operating systems and optional harness adapters to ship initially.
+  Remote launch/supervision is out of scope; worktree isolation is confirmed.
+- Administrative roles, password/token lifecycle, and initial administrator
+  setup. Local password accounts, agent API tokens, and all-project access are
+  confirmed.
 - Meaning of completion: local edits, published commits, review acceptance,
   or integration into a target branch; who performs integration and review.
 - Task dependencies, priorities, parent/child work, eligibility, agent
@@ -300,12 +325,14 @@ Ask in focused rounds, adapting later questions to earlier answers.
   separate tasks describing the same work need additional deduplication rules.
 - Expired-work recovery policy, heartbeat mechanism, timing defaults, long
   tool calls, disconnected operation, and human escalation.
-- What agents may create/change autonomously, including shared instructions,
-  lessons, task scope, cancellation, and reprioritization.
+- Rules for agent changes to shared instructions, lessons, task scope,
+  cancellation, and reprioritization. Autonomous task creation and claiming are
+  confirmed; required review is configurable per project.
 - Default completion/review/integration rules and which actor may record or
   verify each type of evidence; lifecycle permissions must be explicit.
-- Lesson visibility across projects, retrieval method, correction/supersession,
-  approval, sensitive content, and retention.
+- Lesson retrieval across projects, correction/supersession, promotion into
+  common lessons or policy, sensitive content, and retention. All authenticated
+  callers can access every project's lessons.
 - Markdown migration format and whether BACKOFF.md is a separate input.
 - Required result evidence, artifact links versus uploads, notifications, and
   search/reporting needs.
@@ -317,9 +344,10 @@ Finalize the remaining product decisions and API/schema contracts before coding.
 Each milestone should leave an executable slice with the stated evidence.
 
 1. **Service, persistence, and access:** Rust/Axum server, SQLite migrations,
-   project/principal access, public authentication help, authenticated bootstrap,
-   configuration, structured logs, and health/readiness. Demonstrate unauthorized
-   isolation and a new workstation's authenticated connection.
+   principal/operation permissions, public authentication help, authenticated
+   bootstrap, HTTPS deployment configuration, structured logs, and health/readiness.
+   Demonstrate that unauthenticated callers cannot read project data, and that
+   a newly authenticated workstation can access all projects.
 2. **Ownership and task state:** typed tasks/dependencies, attempts, conditional
    state transitions, leases, events, idempotency, and a minimal JSON-capable CLI.
    Demonstrate competing claims, dependency cycles/refusals, lost responses,
@@ -351,14 +379,15 @@ Each milestone should leave an executable slice with the stated evidence.
   replaying an old claim never grants fresh authority.
 - A failed completion transaction leaves no partial result or state transition.
 - Unauthorized clients see setup help without project or credential disclosure.
-- Project access restrictions apply to every read and write surface.
+- Authentication and applicable operation/ownership checks apply to every private
+  read/write surface; no project allow-list is required after authentication.
 - SithBit and Submission can each have active claims and jobs at the same time;
   an integration reservation in one does not block an unrelated target in the other.
-- Project-scoped callers cannot read or mutate another project's tasks, lessons,
-  events, search results, imports, or artifacts by substituting record IDs.
+- An authenticated caller can deliberately select either project and read its
+  tasks, lessons, events, search results, imports, and permitted artifacts.
 - A task operation cannot attach another project's attempt or evidence by
   accident; cross-project sharing uses an explicit authorized operation.
-- An authorized operator sees both projects in the overview, while each agent's
+- An authenticated operator sees both projects in the overview, while each agent's
   next-task request stays bound to its selected project.
 - A new agent can follow only the repository snippet and returned instructions
   to claim, checkpoint, complete, and retrieve relevant lessons.

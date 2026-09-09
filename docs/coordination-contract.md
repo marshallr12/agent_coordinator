@@ -12,22 +12,25 @@ support for multiple projects in one service instance.
 ## Project boundaries
 
 Project identity is explicit in claims, sessions' work context, and every
-project-owned record. An operation checks both the caller's project access and
-the project membership of referenced records. Database constraints and service
-checks must reject mismatched task/attempt/evidence relationships. Search,
-events, imports, exports, artifacts, and aggregate views use the same access
-boundary as individual task operations.
+project-owned record. **All authenticated people and agents can access all
+projects**, as confirmed by the operator. There are no project-specific grants.
+An operation checks authentication, applicable operation/ownership permissions,
+and the project membership of referenced records. Database constraints and
+service checks reject mismatched task/attempt/evidence relationships. Search,
+events, imports, exports, artifacts, and aggregate views follow the same rules.
 
 An agent working on project A cannot change its context accidentally because
 another agent selected project B; there is no global active-project setting.
-One principal can have multiple project grants. A dashboard can aggregate all
-projects the caller may see without exposing inaccessible project records.
+The same principal can deliberately select any project. After authentication,
+the dashboard can aggregate all projects. Project context prevents accidental
+mixing of work; it is not a visibility restriction between authenticated users.
 
 Claims and jobs in different projects can be active simultaneously. Integration
 and resource reservations block only their canonical resource scope. Projects
 sharing the same repository target or physical resource must resolve it to a
-common reservation identity. Cross-project knowledge sharing is explicit and
-must not grant the recipient access to private source records or artifacts.
+common reservation identity. Cross-project knowledge retrieval preserves source
+provenance and is available to every authenticated caller. Access to projects
+does not reveal credential secrets or confer ownership of another agent's attempt.
 
 ## Separate work, attempts, and authority
 
@@ -251,7 +254,8 @@ before promising stronger end-to-end guarantees.
 | A task is imported again from an old open-backlog paragraph | Preserve the current closed/superseded record; surface any source conflict |
 | A task waits for a human decision | Retain its checkpoint and decision linkage while other eligible work continues |
 | Two agents claim tasks in different projects | Both can own and work their respective tasks simultaneously |
-| A caller substitutes another project's task/evidence ID | Reject access or the mismatched relationship without leaking that project's records |
+| An authenticated caller deliberately selects a different project | Permit project access; still require the operation's role and current attempt ownership where applicable |
+| A caller attaches project B's evidence to a project A attempt as if it belonged to A | Reject the mismatched relationship; preserve provenance for explicitly supported cross-project references |
 | One project is waiting on an integration reservation | Other projects remain eligible unless they share that same canonical target/resource |
 
 ## Duplicate work beyond a shared task ID
