@@ -261,16 +261,18 @@ agent-coordinator.exe jobs run `
 
 Before registration or launch, the CLI durably saves random job, producer,
 runner, and reporter identities. It then stores the scoped reporter bearer only
-in the protected local job file. The detached guardian clears its environment;
-the producer receives only the environment explicitly listed in the JSON file.
-`AGENT_COORDINATOR_*` variables are rejected, and raw arguments, environment,
-and logs are never uploaded. Standard output and error are kept in separate,
+in the protected local job file. The detached guardian and producer clear their
+inherited environment, retaining only `PATH`, `SystemRoot`, `WINDIR`, `TEMP`,
+`TMP`, `TMPDIR`, `SSL_CERT_FILE`, and `SSL_CERT_DIR` when present. The producer
+also receives the environment explicitly listed in the JSON file, overriding
+those defaults. `AGENT_COORDINATOR_*` and `COORDINATOR_*` variables are rejected.
+Raw arguments, environment, and logs are never uploaded. Output and error streams stay in separate,
 bounded, protected local files shown by `jobs inspect`.
 Set `log_limit_bytes` to `0` to discard both streams; the maximum is 67108864
 bytes per stream.
 
 Replace the example environment values with the workstation's actual trusted
-paths. Include everything the program and its child processes require, such as
+paths. Configure additional values the program and its children require, such as
 `PATH`, the user profile, toolchain directories, temporary directories, and
 Windows `SystemRoot`. Do not copy coordinator token, origin, session, or proof
 variables into this map.

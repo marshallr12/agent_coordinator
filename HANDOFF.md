@@ -25,8 +25,12 @@ reported state. The dashboard shows both records separately.
 Instruction version 2 returns the worktree/resource/job sequence and examples.
 Existing sessions must reconnect and read the new instructions before claiming.
 Use docs/CLI.md for Linux and native Windows commands. The CLI's producer environment
-is explicit and cleared by default; configure the needed toolchain variables and
-never supply coordinator agent credentials to the producer.
+is cleared except for a narrow platform allowlist; configure needed toolchain
+variables and never supply coordinator agent credentials to the producer.
+Native Windows Git calls normalize canonical drive/UNC paths at the command
+boundary, preserving canonical paths for checkout identity checks. Unsupported
+device namespaces are refused; UNC conversion is not a network-filesystem
+durability guarantee.
 
 Linux validation: the integrated workspace tests, warnings-denied Clippy, formatting,
 and JavaScript syntax checks pass. The extended service/CLI smoke exercise passes

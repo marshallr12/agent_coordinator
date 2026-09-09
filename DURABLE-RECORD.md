@@ -41,3 +41,10 @@
   launch authority and remaining lease time immediately before starting work.
   A successful replay cannot refresh an expired grant. Verify the actual checkout
   identity and clean source again before launch.
+- **Log setup is part of launch correctness.** On Windows, an append-only handle
+  cannot truncate a file. Initialize logs through a writable handle before launch
+  intent, then append while draining. Persist pre-spawn failures as `not_started`
+  with a safe local explanation so a detached guardian cannot fail silently.
+- **Native identity paths and tool arguments have different requirements.** Keep
+  canonical Windows paths for identity comparisons, but convert verbatim drive/UNC
+  prefixes at the Git boundary. Git may reject the native extended path syntax.
