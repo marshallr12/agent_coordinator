@@ -11,7 +11,7 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Agent Coordinator foundation service")]
+#[command(version, about = "Agent Coordinator service")]
 struct Options {
     #[arg(
         long,
@@ -105,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Serve => {
             let listener = tokio::net::TcpListener::bind(state.config.listen).await?;
-            tracing::info!(listen = %state.config.listen, "Agent Coordinator foundation service started");
+            tracing::info!(listen = %state.config.listen, "Agent Coordinator service started");
             axum::serve(listener, router(state).into_make_service())
                 .with_graceful_shutdown(shutdown())
                 .await?;

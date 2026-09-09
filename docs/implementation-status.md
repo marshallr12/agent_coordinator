@@ -1,6 +1,6 @@
 # Implementation status
 
-The first executable foundation is implemented. The complete release remains
+The foundation and job/worktree evidence milestone are implemented. The complete release remains
 defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
@@ -34,9 +34,24 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   JSON output, durable pending requests, and same-key retries. The dashboard
   supports project/task creation, task and checkpoint inspection, and credential
   administration; it has responsive layouts and no third-party scripts.
+- Native worktree preparation with durable intent, remote identity and clean-source
+  checks. Repeating preparation reconciles the same checkout; it never resets or
+  deletes existing work.
+- Global named capacity resources and atomic multi-resource reservations shared
+  across projects. Holds survive task expiry, credential revocation, session loss,
+  and missing observations. Ordinary release/recovery cannot bypass unresolved work.
+- Locally launched jobs with stable producer identities, a durable launch journal,
+  bounded local logs, and a detached guardian. Reconnect observes the existing job;
+  uncertain launch intent never authorizes another producer. Linux boot/start time
+  and Windows process creation time distinguish process identity from a reused PID.
+- Scoped job reporter credentials, ordered idempotent observations, and optional
+  bounded task renewal tied to a specific live harness. Observation authority and
+  task ownership are separate. The service never launches workstation processes.
+- Dashboard resource administration and task job/hold evidence, including explicit
+  human reconciliation with recorded termination/isolation evidence.
 - Linux systemd and Caddy examples, locked dependencies, and Linux/Windows CI.
 
-## Deliberate limits of this foundation
+## Deliberate limits of this milestone
 
 There is no task completion endpoint yet. Submission snapshots, independent
 review, serialized target-branch integration, and integrated-result validation
@@ -44,11 +59,18 @@ must be implemented together before code tasks can become done and unblock their
 dependents. The stored review/integration settings reserve the intended policy;
 they do not imply those workflows already execute.
 
-Local job reporters, named resource holds, automatic worktree preparation,
-verification evidence, source-checkpoint publishing, shared lessons/search,
-decision records, Markdown imports/exports, artifact storage, lifecycle hooks,
-and backup/restore are later milestones. Recovery currently records the agent's
-inspection attestation. It cannot yet reconcile producer identities automatically.
+Jobs currently require a clean committed source snapshot; dirty snapshots and
+exact-source verification receipts belong to the submission milestone. Logs stay
+on the workstation and are bounded; service artifact uploads and source-checkpoint
+publishing remain later work. A guardian lost after launch may leave an unknown
+result even if the process has exited. Reconnection never invents an exit result;
+inspect the journal, surviving process, and physical resource before reconciliation.
+
+Shared lessons/search, decision records, Markdown imports/exports, lifecycle-hook
+adapters, and backup/restore remain later milestones. Workstation reports are
+client attestations, not remote filesystem inspection or hardware fencing.
+Supported commands do their work in the foreground; a launcher exiting does not
+verify completion of detached child or external work. Retain holds for that work.
 
 Human accounts currently have first-admin initialization only; password changes,
 account recovery, additional human administration, and token replacement for an
@@ -56,7 +78,7 @@ existing agent principal remain work. A lost issuance response can recover the
 credential identity, but never its secret: revoke it and enroll a fresh name.
 
 JSON requests are limited to 256 KiB. Task details return the latest 50 attempts,
-100 checkpoints, and 50 checkouts; old records remain stored, with complete history
+100 checkpoints, 50 checkouts, and bounded job/resource evidence; old records remain stored, with complete history
 pagination still to be added. Mutation receipts replay for 30 days; expired keys
 remain reserved so a late retry cannot duplicate an old operation. Retention cleanup
 and storage-quota enforcement are not implemented.

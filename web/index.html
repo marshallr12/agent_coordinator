@@ -49,7 +49,7 @@
 
         <div class="design-banner" role="note">
           <span class="banner-icon" aria-hidden="true">✦</span>
-          <span><strong>Foundation stage.</strong> Projects, ownership, leases, and checkpoints are available now. Review and integration arrive in a later milestone.</span>
+          <span><strong>Job evidence stage.</strong> Coordinate tasks, local jobs, and shared resources. Review and integration arrive in a later milestone.</span>
         </div>
 
         <div id="global-alert" class="global-alert" role="status" aria-live="polite" hidden></div>
@@ -58,6 +58,7 @@
             <nav>
               <button class="nav-item active" data-view="overview" type="button"><span aria-hidden="true">⌂</span> Overview</button>
               <button class="nav-item" data-view="tasks" type="button"><span aria-hidden="true">☷</span> Tasks</button>
+              <button class="nav-item" data-view="resources" type="button"><span aria-hidden="true">◇</span> Resources</button>
               <button class="nav-item" data-view="admin" id="admin-nav" type="button"><span aria-hidden="true">⚿</span> Access</button>
             </nav>
             <div class="sidebar-note">
@@ -103,7 +104,21 @@
                   <article class="card lease-card"><div class="card-header"><h2>Ownership</h2><span class="live-label"><span class="status-dot"></span> Live</span></div><div id="lease-content"></div></article>
                 </div>
                 <article class="card checkpoints-card"><div class="card-header"><div><h2>Checkpoint trail</h2><p class="muted">Progress shared by the active or previous attempt.</p></div></div><div id="checkpoints-content"></div></article>
+                <article class="card job-evidence-card"><div class="card-header"><div><h2>Jobs & resource holds</h2><p class="muted">A missing observer does not prove a job stopped. Holds remain until explicitly released or resolved.</p></div></div><div id="job-evidence-content"></div></article>
               </div>
+            </section>
+
+            <section id="resources-view" class="page-view" aria-labelledby="resources-heading" hidden>
+              <div class="page-heading"><div><p class="eyebrow">Shared capacity</p><h1 id="resources-heading">Resources</h1><p class="muted">Use one stable key for each shared fixture or workstation capacity, across all projects.</p></div><button id="refresh-resources" class="button subtle" type="button">Refresh</button></div>
+              <article class="card"><h2>Define a resource</h2><form id="resource-form" class="resource-form">
+                <div><label for="resource-key">Resource key</label><input id="resource-key" required maxlength="200" placeholder="fixture:shared-test-database"></div>
+                <div><label for="resource-capacity">Capacity units</label><input id="resource-capacity" type="number" required min="1" max="1000" value="1"></div>
+                <div><label for="resource-description">Description</label><input id="resource-description" maxlength="2000" placeholder="What consumes this capacity?"></div>
+                <button class="button primary" type="submit">Create resource</button>
+              </form><p class="muted">Agents reserve the complete resource set before launching a job. Capacity is fixed when created.</p></article>
+              <div id="resources-state" class="state-panel" role="status">Loading resources…</div>
+              <div id="resources-list" class="project-grid"></div>
+              <button id="load-more-resources" class="button subtle" type="button" hidden>Load more resources</button>
             </section>
 
             <section id="admin-view" class="page-view" aria-labelledby="admin-heading" hidden>

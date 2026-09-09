@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/server", "crates/client", "crates/cli"]
+members = ["crates/core", "crates/server", "crates/client", "crates/cli", "crates/local"]
 resolver = "2"
 
 [workspace.package]
@@ -27,6 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [profile.release]
 lto = "thin"

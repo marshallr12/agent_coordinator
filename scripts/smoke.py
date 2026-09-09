@@ -18,10 +18,13 @@ import urllib.error
 import urllib.request
 import uuid
 
+from job_smoke import exercise_jobs
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER = ROOT / "target/debug/agent-coordinator-server"
-CLI = ROOT / "target/debug/agent-coordinator"
+BUILD = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "debug"
+SERVER = BUILD / "agent-coordinator-server"
+CLI = BUILD / "agent-coordinator"
 
 
 def run():
@@ -114,6 +117,8 @@ def run():
             assert api(f"/api/v1/projects/{second}/tasks")["items"] == []
             cli(owner, "release", *own_args, body={"summary": "Paused safely with a handoff."})
             assert api(f"/api/v1/projects/{project}/tasks/{task['id']}")["work_status"] == "ready"
+
+            exercise_jobs(temporary, api, cli, project, owner)
 
             # Credential revocation must be visible to the actual CLI on its next call.
             api(f"/api/v1/admin/credentials/{credentials[owner]['credential_id']}/revoke", {})

@@ -1,4 +1,4 @@
-name: Foundation checks
+name: Coordination checks
 
 "on":
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: foundation-${{ github.workflow }}-${{ github.ref }}
+  group: coordination-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -41,7 +41,7 @@ jobs:
         run: python3 scripts/smoke.py
 
   windows-client:
-    name: Native Windows client and CLI tests
+    name: Native Windows client, CLI, and local runner tests
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -58,7 +58,7 @@ jobs:
       # This is a native Windows run, not a Linux cross-compilation check.
       # Windows validation remains pending until this job actually passes.
       - name: Run client and CLI tests
-        run: cargo test -p coordinator-client -p coordinator-cli --locked
+        run: cargo test -p coordinator-client -p coordinator-cli -p coordinator-local --locked
 
   audit:
     name: Audit locked dependencies

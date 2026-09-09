@@ -3,13 +3,14 @@
 A vendor-agnostic service for AI agents on different workstations to coordinate
 tasks, report progress, and share handoffs and lessons across multiple projects.
 
-**Status: executable foundation implemented; full release still in development.**
+**Status: foundation and local-job coordination implemented; full release in development.**
 The Rust service, embedded web dashboard, and native CLI now support authentication,
 multiple projects, task admission, atomic ownership, renewable leases, checkpoints,
-and inspected recovery. [Current implementation and limits](docs/implementation-status.md)
+inspected recovery, worktree preparation, local job reporting, and shared resource
+reservations. [Current implementation and limits](docs/implementation-status.md)
 distinguish working behavior from the complete release design.
 
-## Try the foundation locally
+## Try it locally
 
 Install Rust 1.94 or newer with a native C build toolchain, then build the locked
 workspace. SQLite is bundled; the dashboard has no separate build or CDN dependency.
@@ -47,6 +48,8 @@ command. Linux and native Windows client checks are defined in GitHub Actions.
   installation inputs, data model, milestones, and acceptance scenarios.
 - [Release scope](docs/release-scope.md): engineering defaults, deferred features,
   and implementation-readiness evidence.
+- [Job/worktree contract](docs/job-evidence-contract.md): implemented job reporting,
+  local launch/reconnect rules, scoped reporters, and physical resource holds.
 - [Coordination contract](docs/coordination-contract.md): task ownership,
   renewable leases, retries, worktrees, external jobs, and recovery.
 - [Workflow specification](docs/workflow-spec.md): proposed states, selection,

@@ -565,6 +565,7 @@ async fn unblock_task(
             "An active or expired attempt requires its recovery workflow.",
         ));
     }
+    crate::jobs::ensure_attempt_quiescent(&mut m.tx, &p, &id).await?;
     sqlx::query(
         "UPDATE tasks SET blocked_reason=NULL,revision=revision+1,ready_since=? WHERE id=?",
     )
@@ -585,22 +586,22 @@ async fn unblock_task(
 }
 
 #[derive(FromRow)]
-struct Attempt {
-    id: String,
-    project_id: String,
-    task_id: String,
-    owner_id: String,
-    session_id: String,
-    credential_id: Option<String>,
-    generation: i64,
-    state: String,
-    mode: String,
-    expires_at: i64,
-    last_heartbeat_at: i64,
-    last_progress_at: i64,
-    created_at: i64,
-    ended_at: Option<i64>,
-    outcome: Option<String>,
+pub(crate) struct Attempt {
+    pub(crate) id: String,
+    pub(crate) project_id: String,
+    pub(crate) task_id: String,
+    pub(crate) owner_id: String,
+    pub(crate) session_id: String,
+    pub(crate) credential_id: Option<String>,
+    pub(crate) generation: i64,
+    pub(crate) state: String,
+    pub(crate) mode: String,
+    pub(crate) expires_at: i64,
+    pub(crate) last_heartbeat_at: i64,
+    pub(crate) last_progress_at: i64,
+    pub(crate) created_at: i64,
+    pub(crate) ended_at: Option<i64>,
+    pub(crate) outcome: Option<String>,
 }
 impl Attempt {
     fn value(&self) -> Value {
@@ -617,7 +618,12 @@ async fn attempt(c: &mut SqliteConnection, p: &str, id: &str) -> Result<Attempt,
         .await?
         .ok_or_else(AppError::not_found)
 }
-async fn owned(m: &mut Mutation, p: &str, id: &str, generation: i64) -> Result<Attempt, AppError> {
+pub(crate) async fn owned(
+    m: &mut Mutation,
+    p: &str,
+    id: &str,
+    generation: i64,
+) -> Result<Attempt, AppError> {
     let a = attempt(&mut m.tx, p, id).await?;
     if a.owner_id != m.actor.id
         || Some(a.session_id.as_str()) != m.actor.session_id.as_deref()
@@ -675,6 +681,7 @@ async fn task_detail(
         .bind(&p).bind(&id).fetch_all(&mut *c).await?;
     value["checkouts"] = json!(checkouts.iter().map(checkout_value).collect::<Vec<_>>());
     value["history_limits"] = json!({"attempts":50,"checkpoints":100,"checkouts":50});
+    value["job_evidence"] = crate::jobs::task_evidence(&mut c, &p, &id, s.now()).await?;
     Ok(response(value))
 }
 fn checkout_value(r: &sqlx::sqlite::SqliteRow) -> Value {
@@ -706,7 +713,7 @@ async fn attempt_detail(
     ))
 }
 
-const INSTRUCTIONS: &str = "Connect or resume your own harness session; never reuse another harness's session proof. Read this project's current rules and acknowledge coordination-v1 before claiming. A task listing reserves nothing. Claim a ready task atomically, or inspect an expired task with a recovery claim. Before editing code, register a separate clean worktree and check the task is still undone. Record checkpoints and renew at the returned renew_after_seconds cadence, before the server's deadline. Checkpoints do not renew ownership. Use the same persisted Idempotency-Key when retrying a lost response. On lease loss stop ownership-dependent edits. Recovery must inspect saved work and still-running jobs before resuming. Never restart an unknown job merely because its observer is missing. Release with a handoff if paused; release is not completion. This foundation implements project/task admission, leases, checkpoints, checkout registration and recovery. Submission, review, integration, job reporters and shared lessons are not yet implemented: do not claim work complete through a generic status edit.";
+const INSTRUCTIONS: &str = "Connect or resume your own harness session; never reuse another harness's session proof. Read this project's current rules and acknowledge coordination-v2 before claiming. A task listing reserves nothing. Claim a ready task atomically, or inspect an expired task with a recovery claim. Before editing code, register a separate clean worktree and check the task is still undone. Record checkpoints and renew at the returned renew_after_seconds cadence, before the server's deadline. Checkpoints do not renew ownership. Use the same persisted Idempotency-Key when retrying a lost response. On lease loss stop ownership-dependent edits. Recovery must inspect saved work and still-running jobs before resuming. Never restart an unknown job merely because its observer is missing. Release with a handoff if paused; release is not completion. This service implements project/task admission, leases, checkpoints, checkout registration, local job evidence and recovery. Register resource reservations and jobs before local launch. Missing observers never prove a producer stopped; retain resource holds until terminal evidence or explicit human resolution. A scoped reporter can report its job after lease expiry, but never regain task ownership. Use jobs reconnect for observation only; never relaunch an uncertain producer. Release reservations only after jobs terminate, then release the attempt. Submission, review, integration and shared lessons are not yet implemented: do not claim work complete through a generic status edit.";
 async fn orientation(State(s): State<AppState>, auth: Auth, Path(p): Path<String>) -> Reply {
     let mut c = s.pool.acquire().await?;
     let proj = project(&mut c, &p).await?;
@@ -719,7 +726,20 @@ async fn orientation(State(s): State<AppState>, auth: Auth, Path(p): Path<String
         .bind(now).bind(now).bind(&p).bind(now).fetch_all(&mut *c).await?;
     Ok(response(
         json!({"project":proj,"policy_revision":proj.policy_revision,"instruction_version":INSTRUCTION_VERSION,"required_sections":[REQUIRED_SECTION],"instructions":INSTRUCTIONS,"instructions_complete":true,
-        "candidates":candidates.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"active_attempts":active.iter().map(Attempt::value).collect::<Vec<_>>(),"recovery_candidates":recovery.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"implemented_stage":"foundation"}),
+        "candidates":candidates.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"active_attempts":active.iter().map(Attempt::value).collect::<Vec<_>>(),"recovery_candidates":recovery.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"implemented_stage":"job_evidence", "job_workflow": {
+          "steps":[
+            "1. Claim the task and retain attempt.id and generation. Before editing, use worktree prepare with that attempt, a new path and branch, and the configured repository source/base. Do not reset or reuse another task checkout.",
+            "2. Commit the exact source to test. This milestone requires clean committed inputs. List resources; select the existing canonical identities, then reserve all needed units atomically for this attempt. Ask an operator to define missing resource identities.",
+            "3. Prepare a local JSON file with label, absolute program, argv array, environment object and log_limit_bytes. Run jobs run with attempt, generation, reservation, checkout and input file. Use a foreground program whose exit means its resource use ended; detached or external work needs separate inspection before releasing holds. The CLI persists identities before registration and launches a local guardian; the service never executes the program.",
+            "4. Use jobs status for shared evidence and jobs inspect for the local journal/log paths. A lost response must retry the retained request/key. Use jobs reconnect --job ID to reconnect observation; never submit a replacement job because an observer disappeared.",
+            "5. Keep renewing the task yourself. Optional jobs run --renew-for-seconds N --watch-pid PID delegates at most one hour and only while that exact harness lives. This does not change job observation authority.",
+            "6. When the producer has a terminal result, release its reservation explicitly, checkpoint the result, then release the task if pausing. Unknown jobs retain holds; recovery must inspect old producers and resources before resuming. Only a human may reconcile uncertain physical holds with termination/isolation evidence. A finished test is not task completion."
+          ],
+          "cli_help":["agent-coordinator worktree prepare --help","agent-coordinator resources reserve --help","agent-coordinator jobs run --help","agent-coordinator jobs reconnect --help"],
+          "reservation_input_example":{"items":[{"resource_id":"UUID_FROM_RESOURCES_LIST","units":1}]},
+          "job_input_example":{"label":"Project checks","program":"ABSOLUTE_PROGRAM_PATH","argv":["test"],"environment":{},"log_limit_bytes":1048576},
+          "resource_list":"/api/v1/resources", "project_jobs":format!("/api/v1/projects/{p}/jobs"), "project_reservations":format!("/api/v1/projects/{p}/reservations")
+        }}),
     ))
 }
 async fn acknowledge(
@@ -1005,6 +1025,9 @@ async fn release(
         return Ok(response(v));
     }
     let a = owned(&mut m, &p, &id, input.generation).await?;
+    if !input.blocked {
+        crate::jobs::ensure_attempt_quiescent(&mut m.tx, &p, &a.task_id).await?;
+    }
     if a.mode == "recovery" && !input.blocked {
         return Err(AppError::conflict(
             "recovery_unresolved",
@@ -1088,6 +1111,7 @@ async fn recovery_resolution(
             "This attempt is not inspecting a recovery.",
         ));
     }
+    crate::jobs::ensure_attempt_quiescent(&mut m.tx, &p, &a.task_id).await?;
     add_checkpoint(
         &mut m,
         &p,
@@ -1157,6 +1181,7 @@ async fn register_checkout(
             "Inspect prior work and jobs before registering editable work.",
         ));
     }
+    crate::jobs::ensure_attempt_quiescent(&mut m.tx, &p, &a.task_id).await?;
     if m.actor.kind == "agent" {
         let workstation: String =
             sqlx::query_scalar("SELECT workstation_id FROM agent_sessions WHERE id=?")

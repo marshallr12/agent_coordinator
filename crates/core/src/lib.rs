@@ -1,8 +1,8 @@
 //! Vendor-neutral request types shared by the coordination server and clients.
 use serde::{Deserialize, Serialize};
 
-pub const INSTRUCTION_VERSION: &str = "1";
-pub const REQUIRED_SECTION: &str = "coordination-v1";
+pub const INSTRUCTION_VERSION: &str = "2";
+pub const REQUIRED_SECTION: &str = "coordination-v2";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

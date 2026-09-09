@@ -423,6 +423,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "coordinator-local"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "coordinator-client",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "coordinator-server"
 version = "0.1.0"
 dependencies = [

@@ -1,10 +1,10 @@
-/* Agent Coordinator foundation dashboard. Same-origin API client; no framework required. */
+/* Agent Coordinator dashboard. Same-origin API client; no framework required. */
 (() => {
   'use strict';
 
   const $ = (id) => document.getElementById(id);
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [],
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false,
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null,
     taskCursor: null, hasExtraTaskPages: false, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, pollTimer: null, lastSync: null
@@ -54,6 +54,8 @@
 
   const actorId = () => text(state.actor?.id || state.actor?.principal_id);
   const mutationOperation = (path, method) => {
+    if (method === 'POST' && path === '/api/v1/resources') return 'create_resource';
+    if (method === 'POST' && /\/projects\/[^/]+\/reservations\/[^/]+\/resolve$/.test(path)) return 'resolve_resource';
     if (method === 'POST' && path === '/api/v1/projects') return 'create_project';
     if (method === 'POST' && /\/projects\/[^/]+\/tasks$/.test(path)) return 'create_task';
     if (method === 'POST' && path === '/api/v1/admin/agents') return 'issue_credential';
@@ -69,7 +71,7 @@
   function persistMutation(mutation) {
     if (!mutation.operation || !actorId()) return;
     try { sessionStorage.setItem(PENDING_MUTATION_KEY, JSON.stringify({ actor_id: actorId(), operation: mutation.operation, path: mutation.path, method: mutation.method, key: mutation.key, body: sanitizeForSession(mutation.body), context: mutation.context || {} })); }
-    catch (_) { /* Storage can be disabled; in-memory retry remains available. */ }
+    catch (_) { throw new Error('Pending request storage unavailable'); }
   }
   function clearPersistedMutation() { try { sessionStorage.removeItem(PENDING_MUTATION_KEY); } catch (_) { /* no-op */ } }
   function readPersistedMutation() { try { const raw = sessionStorage.getItem(PENDING_MUTATION_KEY); return raw ? JSON.parse(raw) : null; } catch (_) { clearPersistedMutation(); return null; } }
@@ -86,7 +88,7 @@
     if (options.idempotencyKey) headers.set('Idempotency-Key', options.idempotencyKey);
     let response;
     try {
-      response = await fetch(path, { ...options, method, headers, credentials: 'same-origin' });
+      response = await fetch(path, { ...options, method, headers, credentials: 'same-origin', redirect: 'error' });
     } catch (error) {
       throw new ApiError('The coordinator could not be reached. Keep this request and try again.', 0, 'network_error', null, method !== 'GET');
     }
@@ -149,7 +151,10 @@
     if (state.mutation) return;
     const operation = mutationOperation(path, method);
     state.mutation = { path, body, label, method, key: newKey(), operation, context, onSuccess, onError, inFlight: false };
-    if (operation && actorId()) persistMutation(state.mutation);
+    if (operation && actorId()) {
+      try { persistMutation(state.mutation); }
+      catch (_) { state.mutation = null; setGlobalAlert('This browser cannot save pending requests. Enable session storage before making changes.'); return; }
+    }
     executeMutation(state.mutation);
   }
 
@@ -171,7 +176,7 @@
 
   function signOutLocal() {
     state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
-    state.credentials = []; state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
+    state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     clearPersistedMutation();
     setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); show($('credentials-list'), false);
     if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null;
@@ -188,7 +193,7 @@
 
   function showView(view) {
     state.currentView = view;
-    ['overview', 'tasks', 'task-detail', 'admin'].forEach((name) => show($(`${name}-view`), name === view));
+    ['overview', 'tasks', 'task-detail', 'resources', 'admin'].forEach((name) => show($(`${name}-view`), name === view));
     document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (view === 'task-detail' && button.dataset.view === 'tasks')));
     if (view === 'tasks') $('project-select')?.focus();
   }
@@ -201,6 +206,8 @@
   }
 
   function restoredMutationCallbacks(operation, context = {}) {
+    if (operation === 'create_resource') return async () => { await loadResources(); setGlobalAlert('Resource created.', 'success'); };
+    if (operation === 'resolve_resource') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; showView('task-detail'); await loadTaskDetail(); setGlobalAlert('Resolution recorded. Review the updated job and hold evidence.', 'success'); };
     if (operation === 'create_project') return async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); };
     if (operation === 'create_task') return async () => { state.projectId = context.projectId || state.projectId; await loadTasks(); setGlobalAlert('Task created.', 'success'); };
     if (operation === 'issue_credential') return async (data) => { showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); };
@@ -352,7 +359,7 @@
     const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); badge.className = `status-badge ${status}`; setText($('detail-kind'), text(task.kind || 'general').toUpperCase());
     const criteria = $('acceptance-list'); clear(criteria); const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
     if (!items.length) add(criteria, el('li', 'muted', 'No acceptance criteria recorded.')); else items.forEach((item) => add(criteria, el('li', '', item)));
-    renderLease(data, task); renderCheckpoints(data);
+    renderLease(data, task); renderCheckpoints(data); renderJobEvidence(data);
     show($('task-detail-state'), false); show($('task-detail-content'), true);
   }
 
@@ -402,17 +409,104 @@
   function renderCredentials() { const target = $('credentials-list'); clear(target); if (!state.credentials.length) { show(target, false); setState($('credentials-state'), 'No agent credentials have been issued.', false); return; } show($('credentials-state'), false); show(target, true); state.credentials.forEach((credential) => { const row = el('div', 'credential-row'); const info = el('div'); add(info, el('div', 'credential-name', credential.name || credential.principal_name || credential.id)); add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`)); if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`)); add(row, info); if (!credential.revoked_at) { const revoke = el('button', 'button danger', 'Revoke'); revoke.type = 'button'; revoke.dataset.mutation = 'true'; revoke.addEventListener('click', () => revokeCredential(credential.id)); add(row, revoke); } add(target, row); }); renderMutationState(); }
   function revokeCredential(id) { startMutation(`/api/v1/admin/credentials/${encodeURIComponent(id)}/revoke`, {}, 'credential revocation', async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); }); }
 
-  function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = setInterval(() => { if (!state.actor || state.mutation) return; if (state.currentView === 'overview') loadProjects(true); else if (state.currentView === 'tasks') loadTasks(true); else if (state.currentView === 'task-detail') loadTaskDetail(true); else if (state.currentView === 'admin') loadCredentials(true); }, 5000); }
+  function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = setInterval(() => { if (!state.actor || state.mutation) return; if (state.currentView === 'overview') loadProjects(true); else if (state.currentView === 'tasks') loadTasks(true); else if (state.currentView === 'task-detail') loadTaskDetail(true); else if (state.currentView === 'admin') loadCredentials(true); else if (state.currentView === 'resources' && !state.resourcePagesExtended) loadResources(true); }, 5000); }
 
   $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; await loadProjects(); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
   $('logout-button').addEventListener('click', () => startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()));
-  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') loadCredentials(); }));
+  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') loadCredentials(); if (view === 'resources') loadResources(); }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
   $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); }); });
   function showToken(token) { setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
   function setIssueFeedback(message, kind) { const target = $('issue-feedback'); target.className = `inline-alert ${kind}`; setText(target, message); show(target, true); }
   $('clear-token').addEventListener('click', () => { setText($('issued-token'), ''); show($('token-reveal'), false); }); $('copy-token').addEventListener('click', async () => { const token = $('issued-token').textContent; if (!token) return; try { await navigator.clipboard.writeText(token); setIssueFeedback('Token copied to clipboard.', 'success'); } catch (_) { setIssueFeedback('Copy was unavailable. Select the token and copy it manually.', 'error'); } });
+
+
+  async function loadResources(silent = false, append = false) {
+    if (state.fetching.has('resources')) return;
+    state.fetching.add('resources');
+    const requestedActor = actorId();
+    if (!silent) setState($('resources-state'), 'Loading resources…', true);
+    try {
+      const query = append && state.resourceCursor ? `?cursor=${encodeURIComponent(state.resourceCursor)}` : '';
+      const page = (await request(`/api/v1/resources${query}`)).data;
+      if (!requestedActor || requestedActor !== actorId()) return;
+      const items = listData(page);
+      state.resourcePagesExtended = append;
+      state.resources = append ? [...new Map([...state.resources, ...items].map(item => [item.id, item])).values()] : items;
+      state.resourceCursor = page.next_cursor || null;
+      const target = $('resources-list'); clear(target);
+      state.resources.forEach(resource => {
+        const card = el('article', 'card'); add(card, el('h2', '', resource.key));
+        add(card, el('p', 'muted', resource.description || 'No description'));
+        add(card, el('p', '', `${resource.held_units ?? 0} held / ${resource.capacity} capacity units`));
+        add(card, el('code', 'binding-snippet', resource.id)); add(target, card);
+      });
+      show($('resources-state'), !state.resources.length);
+      if (!state.resources.length) setState($('resources-state'), 'No resources yet. Define a stable key before reserving shared capacity.');
+      show($('load-more-resources'), Boolean(state.resourceCursor));
+    } catch (error) { if (requestedActor === actorId()) setState($('resources-state'), errorMessage(error), false, true); }
+    finally { state.fetching.delete('resources'); }
+  }
+
+  function renderJobEvidence(data) {
+    const target = $('job-evidence-content'); clear(target);
+    const evidence = data.job_evidence || {};
+    const jobs = Array.isArray(evidence.jobs) ? evidence.jobs : [];
+    const reservations = Array.isArray(evidence.reservations) ? evidence.reservations : [];
+    if (evidence.jobs_truncated || evidence.reservations_truncated) add(target, el('p', 'muted', 'Showing up to 50 jobs and 50 reservations, with unresolved evidence first. Use the CLI job and reservation lists to inspect the complete history.'));
+    if (!jobs.length && !reservations.length) { add(target, el('p', 'muted', 'No jobs or resource reservations recorded.')); return; }
+    jobs.forEach(job => {
+      const entry = el('div', 'evidence-entry'); add(entry, el('h3', '', job.label || 'Local job'));
+      add(entry, el('p', '', `Producer: ${displayStatus(job.state)} · Observation: ${displayStatus(job.observation_freshness || 'unknown')}`));
+      add(entry, el('p', 'muted', `Last observation: ${formatDate(job.last_observed_at)} · Exit: ${job.exit_code ?? 'not reported'}`));
+      if (job.inputs_unchanged === false) add(entry, el('p', 'error', 'Source changed during this job; its result does not verify the current checkout.'));
+      if (job.reconciled_at) { add(entry, el('p', 'muted', `Operator reconciliation: ${job.reconciliation_reason || 'Recorded'}`)); add(entry, el('p', '', job.reconciliation_evidence || '')); }
+      add(entry, el('code', '', `Job ${job.id} · Producer ${job.producer_id}`)); add(target, entry);
+    });
+    reservations.forEach(reservation => {
+      const entry = el('div', 'evidence-entry'); add(entry, el('h3', '', `Resource reservation · ${displayStatus(reservation.state)}`));
+      add(entry, el('code', '', reservation.id));
+      if (reservation.resolution_evidence) add(entry, el('p', '', `Resolution evidence: ${reservation.resolution_evidence}`));
+      (reservation.items || []).forEach(item => add(entry, el('p', 'muted', `${item.key || item.resource_id}: ${item.units} units`)));
+      if (!['released','resolved'].includes(reservation.state) && state.actor?.kind === 'human') {
+        const button = el('button', 'button subtle', 'Record resource resolution'); button.type = 'button'; button.dataset.mutation = 'true';
+        button.addEventListener('click', () => openResourceResolution(reservation)); add(entry, button);
+      }
+      add(target, entry);
+    });
+    renderMutationState();
+  }
+
+  function openResourceResolution(reservation) {
+    const projectId = state.projectId; const taskId = state.selectedTaskId;
+    const dialog = el('dialog', 'form-dialog'); const form = el('form');
+    add(form, el('h2', '', 'Resolve a physical resource hold'));
+    add(form, el('p', 'muted', 'Record how you verified the old producer stopped or was isolated. This permits conflicting work to use the resource. An unreachable workstation is not evidence that it stopped.'));
+    for (const [id, label] of [['resolution-reason', 'Reason'], ['resolution-evidence', 'Evidence of termination or isolation']]) {
+      const name = el('label', '', label); name.htmlFor = id; const field = el('textarea'); field.id = id; field.name = id; field.required = true; field.maxLength = 4096;
+      add(form, name); add(form, field);
+    }
+    const actions = el('div', 'dialog-actions'); const cancel = el('button', 'button subtle', 'Cancel'); cancel.type = 'button'; cancel.addEventListener('click', () => dialog.close());
+    const submit = el('button', 'button primary', 'Record resolution'); submit.type = 'submit'; add(actions, cancel); add(actions, submit); add(form, actions); add(dialog, form); add(document.body, dialog);
+    form.addEventListener('submit', event => {
+      event.preventDefault(); if (!form.reportValidity()) return;
+      const values = new FormData(form); dialog.close();
+      startMutation(`/api/v1/projects/${encodeURIComponent(projectId)}/reservations/${encodeURIComponent(reservation.id)}/resolve`, {reason: values.get('resolution-reason'), evidence: values.get('resolution-evidence')}, 'resource resolution', async () => {
+        if (state.projectId === projectId && state.selectedTaskId === taskId) await loadTaskDetail();
+        setGlobalAlert('Resource resolution recorded with evidence.', 'success');
+      }, 'POST', null, {projectId, taskId});
+    });
+    dialog.addEventListener('close', () => dialog.remove()); dialog.showModal();
+  }
+
+  $('refresh-resources').addEventListener('click', () => loadResources());
+  $('load-more-resources').addEventListener('click', () => loadResources(false, true));
+  $('resource-form').addEventListener('submit', event => {
+    event.preventDefault(); if (!event.currentTarget.reportValidity()) return;
+    const body = {key: $('resource-key').value.trim(), capacity: Number($('resource-capacity').value), description: $('resource-description').value.trim()};
+    startMutation('/api/v1/resources', body, 'resource creation', async () => { $('resource-form').reset(); await loadResources(); setGlobalAlert('Resource created.', 'success'); });
+  });
 
   restoreSession();
 })();

@@ -26,14 +26,7 @@ impl Mutation {
         operation: &str,
         input: &T,
     ) -> Result<Self, AppError> {
-        if headers.get_all("Idempotency-Key").iter().count() != 1 {
-            return Err(AppError::bad_request(
-                "Provide exactly one Idempotency-Key header.",
-            ));
-        }
-        let key = headers.get("Idempotency-Key").and_then(|v|v.to_str().ok())
-            .filter(|v| !v.is_empty() && v.len() <= 128 && v.bytes().all(|b|b.is_ascii_graphic()))
-            .ok_or_else(||AppError::bad_request("Provide an Idempotency-Key of 1–128 visible ASCII characters; persist it before sending."))?.to_owned();
+        let key = mutation_key(headers)?;
         let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
         let now = state.now();
         let actor = auth.verify(&mut tx, now).await?;
@@ -43,6 +36,32 @@ impl Mutation {
             .and_then(|v| v.to_str().ok())
             .map(digest);
         let fingerprint = digest(&serde_json::to_string(&(input, &actor.session_id, proof))?);
+        Self::load_receipt(tx, now, actor, operation, key, fingerprint).await
+    }
+
+    pub async fn begin_reporter<T: Serialize>(
+        state: &AppState,
+        auth: &crate::jobs::ReporterAuth,
+        headers: &HeaderMap,
+        operation: &str,
+        input: &T,
+    ) -> Result<Self, AppError> {
+        let key = mutation_key(headers)?;
+        let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let now = state.now();
+        let actor = auth.verify(&mut tx, now).await?;
+        let fingerprint = digest(&serde_json::to_string(&("reporter-v1", auth.id(), input))?);
+        Self::load_receipt(tx, now, actor, operation, key, fingerprint).await
+    }
+
+    async fn load_receipt(
+        mut tx: Transaction<'static, Sqlite>,
+        now: i64,
+        actor: Actor,
+        operation: &str,
+        key: String,
+        fingerprint: String,
+    ) -> Result<Self, AppError> {
         let previous = sqlx::query("SELECT fingerprint,result_json,created_at FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?")
             .bind(&actor.id).bind(operation).bind(&key).fetch_optional(&mut *tx).await?;
         let replay = if let Some(row) = previous {
@@ -88,4 +107,16 @@ impl Mutation {
         self.tx.commit().await?;
         Ok(data)
     }
+}
+
+fn mutation_key(headers: &HeaderMap) -> Result<String, AppError> {
+    if headers.get_all("Idempotency-Key").iter().count() != 1 {
+        return Err(AppError::bad_request(
+            "Provide exactly one Idempotency-Key header.",
+        ));
+    }
+    let key = headers.get("Idempotency-Key").and_then(|v|v.to_str().ok())
+        .filter(|v| !v.is_empty() && v.len() <= 128 && v.bytes().all(|b|b.is_ascii_graphic()))
+        .ok_or_else(||AppError::bad_request("Provide an Idempotency-Key of 1–128 visible ASCII characters; persist it before sending."))?.to_owned();
+    Ok(key)
 }

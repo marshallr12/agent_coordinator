@@ -88,7 +88,7 @@ impl Fixture {
         v["data"].clone()
     }
     async fn ack(&self, c: &Caller, p: &str) {
-        let (status,v)=self.call(c,"POST",&format!("/api/v1/sessions/{}/instruction-acknowledgments",c.session),&Uuid::new_v4().to_string(),json!({"project_id":p,"policy_revision":1,"instruction_version":"1","sections":["coordination-v1"]})).await;
+        let (status,v)=self.call(c,"POST",&format!("/api/v1/sessions/{}/instruction-acknowledgments",c.session),&Uuid::new_v4().to_string(),json!({"project_id":p,"policy_revision":1,"instruction_version":"2","sections":["coordination-v2"]})).await;
         assert_eq!(status, StatusCode::OK, "{v}");
     }
     async fn claim(
@@ -99,7 +99,7 @@ impl Fixture {
         key: &str,
         mode: &str,
     ) -> (StatusCode, Value) {
-        self.call(c,"POST",&format!("/api/v1/projects/{p}/claims"),key,json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":mode,"policy_revision":1,"instruction_version":"1"})).await
+        self.call(c,"POST",&format!("/api/v1/projects/{p}/claims"),key,json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":mode,"policy_revision":1,"instruction_version":"2"})).await
     }
 }
 async fn seed(state: &AppState, human: bool, name: &str) -> Caller {
@@ -216,7 +216,7 @@ async fn competing_claims_have_exactly_one_owner_and_one_generation() {
         let c = if i % 2 == 0 { f.a.clone() } else { f.b.clone() };
         let gate = barrier.clone();
         let path = format!("/api/v1/projects/{p}/claims");
-        let body = json!({"task_id":t["id"],"expected_task_revision":1,"policy_revision":1,"instruction_version":"1"});
+        let body = json!({"task_id":t["id"],"expected_task_revision":1,"policy_revision":1,"instruction_version":"2"});
         workers.push(tokio::spawn(async move {
             gate.wait().await;
             call(app, &c, "POST", &path, &format!("race-{i}"), body)
@@ -309,7 +309,7 @@ async fn ownership_and_receipts_survive_a_service_restart() {
     f.state.pool.close().await;
     let mut reopened = AppState::open(f.state.config.clone()).await.unwrap();
     reopened.clock = f.clock.clone();
-    let (status, replay) = call(router(reopened), &f.a, "POST", &format!("/api/v1/projects/{p}/claims"), "persisted-claim", json!({"task_id":t["id"],"expected_task_revision":1,"policy_revision":1,"instruction_version":"1"})).await;
+    let (status, replay) = call(router(reopened), &f.a, "POST", &format!("/api/v1/projects/{p}/claims"), "persisted-claim", json!({"task_id":t["id"],"expected_task_revision":1,"policy_revision":1,"instruction_version":"2"})).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(attempt(&first), attempt(&replay));
     assert_eq!(replay["data"]["current_authority"]["valid"], true);

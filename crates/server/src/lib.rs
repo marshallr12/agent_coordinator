@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod coordination;
 pub mod error;
+pub mod jobs;
 pub mod mutation;
 pub mod state;
 
@@ -25,6 +26,7 @@ pub fn response(data: Value) -> Json<Value> {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(coordination::routes())
+        .merge(jobs::routes())
         .merge(auth::routes())
         .route(
             "/healthz",
@@ -79,7 +81,15 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
                 | "/api/v1/help/authentication"
         );
     let login = parts.method == Method::POST && parts.uri.path() == "/api/v1/auth/login";
-    let mut result = if !public_read && !login {
+    let mut result = if parts.uri.path().starts_with("/api/v1/reporters/") {
+        match jobs::ReporterAuth::authenticate(&parts, &state).await {
+            Ok(auth) => {
+                parts.extensions.insert(auth);
+                next.run(Request::from_parts(parts, body)).await
+            }
+            Err(error) => error.into_response(),
+        }
+    } else if !public_read && !login {
         match auth::Auth::authenticate(&parts, &state).await {
             Ok(auth) => {
                 parts.extensions.insert(auth);
@@ -147,10 +157,10 @@ fn asset(content_type: &'static str, body: &'static str) -> Response {
 }
 async fn info() -> Json<Value> {
     response(
-        json!({"product":"Agent Coordinator","version":env!("CARGO_PKG_VERSION"),"api_version":"v1","instruction_version":"1",
-        "implementation_stage":"foundation","authentication_help":"/api/v1/help/authentication",
-        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","events"],
-        "unavailable_features":["submission","review","integration","local_job_reporter","resource_holds","artifacts","knowledge","decisions","markdown_import_export","backup_restore"]}),
+        json!({"product":"Agent Coordinator","version":env!("CARGO_PKG_VERSION"),"api_version":"v1","instruction_version":coordinator_core::INSTRUCTION_VERSION,
+        "implementation_stage":"job_evidence","authentication_help":"/api/v1/help/authentication",
+        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events"],
+        "unavailable_features":["submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","backup_restore"]}),
     )
 }
 async fn authentication_help() -> Json<Value> {

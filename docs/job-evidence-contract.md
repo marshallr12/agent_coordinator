@@ -3,15 +3,6 @@
 This milestone implements backlog item 1. It does not enable task completion,
 review, integration, artifact uploads, or automatic remote execution.
 
-## Ownership of implementation files
-
-- Service agent: `server/src/jobs.rs`, migration `0003_jobs.sql`, job tests.
-- Local runner agent: new `crates/local/**`, local journal/process/report tests.
-- Workstation CLI agent: `crates/cli/**`, `docs/CLI.md`; worktree preparation and
-  resource/job commands, calling the local library for guardians.
-- Root: manifests/lockfile, server auth/middleware/mutation integration and
-  coordination gates, end-to-end checks, operator views and status/handoff docs.
-
 ## HTTP interface (successes use the existing envelope)
 
 GET/POST `/api/v1/resources`: globally shared canonical `key`, `capacity` (1–1000),
@@ -20,7 +11,8 @@ GET/POST `/api/v1/projects/{p}/attempts/{a}/reservations`: create
 `{generation,items:[{resource_id,units}]}` atomically, one active reservation per
 attempt; same resource identity blocks across projects. All-or-none admission.
 POST `/api/v1/projects/{p}/reservations/{r}/release` `{generation,reason}`:
-owner may release only when every attached job has a terminal producer result.
+The original owner, or the current recovery owner of the same task using its new
+generation, may release only when attached jobs have terminal producer results.
 POST `.../reservations/{r}/resolve` `{reason,evidence}`: explicit human resolution
 of an uncertain physical resource, retaining provenance and affected job history.
 GET `/api/v1/projects/{p}/reservations`: bounded cursor list with derived held /
@@ -42,8 +34,12 @@ last observation/freshness, source identity, reservation, and terminal result.
 
 Reporter bearer namespace: `acr_<reporter UUID>.<proof>`; no agent token or
 session headers in a guardian. Only these paths accept that bearer:
-GET `/api/v1/reporters/{id}` returns its named job and current renewal/observation
-authority (not its proof). POST `.../{id}/observations`
+GET `/api/v1/reporters/{id}` returns its named job and a `reporter` object with
+current renewal/observation authority, `launch_allowed`, and `lease_remaining_ms`
+(not its proof). Launch requires a current live work attempt, active parent session
+and credential, registered producer, and held reservation. Guardians query this
+immediately before spawning and subtract request elapsed time plus a safety margin.
+A registration receipt does not provide fresh launch authority. POST `.../{id}/observations`
 `{sequence,producer_id,state,pid,process_started_at,exit_code,inputs_unchanged,
 summary}` where state is `registered|running|succeeded|failed|unknown|not_started`.
 Sequence positive and strictly increasing; duplicate same sequence/body replays,
@@ -58,14 +54,14 @@ requires current attempt/generation, active parent session, and live deadline.
 A reporter cannot create tasks/sessions, checkpoint, expand scope, or renew its
 own window. Normal bearer credentials cannot impersonate reporter requests.
 
-Root middleware calls `jobs::ReporterAuth::authenticate(parts,state)` for paths
+The middleware calls `jobs::ReporterAuth::authenticate(parts,state)` for paths
 beginning `/api/v1/reporters/`, before decoding bodies. Its `verify(connection,now)`
-returns the parent Actor after checking subordinate/parent authorization. Root
+returns the parent Actor after checking subordinate/parent authorization. The mutation module
 provides `Mutation::begin_reporter(state,auth,headers,operation,input)` with the
 same immediate-transaction, receipt/event guarantees and reporter-bound fingerprint.
-Root exposes `coordination::{Attempt,owned}` as pub(crate) for service handlers.
+The coordination module exposes `coordination::{Attempt,owned}` as pub(crate) for service handlers.
 
-Root gates release/ordinary requeue/recovery resolution/checkout changes on
+The service gates release/ordinary requeue/recovery resolution/checkout changes on
 unresolved job/resource evidence, using service helper
 `jobs::ensure_attempt_quiescent(connection,project,task_id)` (checks all attempts
 of this task for held reservations or nonterminal jobs; descriptive conflict).
@@ -80,7 +76,7 @@ the same path/branch rather than creating a second worktree. Paths with spaces w
 on Linux and Windows. Resolve repository identity against configured remote URL;
 do not infer a project from a directory basename.
 
-CLI `job run` receives a local program/argv JSON file, an attempt/generation,
+CLI `jobs run` receives a local program/argv JSON file, an attempt/generation,
 reservation ID and prepared checkout. Require a clean committed source snapshot
 for this milestone. Raw argv/environment/log bytes are not uploaded. Persist
 job/producer/runner/reporter identities before registration or local launch.
@@ -92,11 +88,17 @@ An OS file lock serializes guardians, but losing that lock never proves producer
 termination. Record PID plus OS process start identity, distinct producer UUID,
 and terminal exit journal; PID reuse must never attach to a replacement process.
 
-The local library supplies public types/functions agreed with the CLI agent;
-agents coordinate that Rust API directly. Job inspect/reconnect replays durable
+Jobs inspect/reconnect replays durable
 pending observations to the same reporter/job and never launches a producer.
 Capture terminal result and input stability even offline; log files are local,
 explicit, bounded, and protected. Unknown observation state retains resources.
+
+Supported producer commands run their work in the foreground. The launched
+process's exit is evidence about that process, not proof that a detached child,
+remote build, or hardware operation ended. A launcher that returns before such
+work finishes must not be used as a completion witness; keep the resource held
+and inspect/resolve the external work separately. Jobs do not provide OS sandboxing
+or physical fencing.
 
 Optional renewal requires an explicitly supplied harness PID captured with its
 OS start identity. The guardian stops renewal when that exact harness exits,

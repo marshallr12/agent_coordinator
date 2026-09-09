@@ -25,3 +25,19 @@
 - **State what is actually verified.** A Windows CI definition is not a passing
   Windows run. A deployment example is not a deployment. A checkout attestation is
   not remote filesystem inspection. A lease foundation is not reviewed integration.
+- **A lease and a physical resource hold are different records.** Losing task
+  authority or an observer never proves a producer stopped. Keep holds until
+  terminal producer evidence or explicit operator termination/isolation evidence.
+  Record reconciliation separately from the producer's reported outcome.
+- **Launch identity must survive uncertainty.** Persist one producer identity and
+  launch intent before spawning. Reconnect observes it; an unlocked guardian file
+  or missing PID is not permission to start a replacement. Include boot/process
+  creation identity so PID reuse cannot impersonate the original process.
+- **Local observation must survive service failure.** Publish terminal results
+  durably before uploading, preserve exact pending observation keys, and recover
+  an interrupted journal write without dropping the result. Reading status must
+  not wait for the lifetime lock held by a running guardian.
+- **Historical registration is not launch permission.** Check current scoped
+  launch authority and remaining lease time immediately before starting work.
+  A successful replay cannot refresh an expired grant. Verify the actual checkout
+  identity and clean source again before launch.
