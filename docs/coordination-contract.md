@@ -267,6 +267,26 @@ agent thinking time, workstation sleep, and network loss must be considered when
 choosing heartbeat intervals and expiry. The service can expose stale progress
 separately from an expired lease without assuming that silence proves a crash.
 
+Proposed defaults are a one-minute heartbeat and ten-minute task lease. A local
+renewal helper receives a separate, narrowly scoped reporter credential; it can
+renew the named attempt and report authorized jobs, but cannot create checkpoints,
+submit work, change policy, or extend its own reporting window. The active agent
+explicitly declares the action being watched and its reporting-window deadline.
+Propose a one-hour maximum window initially, adjustable by the operator for long
+gates. Renewal cannot extend beyond that deadline or a revoked session/attempt.
+
+The helper stops renewing when its observed harness instance exits, when authority
+is lost, or when the declared window ends. A job continuing beyond the window
+retains its own job record and resource holds; it does not silently keep the
+agent's task owned. The agent can explicitly establish a fresh window while its
+authority is still valid. Manual HTTP clients can renew directly without a helper.
+This supports long tool calls while bounding an orphaned helper's effect.
+
+Display stale progress separately, with a proposed 15-minute warning threshold.
+A declared long job shows its expected deadline and observation freshness, so
+an expected wait is distinguishable from unexplained silence. Warnings do not
+automatically mark failure, restart jobs, or release resources.
+
 Adapter events distinguish a turn ending, context compaction, session
 disconnection, explicit relinquishment, and task completion. Repeated connect or
 resume events reconcile existing session/attempt/job IDs first. They cannot
@@ -336,6 +356,58 @@ before promising stronger end-to-end guarantees.
 | An authenticated caller deliberately selects a different project | Permit project access; still require the operation's role and current attempt ownership where applicable |
 | A caller attaches project B's evidence to a project A attempt as if it belonged to A | Reject the mismatched relationship; preserve provenance for explicitly supported cross-project references |
 | One project is waiting on an integration reservation | Other projects remain eligible unless they share that same canonical target/resource |
+
+## Shared lessons and delegated project rules
+
+Agents may publish and correct lessons, including lessons useful across projects.
+The selected policy also allows a project to delegate binding-rule changes to
+agents without human approval. Store that permission separately from policy
+text; check it before accepting each revision. A rule revision is an explicit,
+attributed operation, not a side effect of importing a lesson or rendering Markdown.
+
+Knowledge records contain a concise statement, explanation, applicability tags
+and versions, source task/submission/revision, supporting evidence, author, and
+created/updated times. Corrections and supersession preserve earlier versions and
+their links. A disputed lesson stays inspectable with its dispute visible; it
+does not silently become mandatory guidance.
+
+Provide project-scoped search and explicit cross-project/common retrieval to all
+authenticated callers. A common lesson preserves its original source rather than
+duplicating detached copies. Rank current applicable records using full-text
+match, component/version tags, and bounded usefulness feedback. Feedback changes
+ranking, never permission or policy status. No embeddings service or model API is
+required for the first release.
+
+Orientation separates mandatory current rules from suggested lessons. Required
+rule updates are versioned and visible to active agents. Local AGENTS.md/CLAUDE.md
+instructions still apply; a service rule cannot silently erase a local rule or
+resolve a conflict by pretending the local instruction was never present.
+
+## Artifact storage and portable recovery
+
+Store bounded log/report uploads in the service, alongside external artifact
+links. Code checkpoints use Git remotes. Record source accessibility honestly:
+local-only uncommitted edits cannot be recovered from a different workstation
+merely because their path appears in a checkpoint. Source-worktree bundles and
+build-directory uploads are outside the selected first-release scope.
+
+Artifact metadata includes ID, project/task/job association, original display
+name, media type, byte size, SHA-256 digest, author, retention, and availability.
+Use generated storage paths, never client filenames as filesystem paths. Stage
+and size-check uploads, finish and durably store the file, then commit accessible
+metadata. Incomplete uploads are not downloadable; orphan-file cleanup and
+backup/restore reconcile filesystem state with database references.
+
+Enforce per-file and aggregate storage quotas before and during uploads. Retain
+metadata and a deletion/expiry reason after removing file bytes, so historical
+evidence does not appear to have an accessible artifact when it no longer does.
+Uploads are explicit; the reporter does not automatically collect credentials,
+environment variables, source trees, or every raw log from a workstation.
+
+Downloads require authentication. Treat uploaded files as untrusted attachments,
+not executable same-origin web pages; any inline preview must render safe text.
+The server stores external links without fetching arbitrary URLs. Cross-machine
+access to a linked resource is reported rather than assumed from its existence.
 
 ## Duplicate work beyond a shared task ID
 

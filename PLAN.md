@@ -47,6 +47,12 @@ after requirements are sufficiently defined and the operator requests it.
   human-readable and JSON output. MCP and TUI interfaces are deferred.
 - Each project can require independent agent review, human review, or both;
   the default review mode is independent agent review.
+- Each project can allow agents to integrate approved, validated work
+  automatically or require human authorization for integration.
+- Each project may authorize agents to change binding project rules without
+  human approval, in addition to publishing and correcting shared lessons.
+- Store bounded log/report uploads in the service and source checkpoints in Git
+  remotes; also support artifact links. Source-worktree bundles are not required.
 - Existing orientation and work records include AGENTS.md / CLAUDE.md,
   HANDOFF.md, BACKLOG.md, and DURABLE-RECORD.md. The request also mentions
   BACKOFF.md; confirm whether this is a separate record or means BACKLOG.md.
@@ -104,7 +110,8 @@ These are design proposals, not settled product decisions.
     must not claim it can stop an offline process or guarantee exactly-once Git
     pushes, deployments, or other actions outside its own database.
 11. Keep searchable lessons with provenance and revision history. Distinguish
-    agent observations from operator-approved project policy. Relevant context
+    agent observations from policy adopted by a human or an authorized agent.
+    Relevant context
     should fit a bounded response instead of dumping every historical record.
 12. Return useful next actions and recovery instructions with API responses,
     particularly for authentication failures, conflicts, and expired leases.
@@ -126,6 +133,12 @@ The proposed first-connection flow and short repository snippet are in
 [docs/onboarding-contract.md](docs/onboarding-contract.md). Its example CLI
 command is a proposed interface and is not implemented yet.
 
+The engineering draft in [docs/workflow-spec.md](docs/workflow-spec.md) specifies
+task lifecycles, derived work statuses, activity eligibility, and completion
+transactions. Product decisions still marked open are not assumed by that draft.
+The proposed wire interface is in [docs/api-contract.md](docs/api-contract.md),
+including agent sessions, claim/renewal examples, and actionable error responses.
+
 ## Decision log
 
 | Decision | Proposed default | Status |
@@ -144,9 +157,12 @@ command is a proposed interface and is not implemented yet.
 | Client platforms | Linux and native Windows | **Confirmed by operator, 2026-09-09** |
 | Initial interfaces | HTTP API, web dashboard, and CLI with JSON output; defer MCP/TUI | **Confirmed by operator, 2026-09-09** |
 | Review authority | Per-project choice of independent agent, human, or both; independent agent default | **Confirmed by operator, 2026-09-09** |
-| Integration authority | Agents integrate when policy/review/checks allow; projects may require human authorization | Open; question sent |
-| Knowledge autonomy | Agents maintain project/common lessons; humans approve binding project rules | Open; question sent |
-| Artifact storage | Bounded service uploads for logs/reports, Git remotes for source checkpoints, optional artifact links | Open; question sent |
+| Integration authority | Agents integrate when policy/review/checks allow; projects may require human authorization | **Confirmed by operator, 2026-09-09** |
+| Knowledge autonomy | Agents maintain lessons; projects may also delegate binding-rule changes without human approval | **Confirmed by operator, 2026-09-09** |
+| Artifact storage | Bounded service uploads for logs/reports, Git remotes for source checkpoints, optional artifact links | **Confirmed by operator, 2026-09-09** |
+| Initial operating size | 20 projects, 50 simultaneous agent sessions, 100,000 historical tasks | Open; question sent |
+| Server baseline | Ubuntu 24.04 LTS, x86_64, 2 CPU cores, 4 GB RAM | Open; question sent |
+| Backup/recovery targets | Hourly backups; 24 hourly and 30 daily copies; documented off-server copying; one-hour restore target | Open; question sent |
 
 Repository evidence supports these proposals but does not settle the unanswered
 preferences. In particular, a policy or permission recorded for a past task in a
@@ -174,8 +190,8 @@ the exact roles remain to be finalized.
   they must share its canonical reservation identity rather than evade its
   concurrency limit through different project names.
 - Knowledge retains its source-project association for relevance and provenance,
-  while every authenticated caller can read across projects. Whether to provide
-  a separate common-lessons collection remains open; it is not an access boundary.
+  while every authenticated caller can read across projects. A proposed common
+  collection holds reusable lessons with source links; it is not an access boundary.
 - Work and long-running checks take place outside database transactions.
   Coordination transactions stay short so an active project does not hold the
   service's database transaction open for the duration of its work.
@@ -327,9 +343,8 @@ shorthand. The service should expose actionable failures and retain answers.
 ## Further questions to resolve
 
 The remaining interview is consolidated in
-[docs/release-scope.md](docs/release-scope.md). It covers client platforms,
-interfaces, review/integration authority, shared knowledge, recoverable artifacts,
-expected operating size, and operational requirements. It also proposes
+[docs/release-scope.md](docs/release-scope.md). Product questions now concern
+expected operating size, the server baseline, and backup/recovery targets. It also proposes
 engineering defaults so routine implementation choices do not each require a
 separate question. Adapt questions to earlier answers and retain the distinction
 between a proposed default and a confirmed requirement.

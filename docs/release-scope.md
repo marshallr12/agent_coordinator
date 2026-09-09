@@ -8,20 +8,19 @@ can specify without a separate interview question for every field or timeout.
 
 | Choice | Recommendation | Why the answer matters |
 | --- | --- | --- |
-| Integration authority | Agents may integrate when project policy and required review allow it; humans manage standing permissions | Determines whether unattended code work can reach completion |
-| Shared knowledge | Project lessons plus an explicitly curated common collection; agents publish lessons, humans approve binding policy | Supports reuse while preserving provenance and instruction authority |
-| Recoverable artifacts | Git remote for source checkpoints; service accepts bounded logs/reports, not full worktrees or build directories | Determines cross-workstation access, storage, and backup requirements |
 | Initial operating size | Establish expected projects, concurrent sessions, and stored history | Sets measurable load and pagination targets |
 | Operations | Establish supported server OS/architecture, backup frequency/retention, and acceptable downtime | Sets packaging and recovery acceptance targets |
 
-Integration authority, knowledge autonomy, and artifact storage questions have
-been presented. Ask the remaining choices in
-small groups, combining closely related operational facts in one free-text
-question when appropriate. Installation as a native Linux systemd service,
+Capacity, server-baseline, and backup/recovery questions have been presented.
+Installation as a native Linux systemd service,
 HTTPS, all-project access, authentication method, agent task creation/claiming,
 worktree isolation, recovery mode, and integrated completion are already settled.
 Linux and native Windows clients, HTTP API/web/CLI interfaces, and configurable
-agent/human/both review are also confirmed. MCP and TUI are deferred.
+agent/human/both review are also confirmed. Projects may allow automatic agent
+integration or require human authorization. Agents maintain shared lessons;
+projects may additionally delegate changes to binding rules without human
+approval. Bounded log/report uploads, Git source checkpoints, and artifact links
+are confirmed. MCP, TUI, and source-worktree bundle storage are deferred.
 
 ## Proposed engineering defaults
 
@@ -42,18 +41,17 @@ operator confirmations. They may be adjusted when the product answers require it
 | Dashboard updates | Periodic refresh with last-updated time; persistent attention queue for blockers/decisions; external email/chat/push integrations deferred unless requested |
 | Local adapters | Vendor-neutral connect/resume/checkpoint/job-report operations with documented hook examples; no automatic alteration of global harness hooks |
 | Permissions | Separate administrator, human operator, and agent operations; no project ACLs; decisions claiming human authorization require a human principal |
+| Rule delegation | A project can grant agents permission to edit binding rules; permission grants and credential administration remain distinct from the rule text |
 | Evidence | Immutable submissions, explicit check roster, exact input and integrated revision, producer identity, artifact accessibility |
 | API retries | Stable mutation keys and transactional receipts; uncertain external effects require reconciliation |
 | Persistence | SQLite on local storage, short transactions, migrations, audit events, tested backup/restore |
 | Browser stack | Vanilla JavaScript modules and CSS, served by Axum; use Alpine only if implementation demonstrates a simplification |
 
-Heartbeat timing and helper behavior need a concrete technical contract before
-implementation. Propose a one-minute reporting interval and ten-minute renewable
-ownership window, configurable per project within server limits. The local
-helper must be attached to a known harness lifecycle or a bounded declared job
-wait; an orphaned helper cannot keep renewing forever. A stale-progress warning
-is separate from lease expiry. Validate these defaults against the long-running
-SithBit gates before treating them as release defaults.
+Propose a one-minute reporting interval and ten-minute renewable ownership
+window, configurable per project within server limits. The bounded-helper
+contract is in [coordination-contract.md](coordination-contract.md). A
+stale-progress warning is separate from lease expiry. Validate these defaults
+against the long-running SithBit gates before treating them as release defaults.
 
 For Markdown input, treat BACKOFF.md as a configurable additional filename.
 Support BACKLOG.md directly. This avoids making a possible filename typo block
@@ -62,10 +60,13 @@ the design while still supporting a distinct file if one exists.
 ## Required specification before coding
 
 1. Resolve the product choices above and explicitly list deferred features.
-2. Define task/activity states, ownership transitions, reviewer independence,
-   recovery permissions, and exact completion guards.
-3. Define request/response schemas and complete HTTP/CLI examples, including
-   authentication help, resume, claim conflicts, and expired authority.
+2. Review the task/activity states, ownership transitions, reviewer independence,
+   recovery permissions, and completion guards in
+   [workflow-spec.md](workflow-spec.md) and
+   [coordination-contract.md](coordination-contract.md).
+3. Expand [api-contract.md](api-contract.md) into matching request/response
+   schemas and complete HTTP/CLI examples, including authentication help,
+   resume, claim conflicts, and expired authority.
 4. Define database constraints and transaction boundaries, including revision
    races, interrupted requests, and resource recovery holds.
 5. Define local worktree/job handling on selected platforms and the practical

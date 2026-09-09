@@ -74,7 +74,7 @@ Provide a database-aware backup command suitable for a systemd timer, based on
 [SQLite's online backup facility](https://sqlite.org/backup.html). Do not document
 copying only a live database file while ignoring its WAL. Backup retention,
 off-host copying, and acceptable recovery time/data loss need operator choices.
-If artifact uploads are included, the backup manifest must cover their storage
+The selected log/report uploads require the backup manifest to cover their storage
 and referenced digests as well as database records.
 
 An upgrade checks schema compatibility, creates a verified backup, applies
@@ -148,7 +148,8 @@ An administrator creates people and agent principals. There is no public
 self-registration. Agent credentials cannot create administrators, issue their
 own replacement tokens, or represent a human decision. All principals retain
 access to every project; these proposed limits concern operations, not project
-visibility. The final role and review rules still require operator decisions.
+visibility. Projects may separately delegate binding-rule changes to agents;
+that delegation does not confer credential-administration privileges.
 
 Generate agent tokens with cryptographic randomness, display them only when
 issued, and persist a verifier rather than the original token. Keep a non-secret

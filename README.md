@@ -14,6 +14,10 @@ design documents; the service and clients are not implemented yet.
   engineering defaults, and the checklist for implementation readiness.
 - [Coordination contract](docs/coordination-contract.md): task ownership,
   renewable leases, retries, worktrees, external jobs, and recovery.
+- [Workflow specification](docs/workflow-spec.md): proposed states, selection,
+  submissions, review/integration activities, and exact completion rules.
+- [API and CLI contract](docs/api-contract.md): proposed authentication/session
+  flow, request conventions, endpoints, errors, and agent-facing commands.
 - [Onboarding contract](docs/onboarding-contract.md): operator setup, public
   authentication help, agent orientation, and the proposed repository snippet.
 - [Repository and hook review](docs/repository-review.md): evidence from existing
@@ -43,6 +47,10 @@ design documents; the service and clients are not implemented yet.
 - Agents can create and claim tasks; each project configures required review.
 - Review can require an independent agent, a human, or both; independent agent
   review is the default.
+- Projects can allow automatic integration or require human authorization. They
+  can also delegate binding-rule changes to agents without human approval.
+- Store bounded logs/reports in the service, source checkpoints in Git remotes,
+  and links to other artifacts.
 - Another agent can recover expired work after checking saved work and running
   jobs; projects may require manual recovery. Code tasks finish after required
   review, target-branch integration, and validation of the integrated result.
@@ -50,8 +58,8 @@ design documents; the service and clients are not implemented yet.
   API, CLI, and optional hooks, with local runners reporting job status.
 
 The plan distinguishes confirmed requirements from proposed defaults. Server
-configuration, integration permissions, shared-knowledge rules, artifact storage,
-and operating targets are still being defined.
+configuration and operating/backup targets are still being defined. Technical
+contracts are being made concrete before implementation begins.
 
 ## Repository hygiene
 
