@@ -791,13 +791,22 @@ async fn host_recovery_enables_account_revokes_sessions_and_preserves_other_auth
         .await
         .unwrap();
     assert!(revoked.is_none());
-    let event: String =
-        sqlx::query_scalar("SELECT data_json FROM events WHERE kind='operator_password_recovered'")
-            .fetch_one(&fixture.state.pool)
-            .await
-            .unwrap();
-    assert!(event.contains("password was lost"));
-    assert!(!event.contains(NEW_PASSWORD));
+    let event = sqlx::query(
+        "SELECT actor_id,record_id,data_json FROM events WHERE kind='operator_password_recovered'",
+    )
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(event.get::<String, _>("actor_id"), operator_id);
+    assert_eq!(event.get::<String, _>("record_id"), operator_id);
+    let event_data: Value = serde_json::from_str(&event.get::<String, _>("data_json")).unwrap();
+    assert_eq!(event_data["reason"], "password was lost");
+    assert_eq!(event_data["host_local"], true);
+    assert_eq!(event_data["initiator_kind"], "host_operator");
+    assert_eq!(event_data["authenticated_principal_id"], Value::Null);
+    assert_eq!(event_data["subject_principal_id"], operator_id);
+    assert_eq!(event_data["actor_id_role"], "subject_reference");
+    assert!(!event.get::<String, _>("data_json").contains(NEW_PASSWORD));
 }
 
 #[tokio::test]

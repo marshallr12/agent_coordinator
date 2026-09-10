@@ -801,7 +801,14 @@ pub async fn recover_operator_password(
     .bind(&id)
     .execute(&mut *tx)
     .await?;
-    let event_data = serde_json::to_string(&json!({"reason":reason,"host_local":true}))?;
+    let event_data = serde_json::to_string(&json!({
+        "reason":reason,
+        "host_local":true,
+        "initiator_kind":"host_operator",
+        "authenticated_principal_id":Value::Null,
+        "subject_principal_id":id,
+        "actor_id_role":"subject_reference"
+    }))?;
     sqlx::query("INSERT INTO events(actor_id,kind,record_id,data_json,created_at) VALUES(?,'operator_password_recovered',?,?,?)")
         .bind(&id)
         .bind(&id)

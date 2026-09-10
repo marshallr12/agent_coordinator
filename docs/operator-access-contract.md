@@ -139,3 +139,10 @@ increments its revision, revokes all browser sessions, and records a bounded
 reason. The principal's ID and role remain unchanged. The transaction does not
 modify agent credentials or sessions, attempts, jobs, submissions, or resource
 holds. The old password and all prior browser sessions remain invalid.
+
+The recovery event identifies `initiator_kind` as `host_operator` and sets
+`authenticated_principal_id` to `null`, because the local command has no
+authenticated browser or agent principal. `subject_principal_id` identifies the
+recovered account. The existing non-null `events.actor_id` foreign key also points
+to that account solely as a `subject_reference`, as recorded by
+`actor_id_role`; it must not be presented as the initiator of the recovery.

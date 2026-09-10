@@ -1,13 +1,15 @@
 # Agent and operator onboarding contract
 
 Status: mixed implementation and release design. Authentication, native session
-connection, task coordination, and the repository bootstrap below are implemented.
-Backup, packaging, and final acceptance sections remain release requirements. Public HTTPS, service-authoritative
-records, access to all projects for every authenticated caller, local password
-accounts for people, and revocable API tokens for agents are confirmed. The
-server runs as a native Linux service under systemd; CLI and job-reporter clients
-support Linux and native Windows. Operation roles are specified in
-[implementation-spec.md](implementation-spec.md). Use [the CLI guide](CLI.md) for implemented commands.
+connection, task coordination, the repository bootstrap, service-authoritative
+records, project access, local human accounts, and revocable agent tokens are
+implemented. Public HTTPS deployment, systemd packaging, backups, and final
+acceptance remain release requirements. Linux and native Windows are client
+targets, and automated CI validates both for the current milestone. The final
+operator-initiated physical Windows workstation exercise remains pending
+acceptance evidence. Operation roles are specified in
+[implementation-spec.md](implementation-spec.md). Use [the CLI guide](CLI.md) for
+implemented commands.
 
 ## Repository binding and workstation credentials
 
