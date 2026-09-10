@@ -160,16 +160,20 @@ def exercise_shared(temporary, api, cli, project, owner):
     uploaded = client(
         "artifacts", "upload", "--id", upload_id, "--file", str(upload_source)
     )
-    assert uploaded == {
-        "artifact_id": upload_id,
-        "size_bytes": len(original_bytes),
-        "sha256": original_digest,
-    }
+    uploaded_artifact = uploaded["artifact"]
+    assert uploaded_artifact["id"] == upload_id
+    assert uploaded_artifact["kind"] == "upload"
+    assert uploaded_artifact["state"] == "finalized"
+    assert uploaded_artifact["availability"] == "available"
+    assert uploaded_artifact["size_bytes"] == len(original_bytes)
+    assert uploaded_artifact["sha256"] == original_digest
     upload_source.write_bytes(b"edited after successful upload")
     repeated = client(
         "artifacts", "upload", "--id", upload_id, "--file", str(upload_source)
     )
-    assert repeated == uploaded, "A completed retry did not reuse its saved upload result."
+    repeated_artifact = repeated["artifact"]
+    for field in ["id", "kind", "state", "availability", "size_bytes", "sha256"]:
+        assert repeated_artifact[field] == uploaded_artifact[field]
 
     download_output = temporary / "download output with spaces.bin"
     downloaded = client(
