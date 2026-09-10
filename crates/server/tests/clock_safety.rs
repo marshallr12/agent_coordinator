@@ -27,6 +27,16 @@ impl Clock for TestClock {
     fn now_ms(&self) -> i64 {
         self.0.load(Ordering::SeqCst)
     }
+    fn use_monotonic_elapsed(&self) -> bool {
+        false
+    }
+}
+
+struct MonotonicTestClock(AtomicI64);
+impl Clock for MonotonicTestClock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 impl TestClock {
     fn set(&self, value: i64) {
@@ -89,7 +99,26 @@ impl Fixture {
         path: &str,
         body: Value,
     ) -> (StatusCode, Value) {
-        call(self.app.clone(), caller, method, path, body).await
+        call_with_key(
+            self.app.clone(),
+            caller,
+            method,
+            path,
+            &Uuid::new_v4().to_string(),
+            body,
+        )
+        .await
+    }
+
+    async fn call_with_key(
+        &self,
+        caller: &Caller,
+        method: &str,
+        path: &str,
+        key: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        call_with_key(self.app.clone(), caller, method, path, key, body).await
     }
 
     async fn status(&self) -> Value {
@@ -163,11 +192,22 @@ async fn call(
     path: &str,
     body: Value,
 ) -> (StatusCode, Value) {
+    call_with_key(app, caller, method, path, &Uuid::new_v4().to_string(), body).await
+}
+
+async fn call_with_key(
+    app: Router,
+    caller: &Caller,
+    method: &str,
+    path: &str,
+    key: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     let mut request = Request::builder()
         .method(method)
         .uri(path)
         .header("content-type", "application/json")
-        .header("idempotency-key", Uuid::new_v4().to_string());
+        .header("idempotency-key", key);
     if caller.human {
         request = request
             .header("cookie", format!("coordinator_local={}", caller.token))
@@ -191,7 +231,7 @@ async fn call(
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
-async fn seed_authority_state(fixture: &Fixture) -> (String, String, String, String) {
+async fn seed_authority_state(fixture: &Fixture) -> (String, String, String, String, String) {
     let project = Uuid::new_v4().to_string();
     let held_task = Uuid::new_v4().to_string();
     let decision_task = Uuid::new_v4().to_string();
@@ -225,8 +265,9 @@ async fn seed_authority_state(fixture: &Fixture) -> (String, String, String, Str
     sqlx::query("INSERT INTO jobs(id,producer_id,project_id,task_id,attempt_id,generation,runner_instance_id,workstation_id,label,source_revision,source_tree,reservation_id,created_at) VALUES(?,?,?,?,?,1,'runner','workstation','clock job','revision','tree',?,?)")
         .bind(&job).bind(Uuid::new_v4().to_string()).bind(&project).bind(&held_task).bind(&attempt).bind(&reservation).bind(BASE).execute(&fixture.state.pool).await.unwrap();
     let reporter = Uuid::new_v4().to_string();
+    let reporter_proof = secret();
     sqlx::query("INSERT INTO reporters(id,job_id,principal_id,credential_id,session_id,proof_hash,expires_at,renew_until,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
-        .bind(&reporter).bind(&job).bind(&fixture.agent.principal).bind(&fixture.agent.credential).bind(&fixture.agent.session).bind(digest(&secret()))
+        .bind(&reporter).bind(&job).bind(&fixture.agent.principal).bind(&fixture.agent.credential).bind(&fixture.agent.session).bind(digest(&reporter_proof))
         .bind(BASE+10_000).bind(BASE+10_000).bind(BASE).execute(&fixture.state.pool).await.unwrap();
     let decision = Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO decisions(id,project_id,question,options_json,rationale,required_actor,created_by,created_at) VALUES(?,?,'Proceed?','[\"Yes\",\"No\"]','Clock decision','either',?,?)")
@@ -237,13 +278,19 @@ async fn seed_authority_state(fixture: &Fixture) -> (String, String, String, Str
         .bind(&decision).bind(&project).bind(&decision_task).execute(&fixture.state.pool).await.unwrap();
     sqlx::query("INSERT INTO decision_answers(decision_id,generation,disposition,answer,rationale,actor_id,actor_session_id,conditions_confirmed,created_at) VALUES(?,1,'allow','Yes','Allowed before expiry',?,?,1,?)")
         .bind(&decision).bind(&fixture.admin.principal).bind(&fixture.admin.session).bind(BASE).execute(&fixture.state.pool).await.unwrap();
-    (project, decision_task, attempt, reporter)
+    (
+        project,
+        decision_task,
+        attempt,
+        reporter.clone(),
+        format!("Bearer acr_{reporter}.{reporter_proof}"),
+    )
 }
 
 #[tokio::test]
 async fn rollback_expires_authority_preserves_holds_and_never_revives_deadlines() {
     let fixture = Fixture::new().await;
-    let (project, decision_task, attempt, reporter) = seed_authority_state(&fixture).await;
+    let (project, decision_task, attempt, reporter, _) = seed_authority_state(&fixture).await;
     let mut connection = fixture.state.pool.acquire().await.unwrap();
     ensure_decisions_resolved(&mut connection, &project, &decision_task, BASE)
         .await
@@ -304,13 +351,10 @@ async fn rollback_expires_authority_preserves_holds_and_never_revives_deadlines(
         .fetch_one(&fixture.state.pool)
         .await
         .unwrap();
-    assert!(reporter_expiry >= BASE + 20_000);
+    assert_eq!(reporter_expiry, BASE + 10_000);
     assert!(reporter_expiry <= clock["clock_state"]["last_safe_time_ms"].as_i64().unwrap());
 
-    let first_safe = clock["clock_state"]["last_safe_time_ms"].as_i64().unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let later = fixture.status().await;
-    assert!(later["clock_state"]["last_safe_time_ms"].as_i64().unwrap() > first_safe);
 
     let incident = later["clock_state"]["incident_id"]
         .as_str()
@@ -328,13 +372,16 @@ async fn rollback_expires_authority_preserves_holds_and_never_revives_deadlines(
     assert_eq!(too_early["error"]["code"], "clock_still_untrusted");
 
     let required = later["clock_state"]["last_safe_time_ms"].as_i64().unwrap();
-    fixture.clock.set(required + 10);
+    fixture.clock.set(required + 60_000);
+    let reconcile_key = "reconcile-first-clock-incident";
+    let reconcile_input = json!({"incident_id":incident,"reason":"The host clock now agrees with an independent trusted source."});
     let (status, recovered) = fixture
-        .call(
+        .call_with_key(
             &fixture.admin,
             "POST",
             "/api/v1/admin/clock/reconcile",
-            json!({"incident_id":incident,"reason":"The host clock now agrees with an independent trusted source."}),
+            reconcile_key,
+            reconcile_input.clone(),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{recovered}");
@@ -354,11 +401,34 @@ async fn rollback_expires_authority_preserves_holds_and_never_revives_deadlines(
         .call(&fixture.expiring_agent, "GET", "/api/v1/me", json!({}))
         .await;
     assert_eq!(expired_status, StatusCode::UNAUTHORIZED);
+
+    fixture.clock.set(BASE);
+    let (status, _) = fixture
+        .call(
+            &fixture.admin,
+            "POST",
+            "/api/v1/projects",
+            json!({"name":"second-incident-effect","repository_url":"https://example.test/second.git","target_branch":"main"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, stale_replay) = fixture
+        .call_with_key(
+            &fixture.admin,
+            "POST",
+            "/api/v1/admin/clock/reconcile",
+            reconcile_key,
+            reconcile_input,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale_replay}");
+    assert_eq!(stale_replay["error"]["code"], "clock_incident_changed");
 }
 
 #[tokio::test]
 async fn restart_detects_persisted_rollback_and_host_recovery_is_attributed() {
     let fixture = Fixture::new().await;
+    let (_, _, _, reporter, reporter_token) = seed_authority_state(&fixture).await;
     fixture.clock.set(BASE + 30_000);
     fixture.status().await;
 
@@ -366,6 +436,19 @@ async fn restart_detects_persisted_rollback_and_host_recovery_is_attributed() {
     let restarted_clock = Arc::new(TestClock(AtomicI64::new(BASE)));
     reopened.clock = restarted_clock.clone();
     let app = router(reopened.clone());
+    let reporter_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/reporters/{reporter}"))
+                .header("authorization", reporter_token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reporter_response.status(), StatusCode::UNAUTHORIZED);
     let (status, _) = call(
         app.clone(),
         &fixture.admin,
@@ -389,7 +472,7 @@ async fn restart_detects_persisted_rollback_and_host_recovery_is_attributed() {
         .unwrap_err();
     assert_eq!(too_early.code, "clock_still_untrusted");
 
-    restarted_clock.set(high_water + 10);
+    restarted_clock.set(high_water + 1_000);
     let recovered = recover_clock(
         &reopened,
         "The host clock now agrees with the trusted workstation clock.",
@@ -420,6 +503,18 @@ async fn small_backward_adjustment_is_clamped_without_an_incident() {
     assert!(after["incident"].is_null());
     assert!(
         after["clock_state"]["last_safe_time_ms"].as_i64().unwrap()
-            > before["clock_state"]["last_safe_time_ms"].as_i64().unwrap()
+            >= before["clock_state"]["last_safe_time_ms"].as_i64().unwrap()
     );
+}
+
+#[tokio::test]
+async fn frequent_submillisecond_samples_do_not_discard_monotonic_elapsed_time() {
+    let mut fixture = Fixture::new().await;
+    fixture.state.clock = Arc::new(MonotonicTestClock(AtomicI64::new(BASE)));
+    let first = fixture.state.now();
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_millis(4) {
+        let _ = fixture.state.now();
+    }
+    assert!(fixture.state.now() >= first + 3);
 }

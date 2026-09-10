@@ -90,11 +90,19 @@ impl Config {
 
 pub trait Clock: Send + Sync {
     fn now_ms(&self) -> i64;
+    /// Production clocks advance protected service time from a monotonic
+    /// anchor. Deterministic injected test clocks may explicitly opt out.
+    fn use_monotonic_elapsed(&self) -> bool {
+        true
+    }
 }
 pub struct SystemClock;
 impl Clock for SystemClock {
     fn now_ms(&self) -> i64 {
         chrono::Utc::now().timestamp_millis()
+    }
+    fn use_monotonic_elapsed(&self) -> bool {
+        true
     }
 }
 
@@ -111,20 +119,10 @@ pub struct AppState {
 
 struct ClockRuntime {
     high_water_ms: i64,
+    anchor_time_ms: i64,
     anchor: Instant,
     initialized: bool,
     incident_active: bool,
-}
-
-impl Default for ClockRuntime {
-    fn default() -> Self {
-        Self {
-            high_water_ms: 0,
-            anchor: Instant::now(),
-            initialized: false,
-            incident_active: false,
-        }
-    }
 }
 
 pub(crate) const MATERIAL_CLOCK_ROLLBACK_MS: i64 = 5_000;
@@ -151,12 +149,21 @@ impl AppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !runtime.initialized {
             runtime.high_water_ms = raw;
+            runtime.anchor_time_ms = raw;
             runtime.anchor = Instant::now();
             runtime.initialized = true;
         } else {
-            let elapsed = runtime.anchor.elapsed().as_millis().min(i64::MAX as u128) as i64;
-            runtime.high_water_ms = runtime.high_water_ms.saturating_add(elapsed).max(raw);
-            runtime.anchor = Instant::now();
+            let elapsed = if self.clock.use_monotonic_elapsed() {
+                runtime.anchor.elapsed().as_millis().min(i64::MAX as u128) as i64
+            } else {
+                0
+            };
+            let expected = runtime.anchor_time_ms.saturating_add(elapsed);
+            runtime.high_water_ms = runtime.high_water_ms.max(expected).max(raw);
+            if raw > expected {
+                runtime.anchor_time_ms = raw;
+                runtime.anchor = Instant::now();
+            }
         }
         runtime.high_water_ms
     }
@@ -179,10 +186,14 @@ impl AppState {
                 .clock_runtime
                 .lock()
                 .map_err(|_| AppError::internal())?;
-            let elapsed = runtime.anchor.elapsed().as_millis().min(i64::MAX as u128) as i64;
+            let elapsed = if self.clock.use_monotonic_elapsed() {
+                runtime.anchor.elapsed().as_millis().min(i64::MAX as u128) as i64
+            } else {
+                0
+            };
             (
                 runtime.high_water_ms,
-                runtime.high_water_ms.saturating_add(elapsed),
+                runtime.anchor_time_ms.saturating_add(elapsed),
                 runtime.initialized,
             )
         };
@@ -250,8 +261,14 @@ impl AppState {
                 .clock_runtime
                 .lock()
                 .map_err(|_| AppError::internal())?;
+            let reanchor = !runtime.initialized
+                || stored_high_water > expected_runtime_time
+                || raw > expected_runtime_time;
             runtime.high_water_ms = safe_now;
-            runtime.anchor = Instant::now();
+            if reanchor {
+                runtime.anchor_time_ms = safe_now;
+                runtime.anchor = Instant::now();
+            }
             runtime.initialized = true;
             runtime.incident_active = was_active || rollback;
         }
@@ -317,11 +334,15 @@ impl AppState {
         let high_water_time_ms: i64 = row.get("last_safe_time_ms");
         let observed_wall_time_ms: i64 = row.get("observed_wall_time_ms");
         let raw = self.raw_now();
-        if raw.saturating_add(MATERIAL_CLOCK_ROLLBACK_MS) < high_water_time_ms {
+        if raw < high_water_time_ms {
             return Err(AppError::conflict(
                 "clock_still_untrusted",
                 "The wall clock remains behind durable service time. Correct the host clock before reconciling this incident.",
-            ));
+            )
+            .with_details(serde_json::json!({
+                "observed_wall_time_ms":raw,
+                "required_safe_time_ms":high_water_time_ms,
+            })));
         }
         let now = raw.max(high_water_time_ms);
         sqlx::query("UPDATE clock_incidents SET recovered_at=?,recovery_reason=?,recovered_by=?,recovery_kind=? WHERE id=? AND recovered_at IS NULL")
@@ -353,6 +374,7 @@ impl AppState {
                 .lock()
                 .map_err(|_| AppError::internal())?;
             runtime.high_water_ms = now;
+            runtime.anchor_time_ms = now;
             runtime.anchor = Instant::now();
             runtime.initialized = true;
             runtime.incident_active = false;
@@ -442,6 +464,18 @@ impl AppState {
             validate_current_schema(&pool).await?;
         }
         let dummy_password_hash = crate::auth::hash_password(crate::auth::secret()).await?;
+        let clock_row =
+            sqlx::query("SELECT last_safe_time_ms,status FROM clock_state WHERE singleton=1")
+                .fetch_one(&pool)
+                .await?;
+        let durable_high_water: i64 = clock_row.get("last_safe_time_ms");
+        let clock_runtime = ClockRuntime {
+            high_water_ms: durable_high_water,
+            anchor_time_ms: durable_high_water,
+            anchor: Instant::now(),
+            initialized: true,
+            incident_active: clock_row.get::<String, _>("status") == "clock_reconciliation",
+        };
         Ok(Self {
             pool,
             config,
@@ -449,7 +483,7 @@ impl AppState {
             login_limits: Arc::new(Mutex::new(LoginLimits::default())),
             password_workers: Arc::new(Semaphore::new(2)),
             dummy_password_hash: Arc::new(dummy_password_hash),
-            clock_runtime: Arc::new(Mutex::new(ClockRuntime::default())),
+            clock_runtime: Arc::new(Mutex::new(clock_runtime)),
         })
     }
 }

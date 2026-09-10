@@ -124,8 +124,25 @@ async fn reconcile_clock(
     )
     .await?;
     admin(&mutation.actor)?;
-    if let Some(replay) = mutation.replay {
-        return Ok(response(replay));
+    if let Some(replay) = &mutation.replay {
+        // A receipt proves that this incident was reconciled once; it cannot
+        // project readiness over a later rollback incident. Re-read the
+        // singleton inside the writer transaction before returning a replay.
+        let current = sqlx::query("SELECT status,incident_id FROM clock_state WHERE singleton=1")
+            .fetch_one(&mut *mutation.tx)
+            .await?;
+        if current.get::<Option<String>, _>("incident_id").as_deref()
+            != Some(input.incident_id.as_str())
+        {
+            return Err(AppError::conflict(
+                "clock_incident_changed",
+                "The active service-clock incident changed. Reload its status before reconciling it.",
+            ));
+        }
+        if current.get::<String, _>("status") != "ready" {
+            return Err(crate::state::clock_reconciliation_error());
+        }
+        return Ok(response(replay.clone()));
     }
     let result = state
         .reconcile_clock_in_tx(
