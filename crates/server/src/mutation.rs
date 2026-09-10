@@ -136,7 +136,7 @@ impl Mutation {
         fingerprint: String,
         authority_epoch: String,
     ) -> Result<Self, AppError> {
-        let previous = sqlx::query("SELECT fingerprint,result_json,created_at,authority_epoch FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?")
+        let previous = sqlx::query("SELECT fingerprint,result_json,created_at,authority_epoch,compacted_at FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?")
             .bind(&actor.id).bind(operation).bind(&key).fetch_optional(&mut *tx).await?;
         let replay = if let Some(row) = previous {
             if row.get::<String, _>("authority_epoch") != authority_epoch {
@@ -149,6 +149,12 @@ impl Mutation {
                 return Err(AppError::conflict(
                     "idempotency_conflict",
                     "This mutation key was already used with different input or session. Reconcile the original request.",
+                ));
+            }
+            if row.get::<Option<i64>, _>("compacted_at").is_some() {
+                return Err(AppError::conflict(
+                    "idempotency_receipt_expired",
+                    "The operation was already processed, but its replay window expired. Inspect its record before starting a new operation.",
                 ));
             }
             if now - row.get::<i64, _>("created_at") > 30 * 86_400_000 {

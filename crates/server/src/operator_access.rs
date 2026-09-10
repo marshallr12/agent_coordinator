@@ -315,15 +315,39 @@ async fn created_operator_retry(
     let Some(key) = idempotency_key(headers) else {
         return Ok(None);
     };
-    let receipt: Option<String> = sqlx::query_scalar("SELECT mr.result_json FROM mutation_receipts mr JOIN service_state ss ON ss.singleton=1 AND ss.authority_epoch=mr.authority_epoch WHERE mr.principal_id=? AND mr.operation='POST /api/v1/admin/operators' AND mr.key=?")
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let clock = state.sample_clock(&mut tx).await?;
+    if clock.incident_detected {
+        tx.commit().await?;
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    if clock.incident_active {
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    let receipt = sqlx::query("SELECT mr.result_json,mr.authority_epoch,mr.compacted_at,ss.authority_epoch AS current_authority_epoch FROM mutation_receipts mr JOIN service_state ss ON ss.singleton=1 WHERE mr.principal_id=? AND mr.operation='POST /api/v1/admin/operators' AND mr.key=?")
         .bind(actor_id)
         .bind(key)
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *tx)
         .await?;
     let Some(receipt) = receipt else {
+        tx.commit().await?;
         return Ok(None);
     };
-    let result: Value = serde_json::from_str(&receipt)?;
+    if receipt.get::<String, _>("authority_epoch")
+        != receipt.get::<String, _>("current_authority_epoch")
+    {
+        return Err(AppError::conflict(
+            "request_from_previous_restore",
+            "This idempotency key belongs to authority from before the latest restore. Inspect the old result and use a new key for an intentional new operation.",
+        ));
+    }
+    if receipt.get::<Option<i64>, _>("compacted_at").is_some() {
+        return Err(AppError::conflict(
+            "idempotency_receipt_expired",
+            "The operation was already processed, but its replay window expired. Inspect its record before starting a new operation.",
+        ));
+    }
+    let result: Value = serde_json::from_str(&receipt.get::<String, _>("result_json"))?;
     let id = result
         .pointer("/operator/id")
         .and_then(Value::as_str)
@@ -341,8 +365,9 @@ async fn created_operator_retry(
     let password_hash =
         sqlx::query_scalar("SELECT password_hash FROM principals WHERE id=? AND kind='human'")
             .bind(id)
-            .fetch_optional(&state.pool)
+            .fetch_optional(&mut *tx)
             .await?;
+    tx.commit().await?;
     Ok(password_hash.map(|password_hash| CreatedOperatorRetry {
         password_hash,
         original_name,
@@ -998,6 +1023,9 @@ pub async fn recover_operator_password(
     let clock = state.sample_clock(&mut tx).await?;
     if clock.incident_detected {
         tx.commit().await?;
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    if clock.incident_active {
         return Err(crate::state::clock_reconciliation_error());
     }
     let now = clock.now;

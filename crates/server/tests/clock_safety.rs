@@ -6,7 +6,7 @@ use axum::{
 use coordinator_server::{
     auth::{digest, secret},
     knowledge::ensure_decisions_resolved,
-    operator_access::recover_clock,
+    operator_access::{recover_clock, recover_operator_password},
     router,
     state::{AppState, Clock, Config},
 };
@@ -325,6 +325,21 @@ async fn rollback_expires_authority_preserves_holds_and_never_revives_deadlines(
     let clock = fixture.status().await;
     assert_eq!(clock["clock_state"]["status"], "clock_reconciliation");
     assert_eq!(clock["material_rollback_threshold_ms"], 5_000);
+    let password_recovery = recover_operator_password(
+        &fixture.state,
+        "clock-admin",
+        "a replacement clock recovery password".into(),
+        "The account must remain unchanged until clock reconciliation finishes.",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(password_recovery.code, "clock_reconciliation_required");
+    let admin_revision: i64 = sqlx::query_scalar("SELECT revision FROM principals WHERE id=?")
+        .bind(&fixture.admin.principal)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(admin_revision, 1);
     let attempt_row = sqlx::query("SELECT state FROM attempts WHERE id=?")
         .bind(&attempt)
         .fetch_one(&fixture.state.pool)
@@ -517,4 +532,85 @@ async fn frequent_submillisecond_samples_do_not_discard_monotonic_elapsed_time()
         let _ = fixture.state.now();
     }
     assert!(fixture.state.now() >= first + 3);
+}
+
+#[tokio::test]
+async fn compacted_receipts_remain_reserved_when_raw_time_moves_backward() {
+    let fixture = Fixture::new().await;
+    let project_key = "compacted-project-receipt";
+    let project_input = json!({"name":"compacted receipt project","repository_url":"https://example.test/compacted.git","target_branch":"main"});
+    let (status, created) = fixture
+        .call_with_key(
+            &fixture.admin,
+            "POST",
+            "/api/v1/projects",
+            project_key,
+            project_input.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    fixture.clock.set(BASE + 4_000);
+    fixture.status().await;
+    sqlx::query("UPDATE mutation_receipts SET result_json='null',compacted_at=? WHERE principal_id=? AND operation='POST /api/v1/projects' AND key=?")
+        .bind(BASE + 4_000)
+        .bind(&fixture.admin.principal)
+        .bind(project_key)
+        .execute(&fixture.state.pool)
+        .await
+        .unwrap();
+    fixture.clock.set(BASE + 1_000);
+    let (status, replay) = fixture
+        .call_with_key(
+            &fixture.admin,
+            "POST",
+            "/api/v1/projects",
+            project_key,
+            project_input,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{replay}");
+    assert_eq!(replay["error"]["code"], "idempotency_receipt_expired");
+
+    let operator_key = "compacted-operator-receipt";
+    sqlx::query("INSERT INTO mutation_receipts(principal_id,operation,key,fingerprint,result_json,created_at,authority_epoch,compacted_at) VALUES(?,'POST /api/v1/admin/operators',?,'permanent-tombstone','null',?,'initial',?)")
+        .bind(&fixture.admin.principal)
+        .bind(operator_key)
+        .bind(BASE)
+        .bind(BASE + 4_000)
+        .execute(&fixture.state.pool)
+        .await
+        .unwrap();
+    let operator_input = json!({"name":"must-not-hash-or-create","role":"operator","password":"a private compacted password"});
+    let (status, compacted) = fixture
+        .call_with_key(
+            &fixture.admin,
+            "POST",
+            "/api/v1/admin/operators",
+            operator_key,
+            operator_input.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{compacted}");
+    assert_eq!(compacted["error"]["code"], "idempotency_receipt_expired");
+
+    let old_epoch_key = "old-epoch-compacted-operator-receipt";
+    sqlx::query("INSERT INTO mutation_receipts(principal_id,operation,key,fingerprint,result_json,created_at,authority_epoch,compacted_at) VALUES(?,'POST /api/v1/admin/operators',?,'permanent-tombstone','null',?,'old-authority-epoch',?)")
+        .bind(&fixture.admin.principal)
+        .bind(old_epoch_key)
+        .bind(BASE)
+        .bind(BASE + 4_000)
+        .execute(&fixture.state.pool)
+        .await
+        .unwrap();
+    let (status, old_epoch) = fixture
+        .call_with_key(
+            &fixture.admin,
+            "POST",
+            "/api/v1/admin/operators",
+            old_epoch_key,
+            operator_input,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{old_epoch}");
+    assert_eq!(old_epoch["error"]["code"], "request_from_previous_restore");
 }
