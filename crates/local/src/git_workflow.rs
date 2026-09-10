@@ -748,6 +748,14 @@ fn create_integration_result(intent: &IntegrationIntent) -> Result<(String, Stri
 }
 
 fn validate_result(intent: &IntegrationIntent) -> Result<()> {
+    let expected_target_tree = git_text(
+        &intent.checkout,
+        ["rev-parse", &format!("{}^{{tree}}", intent.expected_target)],
+    )?;
+    ensure!(
+        expected_target_tree == intent.expected_target_tree,
+        "expected target tree changed"
+    );
     let result = intent
         .result
         .as_deref()
