@@ -3,7 +3,7 @@
 Execution instruction: complete the remaining items sequentially. The main agent
 reviews each item's code and validation evidence before starting the next item.
 Continue without operator review; ask only for information or access needed to
-proceed. Complete items 3 through 6.2 autonomously, including Linux acceptance.
+proceed. Complete items 4 through 6.2 autonomously, including Linux acceptance.
 The operator will start Windows workstation acceptance as final item 7 after Linux acceptance; CI does
 not replace that workstation exercise.
 
@@ -21,11 +21,14 @@ native Git publication, and integrated-result validation before done/dependency
 release. Publication recovery preserves original evidence and transfers the hold
 to a fresh integration activity for fresh checks.
 
+Completed item 3: revisioned lessons, binding-rule provenance, scoped decisions,
+bounded context, artifact links/uploads, and authoritative Markdown import/export.
+The main agent reviewed the integrated behavior; all 114 tests, the built smoke
+exercise, browser checks, Linux/Windows CI, and dependency audit passed. Audited
+SithBit/Submission fixtures preserve historical closure and leave source
+repositories unchanged.
+
 Next work, preserving the original backlog numbering:
-3. Add revisioned lessons, binding rules/provenance, decision queue, bounded context
-   search, artifact links/uploads, and service-authoritative Markdown import/export.
-   Exercise the audited SithBit and Submission historical fixtures without mutating
-   those source repositories or reopening completed imported items.
 4. Expand operator account management, recovery/rotation, policy editor, objective grouping and full task
    history pagination, operator recovery controls, and native client commands.
    Keep the short bootstrap snippet and returned instructions aligned with behavior.

@@ -1,9 +1,8 @@
 # Implementation handoff — 2026-09-09
 
-Backlog item 3 implementation is ready: shared knowledge, scoped decisions,
-bounded artifacts, and authoritative Markdown imports/exports. Local integrated
-validation has passed; CI is pending. Do not mark the item complete until CI passes.
-Continue sequentially with item 4 after the main agent reviews that evidence.
+Backlog item 3 is implemented and reviewed: shared knowledge, scoped decisions,
+bounded artifacts, and authoritative Markdown imports/exports. All 114 tests, local build/smoke/browser checks, and Linux/Windows CI passed.
+Continue sequentially with item 4.
 
 Instruction version 4 describes the implemented shared-record workflow and CLI
 commands. Existing harnesses must read and acknowledge it before new claims.
@@ -31,6 +30,9 @@ use the standard searchable/correctable scope and provenance shapes. Sanitized
 SithBit/Submission fixtures came from read-only source review; those repositories
 and Submission's pre-existing edits were preserved.
 
+Implementation commit `ca59ee0` passed
+[CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271),
+including native Windows tests and the locked dependency audit.
 Current local tests, service/CLI smoke, and browser evidence are described in
 [implementation status](docs/implementation-status.md). Each worktree must use its
 own Cargo target directory. Main-agent review corrected decision authority/read

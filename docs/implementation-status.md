@@ -188,8 +188,11 @@ lesson revision 2 and feedback, denied/reopened/allowed decisions, policy-change
 invalidation, planned/done imported task states, context search, rule provenance,
 artifact links, export, project selection, and responsive layout without
 horizontal overflow at approximately 390 CSS pixels. No browser errors were
-reported. Final CI for this milestone is pending until the integrated commit is
-pushed; the earlier CI link above applies only to the prior milestone.
+reported. Implementation commit `ca59ee0` passed Linux format/Clippy/tests/build,
+the full service/CLI exercise, native Windows client/CLI/local tests, and the
+locked dependency audit in
+[CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271).
+The earlier CI link above applies to the prior milestone.
 
 The remaining release sequence is operator management, backups/restore, Linux
 acceptance, MCP (6.1), mdBook (6.2), and operator-initiated Windows acceptance (7).
