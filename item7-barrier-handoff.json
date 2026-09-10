@@ -1,0 +1,17 @@
+{
+  "schema": "agent-coordinator-item7-barrier-v1",
+  "created_by_workstation": "mxmini",
+  "service_url": "https://huntington-left-sources-farms.trycloudflare.com",
+  "project_id": "7d9f4b62-0e09-4c7c-a5ca-07c6bddbf76a",
+  "task_id": "e0ef5166-0ea3-4bac-aa46-80f37264810c",
+  "expected_task_revision": 1,
+  "policy_revision": 1,
+  "instruction_version": "7",
+  "barrier_utc": "2026-09-10T16:11:27Z",
+  "barrier_unix_seconds": 1789056687,
+  "linux_principal_id": "5abb3e12-bc7d-447e-ba29-3422cf47166e",
+  "linux_session_id": "07d69778-c404-478d-a598-b70832000b3a",
+  "windows_action": "Using the already-connected native Windows principal and a current native Windows session, submit exactly one ordinary work claim for the exact task and revision at the barrier. Preserve the request body and idempotency key before sending. Do not create another credential or expose credentials, tokens, proofs, or request headers. Record the sanitized result in item7-barrier-windows-result.json on this branch and push it immediately.",
+  "linux_action": "The Linux peer will submit its independently journaled ordinary work claim at the same barrier and will record only sanitized evidence.",
+  "post_race": "The winner must checkpoint the outcome and keep ownership until both results are inspected. The loser must record the existing-owner conflict. The winner will then release the task ready unless a later acceptance step requires submission."
+}
