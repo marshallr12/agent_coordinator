@@ -722,19 +722,11 @@ async fn revoke_credential(
     ))
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct NewSession {
-    session_id: String,
-    workstation_id: String,
-    harness: String,
-    capabilities: Vec<String>,
-}
 async fn create_session(
     State(state): State<AppState>,
     auth: Auth,
     headers: HeaderMap,
-    Json(input): Json<NewSession>,
+    Json(input): Json<coordinator_core::SessionInput>,
 ) -> Result<Json<Value>, AppError> {
     agent(&auth.actor)?;
     if !valid_id(&input.session_id)

@@ -16,6 +16,7 @@ pub use workflow::*;
 pub const INSTRUCTION_VERSION: &str = "7";
 pub const REQUIRED_SECTION: &str = "coordination-v7";
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectInput {
@@ -24,6 +25,7 @@ pub struct ProjectInput {
     pub target_branch: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskInput {
@@ -50,6 +52,7 @@ fn work() -> String {
     "work".into()
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimInput {
@@ -61,6 +64,7 @@ pub struct ClaimInput {
     pub instruction_version: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Acknowledgment {
@@ -70,12 +74,14 @@ pub struct Acknowledgment {
     pub sections: Vec<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenewInput {
     pub generation: i64,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointInput {
@@ -89,6 +95,7 @@ pub struct CheckpointInput {
     pub blockers: Vec<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseInput {
@@ -98,6 +105,7 @@ pub struct ReleaseInput {
     pub blocked: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryInput {
@@ -108,6 +116,7 @@ pub struct RecoveryInput {
     pub running_jobs_checked: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckoutInput {
@@ -120,6 +129,7 @@ pub struct CheckoutInput {
     pub clean: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyInput {
@@ -134,6 +144,7 @@ pub struct PolicyInput {
     pub automatic_integration: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskEdit {
@@ -150,4 +161,23 @@ pub fn timestamp(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .unwrap_or(chrono::DateTime::UNIX_EPOCH)
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Stable harness registration; resume proof is supplied only in an HTTP header.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionInput {
+    pub session_id: String,
+    pub workstation_id: String,
+    pub harness: String,
+    pub capabilities: Vec<String>,
+}
+
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnblockInput {
+    pub expected_revision: i64,
+    pub reason: String,
 }

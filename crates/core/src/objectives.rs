@@ -1,6 +1,7 @@
 //! Objective grouping requests shared by the service and native clients.
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectiveChildInput {
@@ -8,6 +9,7 @@ pub struct ObjectiveChildInput {
     pub required: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectiveInput {
@@ -23,6 +25,7 @@ pub struct ObjectiveInput {
     pub planned: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectiveChildrenInput {

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredCheck {
@@ -8,6 +9,7 @@ pub struct RequiredCheck {
     pub environment: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowPolicyInput {
@@ -16,6 +18,7 @@ pub struct WorkflowPolicyInput {
     pub required_checks: Vec<RequiredCheck>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptanceEvidence {
@@ -23,6 +26,7 @@ pub struct AcceptanceEvidence {
     pub evidence: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmissionInput {
@@ -61,6 +65,7 @@ mod compatibility_tests {
     }
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActivityClaimInput {
@@ -69,6 +74,7 @@ pub struct ActivityClaimInput {
     pub expected_workflow_policy_revision: i64,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewFindingInput {
@@ -78,6 +84,7 @@ pub struct ReviewFindingInput {
     pub evidence: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewInput {
@@ -89,6 +96,7 @@ pub struct ReviewInput {
     pub findings: Vec<ReviewFindingInput>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntegrationAuthorizationInput {
@@ -98,6 +106,7 @@ pub struct IntegrationAuthorizationInput {
     pub summary: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicationIntentInput {
@@ -109,6 +118,7 @@ pub struct PublicationIntentInput {
     pub result_tree: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntegrationResultInput {
@@ -122,6 +132,7 @@ pub struct IntegrationResultInput {
     pub summary: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicationReconciliationInput {
@@ -132,6 +143,7 @@ pub struct PublicationReconciliationInput {
     pub evidence: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FinalizeIntegrationInput {
@@ -141,6 +153,7 @@ pub struct FinalizeIntegrationInput {
     pub observed_target_tree: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReopenSubmissionInput {
@@ -148,6 +161,7 @@ pub struct ReopenSubmissionInput {
     pub reason: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActivityReleaseInput {

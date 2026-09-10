@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TaskHistoryItem {
     pub kind: String,
@@ -12,6 +13,7 @@ pub struct TaskHistoryItem {
     pub record: Value,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TaskHistoryPage {
     pub project_id: String,

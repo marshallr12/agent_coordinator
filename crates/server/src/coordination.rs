@@ -639,18 +639,12 @@ async fn edit_task(
         m.finish(value, Some(&p), "task.edited", &id).await?,
     ))
 }
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Unblock {
-    expected_revision: i64,
-    reason: String,
-}
 async fn unblock_task(
     State(s): State<AppState>,
     auth: Auth,
     Path((p, id)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Result<Json<Unblock>, JsonRejection>,
+    body: Result<Json<UnblockInput>, JsonRejection>,
 ) -> Reply {
     let input = payload(body)?;
     bounded(&input.reason, "reason", 4096, true)?;

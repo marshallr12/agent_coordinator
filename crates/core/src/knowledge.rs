@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeScope {
@@ -15,6 +16,7 @@ pub struct KnowledgeScope {
     pub versions: Vec<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeProvenance {
@@ -24,6 +26,7 @@ pub struct KnowledgeProvenance {
     pub source_submission_id: Option<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeInput {
@@ -48,6 +51,7 @@ fn project_collection() -> String {
 }
 
 /// The lesson shape accepted as part of an immutable submission transaction.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmissionLessonInput {
@@ -69,6 +73,7 @@ pub struct SubmissionLessonInput {
     pub source_uri: Option<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeEditInput {
@@ -85,6 +90,7 @@ pub struct KnowledgeEditInput {
     pub superseded_by_id: Option<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeFeedbackInput {
@@ -94,6 +100,7 @@ pub struct KnowledgeFeedbackInput {
     pub comment: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionTaskInput {
@@ -101,6 +108,7 @@ pub struct DecisionTaskInput {
     pub task_revision: i64,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionInput {
@@ -117,6 +125,7 @@ pub struct DecisionInput {
     pub expires_at: Option<i64>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionAnswerInput {
@@ -128,6 +137,7 @@ pub struct DecisionAnswerInput {
     pub conditions_confirmed: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionReopenInput {

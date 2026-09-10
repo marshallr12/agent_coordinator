@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportSource {
@@ -13,6 +14,7 @@ pub struct ImportSource {
     pub environment: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MarkdownChunk {
@@ -20,6 +22,7 @@ pub struct MarkdownChunk {
     pub markdown: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoricalMapping {
@@ -30,6 +33,7 @@ pub struct HistoricalMapping {
     pub evidence: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportPreviewInput {
@@ -39,6 +43,7 @@ pub struct ImportPreviewInput {
     pub historical_mappings: Vec<HistoricalMapping>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyImportInput {
@@ -46,6 +51,7 @@ pub struct ApplyImportInput {
     pub expected_project_event_revision: i64,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ImportItem {
     pub stable_identity: String,
@@ -59,6 +65,7 @@ pub struct ImportItem {
     pub prior_record_revision: Option<i64>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ImportConflict {
     pub code: String,
@@ -68,6 +75,7 @@ pub struct ImportConflict {
     pub blocking: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct UnresolvedMarkdownLink {
     pub source_path: String,
@@ -75,6 +83,7 @@ pub struct UnresolvedMarkdownLink {
     pub target: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ImportPreview {
     pub id: String,
@@ -89,6 +98,7 @@ pub struct ImportPreview {
     pub applied_at: Option<String>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExportRecord {
     pub sort_key: String,

@@ -1,6 +1,7 @@
 //! Requests for bounded, authenticated artifact storage.
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactLinkInput {
@@ -21,6 +22,7 @@ pub struct ArtifactLinkInput {
     pub pinned: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactUploadInput {
@@ -38,6 +40,7 @@ pub struct ArtifactUploadInput {
     pub pinned: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactRetentionInput {
@@ -46,6 +49,7 @@ pub struct ArtifactRetentionInput {
     pub retention_days: Option<i64>,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactDeleteInput {
