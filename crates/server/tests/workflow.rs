@@ -122,6 +122,7 @@ impl Fixture {
         let (s,v)=self.call(c,"POST",&format!("/api/v1/projects/{p}/attempts/{}/checkout",attempt["id"].as_str().unwrap()),json!({"generation":attempt["generation"],"workstation_id":format!("{0}-workstation",c.principal),"identity":Uuid::new_v4().to_string(),"path":"/tmp/workflow-test","branch":"workflow-test","base_revision":base,"clean":true})).await;
         assert_eq!(s, StatusCode::OK, "{v}");
     }
+    #[allow(clippy::too_many_arguments)]
     async fn submit(
         &self,
         c: &Caller,
@@ -280,11 +281,11 @@ const TREE: &str = "3333333333333333333333333333333333333333";
 const RESULT: &str = "4444444444444444444444444444444444444444";
 const RESULT_TREE: &str = "5555555555555555555555555555555555555555";
 
-async fn code_integration(f: &Fixture, name: &str) -> (String, Value, Value) {
+async fn code_integration(f: &Fixture, name: &str, canonical: &str) -> (String, Value, Value) {
     let repo = format!("https://example.test/{name}.git");
     let p = f.project(name, &repo).await;
     f.policy_none(&p).await;
-    f.workflow_policy(&p, name).await;
+    f.workflow_policy(&p, canonical).await;
     let t = f.task(&p, "code", "Implement exact workflow").await;
     let owner = f.claim(&f.a, &p, &t, 2).await;
     f.checkout(&f.a, &p, &owner, BASE).await;
@@ -308,7 +309,7 @@ async fn code_integration(f: &Fixture, name: &str) -> (String, Value, Value) {
 #[tokio::test]
 async fn exact_success_job_enables_publish_and_atomic_completion() {
     let f = Fixture::new().await;
-    let (p, t, submitted) = code_integration(&f, "code-success").await;
+    let (p, t, submitted) = code_integration(&f, "code-success", "code-success").await;
     let integration = activity(&submitted, "integration").clone();
     let (status, claimed) = f.claim_activity(&f.c, &p, &integration, 2, 1).await;
     assert_eq!(status, StatusCode::OK, "{claimed}");
@@ -365,7 +366,7 @@ async fn exact_success_job_enables_publish_and_atomic_completion() {
 #[tokio::test]
 async fn intent_only_crash_retains_hold_until_human_reconciliation_creates_replacement() {
     let f = Fixture::new().await;
-    let (p, _t, submitted) = code_integration(&f, "intent-crash").await;
+    let (p, _t, submitted) = code_integration(&f, "intent-crash", "intent-crash").await;
     let integration = activity(&submitted, "integration").clone();
     let (_, claimed) = f.claim_activity(&f.c, &p, &integration, 2, 1).await;
     let attempt = claimed["data"]["attempt"].clone();

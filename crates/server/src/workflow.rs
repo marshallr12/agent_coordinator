@@ -466,7 +466,6 @@ async fn submit(
             &submission,
             "agent_review",
             1,
-            None,
             mutation.now,
         )
         .await?;
@@ -479,23 +478,24 @@ async fn submit(
             &submission,
             "human_review",
             1,
-            None,
             mutation.now,
         )
         .await?;
     }
     if input.kind == "code" {
-        create_activity(
+        let integration_activity = create_activity(
             &mut mutation.tx,
             &project,
             &subject,
             &submission,
             "integration",
             1,
-            (need_agent || need_human).then_some("Required reviews are pending."),
             mutation.now,
         )
         .await?;
+        if need_agent || need_human {
+            sqlx::query("UPDATE tasks SET blocked_reason='Required reviews are pending.' WHERE id=(SELECT activity_task_id FROM workflow_activities WHERE id=?)").bind(integration_activity).execute(&mut *mutation.tx).await?;
+        }
     } else if phase == "done" {
         sqlx::query("UPDATE tasks SET lifecycle='done',blocked_reason=NULL WHERE id=?")
             .bind(&subject.task_id)
@@ -1376,11 +1376,6 @@ async fn release_activity(
             &ctx.submission,
             "integration",
             slot,
-            if input.blocked {
-                Some(input.summary.as_str())
-            } else {
-                None
-            },
             m.now,
         )
         .await?;
@@ -2048,7 +2043,6 @@ async fn reconcile_publication(
         &ctx.submission,
         "integration",
         slot,
-        None,
         m.now,
     )
     .await?;
@@ -2273,7 +2267,6 @@ async fn create_activity(
     submission: &str,
     kind: &str,
     slot: i64,
-    blocked: Option<&str>,
     now: i64,
 ) -> Result<String, AppError> {
     let activity = Uuid::new_v4().to_string();
@@ -2289,7 +2282,7 @@ async fn create_activity(
     }])?;
     sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,revision,generation,blocked_reason,created_at,ready_since) VALUES(?,?,?,?,?,'general',0,'open',1,0,?,?,?)")
         .bind(&task).bind(project).bind(&title).bind(format!("Internal workflow activity for submission {submission}.")).bind(&acceptance)
-        .bind(blocked).bind(now).bind(now).execute(&mut *c).await?;
+        .bind(Option::<String>::None).bind(now).bind(now).execute(&mut *c).await?;
     sqlx::query("INSERT INTO task_revisions(project_id,task_id,revision,data_json,actor_id,created_at) \
         SELECT ?,?,1,json_object('title',?,'description',?,'acceptance_criteria',json(?),'kind','general','priority',0,'depends_on',json('[]'),'planned',false),created_by,? FROM submissions WHERE id=?")
         .bind(project).bind(&task).bind(&title).bind(format!("Internal workflow activity for submission {submission}."))
