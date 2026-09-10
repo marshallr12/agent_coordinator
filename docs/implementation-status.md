@@ -137,9 +137,10 @@ stale-candidate recovery, preserved history, responsive layout, and sign-out.
 
 Linux workspace checks, the real service/CLI smoke exercise, native Windows
 client/CLI/local-runner tests, and the locked dependency audit passed for workflow
-implementation commit `df62e3a` in
-[CI run 34423673990](https://github.com/marshallr12/agent_coordinator/actions/runs/34423673990).
-Subsequent recovery regressions and final UI changes are also checked locally.
+implementation commit `5e6f19b` in
+[CI run 34424382043](https://github.com/marshallr12/agent_coordinator/actions/runs/34424382043).
+The same revision passed all 84 local workspace tests, warnings-denied Clippy,
+formatting, JavaScript syntax checks, and the complete smoke exercise.
 No production deployment, 100,000-task benchmark, off-server
 backup, or restore rehearsal has occurred.
 

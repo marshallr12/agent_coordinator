@@ -34,7 +34,12 @@ Independent reviewers need separately enrolled principals. The CLI now performs
 instruction acknowledgment before review/integration claims as well as ordinary
 claims. Git 2.39.5 was used locally; native integration requires Git 2.39 or newer.
 
-Validation results are recorded in docs/implementation-status.md. The complete
+All 84 workspace tests, warnings-denied Clippy, formatting, JavaScript syntax,
+and the full built service/CLI exercise pass locally. Linux workspace checks,
+native Windows client/CLI/local-runner tests, and the locked dependency audit
+passed for implementation commit `5e6f19b` in
+[CI run 34424382043](https://github.com/marshallr12/agent_coordinator/actions/runs/34424382043).
+Validation details are recorded in docs/implementation-status.md. The complete
 Linux service/CLI exercise passes real Git preparation/publication, both reviews,
 human authorization, refusal before required checks, exact producer evidence,
 historical publish retry, and dependency release only after finalization. Browser
