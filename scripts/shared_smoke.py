@@ -1,4 +1,5 @@
 """Shared records, bounded context, import/export, and artifact metadata smoke."""
+import hashlib
 import time
 
 
@@ -141,6 +142,48 @@ def exercise_shared(temporary, api, cli, project, owner):
     assert any(item["id"] == artifact["id"] for item in listed_artifacts["items"])
     assert "storage" in listed_artifacts
 
+    upload_source = temporary / "shared artifact source with spaces.bin"
+    original_bytes = b"original shared artifact bytes\x00\xff\n"
+    original_digest = hashlib.sha256(original_bytes).hexdigest()
+    upload_source.write_bytes(original_bytes)
+    reservation = client("artifacts", "reserve", body={
+        "filename": "shared-smoke.bin",
+        "media_type": "application/octet-stream",
+        "size_bytes": len(original_bytes),
+        "sha256": original_digest,
+        "task_id": task["id"],
+        "job_id": None,
+        "retention_days": 90,
+        "pinned": False,
+    })
+    upload_id = reservation["artifact"]["id"]
+    uploaded = client(
+        "artifacts", "upload", "--id", upload_id, "--file", str(upload_source)
+    )
+    assert uploaded == {
+        "artifact_id": upload_id,
+        "size_bytes": len(original_bytes),
+        "sha256": original_digest,
+    }
+    upload_source.write_bytes(b"edited after successful upload")
+    repeated = client(
+        "artifacts", "upload", "--id", upload_id, "--file", str(upload_source)
+    )
+    assert repeated == uploaded, "A completed retry did not reuse its saved upload result."
+
+    download_output = temporary / "download output with spaces.bin"
+    downloaded = client(
+        "artifacts", "download", "--id", upload_id, "--output", str(download_output)
+    )["download"]
+    assert downloaded["size_bytes"] == len(original_bytes)
+    assert download_output.read_bytes() == original_bytes
+    refused = cli(
+        owner, "artifacts", "download", "--id", upload_id,
+        "--output", str(download_output), expected=2,
+    )
+    assert refused["error"]["code"] == "invalid_client_input"
+    assert download_output.read_bytes() == original_bytes
+
     exported = client("export", "--limit", "200")
     markdown = exported["markdown"]
     assert exported["generated"] and exported["omissions"] == []
@@ -148,4 +191,5 @@ def exercise_shared(temporary, api, cli, project, owner):
     assert preview["items"][0]["stable_identity"] in markdown
     assert "a" * 40 in markdown
     print("PASS: knowledge correction and bounded context, protected decision answer,")
-    print("      human-gated import, generated export provenance, and artifact link metadata.")
+    print("      human-gated import, generated export provenance, artifact metadata,")
+    print("      durable native upload retry, safe download, and byte-for-byte content.")
