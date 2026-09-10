@@ -530,8 +530,9 @@ agent-coordinator.exe integrations prepare `
 
 Preparation checks fresh activity and attempt authority before local Git work,
 persists the exact request before creating the result, registers immutable
-publication intent before any push, and materializes the result in the isolated
-checkout for exact-source checks. It never updates the target branch.
+publication intent with the exact prepublication target revision and tree before
+any push, and materializes the result in the isolated checkout for exact-source
+checks. It never updates the target branch.
 
 Run every required check against that materialized checkout, wait for terminal
 successful job receipts, and release the check reservations. The checkout must

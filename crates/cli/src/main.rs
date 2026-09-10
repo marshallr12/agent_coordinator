@@ -1296,6 +1296,7 @@ async fn prepare_integration(
         "generation": args.authority.generation,
         "submission_id": args.submission,
         "observed_target_revision": prepared.expected_target,
+        "observed_target_tree": prepared.expected_target_tree,
         "result_revision": result,
         "result_tree": result_tree
     });
@@ -1306,7 +1307,12 @@ async fn prepare_integration(
         require_matching_fields(
             existing,
             &body,
-            &["observed_target_revision", "result_revision", "result_tree"],
+            &[
+                "observed_target_revision",
+                "observed_target_tree",
+                "result_revision",
+                "result_tree",
+            ],
         )
         .map_err(Failure::invalid)?;
         if let Some(pending) = &session.pending {
@@ -1987,6 +1993,10 @@ async fn validate_publication_authority(
         (
             "observed_target_revision",
             publication.expected_target.as_str(),
+        ),
+        (
+            "observed_target_tree",
+            publication.expected_target_tree.as_str(),
         ),
         ("result_revision", publication.result.as_str()),
         ("result_tree", publication.result_tree.as_str()),
