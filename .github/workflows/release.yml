@@ -1,0 +1,180 @@
+name: Release package acceptance
+
+"on":
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.98.1
+  CADDY_VERSION: 2.11.4
+  CADDY_LINUX_AMD64_SHA256: 527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9
+
+jobs:
+  linux-package:
+    name: Ubuntu 24.04 package and systemd/HTTPS acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Rebuild and package twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
+          epoch="$(git show -s --format=%ct HEAD)"
+          CARGO_TARGET_DIR=target/repro-first cargo build --release --locked -p coordinator-server -p coordinator-cli
+          python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
+            --server target/repro-first/release/agent-coordinator-server --cli target/repro-first/release/agent-coordinator \
+            --source-date-epoch "$epoch" --output-dir dist/first
+          CARGO_TARGET_DIR=target/repro-second cargo build --release --locked -p coordinator-server -p coordinator-cli
+          python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
+            --server target/repro-second/release/agent-coordinator-server --cli target/repro-second/release/agent-coordinator \
+            --source-date-epoch "$epoch" --output-dir dist/second
+          cmp "dist/first/agent-coordinator-$version-linux-x86_64.tar.gz" \
+              "dist/second/agent-coordinator-$version-linux-x86_64.tar.gz"
+          cmp "dist/first/agent-coordinator-$version-linux-x86_64.tar.gz.sha256" \
+              "dist/second/agent-coordinator-$version-linux-x86_64.tar.gz.sha256"
+          python3 scripts/linux_install_smoke.py \
+            --package "dist/first/agent-coordinator-$version-linux-x86_64.tar.gz"
+          echo "PACKAGE=dist/first/agent-coordinator-$version-linux-x86_64.tar.gz" >> "$GITHUB_ENV"
+      - name: Download and verify the pinned Caddy fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/caddy-release"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+            --output "$RUNNER_TEMP/caddy-release/caddy.tar.gz" \
+            "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+          echo "$CADDY_LINUX_AMD64_SHA256  $RUNNER_TEMP/caddy-release/caddy.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/caddy-release/caddy.tar.gz" -C "$RUNNER_TEMP/caddy-release" caddy
+          "$RUNNER_TEMP/caddy-release/caddy" version
+      - name: Exercise disposable systemd installation and trusted HTTPS
+        run: sudo --preserve-env=CI python3 scripts/linux_install_smoke.py --package "$PACKAGE" --systemd --caddy "$RUNNER_TEMP/caddy-release/caddy"
+      - name: Upload accepted Linux package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agent-coordinator-linux-x86_64
+          path: |
+            ${{ env.PACKAGE }}
+            ${{ env.PACKAGE }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-package:
+    name: Native Windows CLI release package
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default $env:RUST_TOOLCHAIN
+      - name: Run native Windows client tests
+        run: |
+          cargo test -p coordinator-client -p coordinator-cli -p coordinator-local --locked --no-fail-fast
+      - name: Rebuild and package the Windows CLI twice
+        shell: pwsh
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $epoch = git show -s --format=%ct HEAD
+          $env:CARGO_TARGET_DIR = "target/repro-first"
+          cargo build --release --locked -p coordinator-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/package_release.py --platform windows-x86_64 --version $version --cli target/repro-first/release/agent-coordinator.exe --source-date-epoch $epoch --output-dir dist/first
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CARGO_TARGET_DIR = "target/repro-second"
+          cargo build --release --locked -p coordinator-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/package_release.py --platform windows-x86_64 --version $version --cli target/repro-second/release/agent-coordinator.exe --source-date-epoch $epoch --output-dir dist/second
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $package = "agent-coordinator-$version-windows-x86_64.zip"
+          if ((Get-FileHash "dist/first/$package").Hash -ne (Get-FileHash "dist/second/$package").Hash) { throw "Windows packages are not reproducible." }
+          if ((Get-FileHash "dist/first/$package.sha256").Hash -ne (Get-FileHash "dist/second/$package.sha256").Hash) { throw "Windows checksums are not reproducible." }
+          & target/repro-first/release/agent-coordinator.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PACKAGE_TO_VERIFY = "dist/first/$package"
+          @'
+          import hashlib
+          import os
+          from pathlib import Path, PurePosixPath
+          import zipfile
+
+          package = Path(os.environ["PACKAGE_TO_VERIFY"])
+          outer = Path(str(package) + ".sha256").read_text(encoding="ascii").split()
+          assert outer == [hashlib.sha256(package.read_bytes()).hexdigest(), package.name]
+          with zipfile.ZipFile(package) as archive:
+              names = archive.namelist()
+              assert len(names) == len(set(names)) and len(names) <= 64
+              assert all(not PurePosixPath(name).is_absolute() and ".." not in PurePosixPath(name).parts for name in names)
+              manifest_name = next(name for name in names if name.endswith("/SHA256SUMS"))
+              root = manifest_name.removesuffix("SHA256SUMS")
+              expected = {
+                  name: digest
+                  for digest, name in (line.split() for line in archive.read(manifest_name).decode("ascii").splitlines())
+              }
+              actual = {name.removeprefix(root) for name in names if name != manifest_name}
+              assert set(expected) == actual and "agent-coordinator.exe" in actual
+              for name, digest in expected.items():
+                  assert hashlib.sha256(archive.read(root + name)).hexdigest() == digest
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "WINDOWS_PACKAGE=dist/first/$package" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Upload accepted Windows CLI package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agent-coordinator-windows-x86_64
+          path: |
+            ${{ env.WINDOWS_PACKAGE }}
+            ${{ env.WINDOWS_PACKAGE }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-load:
+    name: Ubuntu 24.04 release-size load acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Build the native release server
+        run: cargo build --release --locked -p coordinator-server
+      - name: Run the 30-minute release-size workload
+        run: python3 scripts/load_acceptance.py --server target/release/agent-coordinator-server --duration 1800 --rate 50 --history 100000 --report load-acceptance.json
+      - name: Upload the sanitized load report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-load-acceptance
+          path: load-acceptance.json
+          if-no-files-found: error
+          retention-days: 14

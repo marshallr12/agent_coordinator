@@ -1,12 +1,14 @@
-# Foundation deployment examples
+# Service deployment examples
 
-These are installation examples for the first foundation slice, not evidence of
-a production deployment or completion of the planned release. Use one service
-process and a local filesystem for SQLite. Caddy terminates HTTPS; the service
-only accepts loopback listener addresses and ignores forwarded headers.
+These examples configure one service process with SQLite on a local filesystem.
+Caddy terminates HTTPS; the service accepts only loopback listener addresses and
+ignores forwarded headers. For checksum verification, package layout, supported
+binary platform, upgrade boundaries, and removal, start with the
+[Linux release installation guide](../docs/linux-installation.md).
 
-1. Build `agent-coordinator-server` from the reviewed source and install it as
-   `/usr/local/bin/agent-coordinator-server`. Assets and migrations are embedded.
+1. Verify and extract the reviewed release package. Install its
+   `agent-coordinator-server` and `agent-coordinator` binaries under
+   `/usr/local/bin`. Assets and migrations are embedded in the server.
 2. Create an unprivileged `agent-coordinator` system account and group, a
    `/var/lib/agent-coordinator` directory owned by that account with mode 0700,
    and `/etc/agent-coordinator` owned by root.
