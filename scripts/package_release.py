@@ -8,17 +8,20 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import shutil
 import stat
 import tarfile
 import tempfile
+import urllib.parse
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = ("linux-x86_64", "windows-x86_64")
 VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}\Z")
+MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))")
 
 
 def sha256(path: Path) -> str:
@@ -57,6 +60,10 @@ def source_entries(platform: str, server: Path | None, cli: Path) -> dict[str, t
         entries[source.name] = (checked_file(source, "top-level guide"), 0o644)
     for source in sorted(docs.glob("*.md")):
         entries[f"docs/{source.name}"] = (checked_file(source, "documentation"), 0o644)
+    for source in sorted(deploy.iterdir()):
+        if source.is_file() and not source.is_symlink():
+            mode = 0o600 if source.name == "service.env.example" else 0o644
+            entries[f"deploy/{source.name}"] = (checked_file(source, "deployment file"), mode)
     if platform == "linux-x86_64":
         if server is None:
             raise SystemExit("--server is required for the Linux package")
@@ -64,15 +71,27 @@ def source_entries(platform: str, server: Path | None, cli: Path) -> dict[str, t
             "bin/agent-coordinator-server": (checked_file(server, "server binary"), 0o755),
             "bin/agent-coordinator": (checked_file(cli, "CLI binary"), 0o755),
         })
-        for source in sorted(deploy.iterdir()):
-            if source.is_file() and not source.is_symlink():
-                mode = 0o600 if source.name == "service.env.example" else 0o644
-                entries[f"deploy/{source.name}"] = (checked_file(source, "deployment file"), mode)
     else:
         if server is not None:
             raise SystemExit("--server is not accepted for the Windows CLI package")
         entries["agent-coordinator.exe"] = (checked_file(cli, "Windows CLI binary"), 0o755)
     return entries
+
+
+def validate_local_markdown_links(entries: dict[str, tuple[Path, int]]) -> None:
+    for name, (source, _) in entries.items():
+        if not name.endswith(".md"):
+            continue
+        for match in MARKDOWN_LINK.finditer(source.read_text(encoding="utf-8")):
+            raw = match.group(1) or match.group(2)
+            parsed = urllib.parse.urlsplit(raw)
+            if parsed.scheme or parsed.netloc or not parsed.path or parsed.path.startswith("/"):
+                continue
+            target = posixpath.normpath(
+                posixpath.join(str(PurePosixPath(name).parent), urllib.parse.unquote(parsed.path))
+            )
+            if target == ".." or target.startswith("../") or target not in entries:
+                raise SystemExit(f"local Markdown link is missing from the package: {name}")
 
 
 def checksum_manifest(entries: dict[str, tuple[Path, int]]) -> bytes:
@@ -170,6 +189,7 @@ def main() -> None:
         raise SystemExit("--source-date-epoch is outside the supported range")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     entries = source_entries(args.platform, args.server, args.cli)
+    validate_local_markdown_links(entries)
     manifest = checksum_manifest(entries)
     root_name = f"agent-coordinator-{args.version}-{args.platform}"
     suffix = ".tar.gz" if args.platform == "linux-x86_64" else ".zip"
