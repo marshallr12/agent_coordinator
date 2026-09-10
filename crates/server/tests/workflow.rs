@@ -24,6 +24,58 @@ impl Clock for TestClock {
     }
 }
 
+#[tokio::test]
+async fn revoked_reviewer_claim_receipt_never_grants_current_authority() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("review-revoked", "https://example.test/revoked.git")
+        .await;
+    let t = f.task(&p, "general", "Review revocation").await;
+    let owner = f.claim(&f.a, &p, &t, 1).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
+        .await;
+    let review = activity(&submitted, "agent_review").clone();
+    f.ack(&f.b, &p, 1).await;
+    let path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/claim",
+        review["id"].as_str().unwrap()
+    );
+    let body = json!({"expected_submission_id":review["submission_id"],"expected_project_policy_revision":1,"expected_workflow_policy_revision":0});
+    let (status, first) = call(
+        f.app.clone(),
+        &f.b,
+        "POST",
+        &path,
+        "stable-review-claim",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    sqlx::query("UPDATE credentials SET revoked_at=? WHERE id=?")
+        .bind(f.state.now())
+        .bind(&f.b.credential)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, rejected) = call(
+        f.app.clone(),
+        &f.b,
+        "POST",
+        &path,
+        "stable-review-claim",
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{rejected}");
+    let (status, recovered) = f.claim_activity(&f.c, &p, &review, 1, 0).await;
+    assert_eq!(status, StatusCode::OK, "{recovered}");
+    assert_ne!(
+        recovered["data"]["attempt"]["id"],
+        first["data"]["attempt"]["id"]
+    );
+}
+
 #[derive(Clone)]
 struct Caller {
     token: String,
@@ -121,6 +173,22 @@ impl Fixture {
     async fn checkout(&self, c: &Caller, p: &str, attempt: &Value, base: &str) {
         let (s,v)=self.call(c,"POST",&format!("/api/v1/projects/{p}/attempts/{}/checkout",attempt["id"].as_str().unwrap()),json!({"generation":attempt["generation"],"workstation_id":format!("{0}-workstation",c.principal),"identity":Uuid::new_v4().to_string(),"path":"/tmp/workflow-test","branch":"workflow-test","base_revision":base,"clean":true})).await;
         assert_eq!(s, StatusCode::OK, "{v}");
+    }
+    async fn check_job(
+        &self,
+        p: &str,
+        activity: &Value,
+        attempt: &Value,
+        source_revision: &str,
+        source_tree: &str,
+    ) -> String {
+        let reservation = Uuid::new_v4().to_string();
+        let job = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO reservations(id,project_id,attempt_id,generation,state,created_by,created_at,released_at,released_by,release_reason) VALUES(?,?,?,?,'released',?,?,?,?,'workflow check complete')")
+            .bind(&reservation).bind(p).bind(attempt["id"].as_str().unwrap()).bind(attempt["generation"].as_i64().unwrap()).bind(&self.c.principal).bind(self.state.now()).bind(self.state.now()).bind(&self.c.principal).execute(&self.state.pool).await.unwrap();
+        sqlx::query("INSERT INTO jobs(id,producer_id,project_id,task_id,attempt_id,generation,runner_instance_id,workstation_id,label,source_revision,source_tree,reservation_id,state,last_sequence,last_observed_at,exit_code,inputs_unchanged,summary,created_at,check_identity,check_version,check_environment) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'succeeded',1,?,0,1,'passed',?,?,?,?)")
+            .bind(&job).bind(Uuid::new_v4().to_string()).bind(p).bind(activity["activity_task_id"].as_str().unwrap()).bind(attempt["id"].as_str().unwrap()).bind(attempt["generation"].as_i64().unwrap()).bind(Uuid::new_v4().to_string()).bind(format!("{}-workstation",self.c.principal)).bind("workspace tests").bind(source_revision).bind(source_tree).bind(&reservation).bind(self.state.now()).bind(self.state.now()).bind("workspace-tests").bind("v1").bind("linux-ci").execute(&self.state.pool).await.unwrap();
+        job
     }
     #[allow(clippy::too_many_arguments)]
     async fn submit(
@@ -399,5 +467,131 @@ async fn intent_only_crash_retains_hold_until_human_reconciliation_creates_repla
             .await
             .unwrap(),
         "released"
+    );
+    let (status,blocked)=f.call(&f.admin,"PUT",&format!("/api/v1/projects/{p}/workflow-policy"),json!({"expected_revision":1,"canonical_repository_key":"intent-crash","required_checks":[{"identity":"workspace-tests","version":"v2","environment":"linux-ci"}]})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    let replacement = activity(&reconciled["data"], "integration").clone();
+    let (status, fresh_claim) = f.claim_activity(&f.c, &p, &replacement, 2, 1).await;
+    assert_eq!(status, StatusCode::OK, "{fresh_claim}");
+    let fresh = fresh_claim["data"]["attempt"].clone();
+    f.checkout(&f.c, &p, &fresh, RESULT).await;
+    let (status,v)=f.call(&f.c,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/publication-intent",replacement["id"].as_str().unwrap()),json!({"generation":fresh["generation"],"submission_id":replacement["submission_id"],"observed_target_revision":RESULT,"observed_target_tree":RESULT_TREE,"result_revision":RESULT,"result_tree":RESULT_TREE})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let job = f
+        .check_job(&p, &replacement, &fresh, RESULT, RESULT_TREE)
+        .await;
+    let (status,v)=f.call(&f.c,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/integration-result",replacement["id"].as_str().unwrap()),json!({"generation":fresh["generation"],"submission_id":replacement["submission_id"],"publication_state":"published","observed_target_revision":RESULT,"result_revision":RESULT,"result_tree":RESULT_TREE,"check_job_ids":[job],"summary":"replacement result revalidated"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status,done)=f.call(&f.c,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/finalize",replacement["id"].as_str().unwrap()),json!({"generation":fresh["generation"],"submission_id":replacement["submission_id"],"observed_target_revision":RESULT,"observed_target_tree":RESULT_TREE})).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["data"]["work_status"], "done");
+}
+
+#[tokio::test]
+async fn canonical_target_claim_race_grants_one_global_hold() {
+    let f = Fixture::new().await;
+    let (p1, _t1, s1) = code_integration(&f, "shared-one", "shared-canonical").await;
+    let (p2, _t2, s2) = code_integration(&f, "shared-two", "shared-canonical").await;
+    let a1 = activity(&s1, "integration").clone();
+    let a2 = activity(&s2, "integration").clone();
+    f.ack(&f.b, &p1, 2).await;
+    f.ack(&f.c, &p2, 2).await;
+    let app1 = f.app.clone();
+    let app2 = f.app.clone();
+    let b = f.b.clone();
+    let c = f.c.clone();
+    let path1 = format!(
+        "/api/v1/projects/{p1}/workflow-activities/{}/claim",
+        a1["id"].as_str().unwrap()
+    );
+    let path2 = format!(
+        "/api/v1/projects/{p2}/workflow-activities/{}/claim",
+        a2["id"].as_str().unwrap()
+    );
+    let body1 = json!({"expected_submission_id":a1["submission_id"],"expected_project_policy_revision":2,"expected_workflow_policy_revision":1});
+    let body2 = json!({"expected_submission_id":a2["submission_id"],"expected_project_policy_revision":2,"expected_workflow_policy_revision":1});
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let b1 = barrier.clone();
+    let b2 = barrier.clone();
+    let one = tokio::spawn(async move {
+        b1.wait().await;
+        call(app1, &b, "POST", &path1, "race-one", body1).await.0
+    });
+    let two = tokio::spawn(async move {
+        b2.wait().await;
+        call(app2, &c, "POST", &path2, "race-two", body2).await.0
+    });
+    let statuses = [one.await.unwrap(), two.await.unwrap()];
+    assert_eq!(statuses.iter().filter(|s| **s == StatusCode::OK).count(), 1);
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM integration_holds WHERE canonical_repository_key='shared-canonical' AND target_branch='main' AND state='held'").fetch_one(&f.state.pool).await.unwrap(),1);
+}
+
+#[tokio::test]
+async fn manual_recovery_rejects_agent_takeover_and_human_reopens_expired_review() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("manual-review", "https://example.test/manual.git")
+        .await;
+    let (status,v)=f.call(&f.admin,"PATCH",&format!("/api/v1/projects/{p}/policy"),json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"manual","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let t = f.task(&p, "general", "Manual recovery").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+        .await;
+    let review = activity(&submitted, "agent_review").clone();
+    let (status, claimed) = f.claim_activity(&f.b, &p, &review, 2, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    f.clock.0.fetch_add(600_000, Ordering::SeqCst);
+    let (status, _) = f.claim_activity(&f.c, &p, &review, 2, 0).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status,reopened)=f.call(&f.admin,"POST",&format!("/api/v1/projects/{p}/tasks/{}/workflow/reopen",t["id"].as_str().unwrap()),json!({"submission_id":review["submission_id"],"reason":"expired reviewer inspected; no jobs or holds remain"})).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["data"]["work_status"], "ready");
+}
+
+#[tokio::test]
+async fn changes_requested_revokes_a_concurrent_review_without_losing_history() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("both-review", "https://example.test/both.git")
+        .await;
+    let (status,v)=f.call(&f.admin,"PATCH",&format!("/api/v1/projects/{p}/policy"),json!({"expected_revision":1,"review_mode":"both","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let t = f.task(&p, "general", "Both reviews").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+        .await;
+    let agent = activity(&submitted, "agent_review").clone();
+    let human_slot = activity(&submitted, "human_review").clone();
+    let (_, agent_claim) = f.claim_activity(&f.b, &p, &agent, 2, 0).await;
+    let (status,human_claim)=f.call(&f.admin,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/claim",human_slot["id"].as_str().unwrap()),json!({"expected_submission_id":human_slot["submission_id"],"expected_project_policy_revision":2,"expected_workflow_policy_revision":0})).await;
+    assert_eq!(status, StatusCode::OK, "{human_claim}");
+    let (status,changed)=f.call(&f.b,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/review",agent["id"].as_str().unwrap()),json!({"generation":agent_claim["data"]["attempt"]["generation"],"submission_id":agent["submission_id"],"decision":"changes_requested","summary":"revision required","findings":[{"severity":"required","remedy":"fix the identified issue","evidence":"reviewed exact submission"}]})).await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(changed["data"]["work_status"], "ready");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM attempts WHERE id=?")
+            .bind(human_claim["data"]["attempt"]["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap(),
+        "canceled"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM review_findings WHERE activity_id=?")
+            .bind(agent["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap(),
+        1
     );
 }

@@ -722,6 +722,12 @@ async fn reopen(
             "Reopen must name the exact current submission.",
         ));
     }
+    if subject.get::<String, _>("phase") == "done" {
+        return Err(AppError::conflict(
+            "workflow_complete",
+            "A completed workflow cannot be reopened.",
+        ));
+    }
     let effects:i64=sqlx::query_scalar("SELECT count(*) FROM workflow_activities wa JOIN publication_intents pi ON pi.activity_id=wa.id LEFT JOIN publication_reconciliations pr ON pr.activity_id=wa.id WHERE wa.submission_id=? AND (pr.activity_id IS NULL OR pr.disposition!='not_published')")
         .bind(&input.submission_id).fetch_one(&mut *m.tx).await?;
     if effects > 0 {
@@ -730,16 +736,30 @@ async fn reopen(
             "Publication intent or result exists. Reconcile that external effect before reopening revision work.",
         ));
     }
-    let owners:i64=sqlx::query_scalar("SELECT count(*) FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id WHERE wa.submission_id=? AND t.current_attempt_id IS NOT NULL")
-        .bind(&input.submission_id).fetch_one(&mut *m.tx).await?;
-    if owners > 0 {
-        return Err(AppError::conflict(
-            "activity_owned",
-            "Release or recover every linked workflow activity before reopening.",
-        ));
+    let stale = !workflow_snapshot(&mut m.tx, &project, &task, m.now).await?["blockers"]
+        .as_array()
+        .is_some_and(Vec::is_empty);
+    let activity_ids=sqlx::query_scalar::<_,String>("SELECT wa.id FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id WHERE wa.submission_id=? AND t.current_attempt_id IS NOT NULL")
+        .bind(&input.submission_id).fetch_all(&mut *m.tx).await?;
+    if !stale {
+        for activity_id in &activity_ids {
+            let value = activity_value(&mut m.tx, &project, activity_id, m.now).await?;
+            if value["current_attempt"]["valid_by_time"] == true
+                && value["current_attempt"]["owner_authorized"] == true
+            {
+                return Err(AppError::conflict(
+                    "activity_owned",
+                    "Release every live current workflow activity before reopening.",
+                ));
+            }
+        }
     }
     crate::jobs::ensure_attempt_quiescent(&mut m.tx, &project, &task).await?;
     ensure_workflow_quiescent(&mut m.tx, &project, &task).await?;
+    sqlx::query("UPDATE attempts SET state='canceled',ended_at=?,outcome='Human reopened expired, revoked, or stale workflow authority.' WHERE id IN (SELECT t.current_attempt_id FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id WHERE wa.submission_id=? AND t.current_attempt_id IS NOT NULL) AND state='active'")
+        .bind(m.now).bind(&input.submission_id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE tasks SET current_attempt_id=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=?)")
+        .bind(&input.submission_id).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE submissions SET superseded_at=? WHERE id=? AND superseded_at IS NULL")
         .bind(m.now)
         .bind(&input.submission_id)
@@ -752,7 +772,7 @@ async fn reopen(
     .bind(&task)
     .execute(&mut *m.tx)
     .await?;
-    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND state='queued'").bind(m.now).bind(&input.submission_id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND state IN ('queued','active')").bind(m.now).bind(&input.submission_id).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND state='canceled')")
         .bind(&input.submission_id).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE integration_holds SET state='released',released_by=?,released_at=?,release_reason=? WHERE activity_id IN (SELECT id FROM workflow_activities WHERE submission_id=?) AND state='held'")
@@ -948,6 +968,7 @@ struct ActivityContext {
     project_current_policy: i64,
     workflow_current_policy: Option<i64>,
     automatic_integration: bool,
+    recovery_mode: String,
     lease_seconds: i64,
     canonical_repository_key: Option<String>,
     target_branch: Option<String>,
@@ -958,7 +979,7 @@ async fn activity_context(
     project: &str,
     id: &str,
 ) -> Result<ActivityContext, AppError> {
-    let r=sqlx::query("SELECT wa.id,wa.kind,wa.subject_task_id,wa.submission_id,wa.activity_task_id,wa.state,ws.current_submission_id,ws.phase,s.superseded_at,s.task_revision,s.project_policy_revision,s.workflow_policy_revision,s.canonical_repository_key,s.target_branch,p.policy_revision,p.review_mode,p.automatic_integration,p.lease_seconds,wp.revision AS current_workflow_revision FROM workflow_activities wa JOIN workflow_subjects ws ON ws.task_id=wa.subject_task_id JOIN submissions s ON s.id=wa.submission_id JOIN projects p ON p.id=wa.project_id LEFT JOIN workflow_policies wp ON wp.project_id=wa.project_id WHERE wa.project_id=? AND wa.id=?")
+    let r=sqlx::query("SELECT wa.id,wa.kind,wa.subject_task_id,wa.submission_id,wa.activity_task_id,wa.state,ws.current_submission_id,ws.phase,s.superseded_at,s.task_revision,s.project_policy_revision,s.workflow_policy_revision,s.canonical_repository_key,s.target_branch,p.policy_revision,p.review_mode,p.automatic_integration,p.recovery_mode,p.lease_seconds,wp.revision AS current_workflow_revision FROM workflow_activities wa JOIN workflow_subjects ws ON ws.task_id=wa.subject_task_id JOIN submissions s ON s.id=wa.submission_id JOIN projects p ON p.id=wa.project_id LEFT JOIN workflow_policies wp ON wp.project_id=wa.project_id WHERE wa.project_id=? AND wa.id=?")
         .bind(project).bind(id).fetch_optional(&mut *c).await?.ok_or_else(AppError::not_found)?;
     Ok(ActivityContext {
         id: r.get("id"),
@@ -975,6 +996,7 @@ async fn activity_context(
         project_current_policy: r.get("policy_revision"),
         workflow_current_policy: r.get("current_workflow_revision"),
         automatic_integration: r.get("automatic_integration"),
+        recovery_mode: r.get("recovery_mode"),
         lease_seconds: r.get("lease_seconds"),
         canonical_repository_key: r.get("canonical_repository_key"),
         target_branch: r.get("target_branch"),
@@ -1226,6 +1248,11 @@ async fn claim_activity(
             return Err(AppError::conflict(
                 "claim_conflict",
                 "This workflow activity already has a current owner.",
+            ));
+        }
+        if ctx.recovery_mode == "manual" && m.actor.kind != "human" {
+            return Err(AppError::forbidden(
+                "This project requires a human to inspect expired or revoked workflow activity authority.",
             ));
         }
         crate::jobs::ensure_attempt_quiescent(&mut m.tx, &project, &ctx.activity_task).await?;
