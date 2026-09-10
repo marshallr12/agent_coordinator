@@ -5,8 +5,10 @@ management, password recovery, agent credential rotation, policy editing,
 objective grouping, full task history, inspected operator recovery, and native
 commands. All 129 workspace tests, warnings-denied Clippy, formatting, workspace
 build, JavaScript checks, the full smoke exercise, and browser verification passed.
-Required Linux/Windows CI is pending for this milestone; integrate only after it passes.
-Then continue sequentially with item 5, backups and restore authority invalidation.
+Implementation commit `865365d` passed [CI run 34440915688](https://github.com/marshallr12/agent_coordinator/actions/runs/34440915688),
+including Linux, native Windows, and the dependency audit. The final host-audit
+attribution clarification also passed its focused regression and workspace Clippy.
+Continue sequentially with item 5, backups and restore authority invalidation.
 
 Instruction version 5 describes the implemented workflow. Existing harnesses must
 read and acknowledge it before new claims. Objective membership freezes after work

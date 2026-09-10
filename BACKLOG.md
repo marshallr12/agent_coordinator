@@ -32,7 +32,8 @@ Completed item 4: operator accounts and browser sessions, password recovery,
 agent credential rotation, full policy editing, revisioned objective grouping,
 complete task history pagination, inspected operator recovery controls, and named
 native commands. Main-agent review and all 129 local tests, Clippy, build, smoke,
-and browser checks passed. Required CI is tracked in the handoff.
+and browser checks passed. Linux/native-Windows CI and the dependency audit
+passed; evidence is linked in the handoff.
 
 Next work, preserving the original backlog numbering:
 5. Implement consistent backups and restore authority invalidation; retention of

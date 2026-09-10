@@ -229,3 +229,9 @@ errors were reported, and the phone view fit 375 CSS pixels without overflow.
 History cursors use insertion row identifiers. Future database maintenance must
 preserve those identifiers or explicitly invalidate outstanding cursors; never
 silently reuse them after an in-place VACUUM or a restore.
+
+Implementation commit `865365d` passed Linux workspace checks and smoke, native
+Windows client/CLI/local-runner tests, and the dependency audit in
+[CI run 34440915688](https://github.com/marshallr12/agent_coordinator/actions/runs/34440915688).
+The final audit clarification labels host password recovery's initiator separately
+from its target account and passed a focused regression and workspace Clippy.
