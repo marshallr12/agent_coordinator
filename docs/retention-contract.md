@@ -111,8 +111,8 @@ Maintenance does not delete or rewrite semantic events, projects, task
 definitions or revisions, dependencies, attempts, checkpoints, handoffs,
 checkouts, resource holds, jobs, submissions, artifact references, knowledge or
 lesson revisions, decisions, reviews, integration evidence, objectives, restore
-evidence, or closed import identities. It does not delete artifact files;
-artifact expiry and deletion continue through the artifact store's database
+evidence, or closed import identities. Payload compaction does not directly remove artifact files. Each committed batch
+also invokes a bounded artifact cleanup pass using the artifact store’s database
 recheck and backup-aware GC lock.
 
 The first release intentionally favors trustworthy provenance over reclaiming
@@ -120,3 +120,24 @@ every byte. Event payloads are already compact, and receipt tombstones still use
 one bounded row per mutation. This policy bounds work per invocation but does
 not promise a storage ceiling for permanent semantic history. Deployment sizing
 and the 100,000-task load test must include those identity and audit rows.
+
+## Daily maintenance timer
+
+The release includes [a maintenance service](../deploy/agent-coordinator-maintenance.service)
+and [daily timer](../deploy/agent-coordinator-maintenance.timer). Install them
+beside the service and backup units, then enable the timer:
+
+```sh
+sudo install -o root -g root -m 0644 deploy/agent-coordinator-maintenance.service deploy/agent-coordinator-maintenance.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now agent-coordinator-maintenance.timer
+sudo systemctl start agent-coordinator-maintenance.service
+sudo journalctl -u agent-coordinator-maintenance.service
+```
+
+The default invocation processes at most 20 batches of 500 candidate rows per
+kind. Inspect the result’s remaining flags; a large existing history may need
+additional invocations. The five-minute unit timeout may interrupt between
+batches; committed batches remain valid and the next invocation continues with
+uninspected rows. Monitor failed units, remaining work, and disk capacity.
+Correct and reconcile a clock incident before retrying failed maintenance.

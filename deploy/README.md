@@ -61,6 +61,11 @@ binary platform, upgrade boundaries, and removal, start with the
    advisory-locked off-server copies, restore authority invalidation, and the
    required recovery exercise.
 
+Install the [daily maintenance timer](../docs/retention-contract.md#daily-maintenance-timer)
+for bounded replay/health payload compaction. Permanent task and lesson history
+remains stored. Follow the [clock recovery guide](../docs/clock-safety-contract.md)
+if the service reports a clock reconciliation pause.
+
 For local development only, use
 `--public-origin http://127.0.0.1:8080 --allow-insecure-loopback`. The explicit
 opt-in permits a non-Secure development cookie solely for a loopback origin.

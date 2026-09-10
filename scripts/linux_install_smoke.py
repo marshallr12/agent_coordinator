@@ -12,6 +12,7 @@ import secrets
 import shutil
 import socket
 import ssl
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -38,6 +39,8 @@ REQUIRED = {
     "deploy/agent-coordinator-backup.service",
     "deploy/agent-coordinator-backup.timer",
     "deploy/agent-coordinator.service",
+    "deploy/agent-coordinator-maintenance.service",
+    "deploy/agent-coordinator-maintenance.timer",
     "deploy/service.env.example",
     "docs/CLI.md",
     "docs/backup-restore-guide.md",
@@ -224,12 +227,14 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
     name = f"acpkg{suffix}"
     service_unit = f"{name}.service"
     caddy_unit = f"{name}-caddy.service"
+    maintenance_unit = f"{name}-maintenance.service"
     data = Path("/var/lib") / name
     config = Path("/etc") / name
     install = Path("/opt") / name
     unit_dir = Path("/etc/systemd/system")
     service_path = unit_dir / service_unit
     caddy_path = unit_dir / caddy_unit
+    maintenance_path = unit_dir / maintenance_unit
     server_port, https_port = unused_port(), unused_port()
     while https_port == server_port:
         https_port = unused_port()
@@ -267,14 +272,22 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
             "--database", str(data / "coordinator.sqlite3"), "--listen", f"127.0.0.1:{server_port}",
             "--public-origin", origin, "init-admin", "--username", "package-admin", "--password-stdin",
         ], input_text=password + "\n")
-        production = (root / "deploy/agent-coordinator.service").read_text()
-        production = production.replace("User=agent-coordinator", f"User={name}")
-        production = production.replace("Group=agent-coordinator", f"Group={name}")
-        production = production.replace("/var/lib/agent-coordinator", str(data))
-        production = production.replace("/etc/agent-coordinator/service.env", str(environment))
-        production = production.replace("/usr/local/bin/agent-coordinator-server", str(install / "agent-coordinator-server"))
-        production = production.replace("StateDirectory=agent-coordinator", f"StateDirectory={name}")
-        service_path.write_text(production)
+        def installed_unit(filename):
+            content = (root / "deploy" / filename).read_text()
+            for old, new in [
+                ("User=agent-coordinator", f"User={name}"),
+                ("Group=agent-coordinator", f"Group={name}"),
+                ("/var/lib/agent-coordinator", str(data)),
+                ("/etc/agent-coordinator/service.env", str(environment)),
+                ("/usr/local/bin/agent-coordinator-server", str(install / "agent-coordinator-server")),
+                ("StateDirectory=agent-coordinator", f"StateDirectory={name}"),
+            ]:
+                content = content.replace(old, new)
+            return content
+
+        service_path.write_text(installed_unit("agent-coordinator.service"))
+        maintenance_path.write_text(installed_unit("agent-coordinator-maintenance.service"))
+        maintenance_path.chmod(0o644)
         caddy_path.write_text(
             "[Unit]\nDescription=Disposable Agent Coordinator HTTPS acceptance proxy\nAfter=network.target\n"
             f"[Service]\nType=simple\nUser={name}\nGroup={name}\nWorkingDirectory={data}\n"
@@ -285,7 +298,7 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
         )
         service_path.chmod(0o644)
         caddy_path.chmod(0o644)
-        run(["systemd-analyze", "verify", str(service_path), str(caddy_path)])
+        run(["systemd-analyze", "verify", str(service_path), str(caddy_path), str(maintenance_path)])
         run(["systemctl", "daemon-reload"])
         run(["systemctl", "start", service_unit])
         wait_for(None, f"http://127.0.0.1:{server_port}/healthz")
@@ -330,10 +343,14 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
         ], env=client_env)
         assert credential["token"] not in listed.stdout and credential["token"] not in listed.stderr
         assert json.loads(listed.stdout)["data"]["items"] == []
-        print("PASS: package checksums/layout, systemd install/start/restart, trusted internal-CA HTTPS, and native CLI reconnect.")
+        run(["systemctl", "start", maintenance_unit])
+        with sqlite3.connect(data / "coordinator.sqlite3") as connection:
+            assert connection.execute("SELECT count(*) FROM maintenance_runs WHERE state='complete'").fetchone()[0] == 1
+        print("PASS: package checksums/layout, systemd install/start/restart/maintenance, trusted internal-CA HTTPS, and native CLI reconnect.")
     finally:
-        for unit in [caddy_unit, service_unit]:
+        for unit in [maintenance_unit, caddy_unit, service_unit]:
             subprocess.run(["systemctl", "stop", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        maintenance_path.unlink(missing_ok=True)
         service_path.unlink(missing_ok=True)
         caddy_path.unlink(missing_ok=True)
         subprocess.run(["systemctl", "daemon-reload"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

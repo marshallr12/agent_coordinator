@@ -1,0 +1,11 @@
+[Unit]
+Description=Run bounded Agent Coordinator maintenance daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+Unit=agent-coordinator-maintenance.service
+
+[Install]
+WantedBy=timers.target
