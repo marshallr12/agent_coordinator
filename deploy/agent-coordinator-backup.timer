@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Agent Coordinator backup hourly
+
+[Timer]
+OnCalendar=*-*-* *:00:00 UTC
+AccuracySec=1s
+RandomizedDelaySec=59s
+Persistent=true
+Unit=agent-coordinator-backup.service
+
+[Install]
+WantedBy=timers.target

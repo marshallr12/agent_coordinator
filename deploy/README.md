@@ -38,6 +38,26 @@ only accepts loopback listener addresses and ignores forwarded headers.
    is displayed once. If that response is lost, retry the same request/key to
    recover its identity, then rotate that credential under **Access** to issue
    a replacement for the same agent principal. A token is never replayed.
+7. Create the separate backup repository and install the hourly backup units:
+
+   ```sh
+   sudo install -d -o agent-coordinator -g agent-coordinator -m 0700 \
+     /var/lib/agent-coordinator-backups
+   sudo install -o root -g root -m 0644 \
+     deploy/agent-coordinator-backup.service \
+     deploy/agent-coordinator-backup.timer \
+     /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now agent-coordinator-backup.timer
+   sudo systemctl start agent-coordinator-backup.service
+   ```
+
+   Confirm that the first oneshot succeeded and verify its reported snapshot.
+   Timer activation alone is not backup evidence. Configure an alert for a failed
+   backup unit and stale verified-snapshot age. See the
+   [backup and restore guide](../docs/backup-restore-guide.md) for retention,
+   advisory-locked off-server copies, restore authority invalidation, and the
+   required recovery exercise.
 
 For local development only, use
 `--public-origin http://127.0.0.1:8080 --allow-insecure-loopback`. The explicit
@@ -57,7 +77,9 @@ client-supplied forwarding headers to bypass its global limit.
 
 The server stores only credential/session verifiers and redacts issued tokens
 from mutation receipts and events. Do not enable HTTP access logs that record
-headers, bodies, or query strings. Protect the database and its WAL files as
-credentials. Database initialization uses mode 0600; systemd uses umask 0077.
-Restore invalidation and verified off-server backup procedures are not implemented
-in this foundation slice; do not represent these examples as a recovery plan.
+headers, bodies, or query strings. Protect the database, its WAL files, artifacts,
+and every backup snapshot as credentials. Database initialization uses mode 0600;
+systemd uses umask 0077. The installed backup repository is local protection only.
+Do not claim host-loss protection until a complete destination copy has passed
+destination-side verification, and do not claim the one-hour restore target until
+the documented recovery exercise has measured it end to end.
