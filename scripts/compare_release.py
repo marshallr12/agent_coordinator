@@ -74,6 +74,8 @@ def pe_summary(content: bytes) -> dict[str, object] | None:
     coff = pe_offset + 4
     section_count = u16(content, coff + 2, "COFF section count")
     coff_timestamp = u32(content, coff + 4, "COFF timestamp")
+    if section_count > 96:
+        raise ComparisonError("PE section count exceeds its diagnostic bound")
     optional_size = u16(content, coff + 16, "COFF optional-header size")
     optional = coff + 20
     checked_slice(content, optional, optional_size, "PE optional header")
@@ -123,6 +125,8 @@ def pe_summary(content: bytes) -> dict[str, object] | None:
 
     debug_entries: list[dict[str, object]] = []
     if debug_size:
+        if debug_size // 28 > 128:
+            raise ComparisonError("PE debug directory exceeds its diagnostic bound")
         if debug_size % 28:
             raise ComparisonError("PE debug directory has a partial entry")
         debug_offset = rva_to_offset(debug_rva, debug_size)
@@ -180,6 +184,8 @@ def byte_difference(first: bytes, second: bytes) -> dict[str, int | None]:
 def read_archive(path: Path) -> tuple[dict[str, bytes], dict[str, dict[str, object]]]:
     if not path.is_file() or path.is_symlink():
         raise ComparisonError(f"archive is not a regular file: {path}")
+    if path.stat().st_size > MAX_TOTAL_SIZE:
+        raise ComparisonError("archive file exceeds its diagnostic bound")
     contents: dict[str, bytes] = {}
     metadata: dict[str, dict[str, object]] = {}
     with zipfile.ZipFile(path) as archive:
@@ -206,6 +212,14 @@ def read_archive(path: Path) -> tuple[dict[str, bytes], dict[str, dict[str, obje
                 "external_attributes": f"0x{info.external_attr:08x}",
             }
     return contents, metadata
+
+
+def archive_digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
 
 
 def compare(first_path: Path, second_path: Path) -> dict[str, object]:
@@ -235,8 +249,12 @@ def compare(first_path: Path, second_path: Path) -> dict[str, object]:
             item["second_pe"] = second_pe
         differences.append(item)
 
+    first_digest, second_digest = archive_digest(first_path), archive_digest(second_path)
     return {
-        "equal": not differences and first_names == second_names,
+        "equal": first_digest == second_digest,
+        "member_contents_and_metadata_equal": not differences and first_names == second_names,
+        "first_archive_sha256": first_digest,
+        "second_archive_sha256": second_digest,
         "first_member_count": len(first),
         "second_member_count": len(second),
         "only_in_first": sorted(first_names - second_names),
@@ -253,7 +271,7 @@ def main() -> int:
     try:
         result = compare(args.first, args.second)
     except (ComparisonError, OSError, RuntimeError, zipfile.BadZipFile) as error:
-        print(json.dumps({"error": str(error)}, sort_keys=True), file=sys.stderr)
+        print(json.dumps({"error": "comparison_failed", "category": type(error).__name__}, sort_keys=True), file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["equal"] else 1

@@ -102,6 +102,8 @@ jobs:
           $version = python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $epoch = git show -s --format=%ct HEAD
+          $env:RUSTFLAGS = "-C link-arg=/Brepro"
+          $env:ARFLAGS_x86_64_pc_windows_msvc = "/Brepro"
           $env:CARGO_TARGET_DIR = "target/repro-first"
           cargo build --release --locked -p coordinator-cli
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -113,7 +115,8 @@ jobs:
           python scripts/package_release.py --platform windows-x86_64 --version $version --cli target/repro-second/release/agent-coordinator.exe --source-date-epoch $epoch --output-dir dist/second
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $package = "agent-coordinator-$version-windows-x86_64.zip"
-          if ((Get-FileHash "dist/first/$package").Hash -ne (Get-FileHash "dist/second/$package").Hash) { throw "Windows packages are not reproducible." }
+          python scripts/compare_release.py "dist/first/$package" "dist/second/$package"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ((Get-FileHash "dist/first/$package.sha256").Hash -ne (Get-FileHash "dist/second/$package.sha256").Hash) { throw "Windows checksums are not reproducible." }
           & target/repro-first/release/agent-coordinator.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -153,6 +156,19 @@ jobs:
             ${{ env.WINDOWS_PACKAGE }}.sha256
           if-no-files-found: error
           retention-days: 14
+
+      - name: Retain failed Windows package comparison inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: diagnostic-unaccepted-windows-packages
+          path: |
+            dist/first/*.zip
+            dist/first/*.sha256
+            dist/second/*.zip
+            dist/second/*.sha256
+          if-no-files-found: ignore
+          retention-days: 3
 
   linux-load:
     name: Ubuntu 24.04 release-size load acceptance
