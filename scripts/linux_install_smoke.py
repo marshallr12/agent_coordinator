@@ -278,7 +278,7 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
         caddy_path.write_text(
             "[Unit]\nDescription=Disposable Agent Coordinator HTTPS acceptance proxy\nAfter=network.target\n"
             f"[Service]\nType=simple\nUser={name}\nGroup={name}\nWorkingDirectory={data}\n"
-            f"Environment=HOME={data}\nEnvironment=XDG_DATA_HOME={data}/caddy-data\nEnvironment=XDG_CONFIG_HOME={data}/caddy-config\n"
+            f"Environment=XDG_DATA_HOME={data}/caddy-data\nEnvironment=XDG_CONFIG_HOME={data}/caddy-config\n"
             f"ExecStart={install}/caddy run --config {caddyfile} --adapter caddyfile\n"
             "NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\n"
             f"ReadWritePaths={data}\n[Install]\nWantedBy=multi-user.target\n"

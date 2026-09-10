@@ -172,6 +172,7 @@ jobs:
       - name: Run the 30-minute release-size workload
         run: python3 scripts/load_acceptance.py --server target/release/agent-coordinator-server --duration 1800 --rate 50 --history 100000 --report load-acceptance.json
       - name: Upload the sanitized load report
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-load-acceptance
