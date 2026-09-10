@@ -44,10 +44,13 @@ stale/unknown job evidence, human resource reconciliation without fabricated
 success, released capacity counts, sign-out, and desktop/phone layouts were checked.
 Temporary servers were stopped. No source projects or their histories were changed.
 
-Native Windows validation for this milestone is still being completed. The first
-run found two pre-launch/log-capture failures; do not treat Windows as verified until
-the corrected run passes. The prior foundation run 34398311217 passed Linux,
-native Windows, and the dependency audit.
+Native Windows client, CLI, and local runner tests passed in
+[CI run 34419243344](https://github.com/marshallr12/agent_coordinator/actions/runs/34419243344),
+which also passed Linux workspace checks, the built service/CLI smoke test,
+and the locked dependency audit.
+The checked implementation is commit `342f393`. Windows validation found and fixed
+append-only log truncation and Git's handling of canonical Windows path prefixes.
+Full two-workstation release acceptance remains separate work.
 
 The service has not been deployed publicly. Host, DNS name, and backup destination
 remain installation choices. The 20-project/50-session/100,000-task target, backups,

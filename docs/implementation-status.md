@@ -97,11 +97,17 @@ The server tests cover authentication boundaries, revocation, session isolation,
 instruction versions, project boundaries, dependency-cycle rollback, a concurrent
 claim race, exact deadline expiry, recovery fencing, stale response replay, and
 ownership persistence across restart. The combined smoke exercise tests the built
-CLI and service with two independent harnesses and two projects.
+CLI and service with two independent harnesses and two projects, isolated worktree
+preparation, duplicate-free reconnect, job evidence, and explicit capacity release.
+Job tests exercise global capacity, reporter authority after task/session loss,
+parent revocation, bounded renewal, terminal observations, and human reconciliation.
 
 The dashboard has been checked in a real browser at desktop and phone widths.
-CI defines native Windows client tests; their existence alone is not evidence that
-Windows has passed. No production deployment, 100,000-task benchmark, off-server
+Native Windows client, CLI, and local runner tests, plus Linux workspace checks
+and the service/CLI smoke test, passed for implementation commit `342f393` in
+[CI run 34419243344](https://github.com/marshallr12/agent_coordinator/actions/runs/34419243344).
+The same run passed the locked dependency audit.
+No production deployment, 100,000-task benchmark, off-server
 backup, or restore rehearsal has occurred.
 
 Continue with [BACKLOG.md](../BACKLOG.md) and [HANDOFF.md](../HANDOFF.md).
