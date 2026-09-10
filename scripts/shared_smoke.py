@@ -77,7 +77,9 @@ def exercise_shared(temporary, api, cli, project, owner):
         for item in context["items"]
     )
 
-    project_state = api(f"/api/v1/projects/{project}")
+    project_state = next(
+        item for item in api("/api/v1/projects")["items"] if item["id"] == project
+    )
     decision = client("decisions", "create", body={
         "question": "May the smoke agent choose the protected release path?",
         "options": ["Proceed", "Stop"],
