@@ -101,3 +101,14 @@
   generation bindings, verify operation mix and actual concurrent intervals, and
   name the measured CPU/memory constraints. Per-process limits do not establish an
   aggregate host-memory baseline; short runs do not establish sustained capacity.
+- **Measure the binary that will be installed.** A server-only build and a combined
+  server/CLI build can enable different shared dependency features. Feed the
+  accepted package into capacity testing and assert its recorded executable
+  digest before setup; a matching source revision alone does not prove binary
+  identity. Native Windows reproducibility also needs deterministic linker and
+  archive flags, including C dependencies.
+- **Share clock observations only after commit.** Coalesce requests already
+  waiting when a protected-time sample was taken, publish it only after its
+  transaction commits, and resample for later arrivals. Every request still
+  verifies current credentials; mutations recheck time and ownership under their
+  own writer lock. A failed clock commit cannot be published to waiting callers.

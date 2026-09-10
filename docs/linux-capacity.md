@@ -75,6 +75,14 @@ aggregate CPU throttling counters, queue depth, completed counts, and background
 operation progress, including on a failed run. These counters help diagnose
 contention without recording request contents.
 
+Release CI takes its executable from the accepted Linux package, verifies the
+archive and internal checksums, and checks the server digest against the package
+job's recorded value before running the workload. A separate server-only build
+is insufficient to establish performance of that exact package: building the
+server and CLI together can select additional shared dependency features.
+`--expected-server-sha256` makes a digest mismatch fail before fixture setup and
+records the expected identity alongside the observed executable digest.
+
 Short runs (`--duration 60`, for example) are development checks and have
 `full_acceptance: false`; they may omit `--require-baseline`. A report sets
 `full_acceptance_eligible: true` only for the full workload on the verified
