@@ -50,7 +50,6 @@ binary platform, upgrade boundaries, and removal, start with the
      deploy/agent-coordinator-backup.timer \
      /etc/systemd/system/
    sudo systemctl daemon-reload
-   sudo systemctl enable --now agent-coordinator-backup.timer
    sudo systemctl start agent-coordinator-backup.service
    ```
 
@@ -60,6 +59,13 @@ binary platform, upgrade boundaries, and removal, start with the
    [backup and restore guide](../docs/backup-restore-guide.md) for retention,
    advisory-locked off-server copies, restore authority invalidation, and the
    required recovery exercise.
+
+   Enable the persistent schedule only after the first snapshot passes
+   verification:
+
+   ```sh
+   sudo systemctl enable --now agent-coordinator-backup.timer
+   ```
 
 Install the [daily maintenance timer](../docs/retention-contract.md#daily-maintenance-timer)
 for bounded replay/health payload compaction. Permanent task and lesson history

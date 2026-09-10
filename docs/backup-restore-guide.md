@@ -33,7 +33,6 @@ sudo install -o root -g root -m 0644 \
   deploy/agent-coordinator-backup.timer \
   /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now agent-coordinator-backup.timer
 sudo systemctl start agent-coordinator-backup.service
 ```
 
@@ -48,6 +47,13 @@ for calendar accuracy, randomized delay, and persistent catch-up.
 Keep `service.env` limited to the non-secret server settings shown in the deploy
 example. The backup unit has no network access and performs no off-server transfer;
 configure transfer credentials only in the separate operator-selected mechanism.
+
+Verify the first snapshot as described below. Only after it passes verification,
+enable the persistent schedule:
+
+```sh
+sudo systemctl enable --now agent-coordinator-backup.timer
+```
 
 Inspect the actual result rather than treating timer activation as proof of a
 backup:
