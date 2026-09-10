@@ -56,7 +56,7 @@ After measured traffic, the runner stops the live service and restores the
 captured 100,000-task snapshot into a fresh temporary directory. This restore
 stage must finish in less than one hour and pass SQLite integrity and foreign-key
 checks. It verifies historical task count and the restored reconciliation pause,
-including invalidated credentials, browser and agent sessions, human passwords,
+including invalidated credentials, browser and agent sessions, human accounts,
 and active attempts. Its reported time measures file restore plus staged authority
 invalidation and validation. It is not a full service-recovery time: the human
 inspection checklist, old-installation fencing, client reconnection, and service
@@ -76,7 +76,10 @@ operation progress, including on a failed run. These counters help diagnose
 contention without recording request contents.
 
 Short runs (`--duration 60`, for example) are development checks and have
-`full_acceptance: false`; they may omit `--require-baseline`. The same exact
+`full_acceptance: false`; they may omit `--require-baseline`. A report sets
+`full_acceptance_eligible: true` only for the full workload on the verified
+baseline, then sets `full_acceptance: true` only after every workload, ownership,
+backup, and restore-stage assertion passes. The same exact
 ownership, workload-accounting, overlap, restore-stage, and sanitization checks
 still run, although a backup may finish after short metadata traffic ends. A
 30-minute run without every verified baseline condition also has

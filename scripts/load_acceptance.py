@@ -160,6 +160,7 @@ def run(args):
         resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
 
     report = {"schema_version": 2, "passed": False, "full_acceptance": False,
+        "full_acceptance_eligible": False,
         "baseline_required": args.require_baseline,
         "duration_requested_seconds": args.duration, "requests_per_second": args.rate,
         "projects": 20, "agent_sessions": 50, "historical_tasks": args.history,
@@ -189,7 +190,7 @@ def run(args):
         report["baseline"] = baseline
         full_workload = args.duration >= 1800 and args.rate == 50 and args.history == 100000
         report["full_workload"] = full_workload
-        report["full_acceptance"] = full_workload and baseline["verified"]
+        report["full_acceptance_eligible"] = full_workload and baseline["verified"]
         if args.require_baseline and not baseline["verified"]:
             failed = sorted(name for name, passed in baseline["checks"].items() if not passed)
             raise AssertionError("Required Linux baseline checks failed: " + ", ".join(failed))
@@ -240,6 +241,7 @@ def run(args):
                 projects = [operator.call("/api/v1/projects", {"name": f"Load project {index:02}",
                     "repository_url": f"https://example.invalid/load-{index}.git", "target_branch": "main"})[1]["id"]
                     for index in range(20)]
+                assert len(projects) == len(set(projects)) == 20
                 _, credential = operator.call("/api/v1/admin/agents", {"name": "capacity-fixture"})
                 stop(process)
                 process = None
@@ -291,6 +293,7 @@ def run(args):
                     sessions.append(api)
                     active.append({"base": base, "project_id": project, "task_id": task["id"],
                         "attempt": claim["claim"]["attempt"], "session_id": session_id})
+                assert len(sessions) == 50 and len({item["session_id"] for item in active}) == 50
                 _, race_task = sessions[0].call(f"/api/v1/projects/{projects[0]}/tasks", {"title": "100 simultaneous claim requests",
                     "kind": "general", "acceptance_criteria": ["Exactly one winner."]})
                 barrier = threading.Barrier(100)
@@ -408,7 +411,7 @@ def run(args):
                         "snapshot_bytes": value["snapshot_bytes"]}}
 
                 began, last_progress = time.monotonic(), 0
-                label = "full acceptance" if report["full_acceptance"] else (
+                label = "full acceptance candidate" if report["full_acceptance_eligible"] else (
                     "full workload without verified baseline" if full_workload else "short development check")
                 print(f"Starting {label}: {args.history} historical tasks, 20 projects, 50 sessions, {args.rate} requests/s.", flush=True)
                 with ThreadPoolExecutor(max_workers=100) as workers:
@@ -475,6 +478,9 @@ def run(args):
                     item["attempt"]["generation"], credential["principal_id"], item["session_id"],
                     credential["credential_id"]) for item in active}
                 with sqlite3.connect(database) as connection:
+                    observed_projects = connection.execute("SELECT count(*) FROM projects").fetchone()[0]
+                    observed_agent_sessions = connection.execute("SELECT count(*) FROM agent_sessions").fetchone()[0]
+                    assert observed_projects == 20 and observed_agent_sessions == 50
                     assert connection.execute("SELECT count(*) FROM tasks WHERE lifecycle='canceled'").fetchone()[0] == args.history
                     rows = connection.execute("SELECT a.project_id,a.task_id,a.id,a.generation,a.owner_id,a.session_id,a.credential_id,"
                         "t.current_attempt_id,t.generation,a.expires_at FROM attempts a JOIN tasks t ON t.project_id=a.project_id AND t.id=a.task_id "
@@ -505,6 +511,8 @@ def run(args):
                         "successful_renewals_per_participating_session_min": min(renewals_by_session.values(), default=0),
                         "successful_renewals_per_participating_session_max": max(renewals_by_session.values(), default=0)},
                     "unexpected_errors": dict(errors), "maxima": maxima,
+                    "observed_projects": observed_projects,
+                    "observed_agent_sessions": observed_agent_sessions,
                     "ownership_invariants_passed": True, "artifact_ownership_invariant_passed": True})
                 assert not errors, "Unexpected workload errors; inspect the sanitized report."
                 assert operation_counts == scheduled_operations
@@ -522,6 +530,7 @@ def run(args):
                 report["restore_stage"] = restore_stage(
                     server, backup_result["snapshot"], temporary / "restored", affinity, args.history)
                 report["passed"] = True
+                report["full_acceptance"] = report["full_acceptance_eligible"]
             finally:
                 if process is not None:
                     stop(process)
