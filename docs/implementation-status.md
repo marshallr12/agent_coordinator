@@ -278,3 +278,7 @@ database/artifact storage, plus working space. Engine limits and the cooperative
 45-minute deadline are documented in the backup contract. The rehearsal is not
 a production-size restore benchmark or proof of host-loss protection. Installation
 requires destination-side verification and a measured recovery exercise.
+
+Backup/restore implementation `283d9d0` passed Linux workspace checks and both
+smoke exercises, native Windows client/CLI/local-runner tests, and the dependency
+audit in [CI run 34445152452](https://github.com/marshallr12/agent_coordinator/actions/runs/34445152452).

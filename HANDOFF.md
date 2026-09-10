@@ -39,4 +39,6 @@ Each concurrent worktree must retain its own Cargo target directory.
 
 Item 4 passed Linux, native Windows, and audit CI at `1fcf9e4` in
 [run 34441512277](https://github.com/marshallr12/agent_coordinator/actions/runs/34441512277).
-Item 5 CI evidence will be recorded after the integrated commit is pushed.
+Item 5 at `283d9d0` passed Linux format/Clippy/tests/build and both smoke exercises,
+native Windows client/CLI/local-runner tests, and dependency audit in
+[run 34445152452](https://github.com/marshallr12/agent_coordinator/actions/runs/34445152452).
