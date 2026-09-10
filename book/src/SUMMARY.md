@@ -13,6 +13,9 @@
 
 - [Linux release installation](docs/linux-installation.md)
 - [Service deployment examples](deploy/README.md)
+- [Build the release package](docs/build-release-package.md)
+- [Deploy to an Azure virtual machine](docs/deploy-azure.md)
+- [Deploy to a Google Cloud e2-micro](docs/deploy-gcp-e2-micro.md)
 - [Backup and restore operations](docs/backup-restore-guide.md)
 - [Service clock safety](docs/clock-safety-contract.md)
 - [Storage retention and maintenance](docs/retention-contract.md)
