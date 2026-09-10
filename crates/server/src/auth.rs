@@ -63,6 +63,15 @@ pub struct Auth {
 }
 
 impl Auth {
+    pub(crate) fn require_browser(&self) -> Result<(), AppError> {
+        if !matches!(self.credential, Credential::Browser { .. }) {
+            return Err(AppError::forbidden(
+                "This operation requires a human browser session.",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn verify(
         &self,
         connection: &mut SqliteConnection,
@@ -223,7 +232,7 @@ fn valid_secret(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_graphic() && c != b';' && c != b',')
 }
-fn valid_id(value: &str) -> bool {
+pub(crate) fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
@@ -294,6 +303,10 @@ fn cookie_header(state: &AppState, token: &str, clear: bool) -> HeaderValue {
     .expect("Generated cookie contains only safe characters")
 }
 
+pub(crate) fn clear_browser_cookie(state: &AppState) -> HeaderValue {
+    cookie_header(state, "", true)
+}
+
 fn argon2() -> Argon2<'static> {
     // OWASP minimum reviewed 2026-09-09: Argon2id, 19 MiB, t=2, p=1.
     Argon2::new(
@@ -302,18 +315,57 @@ fn argon2() -> Argon2<'static> {
         Params::new(19 * 1024, 2, 1, None).expect("Valid Argon2 parameters"),
     )
 }
+fn hash_password_sync(password: &str) -> Result<String, AppError> {
+    let mut salt = [0u8; 16];
+    getrandom::fill(&mut salt).map_err(|_| AppError::internal())?;
+    let salt = SaltString::encode_b64(&salt).map_err(|_| AppError::internal())?;
+    argon2()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|_| AppError::internal())
+}
+
 pub async fn hash_password(password: String) -> Result<String, AppError> {
+    tokio::task::spawn_blocking(move || hash_password_sync(&password))
+        .await
+        .map_err(|_| AppError::internal())?
+}
+
+pub(crate) async fn hash_password_bounded(
+    state: &AppState,
+    password: String,
+) -> Result<String, AppError> {
+    let permit = state
+        .password_workers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::rate_limited())?;
     tokio::task::spawn_blocking(move || {
-        let mut salt = [0u8; 16];
-        getrandom::fill(&mut salt).map_err(|_| AppError::internal())?;
-        let salt = SaltString::encode_b64(&salt).map_err(|_| AppError::internal())?;
-        argon2()
-            .hash_password(password.as_bytes(), &salt)
-            .map(|hash| hash.to_string())
-            .map_err(|_| AppError::internal())
+        let _permit = permit;
+        hash_password_sync(&password)
     })
     .await
     .map_err(|_| AppError::internal())?
+}
+
+pub(crate) async fn verify_password(
+    state: &AppState,
+    password: String,
+    encoded_hash: String,
+) -> Result<bool, AppError> {
+    let permit = state
+        .password_workers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::rate_limited())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        PasswordHash::new(&encoded_hash)
+            .ok()
+            .is_some_and(|hash| argon2().verify_password(password.as_bytes(), &hash).is_ok())
+    })
+    .await
+    .map_err(|_| AppError::internal())
 }
 
 /// Host-local bootstrap only; never mounted as an HTTP route.
@@ -429,12 +481,13 @@ async fn login(
     sqlx::query("UPDATE browser_sessions SET revoked_at=? WHERE principal_id=? AND id NOT IN (SELECT id FROM browser_sessions WHERE principal_id=? AND revoked_at IS NULL ORDER BY expires_at DESC LIMIT 9)")
         .bind(now).bind(&id).bind(&id).execute(&mut *tx).await?;
     sqlx::query(
-        "INSERT INTO browser_sessions(id,principal_id,token_hash,expires_at) VALUES(?,?,?,?)",
+        "INSERT INTO browser_sessions(id,principal_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)",
     )
     .bind(&session_id)
     .bind(&id)
     .bind(digest(&token))
     .bind(now + SESSION_LIFETIME_MS)
+    .bind(now)
     .execute(&mut *tx)
     .await?;
     sqlx::query("INSERT INTO events(actor_id,kind,record_id,data_json,created_at) VALUES(?,'browser_signed_in',?,'{}',?)")
@@ -498,7 +551,7 @@ async fn logout(
     Ok(result)
 }
 
-fn admin(actor: &Actor) -> Result<(), AppError> {
+pub(crate) fn admin(actor: &Actor) -> Result<(), AppError> {
     if actor.kind != "human" || actor.role != "admin" {
         return Err(AppError::forbidden(
             "A human administrator is required for credential administration.",
@@ -514,7 +567,7 @@ fn agent(actor: &Actor) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn validate_name(name: &str) -> Result<(), AppError> {
+pub(crate) fn validate_name(name: &str) -> Result<(), AppError> {
     if name.is_empty()
         || name.len() > 100
         || name.trim() != name
@@ -540,14 +593,14 @@ async fn credentials(
     if page.cursor.as_ref().is_some_and(|cursor| !valid_id(cursor)) {
         return Err(AppError::bad_request("Invalid cursor."));
     }
-    let rows = sqlx::query("SELECT c.id,p.name,c.principal_id,c.created_at,c.revoked_at,c.expires_at FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.id>? ORDER BY c.id LIMIT 201")
+    let rows = sqlx::query("SELECT c.id,c.name AS credential_name,p.name,c.principal_id,c.issued_by,c.created_at,c.revoked_at,c.expires_at FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.id>? ORDER BY c.id LIMIT 201")
         .bind(page.cursor.unwrap_or_default()).fetch_all(&state.pool).await?;
     let next = if rows.len() > 200 {
         Some(rows[199].get::<String, _>("id"))
     } else {
         None
     };
-    let items: Vec<_> = rows.iter().take(200).map(|row| json!({"id":row.get::<String,_>("id"), "name":row.get::<String,_>("name"), "principal_id":row.get::<String,_>("principal_id"), "created_at":timestamp(row.get("created_at")), "revoked_at":row.get::<Option<i64>,_>("revoked_at").map(timestamp), "expires_at":row.get::<Option<i64>,_>("expires_at").map(timestamp)})).collect();
+    let items: Vec<_> = rows.iter().take(200).map(|row| json!({"id":row.get::<String,_>("id"), "name":row.get::<String,_>("name"), "credential_name":row.get::<String,_>("credential_name"), "principal_name":row.get::<String,_>("name"), "principal_id":row.get::<String,_>("principal_id"), "issued_by":row.get::<Option<String>,_>("issued_by"), "created_at":timestamp(row.get("created_at")), "revoked_at":row.get::<Option<i64>,_>("revoked_at").map(timestamp), "expires_at":row.get::<Option<i64>,_>("expires_at").map(timestamp)})).collect();
     Ok(response(json!({"items":items,"next_cursor":next})))
 }
 
@@ -586,16 +639,17 @@ async fn create_agent(
     .bind(mutation.now)
     .execute(&mut *mutation.tx)
     .await?;
-    sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,created_at) VALUES(?,?,?,?)")
+    sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,name,issued_by,created_at) VALUES(?,?,?,'initial',?,?)")
         .bind(&credential_id)
         .bind(&principal_id)
         .bind(digest(&token))
+        .bind(&mutation.actor.id)
         .bind(mutation.now)
         .execute(&mut *mutation.tx)
         .await?;
     let mut data = mutation
         .finish(
-            json!({"principal_id":principal_id,"credential_id":credential_id,"name":input.name}),
+            json!({"principal_id":principal_id,"credential_id":credential_id,"name":input.name,"credential_name":"initial"}),
             None,
             "agent_credential_issued",
             &credential_id,
@@ -750,7 +804,7 @@ fn session_json(row: &sqlx::sqlite::SqliteRow) -> Result<Value, AppError> {
         "created_at":timestamp(row.get("created_at")),"closed_at":row.get::<Option<i64>,_>("closed_at").map(timestamp)}),
     )
 }
-fn timestamp(ms: i64) -> String {
+pub(crate) fn timestamp(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .unwrap_or_default()
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
