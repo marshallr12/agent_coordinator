@@ -524,6 +524,11 @@ pub(super) fn prepare(
             .ok_or_else(|| AppError::bad_request("Supply the tool's typed body object."))?;
         if name == "coordinator_session_register" {
             let session = header_value(headers, SESSION_HEADER)?;
+            if !valid_id(session) || matches!(session, "." | "..") {
+                return Err(AppError::bad_request(
+                    "Configure a session ID usable as a single safe path segment.",
+                ));
+            }
             if body.get("session_id").and_then(Value::as_str) != Some(session) {
                 return Err(AppError::bad_request(
                     "body.session_id must match the session ID persisted in client configuration.",
