@@ -21,6 +21,12 @@ pub struct ProgramInput {
     pub environment: BTreeMap<String, String>,
     #[serde(default = "default_log_limit")]
     pub log_limit_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_environment: Option<String>,
 }
 
 fn default_log_limit() -> u64 {
@@ -166,12 +172,26 @@ fn validate_program(input: &ProgramInput) -> Result<()> {
     if input.log_limit_bytes > 64 * 1024 * 1024 {
         bail!("log_limit_bytes must be between 0 and 67108864");
     }
-    if input
-        .environment
-        .keys()
-        .any(|name| name.to_ascii_uppercase().starts_with("AGENT_COORDINATOR_"))
+    if input.environment.keys().any(|name| {
+        let name = name.to_ascii_uppercase();
+        name.starts_with("AGENT_COORDINATOR_") || name.starts_with("COORDINATOR_")
+    }) {
+        bail!("job environment must not contain coordinator credential or session variables");
+    }
+    let check_fields = [
+        input.check_identity.as_deref(),
+        input.check_version.as_deref(),
+        input.check_environment.as_deref(),
+    ];
+    if check_fields.iter().any(Option::is_some) && !check_fields.iter().all(Option::is_some) {
+        bail!("check_identity, check_version, and check_environment must be supplied together");
+    }
+    if check_fields
+        .iter()
+        .flatten()
+        .any(|value| value.trim().is_empty())
     {
-        bail!("job environment must not contain AGENT_COORDINATOR_* variables");
+        bail!("check identity, version, and environment must not be empty");
     }
     Ok(())
 }
@@ -352,4 +372,46 @@ fn protect_file(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn protect_file(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn program() -> ProgramInput {
+        ProgramInput {
+            label: "check".into(),
+            program: if cfg!(windows) {
+                PathBuf::from(r"C:\tools\check.exe")
+            } else {
+                PathBuf::from("/usr/bin/true")
+            },
+            argv: Vec::new(),
+            environment: BTreeMap::new(),
+            log_limit_bytes: 0,
+            check_identity: None,
+            check_version: None,
+            check_environment: None,
+        }
+    }
+
+    #[test]
+    fn omitted_check_metadata_stays_absent_from_serialized_input() {
+        let encoded = serde_json::to_value(program()).unwrap();
+        assert!(encoded.get("check_identity").is_none());
+        assert!(encoded.get("check_version").is_none());
+        assert!(encoded.get("check_environment").is_none());
+    }
+
+    #[test]
+    fn check_metadata_is_all_or_none_and_nonempty() {
+        let mut input = program();
+        input.check_identity = Some("workspace-tests".into());
+        assert!(validate_program(&input).is_err());
+        input.check_version = Some("v1".into());
+        input.check_environment = Some("linux-x86_64".into());
+        assert!(validate_program(&input).is_ok());
+        input.check_environment = Some(" ".into());
+        assert!(validate_program(&input).is_err());
+    }
 }

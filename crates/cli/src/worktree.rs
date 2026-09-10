@@ -429,11 +429,32 @@ where
     S: AsRef<OsStr>,
 {
     let working_directory = git_compatible_path(repository)?;
-    Command::new("git")
-        .args(args)
-        .current_dir(&working_directory)
+    let mut command = Command::new("git");
+    command.args(args).current_dir(&working_directory);
+    for (name, _) in std::env::vars_os() {
+        if remove_from_git_environment(&name) {
+            command.env_remove(name);
+        }
+    }
+    command
         .output()
         .with_context(|| format!("run Git in {}", repository.display()))
+}
+
+fn remove_from_git_environment(name: &OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    name.starts_with("AGENT_COORDINATOR_")
+        || name.starts_with("COORDINATOR_")
+        || matches!(
+            name.as_str(),
+            "GIT_DIR"
+                | "GIT_WORK_TREE"
+                | "GIT_COMMON_DIR"
+                | "GIT_INDEX_FILE"
+                | "GIT_OBJECT_DIRECTORY"
+                | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+                | "GIT_NAMESPACE"
+        )
 }
 
 #[cfg(not(windows))]
@@ -724,6 +745,28 @@ mod tests {
         )
         .unwrap();
         assert!(current_snapshot(&prepared).is_err());
+    }
+
+    #[test]
+    fn git_environment_removes_coordinator_secrets_and_repository_overrides() {
+        for name in [
+            "AGENT_COORDINATOR_TOKEN",
+            "agent_coordinator_session",
+            "COORDINATOR_REPORTER_PROOF",
+            "coordinator_other",
+            "GIT_DIR",
+            "git_work_tree",
+            "Git_Common_Dir",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "git_alternate_object_directories",
+            "GIT_NAMESPACE",
+        ] {
+            assert!(remove_from_git_environment(OsStr::new(name)), "{name}");
+        }
+        for name in ["PATH", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK", "HOME"] {
+            assert!(!remove_from_git_environment(OsStr::new(name)), "{name}");
+        }
     }
 
     #[cfg(windows)]

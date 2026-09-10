@@ -219,6 +219,9 @@ commit and tree identities before registration.
     "TMPDIR": "/tmp",
     "CARGO_TERM_COLOR": "never"
   },
+  "check_identity": "workspace-tests",
+  "check_version": "v1",
+  "check_environment": "linux-x86_64",
   "log_limit_bytes": 1048576
 }
 ```
@@ -247,6 +250,9 @@ PowerShell uses the same JSON shape; `program` must be an absolute native path:
     "TEMP": "C:\\Users\\agent\\AppData\\Local\\Temp",
     "TMP": "C:\\Users\\agent\\AppData\\Local\\Temp"
   },
+  "check_identity": "workspace-tests",
+  "check_version": "v1",
+  "check_environment": "windows-x86_64-msvc",
   "log_limit_bytes": 1048576
 }
 ```
@@ -305,6 +311,284 @@ producer. If a durable launch intent exists without a recorded process identity,
 the state becomes unknown and the guardian refuses to launch again. A missing
 local journal is also treated as uncertain because the producer may already have
 run. PID alone is never used as producer identity.
+
+The three `check_identity`, `check_version`, and `check_environment` fields are
+optional for ordinary jobs and must be supplied together. For a required
+integration check, copy the exact tuple from the project's human-managed
+workflow policy and add `--activity` so the CLI verifies that the checkout is
+at that activity's exact prepared result:
+
+```sh
+agent-coordinator checks list
+
+agent-coordinator jobs run \
+  --activity integration-activity-id \
+  --attempt integration-attempt-id --generation 1 \
+  --reservation reservation-id \
+  --checkout "/srv/worktrees/integration 42" \
+  --input required-check.json
+```
+
+Omit all three check fields for an ordinary producer. The service creates check
+receipts from registered terminal jobs. A later integration command selects
+those receipts by job ID; the CLI never accepts a caller-authored pass result.
+
+## Immutable submissions
+
+Submission evidence JSON contains only the bounded result narrative. Every
+current acceptance criterion must appear exactly once:
+
+```json
+{
+  "summary": "Implemented and validated the requested behavior.",
+  "acceptance_evidence": [
+    {
+      "criterion": "The exact criterion text from the task",
+      "evidence": "The exact behavior and check that demonstrate it"
+    }
+  ],
+  "handoff": "Review the candidate and its registered job evidence."
+}
+```
+
+For code work, the CLI reads the repository, base commit, candidate commit, and
+candidate tree from the attempt's registered, clean prepared worktree. These
+fields cannot be supplied through JSON:
+
+```sh
+agent-coordinator submissions code \
+  --attempt attempt-id --generation 2 \
+  --task-revision 4 --project-policy-revision 3 \
+  --workflow-policy-revision 2 \
+  --checkout "/srv/worktrees/task 42" \
+  --input submission.json
+```
+
+```powershell
+agent-coordinator.exe submissions code `
+  --attempt attempt-id --generation 2 `
+  --task-revision 4 --project-policy-revision 3 `
+  --workflow-policy-revision 2 `
+  --checkout 'C:\agent worktrees\task 42' `
+  --input .\submission.json
+```
+
+The service requires the attempt to be current and quiescent: release its
+reservations after every attached producer is terminal before submission.
+Submission ends the implementation attempt and creates the review and
+integration activities required by the pinned policies. It does not itself mark
+a code task complete.
+
+A submission records commit and tree identities; it does not upload Git objects.
+Before submitting work that another workstation must review or integrate, push
+the candidate commit to a durable remote checkpoint ref that the other
+workstation can fetch. For example:
+
+```sh
+git -C "/srv/worktrees/task 42" push origin \
+  HEAD:refs/agent-coordinator/candidates/submission-id
+```
+
+```powershell
+git -C 'C:\agent worktrees\task 42' push origin `
+  'HEAD:refs/agent-coordinator/candidates/submission-id'
+```
+
+On another workstation, fetch that exact ref before claiming review or
+integration work:
+
+```sh
+git -C /srv/src/project fetch origin \
+  refs/agent-coordinator/candidates/submission-id
+```
+
+The checkpoint ref name is an operator convention and is not created by the
+coordinator CLI. Keep it available until review and integration finish. The
+service stores identities and evidence only; sharing a local object database
+between worktrees is sufficient on one machine but does not transfer source to
+another machine.
+
+General work uses the same evidence JSON without any Git fields:
+
+```sh
+agent-coordinator submissions general \
+  --attempt attempt-id --generation 1 \
+  --task-revision 2 --project-policy-revision 3 \
+  --input submission.json
+```
+
+The CLI fixes the workflow-policy revision to zero for general work. A general
+task with no configured review completes atomically; otherwise it waits for its
+new immutable-submission review activities.
+
+## Review activities
+
+List the current subject workflow, then claim one exact agent-review activity.
+A review list grants no ownership:
+
+```sh
+agent-coordinator reviews list --task subject-task-id
+agent-coordinator reviews status --activity review-activity-id
+agent-coordinator reviews claim \
+  --activity review-activity-id --submission submission-id \
+  --project-policy-revision 3 --workflow-policy-revision 2
+```
+
+The returned attempt ID and generation are required for renew, release, and
+decision commands:
+
+```sh
+agent-coordinator reviews renew \
+  --activity review-activity-id \
+  --attempt review-attempt-id --generation 1
+agent-coordinator reviews release \
+  --activity review-activity-id \
+  --attempt review-attempt-id --generation 1 \
+  --input release.json
+```
+
+Activity release JSON uses the activity-specific handoff contract:
+
+```json
+{
+  "summary": "Saved work and evidence are ready for the next owner.",
+  "blocked": false
+}
+```
+
+A review decision JSON contains only the decision evidence:
+
+```json
+{
+  "decision": "approved",
+  "summary": "The candidate satisfies the acceptance criteria.",
+  "findings": [
+    {
+      "severity": "advisory",
+      "remedy": "Consider simplifying the helper in a later change.",
+      "evidence": "The current form is correct and covered by the registered check."
+    }
+  ]
+}
+```
+
+```sh
+agent-coordinator reviews decide \
+  --activity review-activity-id \
+  --attempt review-attempt-id --generation 1 \
+  --submission submission-id --input review.json
+```
+
+`decision` is `approved` or `changes_requested`; finding severity is `required`
+or `advisory`. An agent command cannot record a human review. The service checks
+the authenticated principal and independent contributor history, so changing a
+token or session cannot turn a contributor into an independent reviewer.
+
+## Integration activities
+
+After every required approval and any human publication authorization, list and
+claim the exact integration activity:
+
+```sh
+agent-coordinator integrations list --task subject-task-id
+agent-coordinator integrations status --activity integration-activity-id
+agent-coordinator integrations claim \
+  --activity integration-activity-id --submission submission-id \
+  --project-policy-revision 3 --workflow-policy-revision 2
+```
+
+Prepare and register a separate worktree for the returned integration attempt,
+using the observed full target commit as its base. Then prepare the deterministic
+candidate-containing result:
+
+```sh
+agent-coordinator worktree prepare \
+  --attempt integration-attempt-id --generation 1 \
+  --source /srv/src/project \
+  --path "/srv/worktrees/integration 42" \
+  --branch agent/integrate-42 \
+  --base 0123456789abcdef0123456789abcdef01234567
+
+agent-coordinator integrations prepare \
+  --activity integration-activity-id \
+  --attempt integration-attempt-id --generation 1 \
+  --submission submission-id \
+  --checkout "/srv/worktrees/integration 42" \
+  --expected-target 0123456789abcdef0123456789abcdef01234567 \
+  --candidate 89abcdef0123456789abcdef0123456789abcdef
+```
+
+```powershell
+agent-coordinator.exe integrations prepare `
+  --activity integration-activity-id `
+  --attempt integration-attempt-id --generation 1 `
+  --submission submission-id `
+  --checkout 'C:\agent worktrees\integration 42' `
+  --expected-target 0123456789abcdef0123456789abcdef01234567 `
+  --candidate 89abcdef0123456789abcdef0123456789abcdef
+```
+
+Preparation checks fresh activity and attempt authority before local Git work,
+persists the exact request before creating the result, registers immutable
+publication intent before any push, and materializes the result in the isolated
+checkout for exact-source checks. It never updates the target branch.
+
+Run every required check against that materialized checkout, wait for terminal
+successful job receipts, and release the check reservations. The checkout must
+remain clean at the exact prepared result. Publish with:
+
+```sh
+agent-coordinator integrations publish \
+  --activity integration-activity-id \
+  --attempt integration-attempt-id --generation 1
+```
+
+Immediately before Git starts, the library observes the configured remote,
+calls the service for fresh exact activity, candidate, intent, and remaining
+lease authority, observes the remote again, durably records push intent, and
+uses Git's exact force-with-lease compare-and-swap. A moved target is reported
+without publishing. Once push intent is durable, a retry is observation-only and
+never repeats an uncertain push.
+
+After interruption, inspect the remote without any publication capability:
+
+```sh
+agent-coordinator integrations reconcile \
+  --activity integration-activity-id \
+  --attempt integration-attempt-id --generation 1
+```
+
+This local reconciliation can confirm the exact prepared result, report that the
+target moved, or preserve an uncertain outcome. Only an authenticated human can
+record the service-side disposition of an uncertain or known nonpublication.
+
+When publication is confirmed, finish with an exact set of successful registered
+check jobs:
+
+```json
+{
+  "submission_id": "submission-id",
+  "check_job_ids": ["job-id-linux", "job-id-windows"],
+  "summary": "The exact integrated result passed the pinned check roster."
+}
+```
+
+```sh
+agent-coordinator integrations finish \
+  --activity integration-activity-id \
+  --attempt integration-attempt-id --generation 1 \
+  --input integration-finish.json
+```
+
+`finish` first registers the immutable integration result with those job IDs.
+It then observes the configured remote again and asks the service to finalize
+the exact published commit and tree. The service resolves job IDs to terminal
+producer receipts and checks the pinned identity/version/environment roster;
+the JSON cannot fabricate a result. Finalization atomically completes the
+integration activity and subject task and releases the canonical target hold.
+Use `integrations renew` and `integrations release` with the same argument shapes
+as their review equivalents while the activity remains owned. A release never
+clears an uncertain publication hold.
 
 ## Recovery inspection
 
