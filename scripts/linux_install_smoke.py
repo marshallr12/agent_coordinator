@@ -401,6 +401,7 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
         client_env.update({
             "AGENT_COORDINATOR_HOME": str(client_home),
             "AGENT_COORDINATOR_TOKEN": credential["token"],
+            "AGENT_COORDINATOR_ORIGIN": origin,
             "SSL_CERT_FILE": str(ca),
         })
         connected = run([

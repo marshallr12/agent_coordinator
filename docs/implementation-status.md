@@ -1,7 +1,8 @@
 # Implementation status
 
 The foundation, job/worktree evidence, reviewed completion, shared-record,
-operator-workflow, and backup/restore milestones are implemented.
+operator-workflow, backup/restore, and Linux operational controls are implemented.
+Linux release acceptance is in progress; see the evidence section below.
 The complete release remains
 defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
@@ -112,6 +113,19 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   Unknown jobs and physical/integration holds remain preserved. The dashboard
   records the checklist and can issue a fresh token for the same agent identity.
 
+- Durable clock rollback detection expires task and reporter authority while
+  preserving physical and integration holds. The dashboard and host command
+  record time reconciliation; restored snapshots preserve their creation-time
+  cutoff. Concurrent read authentication can share a newly committed clock sample,
+  while every mutation retains its own writer-lock time and ownership checks.
+- Bounded host maintenance compacts expired receipt results and redundant old
+  running-observation summaries. Permanent request identities and semantic
+  history remain intact. Daily systemd units provide scheduled maintenance.
+- Known-prefix version-1 snapshots from schema 12 onward verify without source
+  changes and migrate only inside a private restore copy. Native release tooling
+  verifies package checksums, offline links, systemd/HTTPS installation, and
+  reproducibility; the sustained resource-constrained acceptance gate is pending.
+
 ## Deliberate limits of this milestone
 
 Completion is enforced through workflow activities; there is no unrestricted
@@ -141,8 +155,9 @@ again using its returned identity. Account-creation retries retain their origina
 key and require the original password, which the dashboard never persists; the
 same administrator can authenticate again to reconcile that request safely.
 
-Instruction version 6 adds restore recovery guidance to operator tools, objective gates, and complete history
-alongside worktree/resource/job evidence, reviewed completion, and shared records.
+Instruction version 7 adds clock reconciliation and receipt-retention guidance
+to the existing restore, operator, worktree/job, completion, and shared-record
+instructions.
 Existing sessions must fetch and acknowledge the new instructions before new claims.
 
 JSON requests default to 1 MiB and can be configured lower; artifact bytes use a
@@ -150,13 +165,16 @@ separate 16 MiB hard limit. Task details return the latest 50 attempts,
 100 checkpoints, 50 checkouts, and bounded job/resource evidence; old records remain stored, with complete history
 pagination available separately. Mutation receipts replay for 30 days; expired keys
 remain reserved so a late retry cannot duplicate an old operation. Artifact retention cleanup and storage quota enforcement are implemented;
-general event/receipt/history retention remains backlog work.
+host maintenance compacts replay payloads and redundant old health summaries.
+Permanent semantic events, task/handoff/lesson history, and request identities are
+retained; this bounds maintenance work, not total historical storage.
 
-Lease timing uses the server clock. Hosts should maintain synchronized time; a
-restore invalidates all existing authority. Server clock rollback handling remains
-part of the next milestone.
-The service is suitable for development exercises; the remaining release recovery
-and operational safeguards must be completed before production use.
+Lease timing uses protected service time. Hosts should maintain synchronized time;
+a material rollback pauses new authority until reconciliation, and a restore
+invalidates existing authority. A rollback during downtime that remains above
+the last durable observation cannot be detected without a trusted external clock.
+Deployment hardware, public hostname, off-server backup destination, and the real
+Windows workstation acceptance remain installation or operator inputs.
 
 ## Evidence and next work
 
@@ -282,3 +300,32 @@ requires destination-side verification and a measured recovery exercise.
 Backup/restore implementation `283d9d0` passed Linux workspace checks and both
 smoke exercises, native Windows client/CLI/local-runner tests, and the dependency
 audit in [CI run 34445152452](https://github.com/marshallr12/agent_coordinator/actions/runs/34445152452).
+
+### Linux operations acceptance candidate
+
+Candidate `3aa6b31` passed Linux formatting, warnings-denied Clippy, workspace
+checks and both smoke exercises; native Windows client/CLI/local-runner checks;
+and the locked dependency audit in
+[CI run 34453403201](https://github.com/marshallr12/agent_coordinator/actions/runs/34453403201).
+Locally, 158 workspace tests and the added failed-commit clock regression passed
+(159 total), with the full build and both smoke exercises. The final small restore
+smoke took 7.3 seconds. Browser checks covered the clock pause, multiline recovery
+reason, reconciliation, and a 375-pixel layout without console errors or overflow.
+
+The actual prior executable upgraded a schema-12 database to schema 16 while
+preserving principals, credentials, sessions, the active attempt, and checkpoints.
+Instruction version 6 was rejected for new claims until version 7 acknowledgment.
+Its old snapshot verified and restored with the new executable in 0.199 seconds;
+restore preserved the snapshot bytes and recorded work while invalidating old
+credentials, sessions, and ownership. Historical search remained available.
+
+A 40-second development workload at 50 requests/second completed 2,000 requests
+with 100,000 historical tasks and 50 agent sessions, p95 49.5 ms, and queue peak 4.
+It verified concurrent upload/backup and a paused, invalidated restore stage.
+This short local run is not the sustained Ubuntu acceptance result. Full release
+checks are running in
+[release CI 34453403271](https://github.com/marshallr12/agent_coordinator/actions/runs/34453403271).
+Item 6 stays open until the constrained 30-minute workload and Linux/Windows
+package and installation gates pass. See [Linux capacity](linux-capacity.md),
+[installation](linux-installation.md), [clock safety](clock-safety-contract.md),
+and [retention](retention-contract.md).
