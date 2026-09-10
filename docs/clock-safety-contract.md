@@ -55,6 +55,12 @@ Restore invalidation remains available for an offline staged database. If it is
 the first observer of a rollback, it commits the clock incident before beginning
 restore invalidation under a fresh writer lock.
 
+Before that invalidation, restore raises the private copy's durable clock
+high-water mark to at least the snapshot manifest's creation time. That time is
+also the artifact-inclusion cutoff, so a destination host with an older wall
+clock cannot revive an expired decision or advertise an expired artifact whose
+blob was correctly omitted from the snapshot.
+
 ## Administrator API
 
 `GET /api/v1/admin/clock` requires a currently enabled administrator and returns:

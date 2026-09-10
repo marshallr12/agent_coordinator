@@ -503,4 +503,38 @@ async fn subject_and_activity_routes_expose_immutable_workflow_evidence() {
     assert!(!combined.contains("contributor-session-secret"));
     assert!(!combined.contains("reviewer-session-secret"));
     assert!(!combined.contains(&unrelated_task));
+
+    assert_eq!(
+        integrations["items"][0]["record"]["authorization"]["valid"],
+        true
+    );
+    let incident = Uuid::new_v4().to_string();
+    let now = f.state.now();
+    sqlx::query("INSERT INTO clock_incidents(id,observed_wall_time_ms,high_water_time_ms,detected_at) VALUES(?,?,?,?)")
+        .bind(&incident)
+        .bind(now - 10_000)
+        .bind(now)
+        .bind(now)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE clock_state SET status='clock_reconciliation',incident_id=?,observed_wall_time_ms=?,detected_at=?,last_safe_time_ms=? WHERE singleton=1")
+        .bind(&incident)
+        .bind(now - 10_000)
+        .bind(now)
+        .bind(now)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let paused_integrations = f
+        .history(&project, &subject, "integrations", 20, None)
+        .await;
+    assert_eq!(
+        paused_integrations["items"][0]["record"]["authorization"]["valid"],
+        false
+    );
+    assert_eq!(
+        paused_integrations["items"][0]["record"]["authorization"]["validity_reason"],
+        "clock_reconciliation_required"
+    );
 }

@@ -476,6 +476,24 @@ async fn assemble_restore(
     let staged_state = AppState::open(config)
         .await
         .context("Restored database is not compatible with this service version.")?;
+    // Snapshot creation time is itself protected service time, and it is also
+    // the cutoff that determines which artifact blobs the snapshot contains.
+    // Carry that observation into the private database before restore
+    // invalidation samples its clock. Otherwise an older host wall clock could
+    // revive an expired decision or an artifact whose blob was correctly left
+    // out of the snapshot.
+    let mut clock_tx = staged_state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let anchored = sqlx::query(
+        "UPDATE clock_state SET last_safe_time_ms=MAX(last_safe_time_ms,?) WHERE singleton=1",
+    )
+    .bind(verified.manifest.created_at_ms)
+    .execute(&mut *clock_tx)
+    .await?;
+    ensure!(
+        anchored.rows_affected() == 1,
+        "Restored database clock state is unavailable."
+    );
+    clock_tx.commit().await?;
     check_deadline(started, "Restore")?;
     let authority = crate::restore::invalidate_restored_state(
         &staged_state,

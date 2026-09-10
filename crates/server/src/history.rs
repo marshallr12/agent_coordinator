@@ -216,7 +216,11 @@ async fn history(
     .await?;
     let had_more = rows.len() > limit as usize;
     let rows = &rows[..rows.len().min(limit as usize)];
-    let mut items = materialize(&mut tx, &query.kind, rows).await?;
+    let clock_ready: bool =
+        sqlx::query_scalar("SELECT status='ready' FROM clock_state WHERE singleton=1")
+            .fetch_one(&mut *tx)
+            .await?;
+    let mut items = materialize(&mut tx, &query.kind, rows, clock_ready).await?;
     let page_snapshot = snapshot(&project, &task, &query.kind, cutoff, &cursor_epoch);
     let mut more = had_more;
     loop {
@@ -341,6 +345,7 @@ async fn materialize(
     c: &mut SqliteConnection,
     kind: &str,
     rows: &[SqliteRow],
+    clock_ready: bool,
 ) -> Result<Vec<(i64, TaskHistoryItem)>, AppError> {
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
@@ -413,7 +418,10 @@ async fn materialize(
             }
             "integrations" => {
                 let activity: String = row.get("id");
-                let authorization=sqlx::query("SELECT submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at,invalidated_at,authorization_revision FROM integration_authorizations WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v|json!({"revision":v.get::<i64,_>("authorization_revision"),"submission_id":v.get::<String,_>("submission_id"),"project_policy_revision":v.get::<i64,_>("project_policy_revision"),"workflow_policy_revision":v.get::<i64,_>("workflow_policy_revision"),"actor_id":v.get::<String,_>("actor_id"),"summary":v.get::<String,_>("summary"),"created_at":timestamp(v.get("created_at")),"invalidated_at":time(v.get("invalidated_at")),"valid":v.get::<Option<i64>,_>("invalidated_at").is_none()}));
+                let authorization=sqlx::query("SELECT submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at,invalidated_at,authorization_revision FROM integration_authorizations WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v| {
+                    let record_valid=v.get::<Option<i64>,_>("invalidated_at").is_none();
+                    json!({"revision":v.get::<i64,_>("authorization_revision"),"submission_id":v.get::<String,_>("submission_id"),"project_policy_revision":v.get::<i64,_>("project_policy_revision"),"workflow_policy_revision":v.get::<i64,_>("workflow_policy_revision"),"actor_id":v.get::<String,_>("actor_id"),"summary":v.get::<String,_>("summary"),"created_at":timestamp(v.get("created_at")),"invalidated_at":time(v.get("invalidated_at")),"valid":record_valid && clock_ready,"validity_reason":if !clock_ready { Some("clock_reconciliation_required") } else if !record_valid { Some("authorization_invalidated") } else { None }})
+                });
                 let authorization_history=sqlx::query("SELECT authorization_revision,submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at,invalidated_at FROM integration_authorization_history WHERE activity_id=? ORDER BY authorization_revision").bind(&activity).fetch_all(&mut *c).await?;
                 let authorization_history:Vec<Value>=authorization_history.iter().map(|v|json!({"revision":v.get::<i64,_>("authorization_revision"),"submission_id":v.get::<String,_>("submission_id"),"project_policy_revision":v.get::<i64,_>("project_policy_revision"),"workflow_policy_revision":v.get::<i64,_>("workflow_policy_revision"),"actor_id":v.get::<String,_>("actor_id"),"summary":v.get::<String,_>("summary"),"created_at":timestamp(v.get("created_at")),"invalidated_at":timestamp(v.get("invalidated_at")),"valid":false})).collect();
                 let hold=sqlx::query("SELECT id,canonical_repository_key,target_branch,state,acquired_by,acquired_at,released_by,released_at,release_reason FROM integration_holds WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v|json!({"id":v.get::<String,_>("id"),"canonical_repository_key":v.get::<String,_>("canonical_repository_key"),"target_branch":v.get::<String,_>("target_branch"),"state":v.get::<String,_>("state"),"acquired_by":v.get::<String,_>("acquired_by"),"acquired_at":timestamp(v.get("acquired_at")),"released_by":v.get::<Option<String>,_>("released_by"),"released_at":time(v.get("released_at")),"release_reason":v.get::<Option<String>,_>("release_reason")}));

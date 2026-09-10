@@ -152,6 +152,68 @@ async fn creates_verifies_and_restores_a_self_contained_snapshot() {
 }
 
 #[tokio::test]
+async fn restore_anchors_time_to_the_manifest_cutoff_before_authority_invalidation() {
+    let fixture = Fixture::new().await;
+    let (artifact, storage) = fixture
+        .finalized_artifact(b"expired before snapshot", false)
+        .await;
+    let retention_until = fixture.state.now() - 1;
+    sqlx::query("UPDATE artifacts SET pinned=0,retention_until=? WHERE id=?")
+        .bind(retention_until)
+        .bind(&artifact)
+        .execute(&fixture.state.pool)
+        .await
+        .unwrap();
+
+    let created = create_backup(&fixture.state, &fixture.repository())
+        .await
+        .unwrap();
+    assert_eq!(created["artifact_count"], 0);
+    let snapshot_time =
+        chrono::DateTime::parse_from_rfc3339(created["created_at"].as_str().unwrap())
+            .unwrap()
+            .timestamp_millis();
+    let snapshot = PathBuf::from(created["snapshot_path"].as_str().unwrap());
+    assert!(!snapshot.join(format!("blobs/{storage}.blob")).exists());
+
+    let destination = fixture.directory.path().join("restored-time-anchor");
+    restore_backup(
+        &snapshot,
+        &destination,
+        "Prove snapshot time cannot move backward during restore.",
+    )
+    .await
+    .unwrap();
+    let pool = sqlx::SqlitePool::connect(destination.join("coordinator.sqlite3").to_str().unwrap())
+        .await
+        .unwrap();
+    let protected_time: i64 =
+        sqlx::query_scalar("SELECT last_safe_time_ms FROM clock_state WHERE singleton=1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let restored_at: i64 = sqlx::query_scalar("SELECT restored_at FROM restore_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(protected_time >= snapshot_time);
+    assert!(restored_at >= snapshot_time);
+    assert!(protected_time >= retention_until);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM artifacts WHERE id=? AND (pinned=1 OR retention_until>?)",
+        )
+        .bind(&artifact)
+        .bind(protected_time)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn missing_or_corrupt_content_never_verifies_as_complete() {
     let missing = Fixture::new().await;
     missing.finalized_artifact(b"missing", false).await;
