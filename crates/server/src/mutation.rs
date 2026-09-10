@@ -39,6 +39,32 @@ impl Mutation {
         Self::load_receipt(tx, now, actor, operation, key, fingerprint).await
     }
 
+    /// Account creation may be retried after an uncertain response forced the
+    /// administrator to sign in again. This one operation binds its receipt to
+    /// the human administrator principal rather than one browser session. All
+    /// current browser authentication and administrator authorization are still
+    /// rechecked after acquiring SQLite's writer lock.
+    pub async fn begin_human_admin_account_creation<T: Serialize>(
+        state: &AppState,
+        auth: &Auth,
+        headers: &HeaderMap,
+        input: &T,
+    ) -> Result<Self, AppError> {
+        auth.require_browser()?;
+        let operation = "POST /api/v1/admin/operators";
+        let key = mutation_key(headers)?;
+        let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let now = state.now();
+        let actor = auth.verify(&mut tx, now).await?;
+        crate::auth::admin(&actor)?;
+        let fingerprint = digest(&serde_json::to_string(&(
+            "human-admin-account-creation-v1",
+            input,
+            &actor.id,
+        ))?);
+        Self::load_receipt(tx, now, actor, operation, key, fingerprint).await
+    }
+
     pub async fn begin_reporter<T: Serialize>(
         state: &AppState,
         auth: &crate::jobs::ReporterAuth,

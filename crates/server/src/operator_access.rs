@@ -167,11 +167,17 @@ fn idempotency_key(headers: &HeaderMap) -> Option<&str> {
     Some(value)
 }
 
-async fn created_operator_password_hash(
+struct CreatedOperatorRetry {
+    password_hash: String,
+    original_name: String,
+    original_role: String,
+}
+
+async fn created_operator_retry(
     state: &AppState,
     actor_id: &str,
     headers: &HeaderMap,
-) -> Result<Option<String>, AppError> {
+) -> Result<Option<CreatedOperatorRetry>, AppError> {
     let Some(key) = idempotency_key(headers) else {
         return Ok(None);
     };
@@ -188,11 +194,26 @@ async fn created_operator_password_hash(
         .pointer("/operator/id")
         .and_then(Value::as_str)
         .ok_or_else(AppError::internal)?;
-    sqlx::query_scalar("SELECT password_hash FROM principals WHERE id=? AND kind='human'")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(Into::into)
+    let original_name = result
+        .pointer("/operator/name")
+        .and_then(Value::as_str)
+        .ok_or_else(AppError::internal)?
+        .to_owned();
+    let original_role = result
+        .pointer("/operator/role")
+        .and_then(Value::as_str)
+        .ok_or_else(AppError::internal)?
+        .to_owned();
+    let password_hash =
+        sqlx::query_scalar("SELECT password_hash FROM principals WHERE id=? AND kind='human'")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?;
+    Ok(password_hash.map(|password_hash| CreatedOperatorRetry {
+        password_hash,
+        original_name,
+        original_role,
+    }))
 }
 
 async fn create_operator(
@@ -206,17 +227,17 @@ async fn create_operator(
     validate_human_role(&input.role)?;
     validate_password(&input.password)?;
     let mut receipt_already_exists = false;
-    let mut password_hash = if let Some(existing_hash) =
-        created_operator_password_hash(&state, &auth.actor.id, &headers).await?
-    {
+    let mut password_matches = true;
+    let existing_retry = created_operator_retry(&state, &auth.actor.id, &headers).await?;
+    let mut password_hash = if let Some(existing) = &existing_retry {
         receipt_already_exists = true;
-        if !verify_password(&state, input.password.clone(), existing_hash.clone()).await? {
-            return Err(AppError::conflict(
-                "idempotency_secret_mismatch",
-                "The re-entered password does not match the original account-creation request.",
-            ));
-        }
-        existing_hash
+        password_matches = verify_password(
+            &state,
+            input.password.clone(),
+            existing.password_hash.clone(),
+        )
+        .await?;
+        existing.password_hash.clone()
     } else {
         hash_password_bounded(&state, input.password.clone()).await?
     };
@@ -227,12 +248,8 @@ async fn create_operator(
         // without retaining another password-checking oracle.
         password_verifier: digest(&password_hash),
     };
-    let mut mutation = match Mutation::begin(
-        &state,
-        &auth,
-        &headers,
-        "POST /api/v1/admin/operators",
-        &receipt,
+    let mut mutation = match Mutation::begin_human_admin_account_creation(
+        &state, &auth, &headers, &receipt,
     )
     .await
     {
@@ -243,27 +260,31 @@ async fn create_operator(
             // from the committed result, verify the re-entered secret off-lock,
             // and then let Mutation recheck current authentication under a new
             // writer lock.
-            let existing_hash = created_operator_password_hash(&state, &auth.actor.id, &headers)
+            let existing = created_operator_retry(&state, &auth.actor.id, &headers)
                 .await?
                 .ok_or(error)?;
-            if !verify_password(&state, input.password.clone(), existing_hash.clone()).await? {
+            if !verify_password(
+                &state,
+                input.password.clone(),
+                existing.password_hash.clone(),
+            )
+            .await?
+            {
                 return Err(AppError::conflict(
                     "idempotency_secret_mismatch",
                     "The re-entered password does not match the original account-creation request.",
                 ));
             }
-            password_hash = existing_hash;
+            password_hash = existing.password_hash;
             receipt.password_verifier = digest(&password_hash);
-            Mutation::begin(
-                &state,
-                &auth,
-                &headers,
-                "POST /api/v1/admin/operators",
-                &receipt,
-            )
-            .await?
+            Mutation::begin_human_admin_account_creation(&state, &auth, &headers, &receipt).await?
         }
         Err(error) if error.code == "idempotency_conflict" => {
+            if let Some(existing) = &existing_retry
+                && (existing.original_name != input.name || existing.original_role != input.role)
+            {
+                return Err(error);
+            }
             return Err(AppError::conflict(
                 "idempotency_secret_mismatch",
                 "The original account-creation password can no longer be verified against the current account.",
@@ -272,6 +293,12 @@ async fn create_operator(
         Err(error) => return Err(error),
     };
     admin(&mutation.actor)?;
+    if !password_matches {
+        return Err(AppError::conflict(
+            "idempotency_secret_mismatch",
+            "The re-entered password does not match the original account-creation request.",
+        ));
+    }
     if let Some(replay) = &mutation.replay {
         let replay_id = replay
             .pointer("/operator/id")

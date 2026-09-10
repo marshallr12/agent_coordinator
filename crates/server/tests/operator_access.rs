@@ -341,6 +341,140 @@ async fn account_creation_replay_and_last_admin_are_guarded() {
 }
 
 #[tokio::test]
+async fn account_creation_replays_after_reauthentication_but_requires_current_admin() {
+    let fixture = Fixture::new().await;
+    let original = fixture.login().await;
+    let own = fixture
+        .call(
+            "GET",
+            "/api/v1/auth/account",
+            &[("cookie", &original.cookie)],
+            None,
+        )
+        .await;
+    own.ok();
+    let original_id = own.body["data"]["operator"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let created = fixture
+        .create_operator(
+            &original,
+            "uncertain-create",
+            "operator",
+            OPERATOR_PASSWORD,
+            "uncertain-create-key",
+        )
+        .await;
+    created.ok();
+    let created_id = created.body["data"]["operator"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let reauthenticated = fixture.login().await;
+    let replay = fixture
+        .create_operator(
+            &reauthenticated,
+            "uncertain-create",
+            "operator",
+            OPERATOR_PASSWORD,
+            "uncertain-create-key",
+        )
+        .await;
+    replay.ok();
+    assert_eq!(replay.body["data"]["operator"]["id"], created_id);
+    fixture
+        .create_operator(
+            &reauthenticated,
+            "uncertain-create",
+            "operator",
+            NEW_PASSWORD,
+            "uncertain-create-key",
+        )
+        .await
+        .error(StatusCode::CONFLICT, "idempotency_secret_mismatch");
+    fixture
+        .create_operator(
+            &reauthenticated,
+            "changed-name",
+            "operator",
+            OPERATOR_PASSWORD,
+            "uncertain-create-key",
+        )
+        .await
+        .error(StatusCode::CONFLICT, "idempotency_conflict");
+    let receipt_count: i64 = sqlx::query_scalar("SELECT count(*) FROM mutation_receipts WHERE operation='POST /api/v1/admin/operators' AND key='uncertain-create-key'")
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE kind='operator_created' AND record_id=?",
+    )
+    .bind(&created_id)
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(receipt_count, 1);
+    assert_eq!(event_count, 1);
+
+    let backup = fixture
+        .create_operator(
+            &reauthenticated,
+            "authority-backup",
+            "admin",
+            OPERATOR_PASSWORD,
+            "authority-backup-key",
+        )
+        .await;
+    backup.ok();
+    let backup_browser = Browser::from_reply(
+        fixture
+            .login_as("authority-backup", OPERATOR_PASSWORD)
+            .await,
+    );
+    fixture
+        .call(
+            "POST",
+            &format!("/api/v1/admin/operators/{original_id}/access"),
+            &backup_browser.headers("disable-original-admin"),
+            Some(json!({"expected_revision":1,"role":"admin","enabled":false})),
+        )
+        .await
+        .ok();
+    fixture
+        .create_operator(
+            &reauthenticated,
+            "uncertain-create",
+            "operator",
+            OPERATOR_PASSWORD,
+            "uncertain-create-key",
+        )
+        .await
+        .error(StatusCode::UNAUTHORIZED, "authentication_required");
+    fixture
+        .call(
+            "POST",
+            &format!("/api/v1/admin/operators/{original_id}/access"),
+            &backup_browser.headers("demote-original-admin"),
+            Some(json!({"expected_revision":2,"role":"operator","enabled":true})),
+        )
+        .await
+        .ok();
+    let demoted = Browser::from_reply(fixture.login_as("admin", ADMIN_PASSWORD).await);
+    fixture
+        .create_operator(
+            &demoted,
+            "uncertain-create",
+            "operator",
+            OPERATOR_PASSWORD,
+            "uncertain-create-key",
+        )
+        .await
+        .error(StatusCode::FORBIDDEN, "operation_not_permitted");
+}
+
+#[tokio::test]
 async fn password_change_revokes_every_session_and_redacts_secrets() {
     let fixture = Fixture::new().await;
     let first = fixture.login().await;

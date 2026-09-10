@@ -51,6 +51,12 @@ original creation request can no longer be secret-verified; inspect the account
 instead. The receipt retains neither the password nor another password-checking
 oracle. A successful replay returns freshly read account metadata, so the old
 receipt cannot represent later role or enabled-state changes as current.
+Account creation is the only mutation whose receipt is bound to the human
+administrator principal instead of the individual browser session. This permits
+replay after signing in again following an uncertain response. The service still
+rechecks the new browser session and current administrator role under the writer
+lock. Revoked, disabled, or demoted administrators cannot replay it. All other
+mutation fingerprints retain their existing session binding.
 
 `POST /api/v1/admin/operators/{id}/access` accepts:
 
