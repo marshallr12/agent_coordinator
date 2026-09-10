@@ -10,6 +10,10 @@ transaction commits. A request arriving after the sample always obtains a new
 one. This reduces writer contention without caching credential validity or
 weakening the fresh time and ownership checks inside every mutation.
 
+Domain deadlines and relative remaining/cadence fields use protected coordinator
+time. Envelope `server_time` is observational wall time for response correlation
+and display; it never grants or extends authority.
+
 The protected service time never moves behind a time already observed by the
 coordinator. During one process lifetime it also advances by monotonic elapsed
 time when the wall clock stalls or moves backward. A backward adjustment of at
