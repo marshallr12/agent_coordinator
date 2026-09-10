@@ -6,9 +6,10 @@
 
 use std::fmt;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +17,7 @@ use serde_json::Value;
 const SESSION_HEADER: &str = "x-coordinator-session";
 const SESSION_PROOF_HEADER: &str = "x-coordinator-session-proof";
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -60,6 +62,7 @@ pub enum ClientError {
     InvalidPath(String),
     InvalidHeader(&'static str),
     Transport(reqwest::Error),
+    Io(std::io::Error),
     InvalidResponse(String),
 }
 
@@ -71,6 +74,7 @@ impl fmt::Display for ClientError {
             Self::InvalidHeader(name) => write!(f, "invalid value for {name}"),
             Self::Transport(error) if error.is_timeout() => write!(f, "service request timed out"),
             Self::Transport(_) => write!(f, "service request failed"),
+            Self::Io(_) => write!(f, "local file operation failed"),
             Self::InvalidResponse(message) => write!(f, "invalid service response: {message}"),
         }
     }
@@ -80,6 +84,7 @@ impl std::error::Error for ClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Transport(error) => Some(error),
+            Self::Io(error) => Some(error),
             _ => None,
         }
     }
@@ -89,6 +94,21 @@ impl std::error::Error for ClientError {
 pub struct ApiResponse {
     pub status: u16,
     pub body: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DownloadReceipt {
+    pub status: u16,
+    pub output: PathBuf,
+    pub size_bytes: u64,
+    pub media_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DownloadResponse {
+    Downloaded(DownloadReceipt),
+    Api(ApiResponse),
 }
 
 impl ApiResponse {
@@ -218,6 +238,137 @@ impl CoordinatorClient {
         .await
     }
 
+    /// Streams one already-reserved artifact from a local file. Callers must
+    /// persist the exact file snapshot and key before invoking this method.
+    pub async fn upload_file(
+        &self,
+        path: &str,
+        file_path: &Path,
+        size_bytes: u64,
+        idempotency_key: &str,
+        session: Option<&SessionAuth>,
+    ) -> Result<ApiResponse, ClientError> {
+        if size_bytes > MAX_RESPONSE_BYTES as u64 {
+            return Err(ClientError::InvalidResponse(
+                "artifact upload exceeds 16 MiB".into(),
+            ));
+        }
+        let metadata = tokio::fs::symlink_metadata(file_path)
+            .await
+            .map_err(ClientError::Io)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != size_bytes
+        {
+            return Err(ClientError::InvalidResponse(
+                "artifact upload source is not the exact saved regular file".into(),
+            ));
+        }
+        let url = api_url(&self.origin, path)?;
+        let mut headers = self.auth_headers(Some(idempotency_key), session, true)?;
+        headers.insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&size_bytes.to_string())
+                .map_err(|_| ClientError::InvalidHeader("content-length"))?,
+        );
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        let file = tokio::fs::File::open(file_path)
+            .await
+            .map_err(ClientError::Io)?;
+        let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
+        let response = self
+            .http
+            .request(Method::PUT, url)
+            .headers(headers)
+            .timeout(Duration::from_secs(120))
+            .body(body)
+            .send()
+            .await
+            .map_err(ClientError::Transport)?;
+        json_response(response).await
+    }
+
+    /// Streams a download to a same-directory temporary and publishes it only
+    /// if the explicit destination does not already exist.
+    pub async fn download_to_path(
+        &self,
+        path: &str,
+        destination: &Path,
+        session: Option<&SessionAuth>,
+    ) -> Result<DownloadResponse, ClientError> {
+        if std::fs::symlink_metadata(destination).is_ok() {
+            return Err(ClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "download destination already exists",
+            )));
+        }
+        let url = api_url(&self.origin, path)?;
+        let headers = self.auth_headers(None, session, true)?;
+        let mut response = self
+            .http
+            .request(Method::GET, url)
+            .headers(headers)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(ClientError::Transport)?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return json_response(response).await.map(DownloadResponse::Api);
+        }
+        if let Some(length) = response.content_length()
+            && length > MAX_RESPONSE_BYTES as u64
+        {
+            return Err(ClientError::InvalidResponse(
+                "artifact download exceeds 16 MiB".into(),
+            ));
+        }
+        let media_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let temporary = tempfile::Builder::new()
+            .prefix(".agent-coordinator-download-")
+            .tempfile_in(parent)
+            .map_err(ClientError::Io)?;
+        protect_file(temporary.path())?;
+        let writer = temporary.as_file().try_clone().map_err(ClientError::Io)?;
+        let mut writer = tokio::fs::File::from_std(writer);
+        let mut received = 0_u64;
+        while let Some(chunk) = response.chunk().await.map_err(ClientError::Transport)? {
+            received = received.saturating_add(chunk.len() as u64);
+            if received > MAX_RESPONSE_BYTES as u64 {
+                return Err(ClientError::InvalidResponse(
+                    "artifact download exceeds 16 MiB".into(),
+                ));
+            }
+            tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk)
+                .await
+                .map_err(ClientError::Io)?;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut writer)
+            .await
+            .map_err(ClientError::Io)?;
+        writer.sync_all().await.map_err(ClientError::Io)?;
+        drop(writer);
+        temporary
+            .persist_noclobber(destination)
+            .map_err(|error| ClientError::Io(error.error))?;
+        sync_parent(parent)?;
+        Ok(DownloadResponse::Downloaded(DownloadReceipt {
+            status,
+            output: destination.to_owned(),
+            size_bytes: received,
+            media_type,
+        }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn request_inner(
         &self,
@@ -240,6 +391,21 @@ impl CoordinatorClient {
             return Err(ClientError::InvalidHeader(IDEMPOTENCY_HEADER));
         }
 
+        let headers = self.auth_headers(idempotency_key, session, include_session_id)?;
+        let mut request = self.http.request(method.reqwest(), url).headers(headers);
+        if let Some(body) = body {
+            request = request.header(CONTENT_TYPE, "application/json").json(body);
+        }
+        let response = request.send().await.map_err(ClientError::Transport)?;
+        json_response(response).await
+    }
+
+    fn auth_headers(
+        &self,
+        idempotency_key: Option<&str>,
+        session: Option<&SessionAuth>,
+        include_session_id: bool,
+    ) -> Result<HeaderMap, ClientError> {
         let mut headers = HeaderMap::new();
         if let Some(token) = &self.token {
             let bearer = HeaderValue::from_str(&format!("Bearer {token}"))
@@ -268,35 +434,73 @@ impl CoordinatorClient {
             );
         }
 
-        let mut request = self.http.request(method.reqwest(), url).headers(headers);
-        if let Some(body) = body {
-            request = request.header(CONTENT_TYPE, "application/json").json(body);
-        }
-        let response = request.send().await.map_err(ClientError::Transport)?;
-        let status = response.status().as_u16();
-        let bytes = response.bytes().await.map_err(ClientError::Transport)?;
-        if (300..400).contains(&status) {
-            return Ok(ApiResponse {
-                status,
-                body: serde_json::json!({
-                    "error": {
-                        "code": "redirect_refused",
-                        "message": "the service returned a redirect; update the configured service origin explicitly",
-                        "details": {},
-                        "next_actions": [],
-                        "retryable": false
-                    }
-                }),
-            });
-        }
-        let body: Value = serde_json::from_slice(&bytes).map_err(|_| {
-            ClientError::InvalidResponse(format!(
-                "HTTP {status} did not contain a JSON response body"
-            ))
-        })?;
-        validate_envelope(status, &body)?;
-        Ok(ApiResponse { status, body })
+        Ok(headers)
     }
+}
+
+async fn json_response(mut response: reqwest::Response) -> Result<ApiResponse, ClientError> {
+    let status = response.status().as_u16();
+    if (300..400).contains(&status) {
+        return Ok(ApiResponse {
+            status,
+            body: serde_json::json!({
+                "error": {
+                    "code": "redirect_refused",
+                    "message": "the service returned a redirect; update the configured service origin explicitly",
+                    "details": {},
+                    "next_actions": [],
+                    "retryable": false
+                }
+            }),
+        });
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(ClientError::InvalidResponse(format!(
+            "HTTP {status} response exceeds 16 MiB"
+        )));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(ClientError::Transport)? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err(ClientError::InvalidResponse(format!(
+                "HTTP {status} response exceeds 16 MiB"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let body: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        ClientError::InvalidResponse(format!(
+            "HTTP {status} did not contain a JSON response body"
+        ))
+    })?;
+    validate_envelope(status, &body)?;
+    Ok(ApiResponse { status, body })
+}
+
+#[cfg(unix)]
+fn protect_file(path: &Path) -> Result<(), ClientError> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(ClientError::Io)
+}
+
+#[cfg(not(unix))]
+fn protect_file(_path: &Path) -> Result<(), ClientError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> Result<(), ClientError> {
+    std::fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(ClientError::Io)
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> Result<(), ClientError> {
+    Ok(())
 }
 
 fn http_client() -> Result<reqwest::Client, ClientError> {
@@ -499,5 +703,64 @@ mod tests {
         source_task.await.unwrap();
         destination_task.await.unwrap();
         assert!(!reached_destination.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn ordinary_json_responses_are_bounded_before_buffering() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut input = [0_u8; 2048];
+            let _ = stream.read(&mut input).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16777217\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let client =
+            CoordinatorClient::new(&format!("http://{address}"), "test-secret", true).unwrap();
+        let error = client.get("/api/v1/info", None).await.unwrap_err();
+        assert!(matches!(error, ClientError::InvalidResponse(_)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_streams_to_a_new_file_without_overwriting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut input = [0_u8; 2048];
+            let _ = stream.read(&mut input).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 14\r\nConnection: close\r\n\r\nartifact bytes",
+                )
+                .await
+                .unwrap();
+        });
+        let client =
+            CoordinatorClient::new(&format!("http://{address}"), "test-secret", true).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("artifact.txt");
+        let result = client
+            .download_to_path("/api/v1/projects/p/artifacts/a/content", &output, None)
+            .await
+            .unwrap();
+        let DownloadResponse::Downloaded(receipt) = result else {
+            panic!("expected a downloaded file")
+        };
+        assert_eq!(receipt.size_bytes, 14);
+        assert_eq!(std::fs::read(&output).unwrap(), b"artifact bytes");
+        let error = client
+            .download_to_path("/api/v1/projects/p/artifacts/a/content", &output, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::Io(_)));
+        assert_eq!(std::fs::read(&output).unwrap(), b"artifact bytes");
+        server.await.unwrap();
     }
 }
