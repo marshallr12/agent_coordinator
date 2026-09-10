@@ -27,6 +27,9 @@ argon2 = "0.5"
 subtle = "2"
 rpassword = "7"
 url = "2"
+fs2.workspace = true
+tokio-util.workspace = true
+http-body-util.workspace = true
 [dev-dependencies]
 tower.workspace = true
 http-body-util.workspace = true
