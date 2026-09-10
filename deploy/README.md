@@ -25,7 +25,9 @@ only accepts loopback listener addresses and ignores forwarded headers.
    Automation may add `--password-stdin` and supply the password through a
    protected pipe. There is deliberately no password command-line argument.
    Initialization succeeds only on an empty installation; it is not an account
-   recovery command. Password change and recovery remain future work.
+   recovery command. Use **My account** for password changes, or the audited host
+   `recover-operator-password` command described in [the operator guide](../docs/operator-guide.md)
+   for account recovery.
 5. Install `agent-coordinator.service` under `/etc/systemd/system`, reload
    systemd, and enable/start the service. Install Caddy with the matching public
    hostname from `Caddyfile.example`. Permit public HTTPS to Caddy and keep port
@@ -34,8 +36,8 @@ only accepts loopback listener addresses and ignores forwarded headers.
    before reloading Caddy; see its [request-body size limit documentation](https://caddyserver.com/docs/caddyfile/directives/request_body).
 6. Open the HTTPS site, sign in, and issue a named agent credential. The token
    is displayed once. If that response is lost, retry the same request/key to
-   recover the credential identity, revoke it, and issue a replacement under a
-   fresh agent name. Token rotation for an existing principal is future work.
+   recover its identity, then rotate that credential under **Access** to issue
+   a replacement for the same agent principal. A token is never replayed.
 
 For local development only, use
 `--public-origin http://127.0.0.1:8080 --allow-insecure-loopback`. The explicit
