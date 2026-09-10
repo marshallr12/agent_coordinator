@@ -678,6 +678,12 @@ mod authoritative_clock_tests {
         assert_eq!(clock.samples.load(Ordering::SeqCst), 1);
         assert!(samples.iter().all(|sample| sample.now == samples[0].now));
         assert!(samples.iter().all(|sample| !sample.incident_detected));
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT last_safe_time_ms FROM clock_state WHERE singleton=1")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(persisted, samples[0].now);
     }
 
     #[tokio::test]
@@ -699,5 +705,62 @@ mod authoritative_clock_tests {
             .await
             .unwrap();
         assert_eq!(status, "clock_reconciliation");
+    }
+
+    #[tokio::test]
+    async fn failed_clock_commit_is_not_published_for_waiting_callers() {
+        let (_directory, state, clock) = counting_state().await;
+        sqlx::query("CREATE TABLE clock_commit_parent(id INTEGER PRIMARY KEY)")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE clock_commit_failure(\
+             parent_id INTEGER NOT NULL REFERENCES clock_commit_parent(id) \
+             DEFERRABLE INITIALLY DEFERRED)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_clock_commit AFTER UPDATE OF last_safe_time_ms ON clock_state \
+             BEGIN INSERT INTO clock_commit_failure(parent_id) VALUES(1); END",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let requested_at = Instant::now();
+        assert!(
+            state
+                .authoritative_now_requested_at(requested_at)
+                .await
+                .is_err()
+        );
+        assert_eq!(clock.samples.load(Ordering::SeqCst), 1);
+        assert!(
+            state
+                .authoritative_clock_gate
+                .lock()
+                .await
+                .published
+                .is_none()
+        );
+
+        sqlx::query("DROP TRIGGER fail_clock_commit")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let sample = state
+            .authoritative_now_requested_at(requested_at)
+            .await
+            .unwrap();
+        assert_eq!(clock.samples.load(Ordering::SeqCst), 2);
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT last_safe_time_ms FROM clock_state WHERE singleton=1")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(persisted, sample.now);
     }
 }
