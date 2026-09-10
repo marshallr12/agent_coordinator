@@ -6,6 +6,7 @@
 //! intent prevents an interrupted guardian from launching the same producer a
 //! second time.
 
+pub mod git_workflow;
 mod persist;
 mod process;
 
