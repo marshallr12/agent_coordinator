@@ -776,6 +776,11 @@ async fn upload(
     body: Body,
 ) -> Reply {
     require_upload_key(&headers)?;
+    // Reject a paused clock before accepting bytes or publishing a blob. The
+    // final mutation still rechecks authority after streaming completes.
+    if state.authoritative_now().await?.incident_active {
+        return Err(crate::state::clock_reconciliation_error());
+    }
     let permit = tokio::time::timeout(
         LOCK_WAIT,
         UPLOAD_LIMIT.get_or_init(|| Semaphore::new(4)).acquire(),

@@ -21,6 +21,9 @@ use uuid::Uuid;
 
 struct TestClock(AtomicI64);
 impl Clock for TestClock {
+    fn use_monotonic_elapsed(&self) -> bool {
+        false
+    }
     fn now_ms(&self) -> i64 {
         self.0.load(Ordering::SeqCst)
     }
@@ -128,6 +131,61 @@ impl Fixture {
             .await;
         assert_eq!(status, StatusCode::OK, "{value}");
     }
+}
+
+#[tokio::test]
+async fn task_context_scopes_the_search_index_without_searching_project_metadata() {
+    let f = Fixture::new().await;
+    let source = f.project("indexed-source").await;
+    let other = f.project("indexed-other").await;
+    let task = f.task(&source, "Projectscopedneedle original").await;
+    f.task(&other, "Projectscopedneedle other project").await;
+    // Rebuilding the derived index must preserve searchability of existing tasks.
+    sqlx::raw_sql(include_str!("../migrations/0015_search_project_index.sql"))
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, result) = f
+        .call(
+            &f.agent,
+            "GET",
+            &format!(
+                "/api/v1/projects/{source}/context?q=projectscopedneedle&limit=20&budget=8192"
+            ),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = result["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["record"]["id"], task["id"]);
+    let (status, metadata) = f
+        .call(
+            &f.agent,
+            "GET",
+            &format!("/api/v1/projects/{source}/context?q={source}&limit=20&budget=8192"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(metadata["data"]["items"].as_array().unwrap().is_empty());
+    let (status, _) = f.call(&f.agent, "PATCH",
+        &format!("/api/v1/projects/{source}/tasks/{}", task["id"].as_str().unwrap()),
+        json!({"expected_revision":1,"title":"Replaced search text","description":"Updated content",
+            "acceptance_criteria":["Search index follows revisions"],"priority":2,"depends_on":[],"planned":false})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, replaced) = f
+        .call(
+            &f.agent,
+            "GET",
+            &format!(
+                "/api/v1/projects/{source}/context?q=projectscopedneedle&limit=20&budget=8192"
+            ),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(replaced["data"]["items"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

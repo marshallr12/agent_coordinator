@@ -24,6 +24,9 @@ use uuid::Uuid;
 
 struct TestClock(AtomicI64);
 impl Clock for TestClock {
+    fn use_monotonic_elapsed(&self) -> bool {
+        false
+    }
     fn now_ms(&self) -> i64 {
         self.0.load(Ordering::SeqCst)
     }
@@ -461,7 +464,10 @@ async fn reservations_enforce_bounds_expiry_quota_and_revocation() {
         .error(StatusCode::PAYLOAD_TOO_LARGE, "artifact_too_large");
 
     let (expired, expired_path) = fixture.reserve(&project, b"a", "expired.bin").await;
-    fixture.clock.0.fetch_add(3_600_001, Ordering::SeqCst);
+    fixture
+        .clock
+        .0
+        .store(fixture.state.now() + 3_600_001, Ordering::SeqCst);
     let detail = fixture
         .json(
             &fixture.a,
@@ -556,7 +562,10 @@ async fn retention_and_deletion_keep_explicit_unavailable_metadata() {
         )
         .await;
     retained.ok();
-    fixture.clock.0.fetch_add(86_400_001, Ordering::SeqCst);
+    fixture
+        .clock
+        .0
+        .store(fixture.state.now() + 86_400_001, Ordering::SeqCst);
     let expired = fixture
         .json(
             &fixture.b,
@@ -638,7 +647,10 @@ async fn cleanup_never_removes_bytes_while_an_artifact_lock_is_live() {
         .fetch_one(&fixture.state.pool)
         .await
         .unwrap();
-    fixture.clock.0.fetch_add(3_600_001, Ordering::SeqCst);
+    fixture
+        .clock
+        .0
+        .store(fixture.state.now() + 3_600_001, Ordering::SeqCst);
     let database = &fixture.state.config.database_path;
     let store = database.with_file_name(format!(
         "{}.artifacts",
@@ -662,4 +674,63 @@ async fn cleanup_never_removes_bytes_while_an_artifact_lock_is_live() {
     reconcile_store(&fixture.state).await.unwrap();
     reconcile_store(&fixture.state).await.unwrap();
     assert!(!blob.exists(), "expired blob was not eventually cleaned");
+}
+
+#[tokio::test]
+async fn clock_pause_rejects_upload_before_writing_content() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("clock upload pause").await;
+    let bytes = b"must not be streamed while authority is paused";
+    let (artifact, upload_path) = fixture.reserve(&project, bytes, "clock.txt").await;
+    fixture.clock.0.fetch_sub(60_000, Ordering::SeqCst);
+    let reply = fixture
+        .bytes(
+            &fixture.a,
+            "PUT",
+            &upload_path,
+            "paused-upload",
+            bytes.to_vec(),
+        )
+        .await;
+    reply.error(StatusCode::CONFLICT, "clock_reconciliation_required");
+    let state: String = sqlx::query_scalar("SELECT state FROM artifacts WHERE id=?")
+        .bind(&artifact)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "reserved");
+    let root = fixture
+        .state
+        .config
+        .database_path
+        .with_file_name("coordinator.sqlite3.artifacts");
+    let storage: String = sqlx::query_scalar("SELECT storage_key FROM artifacts WHERE id=?")
+        .bind(&artifact)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert!(
+        !root
+            .join("blobs")
+            .join(&storage[..2])
+            .join(format!("{storage}.blob"))
+            .exists()
+    );
+    assert!(
+        !root
+            .join("staging")
+            .join(format!("{storage}.part"))
+            .exists()
+    );
+    // Retrying during the persisted incident must remain rejected as well.
+    fixture
+        .bytes(
+            &fixture.a,
+            "PUT",
+            &upload_path,
+            "paused-upload",
+            bytes.to_vec(),
+        )
+        .await
+        .error(StatusCode::CONFLICT, "clock_reconciliation_required");
 }

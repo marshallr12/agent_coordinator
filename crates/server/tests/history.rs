@@ -295,6 +295,30 @@ async fn operational_evidence_is_complete_but_authentication_material_is_redacte
         .await
         .unwrap();
 
+    // Artifact mutations have their own record identity. They belong in the
+    // task's event history through either a task or producer association.
+    for (label, task_link, job_link) in [
+        ("task", Some(task.as_str()), None),
+        ("job", None, Some(job.as_str())),
+        ("unrelated", None, None),
+    ] {
+        let artifact = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO artifacts(id,project_id,kind,task_id,job_id,display_name,media_type,external_url,state,created_by,created_at,finalized_at) VALUES(?,?,'external_link',?,?,'history link','text/plain','https://example.test/log','finalized',?,?,?)")
+            .bind(&artifact).bind(&project).bind(task_link).bind(job_link)
+            .bind(&f.principal).bind(f.state.now()).bind(f.state.now()).execute(&f.state.pool).await.unwrap();
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,'artifact.linked',?,?,?)")
+            .bind(&project).bind(&f.principal).bind(&artifact)
+            .bind(json!({"evidence":format!("{label} artifact event")}).to_string())
+            .bind(f.state.now()).execute(&f.state.pool).await.unwrap();
+    }
+    let artifact_events = f
+        .history(&project, &task, "events", 100, None)
+        .await
+        .to_string();
+    assert!(artifact_events.contains("task artifact event"));
+    assert!(artifact_events.contains("job artifact event"));
+    assert!(!artifact_events.contains("unrelated artifact event"));
+
     let mut combined = String::new();
     for kind in [
         "attempts",

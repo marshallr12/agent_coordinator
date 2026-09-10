@@ -294,15 +294,31 @@ async fn fetch_rows(
             .bind(project).bind(subject).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
         "task_revisions" => sqlx::query("SELECT tr.rowid cursor_id,CASE WHEN tr.task_id=? THEN 'subject' ELSE 'workflow_activity' END relation,tr.task_id related_task_id,tr.* FROM task_revisions tr WHERE tr.project_id=? AND (tr.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities scope WHERE scope.project_id=? AND scope.subject_task_id=? AND scope.activity_task_id=tr.task_id)) AND tr.rowid>? AND tr.rowid<=? ORDER BY tr.rowid LIMIT ?")
             .bind(subject).bind(project).bind(subject).bind(project).bind(subject).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
-        "events" => sqlx::query("SELECT e.rowid cursor_id,'task_graph_event' relation,? related_task_id,e.* FROM events e WHERE e.project_id=? AND (e.record_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND (wa.id=e.record_id OR wa.activity_task_id=e.record_id OR wa.submission_id=e.record_id)) OR EXISTS(SELECT 1 FROM attempts a WHERE a.project_id=? AND a.id=e.record_id AND (a.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.activity_task_id=a.task_id))) OR EXISTS(SELECT 1 FROM checkpoints cp JOIN attempts a ON a.id=cp.attempt_id WHERE cp.project_id=? AND cp.id=e.record_id AND (a.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.activity_task_id=a.task_id))) OR EXISTS(SELECT 1 FROM jobs j WHERE j.project_id=? AND j.id=e.record_id AND (j.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.activity_task_id=j.task_id))) OR EXISTS(SELECT 1 FROM reservations r JOIN attempts a ON a.id=r.attempt_id WHERE r.project_id=? AND r.id=e.record_id AND (a.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.activity_task_id=a.task_id))) OR EXISTS(SELECT 1 FROM submissions s WHERE s.project_id=? AND s.id=e.record_id AND s.task_id=?)) AND e.rowid>? AND e.rowid<=? ORDER BY e.rowid LIMIT ?")
-            .bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject)
+        "events" => sqlx::query(
+            "WITH scope_tasks(id) AS MATERIALIZED (SELECT ? UNION SELECT activity_task_id FROM workflow_activities WHERE project_id=? AND subject_task_id=?), \
+             scope_attempts(id) AS MATERIALIZED (SELECT id FROM attempts WHERE project_id=? AND task_id IN (SELECT id FROM scope_tasks)), \
+             record_ids(id) AS MATERIALIZED ( \
+               SELECT id FROM scope_tasks \
+               UNION SELECT id FROM workflow_activities WHERE project_id=? AND subject_task_id=? \
+               UNION SELECT submission_id FROM workflow_activities WHERE project_id=? AND subject_task_id=? \
+               UNION SELECT id FROM scope_attempts \
+               UNION SELECT id FROM checkpoints WHERE project_id=? AND attempt_id IN (SELECT id FROM scope_attempts) \
+               UNION SELECT id FROM jobs WHERE project_id=? AND task_id IN (SELECT id FROM scope_tasks) \
+               UNION SELECT id FROM reservations WHERE project_id=? AND attempt_id IN (SELECT id FROM scope_attempts) \
+               UNION SELECT id FROM submissions WHERE project_id=? AND task_id=? \
+               UNION SELECT id FROM artifacts WHERE project_id=? AND task_id IN (SELECT id FROM scope_tasks) \
+               UNION SELECT id FROM artifacts WHERE project_id=? AND job_id IN (SELECT id FROM jobs WHERE project_id=? AND task_id IN (SELECT id FROM scope_tasks)) \
+               UNION SELECT sa.artifact_id FROM submission_artifacts sa JOIN submissions s ON s.project_id=sa.project_id AND s.id=sa.submission_id WHERE sa.project_id=? AND s.task_id=? \
+             ) \
+             SELECT e.rowid cursor_id,'task_graph_event' relation,? related_task_id,e.* \
+             FROM events e WHERE e.project_id=? AND e.record_id IN (SELECT id FROM record_ids) \
+             AND e.rowid>? AND e.rowid<=? ORDER BY e.rowid LIMIT ?"
+        )
+            .bind(subject).bind(project).bind(subject).bind(project)
             .bind(project).bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject)
-            .bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
+            .bind(project).bind(project).bind(project).bind(project).bind(subject)
+            .bind(project).bind(project).bind(project).bind(project).bind(subject)
+            .bind(subject).bind(project).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
         _ => unreachable!("kind validated before query"),
     };
     Ok(rows)
@@ -353,7 +369,7 @@ async fn materialize(
             "job_observations" => (
                 related_task(row),
                 time(Some(row.get("observed_at"))),
-                json!({"job_id":row.get::<String,_>("job_id"),"sequence":row.get::<i64,_>("sequence"),"producer_id":row.get::<String,_>("producer_id"),"state":row.get::<String,_>("state"),"pid":row.get::<Option<i64>,_>("pid"),"process_started_at":row.get::<Option<String>,_>("process_started_at"),"exit_code":row.get::<Option<i64>,_>("exit_code"),"inputs_unchanged":row.get::<Option<bool>,_>("inputs_unchanged"),"summary":row.get::<String,_>("summary"),"observed_at":timestamp(row.get("observed_at"))}),
+                json!({"job_id":row.get::<String,_>("job_id"),"sequence":row.get::<i64,_>("sequence"),"producer_id":row.get::<String,_>("producer_id"),"state":row.get::<String,_>("state"),"pid":row.get::<Option<i64>,_>("pid"),"process_started_at":row.get::<Option<String>,_>("process_started_at"),"exit_code":row.get::<Option<i64>,_>("exit_code"),"inputs_unchanged":row.get::<Option<bool>,_>("inputs_unchanged"),"summary":row.get::<String,_>("summary"),"observed_at":timestamp(row.get("observed_at")),"payload_compacted_at":time(row.get("payload_compacted_at"))}),
             ),
             "resources" => {
                 let id: String = row.get("id");

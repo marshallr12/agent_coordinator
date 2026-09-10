@@ -97,3 +97,17 @@ pub use history::*;
 The server crate must declare `pub mod history;` and merge `history::routes()`
 into the application router. Migration `0011_history_indexes.sql` must run after
 the existing workflow, knowledge, import, artifact, and operator migrations.
+
+## Retained observation payloads
+
+Maintenance may clear the summary of an old, exactly redundant intermediate job
+observation. History exposes `payload_compacted_at` as an RFC 3339 timestamp, or
+`null` when the payload is intact. The row, sequence, process identity, state, and
+request identity remain stored. First/last observations, state transitions, and
+nonduplicate progress summaries remain intact. See [retention](retention-contract.md).
+
+Event pages build the requested task’s related record identities, then use the
+project/record index. They include task-, job-, and submission-associated artifact
+mutations. Returned pages remain bounded; query work for a task with exceptionally
+deep evidence grows with that task’s own history, rather than unrelated project
+events. The release volume benchmark does not model 100,000 records on one task.

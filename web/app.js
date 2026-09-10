@@ -62,6 +62,7 @@
     if (method === 'POST' && /\/admin\/credentials\/[^/]+\/rotate$/.test(path)) return 'rotate_credential';
     if (method === 'POST' && path === '/api/v1/admin/operators') return 'create_operator';
     if (method === 'POST' && path === '/api/v1/auth/password') return 'change_password';
+    if (method === 'POST' && path === '/api/v1/admin/clock/reconcile') return 'clock_change';
     if (method === 'POST' && path.startsWith('/api/v1/admin/restore/')) return 'restore_change';
     if (method === 'POST' && /\/admin\/agents\/[^/]+\/credentials$/.test(path)) return 'rotate_credential';
     if (method === 'POST' && path === '/api/v1/resources') return 'create_resource';
@@ -194,7 +195,7 @@
     $('context-search').reset();
     state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
-    setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('restore-status')); clear($('restore-requirements')); clear($('task-operator-actions')); show($('credentials-list'), false);
+    setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('restore-status')); clear($('clock-status')); clear($('restore-requirements')); clear($('task-operator-actions')); show($('credentials-list'), false);
     if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null;
     show($('dashboard-view'), false); show($('loading-view'), false); show($('login-view'), true);
     $('login-form')?.reset(); $('username')?.focus();
@@ -222,6 +223,7 @@
   }
 
   function restoredMutationCallbacks(operation, context = {}) {
+    if (operation === 'clock_change') return async () => { await loadClock(); setGlobalAlert('Clock reconciliation recorded. Expired work still requires recovery.', 'success'); };
     if (operation === 'restore_change') return async () => { await loadRestore(); setGlobalAlert('Restore reconciliation recorded.', 'success'); };
     if (operation === 'create_operator') return async () => { await loadOperators(); setGlobalAlert('Operator account created.', 'success'); };
     if (operation === 'change_password') return async () => { signOutLocal(); showLoginError('Password changed. Sign in with your new password.'); };
@@ -461,7 +463,7 @@
 
   $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
   $('logout-button').addEventListener('click', () => startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()));
-  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
+  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); loadClock(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
   $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); }); });
@@ -1171,6 +1173,31 @@
   $('new-operator-button').addEventListener('click',createOperator);
   $('refresh-operators').addEventListener('click',() => loadOperators());
 
+  let clockSequence = 0;
+  async function loadClock() {
+    if (state.actor?.role !== 'admin') return;
+    const currentActor = actorId(), sequence = ++clockSequence;
+    try {
+      const data = (await request('/api/v1/admin/clock')).data;
+      if (sequence !== clockSequence || currentActor !== actorId()) return;
+      const target = $('clock-status'); clear(target);
+      const paused = data.clock_state.status !== 'ready';
+      add(target, el('p', '', paused
+        ? 'Coordination is paused because the server clock moved backward. Correct and verify the host clock before reconciling this incident. Expired ownership and preserved holds still require recovery.'
+        : 'No unresolved server clock incident. Task leases use protected server time.'));
+      recordDetails(target, 'Clock status and incident evidence', data);
+      if (paused) add(target, actionButton('Reconcile corrected clock', () => {
+        const view = workflowDialog('Reconcile server clock', 'Record how trustworthy server time was restored. The service checks its stored time boundary before clearing this pause; old ownership is not revived.');
+        view.field('reason','Clock correction evidence').maxLength = 2000;
+        view.finish('Record clock reconciliation', (values, dialog) => {
+          dialog.close(); startMutation('/api/v1/admin/clock/reconcile', {incident_id:data.clock_state.incident_id,reason:values.get('reason')}, 'clock reconciliation', restoredMutationCallbacks('clock_change'));
+        });
+      }));
+      renderMutationState();
+    } catch (error) { if (sequence === clockSequence && currentActor === actorId()) setGlobalAlert(errorMessage(error)); }
+  }
+  $('refresh-clock').addEventListener('click', () => loadClock());
+
   let restoreSequence = 0;
   async function loadRestore(cursor = null) {
     if (state.actor?.role !== 'admin') return;
@@ -1184,7 +1211,7 @@
       if (!cursor) {
         add(target, el('p', '', service.coordination_state === 'restore_reconciliation'
           ? 'Coordination is paused after restore. Inspect preserved holds, stop the old installation, and reconcile work since the snapshot before resuming.'
-          : 'Coordination is enabled. Task ownership and physical resource checks still apply.'));
+          : 'No restore reconciliation is required. Clock, task ownership, and physical resource checks still apply.'));
         if (data.restore) {
           add(target, el('p', 'muted', `${data.restore.inspected}/${data.restore.required_inspections} preserved holds inspected · Old installation ${data.restore.old_installation_fenced ? 'fenced' : 'not yet confirmed stopped'} · Snapshot gap ${data.restore.post_snapshot_gap_reconciled ? 'reconciled' : 'not yet reconciled'}`));
           recordDetails(target, 'Restore record and reconciliation evidence', data.restore);

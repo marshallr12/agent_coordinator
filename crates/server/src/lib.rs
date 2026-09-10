@@ -7,6 +7,7 @@ pub mod history;
 pub mod imports;
 pub mod jobs;
 pub mod knowledge;
+pub mod maintenance;
 pub mod mutation;
 pub mod objectives;
 pub mod operator_access;
