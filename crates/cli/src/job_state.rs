@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

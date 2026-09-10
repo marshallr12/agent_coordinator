@@ -734,8 +734,16 @@ async fn context(
         items.push(item);
     }
     if instructions_complete && items.len() < limit as usize {
-        let task_rows=sqlx::query("SELECT t.id,t.title,t.description,t.acceptance_json,t.revision,t.lifecycle,bm25(task_search) AS rank FROM task_search JOIN tasks t ON t.id=task_search.task_id WHERE task_search MATCH ? AND task_search.project_id=? ORDER BY rank,t.id LIMIT ?")
-            .bind(&fts).bind(&project).bind(limit+1).fetch_all(&mut *c).await?;
+        // An indexed project filter prevents ranking every project's matching
+        // history. User words remain limited to task content, not index metadata.
+        let scoped_fts = format!(
+            "project_id:\"{}\" AND {{title description acceptance}} : ({fts})",
+            project.replace('"', "\"\"")
+        );
+        // Let FTS5's rank cursor stop after the bounded candidate set. Joining
+        // and sorting every matching task first defeats this early termination.
+        let task_rows=sqlx::query("WITH hits AS MATERIALIZED (SELECT task_id,rank AS search_rank FROM task_search WHERE task_search MATCH ? AND project_id=? AND rank MATCH 'bm25(0.0,0.0,1.0,1.0,1.0)' ORDER BY rank LIMIT ?) SELECT t.id,t.title,t.description,t.acceptance_json,t.revision,t.lifecycle FROM hits h JOIN tasks t ON t.id=h.task_id AND t.project_id=? ORDER BY h.search_rank,t.id")
+            .bind(&scoped_fts).bind(&project).bind(limit+1).bind(&project).fetch_all(&mut *c).await?;
         for row in task_rows {
             let item = json!({"type":"task","record":{"id":row.get::<String,_>("id"),"title":row.get::<String,_>("title"),"description":row.get::<String,_>("description"),"acceptance_criteria":serde_json::from_str::<Value>(&row.get::<String,_>("acceptance_json"))?,"revision":row.get::<i64,_>("revision"),"lifecycle":row.get::<String,_>("lifecycle")}});
             let size = serde_json::to_vec(&item)?.len();

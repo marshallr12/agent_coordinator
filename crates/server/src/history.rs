@@ -216,7 +216,11 @@ async fn history(
     .await?;
     let had_more = rows.len() > limit as usize;
     let rows = &rows[..rows.len().min(limit as usize)];
-    let mut items = materialize(&mut tx, &query.kind, rows).await?;
+    let clock_ready: bool =
+        sqlx::query_scalar("SELECT status='ready' FROM clock_state WHERE singleton=1")
+            .fetch_one(&mut *tx)
+            .await?;
+    let mut items = materialize(&mut tx, &query.kind, rows, clock_ready).await?;
     let page_snapshot = snapshot(&project, &task, &query.kind, cutoff, &cursor_epoch);
     let mut more = had_more;
     loop {
@@ -294,15 +298,31 @@ async fn fetch_rows(
             .bind(project).bind(subject).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
         "task_revisions" => sqlx::query("SELECT tr.rowid cursor_id,CASE WHEN tr.task_id=? THEN 'subject' ELSE 'workflow_activity' END relation,tr.task_id related_task_id,tr.* FROM task_revisions tr WHERE tr.project_id=? AND (tr.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities scope WHERE scope.project_id=? AND scope.subject_task_id=? AND scope.activity_task_id=tr.task_id)) AND tr.rowid>? AND tr.rowid<=? ORDER BY tr.rowid LIMIT ?")
             .bind(subject).bind(project).bind(subject).bind(project).bind(subject).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
-        "events" => sqlx::query("SELECT e.rowid cursor_id,'task_graph_event' relation,? related_task_id,e.* FROM events e WHERE e.project_id=? AND (e.record_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND (wa.id=e.record_id OR wa.activity_task_id=e.record_id OR wa.submission_id=e.record_id)) OR EXISTS(SELECT 1 FROM attempts a WHERE a.project_id=? AND a.id=e.record_id AND (a.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.activity_task_id=a.task_id))) OR EXISTS(SELECT 1 FROM checkpoints cp JOIN attempts a ON a.id=cp.attempt_id WHERE cp.project_id=? AND cp.id=e.record_id AND (a.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.activity_task_id=a.task_id))) OR EXISTS(SELECT 1 FROM jobs j WHERE j.project_id=? AND j.id=e.record_id AND (j.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.activity_task_id=j.task_id))) OR EXISTS(SELECT 1 FROM reservations r JOIN attempts a ON a.id=r.attempt_id WHERE r.project_id=? AND r.id=e.record_id AND (a.task_id=? OR EXISTS(SELECT 1 FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.activity_task_id=a.task_id))) OR EXISTS(SELECT 1 FROM submissions s WHERE s.project_id=? AND s.id=e.record_id AND s.task_id=?)) AND e.rowid>? AND e.rowid<=? ORDER BY e.rowid LIMIT ?")
-            .bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject)
+        "events" => sqlx::query(
+            "WITH scope_tasks(id) AS MATERIALIZED (SELECT ? UNION SELECT activity_task_id FROM workflow_activities WHERE project_id=? AND subject_task_id=?), \
+             scope_attempts(id) AS MATERIALIZED (SELECT id FROM attempts WHERE project_id=? AND task_id IN (SELECT id FROM scope_tasks)), \
+             record_ids(id) AS MATERIALIZED ( \
+               SELECT id FROM scope_tasks \
+               UNION SELECT id FROM workflow_activities WHERE project_id=? AND subject_task_id=? \
+               UNION SELECT submission_id FROM workflow_activities WHERE project_id=? AND subject_task_id=? \
+               UNION SELECT id FROM scope_attempts \
+               UNION SELECT id FROM checkpoints WHERE project_id=? AND attempt_id IN (SELECT id FROM scope_attempts) \
+               UNION SELECT id FROM jobs WHERE project_id=? AND task_id IN (SELECT id FROM scope_tasks) \
+               UNION SELECT id FROM reservations WHERE project_id=? AND attempt_id IN (SELECT id FROM scope_attempts) \
+               UNION SELECT id FROM submissions WHERE project_id=? AND task_id=? \
+               UNION SELECT id FROM artifacts WHERE project_id=? AND task_id IN (SELECT id FROM scope_tasks) \
+               UNION SELECT id FROM artifacts WHERE project_id=? AND job_id IN (SELECT id FROM jobs WHERE project_id=? AND task_id IN (SELECT id FROM scope_tasks)) \
+               UNION SELECT sa.artifact_id FROM submission_artifacts sa JOIN submissions s ON s.project_id=sa.project_id AND s.id=sa.submission_id WHERE sa.project_id=? AND s.task_id=? \
+             ) \
+             SELECT e.rowid cursor_id,'task_graph_event' relation,? related_task_id,e.* \
+             FROM events e WHERE e.project_id=? AND e.record_id IN (SELECT id FROM record_ids) \
+             AND e.rowid>? AND e.rowid<=? ORDER BY e.rowid LIMIT ?"
+        )
+            .bind(subject).bind(project).bind(subject).bind(project)
             .bind(project).bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject).bind(project).bind(subject)
-            .bind(project).bind(subject)
-            .bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
+            .bind(project).bind(project).bind(project).bind(project).bind(subject)
+            .bind(project).bind(project).bind(project).bind(project).bind(subject)
+            .bind(subject).bind(project).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
         _ => unreachable!("kind validated before query"),
     };
     Ok(rows)
@@ -325,6 +345,7 @@ async fn materialize(
     c: &mut SqliteConnection,
     kind: &str,
     rows: &[SqliteRow],
+    clock_ready: bool,
 ) -> Result<Vec<(i64, TaskHistoryItem)>, AppError> {
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
@@ -353,7 +374,7 @@ async fn materialize(
             "job_observations" => (
                 related_task(row),
                 time(Some(row.get("observed_at"))),
-                json!({"job_id":row.get::<String,_>("job_id"),"sequence":row.get::<i64,_>("sequence"),"producer_id":row.get::<String,_>("producer_id"),"state":row.get::<String,_>("state"),"pid":row.get::<Option<i64>,_>("pid"),"process_started_at":row.get::<Option<String>,_>("process_started_at"),"exit_code":row.get::<Option<i64>,_>("exit_code"),"inputs_unchanged":row.get::<Option<bool>,_>("inputs_unchanged"),"summary":row.get::<String,_>("summary"),"observed_at":timestamp(row.get("observed_at"))}),
+                json!({"job_id":row.get::<String,_>("job_id"),"sequence":row.get::<i64,_>("sequence"),"producer_id":row.get::<String,_>("producer_id"),"state":row.get::<String,_>("state"),"pid":row.get::<Option<i64>,_>("pid"),"process_started_at":row.get::<Option<String>,_>("process_started_at"),"exit_code":row.get::<Option<i64>,_>("exit_code"),"inputs_unchanged":row.get::<Option<bool>,_>("inputs_unchanged"),"summary":row.get::<String,_>("summary"),"observed_at":timestamp(row.get("observed_at")),"payload_compacted_at":time(row.get("payload_compacted_at"))}),
             ),
             "resources" => {
                 let id: String = row.get("id");
@@ -397,7 +418,10 @@ async fn materialize(
             }
             "integrations" => {
                 let activity: String = row.get("id");
-                let authorization=sqlx::query("SELECT submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at,invalidated_at,authorization_revision FROM integration_authorizations WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v|json!({"revision":v.get::<i64,_>("authorization_revision"),"submission_id":v.get::<String,_>("submission_id"),"project_policy_revision":v.get::<i64,_>("project_policy_revision"),"workflow_policy_revision":v.get::<i64,_>("workflow_policy_revision"),"actor_id":v.get::<String,_>("actor_id"),"summary":v.get::<String,_>("summary"),"created_at":timestamp(v.get("created_at")),"invalidated_at":time(v.get("invalidated_at")),"valid":v.get::<Option<i64>,_>("invalidated_at").is_none()}));
+                let authorization=sqlx::query("SELECT submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at,invalidated_at,authorization_revision FROM integration_authorizations WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v| {
+                    let record_valid=v.get::<Option<i64>,_>("invalidated_at").is_none();
+                    json!({"revision":v.get::<i64,_>("authorization_revision"),"submission_id":v.get::<String,_>("submission_id"),"project_policy_revision":v.get::<i64,_>("project_policy_revision"),"workflow_policy_revision":v.get::<i64,_>("workflow_policy_revision"),"actor_id":v.get::<String,_>("actor_id"),"summary":v.get::<String,_>("summary"),"created_at":timestamp(v.get("created_at")),"invalidated_at":time(v.get("invalidated_at")),"valid":record_valid && clock_ready,"validity_reason":if !clock_ready { Some("clock_reconciliation_required") } else if !record_valid { Some("authorization_invalidated") } else { None }})
+                });
                 let authorization_history=sqlx::query("SELECT authorization_revision,submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at,invalidated_at FROM integration_authorization_history WHERE activity_id=? ORDER BY authorization_revision").bind(&activity).fetch_all(&mut *c).await?;
                 let authorization_history:Vec<Value>=authorization_history.iter().map(|v|json!({"revision":v.get::<i64,_>("authorization_revision"),"submission_id":v.get::<String,_>("submission_id"),"project_policy_revision":v.get::<i64,_>("project_policy_revision"),"workflow_policy_revision":v.get::<i64,_>("workflow_policy_revision"),"actor_id":v.get::<String,_>("actor_id"),"summary":v.get::<String,_>("summary"),"created_at":timestamp(v.get("created_at")),"invalidated_at":timestamp(v.get("invalidated_at")),"valid":false})).collect();
                 let hold=sqlx::query("SELECT id,canonical_repository_key,target_branch,state,acquired_by,acquired_at,released_by,released_at,release_reason FROM integration_holds WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v|json!({"id":v.get::<String,_>("id"),"canonical_repository_key":v.get::<String,_>("canonical_repository_key"),"target_branch":v.get::<String,_>("target_branch"),"state":v.get::<String,_>("state"),"acquired_by":v.get::<String,_>("acquired_by"),"acquired_at":timestamp(v.get("acquired_at")),"released_by":v.get::<Option<String>,_>("released_by"),"released_at":time(v.get("released_at")),"release_reason":v.get::<Option<String>,_>("release_reason")}));

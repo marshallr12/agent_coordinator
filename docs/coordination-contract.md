@@ -77,7 +77,9 @@ rule or overwrite an active attempt's ownership.
    authenticated session, allowed transition, and unexpired lease together with
    the mutation. Server time must be sampled after acquiring the write
    transaction, so lock-wait time cannot make an expired lease appear valid.
-5. A lease is valid only while `server_now < expires_at`. Equality is expired.
+5. A lease is valid only while protected coordinator time sampled under the
+   writer lock is less than `expires_at`. Equality is expired. The response's
+   observational wall-clock `server_time` is not an authority clock.
    Renewal is allowed only before expiry. Retrying a renewal cannot resurrect
    an expired attempt.
 6. Terminal attempts reject fresh mutations. The system preserves their results

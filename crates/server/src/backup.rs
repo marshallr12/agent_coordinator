@@ -26,6 +26,8 @@ pub const BACKUP_DISK_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const BACKUP_OPERATION_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const FORMAT_VERSION: u32 = 1;
+// Schema 12 introduced the version-1 self-contained snapshot format.
+const MIN_SUPPORTED_SNAPSHOT_SCHEMA: i64 = 12;
 const HOURLY_BUCKETS: usize = 24;
 const DAILY_BUCKETS: usize = 30;
 const MAX_REPOSITORY_SNAPSHOTS: usize = 10_000;
@@ -474,6 +476,24 @@ async fn assemble_restore(
     let staged_state = AppState::open(config)
         .await
         .context("Restored database is not compatible with this service version.")?;
+    // Snapshot creation time is itself protected service time, and it is also
+    // the cutoff that determines which artifact blobs the snapshot contains.
+    // Carry that observation into the private database before restore
+    // invalidation samples its clock. Otherwise an older host wall clock could
+    // revive an expired decision or an artifact whose blob was correctly left
+    // out of the snapshot.
+    let mut clock_tx = staged_state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let anchored = sqlx::query(
+        "UPDATE clock_state SET last_safe_time_ms=MAX(last_safe_time_ms,?) WHERE singleton=1",
+    )
+    .bind(verified.manifest.created_at_ms)
+    .execute(&mut *clock_tx)
+    .await?;
+    ensure!(
+        anchored.rows_affected() == 1,
+        "Restored database clock state is unavailable."
+    );
+    clock_tx.commit().await?;
     check_deadline(started, "Restore")?;
     let authority = crate::restore::invalidate_restored_state(
         &staged_state,
@@ -683,9 +703,18 @@ async fn validate_database_pool(
         .fetch_all(&mut *connection)
         .await
         .context("Snapshot migration metadata is unavailable.")?;
-        let expected: Vec<_> = MIGRATOR.iter().collect();
+        let expected: Vec<_> = MIGRATOR
+            .iter()
+            .filter(|migration| migration.migration_type.is_up_migration())
+            .collect();
+        // A known contiguous prefix can be verified without modifying the
+        // snapshot. Restore migrates only its private copy before invalidating
+        // authority and publishing it. Live backup opening remains exact-version.
         ensure!(
-            applied.len() == expected.len(),
+            applied.len() <= expected.len()
+                && applied.last().is_some_and(|row| {
+                    row.get::<i64, _>("version") >= MIN_SUPPORTED_SNAPSHOT_SCHEMA
+                }),
             "Snapshot migration set is not compatible with this service version."
         );
         for (row, migration) in applied.iter().zip(expected) {

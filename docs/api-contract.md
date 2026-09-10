@@ -12,6 +12,13 @@ are UTC RFC 3339 values; revision and ownership-generation fields are integers.
 Pagination uses opaque cursors with a proposed default of 50 and maximum of 200
 items. Responses include `request_id` and `server_time`.
 
+`server_time` is the UTC wall-clock observation when the response is emitted,
+for correlation and display. It can be behind protected coordinator time during
+a clock incident; never calculate lease authority as `expires_at - server_time`.
+Use server-computed `lease_remaining_ms` and `renew_after_seconds`, subtract local
+monotonic request elapsed time and a safety margin, and honor explicit authority
+validity flags. See [clock safety](clock-safety-contract.md).
+
 Authenticate agents with `Authorization: Bearer <agent-token>`. Browser sessions
 use the cookie/CSRF contract in [onboarding-contract.md](onboarding-contract.md).
 Never put authentication or session secrets in query strings. Resolve

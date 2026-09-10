@@ -29,9 +29,14 @@ impl Mutation {
     ) -> Result<Self, AppError> {
         let key = mutation_key(headers)?;
         let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let now = state.now();
+        let clock = state.sample_clock(&mut tx).await?;
+        if clock.incident_detected {
+            tx.commit().await?;
+            return Err(crate::state::clock_reconciliation_error());
+        }
+        let now = clock.now;
         let actor = auth.verify(&mut tx, now).await?;
-        let authority_epoch = authority(&mut tx, operation).await?;
+        let authority_epoch = authority(&mut tx, operation, clock.incident_active).await?;
         // Session identity and proof verifier are included to reject key reuse across harnesses.
         let proof = headers
             .get("X-Coordinator-Session-Proof")
@@ -66,10 +71,15 @@ impl Mutation {
         let operation = "POST /api/v1/admin/operators";
         let key = mutation_key(headers)?;
         let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let now = state.now();
+        let clock = state.sample_clock(&mut tx).await?;
+        if clock.incident_detected {
+            tx.commit().await?;
+            return Err(crate::state::clock_reconciliation_error());
+        }
+        let now = clock.now;
         let actor = auth.verify(&mut tx, now).await?;
         crate::auth::admin(&actor)?;
-        let authority_epoch = authority(&mut tx, operation).await?;
+        let authority_epoch = authority(&mut tx, operation, clock.incident_active).await?;
         let fingerprint = if authority_epoch == "initial" {
             digest(&serde_json::to_string(&(
                 "human-admin-account-creation-v1",
@@ -96,9 +106,14 @@ impl Mutation {
     ) -> Result<Self, AppError> {
         let key = mutation_key(headers)?;
         let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let now = state.now();
+        let clock = state.sample_clock(&mut tx).await?;
+        if clock.incident_detected {
+            tx.commit().await?;
+            return Err(crate::state::clock_reconciliation_error());
+        }
+        let now = clock.now;
         let actor = auth.verify(&mut tx, now).await?;
-        let authority_epoch = authority(&mut tx, operation).await?;
+        let authority_epoch = authority(&mut tx, operation, clock.incident_active).await?;
         let fingerprint = if authority_epoch == "initial" {
             digest(&serde_json::to_string(&("reporter-v1", auth.id(), input))?)
         } else {
@@ -121,7 +136,7 @@ impl Mutation {
         fingerprint: String,
         authority_epoch: String,
     ) -> Result<Self, AppError> {
-        let previous = sqlx::query("SELECT fingerprint,result_json,created_at,authority_epoch FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?")
+        let previous = sqlx::query("SELECT fingerprint,result_json,created_at,authority_epoch,compacted_at FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?")
             .bind(&actor.id).bind(operation).bind(&key).fetch_optional(&mut *tx).await?;
         let replay = if let Some(row) = previous {
             if row.get::<String, _>("authority_epoch") != authority_epoch {
@@ -134,6 +149,12 @@ impl Mutation {
                 return Err(AppError::conflict(
                     "idempotency_conflict",
                     "This mutation key was already used with different input or session. Reconcile the original request.",
+                ));
+            }
+            if row.get::<Option<i64>, _>("compacted_at").is_some() {
+                return Err(AppError::conflict(
+                    "idempotency_receipt_expired",
+                    "The operation was already processed, but its replay window expired. Inspect its record before starting a new operation.",
                 ));
             }
             if now - row.get::<i64, _>("created_at") > 30 * 86_400_000 {
@@ -178,6 +199,7 @@ impl Mutation {
 async fn authority(
     tx: &mut Transaction<'static, Sqlite>,
     operation: &str,
+    clock_incident_active: bool,
 ) -> Result<String, AppError> {
     let row = sqlx::query(
         "SELECT authority_epoch,coordination_state FROM service_state WHERE singleton=1",
@@ -191,6 +213,9 @@ async fn authority(
             "restore_reconciliation_required",
             "The restored service is paused. Reconcile restored authority and external effects before changing coordination state.",
         ));
+    }
+    if clock_incident_active && !allowed_during_clock_reconciliation(operation) {
+        return Err(crate::state::clock_reconciliation_error());
     }
     Ok(row.get("authority_epoch"))
 }
@@ -213,6 +238,25 @@ fn allowed_during_restore(operation: &str) -> bool {
             && ((operation.contains("/reservations/") && operation.ends_with("/resolve"))
                 || (operation.contains("/workflow-activities/")
                     && operation.ends_with("/publication-reconciliation"))))
+}
+
+fn allowed_during_clock_reconciliation(operation: &str) -> bool {
+    operation == "POST /api/v1/auth/logout"
+        || (operation.starts_with("POST /api/v1/sessions/") && operation.ends_with("/close"))
+        || operation.starts_with("POST /api/v1/browser-sessions/")
+        || operation == "POST /api/v1/admin/clock/reconcile"
+        || operation.starts_with("POST /api/v1/admin/restore/")
+        || (operation.starts_with("POST /api/v1/projects/")
+            && ((operation.contains("/attempts/")
+                && (operation.ends_with("/checkpoints") || operation.ends_with("/release")))
+                || (operation.contains("/workflow-activities/")
+                    && (operation.ends_with("/release")
+                        || operation.ends_with("/integration-result")
+                        || operation.ends_with("/publication-reconciliation")))
+                || (operation.contains("/reservations/")
+                    && (operation.ends_with("/release") || operation.ends_with("/resolve")))))
+        || (operation.starts_with("POST /api/v1/reporters/")
+            && operation.ends_with("/observations"))
 }
 
 fn mutation_key(headers: &HeaderMap) -> Result<String, AppError> {

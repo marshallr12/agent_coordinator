@@ -183,8 +183,9 @@ impl Auth {
             },
             credential,
         };
+        let clock = state.authoritative_now().await?;
         auth.actor = auth
-            .verify(&mut *state.pool.acquire().await?, state.now())
+            .verify(&mut *state.pool.acquire().await?, clock.now)
             .await?;
         if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS)
             && let Credential::Browser { csrf, .. } = &auth.credential
@@ -382,6 +383,14 @@ pub async fn init_admin(
     }
     let hash = hash_password(password).await?;
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let clock = state.sample_clock(&mut tx).await?;
+    if clock.incident_detected {
+        tx.commit().await?;
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    if clock.incident_active {
+        return Err(crate::state::clock_reconciliation_error());
+    }
     let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM principals")
         .fetch_one(&mut *tx)
         .await?;
@@ -392,7 +401,7 @@ pub async fn init_admin(
         ));
     }
     let id = uuid::Uuid::new_v4().to_string();
-    let now = state.now();
+    let now = clock.now;
     sqlx::query("INSERT INTO principals(id,name,kind,role,password_hash,created_at) VALUES(?,?,'human','admin',?,?)")
         .bind(&id).bind(username).bind(hash).bind(now).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO events(actor_id,kind,record_id,data_json,created_at) VALUES(?,'admin_initialized',?,'{}',?)")
@@ -468,11 +477,19 @@ async fn login(
     let row = row.ok_or_else(AppError::auth_required)?;
     let id: String = row.get("id");
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let clock = state.sample_clock(&mut tx).await?;
+    if clock.incident_detected {
+        tx.commit().await?;
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    if clock.incident_active {
+        return Err(crate::state::clock_reconciliation_error());
+    }
     // Re-check under the write lock in case account revocation or a future
     // password change raced the deliberately off-thread password calculation.
     let row = sqlx::query("SELECT name,role FROM principals WHERE id=? AND password_hash=? AND disabled_at IS NULL AND kind='human'")
         .bind(&id).bind(original_hash).fetch_optional(&mut *tx).await?.ok_or_else(AppError::auth_required)?;
-    let now = state.now();
+    let now = clock.now;
     let token = secret();
     let session_id = uuid::Uuid::new_v4().to_string();
     // Bound retained session verifiers and active sign-ins for each account.

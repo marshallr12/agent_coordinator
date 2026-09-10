@@ -47,6 +47,136 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/admin/agents/{id}/credentials",
             post(issue_existing_agent_credential),
         )
+        .route("/api/v1/admin/clock", get(clock_status))
+        .route("/api/v1/admin/clock/reconcile", post(reconcile_clock))
+}
+
+fn clock_state_value(row: &sqlx::sqlite::SqliteRow) -> Value {
+    json!({
+        "status":row.get::<String,_>("status"),
+        "last_safe_time":timestamp(row.get("last_safe_time_ms")),
+        "last_safe_time_ms":row.get::<i64,_>("last_safe_time_ms"),
+        "incident_id":row.get::<Option<String>,_>("incident_id"),
+        "observed_wall_time":row.get::<Option<i64>,_>("observed_wall_time_ms").map(timestamp),
+        "observed_wall_time_ms":row.get::<Option<i64>,_>("observed_wall_time_ms"),
+        "detected_at":row.get::<Option<i64>,_>("detected_at").map(timestamp),
+    })
+}
+
+fn clock_incident_value(row: &sqlx::sqlite::SqliteRow) -> Value {
+    json!({
+        "id":row.get::<String,_>("id"),
+        "observed_wall_time":timestamp(row.get("observed_wall_time_ms")),
+        "observed_wall_time_ms":row.get::<i64,_>("observed_wall_time_ms"),
+        "high_water_time":timestamp(row.get("high_water_time_ms")),
+        "high_water_time_ms":row.get::<i64,_>("high_water_time_ms"),
+        "detected_at":timestamp(row.get("detected_at")),
+        "recovered_at":row.get::<Option<i64>,_>("recovered_at").map(timestamp),
+        "recovery_reason":row.get::<Option<String>,_>("recovery_reason"),
+        "recovered_by":row.get::<Option<String>,_>("recovered_by"),
+        "recovery_kind":row.get::<Option<String>,_>("recovery_kind"),
+    })
+}
+
+async fn clock_status(State(state): State<AppState>, auth: Auth) -> Result<Json<Value>, AppError> {
+    admin(&auth.actor)?;
+    let clock = sqlx::query("SELECT status,last_safe_time_ms,incident_id,observed_wall_time_ms,detected_at FROM clock_state WHERE singleton=1")
+        .fetch_one(&state.pool)
+        .await?;
+    let incident = if let Some(id) = clock.get::<Option<String>, _>("incident_id") {
+        let row = sqlx::query("SELECT id,observed_wall_time_ms,high_water_time_ms,detected_at,recovered_at,recovery_reason,recovered_by,recovery_kind FROM clock_incidents WHERE id=?")
+            .bind(id)
+            .fetch_one(&state.pool)
+            .await?;
+        clock_incident_value(&row)
+    } else {
+        Value::Null
+    };
+    Ok(response(json!({
+        "clock_state":clock_state_value(&clock),
+        "incident":incident,
+        "material_rollback_threshold_ms":crate::state::MATERIAL_CLOCK_ROLLBACK_MS,
+    })))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReconcileClockInput {
+    incident_id: String,
+    reason: String,
+}
+
+async fn reconcile_clock(
+    State(state): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Json(input): Json<ReconcileClockInput>,
+) -> Result<Json<Value>, AppError> {
+    if !valid_id(&input.incident_id) {
+        return Err(AppError::bad_request("Invalid incident_id."));
+    }
+    let mut mutation = Mutation::begin(
+        &state,
+        &auth,
+        &headers,
+        "POST /api/v1/admin/clock/reconcile",
+        &input,
+    )
+    .await?;
+    admin(&mutation.actor)?;
+    if let Some(replay) = &mutation.replay {
+        // A receipt proves that this incident was reconciled once; it cannot
+        // project readiness over a later rollback incident. Re-read the
+        // singleton inside the writer transaction before returning a replay.
+        let current = sqlx::query("SELECT status,incident_id FROM clock_state WHERE singleton=1")
+            .fetch_one(&mut *mutation.tx)
+            .await?;
+        if current.get::<Option<String>, _>("incident_id").as_deref()
+            != Some(input.incident_id.as_str())
+        {
+            return Err(AppError::conflict(
+                "clock_incident_changed",
+                "The active service-clock incident changed. Reload its status before reconciling it.",
+            ));
+        }
+        if current.get::<String, _>("status") != "ready" {
+            return Err(crate::state::clock_reconciliation_error());
+        }
+        return Ok(response(replay.clone()));
+    }
+    let result = state
+        .reconcile_clock_in_tx(
+            &mut mutation.tx,
+            &input.incident_id,
+            &input.reason,
+            "authenticated_admin",
+            Some(&mutation.actor.id),
+        )
+        .await?;
+    let data = json!({
+        "clock_state":{
+            "status":"ready",
+            "last_safe_time":timestamp(result.now),
+            "last_safe_time_ms":result.now,
+            "incident_id":result.incident_id,
+            "observed_wall_time":timestamp(result.observed_wall_time_ms),
+            "observed_wall_time_ms":result.observed_wall_time_ms,
+        },
+        "incident":{
+            "id":result.incident_id,
+            "high_water_time":timestamp(result.high_water_time_ms),
+            "high_water_time_ms":result.high_water_time_ms,
+            "recovered_at":timestamp(result.now),
+            "recovery_reason":input.reason,
+            "recovered_by":mutation.actor.id,
+            "recovery_kind":"authenticated_admin",
+        }
+    });
+    Ok(response(
+        mutation
+            .finish(data, None, "clock_reconciled", &input.incident_id)
+            .await?,
+    ))
 }
 
 fn validate_password(password: &str) -> Result<(), AppError> {
@@ -185,15 +315,39 @@ async fn created_operator_retry(
     let Some(key) = idempotency_key(headers) else {
         return Ok(None);
     };
-    let receipt: Option<String> = sqlx::query_scalar("SELECT mr.result_json FROM mutation_receipts mr JOIN service_state ss ON ss.singleton=1 AND ss.authority_epoch=mr.authority_epoch WHERE mr.principal_id=? AND mr.operation='POST /api/v1/admin/operators' AND mr.key=?")
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let clock = state.sample_clock(&mut tx).await?;
+    if clock.incident_detected {
+        tx.commit().await?;
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    if clock.incident_active {
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    let receipt = sqlx::query("SELECT mr.result_json,mr.authority_epoch,mr.compacted_at,ss.authority_epoch AS current_authority_epoch FROM mutation_receipts mr JOIN service_state ss ON ss.singleton=1 WHERE mr.principal_id=? AND mr.operation='POST /api/v1/admin/operators' AND mr.key=?")
         .bind(actor_id)
         .bind(key)
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *tx)
         .await?;
     let Some(receipt) = receipt else {
+        tx.commit().await?;
         return Ok(None);
     };
-    let result: Value = serde_json::from_str(&receipt)?;
+    if receipt.get::<String, _>("authority_epoch")
+        != receipt.get::<String, _>("current_authority_epoch")
+    {
+        return Err(AppError::conflict(
+            "request_from_previous_restore",
+            "This idempotency key belongs to authority from before the latest restore. Inspect the old result and use a new key for an intentional new operation.",
+        ));
+    }
+    if receipt.get::<Option<i64>, _>("compacted_at").is_some() {
+        return Err(AppError::conflict(
+            "idempotency_receipt_expired",
+            "The operation was already processed, but its replay window expired. Inspect its record before starting a new operation.",
+        ));
+    }
+    let result: Value = serde_json::from_str(&receipt.get::<String, _>("result_json"))?;
     let id = result
         .pointer("/operator/id")
         .and_then(Value::as_str)
@@ -211,8 +365,9 @@ async fn created_operator_retry(
     let password_hash =
         sqlx::query_scalar("SELECT password_hash FROM principals WHERE id=? AND kind='human'")
             .bind(id)
-            .fetch_optional(&state.pool)
+            .fetch_optional(&mut *tx)
             .await?;
+    tx.commit().await?;
     Ok(password_hash.map(|password_hash| CreatedOperatorRetry {
         password_hash,
         original_name,
@@ -865,7 +1020,15 @@ pub async fn recover_operator_password(
     }
     let password_hash = hash_password_bounded(state, new_password).await?;
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let now = state.now();
+    let clock = state.sample_clock(&mut tx).await?;
+    if clock.incident_detected {
+        tx.commit().await?;
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    if clock.incident_active {
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    let now = clock.now;
     let current = sqlx::query("SELECT id,name,role,disabled_at,created_at,revision FROM principals WHERE name=? AND kind='human'")
         .bind(username)
         .fetch_optional(&mut *tx)
@@ -909,4 +1072,49 @@ pub async fn recover_operator_password(
     });
     tx.commit().await?;
     Ok(result)
+}
+
+/// Host-local clock recovery. This function is intentionally not mounted as an
+/// HTTP route. A host operator must first correct the wall clock, then provide
+/// an audit reason. It never creates or impersonates a principal.
+pub async fn recover_clock(state: &AppState, reason: &str) -> Result<Value, AppError> {
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let clock = state.sample_clock(&mut tx).await?;
+    if clock.incident_detected {
+        tx.commit().await?;
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    let incident_id: Option<String> =
+        sqlx::query_scalar("SELECT incident_id FROM clock_state WHERE singleton=1")
+            .fetch_one(&mut *tx)
+            .await?;
+    let incident_id = incident_id.ok_or_else(|| {
+        AppError::conflict(
+            "clock_not_paused",
+            "There is no active service-clock incident to reconcile.",
+        )
+    })?;
+    let result = state
+        .reconcile_clock_in_tx(&mut tx, &incident_id, reason, "host_operator", None)
+        .await?;
+    tx.commit().await?;
+    Ok(json!({
+        "clock_state":{
+            "status":"ready",
+            "last_safe_time":timestamp(result.now),
+            "last_safe_time_ms":result.now,
+            "incident_id":result.incident_id,
+            "observed_wall_time":timestamp(result.observed_wall_time_ms),
+            "observed_wall_time_ms":result.observed_wall_time_ms,
+        },
+        "incident":{
+            "id":result.incident_id,
+            "high_water_time":timestamp(result.high_water_time_ms),
+            "high_water_time_ms":result.high_water_time_ms,
+            "recovered_at":timestamp(result.now),
+            "recovery_reason":reason,
+            "recovered_by":Value::Null,
+            "recovery_kind":"host_operator",
+        }
+    }))
 }

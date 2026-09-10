@@ -1,44 +1,51 @@
 # Implementation handoff — 2026-09-10
 
-Backlog item 5 is implemented and reviewed locally. Verified online SQLite/artifact
-backups, self-contained retention, fresh-directory restore, and authority
-invalidation are wired into the server. Restore pauses coordination until a human
-records all captured hold inspections, fences the old installation, and reconciles
-the post-snapshot gap. Holds and unknown work stay preserved. The Access dashboard
-provides the checklist and replacement credentials for the same agent principal.
+Backlog item 6 is implemented and reviewed. Linux operational controls include
+durable clock rollback detection and reconciliation, bounded storage maintenance,
+verified native packages, and documented systemd/HTTPS installation and recovery.
+Instruction version 7 requires fresh acknowledgment before new claims.
 
-All 140 workspace tests, warnings-denied Clippy, formatting, workspace build,
-JavaScript checks, the full existing smoke exercise, and the new restore exercise
-passed. The final small restore fixture recovered in 6.9 seconds; it is not a
-production-size benchmark or an actual off-server transfer. Browser verification
-covered the checklist, multiline evidence, task links, credential replacement,
-retained resource capacity, and a 375 CSS-pixel layout with no browser errors.
-The disposable service and tab were stopped and closed.
+Candidate `a16d879` passed all 160 workspace tests, formatting, warnings-denied
+Clippy, build, both service/CLI smoke exercises, native Windows client/local-runner
+tests, and dependency audit in [standard CI](https://github.com/marshallr12/agent_coordinator/actions/runs/34459987850).
+The [release checks](https://github.com/marshallr12/agent_coordinator/actions/runs/34459987847)
+verified byte-identical Linux and Windows packages, trusted HTTPS, CLI reconnect
+after service restart, the backup and maintenance timers, and the first verified backup.
 
-Main-agent review corrected manifest/database artifact coverage, atomic
-no-overwrite directory publication, standalone verification parent mutation,
-repository overlap checks, backup schema read-only behavior, deadline coverage,
-old receipt-key reuse, and invalidated integration authorization renewal.
-Independent review found no remaining restore-authority blocker. History cursors
-now use a restore epoch; old cursors must be restarted after restore or upgrade.
-Instruction version 6 explains restore recovery and requires fresh acknowledgment.
+The accepted packaged server completed 90,000 requests in 30 minutes at 50
+requests/second across 20 projects and 50 sessions with 100,000 historical
+tasks. Overall p95 was 21.0 ms and p99 was 21.7 ms; every operation met the
+500 ms p95 target. There were no unexpected errors, and exact ownership checks
+passed. The shared two-CPU/4-GiB/no-swap scope peaked at 664.1 MiB; server RSS
+peaked at 84.6 MiB. The captured snapshot restored to a verified, authority-
+invalidated reconciliation pause in 6.511 seconds.
+See [retained acceptance evidence](docs/linux-capacity-evidence.md).
+
+Main-agent review covered transaction timing, clock sample publication after
+commit, permanent receipt identities, bounded maintenance scans, project-scoped
+search, historical evidence, snapshot compatibility, native reproducibility,
+installation cleanup, and the assertions supporting acceptance claims.
+Existing schema-12 snapshots verify unchanged and restore through a privately
+migrated schema-16 copy. Restore carries the snapshot's time forward before
+invalidating old authority. The actual prior executable's live database upgraded
+while retaining recorded work; old snapshot recovery rejected old credentials.
+
+Clock recovery never revives expired task ownership or releases physical holds.
+Maintenance retains semantic task/handoff/lesson history and permanent request
+identities, so it bounds cleanup work without imposing a total history ceiling.
+The capacity restore stage excludes human inspection, old-installation fencing,
+reconnection, and resumption. A separate small end-to-end recovery exercise passed
+in 7.3 seconds. No production deployment or actual off-server transfer is claimed.
+
+Continue sequentially with item 6.1: a vendor-agnostic MCP endpoint reusing current
+authentication, session, policy, ownership, and retry safeguards. Review its code
+and validation before item 6.2, the mdBook documentation consolidation. Complete
+both without operator intervention unless essential information is missing.
+The operator will commence the real Windows workstation acceptance as item 7;
+native Windows CI and reproducible packages do not replace that exercise.
+Keep a separate Cargo target directory in every concurrent worktree.
 
 See [implementation status](docs/implementation-status.md),
-[backup and restore operations](docs/backup-restore-guide.md), and
-[storage contract](docs/backup-contract.md). Engine limits are 8 GiB database,
-1,000,000 artifact entries, 64 MiB manifest, 16 MiB per blob, and a cooperative
-45-minute deadline. Full snapshots require their own storage; off-server transport
-and production installation remain operator-selected deployment inputs.
-
-Continue sequentially with item 6: Linux packaging/acceptance, clock rollback,
-storage retention, and the 20-project / 50-session / 100,000-task load target.
-Complete remaining items through 6.2 without operator intervention unless missing
-information is essential. MCP is 6.1 and mdBook is 6.2. The operator will commence
-native Windows workstation acceptance as final item 7; CI does not replace it.
-Each concurrent worktree must retain its own Cargo target directory.
-
-Item 4 passed Linux, native Windows, and audit CI at `1fcf9e4` in
-[run 34441512277](https://github.com/marshallr12/agent_coordinator/actions/runs/34441512277).
-Item 5 at `283d9d0` passed Linux format/Clippy/tests/build and both smoke exercises,
-native Windows client/CLI/local-runner tests, and dependency audit in
-[run 34445152452](https://github.com/marshallr12/agent_coordinator/actions/runs/34445152452).
+[Linux installation](docs/linux-installation.md), [capacity](docs/linux-capacity.md),
+[clock safety](docs/clock-safety-contract.md), [retention](docs/retention-contract.md),
+and [backup/restore operations](docs/backup-restore-guide.md).

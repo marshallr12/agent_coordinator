@@ -3,7 +3,7 @@
 A vendor-agnostic service for AI agents on different workstations to coordinate
 tasks, report progress, and share handoffs and lessons across multiple projects.
 
-**Status: coordination, operator workflows, and backup/restore implemented; full release in development.**
+**Status: coordination and Linux operations implemented and accepted; MCP and mdBook are next.**
 The Rust service, embedded web dashboard, and native CLI now support authentication,
 multiple projects, task admission, atomic ownership, renewable leases, checkpoints,
 inspected recovery, worktree preparation, local job reporting, and shared resource
@@ -11,7 +11,8 @@ reservations, immutable submissions, independent review, serialized integration,
 completion after exact integrated checks, revisioned lessons, scoped decisions,
 bounded evidence uploads, authoritative Markdown imports/exports, operator account
 management, project policy editing, objective grouping, complete task history,
-verified online backups, and restore reconciliation. [Current implementation and limits](docs/implementation-status.md)
+verified online backups, restore reconciliation, clock rollback handling, and
+bounded storage maintenance. [Current implementation and limits](docs/implementation-status.md)
 distinguish working behavior from the complete release design.
 
 ## Try it locally
@@ -50,6 +51,16 @@ command. Linux and native Windows client checks are defined in GitHub Actions.
 
 ## Design documents
 
+- [Linux installation](docs/linux-installation.md): verified native packages,
+  systemd, HTTPS, upgrades, and removal.
+- [Linux capacity](docs/linux-capacity.md): the constrained 20-project, 50-session,
+  100,000-task workload and measured restore stage.
+- [Linux acceptance evidence](docs/linux-capacity-evidence.md): passing package,
+  installation, workload, and recovery checks with the retained measured report.
+- [Clock safety](docs/clock-safety-contract.md): durable time, authority expiry,
+  and operator reconciliation.
+- [Storage maintenance](docs/retention-contract.md): bounded compaction, permanent
+  request identities, and daily maintenance.
 - [Backup and restore guide](docs/backup-restore-guide.md): hourly snapshots,
   off-server copying, fresh-directory recovery, and the operator checklist.
 - [Backup storage contract](docs/backup-contract.md): consistency, verification,
@@ -125,11 +136,12 @@ Use the implementation-status document above to see which parts are available.
 - Existing harnesses launch agents. The service coordinates their work through
   API, CLI, and optional hooks, with local runners reporting job status.
 
-The release target is 20 projects, 50 simultaneous agent sessions, and 100,000
-historical tasks; those load targets are not yet verified. Backup examples run
+The packaged server passed the 20-project, 50-session, 100,000-historical-task
+target at 50 requests/second for 30 minutes under a shared two-CPU/4-GiB/no-swap
+limit. See the acceptance evidence above for measurements and scope. Backup examples run
 hourly, retaining 24 hourly and 30 daily copies, with documented off-server copying
 and a one-hour restore target. The disposable local restore rehearsal passed;
-production-size recovery and an actual off-server destination remain installation checks.
+full operator-led recovery and an actual off-server destination remain installation checks.
 
 The actual server is undecided. The test baseline is Ubuntu 24.04 LTS on x86_64
 with 2 CPU cores and 4 GB RAM. Remaining host/domain/backup-destination choices

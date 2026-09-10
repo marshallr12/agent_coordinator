@@ -98,7 +98,8 @@ impl ReporterAuth {
             id: id.to_owned(),
             proof_hash: digest(proof),
         };
-        auth.verify(&mut *state.pool.acquire().await?, state.now())
+        let clock = state.authoritative_now().await?;
+        auth.verify(&mut *state.pool.acquire().await?, clock.now)
             .await?;
         Ok(auth)
     }

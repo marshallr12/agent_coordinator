@@ -619,8 +619,15 @@ async fn activity_value(
     } else {
         None
     };
+    let clock_ready: bool =
+        sqlx::query_scalar("SELECT status='ready' FROM clock_state WHERE singleton=1")
+            .fetch_one(&mut *c)
+            .await?;
     let authorization = sqlx::query("SELECT actor_id,summary,created_at,invalidated_at,authorization_revision FROM integration_authorizations WHERE activity_id=?")
-        .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"actor_id":r.get::<String,_>("actor_id"),"summary":r.get::<String,_>("summary"),"created_at":timestamp(r.get("created_at")),"invalidated_at":r.get::<Option<i64>,_>("invalidated_at").map(timestamp),"valid":r.get::<Option<i64>,_>("invalidated_at").is_none(),"revision":r.get::<i64,_>("authorization_revision")}));
+        .bind(id).fetch_optional(&mut *c).await?.map(|r| {
+            let record_valid = r.get::<Option<i64>, _>("invalidated_at").is_none();
+            json!({"actor_id":r.get::<String,_>("actor_id"),"summary":r.get::<String,_>("summary"),"created_at":timestamp(r.get("created_at")),"invalidated_at":r.get::<Option<i64>,_>("invalidated_at").map(timestamp),"valid":record_valid && clock_ready,"validity_reason":if !clock_ready { Some("clock_reconciliation_required") } else if !record_valid { Some("authorization_invalidated") } else { None },"revision":r.get::<i64,_>("authorization_revision")})
+        });
     let intent = sqlx::query("SELECT observed_target_revision,observed_target_tree,result_revision,result_tree,created_by,created_at FROM publication_intents WHERE activity_id=?")
         .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"observed_target_revision":r.get::<String,_>("observed_target_revision"),"observed_target_tree":r.get::<String,_>("observed_target_tree"),"result_revision":r.get::<String,_>("result_revision"),"result_tree":r.get::<String,_>("result_tree"),"created_by":r.get::<String,_>("created_by"),"created_at":timestamp(r.get("created_at"))}));
     let result = sqlx::query("SELECT publication_state,observed_target_revision,result_revision,result_tree,check_job_ids_json,summary,created_at FROM integration_results WHERE activity_id=?")

@@ -70,6 +70,18 @@ enum Command {
         #[arg(long)]
         reason: String,
     },
+    /// Reconcile a detected server clock rollback after trustworthy time is restored.
+    RecoverClock {
+        #[arg(long)]
+        reason: String,
+    },
+    /// Compact expired replay payloads and redundant health evidence in bounded batches.
+    Maintenance {
+        #[arg(long, default_value_t = 500)]
+        batch_size: usize,
+        #[arg(long, default_value_t = 20)]
+        max_batches: usize,
+    },
     /// Recover a human account locally and invalidate all of its browser sessions.
     RecoverOperatorPassword {
         #[arg(long)]
@@ -116,10 +128,10 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());
         }
-        Command::Backup { .. } => {
+        Command::Backup { .. } | Command::Maintenance { .. } | Command::RecoverClock { .. } => {
             anyhow::ensure!(
                 options.database.is_file(),
-                "Backup requires an existing service database."
+                "This operation requires an existing service database."
             );
         }
         _ => {}
@@ -139,6 +151,25 @@ async fn main() -> anyhow::Result<()> {
         AppState::open(config).await?
     };
     match options.command {
+        Command::RecoverClock { reason } => {
+            let report =
+                coordinator_server::operator_access::recover_clock(&state, &reason).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::Maintenance {
+            batch_size,
+            max_batches,
+        } => {
+            let report = coordinator_server::maintenance::run_maintenance(
+                &state,
+                coordinator_server::maintenance::MaintenanceOptions {
+                    batch_size,
+                    max_batches,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::Backup { repository } => {
             let report = coordinator_server::backup::create_backup(&state, &repository).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
