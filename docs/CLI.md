@@ -561,6 +561,11 @@ agent-coordinator integrations reconcile \
 This local reconciliation can confirm the exact prepared result, report that the
 target moved, or preserve an uncertain outcome. Only an authenticated human can
 record the service-side disposition of an uncertain or known nonpublication.
+If the remote moved to an object the trusted checkout does not contain, fetch
+that exact remote target ref into the checkout and reconcile again so its tree
+can be observed before a human records evidence. If the target ref was deleted,
+stop and have an operator restore or repair it; do not substitute a zero commit
+or continue the normal integration workflow.
 
 When publication is confirmed, finish with an exact set of successful registered
 check jobs:

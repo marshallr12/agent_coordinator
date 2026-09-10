@@ -1631,18 +1631,26 @@ async fn activity_claim(
     context: &ContextData,
     args: &ActivityClaimArgs,
 ) -> std::result::Result<Value, Failure> {
-    activity_mutation(
-        cli,
+    validate_segment("activity", &args.activity).map_err(Failure::invalid)?;
+    validate_segment("submission", &args.submission).map_err(Failure::invalid)?;
+    let (_session_lock, session_path, mut state) = load_required_state(cli, context)?;
+    acknowledge_current_orientation(context, &session_path, &mut state).await?;
+    let path = activity_operation_path(context, &args.activity, "claim")?;
+    let response = persist_and_send(
         context,
-        &args.activity,
-        "claim",
+        &session_path,
+        &mut state,
+        HttpMethod::Post,
+        &path,
         json!({
             "expected_submission_id": args.submission,
             "expected_project_policy_revision": args.project_policy_revision,
             "expected_workflow_policy_revision": args.workflow_policy_revision
         }),
+        true,
     )
-    .await
+    .await?;
+    require_success(response)
 }
 
 async fn activity_renew(
@@ -2852,6 +2860,44 @@ async fn claim(
         return Err(Failure::invalid("--revision is required with --task"));
     }
     let (_session_lock, session_path, mut state) = load_required_state(cli, context)?;
+    let orientation = acknowledge_current_orientation(context, &session_path, &mut state).await?;
+
+    let mut body = Map::new();
+    body.insert("mode".into(), Value::String(args.mode.as_str().to_owned()));
+    body.insert(
+        "policy_revision".into(),
+        Value::Number(orientation.policy_revision.into()),
+    );
+    body.insert(
+        "instruction_version".into(),
+        Value::String(orientation.instruction_version),
+    );
+    if let Some(task) = &args.task {
+        body.insert("task_id".into(), Value::String(task.clone()));
+        body.insert(
+            "expected_task_revision".into(),
+            Value::Number(args.revision.expect("validated above").into()),
+        );
+    }
+    let path = format!("/api/v1/projects/{}/claims", context.binding.project_id);
+    let response = persist_and_send(
+        context,
+        &session_path,
+        &mut state,
+        HttpMethod::Post,
+        &path,
+        Value::Object(body),
+        true,
+    )
+    .await?;
+    require_success(response)
+}
+
+async fn acknowledge_current_orientation(
+    context: &ContextData,
+    session_path: &Path,
+    state: &mut SessionState,
+) -> std::result::Result<OrientationVersion, Failure> {
     let orientation = state.orientation.clone().ok_or_else(|| {
         Failure::invalid("run connect before claiming so current instructions can be returned")
     })?;
@@ -2884,8 +2930,8 @@ async fn claim(
         });
         let response = persist_and_send(
             context,
-            &session_path,
-            &mut state,
+            session_path,
+            &mut *state,
             HttpMethod::Post,
             &acknowledge_path,
             acknowledge_body,
@@ -2894,38 +2940,9 @@ async fn claim(
         .await?;
         require_success(response)?;
         state.acknowledged = Some(orientation.clone());
-        state::save(&session_path, &state).map_err(Failure::invalid)?;
+        state::save(session_path, state).map_err(Failure::invalid)?;
     }
-
-    let mut body = Map::new();
-    body.insert("mode".into(), Value::String(args.mode.as_str().to_owned()));
-    body.insert(
-        "policy_revision".into(),
-        Value::Number(orientation.policy_revision.into()),
-    );
-    body.insert(
-        "instruction_version".into(),
-        Value::String(orientation.instruction_version),
-    );
-    if let Some(task) = &args.task {
-        body.insert("task_id".into(), Value::String(task.clone()));
-        body.insert(
-            "expected_task_revision".into(),
-            Value::Number(args.revision.expect("validated above").into()),
-        );
-    }
-    let path = format!("/api/v1/projects/{}/claims", context.binding.project_id);
-    let response = persist_and_send(
-        context,
-        &session_path,
-        &mut state,
-        HttpMethod::Post,
-        &path,
-        Value::Object(body),
-        true,
-    )
-    .await?;
-    require_success(response)
+    Ok(orientation)
 }
 
 async fn request(
