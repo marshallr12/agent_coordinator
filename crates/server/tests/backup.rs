@@ -404,3 +404,157 @@ fn assert_private_tree(root: &Path) {
         }
     }
 }
+
+// Construct an actual schema-12 database from the original migration bytes,
+// then put it in a version-1 snapshot envelope. The separate old-binary upgrade
+// exercise also verifies a snapshot produced by the previous executable.
+async fn old_schema_snapshot(fixture: &Fixture) -> PathBuf {
+    let migrations = fixture.directory.path().join("schema12-migrations");
+    fs::create_dir(&migrations).unwrap();
+    for migration in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 12)
+    {
+        let name = format!(
+            "{:04}_{}.sql",
+            migration.version,
+            migration.description.replace(' ', "_")
+        );
+        fs::write(migrations.join(name), migration.sql.as_str().as_bytes()).unwrap();
+    }
+    let old_database = fixture.directory.path().join("schema12.sqlite3");
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&old_database)
+            .create_if_missing(true)
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    sqlx::migrate::Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO principals(id,name,kind,role,password_hash,created_at) VALUES('old-admin','old-admin','human','admin','test-password-hash',1)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO projects(id,name,repository_url,target_branch,created_at) VALUES('old-project','Old project','https://example.test/old.git','main',1)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES('old-task','old-project','Preserved old search evidence','','[]','general',2,'canceled',1,1)")
+        .execute(&pool).await.unwrap();
+    pool.close().await;
+    let created = create_backup(&fixture.state, &fixture.repository())
+        .await
+        .unwrap();
+    let snapshot = PathBuf::from(created["snapshot_path"].as_str().unwrap());
+    drop(secure_file(&old_database));
+    fs::copy(&old_database, snapshot.join("database.sqlite3")).unwrap();
+    reseal_snapshot_database(&snapshot, 12);
+    snapshot
+}
+
+fn reseal_snapshot_database(snapshot: &Path, schema: i64) {
+    let database = fs::read(snapshot.join("database.sqlite3")).unwrap();
+    let manifest_path = snapshot.join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["schema_version"] = Value::from(schema);
+    manifest["database"]["size_bytes"] = Value::from(database.len());
+    manifest["database"]["sha256"] = Value::from(hex::encode(Sha256::digest(&database)));
+    let encoded = serde_json::to_vec_pretty(&manifest).unwrap();
+    fs::write(manifest_path, &encoded).unwrap();
+    let path = snapshot.join("COMPLETE");
+    let mut completion: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    completion["manifest_sha256"] = Value::from(hex::encode(Sha256::digest(encoded)));
+    fs::write(path, serde_json::to_vec_pretty(&completion).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn old_snapshot_is_verified_then_migrated_and_paused_without_changing_source() {
+    let fixture = Fixture::new().await;
+    let snapshot = old_schema_snapshot(&fixture).await;
+    let source = fs::read(snapshot.join("database.sqlite3")).unwrap();
+    assert_eq!(verify_backup(&snapshot).await.unwrap()["verified"], true);
+    let destination = fixture.directory.path().join("upgraded-restore");
+    restore_backup(
+        &snapshot,
+        &destination,
+        "Verify upgrade of an old snapshot.",
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(snapshot.join("database.sqlite3")).unwrap(), source);
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(destination.join("coordinator.sqlite3"))
+            .read_only(true),
+    )
+    .await
+    .unwrap();
+    let newest = sqlx::migrate!("./migrations")
+        .iter()
+        .map(|m| m.version)
+        .max()
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT max(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        newest
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT coordination_state FROM service_state")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "restore_reconciliation"
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM principals WHERE id='old-admin' AND disabled_at IS NOT NULL AND password_hash<>'test-password-hash'").fetch_one(&pool).await.unwrap(), 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT task_id FROM task_search WHERE task_search MATCH 'Preserved'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "old-task"
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn snapshot_prefix_rejects_missing_altered_future_and_preformat_migrations() {
+    for (change, schema) in [
+        ("DELETE FROM _sqlx_migrations WHERE version=6", 12),
+        (
+            "UPDATE _sqlx_migrations SET checksum=x'00' WHERE version=12",
+            12,
+        ),
+        (
+            "UPDATE _sqlx_migrations SET version=999 WHERE version=12",
+            999,
+        ),
+        ("DELETE FROM _sqlx_migrations WHERE version=12", 11),
+    ] {
+        let fixture = Fixture::new().await;
+        let snapshot = old_schema_snapshot(&fixture).await;
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(snapshot.join("database.sqlite3")),
+        )
+        .await
+        .unwrap();
+        sqlx::query(change).execute(&pool).await.unwrap();
+        pool.close().await;
+        reseal_snapshot_database(&snapshot, schema);
+        let error = verify_backup(&snapshot).await.unwrap_err().to_string();
+        assert!(error.contains("migration"), "{error}");
+        let destination = fixture.directory.path().join("must-not-publish");
+        assert!(
+            restore_backup(&snapshot, &destination, "Reject incompatible snapshot.")
+                .await
+                .is_err()
+        );
+        assert!(!destination.exists());
+    }
+}

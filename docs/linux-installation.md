@@ -123,7 +123,10 @@ verify a backup. Stop the service, stage and checksum the new binaries, replace
 both binaries together, then start the service and check HTTPS health, sign-in,
 and native client reconnect. The new server may migrate the database on startup;
 the new binary deliberately rejects an older schema for backup rather than
-silently upgrading it during a backup command.
+silently upgrading it during a backup command. Version-1 snapshots from schema 12 onward
+can be verified and restored by this release when their migration history is an
+exact known prefix. Restore upgrades its private copy before invalidating old
+authority; it leaves the original snapshot unchanged.
 
 Do not roll an old binary back over a database after a newer migration. Restore
 the pre-upgrade snapshot into a fresh directory with a matching compatible binary

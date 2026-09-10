@@ -106,7 +106,13 @@ directory with a valid `COMPLETE`; partial directories are never usable backups.
 Creation verifies SQLite integrity, foreign keys, the exact successful migration
 version/description/checksum set, and exact agreement between the manifest and
 all eligible artifact rows before publication. Verification repeats those checks
-as well as every recorded size and digest. A failed assembly removes only its
+as well as every recorded size and digest. For version-1 snapshots from schema 12
+(the first backup implementation) onward, verification also accepts an exact,
+known contiguous prefix of the current migration set. Missing, altered, failed,
+unknown, future, and pre-format migration histories are rejected. Verification
+never migrates the snapshot; restore migrates only its private staged copy before
+invalidating authority. Opening a live database for backup still requires this
+executable’s complete current migration set. A failed assembly removes only its
 generated partial directory and neither publishes nor prunes.
 If a separately completed snapshot publishes but retention later fails, output
 contains `warning.code: retention_failed`; the new and prior usable snapshots
@@ -161,7 +167,7 @@ ABSENT_DATA_DIRECTORY/
 ```
 
 The copied database must match the immutable snapshot manifest before authority
-invalidation. The engine then opens only the staged database, calls
+invalidation. The engine then opens and migrates only the staged database, calls
 `restore::invalidate_restored_state`, checkpoints and closes SQLite, rechecks
 database integrity, foreign keys, and the current migration set, and re-hashes
 every restored artifact. The database checksum is expected to differ after
