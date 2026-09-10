@@ -539,7 +539,7 @@
   function renderWorkflow(data) {
     const target = $('workflow-content'); clear(target); const workflow = data.workflow || {}; const submission = workflow.submission;
     if (!submission) { add(target, el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.')); return; }
-    const candidate = el('div', 'workflow-entry'); add(candidate, el('h3', '', 'Current candidate'));
+    const candidate = el('div', 'workflow-entry'); add(candidate, el('h3', '', workflow.phase === 'revision_needed' ? 'Previous candidate' : 'Current candidate'));
     add(candidate, el('p', '', submission.summary));
     const details = el('dl');
     [['Submission', submission.id], ['Source revision', submission.candidate_revision], ['Source tree', submission.candidate_tree], ['Task revision', submission.task_revision], ['Policy revision', submission.project_policy_revision]].filter(([,value]) => value !== null && value !== undefined).forEach(([label,value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
@@ -571,13 +571,13 @@
       if (activity.authorization) add(entry, el('p', '', `Human authorization: ${activity.authorization.summary}`));
       const action = (label, callback) => { const button = el('button', 'button subtle', label); button.type = 'button'; button.dataset.mutation = 'true'; button.addEventListener('click', callback); add(entry, button); };
       if (state.actor?.kind === 'human' && !['done','completed','canceled'].includes(activity.status)) {
-        if (activity.kind === 'human_review') {
+        if (activity.kind === 'human_review' && !(workflow.blockers || []).length) {
           const current = attempt?.state === 'active' && attempt.valid_by_time === true && attempt.owner_authorized === true;
           if (current && attempt.owner_id === actorId() && attempt.session_id === state.actor.session_id) action('Record human review', () => openHumanReview(activity, submission, attempt));
           else if (!current) action('Claim human review', () => workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/claim`, {expected_submission_id: submission.id, expected_project_policy_revision: submission.project_policy_revision, expected_workflow_policy_revision: submission.workflow_policy_revision}, 'review claim', response => openHumanReview(activity, submission, response.attempt)));
         }
         if (activity.kind === 'integration') {
-          if (!activity.authorization && workflow.phase === 'integration' && state.projects.find(project => text(project.id) === state.projectId)?.automatic_integration === false) action('Authorize integration', () => openIntegrationAuthorization(activity, submission));
+          if (!activity.authorization && !(workflow.blockers || []).length && workflow.phase === 'integration' && state.projects.find(project => text(project.id) === state.projectId)?.automatic_integration === false) action('Authorize integration', () => openIntegrationAuthorization(activity, submission));
           if (activity.intent && !activity.publication_reconciliation) action('Reconcile publication', () => openPublicationReconciliation(activity, submission));
         }
       }
