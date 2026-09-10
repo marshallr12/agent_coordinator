@@ -9,6 +9,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
 };
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(version, about = "Agent Coordinator service")]
@@ -106,8 +107,10 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Do not log request bodies, headers, URLs, password hashes, or SQL values.
+    // rmcp's diagnostic events can include decoded messages or request
+    // headers. Keep that target disabled regardless of ambient RUST_LOG.
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(EnvFilter::new("info,rmcp=off"))
         .init();
     let options = Options::parse();
     // Verification and restore must not create, migrate, or otherwise touch the

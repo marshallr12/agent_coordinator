@@ -8,6 +8,7 @@ pub mod imports;
 pub mod jobs;
 pub mod knowledge;
 pub mod maintenance;
+pub mod mcp;
 pub mod mutation;
 pub mod objectives;
 pub mod operator_access;
@@ -34,6 +35,10 @@ pub fn response(data: Value) -> Json<Value> {
 }
 
 pub fn router(state: AppState) -> Router {
+    rest_router(state.clone()).merge(mcp::routes(state))
+}
+
+pub(crate) fn rest_router(state: AppState) -> Router {
     Router::new()
         .merge(coordination::routes())
         .merge(workflow::routes())
@@ -176,8 +181,9 @@ fn asset(content_type: &'static str, body: &'static str) -> Response {
 async fn info() -> Json<Value> {
     response(
         json!({"product":"Agent Coordinator","version":env!("CARGO_PKG_VERSION"),"api_version":"v1","instruction_version":coordinator_core::INSTRUCTION_VERSION,
-        "implementation_stage":"linux_operations","authentication_help":"/api/v1/help/authentication",
-        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events","submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","operator_accounts","password_change","browser_session_revocation","agent_token_rotation","objectives","task_history","backup_restore","restore_reconciliation","clock_reconciliation","storage_maintenance"],
+        "implementation_stage":"mcp","authentication_help":"/api/v1/help/authentication",
+        "mcp":{"path":"/mcp","transport":"Streamable HTTP","stateless":true},
+        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events","submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","operator_accounts","password_change","browser_session_revocation","agent_token_rotation","objectives","task_history","backup_restore","restore_reconciliation","clock_reconciliation","storage_maintenance","mcp"],
         "unavailable_features":[]}),
     )
 }
@@ -186,6 +192,9 @@ async fn authentication_help() -> Json<Value> {
         json!({"title":"Connect to Agent Coordinator","message":"Ask the service administrator to enroll your workstation. Every authenticated person and agent can access all projects; credential administration requires a human administrator.",
         "browser_steps":["The host operator initializes the first administrator with the local init-admin command.","Open this service over HTTPS and sign in with your local username and password.","An administrator can create human accounts and issue, rotate, and revoke agent credentials under Access. Use My account to change a password and revoke browser sessions."],
         "agent_steps":["Obtain a workstation credential from a human administrator.","Store the credential outside repositories and bind it to this service's trusted HTTPS origin.","Use Authorization: Bearer <agent-token>. Never put credentials in a URL.","Generate and persist a random session ID and a random 32-byte session proof before registering a session.","Send X-Coordinator-Session and X-Coordinator-Session-Proof with the agent token for subsequent session work."],
+        "mcp_steps":["Run agent-coordinator --session NAME connect, then launch a trusted client with agent-coordinator --session NAME mcp-client -- /absolute/path/to/trusted-client [ARGS...]. Configure the client to map the protected launcher environment values to the bearer, session ID, and session proof HTTP headers; never place credentials in tool arguments, command arguments, URLs, logs, or repositories.","List tools, then call coordinator_session_get or coordinator_session_register before work that requires a session.","Read coordinator_orientation and acknowledge its exact instruction and policy revisions before claiming.","Claim before source changes. Use the launcher environment and native CLI for local files, Git, jobs, binary artifact transfer, and guarded publication.","Checkpoint and renew before expiry, then submit evidence and lessons. MCP ping, initialize, metadata requests, and receipt replay do not renew ownership.","Independent review requires another eligible principal; serialized integration and integrated checks use exact source identities."],
+        "mcp_path":"/mcp","mcp_transport":"stateless Streamable HTTP","mcp_public_oauth_enrollment":false,
+        "mcp_authentication_note":"This deployment uses administrator-issued opaque bearer credentials. It does not provide public enrollment or an OAuth authorization server.",
         "bootstrap_snippet":"Read .agent-coordinator.toml and select a unique stable harness name. Run agent-coordinator --session UNIQUE_HARNESS_NAME connect; use the same --session on every command. Read the returned rules and workflow. Claim before changing code, prepare a separate worktree, report progress and renew before expiry. Submit evidence and lessons. On authentication failure show the operator the setup instructions. Connection reserves no work.",
         "registration_path":"/api/v1/sessions","sign_in_path":"/api/v1/auth/login","public_registration":false,
         "mutation_requirement":"Persist an Idempotency-Key and the request before each authenticated mutation. Retry uncertain requests with the same key."}),

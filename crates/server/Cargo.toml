@@ -8,7 +8,7 @@ license.workspace = true
 name = "agent-coordinator-server"
 path = "src/main.rs"
 [dependencies]
-coordinator-core = { path = "../core" }
+coordinator-core = { path = "../core", features = ["json-schema"] }
 anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
@@ -30,7 +30,9 @@ url = "2"
 fs2.workspace = true
 tokio-util.workspace = true
 http-body-util.workspace = true
-[dev-dependencies]
+rmcp = { version = "=3.2.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+schemars = "1"
 tower.workspace = true
+[dev-dependencies]
 http-body-util.workspace = true
 tempfile.workspace = true
