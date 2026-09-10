@@ -5,10 +5,13 @@ tasks. Run the disposable exercise against a freshly built executable:
 
 ```sh
 cargo build --release --workspace --locked
-python3 scripts/load_acceptance.py \
-  --server target/release/agent-coordinator-server \
-  --duration 1800 --rate 50 --history 100000 \
-  --report capacity-report.json
+sudo systemd-run --scope --quiet \
+  -p MemoryMax=4G -p MemorySwapMax=0 -p CPUQuota=200% \
+  runuser -u "$(id -un)" -- \
+  /usr/bin/python3 scripts/load_acceptance.py \
+    --server target/release/agent-coordinator-server \
+    --duration 1800 --rate 50 --history 100000 \
+    --require-baseline --report capacity-report.json
 ```
 
 It creates a private temporary installation and synthetic canceled history while
@@ -24,26 +27,57 @@ events. All 50 active attempts are renewed throughout the run. Requests follow a
 fixed schedule; latency includes time waiting in the client queue. The exercise
 fails instead of quietly reducing load when 100 requests are pending. It also
 streams a 16 MiB artifact and creates a verified online backup during traffic.
+Backup waits until the first upload chunk is in flight. The report records both
+operation intervals and the runner requires them to overlap. In a full workload,
+both operations must complete while metadata traffic is still measured and at
+least one metadata request must complete during their overlap.
 
 The report records per-operation and combined p95/p99, achieved request rate,
 errors, peak resident memory, scheduling delay, claim conflicts, and final
 ownership/foreign-key checks. Every metadata operation must have p95 below
 500 milliseconds, with no unexpected error and at least 98% of the target rate.
-The final check requires exactly 50 current, unexpired ownership generations.
+The report records and checks the exact read/write operation counts and successful
+renewal participation for every scheduled session. The final ownership check
+compares the exact 50 expected project, task, attempt, generation, principal,
+session, and credential tuples. It also requires current task pointers, unexpired
+leases, and the finalized artifact's project, creator, size, and digest to match.
 
-Both service and backup are restricted to the same two available CPU cores and
-4 GiB of virtual address space **per process**. Resident memory is sampled
-separately. This is not a 4 GiB aggregate host memory limit; the report names the
-actual constraint and host. A production host must also budget memory for its
-proxy, OS, and concurrent backups. The actual deployment hardware is undecided.
+`--require-baseline` accepts only a clean source tree on Ubuntu 24.04 x86_64 with
+at least two available CPUs and a unified cgroup v2 that limits the whole runner
+scope to at most two CPUs and 4 GiB aggregate memory with swap disabled. The
+scope contains the load generator, service, backup, restore stage, and their
+charged page cache. The report records `cpu.max`, `memory.max`,
+`memory.swap.max`, and aggregate `memory.current` and `memory.peak`. Service,
+backup, and restore processes retain a 4 GiB address-space limit as a secondary
+bound. The service is pinned to two available CPUs; backup and restore use the
+same pair.
+
+After measured traffic, the runner stops the live service and restores the
+captured 100,000-task snapshot into a fresh temporary directory. This restore
+stage must finish in less than one hour and pass SQLite integrity and foreign-key
+checks. It verifies historical task count and the restored reconciliation pause,
+including invalidated credentials, browser and agent sessions, human passwords,
+and active attempts. Its reported time measures file restore plus staged authority
+invalidation and validation. It is not a full service-recovery time: the human
+inspection checklist, old-installation fencing, client reconnection, and service
+resumption are outside this capacity runner. The small end-to-end backup smoke
+exercise separately tests completion of that workflow.
 
 Transport for this capacity workload is authenticated loopback HTTP. The separate
 [Linux installation exercise](linux-installation.md) verifies systemd and HTTPS.
-The report includes executable SHA-256, source revision/dirty status, and database
-schema version. Keep it with the exact build's other release evidence.
+The report includes executable SHA-256, clean source revision, database schema
+version, and GitHub repository, head SHA, ref, workflow, job, run ID, and attempt
+when those CI values exist. Keep it with the exact build's other release evidence.
+The executable digest and CI build job together identify the tested binary; the
+runner never records credentials, request headers, raw errors, or captured server
+output.
 
 Short runs (`--duration 60`, for example) are development checks and have
-`full_acceptance: false`. They do not substitute for the 30-minute release run.
+`full_acceptance: false`; they may omit `--require-baseline`. The same exact
+ownership, workload-accounting, overlap, restore-stage, and sanitization checks
+still run, although a backup may finish after short metadata traffic ends. A
+30-minute run without every verified baseline condition also has
+`full_acceptance: false`. Neither substitutes for the constrained release run.
 Local CPU contention from unrelated builds can affect the result and should be
 avoided for final measurements. The native Windows workstation exercise remains
 [backlog item 7](../BACKLOG.md), separate from all of these checks.
