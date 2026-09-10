@@ -35,6 +35,7 @@ struct HistoryQuery {
 #[derive(Deserialize, Serialize)]
 struct HistoryCursor {
     version: u8,
+    cursor_epoch: String,
     project_id: String,
     task_id: String,
     kind: String,
@@ -136,9 +137,9 @@ fn encode_cursor(cursor: &HistoryCursor) -> Result<String, AppError> {
     Ok(hex::encode(serde_json::to_vec(cursor)?))
 }
 
-fn snapshot(project: &str, task: &str, kind: &str, cutoff: i64) -> String {
+fn snapshot(project: &str, task: &str, kind: &str, cutoff: i64, cursor_epoch: &str) -> String {
     let mut digest = Sha256::new();
-    for part in [project, task, kind, &cutoff.to_string()] {
+    for part in [project, task, kind, &cutoff.to_string(), cursor_epoch] {
         digest.update(part.as_bytes());
         digest.update([0]);
     }
@@ -161,6 +162,10 @@ async fn history(
         return Err(AppError::bad_request("limit must be between 1 and 200."));
     }
     let mut tx = state.pool.begin().await?;
+    let cursor_epoch: String =
+        sqlx::query_scalar("SELECT cursor_epoch FROM service_state WHERE singleton=1")
+            .fetch_one(&mut *tx)
+            .await?;
     let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks WHERE project_id=? AND id=?")
         .bind(&project)
         .bind(&task)
@@ -180,7 +185,8 @@ async fn history(
 
     let (cutoff, last) = if let Some(value) = query.cursor.as_deref() {
         let cursor = decode_cursor(value)?;
-        if cursor.version != 1
+        if cursor.version != 2
+            || cursor.cursor_epoch != cursor_epoch
             || cursor.project_id != project
             || cursor.task_id != task
             || cursor.kind != query.kind
@@ -211,7 +217,7 @@ async fn history(
     let had_more = rows.len() > limit as usize;
     let rows = &rows[..rows.len().min(limit as usize)];
     let mut items = materialize(&mut tx, &query.kind, rows).await?;
-    let page_snapshot = snapshot(&project, &task, &query.kind, cutoff);
+    let page_snapshot = snapshot(&project, &task, &query.kind, cutoff, &cursor_epoch);
     let mut more = had_more;
     loop {
         let next_cursor = if more {
@@ -219,7 +225,8 @@ async fn history(
                 .last()
                 .map(|(cursor_id, _)| {
                     encode_cursor(&HistoryCursor {
-                        version: 1,
+                        version: 2,
+                        cursor_epoch: cursor_epoch.clone(),
                         project_id: project.clone(),
                         task_id: task.clone(),
                         kind: query.kind.clone(),
@@ -390,7 +397,9 @@ async fn materialize(
             }
             "integrations" => {
                 let activity: String = row.get("id");
-                let authorization=sqlx::query("SELECT submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at FROM integration_authorizations WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v|json!({"submission_id":v.get::<String,_>("submission_id"),"project_policy_revision":v.get::<i64,_>("project_policy_revision"),"workflow_policy_revision":v.get::<i64,_>("workflow_policy_revision"),"actor_id":v.get::<String,_>("actor_id"),"summary":v.get::<String,_>("summary"),"created_at":timestamp(v.get("created_at"))}));
+                let authorization=sqlx::query("SELECT submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at,invalidated_at,authorization_revision FROM integration_authorizations WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v|json!({"revision":v.get::<i64,_>("authorization_revision"),"submission_id":v.get::<String,_>("submission_id"),"project_policy_revision":v.get::<i64,_>("project_policy_revision"),"workflow_policy_revision":v.get::<i64,_>("workflow_policy_revision"),"actor_id":v.get::<String,_>("actor_id"),"summary":v.get::<String,_>("summary"),"created_at":timestamp(v.get("created_at")),"invalidated_at":time(v.get("invalidated_at")),"valid":v.get::<Option<i64>,_>("invalidated_at").is_none()}));
+                let authorization_history=sqlx::query("SELECT authorization_revision,submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at,invalidated_at FROM integration_authorization_history WHERE activity_id=? ORDER BY authorization_revision").bind(&activity).fetch_all(&mut *c).await?;
+                let authorization_history:Vec<Value>=authorization_history.iter().map(|v|json!({"revision":v.get::<i64,_>("authorization_revision"),"submission_id":v.get::<String,_>("submission_id"),"project_policy_revision":v.get::<i64,_>("project_policy_revision"),"workflow_policy_revision":v.get::<i64,_>("workflow_policy_revision"),"actor_id":v.get::<String,_>("actor_id"),"summary":v.get::<String,_>("summary"),"created_at":timestamp(v.get("created_at")),"invalidated_at":timestamp(v.get("invalidated_at")),"valid":false})).collect();
                 let hold=sqlx::query("SELECT id,canonical_repository_key,target_branch,state,acquired_by,acquired_at,released_by,released_at,release_reason FROM integration_holds WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v|json!({"id":v.get::<String,_>("id"),"canonical_repository_key":v.get::<String,_>("canonical_repository_key"),"target_branch":v.get::<String,_>("target_branch"),"state":v.get::<String,_>("state"),"acquired_by":v.get::<String,_>("acquired_by"),"acquired_at":timestamp(v.get("acquired_at")),"released_by":v.get::<Option<String>,_>("released_by"),"released_at":time(v.get("released_at")),"release_reason":v.get::<Option<String>,_>("release_reason")}));
                 let intent=sqlx::query("SELECT submission_id,attempt_id,observed_target_revision,observed_target_tree,result_revision,result_tree,created_by,created_at FROM publication_intents WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?.map(|v|json!({"submission_id":v.get::<String,_>("submission_id"),"attempt_id":v.get::<String,_>("attempt_id"),"observed_target_revision":v.get::<String,_>("observed_target_revision"),"observed_target_tree":v.get::<String,_>("observed_target_tree"),"result_revision":v.get::<String,_>("result_revision"),"result_tree":v.get::<String,_>("result_tree"),"created_by":v.get::<String,_>("created_by"),"created_at":timestamp(v.get("created_at"))}));
                 let integration_result=sqlx::query("SELECT submission_id,attempt_id,publication_state,observed_target_revision,result_revision,result_tree,check_job_ids_json,summary,reported_by,created_at FROM integration_results WHERE activity_id=?").bind(&activity).fetch_optional(&mut *c).await?;
@@ -421,7 +430,7 @@ async fn materialize(
                 (
                     related_task(row),
                     time(Some(row.get("created_at"))),
-                    json!({"activity":activity_value(row),"authorization":authorization,"hold":hold,"publication_intent":intent,"integration_result":integration_result,"check_jobs":check_jobs,"publication_reconciliation":reconciliation}),
+                    json!({"activity":activity_value(row),"authorization":authorization,"authorization_history":authorization_history,"hold":hold,"publication_intent":intent,"integration_result":integration_result,"check_jobs":check_jobs,"publication_reconciliation":reconciliation}),
                 )
             }
             "task_revisions" => (

@@ -619,8 +619,8 @@ async fn activity_value(
     } else {
         None
     };
-    let authorization = sqlx::query("SELECT actor_id,summary,created_at FROM integration_authorizations WHERE activity_id=?")
-        .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"actor_id":r.get::<String,_>("actor_id"),"summary":r.get::<String,_>("summary"),"created_at":timestamp(r.get("created_at"))}));
+    let authorization = sqlx::query("SELECT actor_id,summary,created_at,invalidated_at,authorization_revision FROM integration_authorizations WHERE activity_id=?")
+        .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"actor_id":r.get::<String,_>("actor_id"),"summary":r.get::<String,_>("summary"),"created_at":timestamp(r.get("created_at")),"invalidated_at":r.get::<Option<i64>,_>("invalidated_at").map(timestamp),"valid":r.get::<Option<i64>,_>("invalidated_at").is_none(),"revision":r.get::<i64,_>("authorization_revision")}));
     let intent = sqlx::query("SELECT observed_target_revision,observed_target_tree,result_revision,result_tree,created_by,created_at FROM publication_intents WHERE activity_id=?")
         .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"observed_target_revision":r.get::<String,_>("observed_target_revision"),"observed_target_tree":r.get::<String,_>("observed_target_tree"),"result_revision":r.get::<String,_>("result_revision"),"result_tree":r.get::<String,_>("result_tree"),"created_by":r.get::<String,_>("created_by"),"created_at":timestamp(r.get("created_at"))}));
     let result = sqlx::query("SELECT publication_state,observed_target_revision,result_revision,result_tree,check_job_ids_json,summary,created_at FROM integration_results WHERE activity_id=?")
@@ -1160,7 +1160,7 @@ async fn publication_readiness(
     {
         return Ok((false, Vec::new()));
     }
-    if !ctx.automatic_integration && sqlx::query_scalar::<_,i64>("SELECT count(*) FROM integration_authorizations WHERE activity_id=? AND submission_id=? AND project_policy_revision=? AND workflow_policy_revision=?")
+    if !ctx.automatic_integration && sqlx::query_scalar::<_,i64>("SELECT count(*) FROM integration_authorizations WHERE activity_id=? AND submission_id=? AND project_policy_revision=? AND workflow_policy_revision=? AND invalidated_at IS NULL")
         .bind(&ctx.id).bind(&ctx.submission).bind(ctx.project_policy_revision).bind(ctx.workflow_policy_revision).fetch_one(&mut *c).await?==0{return Ok((false,Vec::new()));}
     let intent=sqlx::query("SELECT result_revision,result_tree FROM publication_intents WHERE activity_id=? AND attempt_id=?").bind(&ctx.id).bind(attempt_id).fetch_optional(&mut *c).await?;
     let Some(intent) = intent else {
@@ -1284,7 +1284,7 @@ async fn claim_activity(
                 ));
             }
             if !ctx.automatic_integration {
-                let authorized:i64=sqlx::query_scalar("SELECT count(*) FROM integration_authorizations WHERE activity_id=? AND submission_id=? AND project_policy_revision=? AND workflow_policy_revision=?")
+                let authorized:i64=sqlx::query_scalar("SELECT count(*) FROM integration_authorizations WHERE activity_id=? AND submission_id=? AND project_policy_revision=? AND workflow_policy_revision=? AND invalidated_at IS NULL")
                     .bind(&ctx.id).bind(&ctx.submission).bind(ctx.project_policy_revision).bind(ctx.workflow_policy_revision)
                     .fetch_one(&mut *m.tx).await?;
                 if authorized == 0 {
@@ -1756,8 +1756,27 @@ async fn authorize_integration(
             "Required reviews must approve this submission before integration authorization.",
         ));
     }
-    sqlx::query("INSERT INTO integration_authorizations(activity_id,submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at) VALUES(?,?,?,?,?,?,?)")
-        .bind(&ctx.id).bind(&ctx.submission).bind(ctx.project_policy_revision).bind(ctx.workflow_policy_revision).bind(&m.actor.id).bind(&input.summary).bind(m.now).execute(&mut *m.tx).await?;
+    let previous =
+        sqlx::query("SELECT invalidated_at FROM integration_authorizations WHERE activity_id=?")
+            .bind(&ctx.id)
+            .fetch_optional(&mut *m.tx)
+            .await?;
+    if previous
+        .as_ref()
+        .is_some_and(|row| row.get::<Option<i64>, _>("invalidated_at").is_none())
+    {
+        return Err(AppError::conflict(
+            "integration_already_authorized",
+            "This integration activity already has current human authorization.",
+        ));
+    }
+    if previous.is_some() {
+        sqlx::query("UPDATE integration_authorizations SET submission_id=?,project_policy_revision=?,workflow_policy_revision=?,actor_id=?,summary=?,created_at=?,invalidated_at=NULL,authorization_revision=authorization_revision+1 WHERE activity_id=? AND invalidated_at IS NOT NULL")
+            .bind(&ctx.submission).bind(ctx.project_policy_revision).bind(ctx.workflow_policy_revision).bind(&m.actor.id).bind(&input.summary).bind(m.now).bind(&ctx.id).execute(&mut *m.tx).await?;
+    } else {
+        sqlx::query("INSERT INTO integration_authorizations(activity_id,submission_id,project_policy_revision,workflow_policy_revision,actor_id,summary,created_at) VALUES(?,?,?,?,?,?,?)")
+            .bind(&ctx.id).bind(&ctx.submission).bind(ctx.project_policy_revision).bind(ctx.workflow_policy_revision).bind(&m.actor.id).bind(&input.summary).bind(m.now).execute(&mut *m.tx).await?;
+    }
     let value = activity_value(&mut m.tx, &project, &ctx.id, m.now).await?;
     Ok(response(
         m.finish(value, Some(&project), "integration.authorized", &ctx.id)
@@ -1803,7 +1822,7 @@ async fn publication_intent(
         ));
     }
     if !ctx.automatic_integration {
-        let n:i64=sqlx::query_scalar("SELECT count(*) FROM integration_authorizations WHERE activity_id=? AND submission_id=? AND project_policy_revision=? AND workflow_policy_revision=?")
+        let n:i64=sqlx::query_scalar("SELECT count(*) FROM integration_authorizations WHERE activity_id=? AND submission_id=? AND project_policy_revision=? AND workflow_policy_revision=? AND invalidated_at IS NULL")
             .bind(&ctx.id).bind(&ctx.submission).bind(ctx.project_policy_revision).bind(ctx.workflow_policy_revision).fetch_one(&mut *m.tx).await?;
         if n == 0 {
             return Err(AppError::conflict(
@@ -2209,7 +2228,7 @@ async fn finalize(
         ));
     }
     if !ctx.automatic_integration {
-        let n:i64=sqlx::query_scalar("SELECT count(*) FROM integration_authorizations WHERE activity_id=? AND submission_id=? AND project_policy_revision=? AND workflow_policy_revision=?")
+        let n:i64=sqlx::query_scalar("SELECT count(*) FROM integration_authorizations WHERE activity_id=? AND submission_id=? AND project_policy_revision=? AND workflow_policy_revision=? AND invalidated_at IS NULL")
             .bind(&ctx.id).bind(&ctx.submission).bind(ctx.project_policy_revision).bind(ctx.workflow_policy_revision).fetch_one(&mut *m.tx).await?;
         if n == 0 {
             return Err(AppError::conflict(

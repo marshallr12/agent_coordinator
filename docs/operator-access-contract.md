@@ -124,6 +124,22 @@ without `token`, adds `secret_unavailable: true`, and directs the administrator 
 rotate the newly created replacement credential with a new idempotency key. The
 default rotation then revokes that credential while issuing another token.
 
+After a restore revokes every credential, an administrator can preserve an
+existing agent identity while issuing fresh authentication with:
+
+```text
+POST /api/v1/admin/agents/{principal_id}/credentials
+{"name":"after-restore"}
+```
+
+The principal must still be an enabled agent. The first response contains its
+unchanged `principal_id` and `principal_name`, the new `credential` record, and
+the one-time `token`. A replay returns the saved credential identity without the
+token and sets `secret_unavailable: true`. The operation is available during
+restore reconciliation so a recovered administrator can reconnect clients, but
+the global restore pause prevents those clients from claiming or changing work
+until reconciliation finishes.
+
 ## Host-local recovery
 
 Lost-password recovery is exported for the server's local command and has no HTTP

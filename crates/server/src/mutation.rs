@@ -17,6 +17,7 @@ pub struct Mutation {
     operation: String,
     key: String,
     fingerprint: String,
+    authority_epoch: String,
 }
 impl Mutation {
     pub async fn begin<T: Serialize>(
@@ -30,13 +31,24 @@ impl Mutation {
         let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
         let now = state.now();
         let actor = auth.verify(&mut tx, now).await?;
+        let authority_epoch = authority(&mut tx, operation).await?;
         // Session identity and proof verifier are included to reject key reuse across harnesses.
         let proof = headers
             .get("X-Coordinator-Session-Proof")
             .and_then(|v| v.to_str().ok())
             .map(digest);
-        let fingerprint = digest(&serde_json::to_string(&(input, &actor.session_id, proof))?);
-        Self::load_receipt(tx, now, actor, operation, key, fingerprint).await
+        let fingerprint = if authority_epoch == "initial" {
+            digest(&serde_json::to_string(&(input, &actor.session_id, proof))?)
+        } else {
+            digest(&serde_json::to_string(&(
+                "mutation-v2",
+                &authority_epoch,
+                input,
+                &actor.session_id,
+                proof,
+            ))?)
+        };
+        Self::load_receipt(tx, now, actor, operation, key, fingerprint, authority_epoch).await
     }
 
     /// Account creation may be retried after an uncertain response forced the
@@ -57,12 +69,22 @@ impl Mutation {
         let now = state.now();
         let actor = auth.verify(&mut tx, now).await?;
         crate::auth::admin(&actor)?;
-        let fingerprint = digest(&serde_json::to_string(&(
-            "human-admin-account-creation-v1",
-            input,
-            &actor.id,
-        ))?);
-        Self::load_receipt(tx, now, actor, operation, key, fingerprint).await
+        let authority_epoch = authority(&mut tx, operation).await?;
+        let fingerprint = if authority_epoch == "initial" {
+            digest(&serde_json::to_string(&(
+                "human-admin-account-creation-v1",
+                input,
+                &actor.id,
+            ))?)
+        } else {
+            digest(&serde_json::to_string(&(
+                "human-admin-account-creation-v2",
+                &authority_epoch,
+                input,
+                &actor.id,
+            ))?)
+        };
+        Self::load_receipt(tx, now, actor, operation, key, fingerprint, authority_epoch).await
     }
 
     pub async fn begin_reporter<T: Serialize>(
@@ -76,8 +98,18 @@ impl Mutation {
         let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
         let now = state.now();
         let actor = auth.verify(&mut tx, now).await?;
-        let fingerprint = digest(&serde_json::to_string(&("reporter-v1", auth.id(), input))?);
-        Self::load_receipt(tx, now, actor, operation, key, fingerprint).await
+        let authority_epoch = authority(&mut tx, operation).await?;
+        let fingerprint = if authority_epoch == "initial" {
+            digest(&serde_json::to_string(&("reporter-v1", auth.id(), input))?)
+        } else {
+            digest(&serde_json::to_string(&(
+                "reporter-v2",
+                &authority_epoch,
+                auth.id(),
+                input,
+            ))?)
+        };
+        Self::load_receipt(tx, now, actor, operation, key, fingerprint, authority_epoch).await
     }
 
     async fn load_receipt(
@@ -87,10 +119,17 @@ impl Mutation {
         operation: &str,
         key: String,
         fingerprint: String,
+        authority_epoch: String,
     ) -> Result<Self, AppError> {
-        let previous = sqlx::query("SELECT fingerprint,result_json,created_at FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?")
+        let previous = sqlx::query("SELECT fingerprint,result_json,created_at,authority_epoch FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?")
             .bind(&actor.id).bind(operation).bind(&key).fetch_optional(&mut *tx).await?;
         let replay = if let Some(row) = previous {
+            if row.get::<String, _>("authority_epoch") != authority_epoch {
+                return Err(AppError::conflict(
+                    "request_from_previous_restore",
+                    "This idempotency key belongs to authority from before the latest restore. Inspect the old result and use a new key for an intentional new operation.",
+                ));
+            }
             if row.get::<String, _>("fingerprint") != fingerprint {
                 return Err(AppError::conflict(
                     "idempotency_conflict",
@@ -115,6 +154,7 @@ impl Mutation {
             operation: operation.into(),
             key,
             fingerprint,
+            authority_epoch,
         })
     }
     pub async fn finish(
@@ -125,14 +165,54 @@ impl Mutation {
         record_id: &str,
     ) -> Result<Value, AppError> {
         let encoded = serde_json::to_string(&data)?;
-        sqlx::query("INSERT INTO mutation_receipts(principal_id,operation,key,fingerprint,result_json,created_at) VALUES(?,?,?,?,?,?)")
-            .bind(&self.actor.id).bind(&self.operation).bind(&self.key).bind(&self.fingerprint).bind(&encoded).bind(self.now).execute(&mut *self.tx).await?;
+        sqlx::query("INSERT INTO mutation_receipts(principal_id,operation,key,fingerprint,result_json,created_at,authority_epoch) VALUES(?,?,?,?,?,?,?)")
+            .bind(&self.actor.id).bind(&self.operation).bind(&self.key).bind(&self.fingerprint).bind(&encoded).bind(self.now).bind(&self.authority_epoch).execute(&mut *self.tx).await?;
         // Keep audit payloads small and never store credential-bearing response bodies here.
         sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,?,?,?,?)")
             .bind(project).bind(&self.actor.id).bind(kind).bind(record_id).bind("{}").bind(self.now).execute(&mut *self.tx).await?;
         self.tx.commit().await?;
         Ok(data)
     }
+}
+
+async fn authority(
+    tx: &mut Transaction<'static, Sqlite>,
+    operation: &str,
+) -> Result<String, AppError> {
+    let row = sqlx::query(
+        "SELECT authority_epoch,coordination_state FROM service_state WHERE singleton=1",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if row.get::<String, _>("coordination_state") == "restore_reconciliation"
+        && !allowed_during_restore(operation)
+    {
+        return Err(AppError::conflict(
+            "restore_reconciliation_required",
+            "The restored service is paused. Reconcile restored authority and external effects before changing coordination state.",
+        ));
+    }
+    Ok(row.get("authority_epoch"))
+}
+
+fn allowed_during_restore(operation: &str) -> bool {
+    operation == "POST /api/v1/auth/logout"
+        || operation == "POST /api/v1/auth/password"
+        || operation == "POST /api/v1/sessions"
+        || (operation.starts_with("POST /api/v1/sessions/")
+            && (operation.ends_with("/close")
+                || operation.ends_with("/instruction-acknowledgments")))
+        || operation == "POST /api/v1/admin/operators"
+        || operation.starts_with("POST /api/v1/admin/operators/")
+        || operation.starts_with("POST /api/v1/browser-sessions/")
+        || operation.starts_with("POST /api/v1/admin/credentials/")
+        || (operation.starts_with("POST /api/v1/admin/agents/")
+            && operation.ends_with("/credentials"))
+        || operation.starts_with("POST /api/v1/admin/restore/")
+        || (operation.starts_with("POST /api/v1/projects/")
+            && ((operation.contains("/reservations/") && operation.ends_with("/resolve"))
+                || (operation.contains("/workflow-activities/")
+                    && operation.ends_with("/publication-reconciliation"))))
 }
 
 fn mutation_key(headers: &HeaderMap) -> Result<String, AppError> {

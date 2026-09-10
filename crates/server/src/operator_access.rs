@@ -43,6 +43,10 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/admin/credentials/{id}/rotate",
             post(rotate_agent_credential),
         )
+        .route(
+            "/api/v1/admin/agents/{id}/credentials",
+            post(issue_existing_agent_credential),
+        )
 }
 
 fn validate_password(password: &str) -> Result<(), AppError> {
@@ -181,7 +185,7 @@ async fn created_operator_retry(
     let Some(key) = idempotency_key(headers) else {
         return Ok(None);
     };
-    let receipt: Option<String> = sqlx::query_scalar("SELECT result_json FROM mutation_receipts WHERE principal_id=? AND operation='POST /api/v1/admin/operators' AND key=?")
+    let receipt: Option<String> = sqlx::query_scalar("SELECT mr.result_json FROM mutation_receipts mr JOIN service_state ss ON ss.singleton=1 AND ss.authority_epoch=mr.authority_epoch WHERE mr.principal_id=? AND mr.operation='POST /api/v1/admin/operators' AND mr.key=?")
         .bind(actor_id)
         .bind(key)
         .fetch_optional(&state.pool)
@@ -752,6 +756,87 @@ async fn rotate_agent_credential(
     });
     let mut data = mutation
         .finish(data, None, "agent_credential_rotated", &credential_id)
+        .await?;
+    data["token"] = json!(token);
+    Ok(response(data))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct IssueExistingCredentialInput {
+    name: String,
+}
+
+async fn issue_existing_agent_credential(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<IssueExistingCredentialInput>,
+) -> Result<Json<Value>, AppError> {
+    admin(&auth.actor)?;
+    validate_name(&input.name)?;
+    if !valid_id(&id) {
+        return Err(AppError::not_found());
+    }
+    let mut mutation = Mutation::begin(
+        &state,
+        &auth,
+        &headers,
+        &format!("POST /api/v1/admin/agents/{id}/credentials"),
+        &input,
+    )
+    .await?;
+    admin(&mutation.actor)?;
+    if let Some(replay) = &mutation.replay {
+        let mut data = replay.clone();
+        data["secret_unavailable"] = json!(true);
+        data["next_action"] =
+            json!("Issue another replacement credential with a new name and idempotency key.");
+        return Ok(response(data));
+    }
+    let principal = sqlx::query(
+        "SELECT id,name,disabled_at FROM principals WHERE id=? AND kind='agent' AND role='agent'",
+    )
+    .bind(&id)
+    .fetch_optional(&mut *mutation.tx)
+    .await?
+    .ok_or_else(AppError::not_found)?;
+    if principal.get::<Option<i64>, _>("disabled_at").is_some() {
+        return Err(AppError::conflict(
+            "agent_not_active",
+            "Enable the existing agent principal before issuing a credential.",
+        ));
+    }
+    let credential_id = uuid::Uuid::new_v4().to_string();
+    let token = secret();
+    sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,name,issued_by,created_at) VALUES(?,?,?,?,?,?)")
+        .bind(&credential_id)
+        .bind(&id)
+        .bind(digest(&token))
+        .bind(&input.name)
+        .bind(&mutation.actor.id)
+        .bind(mutation.now)
+        .execute(&mut *mutation.tx)
+        .await?;
+    let data = json!({
+        "principal_id":id,
+        "principal_name":principal.get::<String,_>("name"),
+        "credential":{
+            "id":credential_id,
+            "name":input.name,
+            "created_at":timestamp(mutation.now),
+            "expires_at":Value::Null,
+            "revoked_at":Value::Null
+        }
+    });
+    let mut data = mutation
+        .finish(
+            data,
+            None,
+            "existing_agent_credential_issued",
+            &credential_id,
+        )
         .await?;
     data["token"] = json!(token);
     Ok(response(data))
