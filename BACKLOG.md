@@ -51,10 +51,14 @@ Overall p95 was 21.0 ms, with no unexpected errors and exact ownership preserved
 The snapshot restore stage passed in 6.511 seconds. Main-agent review is complete;
 see [retained acceptance evidence](docs/linux-capacity-evidence.md) for scope and limits.
 
+Completed item 6.1: authenticated stateless MCP with 56 typed tools sharing the
+REST session, policy, ownership, and receipt checks. The native client launcher
+securely shares its saved harness identity with a trusted foreground MCP client.
+All 182 workspace tests, formatting, Clippy, build, and both smoke exercises pass.
+Main-agent review is complete; see [MCP guidance](docs/mcp-guide.md) for compatibility
+and local-operation limits. Native Windows CI for this change is pending.
+
 Next work, preserving the original backlog numbering:
-- **6.1.** Add a vendor-agnostic MCP server endpoint to the service. Reuse the existing
-   authentication, session, policy, ownership, and idempotency checks; expose
-   actionable connection guidance and test protocol/client compatibility.
 - **6.2.** Consolidate project documentation and README content into an mdBook project
    with a coherent navigation structure, maintained source links, build checks,
    and concise repository entry points that direct readers to the book.

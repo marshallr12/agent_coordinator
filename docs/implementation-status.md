@@ -236,8 +236,8 @@ locked dependency audit in
 [CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271).
 The earlier CI link above applies to the prior milestone.
 
-The remaining release sequence is Linux
-acceptance, MCP (6.1), mdBook (6.2), and operator-initiated Windows acceptance (7).
+The remaining release sequence is mdBook (6.2) and operator-initiated Windows
+acceptance (7).
 
 
 ### Operator-workflow review evidence
@@ -340,3 +340,20 @@ Main-agent review is complete. The [retained acceptance evidence](linux-capacity
 includes the complete sanitized capacity report and its identity. The next documentation item is mdBook 6.2. The operator will commence the actual Windows
 workstation exercise as item 7; CI does not replace it. Production deployment,
 off-server transport, and full operator-led recovery remain installation checks.
+
+### MCP review evidence
+
+Candidate `cd9a633` passed all 182 workspace tests, formatting, warnings-denied
+Clippy, workspace build, and both smoke exercises. Official rmcp 3.2.0 clients
+exercise modern discovery and legacy initialization over real TCP. Twelve wire
+regressions cover authentication, revocation after admission, policy, independent
+review, competing claims, exact shared REST receipts, session/generation guards,
+and clock/lease semantics. The live launcher exercise shares one saved harness
+with native CLI commands and MCP, writes a checkpoint, rejects a second launcher,
+and verifies that connection traffic does not renew ownership.
+
+Main-agent review is complete. Native Windows CI and dependency audit for this
+candidate are pending. Compatibility is established for the exercised protocol
+and SDK paths, not every vendor GUI. OAuth-only clients lacking protected custom
+headers cannot connect directly. Git, job launch/reporting, and binary transfer
+remain native operations; the service does not execute workstation commands.
