@@ -1,6 +1,7 @@
 mod artifact_transfer;
 mod config;
 mod job_state;
+mod mcp_client;
 mod operator;
 mod shared;
 mod state;
@@ -27,7 +28,7 @@ use uuid::Uuid;
 )]
 struct Cli {
     /// Repository binding. Defaults to .agent-coordinator.toml in this directory or a parent.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "AGENT_COORDINATOR_REPO_CONFIG")]
     repo_config: Option<PathBuf>,
 
     /// Local harness-session name. Set a different value for every independent harness.
@@ -48,6 +49,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Launch a trusted MCP client with this connected harness's credentials in its environment.
+    McpClient(mcp_client::LaunchArgs),
     /// Group child tasks under a general objective with its own completion evidence.
     Objectives {
         #[command(subcommand)]
@@ -590,6 +593,7 @@ struct RequestArgs {
 }
 
 struct ContextData {
+    binding_path: PathBuf,
     binding: config::RepositoryBinding,
     origin: String,
     client: CoordinatorClient,
@@ -882,6 +886,7 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
     }
     let context = build_context(cli).await?;
     match &cli.command {
+        Command::McpClient(args) => mcp_client::launch(cli, &context, args).await,
         Command::Objectives { command } => operator::objectives(cli, &context, command).await,
         Command::Policy { command } => operator::policy(cli, &context, command).await,
         Command::Connect(args) => connect(cli, &context, args).await,
@@ -2781,7 +2786,9 @@ async fn reconcile_remote_job(
 }
 
 async fn build_context(cli: &Cli) -> std::result::Result<ContextData, Failure> {
-    let (_, binding) = config::binding(cli.repo_config.as_deref()).map_err(Failure::invalid)?;
+    let (binding_path, binding) =
+        config::binding(cli.repo_config.as_deref()).map_err(Failure::invalid)?;
+    let binding_path = std::fs::canonicalize(binding_path).map_err(Failure::invalid)?;
     validate_segment("project_id", &binding.project_id).map_err(Failure::invalid)?;
     let origin =
         coordinator_client::normalize_origin(&binding.service_url, cli.allow_insecure_loopback)
@@ -2819,6 +2826,7 @@ async fn build_context(cli: &Cli) -> std::result::Result<ContextData, Failure> {
     let client = CoordinatorClient::new(&binding.service_url, token, cli.allow_insecure_loopback)
         .map_err(client_failure)?;
     Ok(ContextData {
+        binding_path,
         binding,
         origin,
         client,

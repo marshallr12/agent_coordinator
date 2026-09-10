@@ -22,6 +22,7 @@ from job_smoke import exercise_jobs
 from completion_smoke import exercise_completion
 from shared_smoke import exercise_shared
 from operator_smoke import exercise_operator
+from mcp_launcher_smoke import exercise_mcp_launcher
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,6 +125,7 @@ def run():
             detail = api(f"/api/v1/projects/{project}/tasks/{task['id']}")
             assert detail["work_status"] == "in_progress" and detail["checkpoints"][0]["summary"] == "Saved the shared handoff."
             assert api(f"/api/v1/projects/{second}/tasks")["items"] == []
+            exercise_mcp_launcher(cli, api, project, owner, attempt, CLI)
             cli(owner, "release", *own_args, body={"summary": "Paused safely with a handoff."})
             assert api(f"/api/v1/projects/{project}/tasks/{task['id']}")["work_status"] == "ready"
 
