@@ -20,6 +20,7 @@ import uuid
 
 from job_smoke import exercise_jobs
 from completion_smoke import exercise_completion
+from shared_smoke import exercise_shared
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -127,6 +128,7 @@ def run():
 
             exercise_jobs(temporary, api, cli, project, owner)
             exercise_completion(temporary, api, cli, owner)
+            exercise_shared(temporary, api, cli, project, owner)
 
             # Credential revocation must be visible to the actual CLI on its next call.
             api(f"/api/v1/admin/credentials/{credentials[owner]['credential_id']}/revoke", {})
