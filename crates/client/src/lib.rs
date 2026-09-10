@@ -13,6 +13,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, He
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const SESSION_HEADER: &str = "x-coordinator-session";
 const SESSION_PROOF_HEADER: &str = "x-coordinator-session-proof";
@@ -101,6 +102,7 @@ pub struct DownloadReceipt {
     pub status: u16,
     pub output: PathBuf,
     pub size_bytes: u64,
+    pub sha256: String,
     pub media_type: Option<String>,
 }
 
@@ -295,8 +297,20 @@ impl CoordinatorClient {
         &self,
         path: &str,
         destination: &Path,
+        expected_size: u64,
+        expected_sha256: &str,
         session: Option<&SessionAuth>,
     ) -> Result<DownloadResponse, ClientError> {
+        if expected_size > MAX_RESPONSE_BYTES as u64
+            || expected_sha256.len() != 64
+            || !expected_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ClientError::InvalidResponse(
+                "artifact metadata has an invalid size or SHA-256 digest".into(),
+            ));
+        }
         if std::fs::symlink_metadata(destination).is_ok() {
             return Err(ClientError::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -317,12 +331,17 @@ impl CoordinatorClient {
         if !(200..300).contains(&status) {
             return json_response(response).await.map(DownloadResponse::Api);
         }
-        if let Some(length) = response.content_length()
-            && length > MAX_RESPONSE_BYTES as u64
-        {
-            return Err(ClientError::InvalidResponse(
-                "artifact download exceeds 16 MiB".into(),
-            ));
+        if let Some(length) = response.content_length() {
+            if length > MAX_RESPONSE_BYTES as u64 {
+                return Err(ClientError::InvalidResponse(
+                    "artifact download exceeds 16 MiB".into(),
+                ));
+            }
+            if length != expected_size {
+                return Err(ClientError::InvalidResponse(
+                    "artifact download Content-Length does not match its metadata".into(),
+                ));
+            }
         }
         let media_type = response
             .headers()
@@ -341,6 +360,7 @@ impl CoordinatorClient {
         let writer = temporary.as_file().try_clone().map_err(ClientError::Io)?;
         let mut writer = tokio::fs::File::from_std(writer);
         let mut received = 0_u64;
+        let mut hasher = Sha256::new();
         while let Some(chunk) = response.chunk().await.map_err(ClientError::Transport)? {
             received = received.saturating_add(chunk.len() as u64);
             if received > MAX_RESPONSE_BYTES as u64 {
@@ -351,6 +371,13 @@ impl CoordinatorClient {
             tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk)
                 .await
                 .map_err(ClientError::Io)?;
+            hasher.update(&chunk);
+        }
+        let sha256 = format!("{:x}", hasher.finalize());
+        if received != expected_size || sha256 != expected_sha256 {
+            return Err(ClientError::InvalidResponse(
+                "artifact download bytes do not match the recorded size and SHA-256 digest".into(),
+            ));
         }
         tokio::io::AsyncWriteExt::flush(&mut writer)
             .await
@@ -365,6 +392,7 @@ impl CoordinatorClient {
             status,
             output: destination.to_owned(),
             size_bytes: received,
+            sha256,
             media_type,
         }))
     }
@@ -746,21 +774,86 @@ mod tests {
             CoordinatorClient::new(&format!("http://{address}"), "test-secret", true).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("artifact.txt");
+        let digest = format!("{:x}", Sha256::digest(b"artifact bytes"));
         let result = client
-            .download_to_path("/api/v1/projects/p/artifacts/a/content", &output, None)
+            .download_to_path(
+                "/api/v1/projects/p/artifacts/a/content",
+                &output,
+                14,
+                &digest,
+                None,
+            )
             .await
             .unwrap();
         let DownloadResponse::Downloaded(receipt) = result else {
             panic!("expected a downloaded file")
         };
         assert_eq!(receipt.size_bytes, 14);
+        assert_eq!(receipt.sha256, digest);
         assert_eq!(std::fs::read(&output).unwrap(), b"artifact bytes");
         let error = client
-            .download_to_path("/api/v1/projects/p/artifacts/a/content", &output, None)
+            .download_to_path(
+                "/api/v1/projects/p/artifacts/a/content",
+                &output,
+                14,
+                &digest,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(matches!(error, ClientError::Io(_)));
         assert_eq!(std::fs::read(&output).unwrap(), b"artifact bytes");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_rejects_size_and_digest_mismatches_before_publishing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut input = [0_u8; 2048];
+                let _ = stream.read(&mut input).await.unwrap();
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 14\r\nConnection: close\r\n\r\nartifact bytes",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let client =
+            CoordinatorClient::new(&format!("http://{address}"), "test-secret", true).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let wrong_size = directory.path().join("wrong-size.bin");
+        let digest = format!("{:x}", Sha256::digest(b"artifact bytes"));
+        let error = client
+            .download_to_path(
+                "/api/v1/projects/p/artifacts/a/content",
+                &wrong_size,
+                15,
+                &digest,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::InvalidResponse(_)));
+        assert!(!wrong_size.exists());
+
+        let wrong_digest = directory.path().join("wrong-digest.bin");
+        let error = client
+            .download_to_path(
+                "/api/v1/projects/p/artifacts/a/content",
+                &wrong_digest,
+                14,
+                &"0".repeat(64),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::InvalidResponse(_)));
+        assert!(!wrong_digest.exists());
         server.await.unwrap();
     }
 }

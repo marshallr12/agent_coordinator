@@ -67,11 +67,11 @@ pub async fn upload(
     protect_directory(&paths.directory)?;
     let _lock = lock(&paths.lock)?;
 
-    let mut intent = match load(&paths.state)? {
+    let (mut intent, initial_detail) = match load(&paths.state)? {
         Some(intent) => {
             let source = source_reference(source)?;
             validate_saved(context, artifact_id, &source, &intent)?;
-            intent
+            (intent, None)
         }
         None => {
             let source = fs::canonicalize(source)
@@ -90,7 +90,10 @@ pub async fn upload(
                 let _ = fs::remove_file(&paths.payload);
                 return Ok(detail);
             }
-            validate_reservation(&detail, size_bytes, &sha256)?;
+            if let Err(error) = inspect_upload(&detail, size_bytes, &sha256) {
+                let _ = fs::remove_file(&paths.payload);
+                return Err(error);
+            }
             let intent = UploadIntent {
                 version: 1,
                 service_origin: context.service_origin.to_owned(),
@@ -105,11 +108,27 @@ pub async fn upload(
                 completed_response: None,
             };
             save(&paths.state, &intent, &paths.directory)?;
-            intent
+            (intent, Some(detail))
         }
     };
-    if let Some(response) = intent.completed_response {
-        return Ok(response);
+    if intent.completed_response.is_some() {
+        return refresh_completed(context, artifact_id, &intent, &paths).await;
+    }
+    let detail = match initial_detail {
+        Some(detail) => detail,
+        None => authenticated_detail(context, artifact_id).await?,
+    };
+    if !detail.is_success() {
+        return Ok(detail);
+    }
+    match inspect_upload(&detail, intent.size_bytes, &intent.sha256)? {
+        UploadState::Pending => {}
+        UploadState::Finalized => {
+            intent.completed_response = Some(detail.clone());
+            save(&paths.state, &intent, &paths.directory)?;
+            cleanup_payload(&paths)?;
+            return Ok(detail);
+        }
     }
     validate_payload(&intent)?;
     let path = format!(
@@ -130,11 +149,7 @@ pub async fn upload(
     if response.is_success() {
         intent.completed_response = Some(response.clone());
         save(&paths.state, &intent, &paths.directory)?;
-        match fs::remove_file(&paths.payload) {
-            Ok(()) => sync_directory(&paths.directory)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("remove completed artifact snapshot"),
-        }
+        cleanup_payload(&paths)?;
     }
     Ok(response)
 }
@@ -172,15 +187,55 @@ pub async fn download(
     if fs::symlink_metadata(output).is_ok() {
         bail!("download output already exists: {}", output.display());
     }
+    let detail = authenticated_detail(context, artifact_id).await?;
+    if !detail.is_success() {
+        return Ok(DownloadResponse::Api(detail));
+    }
+    let (expected_size, expected_sha256) = download_expectation(&detail)?;
     let path = format!(
         "/api/v1/projects/{}/artifacts/{artifact_id}/content",
         context.project_id
     );
     context
         .client
-        .download_to_path(&path, output, Some(context.session))
+        .download_to_path(
+            &path,
+            output,
+            expected_size,
+            &expected_sha256,
+            Some(context.session),
+        )
         .await
         .context("stream artifact download")
+}
+
+async fn authenticated_detail(
+    context: &TransferContext<'_>,
+    artifact_id: &str,
+) -> Result<ApiResponse> {
+    let path = format!(
+        "/api/v1/projects/{}/artifacts/{artifact_id}",
+        context.project_id
+    );
+    context
+        .client
+        .get(&path, Some(context.session))
+        .await
+        .context("inspect current artifact metadata")
+}
+
+async fn refresh_completed(
+    context: &TransferContext<'_>,
+    artifact_id: &str,
+    intent: &UploadIntent,
+    paths: &UploadPaths,
+) -> Result<ApiResponse> {
+    let detail = authenticated_detail(context, artifact_id).await?;
+    if detail.is_success() {
+        validate_same_upload(&detail, intent.size_bytes, &intent.sha256)?;
+    }
+    cleanup_payload(paths)?;
+    Ok(detail)
 }
 
 fn validate_artifact_id(value: &str) -> Result<()> {
@@ -274,28 +329,84 @@ fn snapshot(source: &Path, payload: &Path, directory: &Path) -> Result<(u64, Str
     Ok((size, hex::encode(hasher.finalize())))
 }
 
-fn validate_reservation(response: &ApiResponse, size: u64, sha256: &str) -> Result<()> {
-    let artifact = response
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UploadState {
+    Pending,
+    Finalized,
+}
+
+fn artifact_metadata(response: &ApiResponse) -> Result<&serde_json::Value> {
+    response
         .body
         .pointer("/data/artifact")
-        .ok_or_else(|| anyhow!("artifact detail omitted data.artifact"))?;
+        .ok_or_else(|| anyhow!("artifact detail omitted data.artifact"))
+}
+
+fn validate_same_upload(response: &ApiResponse, size: u64, sha256: &str) -> Result<()> {
+    let artifact = artifact_metadata(response)?;
+    if artifact.get("kind").and_then(serde_json::Value::as_str) != Some("upload")
+        || artifact
+            .get("size_bytes")
+            .and_then(serde_json::Value::as_u64)
+            != Some(size)
+        || artifact.get("sha256").and_then(serde_json::Value::as_str) != Some(sha256)
+    {
+        bail!("current artifact metadata does not match the saved upload");
+    }
+    Ok(())
+}
+
+fn inspect_upload(response: &ApiResponse, size: u64, sha256: &str) -> Result<UploadState> {
+    validate_same_upload(response, size, sha256)?;
+    let artifact = artifact_metadata(response)?;
+    match (
+        artifact.get("state").and_then(serde_json::Value::as_str),
+        artifact
+            .get("availability")
+            .and_then(serde_json::Value::as_str),
+    ) {
+        (Some("reserved"), Some("pending")) => Ok(UploadState::Pending),
+        (Some("finalized"), _) => Ok(UploadState::Finalized),
+        _ => bail!("artifact is not a live upload reservation or finalized upload"),
+    }
+}
+
+fn download_expectation(response: &ApiResponse) -> Result<(u64, String)> {
+    let artifact = artifact_metadata(response)?;
     if artifact.get("kind").and_then(serde_json::Value::as_str) != Some("upload")
         || artifact
             .get("availability")
             .and_then(serde_json::Value::as_str)
-            != Some("pending")
+            != Some("available")
+        || artifact.get("state").and_then(serde_json::Value::as_str) != Some("finalized")
     {
-        bail!("artifact is not a live upload reservation");
+        bail!("artifact is not an available finalized upload");
     }
-    if artifact
+    let size = artifact
         .get("size_bytes")
         .and_then(serde_json::Value::as_u64)
-        != Some(size)
-        || artifact.get("sha256").and_then(serde_json::Value::as_str) != Some(sha256)
+        .ok_or_else(|| anyhow!("artifact detail omitted a valid size_bytes"))?;
+    let sha256 = artifact
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("artifact detail omitted a valid sha256"))?;
+    if size > MAX_RESPONSE_BYTES as u64
+        || sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        bail!("saved file size or SHA-256 does not match the upload reservation");
+        bail!("artifact detail contains an invalid size or SHA-256 digest");
     }
-    Ok(())
+    Ok((size, sha256.to_owned()))
+}
+
+fn cleanup_payload(paths: &UploadPaths) -> Result<()> {
+    match fs::remove_file(&paths.payload) {
+        Ok(()) => sync_directory(&paths.directory),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("remove completed artifact snapshot"),
+    }
 }
 
 fn validate_saved(
@@ -422,6 +533,14 @@ fn sync_directory(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     #[test]
     fn snapshot_is_bounded_and_digest_bound() {
@@ -452,6 +571,107 @@ mod tests {
         assert_eq!(
             source_reference(&canonical_source).unwrap(),
             canonical_source
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_upload_rechecks_current_auth_and_cleans_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let saw_request = Arc::new(AtomicBool::new(false));
+        let observed = saw_request.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            assert!(request[..read].starts_with(b"GET /api/v1/projects/project/artifacts/"));
+            assert!(
+                request[..read]
+                    .windows(b"\r\nx-coordinator-session:".len())
+                    .any(|window| window.eq_ignore_ascii_case(b"\r\nx-coordinator-session:"))
+            );
+            observed.store(true, Ordering::SeqCst);
+            let body = serde_json::json!({
+                "error": {"code":"session_revoked","message":"revoked"},
+                "request_id":"request",
+                "server_time":"2026-09-09T00:00:00Z"
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let payload = directory.path().join("payload.bin");
+        fs::write(&payload, b"artifact bytes").unwrap();
+        let artifact_id = Uuid::new_v4().to_string();
+        let client =
+            CoordinatorClient::new(&format!("http://{address}"), "test-secret", true).unwrap();
+        let session = SessionAuth {
+            id: "session".into(),
+            proof: "proof".into(),
+        };
+        let context = TransferContext {
+            client: &client,
+            service_origin: client.origin(),
+            project_id: "project",
+            local_session: "local",
+            session: &session,
+        };
+        let intent = UploadIntent {
+            version: 1,
+            service_origin: client.origin().into(),
+            project_id: "project".into(),
+            local_session: "local".into(),
+            artifact_id: artifact_id.clone(),
+            source: directory.path().join("source.bin"),
+            payload: payload.clone(),
+            size_bytes: 14,
+            sha256: hex::encode(Sha256::digest(b"artifact bytes")),
+            idempotency_key: Uuid::new_v4().to_string(),
+            completed_response: Some(ApiResponse {
+                status: 200,
+                body: serde_json::json!({"data":{"artifact":{}}}),
+            }),
+        };
+        let paths = UploadPaths {
+            directory: directory.path().to_owned(),
+            state: directory.path().join("intent.json"),
+            payload: payload.clone(),
+            lock: directory.path().join("intent.lock"),
+        };
+        let response = refresh_completed(&context, &artifact_id, &intent, &paths)
+            .await
+            .unwrap();
+        assert_eq!(response.status, 403);
+        assert!(saw_request.load(Ordering::SeqCst));
+        assert!(!payload.exists());
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn matching_finalized_upload_is_reconciled_without_another_put() {
+        let digest = hex::encode(Sha256::digest(b"artifact bytes"));
+        let detail = ApiResponse {
+            status: 200,
+            body: serde_json::json!({
+                "data":{"artifact":{
+                    "kind":"upload",
+                    "state":"finalized",
+                    "availability":"available",
+                    "size_bytes":14,
+                    "sha256":digest
+                }},
+                "request_id":"request",
+                "server_time":"2026-09-09T00:00:00Z"
+            }),
+        };
+        assert_eq!(
+            inspect_upload(&detail, 14, &digest).unwrap(),
+            UploadState::Finalized
         );
     }
 }

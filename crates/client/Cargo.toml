@@ -13,6 +13,7 @@ uuid.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tempfile.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
