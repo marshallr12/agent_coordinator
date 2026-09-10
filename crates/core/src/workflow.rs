@@ -83,6 +83,7 @@ pub struct PublicationIntentInput {
     pub generation: i64,
     pub submission_id: String,
     pub observed_target_revision: String,
+    pub observed_target_tree: String,
     pub result_revision: String,
     pub result_tree: String,
 }
@@ -124,4 +125,13 @@ pub struct FinalizeIntegrationInput {
 pub struct ReopenSubmissionInput {
     pub submission_id: String,
     pub reason: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityReleaseInput {
+    pub generation: i64,
+    pub summary: String,
+    #[serde(default)]
+    pub blocked: bool,
 }

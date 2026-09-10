@@ -78,8 +78,11 @@ global across projects and survives attempt/session/credential expiry.
 
 Activity attempts renew through the existing
 `POST /api/v1/projects/{project}/attempts/{attempt}/renew` endpoint and use existing
-checkout, reservation, and job endpoints. Workflow state changes always require
-the activity ID as an additional candidate/type guard.
+checkout, reservation, and job endpoints. They release through
+`POST /api/v1/projects/{project}/workflow-activities/{activity}/release` with
+`{generation, summary, blocked:false}`; a release after publication intent is
+refused until a result and reconciliation are recorded. Workflow state changes
+always require the activity ID as an additional candidate/type guard.
 
 `POST /api/v1/projects/{project}/workflow-activities/{activity}/review` accepts:
 
@@ -129,6 +132,7 @@ After claiming integration and registering an isolated checkout, the owner calls
   "generation": 1,
   "submission_id": "uuid",
   "observed_target_revision": "full target revision before publication",
+  "observed_target_tree": "full target tree before publication",
   "result_revision": "full intended integrated revision",
   "result_tree": "full intended integrated tree"
 }
@@ -139,18 +143,30 @@ client must independently verify that the remote target still equals
 `observed_target_revision` before publishing. Repeating with a new key cannot
 replace an intent; retry uses the original key.
 
+A fresh activity GET returns `publication_allowed` and
+`qualifying_check_job_ids`. Publishing is allowed only while the exact candidate,
+policies, approvals, authorization, activity lease, canonical hold, intent, and
+one successful stable-input exact-result producer per required roster entry are
+all current. Publication intent alone is not permission to publish. Once any
+integration result exists, publication is no longer allowed for that activity.
+
 `POST /api/v1/projects/{project}/workflow-activities/{activity}/integration-result`
 accepts `{generation, submission_id, publication_state, observed_target_revision,
 result_revision, result_tree, check_job_ids, summary}` where publication state is
 `published`, `not_published`, or `uncertain`. Values must match the saved intent.
-An uncertain result is durable, makes the activity recovery-required, and retains
+An uncertain result may omit checks, is durable, makes the activity
+recovery-required, and retains
 the global hold. It never completes work or releases the hold. A known
 `not_published` result also retains the hold until explicit reconciliation.
 
 A human reconciles with
 `POST /api/v1/projects/{project}/workflow-activities/{activity}/publication-reconciliation`
 and `{submission_id, disposition, observed_target_revision, observed_target_tree,
-evidence}`, where disposition is `published` or `not_published`. Reconciliation
+evidence}`, where disposition is `published`, `not_published`, or `target_moved`.
+`target_moved` records that the intended result was published but a later external
+actor advanced the target before finalization; it closes the old activity and hold
+and creates a fresh integration activity for the same approved candidate. The new
+activity requires fresh authorization and checks against its new result. Reconciliation
 cannot invent check success. Confirmed publication must match the intent's exact
 result revision/tree. Confirmed nonpublication permits an explicit new integration
 attempt after the old hold is closed in the same transaction.

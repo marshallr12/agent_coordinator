@@ -102,7 +102,8 @@ CREATE UNIQUE INDEX one_integration_target_hold ON integration_holds(canonical_r
 CREATE TABLE publication_intents (
     activity_id TEXT PRIMARY KEY NOT NULL REFERENCES workflow_activities(id),
     submission_id TEXT NOT NULL REFERENCES submissions(id), attempt_id TEXT NOT NULL REFERENCES attempts(id),
-    observed_target_revision TEXT NOT NULL, result_revision TEXT NOT NULL, result_tree TEXT NOT NULL,
+    observed_target_revision TEXT NOT NULL, observed_target_tree TEXT NOT NULL,
+    result_revision TEXT NOT NULL, result_tree TEXT NOT NULL,
     created_by TEXT NOT NULL REFERENCES principals(id), created_at INTEGER NOT NULL
 );
 CREATE TABLE integration_results (
@@ -116,7 +117,7 @@ CREATE TABLE integration_results (
 CREATE TABLE publication_reconciliations (
     activity_id TEXT PRIMARY KEY NOT NULL REFERENCES workflow_activities(id),
     submission_id TEXT NOT NULL REFERENCES submissions(id),
-    disposition TEXT NOT NULL CHECK(disposition IN ('published','not_published')),
+    disposition TEXT NOT NULL CHECK(disposition IN ('published','not_published','target_moved')),
     observed_target_revision TEXT NOT NULL, observed_target_tree TEXT NOT NULL, evidence TEXT NOT NULL,
     actor_id TEXT NOT NULL REFERENCES principals(id), created_at INTEGER NOT NULL
 );
