@@ -78,7 +78,16 @@ pub async fn invalidate_restored_state(
     let cursor_epoch = secret();
     let restore_id = uuid::Uuid::new_v4().to_string();
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let now = state.now();
+    // A first rollback observation commits only the clock incident. Restore
+    // invalidation then starts under a fresh writer lock, so no unrelated
+    // restore effect can be hidden in the incident-detection transaction.
+    let mut clock = state.sample_clock(&mut tx).await?;
+    if clock.incident_detected {
+        tx.commit().await?;
+        tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+        clock = state.sample_clock(&mut tx).await?;
+    }
+    let now = clock.now;
     let service =
         sqlx::query("SELECT authority_epoch,cursor_epoch FROM service_state WHERE singleton=1")
             .fetch_one(&mut *tx)

@@ -1,5 +1,5 @@
 use sqlx::{
-    ConnectOptions, Row, SqlitePool,
+    ConnectOptions, Row, Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{
@@ -10,6 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
+
+use crate::error::AppError;
 
 #[derive(Clone)]
 pub struct Config {
@@ -104,11 +106,263 @@ pub struct AppState {
     pub(crate) login_limits: Arc<Mutex<LoginLimits>>,
     pub(crate) password_workers: Arc<Semaphore>,
     pub(crate) dummy_password_hash: Arc<String>,
+    clock_runtime: Arc<Mutex<ClockRuntime>>,
+}
+
+struct ClockRuntime {
+    high_water_ms: i64,
+    anchor: Instant,
+    initialized: bool,
+    incident_active: bool,
+}
+
+impl Default for ClockRuntime {
+    fn default() -> Self {
+        Self {
+            high_water_ms: 0,
+            anchor: Instant::now(),
+            initialized: false,
+            incident_active: false,
+        }
+    }
+}
+
+pub(crate) const MATERIAL_CLOCK_ROLLBACK_MS: i64 = 5_000;
+
+pub(crate) struct ClockSample {
+    pub now: i64,
+    pub incident_active: bool,
+    pub incident_detected: bool,
+}
+
+pub(crate) struct ClockReconciliation {
+    pub incident_id: String,
+    pub now: i64,
+    pub observed_wall_time_ms: i64,
+    pub high_water_time_ms: i64,
 }
 
 impl AppState {
     pub fn now(&self) -> i64 {
-        self.clock.now_ms()
+        let raw = self.clock.now_ms().max(0);
+        let mut runtime = self
+            .clock_runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !runtime.initialized {
+            runtime.high_water_ms = raw;
+            runtime.anchor = Instant::now();
+            runtime.initialized = true;
+        } else {
+            let elapsed = runtime.anchor.elapsed().as_millis().min(i64::MAX as u128) as i64;
+            runtime.high_water_ms = runtime.high_water_ms.saturating_add(elapsed).max(raw);
+            runtime.anchor = Instant::now();
+        }
+        runtime.high_water_ms
+    }
+
+    pub(crate) fn raw_now(&self) -> i64 {
+        self.clock.now_ms().max(0)
+    }
+
+    /// Sample service time while the caller holds SQLite's writer lock. A
+    /// rollback incident is durable even when the requested operation is later
+    /// rejected. Callers that reject a newly detected incident must commit the
+    /// clock-only transaction first.
+    pub(crate) async fn sample_clock(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> Result<ClockSample, AppError> {
+        let raw = self.raw_now();
+        let (runtime_high_water, expected_runtime_time, runtime_initialized) = {
+            let runtime = self
+                .clock_runtime
+                .lock()
+                .map_err(|_| AppError::internal())?;
+            let elapsed = runtime.anchor.elapsed().as_millis().min(i64::MAX as u128) as i64;
+            (
+                runtime.high_water_ms,
+                runtime.high_water_ms.saturating_add(elapsed),
+                runtime.initialized,
+            )
+        };
+        let row = sqlx::query("SELECT last_safe_time_ms,status FROM clock_state WHERE singleton=1")
+            .fetch_one(&mut **tx)
+            .await?;
+        let stored_high_water: i64 = row.get("last_safe_time_ms");
+        let previous_high_water = stored_high_water.max(runtime_high_water);
+        let was_active = row.get::<String, _>("status") == "clock_reconciliation";
+        let expected = if runtime_initialized {
+            expected_runtime_time.max(stored_high_water)
+        } else {
+            stored_high_water
+        };
+        let rollback = !was_active && raw.saturating_add(MATERIAL_CLOCK_ROLLBACK_MS) < expected;
+        // Even a small rollback is clamped to elapsed monotonic time. This
+        // avoids extending a deadline while tolerating normal wall-clock
+        // adjustment below the material-incident threshold.
+        let safe_now = expected.max(raw).max(previous_high_water);
+        let mut incident_detected = false;
+        if rollback && !was_active {
+            let incident_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query("INSERT INTO clock_incidents(id,observed_wall_time_ms,high_water_time_ms,detected_at) VALUES(?,?,?,?)")
+                .bind(&incident_id)
+                .bind(raw)
+                .bind(safe_now)
+                .bind(safe_now)
+                .execute(&mut **tx)
+                .await?;
+            sqlx::query("INSERT INTO clock_reconciliation_events(incident_id,kind,initiator_kind,observed_wall_time_ms,high_water_time_ms,reason,created_at) VALUES(?,'rollback_detected','service',?,?,?,?)")
+                .bind(&incident_id)
+                .bind(raw)
+                .bind(safe_now)
+                .bind("The wall clock moved behind the durable service-time high-water mark.")
+                .bind(safe_now)
+                .execute(&mut **tx)
+                .await?;
+            sqlx::query("UPDATE clock_state SET last_safe_time_ms=?,status='clock_reconciliation',incident_id=?,observed_wall_time_ms=?,detected_at=? WHERE singleton=1")
+                .bind(safe_now)
+                .bind(&incident_id)
+                .bind(raw)
+                .bind(safe_now)
+                .execute(&mut **tx)
+                .await?;
+            sqlx::query("UPDATE attempts SET state='expired',ended_at=COALESCE(ended_at,?),outcome=COALESCE(outcome,'Authority expired after a material service-clock rollback.') WHERE state='active'")
+                .bind(safe_now)
+                .execute(&mut **tx)
+                .await?;
+            sqlx::query(
+                "UPDATE reporters SET expires_at=MIN(expires_at,?),renew_until=MIN(renew_until,?)",
+            )
+            .bind(safe_now)
+            .bind(safe_now)
+            .execute(&mut **tx)
+            .await?;
+            incident_detected = true;
+        } else if safe_now > stored_high_water {
+            sqlx::query("UPDATE clock_state SET last_safe_time_ms=? WHERE singleton=1")
+                .bind(safe_now)
+                .execute(&mut **tx)
+                .await?;
+        }
+        {
+            let mut runtime = self
+                .clock_runtime
+                .lock()
+                .map_err(|_| AppError::internal())?;
+            runtime.high_water_ms = safe_now;
+            runtime.anchor = Instant::now();
+            runtime.initialized = true;
+            runtime.incident_active = was_active || rollback;
+        }
+        Ok(ClockSample {
+            now: safe_now,
+            incident_active: was_active || rollback,
+            incident_detected,
+        })
+    }
+
+    /// Authenticate reads against a durable, nondecreasing service time. The
+    /// short writer transaction never spans request or process work.
+    pub(crate) async fn authoritative_now(&self) -> Result<ClockSample, AppError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let sample = self.sample_clock(&mut tx).await?;
+        tx.commit().await?;
+        Ok(sample)
+    }
+
+    pub(crate) async fn reconcile_clock_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        incident_id: &str,
+        reason: &str,
+        initiator_kind: &str,
+        actor_id: Option<&str>,
+    ) -> Result<ClockReconciliation, AppError> {
+        if reason.trim() != reason
+            || reason.is_empty()
+            || reason.len() > 2_000
+            || reason
+                .chars()
+                .any(|value| value.is_control() && !matches!(value, '\n' | '\t'))
+        {
+            return Err(AppError::bad_request(
+                "reason must contain 1 to 2000 bytes without surrounding whitespace or control characters other than newlines and tabs.",
+            ));
+        }
+        if !matches!(initiator_kind, "authenticated_admin" | "host_operator") {
+            return Err(AppError::internal());
+        }
+        if initiator_kind == "authenticated_admin" && actor_id.is_none()
+            || initiator_kind == "host_operator" && actor_id.is_some()
+        {
+            return Err(AppError::internal());
+        }
+        let row = sqlx::query("SELECT status,incident_id,last_safe_time_ms,observed_wall_time_ms FROM clock_state WHERE singleton=1")
+            .fetch_one(&mut **tx)
+            .await?;
+        if row.get::<String, _>("status") != "clock_reconciliation" {
+            return Err(AppError::conflict(
+                "clock_not_paused",
+                "There is no active service-clock incident to reconcile.",
+            ));
+        }
+        let current_incident: String = row.get("incident_id");
+        if current_incident != incident_id {
+            return Err(AppError::conflict(
+                "clock_incident_changed",
+                "The active service-clock incident changed. Reload its status before reconciling it.",
+            ));
+        }
+        let high_water_time_ms: i64 = row.get("last_safe_time_ms");
+        let observed_wall_time_ms: i64 = row.get("observed_wall_time_ms");
+        let raw = self.raw_now();
+        if raw.saturating_add(MATERIAL_CLOCK_ROLLBACK_MS) < high_water_time_ms {
+            return Err(AppError::conflict(
+                "clock_still_untrusted",
+                "The wall clock remains behind durable service time. Correct the host clock before reconciling this incident.",
+            ));
+        }
+        let now = raw.max(high_water_time_ms);
+        sqlx::query("UPDATE clock_incidents SET recovered_at=?,recovery_reason=?,recovered_by=?,recovery_kind=? WHERE id=? AND recovered_at IS NULL")
+            .bind(now)
+            .bind(reason)
+            .bind(actor_id)
+            .bind(initiator_kind)
+            .bind(incident_id)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("INSERT INTO clock_reconciliation_events(incident_id,kind,initiator_kind,actor_id,observed_wall_time_ms,high_water_time_ms,reason,created_at) VALUES(?,'clock_reconciled',?,?,?,?,?,?)")
+            .bind(incident_id)
+            .bind(initiator_kind)
+            .bind(actor_id)
+            .bind(raw)
+            .bind(high_water_time_ms)
+            .bind(reason)
+            .bind(now)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("UPDATE clock_state SET last_safe_time_ms=?,status='ready',observed_wall_time_ms=? WHERE singleton=1")
+            .bind(now)
+            .bind(raw)
+            .execute(&mut **tx)
+            .await?;
+        {
+            let mut runtime = self
+                .clock_runtime
+                .lock()
+                .map_err(|_| AppError::internal())?;
+            runtime.high_water_ms = now;
+            runtime.anchor = Instant::now();
+            runtime.initialized = true;
+            runtime.incident_active = false;
+        }
+        Ok(ClockReconciliation {
+            incident_id: incident_id.to_owned(),
+            now,
+            observed_wall_time_ms,
+            high_water_time_ms,
+        })
     }
     pub async fn open(config: Config) -> anyhow::Result<Self> {
         Self::open_internal(config, true).await
@@ -195,8 +449,16 @@ impl AppState {
             login_limits: Arc::new(Mutex::new(LoginLimits::default())),
             password_workers: Arc::new(Semaphore::new(2)),
             dummy_password_hash: Arc::new(dummy_password_hash),
+            clock_runtime: Arc::new(Mutex::new(ClockRuntime::default())),
         })
     }
+}
+
+pub(crate) fn clock_reconciliation_error() -> AppError {
+    AppError::conflict(
+        "clock_reconciliation_required",
+        "The service clock moved backward. Restore trustworthy time and reconcile the recorded incident before granting or changing authority.",
+    )
 }
 
 /// A backup command must never upgrade the database of a running older server.
