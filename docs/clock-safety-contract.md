@@ -4,7 +4,11 @@ Service time is part of every credential, session, lease, reporter, decision,
 and publication-authority check. The coordinator records a durable high-water
 mark and combines it with an in-process monotonic clock. Authoritative reads and
 writers sample that clock through a short SQLite writer transaction before
-checking time-dependent authority.
+checking time-dependent authority. Concurrent authentication requests that were
+already waiting when a clock sample was taken may share that sample after its
+transaction commits. A request arriving after the sample always obtains a new
+one. This reduces writer contention without caching credential validity or
+weakening the fresh time and ownership checks inside every mutation.
 
 The protected service time never moves behind a time already observed by the
 coordinator. During one process lifetime it also advances by monotonic elapsed
