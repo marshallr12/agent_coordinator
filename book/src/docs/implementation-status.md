@@ -371,5 +371,10 @@ Package checks verify checksums, offline Markdown links, bounded member counts
 and expanded size, and a complete book build from an extracted archive. The final
 local structural fixture used stripped copies of the current debug binaries;
 it does not replace the retained Linux release/capacity evidence. Documentation
-CI is configured; its first run is pending. Main review is complete; only the
-operator-initiated Windows workstation acceptance remains on the backlog.
+CI could not start because GitHub reported an account billing/spending-limit
+condition. No steps ran in
+[documentation run 34470307262](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307262)
+or [coordination run 34470307047](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307047).
+Main review is complete; rerun hosted validation after that account condition is
+resolved. The operator-initiated Windows workstation exercise remains final item 7.
+Local-file book navigation and search passed with networking disabled.

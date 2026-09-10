@@ -1,8 +1,9 @@
 # Implementation handoff — 2026-09-10
 
 Backlog items 6.1 (MCP) and 6.2 (mdBook) are implemented and reviewed.
-Only item 7 remains: the operator will commence native Windows workstation
-acceptance against the Linux service/workstation. Do not substitute native
+The implementation sequence is complete. A hosted-CI validation follow-up is
+blocked by GitHub account billing/spending limits. The operator will commence
+item 7, native Windows workstation acceptance against the Linux service/workstation. Do not substitute native
 Windows CI or package checks for that physical workstation exercise.
 
 ## MCP completion
@@ -42,7 +43,16 @@ Package checks passed for layout, checksums, permissions, offline links, explici
 member/size limits, and building the book from an extracted archive. The final
 local structural package used stripped copies of the current local debug binaries;
 it is documentation validation, not new release-binary or capacity acceptance.
-Documentation CI is configured; its first run is pending.
+Local-file navigation and search also passed with networking disabled.
+
+Hosted CI could not start: GitHub reported failed recent account payments or a
+spending limit requiring attention. No steps ran in
+[documentation run 34470307262](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307262)
+or [coordination run 34470307047](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307047).
+After the operator resolves the account condition, rerun both workflows on the
+then-current main commit. Runtime Rust code is unchanged from MCP's passing CI;
+these failed-to-start runs are not test failures or successful validation. No
+billing settings were changed.
 
 Use `mdbook build` or `python3 scripts/check_docs.py` from a source checkout; output
 is `target/book/index.html`. See [book maintenance](docs/documentation.md).

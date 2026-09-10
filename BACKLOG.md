@@ -64,10 +64,16 @@ mdBook with pinned builds, source coverage and link checks, concise compatibilit
 entry points, and live includes of root agent/handoff/backlog/lesson records.
 Main-agent review, the rendered link/fragment checks, browser navigation/search
 and phone layout, package bounds/checksums/offline links, and a book build from
-an extracted package passed. Documentation CI is configured; its first run is
-pending. See [book maintenance](docs/documentation.md).
+an extracted package passed, including local-file navigation/search with networking
+disabled. Hosted CI could not start because GitHub reported an account billing or
+spending-limit block. See [book maintenance](docs/documentation.md).
 
 Next work, preserving the original backlog numbering:
+- **6.2 validation follow-up (externally blocked).** After the operator resolves
+   GitHub's account billing/spending-limit condition, rerun documentation and
+   coordination CI on the then-current main commit. No job steps ran in
+   [documentation run 34470307262](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307262)
+   or [coordination run 34470307047](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307047).
 - **7.** Final operator-initiated native Windows workstation acceptance, including
    coordination with the Linux service/workstation. The operator will commence
    this on a Windows machine after items 6 through 6.2; do not substitute CI for this test or
