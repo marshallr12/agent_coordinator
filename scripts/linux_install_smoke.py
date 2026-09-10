@@ -228,13 +228,18 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
     service_unit = f"{name}.service"
     caddy_unit = f"{name}-caddy.service"
     maintenance_unit = f"{name}-maintenance.service"
+    backup_unit = f"{name}-backup.service"
+    backup_timer_unit = f"{name}-backup.timer"
     data = Path("/var/lib") / name
+    backup_data = Path("/var/lib") / f"{name}-backups"
     config = Path("/etc") / name
     install = Path("/opt") / name
     unit_dir = Path("/etc/systemd/system")
     service_path = unit_dir / service_unit
     caddy_path = unit_dir / caddy_unit
     maintenance_path = unit_dir / maintenance_unit
+    backup_path = unit_dir / backup_unit
+    backup_timer_path = unit_dir / backup_timer_unit
     server_port, https_port = unused_port(), unused_port()
     while https_port == server_port:
         https_port = unused_port()
@@ -277,6 +282,7 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
             for old, new in [
                 ("User=agent-coordinator", f"User={name}"),
                 ("Group=agent-coordinator", f"Group={name}"),
+                ("Unit=agent-coordinator-backup.service", f"Unit={backup_unit}"),
                 ("/var/lib/agent-coordinator", str(data)),
                 ("/etc/agent-coordinator/service.env", str(environment)),
                 ("/usr/local/bin/agent-coordinator-server", str(install / "agent-coordinator-server")),
@@ -287,7 +293,11 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
 
         service_path.write_text(installed_unit("agent-coordinator.service"))
         maintenance_path.write_text(installed_unit("agent-coordinator-maintenance.service"))
+        backup_path.write_text(installed_unit("agent-coordinator-backup.service"))
+        backup_timer_path.write_text(installed_unit("agent-coordinator-backup.timer"))
         maintenance_path.chmod(0o644)
+        backup_path.chmod(0o644)
+        backup_timer_path.chmod(0o644)
         caddy_path.write_text(
             "[Unit]\nDescription=Disposable Agent Coordinator HTTPS acceptance proxy\nAfter=network.target\n"
             f"[Service]\nType=simple\nUser={name}\nGroup={name}\nWorkingDirectory={data}\n"
@@ -298,7 +308,10 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
         )
         service_path.chmod(0o644)
         caddy_path.chmod(0o644)
-        run(["systemd-analyze", "verify", str(service_path), str(caddy_path), str(maintenance_path)])
+        run([
+            "systemd-analyze", "verify", str(service_path), str(caddy_path), str(maintenance_path),
+            str(backup_path), str(backup_timer_path),
+        ])
         run(["systemctl", "daemon-reload"])
         run(["systemctl", "start", service_unit])
         wait_for(None, f"http://127.0.0.1:{server_port}/healthz")
@@ -346,16 +359,24 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
         run(["systemctl", "start", maintenance_unit])
         with sqlite3.connect(data / "coordinator.sqlite3") as connection:
             assert connection.execute("SELECT count(*) FROM maintenance_runs WHERE state='complete'").fetchone()[0] == 1
-        print("PASS: package checksums/layout, systemd install/start/restart/maintenance, trusted internal-CA HTTPS, and native CLI reconnect.")
+        run(["systemctl", "start", backup_unit])
+        snapshots = [path for path in (backup_data / "snapshots").iterdir() if path.is_dir()]
+        assert len(snapshots) == 1 and (snapshots[0] / "COMPLETE").is_file(), "The first backup was not published."
+        run([
+            "runuser", "-u", name, "--", str(install / "agent-coordinator-server"),
+            "backup-verify", "--snapshot", str(snapshots[0]),
+        ])
+        run(["systemctl", "start", backup_timer_unit])
+        run(["systemctl", "is-active", "--quiet", backup_timer_unit])
+        print("PASS: package checksums/layout, systemd install/start/restart/maintenance/backup, verified snapshot, trusted internal-CA HTTPS, and native CLI reconnect.")
     finally:
-        for unit in [maintenance_unit, caddy_unit, service_unit]:
+        for unit in [backup_timer_unit, backup_unit, maintenance_unit, caddy_unit, service_unit]:
             subprocess.run(["systemctl", "stop", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        maintenance_path.unlink(missing_ok=True)
-        service_path.unlink(missing_ok=True)
-        caddy_path.unlink(missing_ok=True)
+        for path in [backup_timer_path, backup_path, maintenance_path, service_path, caddy_path]:
+            path.unlink(missing_ok=True)
         subprocess.run(["systemctl", "daemon-reload"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["systemctl", "reset-failed"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for path in [data, config, install]:
+        for path in [backup_data, data, config, install]:
             shutil.rmtree(path, ignore_errors=True)
         if created_user:
             subprocess.run(["userdel", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
