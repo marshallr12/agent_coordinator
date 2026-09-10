@@ -303,7 +303,11 @@ struct Task {
     attempt_expires: Option<i64>,
     owner_authorized: bool,
     dependencies_ready: bool,
+    objective_children_ready: bool,
     decisions_ready: bool,
+    objective_id: Option<String>,
+    parent_objective_id: Option<String>,
+    parent_objective_required: Option<bool>,
     workflow_phase: Option<String>,
     workflow_activity_kind: Option<String>,
     #[sqlx(default)]
@@ -314,7 +318,11 @@ macro_rules! task_sql {($suffix:literal)=>{concat!(
     "COALESCE(p.disabled_at IS NULL AND p.id IS NOT NULL AND CASE WHEN a.credential_id IS NULL THEN b.id IS NOT NULL AND b.revoked_at IS NULL AND b.expires_at>? ELSE c.id IS NOT NULL AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>?) AND ag.id IS NOT NULL AND ag.closed_at IS NULL END,0) AS owner_authorized, ",
     "(SELECT phase FROM workflow_subjects ws WHERE ws.task_id=t.id) AS workflow_phase, ",
     "(SELECT kind FROM workflow_activities wa WHERE wa.activity_task_id=t.id) AS workflow_activity_kind, ",
+    "(SELECT o.task_id FROM objectives o WHERE o.task_id=t.id) AS objective_id, ",
+    "(SELECT oc.objective_task_id FROM objective_children oc WHERE oc.child_task_id=t.id) AS parent_objective_id, ",
+    "(SELECT oc.required FROM objective_children oc WHERE oc.child_task_id=t.id) AS parent_objective_required, ",
     "NOT EXISTS(SELECT 1 FROM decisions d JOIN decision_cycles dc ON dc.decision_id=d.id AND dc.generation=d.current_generation JOIN projects dp ON dp.id=d.project_id LEFT JOIN decision_answers da ON da.decision_id=d.id AND da.generation=d.current_generation WHERE d.project_id=t.project_id AND EXISTS(SELECT 1 FROM decision_affected_tasks target WHERE target.decision_id=d.id AND target.generation=d.current_generation AND (target.task_id=t.id OR target.task_id=(SELECT subject_task_id FROM workflow_activities WHERE activity_task_id=t.id))) AND (dc.policy_revision!=dp.policy_revision OR EXISTS(SELECT 1 FROM decision_affected_tasks scoped JOIN tasks current ON current.project_id=scoped.project_id AND current.id=scoped.task_id WHERE scoped.decision_id=d.id AND scoped.generation=d.current_generation AND scoped.task_revision!=current.revision) OR da.decision_id IS NULL OR da.disposition!='allow' OR da.conditions_confirmed=0 OR (dc.expires_at IS NOT NULL AND dc.expires_at<=?))) AS decisions_ready, ",
+    "NOT EXISTS(SELECT 1 FROM objective_children oc JOIN tasks child ON child.project_id=oc.project_id AND child.id=oc.child_task_id WHERE oc.objective_task_id=t.id AND oc.required=1 AND child.lifecycle!='done') AS objective_children_ready, ",
     "NOT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks prerequisite ON prerequisite.id=d.prerequisite_id WHERE d.task_id=t.id AND prerequisite.lifecycle!='done') AS dependencies_ready ",
     "FROM tasks t LEFT JOIN attempts a ON a.id=t.current_attempt_id LEFT JOIN principals p ON p.id=a.owner_id LEFT JOIN credentials c ON c.id=a.credential_id LEFT JOIN agent_sessions ag ON ag.id=a.session_id AND ag.credential_id=a.credential_id LEFT JOIN browser_sessions b ON b.id=a.session_id WHERE t.project_id=?) ",$suffix
 )}}
@@ -328,7 +336,7 @@ impl Task {
                 && self.attempt_expires.is_some_and(|v| v > now)
                 && self.owner_authorized
             {
-                if self.decisions_ready {
+                if self.decisions_ready && self.objective_children_ready {
                     "in_progress"
                 } else {
                     "blocked"
@@ -338,6 +346,9 @@ impl Task {
             };
         }
         if !self.decisions_ready {
+            return "blocked";
+        }
+        if !self.objective_children_ready {
             return "blocked";
         }
         if let Some(status) = &self.workflow_status {
@@ -361,7 +372,9 @@ impl Task {
         json!({"id":self.id,"project_id":self.project_id,"title":self.title,"description":self.description,
         "acceptance_criteria":serde_json::from_str::<Value>(&self.acceptance_json).unwrap_or(Value::Null),"kind":self.kind,"priority":self.priority,
         "lifecycle":self.lifecycle,"activity_kind":self.workflow_activity_kind,"revision":self.revision,"generation":self.generation,"current_attempt_id":self.current_attempt_id,
-        "work_status":self.status(now),"blocked_reason":self.blocked_reason,"dependencies_ready":self.dependencies_ready,"decisions_ready":self.decisions_ready,
+        "work_status":self.status(now),"blocked_reason":self.blocked_reason,"dependencies_ready":self.dependencies_ready,
+        "objective_children_ready":self.objective_children_ready,"decisions_ready":self.decisions_ready,
+        "objective_id":self.objective_id,"parent_objective_id":self.parent_objective_id,"parent_objective_required":self.parent_objective_required,
         "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since)})
     }
 }
@@ -377,6 +390,14 @@ async fn task(c: &mut SqliteConnection, p: &str, id: &str, now: i64) -> Result<T
         .ok_or_else(AppError::not_found)?;
     enrich_workflow_status(c, p, &mut value, now).await?;
     Ok(value)
+}
+pub(crate) async fn task_record_value(
+    c: &mut SqliteConnection,
+    project: &str,
+    id: &str,
+    now: i64,
+) -> Result<Value, AppError> {
+    Ok(task(c, project, id, now).await?.value(now))
 }
 async fn enrich_workflow_status(
     c: &mut SqliteConnection,
@@ -466,7 +487,7 @@ async fn set_dependencies(
                 "Every dependency must identify a task in this project.",
             ));
         }
-        let cycle:i64=sqlx::query_scalar("WITH RECURSIVE ancestors(id) AS (SELECT ? UNION SELECT d.prerequisite_id FROM task_dependencies d JOIN ancestors a ON a.id=d.task_id) SELECT count(*) FROM ancestors WHERE id=?")
+        let cycle:i64=sqlx::query_scalar("WITH RECURSIVE ancestors(id) AS (SELECT ? UNION SELECT d.prerequisite_id FROM task_dependencies d JOIN ancestors a ON a.id=d.task_id UNION SELECT oc.child_task_id FROM objective_children oc JOIN ancestors a ON a.id=oc.objective_task_id) SELECT count(*) FROM ancestors WHERE id=?")
             .bind(d).bind(id).fetch_one(&mut *c).await?;
         if cycle > 0 {
             return Err(AppError::conflict(
@@ -491,7 +512,11 @@ async fn set_dependencies(
     }
     Ok(())
 }
-async fn save_revision(m: &mut Mutation, p: &str, id: &str) -> Result<Value, AppError> {
+pub(crate) async fn save_task_revision(
+    m: &mut Mutation,
+    p: &str,
+    id: &str,
+) -> Result<Value, AppError> {
     let t = task(&mut m.tx, p, id, m.now).await?;
     let mut value = t.value(m.now);
     value["depends_on"] =
@@ -535,7 +560,7 @@ async fn create_task(
         .bind(&id).bind(&p).bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(&input.kind).bind(input.priority)
         .bind(if input.planned{"planned"}else{"open"}).bind(m.now).bind(m.now).execute(&mut *m.tx).await?;
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
-    let value = save_revision(&mut m, &p, &id).await?;
+    let value = save_task_revision(&mut m, &p, &id).await?;
     Ok(response(
         m.finish(value, Some(&p), "task.created", &id).await?,
     ))
@@ -609,7 +634,7 @@ async fn edit_task(
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
     sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,revision=revision+1 WHERE id=?")
         .bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority).bind(if input.planned{"planned"}else{"open"}).bind(&id).execute(&mut *m.tx).await?;
-    let value = save_revision(&mut m, &p, &id).await?;
+    let value = save_task_revision(&mut m, &p, &id).await?;
     Ok(response(
         m.finish(value, Some(&p), "task.edited", &id).await?,
     ))
@@ -663,7 +688,7 @@ async fn unblock_task(
     .bind(&id)
     .execute(&mut *m.tx)
     .await?;
-    let value = save_revision(&mut m, &p, &id).await?;
+    let value = save_task_revision(&mut m, &p, &id).await?;
     Ok(response(
         m.finish(
             json!({"task":value,"resolution":input.reason}),
@@ -799,7 +824,7 @@ async fn attempt_detail(
         && a.expires_at > now
         && t.owner_authorized
         && t.current_attempt_id.as_deref() == Some(&id)
-        && (a.mode == "recovery" || t.decisions_ready);
+        && (a.mode == "recovery" || (t.decisions_ready && t.objective_children_ready));
     Ok(response(
         json!({"attempt":a.value(),"task":t.value(now),"authority_valid":valid,"lease_remaining_ms":if valid{a.expires_at-now}else{0},"checkout":checkout.as_ref().map(checkout_value)}),
     ))
@@ -810,7 +835,7 @@ async fn orientation(State(s): State<AppState>, auth: Auth, Path(p): Path<String
     let mut c = s.pool.acquire().await?;
     let proj = project(&mut c, &p).await?;
     let now = s.now();
-    let candidates:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND decisions_ready AND current_attempt_id IS NULL ORDER BY priority,ready_since,id LIMIT 20"))
+    let candidates:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND objective_children_ready AND decisions_ready AND current_attempt_id IS NULL ORDER BY priority,ready_since,id LIMIT 20"))
         .bind(now).bind(now).bind(now).bind(&p).fetch_all(&mut *c).await?;
     let active:Vec<Attempt>=sqlx::query_as("SELECT * FROM attempts WHERE project_id=? AND owner_id=? AND session_id=? AND state='active' ORDER BY created_at LIMIT 50")
         .bind(&p).bind(&auth.actor.id).bind(&auth.actor.session_id).fetch_all(&mut *c).await?;
@@ -946,7 +971,7 @@ async fn claim(
             let valid = a.state == "active"
                 && a.expires_at > m.now
                 && t.owner_authorized
-                && (a.mode == "recovery" || t.decisions_ready)
+                && (a.mode == "recovery" || (t.decisions_ready && t.objective_children_ready))
                 && t.current_attempt_id.as_deref() == Some(&id);
             let remaining = if valid { a.expires_at - m.now } else { 0 };
             v["current_authority"] = json!({"valid":valid,"attempt":a.value(),"task_status":t.status(m.now),"lease_remaining_ms":remaining});
@@ -981,7 +1006,7 @@ async fn claim(
     let chosen = if let Some(id) = &input.task_id {
         Some(task(&mut m.tx, &p, id, m.now).await?)
     } else {
-        sqlx::query_as::<_,Task>(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND ((?='work' AND decisions_ready AND current_attempt_id IS NULL) OR (?='recovery' AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized))) ORDER BY priority,ready_since,id LIMIT 1"))
+        sqlx::query_as::<_,Task>(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND ((?='work' AND objective_children_ready AND decisions_ready AND current_attempt_id IS NULL) OR (?='recovery' AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized))) ORDER BY priority,ready_since,id LIMIT 1"))
             .bind(m.now).bind(m.now).bind(m.now).bind(&p).bind(&input.mode).bind(&input.mode).bind(m.now).fetch_optional(&mut *m.tx).await?
     };
     let Some(t) = chosen else {

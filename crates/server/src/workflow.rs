@@ -312,6 +312,8 @@ async fn submit(
         return Ok(response(value));
     }
     let subject = owned_subject(&mut mutation, &project, &attempt, input.generation).await?;
+    crate::objectives::ensure_required_children_done(&mut mutation.tx, &project, &subject.task_id)
+        .await?;
     if subject.kind != input.kind {
         return Err(AppError::bad_request(
             "Submission kind must match the subject task kind.",
@@ -1522,6 +1524,8 @@ async fn ready_dependents(
 ) -> Result<(), AppError> {
     sqlx::query("UPDATE tasks SET ready_since=? WHERE id IN (SELECT d.task_id FROM task_dependencies d WHERE d.prerequisite_id=? AND NOT EXISTS(SELECT 1 FROM task_dependencies x JOIN tasks p ON p.id=x.prerequisite_id WHERE x.task_id=d.task_id AND p.lifecycle!='done'))")
         .bind(now).bind(task_id).execute(&mut *c).await?;
+    sqlx::query("UPDATE tasks SET ready_since=? WHERE id IN (SELECT oc.objective_task_id FROM objective_children oc WHERE oc.child_task_id=? AND oc.required=1 AND NOT EXISTS(SELECT 1 FROM objective_children pending JOIN tasks child ON child.project_id=pending.project_id AND child.id=pending.child_task_id WHERE pending.objective_task_id=oc.objective_task_id AND pending.required=1 AND child.lifecycle!='done'))")
+        .bind(now).bind(task_id).execute(&mut *c).await?;
     Ok(())
 }
 
@@ -1669,6 +1673,12 @@ async fn review(
             .fetch_one(&mut *m.tx)
             .await?;
         if kind == "general" {
+            crate::objectives::ensure_required_children_done(
+                &mut m.tx,
+                &project,
+                &ctx.subject_task,
+            )
+            .await?;
             crate::jobs::ensure_attempt_quiescent(&mut m.tx, &project, &ctx.subject_task).await?;
             ensure_workflow_quiescent(&mut m.tx, &project, &ctx.subject_task).await?;
             sqlx::query("UPDATE workflow_subjects SET phase='done',updated_at=? WHERE task_id=?")
