@@ -1,0 +1,22 @@
+[book]
+authors = ["Agent Coordinator contributors"]
+language = "en"
+src = "book/src"
+title = "Agent Coordinator"
+
+[build]
+build-dir = "target/book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/marshallr12/agent_coordinator"
+edit-url-template = "https://github.com/marshallr12/agent_coordinator/edit/main/{path}"
+
+[output.html.search]
+enable = true
+
+[output.html.playground]
+runnable = false
+editable = false
+copyable = true
+line-numbers = false
