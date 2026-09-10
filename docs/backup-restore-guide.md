@@ -261,6 +261,11 @@ installations cannot act on the same external work.
      --reason '<audited restore administrator recovery reason>'
    ```
 
+   If password recovery reports `clock_reconciliation_required`, correct host
+   time and follow [host clock reconciliation](clock-safety-contract.md#administrator-api)
+   first, then retry password recovery. Restoring a database does not erase a
+   captured clock incident.
+
 7. Sign in as that administrator and enumerate the bounded restore requirements:
 
    The examples below show route and body shapes. Use the dashboard or an

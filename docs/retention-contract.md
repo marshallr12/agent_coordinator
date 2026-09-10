@@ -1,7 +1,7 @@
 # Storage retention and maintenance contract
 
-Status: implemented host-local maintenance engine. Server command wiring and the
-mutation replay check are integrated with the clock-safety work separately.
+The host command, daily systemd timer, and mutation replay checks implement this
+retention policy. Clock reconciliation pauses maintenance until time is trusted.
 
 ## Host command and bounds
 

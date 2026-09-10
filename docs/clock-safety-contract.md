@@ -13,12 +13,15 @@ most 5 seconds is clamped to protected time without opening an incident. A wall
 clock more than 5 seconds behind expected protected time creates a durable clock
 incident and changes `clock_state.status` to `clock_reconciliation`.
 
-The first operation that detects a material rollback commits only the clock
-incident and authority expiry, then returns `409
-clock_reconciliation_required`. Its requested coordination effect is not
-committed. Detection expires every active attempt and reporter deadline while
-preserving task pointers, generations, resource reservations, and integration
-holds for recovery inspection. Existing integration authorization is shown with
+A mutation that first detects rollback under its writer lock commits only the
+clock incident and authority expiry, then returns
+`409 clock_reconciliation_required` without its requested coordination effect.
+Authentication can also detect and persist an incident before the handler runs.
+Evidence reads may still succeed; newly expired reporter credentials fail normal
+authentication, and ordinary mutations encounter the reconciliation pause.
+Detection expires every active attempt and reporter deadline while preserving
+task pointers, generations, resource reservations, and integration holds for
+recovery inspection. Existing integration authorization is shown with
 `valid: false` and `validity_reason: clock_reconciliation_required` while the
 incident is active.
 
@@ -98,11 +101,20 @@ the endpoint returns `clock_incident_changed`,
 administrator reconciliation records the administrator principal in both the
 ordinary mutation event and the immutable clock-reconciliation audit record.
 
-Host-local recovery is exported for the server command and has no HTTP route:
+If sign-in is blocked or the administrator session expired, correct host time and
+run the host-local command as the service account:
 
-```text
-recover_clock(state, reason)
+```sh
+sudo -u agent-coordinator /usr/local/bin/agent-coordinator-server \
+  --database /var/lib/agent-coordinator/coordinator.sqlite3 \
+  recover-clock --reason 'Host time verified against the configured trusted source.'
 ```
+
+Use evidence specific to the incident. There is no unauthenticated HTTP recovery
+route. A successful command does not recover expired task ownership or clear a
+separate restore reconciliation pause. If a restored snapshot also contains a
+clock incident, reconcile the clock before recovering an operator password and
+completing the restore checklist.
 
 It applies the same trustworthy-time and reason checks. Its audit event has
 `initiator_kind: host_operator` and a null `actor_id`; it does not invent or

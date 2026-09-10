@@ -170,7 +170,15 @@ jobs:
       - name: Build the native release server
         run: cargo build --release --locked -p coordinator-server
       - name: Run the 30-minute release-size workload
-        run: python3 scripts/load_acceptance.py --server target/release/agent-coordinator-server --duration 1800 --rate 50 --history 100000 --report load-acceptance.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=CI,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_WORKFLOW,GITHUB_JOB \
+            systemd-run --scope --quiet \
+            --property=MemoryMax=4G --property=MemorySwapMax=0 --property=CPUQuota=200% \
+            runuser -u "$(id -un)" -- \
+            python3 scripts/load_acceptance.py --server target/release/agent-coordinator-server \
+            --duration 1800 --rate 50 --history 100000 --require-baseline --report load-acceptance.json
       - name: Upload the sanitized load report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

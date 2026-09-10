@@ -80,3 +80,24 @@
 - **Bind SQL parameters consistently.** Mixing reused numbered parameters with
   unnamed placeholders can shift SQLx's argument mapping. Use a consistent scheme
   and exercise create/detail/list/next-selection together after projection changes.
+- **Clock safety includes reads and host commands.** Persist protected time before
+  authenticating deadline-dependent reads, including scoped reporter reads.
+  Check account recovery, upload preflight, and backup timestamp paths as well as
+  ordinary mutations. A later incident must invalidate an earlier successful
+  reconciliation response's claim of current readiness.
+- **Preserve fractional monotonic time.** Repeatedly truncating elapsed duration
+  to milliseconds and resetting its anchor can discard time under frequent calls.
+  Keep a fixed anchor, preserve concurrent progress, and use an explicit simulated
+  clock for deterministic deadline tests. Never change the host clock for a test.
+- **A bounded response is not a bounded query.** Apply project scope within the
+  full-text index and limit the ranking cursor before joining task details.
+  Retention must bound inspected candidates even when no row qualifies; an update
+  limit alone can still scan all history while holding the writer lock.
+- **Permanent mutation identity outlives its response.** Compacted receipt payloads
+  need an explicit marker checked before decoding. Keep principal, operation, key,
+  fingerprint, and restore epoch; a stale or compacted key must never create a new
+  effect. Account-creation preflight lookups need the same protection.
+- **Capacity evidence needs exact assertions.** Count the intended owner/session/
+  generation bindings, verify operation mix and actual concurrent intervals, and
+  name the measured CPU/memory constraints. Per-process limits do not establish an
+  aggregate host-memory baseline; short runs do not establish sustained capacity.
