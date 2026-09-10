@@ -1,0 +1,15 @@
+{
+  "schema": "agent-coordinator-item7-barrier-result-v1",
+  "workstation": "mxmini",
+  "submitted_at": "2026-09-10T16:11:27.000190Z",
+  "project_id": "7d9f4b62-0e09-4c7c-a5ca-07c6bddbf76a",
+  "task_id": "e0ef5166-0ea3-4bac-aa46-80f37264810c",
+  "expected_task_revision": 1,
+  "outcome": "owner",
+  "attempt_id": "06619f1d-ed75-4d66-8bd9-0e82b2ce38f0",
+  "generation": 2,
+  "principal_id": "5abb3e12-bc7d-447e-ba29-3422cf47166e",
+  "session_id": "07d69778-c404-478d-a598-b70832000b3a",
+  "task_status": "in_progress",
+  "secrets_included": false
+}
