@@ -33,15 +33,21 @@ and new publication authority.
 The pause keeps bounded operations needed to make work safe or inspectable:
 
 - browser sign-out and revocation, and agent-session closure;
-- attempt checkpoints and release;
 - reservation release and explicit resolution;
 - workflow activity release, integration-result recording, and publication
   reconciliation;
-- existing reporter observations, whose deadline has already been capped;
 - restore reconciliation and clock reconciliation.
 
-These exceptions do not renew an attempt, release a physical or integration
-hold implicitly, create a credential, or mark uncertain external work complete.
+Attempt checkpoint and release routes remain on the pause allowlist so a request
+already proven under a live attempt cannot be rejected solely by the global
+pause. Rollback detection expires all active attempts, however, so a later
+request still fails the normal ownership check and cannot use this exception to
+revive one. Reporter deadlines are capped at detection and later reporter
+authentication fails.
+
+The available exceptions do not renew an attempt, release a physical or
+integration hold implicitly, create a credential, or mark uncertain external
+work complete.
 Restore invalidation remains available for an offline staged database. If it is
 the first observer of a rollback, it commits the clock incident before beginning
 restore invalidation under a fresh writer lock.

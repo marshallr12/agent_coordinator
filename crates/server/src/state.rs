@@ -256,24 +256,35 @@ impl AppState {
                 .execute(&mut **tx)
                 .await?;
         }
-        {
+        let effective_now = {
             let mut runtime = self
                 .clock_runtime
                 .lock()
                 .map_err(|_| AppError::internal())?;
-            let reanchor = !runtime.initialized
-                || stored_high_water > expected_runtime_time
-                || raw > expected_runtime_time;
-            runtime.high_water_ms = safe_now;
-            if reanchor {
+            let elapsed = if self.clock.use_monotonic_elapsed() {
+                runtime.anchor.elapsed().as_millis().min(i64::MAX as u128) as i64
+            } else {
+                0
+            };
+            let live_expected = runtime.anchor_time_ms.saturating_add(elapsed);
+            let live_high_water = runtime.high_water_ms.max(live_expected);
+            let effective_now = safe_now.max(live_high_water);
+            // Re-anchor only for a forward jump beyond the value another
+            // thread may have advanced while this sample awaited SQLite.
+            if safe_now > live_high_water {
                 runtime.anchor_time_ms = safe_now;
                 runtime.anchor = Instant::now();
+            } else if raw > live_expected && raw >= live_high_water {
+                runtime.anchor_time_ms = raw;
+                runtime.anchor = Instant::now();
             }
+            runtime.high_water_ms = effective_now;
             runtime.initialized = true;
             runtime.incident_active = was_active || rollback;
-        }
+            effective_now
+        };
         Ok(ClockSample {
-            now: safe_now,
+            now: effective_now,
             incident_active: was_active || rollback,
             incident_detected,
         })
