@@ -46,7 +46,7 @@ continues to define the release target. No production deployment has occurred.
   scope for the first release.
 - The CLI and local job reporter support Linux and native Windows.
 - The first release includes the HTTP API, web dashboard, and CLI with
-  human-readable and JSON output. MCP and TUI interfaces are deferred.
+  human-readable and JSON output. An MCP endpoint is scheduled as item 6.1 before final Windows acceptance; TUI remains deferred.
 - Each project can require independent agent review, human review, or both;
   the default review mode is independent agent review.
 - Each project can allow agents to integrate approved, validated work
@@ -98,7 +98,7 @@ are specified in the linked contracts and acceptance plan.
    they never access a shared SQLite database file directly.
 2. Provide a versioned JSON API with complete request/response examples and
    concise, versioned agent instructions. A CLI can expose the same operations
-   in both human-readable and JSON formats. MCP and TUI support are deferred;
+   in both human-readable and JSON formats. MCP support is scheduled as backlog item 6.1; TUI remains deferred;
    core functionality does not require either.
 3. Claiming a task atomically verifies eligibility and records ownership in one
    database transaction. Listing work does not reserve it. Both “claim this
@@ -167,7 +167,7 @@ Persistence constraints, operation permissions, and release checks are in
 | Expired-task recovery | Agent-driven recovery after checking prior work/jobs; manual mode configurable per project | **Confirmed by operator, 2026-09-09** |
 | Overall completion | Required review, integration into target branch, and validation of integrated result | **Confirmed by operator, 2026-09-09** |
 | Client platforms | Linux and native Windows | **Confirmed by operator, 2026-09-09** |
-| Initial interfaces | HTTP API, web dashboard, and CLI with JSON output; defer MCP/TUI | **Confirmed by operator, 2026-09-09** |
+| Initial interfaces | HTTP API, web dashboard, CLI with JSON output, and MCP endpoint (item 6.1); defer TUI | **Confirmed by operator, 2026-09-09** |
 | Review authority | Per-project choice of independent agent, human, or both; independent agent default | **Confirmed by operator, 2026-09-09** |
 | Integration authority | Agents integrate when policy/review/checks allow; projects may require human authorization | **Confirmed by operator, 2026-09-09** |
 | Knowledge autonomy | Agents maintain lessons; projects may also delegate binding-rule changes without human approval | **Confirmed by operator, 2026-09-09** |
@@ -335,7 +335,7 @@ SDK. These are conventional records exposed through one API and CLI.
 The operator selected both a CLI and a web interface in the first release. The
 CLI supports human-readable and JSON output on Linux and native Windows; the web
 interface uses vanilla JavaScript and CSS, adding Alpine.js only where it removes
-complexity. MCP and a TUI are deferred.
+complexity. MCP is scheduled as backlog item 6.1; a TUI remains deferred.
 
 The browser should make these questions easy to answer:
 
@@ -459,3 +459,12 @@ slice with the stated evidence and matching generated API/CLI documentation.
 
 Dependency versions and security advisories must be checked when implementation
 begins; this discovery document does not pin dependencies.
+
+## Additional release sequencing — 2026-09-09
+
+The operator requested an MCP server endpoint as backlog item **6.1**, followed by
+consolidating documentation and READMEs into an **mdBook project, item 6.2**.
+Both follow Linux acceptance and precede the operator-initiated native Windows
+workstation acceptance at **item 7**. Windows CI remains part of implementation
+validation and does not replace that physical-workstation exercise. The main
+agent reviews each completed backlog item before proceeding to the next.

@@ -702,7 +702,7 @@ async fn context(
             bounded(value, name, 255, true)?;
         }
     }
-    let mut c = state.pool.acquire().await?;
+    let mut c = state.pool.begin().await?;
     let policy = sqlx::query("SELECT policy_revision,rules FROM projects WHERE id=?")
         .bind(&project)
         .fetch_optional(&mut *c)
@@ -720,7 +720,7 @@ async fn context(
         &project,
         query.task_id.as_deref(),
         state.now(),
-        limit as usize,
+        (limit + 1) as usize,
     )
     .await?;
     for id in decisions {
@@ -764,6 +764,8 @@ async fn context(
             items.push(item);
         }
     }
+    // Reaching capacity leaves later record categories unexamined.
+    truncated |= items.len() >= limit as usize;
     let next_actions = if !instructions_complete {
         json!([{"action":"increase_context_budget","minimum_bytes":mandatory_size}])
     } else if truncated {

@@ -1,54 +1,44 @@
 # Implementation handoff — 2026-09-09
 
-Backlog item 2 is implemented: immutable submissions, independent review, serialized
-integration, exact-result checks, publication recovery, and done/dependency release.
-Continue with item 3 in BACKLOG.md: shared lessons, binding rules/provenance,
-decision records, bounded context, artifacts, and Markdown import/export.
-The complete design remains in PLAN.md; product decisions are settled.
+Backlog item 3 implementation is ready: shared knowledge, scoped decisions,
+bounded artifacts, and authoritative Markdown imports/exports. Local integrated
+validation has passed; CI is pending. Do not mark the item complete until CI passes.
+Continue sequentially with item 4 after the main agent reviews that evidence.
 
-Code owners submit clean committed candidates with acceptance evidence and a
-handoff. Submission ends implementation ownership and creates separate review and
-integration activities. Projects require independent agent, human, both, or no
-review; independent agent review is the default. Contributor principals and
-sessions cannot independently review their own work. Changes requested cancel the
-candidate's pending activities; a new submission receives fresh reviews.
+Instruction version 4 describes the implemented shared-record workflow and CLI
+commands. Existing harnesses must read and acknowledge it before new claims.
+Knowledge revisions keep source/applicability, explicit sharing, feedback, and
+immutable history. Submission lessons and finalized artifact references commit
+in the same transaction as the submission; subsequent corrections cannot rewrite
+submitted evidence. Binding-rule revisions preserve their source/reason.
 
-A human configures the canonical repository key and an explicit required-check
-roster. Projects sharing a repository/target share one integration hold. Agents
-prepare the exact integrated source in a separate worktree, run registered checks
-with matching identity/version/environment, release job resources, then request
-fresh publication authority. Native Git requires a clean candidate-containing
-result, an exact expected target, and a conservative remaining deadline. Once
-push intent is durable, retry only observes; it never launches a second push.
+Typed decision answers pin current task/policy revisions and conditions. Denied,
+pending, expired, and stale decisions block dependent work and authority displays.
+Inspection, checkpointing, and release remain available. Recovery receipts use
+current attempt mode and decisions; they cannot resurrect old permission.
 
-Only known publication, exact successful check receipts, fresh remote observation,
-and quiescent resources permit finalization and dependency release. Human recovery
-records old-publisher termination/isolation and remote evidence; it preserves the
-original result and transfers the hold to a fresh integration activity. That
-activity prepares against the actual target and reruns checks. Recovery cannot
-manufacture a passing result or quietly discard already published work.
+Artifact uploads have a 16 MiB hard bound, configurable 10 GiB default quota and
+256 MiB disk reserve, exact size/digest, bounded streaming, and explicit tombstones.
+Native retries preserve exact bytes/key, reauthenticate, and reconcile matching
+finalized metadata. Downloads verify recorded size and SHA-256 before publishing
+new files. Source checkpoints travel through Git remotes, not artifact bundles.
 
-Instruction version 3 returns the implemented completion sequence and CLI help.
-Use docs/CLI.md and docs/completion-contract.md for exact commands and bodies.
-Independent reviewers need separately enrolled principals. The CLI now performs
-instruction acknowledgment before review/integration claims as well as ordinary
-claims. Git 2.39.5 was used locally; native integration requires Git 2.39 or newer.
+Markdown apply requires a human actor after an immutable preview. Agents can
+preview and export. Imports never reopen historical closure or complete active
+work; changed service records invalidate stale previews. Historical knowledge
+reimports preserve immutable kind, append revisions in trigger-safe order, and
+use the standard searchable/correctable scope and provenance shapes. Sanitized
+SithBit/Submission fixtures came from read-only source review; those repositories
+and Submission's pre-existing edits were preserved.
 
-All 84 workspace tests, warnings-denied Clippy, formatting, JavaScript syntax,
-and the full built service/CLI exercise pass locally. Linux workspace checks,
-native Windows client/CLI/local-runner tests, and the locked dependency audit
-passed for implementation commit `5e6f19b` in
-[CI run 34424382043](https://github.com/marshallr12/agent_coordinator/actions/runs/34424382043).
-Validation details are recorded in docs/implementation-status.md. The complete
-Linux service/CLI exercise passes real Git preparation/publication, both reviews,
-human authorization, refusal before required checks, exact producer evidence,
-historical publish retry, and dependency release only after finalization. Browser
-checks use disposable data; no source projects or histories were modified.
+Current local tests, service/CLI smoke, and browser evidence are described in
+[implementation status](docs/implementation-status.md). Each worktree must use its
+own Cargo target directory. Main-agent review corrected decision authority/read
+projections, historical revision ordering, SQL parameter binding, native transfer
+integrity/current authentication, and a dashboard project-selector mismatch.
 
-No public deployment occurred. Host, DNS name, and backup destination remain
-installation choices. Backups/restore fencing, clock rollback, retention/load,
-and two physical-workstation release acceptance remain backlog work. Source
-snapshots must be clean and committed. Candidate source travels through Git
-remotes; submission does not upload it. Logs remain local and service artifact
-uploads remain deferred. Unknown remote trees require fetching the target for
-inspection; a deleted target requires operator repair before continuing.
+Complete remaining items through 6.2 without operator intervention unless missing
+information is essential. Item 6 is Linux acceptance; MCP is 6.1 and mdBook is 6.2.
+The operator will commence native Windows workstation acceptance as final item 7;
+keep Windows CI checks but do not substitute them for that exercise. No production
+deployment, load benchmark, or backup/restore rehearsal has occurred yet.

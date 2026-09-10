@@ -1,7 +1,10 @@
+pub mod artifacts;
 pub mod auth;
 pub mod coordination;
 pub mod error;
+pub mod imports;
 pub mod jobs;
+pub mod knowledge;
 pub mod mutation;
 pub mod state;
 pub mod workflow;
@@ -30,6 +33,9 @@ pub fn router(state: AppState) -> Router {
         .merge(workflow::routes())
         .merge(jobs::routes())
         .merge(auth::routes())
+        .merge(artifacts::routes())
+        .merge(imports::routes())
+        .merge(knowledge::routes())
         .route(
             "/healthz",
             get(|| async { response(json!({"status":"ok"})) }),
@@ -64,7 +70,7 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .fallback(|| async { error::AppError::not_found() })
-        .layer(DefaultBodyLimit::max(256 * 1024))
+        .layer(DefaultBodyLimit::max(state.config.json_body_limit_bytes))
         // Router-wide middleware includes unmatched private paths and runs
         // before route/path/query/body decoding or existence disclosure.
         .layer(middleware::from_fn_with_state(state.clone(), protect))
@@ -114,7 +120,7 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
             StatusCode::PAYLOAD_TOO_LARGE => error::AppError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "payload_too_large",
-                "The request body exceeds 256 KiB.",
+                "The request body exceeds the configured route limit.",
             ),
             StatusCode::METHOD_NOT_ALLOWED => error::AppError::new(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -160,9 +166,9 @@ fn asset(content_type: &'static str, body: &'static str) -> Response {
 async fn info() -> Json<Value> {
     response(
         json!({"product":"Agent Coordinator","version":env!("CARGO_PKG_VERSION"),"api_version":"v1","instruction_version":coordinator_core::INSTRUCTION_VERSION,
-        "implementation_stage":"reviewed_completion","authentication_help":"/api/v1/help/authentication",
-        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events"],
-        "unavailable_features":["submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","backup_restore"]}),
+        "implementation_stage":"shared_records","authentication_help":"/api/v1/help/authentication",
+        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events","submission","review","integration","artifacts","knowledge","decisions","markdown_import_export"],
+        "unavailable_features":["backup_restore"]}),
     )
 }
 async fn authentication_help() -> Json<Value> {

@@ -58,6 +58,7 @@
             <nav>
               <button class="nav-item active" data-view="overview" type="button"><span aria-hidden="true">⌂</span> Overview</button>
               <button class="nav-item" data-view="tasks" type="button"><span aria-hidden="true">☷</span> Tasks</button>
+              <button class="nav-item" data-view="shared" type="button"><span aria-hidden="true">▤</span> Knowledge & evidence</button>
               <button class="nav-item" data-view="resources" type="button"><span aria-hidden="true">◇</span> Resources</button>
               <button class="nav-item" data-view="admin" id="admin-nav" type="button"><span aria-hidden="true">⚿</span> Access</button>
             </nav>
@@ -108,6 +109,24 @@
                 <article class="card workflow-card"><div class="card-header"><div><h2>Submission & completion</h2><p class="muted">Review and checks apply to a specific candidate. Code completion requires validation of the integrated result.</p></div></div><div id="workflow-content"></div></article>
                 <article class="card job-evidence-card"><div class="card-header"><div><h2>Jobs & resource holds</h2><p class="muted">A missing observer does not prove a job stopped. Holds remain until explicitly released or resolved.</p></div></div><div id="job-evidence-content"></div></article>
               </div>
+            </section>
+
+            <section id="shared-view" class="page-view" aria-labelledby="shared-heading" hidden>
+              <div class="page-heading"><div><p class="eyebrow">Project memory</p><h1 id="shared-heading">Knowledge & evidence</h1><p class="muted">Lessons, decisions, and supporting records with their source and history.</p></div></div>
+              <div class="toolbar">
+                <label class="select-label" for="shared-project">Project<select id="shared-project"><option value="">Choose a project</option></select></label>
+                <label class="select-label" for="shared-kind">Records<select id="shared-kind"><option value="knowledge">Lessons & facts</option><option value="decisions">Decisions</option><option value="artifacts">Artifacts</option><option value="context">Search context</option></select></label>
+                <button id="refresh-shared" class="button subtle" type="button">Refresh</button>
+                <button id="new-lesson" class="button primary" type="button" data-mutation="true">Add lesson</button>
+                <button id="binding-rules" class="button subtle" type="button">Binding rules</button>
+                <button id="import-markdown" class="button subtle" type="button" data-mutation="true">Import Markdown</button>
+                <button id="export-markdown" class="button subtle" type="button">Export snapshot</button>
+              </div>
+              <form id="context-search" class="toolbar" hidden><label for="context-query">Search text<input id="context-query" maxlength="256" placeholder="A task, component, or lesson"></label><label class="checkbox-label"><input id="context-shared" type="checkbox">Include explicitly shared lessons from other projects</label><button class="button primary" type="submit">Search</button></form>
+              <p id="shared-freshness" class="muted" aria-live="polite"></p>
+              <div id="shared-state" class="state-panel" role="status">Choose a project to inspect its records.</div>
+              <div id="shared-list" class="shared-records"></div>
+              <button id="load-more-shared" class="button subtle" type="button" hidden>Load more records</button>
             </section>
 
             <section id="resources-view" class="page-view" aria-labelledby="resources-heading" hidden>

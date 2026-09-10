@@ -9,9 +9,9 @@ client filename as a filesystem path.
 
 - An uploaded artifact is at most 16 MiB. Request bodies are streamed to disk and
   SHA-256 checked; they are not encoded as JSON or buffered in memory.
-- Live and reserved uploads share a 10 GiB service-wide quota. A reservation
+- Live and reserved uploads share a configurable service-wide quota (10 GiB by default). A reservation
   counts until it expires, is deleted, or becomes finalized and later expires.
-- The service preserves 256 MiB of free disk space. It checks available space at
+- The service preserves configurable free disk space (256 MiB by default). It checks available space at
   reservation, before upload, and while writing each chunk. Four uploads may run
   concurrently. Waiting for an upload slot is bounded to five seconds and an
   upload must complete within two minutes.
@@ -132,3 +132,21 @@ transaction before inserting the submission, then call
 same transaction. References are unique, limited to 100, same-project, finalized,
 and live. `submission_artifacts` is immutable; later expiry or deletion changes
 availability without erasing the historical reference.
+
+## Native transfers and configuration
+
+After reserving an upload, use `artifacts upload --id ID --file PATH` with the
+same local harness session. The CLI snapshots exact bytes into its protected
+journal before sending them. Retrying that command reuses the snapshot, digest,
+and idempotency key, even if the original file changed. Completed upload retries reauthenticate and return current artifact metadata,
+including expiry, deletion, or unavailability; they never upload again.
+Use `artifacts download --id ID --output PATH` to save bounded bytes into a new
+file. Its size and SHA-256 must match authenticated metadata before the new file
+is published. An existing destination is never overwritten.
+
+Server settings `COORDINATOR_ARTIFACT_QUOTA_BYTES` and
+`COORDINATOR_ARTIFACT_DISK_RESERVE_BYTES` configure admission limits; the latter
+must retain at least 16 MiB. `COORDINATOR_JSON_BODY_LIMIT_BYTES` defaults to 1 MiB
+and can be lowered to 1024 bytes. Binary streaming retains its separate 16 MiB
+hard limit. Startup reconciles artifact metadata and storage before accepting
+requests, preserving explicit unavailable/tombstoned evidence.

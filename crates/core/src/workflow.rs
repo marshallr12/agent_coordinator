@@ -34,10 +34,31 @@ pub struct SubmissionInput {
     pub summary: String,
     pub acceptance_evidence: Vec<AcceptanceEvidence>,
     pub handoff: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lessons: Vec<crate::knowledge::SubmissionLessonInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_ids: Vec<String>,
     pub repository: Option<String>,
     pub base_revision: Option<String>,
     pub candidate_revision: Option<String>,
     pub candidate_tree: Option<String>,
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::SubmissionInput;
+    use serde_json::json;
+
+    #[test]
+    fn pre_knowledge_submission_keeps_its_receipt_fingerprint_shape() {
+        // A client may retry this persisted request after the service upgrades.
+        let old = json!({"generation":1,"task_revision":1,"project_policy_revision":1,
+            "workflow_policy_revision":0,"kind":"general","summary":"Result",
+            "acceptance_evidence":[],"handoff":"Next steps","repository":null,
+            "base_revision":null,"candidate_revision":null,"candidate_tree":null});
+        let request: SubmissionInput = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), old);
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

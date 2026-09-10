@@ -1,5 +1,7 @@
+mod artifact_transfer;
 mod config;
 mod job_state;
+mod shared;
 mod state;
 mod worktree;
 
@@ -45,6 +47,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Search bounded project context and explicitly shared knowledge.
+    Context(shared::ContextArgs),
+    /// Read and revise shared lessons, facts, and historical context.
+    Knowledge {
+        #[command(subcommand)]
+        command: shared::KnowledgeCommand,
+    },
+    /// Inspect scoped decisions and preserve their answers.
+    Decisions {
+        #[command(subcommand)]
+        command: shared::DecisionsCommand,
+    },
+    /// Inspect evidence artifacts and register external links or uploads.
+    Artifacts {
+        #[command(subcommand)]
+        command: shared::ArtifactsCommand,
+    },
+    /// Preview and explicitly apply bounded Markdown source imports.
+    Imports {
+        #[command(subcommand)]
+        command: shared::ImportsCommand,
+    },
+    /// Export a service-authoritative Markdown snapshot.
+    Export(ListArgs),
     /// Create or resume this harness session and return project orientation. Never claims work.
     Connect(ConnectArgs),
     /// List or create projects.
@@ -655,6 +681,18 @@ fn print_human(command: &Command, value: &Value) {
         } => print_task_table(value),
         Command::Connect(_) => print_connection(value),
         Command::Claim(_) => print_claim(value),
+        Command::Export(_) => {
+            if let Some(markdown) = value.pointer("/data/markdown").and_then(Value::as_str) {
+                println!("{markdown}");
+                print_next_cursor(value);
+            } else {
+                print_json(value, false);
+            }
+        }
+        Command::Knowledge { .. }
+        | Command::Decisions { .. }
+        | Command::Artifacts { .. }
+        | Command::Context(_) => shared::print_records(value),
         _ => {
             println!("Result:");
             print_json(value.get("data").unwrap_or(value), false);
@@ -930,6 +968,12 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
             }
         },
         Command::Submissions { command } => submissions_command(cli, &context, command).await,
+        Command::Context(args) => shared::context(cli, &context, args).await,
+        Command::Knowledge { command } => shared::knowledge(cli, &context, command).await,
+        Command::Decisions { command } => shared::decisions(cli, &context, command).await,
+        Command::Artifacts { command } => shared::artifacts(cli, &context, command).await,
+        Command::Imports { command } => shared::imports(cli, &context, command).await,
+        Command::Export(args) => shared::export(cli, &context, args).await,
         Command::Reviews { command } => reviews_command(cli, &context, command).await,
         Command::Integrations { command } => integrations_command(cli, &context, command).await,
         Command::Recovery { command } => match command {
@@ -3263,17 +3307,25 @@ fn client_failure(error: ClientError) -> Failure {
 }
 
 fn read_json(path: &Path) -> Result<Value> {
-    let mut input = String::new();
+    use std::io::Read;
+    const LIMIT: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
     if path == Path::new("-") {
-        use std::io::Read;
         std::io::stdin()
-            .read_to_string(&mut input)
+            .take(LIMIT + 1)
+            .read_to_end(&mut bytes)
             .context("read JSON from standard input")?;
     } else {
-        input = std::fs::read_to_string(path)
-            .with_context(|| format!("read JSON input {}", path.display()))?;
+        std::fs::File::open(path)
+            .with_context(|| format!("read JSON input {}", path.display()))?
+            .take(LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .context("read JSON request")?;
     }
-    let value: Value = serde_json::from_str(&input).context("parse JSON input")?;
+    if bytes.len() as u64 > LIMIT {
+        bail!("JSON input exceeds 1 MiB; split the source into bounded requests");
+    }
+    let value: Value = serde_json::from_slice(&bytes).context("parse JSON input")?;
     if !value.is_object() {
         bail!("JSON input must be an object");
     }

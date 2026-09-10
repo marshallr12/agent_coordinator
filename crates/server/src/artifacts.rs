@@ -323,9 +323,9 @@ async fn ensure_store(root: &FsPath) -> Result<(), AppError> {
     Ok(())
 }
 
-fn check_disk(root: &FsPath, incoming: u64) -> Result<(), AppError> {
+fn check_disk(root: &FsPath, incoming: u64, reserve: u64) -> Result<(), AppError> {
     let free = fs2::available_space(root).map_err(|_| AppError::internal())?;
-    if free < incoming.saturating_add(DISK_FREE_RESERVE_BYTES) {
+    if free < incoming.saturating_add(reserve) {
         return Err(AppError::new(
             StatusCode::INSUFFICIENT_STORAGE,
             "artifact_storage_low",
@@ -489,7 +489,11 @@ async fn reserve_upload(
     let root = store_root(&state);
     ensure_store(&root).await?;
     reconcile_store(&state).await?;
-    check_disk(&root, input.size_bytes as u64)?;
+    check_disk(
+        &root,
+        input.size_bytes as u64,
+        state.config.artifact_disk_reserve_bytes,
+    )?;
     let mut mutation = Mutation::begin(
         &state,
         &auth,
@@ -518,11 +522,11 @@ async fn reserve_upload(
     .bind(mutation.now)
     .fetch_one(&mut *mutation.tx)
     .await?;
-    if used.saturating_add(input.size_bytes) > LIVE_ARTIFACT_QUOTA_BYTES {
+    if used.saturating_add(input.size_bytes) > state.config.artifact_quota_bytes {
         return Err(AppError::new(
             StatusCode::INSUFFICIENT_STORAGE,
             "artifact_quota_exceeded",
-            "The 10 GiB live artifact quota would be exceeded. Delete or expire retained uploads before retrying.",
+            "The configured live artifact quota would be exceeded. Delete or expire retained uploads before retrying.",
         ));
     }
     let id = Uuid::new_v4().to_string();
@@ -599,10 +603,10 @@ async fn list_artifacts(
             "live_bytes":live_bytes,
             "reserved_bytes":reserved_bytes,
             "quota_used_bytes":live_bytes.saturating_add(reserved_bytes),
-            "quota_bytes":LIVE_ARTIFACT_QUOTA_BYTES,
+            "quota_bytes":state.config.artifact_quota_bytes,
             "max_artifact_bytes":MAX_ARTIFACT_BYTES,
             "disk_available_bytes":disk_available_bytes,
-            "disk_reserve_bytes":DISK_FREE_RESERVE_BYTES,
+            "disk_reserve_bytes":state.config.artifact_disk_reserve_bytes,
             "default_retention_days":DEFAULT_RETENTION_DAYS,
         }
     })))
@@ -772,7 +776,11 @@ async fn upload(
             ));
         }
     }
-    check_disk(&root, expected_size as u64)?;
+    check_disk(
+        &root,
+        expected_size as u64,
+        state.config.artifact_disk_reserve_bytes,
+    )?;
     let lock_path = staging_path(&root, &storage_key, "lock")?;
     let _upload_lock = acquire_upload_lock(lock_path).await?;
     let part_path = staging_path(&root, &storage_key, "part")?;
@@ -837,7 +845,11 @@ async fn upload(
                     // Serialize the free-space check with artifact writes so
                     // concurrent uploads cannot each consume the disk reserve.
                     let _disk = DISK_WRITE_LOCK.get_or_init(|| Mutex::new(())).lock().await;
-                    check_disk(&root, data.len() as u64)?;
+                    check_disk(
+                        &root,
+                        data.len() as u64,
+                        state.config.artifact_disk_reserve_bytes,
+                    )?;
                     file.write_all(&data)
                         .await
                         .map_err(|_| AppError::internal())?;

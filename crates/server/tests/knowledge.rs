@@ -123,7 +123,7 @@ impl Fixture {
                     "/api/v1/sessions/{}/instruction-acknowledgments",
                     self.agent.session
                 ),
-                json!({"project_id":project,"policy_revision":policy_revision,"instruction_version":"3","sections":["coordination-v3"]}),
+                json!({"project_id":project,"policy_revision":policy_revision,"instruction_version":"4","sections":["coordination-v4"]}),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{value}");
@@ -425,6 +425,82 @@ async fn decisions_require_typed_current_allow_and_preserve_reopen_history() {
 }
 
 #[tokio::test]
+async fn context_marks_pending_decisions_truncated_at_the_item_limit() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("decision-context-limit").await;
+    let task = fixture
+        .task(&project, "Bound decisionneedle pending context")
+        .await;
+    let mut decisions = Vec::new();
+    for question in ["First unresolved choice?", "Second unresolved choice?"] {
+        let (status, decision) = fixture
+            .call(
+                &fixture.agent,
+                "POST",
+                &format!("/api/v1/projects/{project}/decisions"),
+                json!({"question":question,"options":["Proceed","Wait"],
+                    "rationale":"The bounded context must disclose truncation.",
+                    "required_actor":"human","affected_tasks":[{"task_id":task["id"],"task_revision":1}],
+                    "policy_revision":1,"environment":"test","conditions":"Operator confirmation required.",
+                    "expires_at":null}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{decision}");
+        decisions.push(decision["data"].clone());
+    }
+
+    let (status, context) = fixture
+        .call(
+            &fixture.agent,
+            "GET",
+            &format!(
+                "/api/v1/projects/{project}/context?q=decisionneedle&task_id={}&limit=1&budget=8192",
+                task["id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{context}");
+    assert_eq!(context["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(context["data"]["items"][0]["type"], "decision");
+    assert_eq!(context["data"]["truncated"], true, "{context}");
+
+    let (status, allowed) = fixture
+        .call(
+            &fixture.admin,
+            "POST",
+            &format!(
+                "/api/v1/projects/{project}/decisions/{}/answer",
+                decisions[0]["id"].as_str().unwrap()
+            ),
+            json!({"expected_generation":1,"disposition":"allow","answer":"Proceed",
+                "rationale":"Exact scope checked.","conditions_confirmed":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{allowed}");
+    let (status, exact_capacity) = fixture
+        .call(
+            &fixture.agent,
+            "GET",
+            &format!(
+                "/api/v1/projects/{project}/context?q=decisionneedle&task_id={}&limit=1&budget=8192",
+                task["id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{exact_capacity}");
+    assert_eq!(
+        exact_capacity["data"]["items"][0]["type"], "decision",
+        "{exact_capacity}"
+    );
+    assert_eq!(
+        exact_capacity["data"]["truncated"], true,
+        "{exact_capacity}"
+    );
+}
+
+#[tokio::test]
 async fn submission_lesson_helper_validates_the_batch_before_inserting() {
     let fixture = Fixture::new().await;
     let project = fixture.project("submission-lessons").await;
@@ -435,7 +511,7 @@ async fn submission_lesson_helper_validates_the_batch_before_inserting() {
             &fixture.agent,
             "POST",
             &format!("/api/v1/projects/{project}/claims"),
-            json!({"task_id":task["id"],"expected_task_revision":1,"mode":"work","policy_revision":1,"instruction_version":"3"}),
+            json!({"task_id":task["id"],"expected_task_revision":1,"mode":"work","policy_revision":1,"instruction_version":"4"}),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{claim}");

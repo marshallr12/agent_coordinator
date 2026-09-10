@@ -64,3 +64,19 @@
 - **Every claim path needs onboarding.** Review and integration claims must follow
   the same durable instruction acknowledgment flow as implementation claims. A
   reviewer may have connected without ever claiming an implementation task.
+
+- **Build outputs belong to a source worktree.** Concurrent builds from different
+  worktrees must use separate Cargo target directories. Shared compiled metadata
+  can resolve a dependency against another worktree's version and produce
+  misleading missing-type errors during integration.
+- **Decision guards include reads and retries.** Evaluate the current attempt mode
+  and current decision scope before reporting authority. A saved recovery claim
+  must not bypass a later decision after recovery changes into ordinary work.
+  Keep checkpoint, inspection, and release available while work is blocked.
+- **Append the revision before advancing its projection.** Historical knowledge
+  reimports must satisfy the same immutable-revision trigger as ordinary edits.
+  Keep the standard scope/provenance shape and immutable record kind so imported
+  records remain searchable and correctable through the same interface.
+- **Bind SQL parameters consistently.** Mixing reused numbered parameters with
+  unnamed placeholders can shift SQLx's argument mapping. Use a consistent scheme
+  and exercise create/detail/list/next-selection together after projection changes.

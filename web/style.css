@@ -167,3 +167,14 @@ textarea { min-height: 108px; resize: vertical; }
 .status-badge.waiting_review, .status-badge.waiting_integration { background: #eef0fd; color: #534a8d; }
 .status-badge.integrating, .status-badge.validating { background: #e6f2fb; color: #24597a; }
 @media (max-width: 650px) { .check-row { grid-template-columns: 1fr; } .workflow-entry dl { grid-template-columns: 1fr; } }
+
+/* Shared records use prose-sized columns; imported text is always plain text. */
+.shared-records { display: grid; gap: 1rem; }
+.shared-records .card { min-width: 0; }
+.shared-records pre, .shared-record-body { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 26rem; overflow: auto; }
+.shared-records details { margin-top: .8rem; }
+.shared-records .record-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+.checkbox-label { display: flex; align-items: center; gap: .5rem; }
+.checkbox-label input { width: auto; }
+#context-search { align-items: end; }
+#shared-view .toolbar { flex-wrap: wrap; }

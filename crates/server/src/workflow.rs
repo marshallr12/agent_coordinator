@@ -434,6 +434,36 @@ async fn submit(
         .bind(if input.kind=="code" {Some(target.as_str())} else {None})
         .bind(&input.base_revision).bind(&input.candidate_revision).bind(&input.candidate_tree)
         .bind(&mutation.actor.id).bind(&owner_session).bind(mutation.now).execute(&mut *mutation.tx).await?;
+    let lessons = crate::knowledge::insert_submission_lessons(
+        &mut mutation.tx,
+        &mutation.actor,
+        mutation.now,
+        &project,
+        &subject.task_id,
+        &submission,
+        &input.lessons,
+    )
+    .await?;
+    for lesson in lessons {
+        sqlx::query("INSERT INTO submission_knowledge(project_id,submission_id,knowledge_id,knowledge_revision) VALUES(?,?,?,1)")
+            .bind(&project).bind(&submission).bind(lesson["id"].as_str().ok_or_else(|| AppError::bad_request("Lesson creation omitted its identity."))?)
+            .execute(&mut *mutation.tx).await?;
+    }
+    crate::artifacts::validate_submission_artifacts(
+        &mut mutation.tx,
+        &project,
+        &input.artifact_ids,
+        mutation.now,
+    )
+    .await?;
+    crate::artifacts::link_submission_artifacts(
+        &mut mutation.tx,
+        &project,
+        &submission,
+        &input.artifact_ids,
+        mutation.now,
+    )
+    .await?;
     sqlx::query("UPDATE attempts SET state='submitted',ended_at=?,outcome=? WHERE id=?")
         .bind(mutation.now)
         .bind(&input.summary)
@@ -518,6 +548,21 @@ async fn submission_value(c: &mut SqliteConnection, id: &str) -> Result<Value, A
         .fetch_optional(&mut *c)
         .await?
         .ok_or_else(AppError::not_found)?;
+    let lesson_ids = sqlx::query_scalar::<_, String>(
+        "SELECT knowledge_id FROM submission_knowledge WHERE submission_id=? ORDER BY knowledge_id",
+    )
+    .bind(id)
+    .fetch_all(&mut *c)
+    .await?;
+    let lessons = sqlx::query("SELECT k.knowledge_id,k.revision,k.title,k.body,k.status,k.provenance_json FROM submission_knowledge sk JOIN knowledge_revisions k ON k.knowledge_id=sk.knowledge_id AND k.revision=sk.knowledge_revision WHERE sk.submission_id=? ORDER BY k.knowledge_id")
+        .bind(id).fetch_all(&mut *c).await?;
+    let lessons = lessons.iter().map(|r| Ok(json!({"id":r.get::<String,_>("knowledge_id"),"revision":r.get::<i64,_>("revision"),"title":r.get::<String,_>("title"),"body":r.get::<String,_>("body"),"status":r.get::<String,_>("status"),"provenance":serde_json::from_str::<Value>(&r.get::<String,_>("provenance_json"))?}))).collect::<Result<Vec<_>,serde_json::Error>>()?;
+    let artifact_ids = sqlx::query_scalar::<_, String>(
+        "SELECT artifact_id FROM submission_artifacts WHERE submission_id=? ORDER BY artifact_id",
+    )
+    .bind(id)
+    .fetch_all(&mut *c)
+    .await?;
     Ok(json!({
         "id":row.get::<String,_>("id"),"task_id":row.get::<String,_>("task_id"),
         "attempt_id":row.get::<String,_>("attempt_id"),"kind":row.get::<String,_>("kind"),
@@ -527,6 +572,7 @@ async fn submission_value(c: &mut SqliteConnection, id: &str) -> Result<Value, A
         "summary":row.get::<String,_>("summary"),
         "acceptance_evidence":serde_json::from_str::<Value>(&row.get::<String,_>("acceptance_evidence_json"))?,
         "handoff":row.get::<String,_>("handoff"),
+        "lesson_ids":lesson_ids,"lessons":lessons,"artifact_ids":artifact_ids,
         "canonical_repository_key":row.get::<Option<String>,_>("canonical_repository_key"),
         "repository":row.get::<Option<String>,_>("repository_url"),
         "target_branch":row.get::<Option<String>,_>("target_branch"),
@@ -920,9 +966,17 @@ pub async fn guard_activity_work(
     activity_task_id: &str,
     now: i64,
 ) -> Result<(), AppError> {
-    let row=sqlx::query("SELECT wa.id,wa.state,wa.submission_id,ws.current_submission_id,s.project_policy_revision,s.workflow_policy_revision,p.policy_revision,wp.revision AS current_workflow_revision,t.current_attempt_id,a.expires_at FROM workflow_activities wa JOIN workflow_subjects ws ON ws.task_id=wa.subject_task_id JOIN submissions s ON s.id=wa.submission_id JOIN projects p ON p.id=wa.project_id LEFT JOIN workflow_policies wp ON wp.project_id=wa.project_id JOIN tasks t ON t.id=wa.activity_task_id LEFT JOIN attempts a ON a.id=t.current_attempt_id WHERE wa.project_id=? AND wa.activity_task_id=?")
+    crate::knowledge::ensure_decisions_resolved(c, project, activity_task_id, now).await?;
+    let row=sqlx::query("SELECT wa.subject_task_id,wa.id,wa.state,wa.submission_id,ws.current_submission_id,s.project_policy_revision,s.workflow_policy_revision,p.policy_revision,wp.revision AS current_workflow_revision,t.current_attempt_id,a.expires_at FROM workflow_activities wa JOIN workflow_subjects ws ON ws.task_id=wa.subject_task_id JOIN submissions s ON s.id=wa.submission_id JOIN projects p ON p.id=wa.project_id LEFT JOIN workflow_policies wp ON wp.project_id=wa.project_id JOIN tasks t ON t.id=wa.activity_task_id LEFT JOIN attempts a ON a.id=t.current_attempt_id WHERE wa.project_id=? AND wa.activity_task_id=?")
         .bind(project).bind(activity_task_id).fetch_optional(&mut *c).await?;
     let Some(row) = row else { return Ok(()) };
+    crate::knowledge::ensure_decisions_resolved(
+        c,
+        project,
+        &row.get::<String, _>("subject_task_id"),
+        now,
+    )
+    .await?;
     if row.get::<String, _>("state") != "active"
         || row.get::<String, _>("submission_id") != row.get::<String, _>("current_submission_id")
         || row.get::<i64, _>("project_policy_revision") != row.get::<i64, _>("policy_revision")
@@ -1033,8 +1087,9 @@ async fn activity_detail(
     auth: Auth,
     Path((project, id)): Path<(String, String)>,
 ) -> Reply {
-    let mut c = state.pool.acquire().await?;
-    let mut value = activity_value(&mut c, &project, &id, state.now()).await?;
+    let mut c = state.pool.begin().await?;
+    let now = state.now();
+    let mut value = activity_value(&mut c, &project, &id, now).await?;
     let ctx = activity_context(&mut c, &project, &id).await?;
     let current = value["current_attempt"].clone();
     let owned = current["owner_id"] == auth.actor.id
@@ -1045,16 +1100,29 @@ async fn activity_detail(
         && ctx.project_policy_revision == ctx.project_current_policy
         && (ctx.workflow_policy_revision == 0
             || ctx.workflow_current_policy == Some(ctx.workflow_policy_revision));
-    let valid = owned && policy_current && ctx.state == "active";
+    let decisions_ready =
+        crate::knowledge::pending_decision_ids(&mut c, &project, Some(&ctx.subject_task), now, 1)
+            .await?
+            .is_empty()
+            && crate::knowledge::pending_decision_ids(
+                &mut c,
+                &project,
+                Some(&ctx.activity_task),
+                now,
+                1,
+            )
+            .await?
+            .is_empty();
+    let valid = owned && policy_current && decisions_ready && ctx.state == "active";
     let remaining = if valid {
         current["expires_at"]
             .as_str()
             .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-            .map_or(0, |v| (v.timestamp_millis() - state.now()).max(0))
+            .map_or(0, |v| (v.timestamp_millis() - now).max(0))
     } else {
         0
     };
-    value["current_authority"] = json!({"valid":valid,"owned":owned,"policy_current":policy_current,"lease_remaining_ms":remaining,"attempt_id":current["id"],"generation":current["generation"]});
+    value["current_authority"] = json!({"valid":valid,"owned":owned,"policy_current":policy_current,"decisions_ready":decisions_ready,"lease_remaining_ms":remaining,"attempt_id":current["id"],"generation":current["generation"]});
     let (publication_allowed, check_job_ids) = if valid && ctx.kind == "integration" {
         publication_readiness(&mut c, &project, &ctx, current["id"].as_str().unwrap_or("")).await?
     } else {
@@ -1136,6 +1204,7 @@ async fn claim_activity(
     .await?;
     let owner_session = session(&m.actor)?.to_owned();
     let ctx = activity_context(&mut m.tx, &project, &id).await?;
+    ensure_activity_decisions(&mut m, &project, &ctx).await?;
     if let Some(mut value) = m.replay {
         let projected = activity_value(&mut m.tx, &project, &ctx.id, m.now).await?;
         let current = &projected["current_attempt"];
@@ -1522,6 +1591,7 @@ async fn review(
     }
     let raw = activity_context(&mut m.tx, &project, &id).await?;
     let ctx = owned_activity(&mut m, &project, &id, input.generation, &raw.kind).await?;
+    ensure_activity_decisions(&mut m, &project, &ctx).await?;
     if !["agent_review", "human_review"].contains(&ctx.kind.as_str())
         || input.submission_id != ctx.submission
     {
@@ -1653,6 +1723,7 @@ async fn authorize_integration(
         return Ok(response(v));
     }
     ensure_current(&ctx)?;
+    ensure_activity_decisions(&mut m, &project, &ctx).await?;
     if ctx.kind != "integration"
         || input.submission_id != ctx.submission
         || input.expected_project_policy_revision != ctx.project_policy_revision
@@ -1708,6 +1779,7 @@ async fn publication_intent(
         return Ok(response(v));
     }
     let ctx = owned_activity(&mut m, &project, &id, input.generation, "integration").await?;
+    ensure_activity_decisions(&mut m, &project, &ctx).await?;
     if input.submission_id != ctx.submission {
         return Err(AppError::conflict(
             "integration_candidate_mismatch",
@@ -1883,6 +1955,7 @@ async fn integration_result(
         return Ok(response(v));
     }
     let ctx = owned_activity(&mut m, &project, &id, input.generation, "integration").await?;
+    ensure_activity_decisions(&mut m, &project, &ctx).await?;
     if input.submission_id != ctx.submission {
         return Err(AppError::conflict(
             "integration_candidate_mismatch",
@@ -2112,6 +2185,7 @@ async fn finalize(
         return Ok(response(v));
     }
     let ctx = owned_activity(&mut m, &project, &id, input.generation, "integration").await?;
+    ensure_activity_decisions(&mut m, &project, &ctx).await?;
     if input.submission_id != ctx.submission {
         return Err(AppError::conflict(
             "integration_candidate_mismatch",
@@ -2248,6 +2322,13 @@ async fn owned_subject(
             "This attempt no longer has current unexpired authority.",
         ));
     }
+    crate::knowledge::ensure_decisions_resolved(
+        &mut m.tx,
+        project,
+        &row.get::<String, _>("task_id"),
+        m.now,
+    )
+    .await?;
     let pinned_task = row.get::<Option<i64>, _>("pinned_task_revision");
     let pinned_policy = row.get::<Option<i64>, _>("pinned_policy_revision");
     if pinned_task.is_none() || pinned_policy.is_none() {
@@ -2317,4 +2398,14 @@ async fn create_activity(
     sqlx::query("INSERT INTO workflow_activities(id,project_id,subject_task_id,submission_id,activity_task_id,kind,slot,state,created_at) VALUES(?,?,?,?,?,?,?,'queued',?)")
         .bind(&activity).bind(project).bind(&subject.task_id).bind(submission).bind(&task).bind(kind).bind(slot).bind(now).execute(&mut *c).await?;
     Ok(activity)
+}
+
+async fn ensure_activity_decisions(
+    m: &mut Mutation,
+    project: &str,
+    ctx: &ActivityContext,
+) -> Result<(), AppError> {
+    crate::knowledge::ensure_decisions_resolved(&mut m.tx, project, &ctx.subject_task, m.now)
+        .await?;
+    crate::knowledge::ensure_decisions_resolved(&mut m.tx, project, &ctx.activity_task, m.now).await
 }

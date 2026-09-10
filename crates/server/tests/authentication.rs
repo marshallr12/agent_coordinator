@@ -593,7 +593,7 @@ async fn malformed_payloads_and_login_abuse_return_stable_errors() {
         .error(StatusCode::BAD_REQUEST, "invalid_request");
     let too_large = format!(
         "{{\"username\":\"admin\",\"password\":\"{}\"}}",
-        "x".repeat(300 * 1024)
+        "x".repeat(2 * 1024 * 1024)
     );
     fixture
         .raw(

@@ -1,6 +1,7 @@
 # Implementation status
 
-The foundation, job/worktree evidence, and reviewed completion milestones are implemented.
+The foundation, job/worktree evidence, reviewed completion, and shared-record
+milestones are implemented.
 The complete release remains
 defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
@@ -70,6 +71,29 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   publication reconciliation, and project review/check settings. Publication
   reconciliation preserves the original evidence and requires a new integration
   activity and fresh validation; it never fabricates a successful check.
+- Revisioned lessons, facts, rejected approaches, and checkpoints; applicability,
+  explicit cross-project sharing, provenance, usefulness feedback, and immutable
+  revision history. Submission lessons and finalized artifact references commit
+  atomically with the immutable submission and retain their original revisions.
+- Plain-text FTS context search with bounded records, full current binding rules,
+  explicit budget/truncation guidance, and current scoped decisions. Rule changes
+  record provenance and preserve policy history.
+- Scoped decisions with typed allow/deny/defer answers, required actor, exact
+  task/policy revisions, environment, conditions, expiry, and reopening history.
+  Blocks apply to selection, work, review, integration, and displayed authority;
+  inspection, checkpointing, and release remain possible while work is blocked.
+- Artifact links and streaming uploads with exact size/SHA-256, configurable quota
+  and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
+  safe storage reconciliation. Native upload journals preserve exact bytes and
+  keys; retries reauthenticate and downloads verify digest before publishing a
+  new file without overwriting existing output.
+- Immutable Markdown previews and human-gated historical apply. Stable source
+  identities, event/revision conflict checks, and durable historical evidence
+  prevent reimports from reopening completed work or completing active attempts.
+  Bounded, snapshot-consistent Markdown exports retain complete provenance.
+- Dashboard and CLI access to lessons, decisions, context, artifact metadata,
+  imports, and exports; the dashboard includes correction, human decision answers,
+  rule editing/history, readable import previews, and snapshot downloads.
 - Linux systemd and Caddy examples, locked dependencies, and Linux/Windows CI.
 
 ## Deliberate limits of this milestone
@@ -84,14 +108,12 @@ it cannot establish whether separately enrolled credentials use the same model.
 
 Jobs and submissions require clean committed source snapshots. The CLI does not
 upload source: publish candidate checkpoints to an appropriate Git remote and
-fetch them on the receiving workstation before review or integration. Logs stay
-on the workstation and are bounded; service artifact uploads and source-checkpoint
-publishing remain later work. A guardian lost after launch may leave an unknown
+fetch them on the receiving workstation before review or integration. Logs remain bounded on the workstation and can be uploaded explicitly as
+service artifacts; publishing source checkpoints remains a Git operation. A guardian lost after launch may leave an unknown
 result even if the process has exited. Reconnection never invents an exit result;
 inspect the journal, surviving process, and physical resource before reconciliation.
 
-Shared lessons/search, decision records, Markdown imports/exports, lifecycle-hook
-adapters, and backup/restore remain later milestones. Workstation reports are
+Lifecycle-hook adapters and backup/restore remain later milestones. Workstation reports are
 client attestations, not remote filesystem inspection or hardware fencing.
 Supported commands do their work in the foreground; a launcher exiting does not
 verify completion of detached child or external work. Retain holds for that work.
@@ -101,14 +123,16 @@ account recovery, additional human administration, and token replacement for an
 existing agent principal remain work. A lost issuance response can recover the
 credential identity, but never its secret: revoke it and enroll a fresh name.
 
-Instruction version 3 includes the worktree/resource/job and reviewed completion sequence.
+Instruction version 4 includes worktree/resource/job evidence, reviewed completion,
+and the shared-record sequence.
 Existing sessions must fetch and acknowledge the new instructions before new claims.
 
-JSON requests are limited to 256 KiB. Task details return the latest 50 attempts,
+JSON requests default to 1 MiB and can be configured lower; artifact bytes use a
+separate 16 MiB hard limit. Task details return the latest 50 attempts,
 100 checkpoints, 50 checkouts, and bounded job/resource evidence; old records remain stored, with complete history
 pagination still to be added. Mutation receipts replay for 30 days; expired keys
-remain reserved so a late retry cannot duplicate an old operation. Retention cleanup
-and storage-quota enforcement are not implemented.
+remain reserved so a late retry cannot duplicate an old operation. Artifact retention cleanup and storage quota enforcement are implemented;
+general event/receipt/history retention remains backlog work.
 
 Lease timing uses the server clock. Hosts should maintain synchronized time; a
 restore or server clock rollback does not yet invalidate all existing authority.
@@ -145,3 +169,27 @@ No production deployment, 100,000-task benchmark, off-server
 backup, or restore rehearsal has occurred.
 
 Continue with [BACKLOG.md](../BACKLOG.md) and [HANDOFF.md](../HANDOFF.md).
+
+### Shared-record review evidence
+
+All 114 workspace tests pass locally (the full suite plus focused checks after
+the final context/selection additions), along with warnings-denied Clippy,
+formatting, JavaScript syntax, workspace build, and the final service/CLI smoke.
+The combined workspace tests cover atomic submission lessons/artifacts, scoped
+work selection, decision expiry and stale authority replay, knowledge correction
+and feedback, FTS applicability, historical import conflicts and reimports,
+export bounds/provenance, artifact quota/expiry/revocation/concurrent cleanup,
+and native transfer integrity. The complete built smoke exercise also covers
+knowledge correction/context, human-required decisions, historical apply,
+provenance-bearing export, exact upload retry, and download bytes/no-overwrite.
+
+Browser verification with disposable data covered literal HTML as inert text,
+lesson revision 2 and feedback, denied/reopened/allowed decisions, policy-change
+invalidation, planned/done imported task states, context search, rule provenance,
+artifact links, export, project selection, and responsive layout without
+horizontal overflow at approximately 390 CSS pixels. No browser errors were
+reported. Final CI for this milestone is pending until the integrated commit is
+pushed; the earlier CI link above applies only to the prior milestone.
+
+The remaining release sequence is operator management, backups/restore, Linux
+acceptance, MCP (6.1), mdBook (6.2), and operator-initiated Windows acceptance (7).

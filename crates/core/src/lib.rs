@@ -1,10 +1,16 @@
 //! Vendor-neutral request types shared by the coordination server and clients.
 use serde::{Deserialize, Serialize};
+pub mod knowledge;
+pub use knowledge::*;
+pub mod imports;
+pub use imports::*;
+pub mod artifacts;
+pub use artifacts::*;
 pub mod workflow;
 pub use workflow::*;
 
-pub const INSTRUCTION_VERSION: &str = "3";
-pub const REQUIRED_SECTION: &str = "coordination-v3";
+pub const INSTRUCTION_VERSION: &str = "4";
+pub const REQUIRED_SECTION: &str = "coordination-v4";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +124,8 @@ pub struct PolicyInput {
     pub recovery_mode: String,
     pub lease_seconds: i64,
     pub rules: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provenance: String,
     pub agent_rule_editing: bool,
     pub automatic_integration: bool,
 }

@@ -21,7 +21,10 @@ agent/human/both review are also confirmed. Projects may allow automatic agent
 integration or require human authorization. Agents maintain shared lessons;
 projects may additionally delegate changes to binding rules without human
 approval. Bounded log/report uploads, Git source checkpoints, and artifact links
-are confirmed. MCP, TUI, and source-worktree bundle storage are deferred.
+are confirmed. The operator subsequently added an MCP endpoint as backlog item
+6.1 and documentation consolidation into mdBook as item 6.2, both before final
+Windows workstation acceptance at item 7. TUI and source-worktree bundle storage
+remain deferred.
 
 ## Proposed engineering defaults
 
@@ -60,7 +63,7 @@ the design while still supporting a distinct file if one exists.
 
 ## Explicitly deferred features
 
-- MCP and interactive TUI clients.
+- Interactive TUI clients.
 - Remote launching/supervision of agent harnesses and arbitrary server-run jobs.
 - Shared editable checkouts for independent implementation tasks.
 - Source-worktree/build-directory bundle storage and a hosted source repository.

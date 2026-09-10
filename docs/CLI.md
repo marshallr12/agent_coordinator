@@ -670,3 +670,104 @@ returned setup/error details when coordination is unavailable; do not silently
 fall back to uncoordinated work. Claim a task before changing code, then renew,
 checkpoint, and release it with its exact attempt ID and ownership generation.
 ```
+
+## Shared knowledge, decisions, and Markdown records
+
+These commands operate on the bound project. All writes use the existing
+protected session journal and retain the exact request and key for `retry`.
+JSON input is limited to 1 MiB. Read results use human-readable output by default;
+`--json` preserves the complete response envelope and cursor.
+
+```sh
+agent-coordinator knowledge list --limit 50
+agent-coordinator knowledge show --id LESSON_ID
+agent-coordinator knowledge create --input lesson.json
+agent-coordinator knowledge edit --id LESSON_ID --input correction.json
+agent-coordinator knowledge feedback --id LESSON_ID --input feedback.json
+agent-coordinator context --query "producer identity" --budget 65536
+agent-coordinator context --query "cache" --component compiler --include-shared
+agent-coordinator decisions list
+agent-coordinator decisions show --id DECISION_ID
+agent-coordinator decisions create --input decision.json
+agent-coordinator decisions answer --id DECISION_ID --input answer.json
+agent-coordinator decisions reopen --id DECISION_ID --input reopen.json
+```
+
+For example, `lesson.json` contains:
+
+```json
+{
+  "kind": "lesson",
+  "title": "Check the producer before repeating a test",
+  "body": "A missing observer does not prove that its producer stopped.",
+  "status": "observed",
+  "scope": {"components": ["test-runner"]},
+  "tags": ["recovery"],
+  "applicability": "When reconnecting after an observer disconnects",
+  "provenance": {"summary": "Observed during task recovery; retain the source revision here"}
+}
+```
+
+Corrections include `expected_revision` and the new title, body, status, scope,
+applicability, tags, and provenance. Prior revisions remain available. Explicit
+cross-project sharing requires `collection: "shared"` and
+`share_across_projects: true` when creating the record; access to all projects
+does not automatically share every lesson. Search treats input as plain words,
+returns complete binding rules, and enforces its byte budget. A budget too small
+for the rules returns an explicitly incomplete packet and asks for a larger budget. Scope filters
+include `--task-id`, `--component`, `--environment`, and `--version`.
+
+Decision creation records the required actor type, exact affected task revisions,
+project policy revision, options, environment, conditions, and optional expiration
+in Unix milliseconds. An answer must exactly match an option and include a typed
+`disposition` (`allow`, `deny`, or `defer`), rationale, and `expected_generation`.
+Only an `allow` with `conditions_confirmed: true` can satisfy the work gate.
+A changed task/policy, expired answer, denial, or deferral keeps work blocked until
+an authorized reopening and answer. Agent credentials cannot answer decisions
+requiring a human; use the dashboard. Decision answers do not change project
+permissions or replace integration authorization.
+
+Submissions may include `lessons` and `artifact_ids` in their evidence JSON.
+Each new lesson uses the lesson fields above, with `provenance_summary` in place
+of `provenance`; the service supplies its task and immutable submission source.
+The submission, handoff, original lesson revisions, and finalized artifact
+references commit together. Later lesson corrections preserve the original
+submission snapshot.
+
+```sh
+agent-coordinator imports preview --input source.json
+agent-coordinator imports show --id PREVIEW_ID
+agent-coordinator imports apply --id PREVIEW_ID --input apply.json
+agent-coordinator export --json --limit 50
+```
+
+Import requests supply `source` (stable context, Git revision, observation time,
+branch, environment), bounded `chunks` containing arbitrary source paths and
+Markdown text, and optional explicit `historical_mappings`. The service never
+reads workstation paths. Agent credentials may preview and export; applying historical migration requires a
+human session in the dashboard, because checked source items create historical
+closure outside the live completion workflow. Inspect the preview's proposed records, conflicts,
+unresolved links, and digest before applying it. The apply request contains
+`preview_digest` and `expected_project_event_revision` from that exact preview;
+intervening service changes require a fresh preview. Ordinary prose remains
+historical context, unchecked checklist tasks start planned, and completed
+imported items retain closure. Imported agent guidance never adopts binding rules.
+See [import contract](import-contract.md) for source identities and limits.
+
+Export without `--json` prints generated Markdown and the next cursor, when
+present. JSON output separates `data.markdown` and `data.next_cursor` for scripts.
+Pass `--cursor` to continue; a changed snapshot requires restarting the export.
+Generated exports contain provenance and cannot be imported over authoritative
+records. The dashboard can download a consistent snapshot up to 16 MiB; larger
+exports should be collected as bounded CLI pages.
+
+For uploaded evidence, first reserve exact size and SHA-256 using
+`artifacts reserve --input reservation.json`, then run
+`artifacts upload --id ARTIFACT_ID --file report.txt`.
+Repeat the same command after an interrupted request; its protected journal keeps
+exact bytes and the original key. A completed retry authenticates again and reports current availability; it
+does not upload again. Download with
+`artifacts download --id ARTIFACT_ID --output new-report.txt`; the destination
+must not exist. Downloaded size and SHA-256 are verified before publishing the
+file. Transfers are bounded to 16 MiB and ordinary JSON responses are
+bounded to 16 MiB. Use `--json` for the full transfer receipt.

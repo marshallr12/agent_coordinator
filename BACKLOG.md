@@ -1,5 +1,12 @@
 # Implementation backlog
 
+Execution instruction: complete the remaining items sequentially. The main agent
+reviews each item's code and validation evidence before starting the next item.
+Continue without operator review; ask only for information or access needed to
+proceed. Complete items 3 through 6.2 autonomously, including Linux acceptance.
+The operator will start Windows workstation acceptance as final item 7 after Linux acceptance; CI does
+not replace that workstation exercise.
+
 The foundation, job/worktree evidence, and reviewed completion milestones are implemented. Use
 [implementation status](docs/implementation-status.md) for precise limits.
 
@@ -24,9 +31,19 @@ Next work, preserving the original backlog numbering:
    Keep the short bootstrap snippet and returned instructions aligned with behavior.
 5. Implement consistent backups and restore authority invalidation; retention of
    24 hourly and 30 daily copies, documented off-server copying, and restore exercise.
-6. Complete Linux packaging and actual native Windows acceptance, the 20-project /
+6. Complete Linux packaging and Linux acceptance, the 20-project /
    50-session / 100,000-task load target, clock rollback handling, storage retention,
-   and two physical-workstation release testing before production deployment.
+   and Linux release testing. Keep native Windows CI checks in place.
+6.1. Add a vendor-agnostic MCP server endpoint to the service. Reuse the existing
+   authentication, session, policy, ownership, and idempotency checks; expose
+   actionable connection guidance and test protocol/client compatibility.
+6.2. Consolidate project documentation and README content into an mdBook project
+   with a coherent navigation structure, maintained source links, build checks,
+   and concise repository entry points that direct readers to the book.
+7. Final operator-initiated native Windows workstation acceptance, including
+   coordination with the Linux service/workstation. The operator will commence
+   this on a Windows machine after items 6 through 6.2; do not substitute CI for this test or
+   claim it passed before the real workstation exercise.
 
 No unrestricted task-status edit, automatic force recovery, or unverified
 completion shortcut should be added to make these milestones appear complete.

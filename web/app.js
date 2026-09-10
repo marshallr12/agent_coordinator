@@ -4,7 +4,7 @@
 
   const $ = (id) => document.getElementById(id);
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false,
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0,
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null,
     taskCursor: null, hasExtraTaskPages: false, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, pollTimer: null, lastSync: null
@@ -55,6 +55,7 @@
   const actorId = () => text(state.actor?.id || state.actor?.principal_id);
   const mutationOperation = (path, method) => {
     if (['POST', 'PUT', 'PATCH'].includes(method) && /\/projects\/[^/]+\/(workflow-policy|policy|workflow-activities\/[^/]+\/[^/]+|tasks\/[^/]+\/workflow\/reopen)$/.test(path)) return 'workflow_change';
+    if (['POST','PATCH'].includes(method) && /\/projects\/[^/]+\/(knowledge|decisions|artifacts|imports)(\/|$)/.test(path)) return 'shared_change';
     if (method === 'POST' && path === '/api/v1/resources') return 'create_resource';
     if (method === 'POST' && /\/projects\/[^/]+\/reservations\/[^/]+\/resolve$/.test(path)) return 'resolve_resource';
     if (method === 'POST' && path === '/api/v1/projects') return 'create_project';
@@ -178,6 +179,8 @@
   function signOutLocal() {
     document.querySelectorAll('dialog').forEach(dialog => dialog.close());
     state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
+    ++state.sharedSeq; state.sharedCursor = null; clear($('shared-list')); setText($('shared-freshness'), '');
+    $('context-search').reset();
     state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     clearPersistedMutation();
     setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); show($('credentials-list'), false);
@@ -195,9 +198,9 @@
 
   function showView(view) {
     state.currentView = view;
-    ['overview', 'tasks', 'task-detail', 'resources', 'admin'].forEach((name) => show($(`${name}-view`), name === view));
+    ['overview', 'tasks', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
     document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (view === 'task-detail' && button.dataset.view === 'tasks')));
-    if (view === 'tasks') $('project-select')?.focus();
+    if (view === 'tasks') { fillProjectSelect(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
   }
 
   function issuedCredentialFeedback(data) {
@@ -208,6 +211,7 @@
   }
 
   function restoredMutationCallbacks(operation, context = {}) {
+    if (operation === 'shared_change') return async (data) => { state.projectId = context.projectId || state.projectId; showView('shared'); if (context.preview) showImportPreview(data, state.projectId); else { await loadShared(); setGlobalAlert('Shared record saved.', 'success'); } };
     if (operation === 'workflow_change') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; if (state.selectedTaskId) { showView('task-detail'); await loadTaskDetail(); } else await loadTasks(); setGlobalAlert('Workflow update recorded. Inspect the current candidate and next actions.', 'success'); };
     if (operation === 'create_resource') return async () => { await loadResources(); setGlobalAlert('Resource created.', 'success'); };
     if (operation === 'resolve_resource') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; showView('task-detail'); await loadTaskDetail(); setGlobalAlert('Resolution recorded. Review the updated job and hold evidence.', 'success'); };
@@ -293,6 +297,7 @@
     add(select, el('option', '', 'Choose a project')).value = '';
     state.projects.forEach((project) => { const option = el('option', '', project.name || project.id); option.value = text(project.id); add(select, option); });
     select.value = state.projects.some((project) => text(project.id) === current) ? current : '';
+    fillSharedProject();
   }
 
   function openProject(id) { state.projectId = text(id); state.taskCursor = null; state.tasks = []; $('project-select').value = state.projectId; $('new-task-button').disabled = false; $('refresh-tasks').disabled = false; showView('tasks'); loadTasks(); }
@@ -416,7 +421,7 @@
 
   $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; await loadProjects(); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
   $('logout-button').addEventListener('click', () => startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()));
-  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') loadCredentials(); if (view === 'resources') loadResources(); }));
+  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') loadCredentials(); if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
   $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); }); });
@@ -545,6 +550,8 @@
     [['Submission', submission.id], ['Source revision', submission.candidate_revision], ['Source tree', submission.candidate_tree], ['Task revision', submission.task_revision], ['Policy revision', submission.project_policy_revision]].filter(([,value]) => value !== null && value !== undefined).forEach(([label,value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
     add(candidate, details); if (submission.handoff) add(candidate, el('p', '', submission.handoff));
     (submission.acceptance_evidence || []).forEach(item => add(candidate, el('p', '', `${item.criterion}: ${item.evidence}`)));
+    if (submission.lessons?.length) recordDetails(candidate, 'Lessons saved with this submission — original revisions', submission.lessons);
+    if (submission.artifact_ids?.length) recordDetails(candidate, 'Attached artifact IDs — inspect current availability in Knowledge & evidence', submission.artifact_ids);
     if (state.actor?.kind === 'human' && workflow.phase !== 'done' && workflow.phase !== 'revision_needed' && submission.task_id) {
       const reopen = el('button', 'button subtle', 'Reopen for revision'); reopen.type = 'button'; reopen.dataset.mutation = 'true';
       reopen.addEventListener('click', () => {
@@ -657,6 +664,187 @@
     });
   }
   $('workflow-settings').addEventListener('click', openWorkflowSettings);
+
+  function fillSharedProject() {
+    const select = $('shared-project'); clear(select);
+    add(select, el('option', '', 'Choose a project')).value = '';
+    state.projects.forEach(project => { const option = el('option', '', project.name); option.value = project.id; add(select, option); });
+    select.value = state.projectId;
+  }
+  function sharedWrite(path, body, label, method = 'POST', after = null) {
+    const projectId = state.projectId;
+    startMutation(path, body, label, async data => {
+      if (projectId !== state.projectId) return;
+      if (after) after(data); else await loadShared();
+    }, method, null, {projectId});
+  }
+  async function loadShared(append = false) {
+    const projectId = state.projectId, currentActor = actorId(), kind = $('shared-kind').value;
+    const seq = ++state.sharedSeq;
+    show($('context-search'), kind === 'context');
+    if (!append) { state.sharedCursor = null; clear($('shared-list')); }
+    show($('load-more-shared'), false);
+    if (!projectId) { setState($('shared-state'), 'Choose a project to inspect its records.'); return; }
+    if (kind === 'context' && !$('context-query').value.trim()) { setState($('shared-state'), 'Enter search text to retrieve relevant context.'); return; }
+    setState($('shared-state'), 'Loading records…', true);
+    const query = new URLSearchParams({limit:'50'});
+    if (append && state.sharedCursor) query.set('cursor', state.sharedCursor);
+    if (kind === 'context') { query.set('q', $('context-query').value); query.set('include_shared', String($('context-shared').checked)); query.set('budget', '65536'); }
+    try {
+      const page = (await request(`${projectPath(projectId)}/${kind}?${query}`)).data;
+      if (seq !== state.sharedSeq || projectId !== state.projectId || currentActor !== actorId()) return;
+      const items = listData(page);
+      items.forEach(item => renderSharedRecord(item, kind));
+      state.sharedCursor = page.next_cursor || null;
+      show($('load-more-shared'), Boolean(state.sharedCursor));
+      show($('shared-state'), !items.length && !append);
+      if (!items.length && !append) setState($('shared-state'), page.instructions_complete === false ? 'The context budget cannot include all binding rules. Increase the budget before relying on this packet.' : 'No matching records.');
+      setText($('shared-freshness'), `Read ${new Date().toLocaleTimeString()}. Refresh to inspect changes.${page.truncated ? ' Results were bounded; narrow the search for more context.' : ''}`);
+      if (kind === 'context' && page.policy?.rules !== undefined) {
+        const rules = el('details', 'card'); add(rules, el('summary', '', 'Current binding project rules')); add(rules, el('pre', '', page.policy.rules)); $('shared-list').prepend(rules);
+      }
+      renderMutationState();
+    } catch (error) { if (seq === state.sharedSeq && currentActor === actorId()) setState($('shared-state'), errorMessage(error), false, true); }
+  }
+  function recordDetails(parent, title, value) {
+    if (value === undefined || value === null) return;
+    const details = el('details'); add(details, el('summary', '', title));
+    add(details, el('pre', '', typeof value === 'string' ? value : JSON.stringify(value, null, 2))); add(parent, details);
+  }
+  function renderSharedRecord(item, kind) {
+    const record = {...(item.record || item)}, card = el('article', 'card'); record.project_id ||= record.source_project_id;
+    add(card, el('h2', '', record.title || record.question || record.display_name || record.filename || record.id));
+    add(card, el('p', 'muted', [record.kind || kind, record.status || record.availability || record.state, record.revision ? `Revision ${record.revision}` : '', record.project_id && record.project_id !== state.projectId ? `Shared from project ${record.project_id}` : ''].filter(Boolean).join(' · ')));
+    add(card, el('p', 'shared-record-body', record.body || record.snippet || record.rationale || record.summary || ''));
+    if (record.applicability) add(card, el('p', '', `Applies when: ${record.applicability}`));
+    if (record.answer) recordDetails(card, 'Recorded answer', record.answer);
+    recordDetails(card, 'Source and applicability', {id:record.id, provenance:record.provenance, scope:record.scope, source:record.source, conditions:record.conditions, affected_tasks:record.affected_tasks, expires_at:record.expires_at});
+    const actions = el('div', 'record-actions');
+    const button = (label, run, mutation = false) => { const node = el('button', 'button subtle', label); node.type = 'button'; if (mutation) node.dataset.mutation = 'true'; node.addEventListener('click', run); add(actions, node); };
+    const ownProject = !record.project_id || record.project_id === state.projectId;
+    if (['knowledge','decisions','artifacts'].includes(kind)) button('Inspect history & details', async () => {
+      const projectId = state.projectId, currentActor = actorId();
+      try { const data = (await request(`${projectPath(projectId)}/${kind}/${encodeURIComponent(record.id)}`)).data; if (projectId === state.projectId && currentActor === actorId()) { recordDetails(card, 'Full record and history', data); card.lastElementChild.open = true; } }
+      catch (error) { setGlobalAlert(errorMessage(error)); }
+    });
+    if (kind === 'knowledge' && ownProject) {
+      button('Correct lesson', () => lessonDialog(record), true);
+      button('This helped', () => sharedWrite(`${projectPath()}/knowledge/${encodeURIComponent(record.id)}/feedback`, {expected_revision:record.revision,useful:true,comment:'Marked helpful by an operator.'}, 'lesson feedback'), true);
+    }
+    if (kind === 'decisions' && ownProject && record.required_actor !== 'agent' && record.status === 'pending') button('Record answer', () => decisionAnswer(record), true);
+    if (kind === 'decisions' && ownProject && record.status !== 'pending') button('Reopen with current scope', () => reopenDecision(record), true);
+    if (kind === 'artifacts') {
+      if (record.availability === 'available' && record.kind === 'upload') { const link = el('a', 'button subtle', 'Download attachment'); link.href = `${projectPath()}/artifacts/${encodeURIComponent(record.id)}/content`; link.download = ''; add(actions, link); }
+      if (record.external_url) { try { const url = new URL(record.external_url); if (url.protocol === 'https:' && !url.username && !url.password) { const link = el('a', 'button subtle', 'Open external evidence'); link.href = url.href; link.rel = 'noopener noreferrer'; link.target = '_blank'; add(actions, link); } } catch (_) { /* Show unusable links as metadata only. */ } }
+      add(card, el('p', 'muted', `${record.size_bytes ?? 'Unknown'} bytes · ${record.sha256 || 'No content digest'}${record.kind === 'external_link' ? ' · External availability is not verified by the service.' : ''}`));
+    }
+    add(card, actions); add($('shared-list'), card);
+  }
+  function lessonDialog(existing = null) {
+    if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    const projectId = state.projectId, view = workflowDialog(existing ? 'Correct a lesson' : 'Add a lesson', 'Record what was learned, when it applies, and the evidence behind it. Lessons do not change binding project rules.');
+    view.field('title', 'Title', existing?.title || '', 'input').maxLength = 255; view.field('body', 'Lesson', existing?.body || '').maxLength = 32768;
+    view.field('applicability', 'When this applies', existing?.applicability || '').required = false;
+    view.field('summary', 'Source or reason for this correction', existing?.provenance?.summary || '');
+    const status = view.field('status', 'Evidence status', '', 'select');
+    for (const value of ['observed','validated','deprecated']) { const option = el('option', '', displayStatus(value)); option.value = value; add(status, option); } status.value = existing?.status || 'observed';
+    view.finish(existing ? 'Save correction' : 'Save lesson', (values, dialog) => {
+      const body = {title:values.get('title'),body:values.get('body'),status:values.get('status'),scope:existing?.scope || {},tags:existing?.tags || [],applicability:values.get('applicability'),provenance:{...(existing?.provenance || {}),summary:values.get('summary')}};
+      if (existing) { body.expected_revision = existing.revision; body.superseded_by_id = existing.superseded_by_id || null; } else { body.kind = 'lesson'; body.collection = 'project'; body.share_across_projects = false; }
+      dialog.close(); sharedWrite(`${projectPath(projectId)}/knowledge${existing ? `/${encodeURIComponent(existing.id)}` : ''}`, body, 'lesson', existing ? 'PATCH' : 'POST');
+    });
+  }
+  function decisionAnswer(record) {
+    const projectId = state.projectId, view = workflowDialog('Answer a scoped decision', record.question);
+    add(view.form, el('p', 'muted', `Environment: ${record.environment || 'Not specified'}. Conditions: ${record.conditions || 'Not specified'}. This answer applies only to the recorded task and policy revisions.`));
+    const disposition = view.field('disposition', 'Effect on the scoped work', '', 'select');
+    for (const [value,label] of [['defer','Keep blocked — answer later'],['deny','Keep blocked — do not proceed'],['allow','Allow work within the recorded scope']]) { const option = el('option', '', label); option.value = value; add(disposition, option); }
+    const answer = view.field('answer', 'Answer', '', 'select'); for (const value of record.options || []) { const option = el('option', '', value); option.value = value; add(answer, option); }
+    view.field('rationale', 'Reason and supporting evidence');
+    const confirmed = view.field('conditions_confirmed', 'I verified the recorded environment and conditions for allowing work', '', 'input'); confirmed.type = 'checkbox'; confirmed.required = false;
+    view.finish('Record answer', (values, dialog) => { dialog.close(); sharedWrite(`${projectPath(projectId)}/decisions/${encodeURIComponent(record.id)}/answer`, {expected_generation:record.generation,disposition:values.get('disposition'),answer:values.get('answer'),rationale:values.get('rationale'),conditions_confirmed:confirmed.checked}, 'decision answer'); });
+  }
+  function importDialog() {
+    if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    const projectId = state.projectId, view = workflowDialog('Preview Markdown import', 'Paste a bounded source section. Unchecked checklist items become planned tasks. Completed items retain closure. Ordinary prose remains historical context. Review the preview before applying.');
+    view.field('context', 'Stable source identity', '', 'input'); view.field('path', 'Source path', 'HANDOFF.md', 'input'); view.field('git_revision', 'Source Git revision', '', 'input');
+    view.field('branch', 'Source branch', '', 'input').required = false; view.field('markdown', 'Markdown source section').maxLength = 60000;
+    view.finish('Preview import', (values, dialog) => {
+      const body = {source:{context:values.get('context'),git_revision:values.get('git_revision'),observed_at:new Date().toISOString(),branch:values.get('branch'),environment:''},chunks:[{path:values.get('path'),markdown:values.get('markdown')}],historical_mappings:[]};
+      dialog.close(); startMutation(`${projectPath(projectId)}/imports/preview`, body, 'import preview', data => showImportPreview(data, projectId), 'POST', null, {projectId,preview:true});
+    });
+  }
+  async function reopenDecision(record) {
+    const projectId = state.projectId, currentActor = actorId();
+    try {
+      const [orientation, detail] = await Promise.all([request(`${projectPath(projectId)}/orientation`), request(`${projectPath(projectId)}/decisions/${encodeURIComponent(record.id)}`)]);
+      if (projectId !== state.projectId || currentActor !== actorId()) return;
+      const current = detail.data;
+      const view = workflowDialog('Reopen this decision', 'The previous answer remains in history. This opens a new question cycle for the same tasks at their current revisions. A new answer is required before work may proceed.');
+      recordDetails(view.form, 'Tasks and their current revisions', current.affected_tasks);
+      view.field('rationale', 'Why the decision needs to be revisited');
+      view.field('environment', 'Environment', current.environment || '').required = false;
+      view.field('conditions', 'Conditions', current.conditions || '').required = false;
+      const expiry = view.field('expires_at', 'Expiration, if needed', '', 'input'); expiry.type = 'datetime-local'; expiry.required = false;
+      view.finish('Reopen decision', (values, dialog) => {
+        dialog.close(); sharedWrite(`${projectPath(projectId)}/decisions/${encodeURIComponent(record.id)}/reopen`, {expected_generation:current.generation,policy_revision:orientation.data.policy_revision,affected_tasks:current.affected_tasks.map(task => ({task_id:task.task_id,task_revision:task.current_revision})),rationale:values.get('rationale'),environment:values.get('environment'),conditions:values.get('conditions'),expires_at:expiry.value ? new Date(expiry.value).getTime() : null}, 'decision reopening');
+      });
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  async function bindingRules() {
+    if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    const projectId = state.projectId, currentActor = actorId();
+    try {
+      const [orientation, history] = await Promise.all([request(`${projectPath(projectId)}/orientation`), request(`${projectPath(projectId)}/policy/history?limit=50`)]);
+      if (projectId !== state.projectId || currentActor !== actorId()) return;
+      const project = orientation.data.project;
+      const view = workflowDialog('Binding project rules', 'These instructions govern work on this project. Changing them creates a new policy revision; agents must read and acknowledge it before claiming work.');
+      view.field('rules', 'Rules', project.rules).maxLength = 32768;
+      view.field('provenance', 'Reason and supporting source').maxLength = 4096;
+      recordDetails(view.form, 'Policy history — first 50 revisions', history.data);
+      view.finish('Save binding rules', (values, dialog) => {
+        dialog.close(); startMutation(`${projectPath(projectId)}/policy`, {expected_revision:project.policy_revision,review_mode:project.review_mode,recovery_mode:project.recovery_mode,lease_seconds:project.lease_seconds,rules:values.get('rules'),provenance:values.get('provenance'),agent_rule_editing:project.agent_rule_editing,automatic_integration:project.automatic_integration}, 'binding rules', async () => { await loadProjects(); setGlobalAlert('Binding rules saved with their reason and source.', 'success'); }, 'PATCH', null, {projectId});
+      });
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  function showImportPreview(data, projectId) {
+    const preview = data.preview || data;
+    const view = workflowDialog('Review import preview', 'Apply exactly this preview. If service records change, create and review a fresh preview. Imported instructions do not change project policy.');
+    add(view.form, el('p', 'muted', `Source: ${preview.source?.context || 'Unspecified'} · ${preview.source?.branch || 'No branch'} · observed ${preview.source?.observed_at || 'Unknown'}`));
+    for (const item of preview.items || []) {
+      const card = el('article', 'shared-card');
+      add(card, el('h3', '', item.title));
+      add(card, el('p', 'muted', `${item.record_kind} · ${item.disposition} · ${item.source_path} / ${item.section_identity}`));
+      if (item.evidence) add(card, el('p', '', item.evidence));
+      add(view.form, card);
+    }
+    if (!(preview.items || []).length) add(view.form, el('p', 'muted', 'No records were proposed.'));
+    if ((preview.conflicts || []).length) add(view.form, el('p', 'alert', 'Conflicts prevent applying this preview. Inspect the details and correct the source.'));
+    if ((preview.unresolved_links || []).length) add(view.form, el('p', 'muted', 'Some source links could not be resolved; inspect them before applying.'));
+    recordDetails(view.form, 'Full source, conflicts, and record identities', preview);
+    view.finish('Apply preview', (_, dialog) => { dialog.close(); sharedWrite(`${projectPath(projectId)}/imports/${encodeURIComponent(preview.id)}/apply`, {preview_digest:preview.digest,expected_project_event_revision:preview.project_event_revision}, 'Markdown import'); });
+  }
+  async function exportSnapshot() {
+    if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    const projectId = state.projectId, currentActor = actorId();
+    try {
+      const pages = []; let cursor = null, bytes = 0;
+      do { const page = (await request(`${projectPath(projectId)}/exports?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data; if (typeof page.markdown !== 'string') throw new ApiError('The export omitted its Markdown.', 200, 'invalid_response'); bytes += new TextEncoder().encode(page.markdown).length; if (bytes > 16 * 1024 * 1024) throw new ApiError('This snapshot exceeds the browser’s 16 MiB download limit. Use the CLI to export individual pages.', 413, 'export_limit'); pages.push(page.markdown); cursor = page.next_cursor; } while (cursor);
+      if (projectId !== state.projectId || currentActor !== actorId()) return;
+      const url = URL.createObjectURL(new Blob([pages.join('\n')], {type:'text/markdown;charset=utf-8'}));
+      const link = el('a'); link.href = url; link.download = `coordinator-${projectId}.md`; add(document.body, link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setGlobalAlert('Snapshot downloaded with provenance and generated-file markers.', 'success');
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  $('shared-project').addEventListener('change', event => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; state.selectedTaskId = ''; loadShared(); });
+  $('shared-kind').addEventListener('change', () => loadShared());
+  $('refresh-shared').addEventListener('click', () => loadShared());
+  $('load-more-shared').addEventListener('click', () => loadShared(true));
+  $('context-search').addEventListener('submit', event => { event.preventDefault(); loadShared(); });
+  $('new-lesson').addEventListener('click', () => lessonDialog());
+  $('binding-rules').addEventListener('click', bindingRules);
+  $('import-markdown').addEventListener('click', importDialog);
+  $('export-markdown').addEventListener('click', exportSnapshot);
 
   restoreSession();
 })();

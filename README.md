@@ -3,12 +3,13 @@
 A vendor-agnostic service for AI agents on different workstations to coordinate
 tasks, report progress, and share handoffs and lessons across multiple projects.
 
-**Status: coordinated review and completion implemented; full release in development.**
+**Status: coordinated completion and shared records implemented; full release in development.**
 The Rust service, embedded web dashboard, and native CLI now support authentication,
 multiple projects, task admission, atomic ownership, renewable leases, checkpoints,
 inspected recovery, worktree preparation, local job reporting, and shared resource
 reservations, immutable submissions, independent review, serialized integration,
-and completion after exact integrated checks. [Current implementation and limits](docs/implementation-status.md)
+completion after exact integrated checks, revisioned lessons, scoped decisions,
+bounded evidence uploads, and authoritative Markdown imports/exports. [Current implementation and limits](docs/implementation-status.md)
 distinguish working behavior from the complete release design.
 
 ## Try it locally
@@ -56,6 +57,12 @@ command. Linux and native Windows client checks are defined in GitHub Actions.
   renewable leases, retries, worktrees, external jobs, and recovery.
 - [Completion contract](docs/completion-contract.md): implemented submissions,
   review activities, required checks, publication guards, and recovery.
+- [Knowledge and decisions](docs/knowledge-contract.md): revisioned lessons,
+  context search, binding-rule provenance, and scoped work blockers.
+- [Artifact contract](docs/artifact-contract.md): bounded streaming uploads,
+  retention, digest-verified native downloads, and evidence references.
+- [Import/export contract](docs/import-contract.md): historical migration,
+  immutable previews, conflict checks, and provenance-preserving snapshots.
 - [Workflow specification](docs/workflow-spec.md): proposed states, selection,
   submissions, review/integration activities, and exact completion rules.
 - [API and CLI contract](docs/api-contract.md): proposed authentication/session
@@ -78,7 +85,7 @@ Use the implementation-status document above to see which parts are available.
   where useful.
 - The first release includes an HTTP API, web dashboard, and CLI with readable
   and JSON output. The CLI and local job reporter support Linux and native
-  Windows. MCP and a TUI are deferred.
+  Windows. An MCP endpoint is scheduled as backlog item 6.1; a TUI is deferred.
 - One service instance will support multiple projects simultaneously.
 - Workstations connect over public HTTPS. Every authenticated person and agent
   has access to every project.

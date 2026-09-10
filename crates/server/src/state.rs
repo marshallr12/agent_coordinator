@@ -17,6 +17,9 @@ pub struct Config {
     pub listen: SocketAddr,
     pub public_origin: String,
     pub allow_insecure_loopback: bool,
+    pub json_body_limit_bytes: usize,
+    pub artifact_quota_bytes: i64,
+    pub artifact_disk_reserve_bytes: u64,
 }
 
 impl Default for Config {
@@ -26,12 +29,27 @@ impl Default for Config {
             listen: "127.0.0.1:8080".parse().unwrap(),
             public_origin: "https://localhost".into(),
             allow_insecure_loopback: false,
+            json_body_limit_bytes: 1024 * 1024,
+            artifact_quota_bytes: 10 * 1024 * 1024 * 1024,
+            artifact_disk_reserve_bytes: 256 * 1024 * 1024,
         }
     }
 }
 
 impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1024..=1024 * 1024).contains(&self.json_body_limit_bytes),
+            "json_body_limit_bytes must be 1024 through 1048576."
+        );
+        anyhow::ensure!(
+            self.artifact_quota_bytes > 0,
+            "artifact_quota_bytes must be positive."
+        );
+        anyhow::ensure!(
+            self.artifact_disk_reserve_bytes >= 16 * 1024 * 1024,
+            "artifact_disk_reserve_bytes must retain at least 16 MiB."
+        );
         anyhow::ensure!(
             self.listen.ip().is_loopback(),
             "The service listener must be loopback; expose HTTPS through the reverse proxy."

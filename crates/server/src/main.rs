@@ -36,6 +36,12 @@ struct Options {
     public_origin: String,
     #[arg(long, env = "COORDINATOR_ALLOW_INSECURE_LOOPBACK", global = true)]
     allow_insecure_loopback: bool,
+    #[arg(long, env = "COORDINATOR_JSON_BODY_LIMIT_BYTES", default_value_t = 1024 * 1024, global = true)]
+    json_body_limit_bytes: usize,
+    #[arg(long, env = "COORDINATOR_ARTIFACT_QUOTA_BYTES", default_value_t = 10 * 1024 * 1024 * 1024, global = true)]
+    artifact_quota_bytes: i64,
+    #[arg(long, env = "COORDINATOR_ARTIFACT_DISK_RESERVE_BYTES", default_value_t = 256 * 1024 * 1024, global = true)]
+    artifact_disk_reserve_bytes: u64,
     #[command(subcommand)]
     command: Command,
 }
@@ -65,6 +71,9 @@ async fn main() -> anyhow::Result<()> {
         listen: options.listen,
         public_origin: options.public_origin,
         allow_insecure_loopback: options.allow_insecure_loopback,
+        json_body_limit_bytes: options.json_body_limit_bytes,
+        artifact_quota_bytes: options.artifact_quota_bytes,
+        artifact_disk_reserve_bytes: options.artifact_disk_reserve_bytes,
     };
     let state = AppState::open(config).await?;
     match options.command {
@@ -105,6 +114,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Serve => {
             let listener = tokio::net::TcpListener::bind(state.config.listen).await?;
+            coordinator_server::artifacts::reconcile_store(&state)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("Artifact store initialization failed: {}", error.code)
+                })?;
             tracing::info!(listen = %state.config.listen, "Agent Coordinator service started");
             axum::serve(listener, router(state).into_make_service())
                 .with_graceful_shutdown(shutdown())

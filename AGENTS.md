@@ -9,6 +9,8 @@ the repository and never print tokens, proofs, passwords, request headers, or SQ
 bind values. Do not enable remote execution by the service.
 
 For concurrent implementation, assign disjoint files and separate Git worktrees.
+Use a separate Cargo target directory inside each worktree; concurrent builds
+from different source trees must not share compiled crate metadata.
 Integrate one reviewed commit at a time. Preserve other worktrees and uncommitted
 changes. Use smaller subagents for bounded tasks when appropriate.
 

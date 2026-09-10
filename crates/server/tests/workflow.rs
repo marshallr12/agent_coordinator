@@ -161,12 +161,12 @@ impl Fixture {
         v["data"].clone()
     }
     async fn ack(&self, c: &Caller, p: &str, policy: i64) {
-        let (s,v)=self.call(c,"POST",&format!("/api/v1/sessions/{}/instruction-acknowledgments",c.session),json!({"project_id":p,"policy_revision":policy,"instruction_version":"3","sections":["coordination-v3"]})).await;
+        let (s,v)=self.call(c,"POST",&format!("/api/v1/sessions/{}/instruction-acknowledgments",c.session),json!({"project_id":p,"policy_revision":policy,"instruction_version":"4","sections":["coordination-v4"]})).await;
         assert_eq!(s, StatusCode::OK, "{v}");
     }
     async fn claim(&self, c: &Caller, p: &str, t: &Value, policy: i64) -> Value {
         self.ack(c, p, policy).await;
-        let (s,v)=self.call(c,"POST",&format!("/api/v1/projects/{p}/claims"),json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":"work","policy_revision":policy,"instruction_version":"3"})).await;
+        let (s,v)=self.call(c,"POST",&format!("/api/v1/projects/{p}/claims"),json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":"work","policy_revision":policy,"instruction_version":"4"})).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         v["data"]["claim"]["attempt"].clone()
     }
@@ -343,7 +343,129 @@ async fn general_submission_requires_an_independent_reviewer_and_then_completes(
 }
 
 const BASE: &str = "1111111111111111111111111111111111111111";
+
+#[tokio::test]
+async fn submission_lessons_and_artifact_references_commit_together_or_not_at_all() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("shared-submission", "https://example.test/shared.git")
+        .await;
+    let t = f.task(&p, "general", "Preserve useful evidence").await;
+    let owner = f.claim(&f.a, &p, &t, 1).await;
+    let path = format!(
+        "/api/v1/projects/{p}/attempts/{}/submissions",
+        owner["id"].as_str().unwrap()
+    );
+    let mut body = json!({"generation":owner["generation"],"task_revision":t["revision"],
+        "project_policy_revision":1,"workflow_policy_revision":0,"kind":"general",
+        "summary":"candidate with durable knowledge","acceptance_evidence":[{"criterion":"required behavior verified","evidence":"observed directly"}],
+        "handoff":"Continue from the attached evidence",
+        "lessons":[{"kind":"lesson","title":"Keep producer identity","body":"A missing observer is not a failed producer.","status":"observed","scope":{},"provenance_summary":"Learned while validating this task"}],
+        "artifact_ids":["missing-artifact"]});
+    let (status, _) = f.call(&f.a, "POST", &path, body.clone()).await;
+    assert!(status.is_client_error());
+    for query in [
+        "SELECT count(*) FROM submissions",
+        "SELECT count(*) FROM knowledge_records",
+    ] {
+        let count: i64 = sqlx::query_scalar(query)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "failed submission left records: {query}");
+    }
+    let active: String = sqlx::query_scalar("SELECT state FROM attempts WHERE id=?")
+        .bind(owner["id"].as_str().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(active, "active");
+    let (status, artifact) = f.call(&f.a, "POST", &format!("/api/v1/projects/{p}/artifacts"),
+        json!({"display_name":"Producer report","media_type":"text/plain","external_url":"https://example.test/report","task_id":t["id"]})).await;
+    assert_eq!(status, StatusCode::OK, "{artifact}");
+    let artifact_id = artifact
+        .pointer("/data/id")
+        .or_else(|| artifact.pointer("/data/artifact/id"))
+        .unwrap()
+        .clone();
+    body["artifact_ids"] = json!([artifact_id]);
+    let key = "atomic-shared-submission";
+    let (status, submitted) = call(f.app.clone(), &f.a, "POST", &path, key, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{submitted}");
+    let (status, replay) = call(f.app.clone(), &f.a, "POST", &path, key, body).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(submitted["data"], replay["data"]);
+    let knowledge: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge_records")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let links: i64 = sqlx::query_scalar("SELECT count(*) FROM submission_artifacts")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!((knowledge, links), (1, 1));
+    assert_eq!(
+        submitted["data"]["submission"]["artifact_ids"],
+        json!([artifact_id])
+    );
+    assert_eq!(
+        submitted["data"]["submission"]["lesson_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 const BASE_TREE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[tokio::test]
+async fn a_pending_subject_decision_blocks_review_completion_but_allows_saving_work() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("scoped-review", "https://example.test/decision.git")
+        .await;
+    let t = f.task(&p, "general", "Scoped deliverable").await;
+    let owner = f.claim(&f.a, &p, &t, 1).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
+        .await;
+    let review = activity(&submitted, "agent_review");
+    let (status, claimed) = f.claim_activity(&f.b, &p, review, 1, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let attempt = &claimed["data"]["attempt"];
+    let (status, decision) = f.call(&f.a, "POST", &format!("/api/v1/projects/{p}/decisions"), json!({
+        "question":"May this deliverable proceed?","options":["Proceed","Wait"],"rationale":"Confirm the environment before completion",
+        "required_actor":"human","affected_tasks":[{"task_id":t["id"],"task_revision":t["revision"]}],
+        "policy_revision":1,"environment":"test","conditions":"Operator checked the target","expires_at":null
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{decision}");
+    let review_path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/review",
+        review["id"].as_str().unwrap()
+    );
+    let review_body = json!({"generation":attempt["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Evidence checked","findings":[]});
+    let (status, blocked) = f
+        .call(&f.b, "POST", &review_path, review_body.clone())
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    assert_eq!(blocked["error"]["code"], "decision_required");
+    let (status, checkpoint) = f.call(&f.b, "POST", &format!("/api/v1/projects/{p}/attempts/{}/checkpoints", attempt["id"].as_str().unwrap()), json!({"generation":attempt["generation"],"summary":"Waiting for operator decision","current_action":"Saving review findings","next_step":"Resume after scoped approval","blockers":["Pending decision"]})).await;
+    assert_eq!(status, StatusCode::OK, "{checkpoint}");
+    let answer_path = format!(
+        "/api/v1/projects/{p}/decisions/{}/answer",
+        decision["data"]["id"].as_str().unwrap()
+    );
+    let answer = json!({"expected_generation":1,"disposition":"allow","answer":"Proceed","rationale":"Target inspected","conditions_confirmed":true});
+    let (status, _) = f.call(&f.b, "POST", &answer_path, answer.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, answered) = f.call(&f.admin, "POST", &answer_path, answer).await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    let (status, done) = f.call(&f.b, "POST", &review_path, review_body).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["data"]["work_status"], "done");
+}
+
 const CANDIDATE: &str = "2222222222222222222222222222222222222222";
 const TREE: &str = "3333333333333333333333333333333333333333";
 const RESULT: &str = "4444444444444444444444444444444444444444";
@@ -594,4 +716,62 @@ async fn changes_requested_revokes_a_concurrent_review_without_losing_history() 
             .unwrap(),
         1
     );
+}
+
+#[tokio::test]
+async fn next_selection_skips_decision_blocked_work() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("decision-selection", "https://example.test/selection.git")
+        .await;
+    let blocked = f.task(&p, "general", "Needs an answer").await;
+    let ready = f.task(&p, "general", "May proceed").await;
+    let (status, decision) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("/api/v1/projects/{p}/decisions"),
+            json!({
+                "question":"May the protected task proceed?", "options":["Proceed","Wait"],
+                "rationale":"An operator must inspect the environment", "required_actor":"human",
+                "affected_tasks":[{"task_id":blocked["id"],"task_revision":blocked["revision"]}],
+                "policy_revision":1,"environment":"test","conditions":"Environment inspected"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{decision}");
+    f.ack(&f.a, &p, 1).await;
+    let (status, orientation) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/orientation"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{orientation}");
+    let candidates = orientation["data"]["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["id"], ready["id"]);
+    let mut input = json!({"task_id":blocked["id"],"expected_task_revision":blocked["revision"],"mode":"work","policy_revision":1,"instruction_version":"4"});
+    let (status, refusal) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("/api/v1/projects/{p}/claims"),
+            input.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["error"]["code"], "decision_required");
+    input.as_object_mut().unwrap().remove("task_id");
+    input
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_task_revision");
+    let (status, claimed) = f
+        .call(&f.a, "POST", &format!("/api/v1/projects/{p}/claims"), input)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["data"]["claim"]["attempt"]["task_id"], ready["id"]);
 }
