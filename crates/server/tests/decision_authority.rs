@@ -29,6 +29,9 @@ impl Clock for TestClock {
     fn now_ms(&self) -> i64 {
         self.0.load(Ordering::SeqCst)
     }
+    fn use_monotonic_elapsed(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]
