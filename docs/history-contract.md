@@ -64,14 +64,16 @@ this insertion cutoff. It is not an immutable state snapshot: durable rows that
 the service permits to change may show their newer values on later pages.
 
 The cursor is versioned and bound to the project, requested task, history kind,
-cutoff, and last row. Reusing it with another project, task, kind, or snapshot
+cutoff, last row, and service cursor epoch. Reusing it with another project, task, kind, or snapshot
 returns conflict code `history_cursor_mismatch`. Malformed cursors return a bad
 request.
 
-Version 1 cursors rely on SQLite row identifiers remaining stable. Retention,
-backup, and maintenance procedures must not run an in-place `VACUUM` while old
-history cursors remain valid. A future maintenance design that can rewrite row
-identifiers must invalidate outstanding cursors with a cursor epoch.
+Version 2 cursors include the service cursor epoch, which rotates before restored
+data is published. A cursor from before restore is rejected; restart the history
+query. Version 1 cursors from earlier service releases must also be replaced.
+Backup uses `VACUUM INTO` on a separate image and leaves live row identifiers
+unchanged. Maintenance must not run an in-place `VACUUM` while cursors remain
+valid; any procedure that rewrites row identifiers must rotate the cursor epoch.
 
 ## Sensitive fields
 

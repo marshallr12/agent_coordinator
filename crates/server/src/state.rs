@@ -1,5 +1,5 @@
 use sqlx::{
-    ConnectOptions, SqlitePool,
+    ConnectOptions, Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{
@@ -111,8 +111,29 @@ impl AppState {
         self.clock.now_ms()
     }
     pub async fn open(config: Config) -> anyhow::Result<Self> {
+        Self::open_internal(config, true).await
+    }
+
+    /// Open a current installation for backup without creating or migrating it.
+    pub async fn open_existing_read_only(config: Config) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.database_path.is_file(),
+            "Backup requires an existing database file."
+        );
+        Self::open_internal(config, false).await
+    }
+
+    async fn open_internal(config: Config, initialize: bool) -> anyhow::Result<Self> {
         config.validate()?;
-        if config.database_path != std::path::Path::new(":memory:") {
+        if config.database_path != std::path::Path::new(":memory:")
+            && let Ok(metadata) = std::fs::symlink_metadata(&config.database_path)
+        {
+            anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "Database path must be a regular file."
+            );
+        }
+        if initialize && config.database_path != std::path::Path::new(":memory:") {
             if let Some(parent) = config
                 .database_path
                 .parent()
@@ -126,12 +147,6 @@ impl AppState {
                     builder.mode(0o700);
                 }
                 builder.create(parent)?;
-            }
-            if let Ok(metadata) = std::fs::symlink_metadata(&config.database_path) {
-                anyhow::ensure!(
-                    metadata.is_file() && !metadata.file_type().is_symlink(),
-                    "Database path must be a regular file."
-                );
             }
             let mut file = std::fs::OpenOptions::new();
             file.create(true).append(true);
@@ -150,7 +165,8 @@ impl AppState {
         }
         let options = SqliteConnectOptions::new()
             .filename(&config.database_path)
-            .create_if_missing(true)
+            .create_if_missing(initialize)
+            .read_only(!initialize)
             .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
@@ -166,7 +182,11 @@ impl AppState {
             )
             .connect_with(options)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        if initialize {
+            sqlx::migrate!("./migrations").run(&pool).await?;
+        } else {
+            validate_current_schema(&pool).await?;
+        }
         let dummy_password_hash = crate::auth::hash_password(crate::auth::secret()).await?;
         Ok(Self {
             pool,
@@ -177,6 +197,38 @@ impl AppState {
             dummy_password_hash: Arc::new(dummy_password_hash),
         })
     }
+}
+
+/// A backup command must never upgrade the database of a running older server.
+/// Require this executable's exact successful migration set before reading it.
+pub async fn validate_current_schema(pool: &SqlitePool) -> anyhow::Result<()> {
+    let migrator = sqlx::migrate!("./migrations");
+    let expected = migrator
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .collect::<Vec<_>>();
+    let applied =
+        sqlx::query("SELECT version,success,checksum FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Database schema is unavailable; use the matching service executable."
+                )
+            })?;
+    anyhow::ensure!(
+        applied.len() == expected.len(),
+        "Database schema differs from this executable; use the matching service version."
+    );
+    for (row, migration) in applied.iter().zip(expected) {
+        anyhow::ensure!(
+            row.get::<i64, _>("version") == migration.version
+                && row.get::<bool, _>("success")
+                && row.get::<Vec<u8>, _>("checksum").as_slice() == migration.checksum.as_ref(),
+            "Database migration history differs from this executable; use the matching service version."
+        );
+    }
+    Ok(())
 }
 
 /// Monotonic time avoids clock adjustments bypassing limits. The global budget

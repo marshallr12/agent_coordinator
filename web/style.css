@@ -180,3 +180,9 @@ textarea { min-height: 108px; resize: vertical; }
 #shared-view .toolbar { flex-wrap: wrap; }
 
 #admin-content > .card { margin-bottom: 15px; }
+#restore-status > .button { margin: 0 8px 10px 0; }
+.credential-row > :first-child { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 620px) {
+  .credential-row { flex-wrap: wrap; }
+  .credential-row > :first-child { flex-basis: 100%; }
+}

@@ -35,9 +35,14 @@ native commands. Main-agent review and all 129 local tests, Clippy, build, smoke
 and browser checks passed. Linux/native-Windows CI and the dependency audit
 passed; evidence is linked in the handoff.
 
+Completed item 5: verified consistent SQLite/artifact snapshots, 24 hourly and
+30 daily retention buckets, documented off-server copying, fresh-directory restore,
+old-authority invalidation, and an explicit operator reconciliation checklist.
+Main-agent review, all 140 workspace tests, Clippy, build, both smoke exercises,
+and browser verification passed. The disposable restore took 6.9 seconds; this
+does not establish production-size recovery or off-server protection.
+
 Next work, preserving the original backlog numbering:
-5. Implement consistent backups and restore authority invalidation; retention of
-   24 hourly and 30 daily copies, documented off-server copying, and restore exercise.
 6. Complete Linux packaging and Linux acceptance, the 20-project /
    50-session / 100,000-task load target, clock rollback handling, storage retention,
    and Linux release testing. Keep native Windows CI checks in place.

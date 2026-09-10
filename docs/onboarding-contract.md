@@ -76,8 +76,8 @@ The final hostname and production Linux distribution are installation inputs,
 not project IDs or assumptions embedded in application code. The test baseline
 is Ubuntu 24.04 LTS on x86_64 with 2 CPU cores and 4 GB RAM.
 
-Provide a database-aware backup command suitable for a systemd timer, based on
-[SQLite's online backup facility](https://sqlite.org/backup.html). Do not document
+Provide a database-aware backup command suitable for a systemd timer, using
+[SQLite's supported online snapshot facilities](https://sqlite.org/backup.html). Do not document
 copying only a live database file while ignoring its WAL. The operator selected
 hourly backups, 24 hourly and 30 daily retained copies, documented off-server
 copying, and a one-hour restore target.
@@ -107,14 +107,15 @@ artifact bytes while the snapshot is being assembled: artifact deletion/garbage
 collection must respect the active backup hold. Do not keep a database writer
 transaction open while copying files.
 
-Store immutable artifact blobs by digest within the backup repository so retained
-snapshots can share identical bytes. Each snapshot has its own database image,
+Store a complete immutable artifact copy within each snapshot directory. The
+first release favors independently verifiable and transferable bundles; shared
+blob deduplication is deferred and storage sizing must include full retained copies.
+Each snapshot has its own database image,
 manifest, schema/service versions, timestamps, digests, and completion marker.
 Only publish the completion marker after database integrity and all referenced
 file digests are verified. A partial snapshot is never counted as a usable backup.
-Retain the most recent 24 hourly snapshots plus one successful snapshot for each
-of the most recent 30 days. Prune shared blobs only when no retained snapshot
-references them. Insufficient space or a failed backup leaves prior usable
+Retain the newest snapshot from each of the most recent 24 hourly buckets plus one successful snapshot for each
+of the most recent 30 days. Prune only complete snapshot directories outside the retention set. Insufficient space or a failed backup leaves prior usable
 snapshots intact and raises a visible operator alert.
 
 Document copying the completed backup repository to an operator-selected server

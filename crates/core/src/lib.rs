@@ -13,8 +13,8 @@ pub use artifacts::*;
 pub mod workflow;
 pub use workflow::*;
 
-pub const INSTRUCTION_VERSION: &str = "5";
-pub const REQUIRED_SECTION: &str = "coordination-v5";
+pub const INSTRUCTION_VERSION: &str = "6";
+pub const REQUIRED_SECTION: &str = "coordination-v6";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

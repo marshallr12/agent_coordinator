@@ -62,6 +62,8 @@
     if (method === 'POST' && /\/admin\/credentials\/[^/]+\/rotate$/.test(path)) return 'rotate_credential';
     if (method === 'POST' && path === '/api/v1/admin/operators') return 'create_operator';
     if (method === 'POST' && path === '/api/v1/auth/password') return 'change_password';
+    if (method === 'POST' && path.startsWith('/api/v1/admin/restore/')) return 'restore_change';
+    if (method === 'POST' && /\/admin\/agents\/[^/]+\/credentials$/.test(path)) return 'rotate_credential';
     if (method === 'POST' && path === '/api/v1/resources') return 'create_resource';
     if (method === 'POST' && /\/projects\/[^/]+\/reservations\/[^/]+\/resolve$/.test(path)) return 'resolve_resource';
     if (method === 'POST' && path === '/api/v1/projects') return 'create_project';
@@ -192,7 +194,7 @@
     $('context-search').reset();
     state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
-    setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('task-operator-actions')); show($('credentials-list'), false);
+    setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('restore-status')); clear($('restore-requirements')); clear($('task-operator-actions')); show($('credentials-list'), false);
     if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null;
     show($('dashboard-view'), false); show($('loading-view'), false); show($('login-view'), true);
     $('login-form')?.reset(); $('username')?.focus();
@@ -220,6 +222,7 @@
   }
 
   function restoredMutationCallbacks(operation, context = {}) {
+    if (operation === 'restore_change') return async () => { await loadRestore(); setGlobalAlert('Restore reconciliation recorded.', 'success'); };
     if (operation === 'create_operator') return async () => { await loadOperators(); setGlobalAlert('Operator account created.', 'success'); };
     if (operation === 'change_password') return async () => { signOutLocal(); showLoginError('Password changed. Sign in with your new password.'); };
     if (operation === 'operator_work') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || ''; if (state.selectedTaskId) { showView('task-detail'); await loadTaskDetail(); } else { showView('tasks'); await loadTasks(); } setGlobalAlert('Update recorded. Inspect the current task and ownership.', 'success'); };
@@ -430,14 +433,35 @@
     catch (error) { if (!silent) setState($('credentials-state'), errorMessage(error), false, true); } finally { state.fetching.delete('credentials'); }
   }
 
-  function renderCredentials() { const target = $('credentials-list'); clear(target); if (!state.credentials.length) { show(target, false); setState($('credentials-state'), 'No agent credentials have been issued.', false); return; } show($('credentials-state'), false); show(target, true); state.credentials.forEach((credential) => { const row = el('div', 'credential-row'); const info = el('div'); add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}`)); add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`)); if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`)); add(row, info); if (!credential.revoked_at) { const rotate = actionButton('Rotate', () => rotateCredential(credential)); add(row, rotate); const revoke = el('button', 'button danger', 'Revoke'); revoke.type = 'button'; revoke.dataset.mutation = 'true'; revoke.addEventListener('click', () => revokeCredential(credential.id)); add(row, revoke); } add(target, row); }); renderMutationState(); }
+  function renderCredentials() {
+    const target = $('credentials-list'); clear(target);
+    if (!state.credentials.length) { show(target, false); setState($('credentials-state'), 'No agent credentials have been issued.', false); return; }
+    show($('credentials-state'), false); show(target, true);
+    const offeredReplacement = new Set();
+    state.credentials.forEach(credential => {
+      const row = el('div', 'credential-row'), info = el('div');
+      add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}`));
+      add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`));
+      if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`));
+      add(row, info);
+      if (!credential.revoked_at) {
+        add(row, actionButton('Rotate', () => rotateCredential(credential)));
+        const revoke = actionButton('Revoke', () => revokeCredential(credential.id)); revoke.className = 'button danger'; add(row, revoke);
+      } else if (credential.principal_id && !offeredReplacement.has(credential.principal_id)) {
+        offeredReplacement.add(credential.principal_id);
+        add(row, actionButton('New token for this agent', () => replaceAgentCredential(credential)));
+      }
+      add(target, row);
+    });
+    renderMutationState();
+  }
   function revokeCredential(id) { startMutation(`/api/v1/admin/credentials/${encodeURIComponent(id)}/revoke`, {}, 'credential revocation', async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); }); }
 
   function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = setInterval(() => { if (!state.actor || state.mutation) return; if (state.currentView === 'overview') loadProjects(true); else if (state.currentView === 'tasks') loadTasks(true); else if (state.currentView === 'task-detail') loadTaskDetail(true); else if (state.currentView === 'admin') loadCredentials(true); else if (state.currentView === 'resources' && !state.resourcePagesExtended) loadResources(true); }, 5000); }
 
   $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
   $('logout-button').addEventListener('click', () => startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()));
-  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
+  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
   $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); }); });
@@ -591,7 +615,7 @@
       if (activity.hold) add(entry, el('p', '', `Target hold: ${displayStatus(activity.hold.state)} · ${activity.hold.canonical_repository_key} · ${activity.hold.target_branch}`));
       if (activity.publication_reconciliation) add(entry, el('p', '', `Reconciled ${displayStatus(activity.publication_reconciliation.disposition)}: ${activity.publication_reconciliation.evidence}`));
       (activity.result?.check_job_ids || []).forEach(id => add(entry, el('p', 'muted', `Check producer: ${id}`)));
-      if (activity.authorization) add(entry, el('p', '', `Human authorization: ${activity.authorization.summary}`));
+      if (activity.authorization) add(entry, el('p', '', `${activity.authorization.valid === false ? 'Invalidated authorization' : 'Human authorization'}: ${activity.authorization.summary}`));
       const action = (label, callback) => { const button = el('button', 'button subtle', label); button.type = 'button'; button.dataset.mutation = 'true'; button.addEventListener('click', callback); add(entry, button); };
       if (state.actor?.kind === 'human' && !['done','completed','canceled'].includes(activity.status)) {
         if (activity.kind === 'human_review' && !(workflow.blockers || []).length) {
@@ -600,7 +624,7 @@
           else if (!current) action('Claim human review', () => workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/claim`, {expected_submission_id: submission.id, expected_project_policy_revision: submission.project_policy_revision, expected_workflow_policy_revision: submission.workflow_policy_revision}, 'review claim', response => openHumanReview(activity, submission, response.attempt)));
         }
         if (activity.kind === 'integration') {
-          if (!activity.authorization && !(workflow.blockers || []).length && workflow.phase === 'integration' && state.projects.find(project => text(project.id) === state.projectId)?.automatic_integration === false) action('Authorize integration', () => openIntegrationAuthorization(activity, submission));
+          if ((!activity.authorization || activity.authorization.valid === false) && !(workflow.blockers || []).length && workflow.phase === 'integration' && state.projects.find(project => text(project.id) === state.projectId)?.automatic_integration === false) action('Authorize integration', () => openIntegrationAuthorization(activity, submission));
           if (activity.intent && !activity.publication_reconciliation) action('Reconcile publication', () => openPublicationReconciliation(activity, submission));
         }
       }
@@ -1146,6 +1170,63 @@
   $('account-button').addEventListener('click',myAccount);
   $('new-operator-button').addEventListener('click',createOperator);
   $('refresh-operators').addEventListener('click',() => loadOperators());
+
+  let restoreSequence = 0;
+  async function loadRestore(cursor = null) {
+    if (state.actor?.role !== 'admin') return;
+    const currentActor = actorId(), sequence = ++restoreSequence;
+    const target = $('restore-status'), list = $('restore-requirements');
+    try {
+      const data = (await request(`/api/v1/admin/restore?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
+      if (sequence !== restoreSequence || currentActor !== actorId()) return;
+      if (!cursor) { clear(target); clear(list); }
+      const service = data.service_state, restoreId = service.restore_id;
+      if (!cursor) {
+        add(target, el('p', '', service.coordination_state === 'restore_reconciliation'
+          ? 'Coordination is paused after restore. Inspect preserved holds, stop the old installation, and reconcile work since the snapshot before resuming.'
+          : 'Coordination is enabled. Task ownership and physical resource checks still apply.'));
+        if (data.restore) {
+          add(target, el('p', 'muted', `${data.restore.inspected}/${data.restore.required_inspections} preserved holds inspected · Old installation ${data.restore.old_installation_fenced ? 'fenced' : 'not yet confirmed stopped'} · Snapshot gap ${data.restore.post_snapshot_gap_reconciled ? 'reconciled' : 'not yet reconciled'}`));
+          recordDetails(target, 'Restore record and reconciliation evidence', data.restore);
+        }
+        if (service.coordination_state === 'restore_reconciliation') {
+          if (!data.restore?.old_installation_fenced) add(target, actionButton('Record old installation stopped', () => restoreEvidence(restoreId, 'old-installation-fenced', 'Old installation stopped', 'Record how the original service was stopped or fenced so it cannot grant competing ownership.')));
+          if (!data.restore?.post_snapshot_gap_reconciled) add(target, actionButton('Record work since the snapshot', () => restoreEvidence(restoreId, 'post-snapshot-gap', 'Reconcile the snapshot gap', 'Compare source checkpoints, publications, jobs, and completed work after the snapshot. Record what was lost, recovered, or remains uncertain.')));
+          add(target, actionButton('Resume coordination', () => restoreEvidence(restoreId, 'finish', 'Resume coordination after restore', 'Every preserved hold must have an inspection record, and both installation fencing and the snapshot gap must be documented. Resuming does not release any physical or integration hold.', true)));
+        }
+      }
+      list.querySelector('[data-more-restore]')?.remove();
+      for (const requirement of data.items || []) {
+        const row = add(list, el('div', 'shared-card'));
+        recordDetails(row, `${displayStatus(requirement.kind)} · ${requirement.target_id} · ${requirement.inspected ? 'Inspected' : 'Needs inspection'}`, requirement);
+        const evidenceTask = requirement.detail?.task_id || requirement.detail?.subject_task_id || requirement.detail?.activity_task_id;
+        if (evidenceTask && requirement.project_id) add(row, actionButton('Open task evidence', () => { state.projectId = requirement.project_id; openTask(evidenceTask); }, false));
+        if (service.coordination_state === 'restore_reconciliation' && !requirement.inspected) add(row, actionButton('Record inspection', () => {
+          const view = workflowDialog('Inspect preserved hold', 'Check the actual workstation, producer, resource, or Git target. This record documents inspection; it does not stop a job, release a hold, or invent a result.');
+          recordDetails(view.form, 'Preserved hold', requirement);
+          selectField(view, 'disposition', 'Observed disposition', 'unknown', [['unknown','Still uncertain'],['held','Still held'],['released','Release was independently verified']]);
+          view.field('evidence', 'Inspection evidence').maxLength = 4096;
+          view.finish('Save inspection', (values, dialog) => { dialog.close(); startMutation('/api/v1/admin/restore/inspections', {restore_id:restoreId,kind:requirement.kind,target_id:requirement.target_id,disposition:values.get('disposition'),evidence:values.get('evidence')}, 'restore inspection', restoredMutationCallbacks('restore_change')); });
+        }));
+      }
+      if (data.next_cursor) { const more = actionButton('Load more preserved holds', () => { more.disabled = true; loadRestore(data.next_cursor); }, false); more.dataset.moreRestore = 'true'; add(list, more); }
+      renderMutationState();
+    } catch (error) { if (sequence === restoreSequence && currentActor === actorId()) { setGlobalAlert(errorMessage(error)); list.querySelector('[data-more-restore]')?.removeAttribute('disabled'); } }
+  }
+  function restoreEvidence(restoreId, action, title, explanation, finish = false) {
+    const view = workflowDialog(title, explanation);
+    view.field('evidence', finish ? 'Reason to resume' : 'Evidence').maxLength = finish ? 2000 : 4096;
+    view.finish(finish ? 'Record reconciliation and resume' : 'Save evidence', (values, dialog) => {
+      dialog.close(); const body = {restore_id:restoreId}; body[finish ? 'reason' : 'evidence'] = values.get('evidence');
+      startMutation(`/api/v1/admin/restore/${action}`, body, 'restore reconciliation', restoredMutationCallbacks('restore_change'));
+    });
+  }
+  function replaceAgentCredential(credential) {
+    const view = workflowDialog('New credential for an existing agent', 'This issues a fresh token while preserving the agent identity and contributor history. Existing revoked tokens remain invalid. The new secret is displayed once.');
+    view.field('name','Credential name','after-recovery','input').maxLength = 100;
+    view.finish('Issue new token', (values, dialog) => { dialog.close(); startMutation(`/api/v1/admin/agents/${encodeURIComponent(credential.principal_id)}/credentials`, {name:values.get('name')}, 'credential replacement', restoredMutationCallbacks('rotate_credential')); });
+  }
+  $('refresh-restore').addEventListener('click', () => loadRestore());
 
   restoreSession();
 })();

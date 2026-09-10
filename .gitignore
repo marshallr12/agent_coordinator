@@ -45,6 +45,7 @@ credentials.toml
 *.sqlite3-journal
 *.sqlite3-shm
 *.sqlite3-wal
+*.sqlite3.artifacts/
 
 # Local agent worktrees; shared agent guidance and memory remain versioned.
 /.worktrees/

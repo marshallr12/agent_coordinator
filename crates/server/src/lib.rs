@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod auth;
+pub mod backup;
 pub mod coordination;
 pub mod error;
 pub mod history;
@@ -9,6 +10,7 @@ pub mod knowledge;
 pub mod mutation;
 pub mod objectives;
 pub mod operator_access;
+pub mod restore;
 pub mod state;
 pub mod workflow;
 
@@ -42,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .merge(history::routes())
         .merge(objectives::routes())
         .merge(operator_access::routes())
+        .merge(restore::routes())
         .route(
             "/healthz",
             get(|| async { response(json!({"status":"ok"})) }),
@@ -172,9 +175,9 @@ fn asset(content_type: &'static str, body: &'static str) -> Response {
 async fn info() -> Json<Value> {
     response(
         json!({"product":"Agent Coordinator","version":env!("CARGO_PKG_VERSION"),"api_version":"v1","instruction_version":coordinator_core::INSTRUCTION_VERSION,
-        "implementation_stage":"operator_workflows","authentication_help":"/api/v1/help/authentication",
-        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events","submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","operator_accounts","password_change","browser_session_revocation","agent_token_rotation","objectives","task_history"],
-        "unavailable_features":["backup_restore"]}),
+        "implementation_stage":"backup_restore","authentication_help":"/api/v1/help/authentication",
+        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events","submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","operator_accounts","password_change","browser_session_revocation","agent_token_rotation","objectives","task_history","backup_restore","restore_reconciliation"],
+        "unavailable_features":[]}),
     )
 }
 async fn authentication_help() -> Json<Value> {

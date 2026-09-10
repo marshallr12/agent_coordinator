@@ -1,7 +1,7 @@
 # Implementation status
 
 The foundation, job/worktree evidence, reviewed completion, shared-record,
-and operator-workflow milestones are implemented.
+operator-workflow, and backup/restore milestones are implemented.
 The complete release remains
 defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
@@ -104,6 +104,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 - Complete task evidence pagination across 12 record kinds, including associated
   review/integration activities, with bounded pages and scoped insertion snapshots.
 - Linux systemd and Caddy examples, locked dependencies, and Linux/Windows CI.
+- Online SQLite/artifact backups with exact digest and database verification,
+  self-contained snapshots, 24 hourly/30 daily retention, and hourly systemd units.
+- Fresh-directory restore invalidates credentials, passwords, sessions, reporters,
+  ownership, and integration authorization before publication. A pause requires
+  hold inspections, old-installation fencing, and post-snapshot gap reconciliation.
+  Unknown jobs and physical/integration holds remain preserved. The dashboard
+  records the checklist and can issue a fresh token for the same agent identity.
 
 ## Deliberate limits of this milestone
 
@@ -122,7 +129,7 @@ service artifacts; publishing source checkpoints remains a Git operation. A guar
 result even if the process has exited. Reconnection never invents an exit result;
 inspect the journal, surviving process, and physical resource before reconciliation.
 
-Lifecycle-hook adapters and backup/restore remain later milestones. Workstation reports are
+Lifecycle-hook adapters remain later work. Workstation reports are
 client attestations, not remote filesystem inspection or hardware fencing.
 Supported commands do their work in the foreground; a launcher exiting does not
 verify completion of detached child or external work. Retain holds for that work.
@@ -134,7 +141,7 @@ again using its returned identity. Account-creation retries retain their origina
 key and require the original password, which the dashboard never persists; the
 same administrator can authenticate again to reconcile that request safely.
 
-Instruction version 5 includes operator tools, objective gates, and complete history
+Instruction version 6 adds restore recovery guidance to operator tools, objective gates, and complete history
 alongside worktree/resource/job evidence, reviewed completion, and shared records.
 Existing sessions must fetch and acknowledge the new instructions before new claims.
 
@@ -146,7 +153,8 @@ remain reserved so a late retry cannot duplicate an old operation. Artifact rete
 general event/receipt/history retention remains backlog work.
 
 Lease timing uses the server clock. Hosts should maintain synchronized time; a
-restore or server clock rollback does not yet invalidate all existing authority.
+restore invalidates all existing authority. Server clock rollback handling remains
+part of the next milestone.
 The service is suitable for development exercises; the remaining release recovery
 and operational safeguards must be completed before production use.
 
@@ -177,7 +185,7 @@ implementation commit `5e6f19b` in
 The same revision passed all 84 local workspace tests, warnings-denied Clippy,
 formatting, JavaScript syntax checks, and the complete smoke exercise.
 No production deployment, 100,000-task benchmark, off-server
-backup, or restore rehearsal has occurred.
+backup has occurred. A small disposable local restore rehearsal is recorded below.
 
 Continue with [BACKLOG.md](../BACKLOG.md) and [HANDOFF.md](../HANDOFF.md).
 
@@ -205,7 +213,7 @@ locked dependency audit in
 [CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271).
 The earlier CI link above applies to the prior milestone.
 
-The remaining release sequence is backups/restore, Linux
+The remaining release sequence is Linux
 acceptance, MCP (6.1), mdBook (6.2), and operator-initiated Windows acceptance (7).
 
 
@@ -235,3 +243,38 @@ Windows client/CLI/local-runner tests, and the dependency audit in
 [CI run 34440915688](https://github.com/marshallr12/agent_coordinator/actions/runs/34440915688).
 The final audit clarification labels host password recovery's initiator separately
 from its target account and passed a focused regression and workspace Clippy.
+
+### Backup and restore review evidence
+
+All 140 workspace tests pass, along with warnings-denied Clippy, formatting,
+JavaScript checks, the workspace build, and the full existing smoke exercise.
+New regressions cover exact manifest/database artifact membership, digest damage,
+missing and symlinked files, retention buckets, artifact cleanup locks, repository
+overlap rejection, standalone verification without parent mutation, atomic
+no-overwrite publication, and read-only backup schema checks.
+
+Restore tests cover old credential/session/reporter rejection, globally reserved
+pre-restore mutation keys, repeated restore of a paused snapshot, preserved holds
+and unknown jobs, complete reconciliation gates, and fresh manual integration
+authorization with prior evidence retained. Independent source review found no
+remaining authority blocker; the main agent reviewed and tested the combined code.
+
+The built service/CLI restore exercise completed in 6.9 seconds after the final
+storage changes. It captured a live database and pinned artifact, verified a
+copied bundle, refused an existing destination, stopped the original service,
+restored into an absent directory, rejected old access, recovered the administrator,
+preserved a checkpoint and hold, completed reconciliation, and reconnected the
+same agent principal with a fresh token/session and a higher recovery generation.
+The copied bundle was another local directory, not a real off-server destination.
+
+Browser checks covered task evidence links, multiline inspection evidence, both
+reconciliation attestations, resuming coordination without releasing a hold, and
+same-agent credential replacement with the secret cleared before inspection.
+The layout fit 375 CSS pixels without horizontal overflow; no browser errors
+were reported. The fixture and browser tab were closed afterward.
+
+Snapshots are full independent copies and can consume roughly 53 times live
+database/artifact storage, plus working space. Engine limits and the cooperative
+45-minute deadline are documented in the backup contract. The rehearsal is not
+a production-size restore benchmark or proof of host-loss protection. Installation
+requires destination-side verification and a measured recovery exercise.

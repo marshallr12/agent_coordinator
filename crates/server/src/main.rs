@@ -49,6 +49,27 @@ struct Options {
 enum Command {
     /// Start the service on its private loopback listener.
     Serve,
+    /// Publish and verify a consistent database/artifact snapshot, then apply retention.
+    Backup {
+        #[arg(long)]
+        repository: PathBuf,
+    },
+    /// Verify a completed snapshot without opening the live service database.
+    BackupVerify {
+        #[arg(long)]
+        snapshot: PathBuf,
+    },
+    /// Restore into a new data directory with old authority invalidated and coordination paused.
+    Restore {
+        #[arg(long)]
+        snapshot: PathBuf,
+        /// Must not exist. The running installation is never overwritten.
+        #[arg(long)]
+        destination: PathBuf,
+        /// Audited reason and source context; do not include credentials.
+        #[arg(long)]
+        reason: String,
+    },
     /// Recover a human account locally and invalidate all of its browser sessions.
     RecoverOperatorPassword {
         #[arg(long)]
@@ -77,6 +98,32 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
     let options = Options::parse();
+    // Verification and restore must not create, migrate, or otherwise touch the
+    // configured live database. Restore prepares an isolated destination itself.
+    match &options.command {
+        Command::BackupVerify { snapshot } => {
+            let report = coordinator_server::backup::verify_backup(snapshot).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        Command::Restore {
+            snapshot,
+            destination,
+            reason,
+        } => {
+            let report =
+                coordinator_server::backup::restore_backup(snapshot, destination, reason).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        Command::Backup { .. } => {
+            anyhow::ensure!(
+                options.database.is_file(),
+                "Backup requires an existing service database."
+            );
+        }
+        _ => {}
+    }
     let config = Config {
         database_path: options.database,
         listen: options.listen,
@@ -86,8 +133,19 @@ async fn main() -> anyhow::Result<()> {
         artifact_quota_bytes: options.artifact_quota_bytes,
         artifact_disk_reserve_bytes: options.artifact_disk_reserve_bytes,
     };
-    let state = AppState::open(config).await?;
+    let state = if matches!(&options.command, Command::Backup { .. }) {
+        AppState::open_existing_read_only(config).await?
+    } else {
+        AppState::open(config).await?
+    };
     match options.command {
+        Command::Backup { repository } => {
+            let report = coordinator_server::backup::create_backup(&state, &repository).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::BackupVerify { .. } | Command::Restore { .. } => {
+            unreachable!("handled before opening the database")
+        }
         Command::InitAdmin {
             username,
             password_stdin,

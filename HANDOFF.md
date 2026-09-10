@@ -1,40 +1,42 @@
 # Implementation handoff — 2026-09-10
 
-Backlog item 4 is implemented and reviewed locally: operator account/session
-management, password recovery, agent credential rotation, policy editing,
-objective grouping, full task history, inspected operator recovery, and native
-commands. All 129 workspace tests, warnings-denied Clippy, formatting, workspace
-build, JavaScript checks, the full smoke exercise, and browser verification passed.
-Implementation commit `865365d` passed [CI run 34440915688](https://github.com/marshallr12/agent_coordinator/actions/runs/34440915688),
-including Linux, native Windows, and the dependency audit. The final host-audit
-attribution clarification also passed its focused regression and workspace Clippy.
-Continue sequentially with item 5, backups and restore authority invalidation.
+Backlog item 5 is implemented and reviewed locally. Verified online SQLite/artifact
+backups, self-contained retention, fresh-directory restore, and authority
+invalidation are wired into the server. Restore pauses coordination until a human
+records all captured hold inspections, fences the old installation, and reconciles
+the post-snapshot gap. Holds and unknown work stay preserved. The Access dashboard
+provides the checklist and replacement credentials for the same agent principal.
 
-Instruction version 5 describes the implemented workflow. Existing harnesses must
-read and acknowledge it before new claims. Objective membership freezes after work
-begins; required children must complete before parent work, and the parent still
-has its own acceptance and review. History pages preserve evidence from associated
-review/integration activities. Row-based cursors must be invalidated if restore or
-future maintenance changes their identifiers.
+All 140 workspace tests, warnings-denied Clippy, formatting, workspace build,
+JavaScript checks, the full existing smoke exercise, and the new restore exercise
+passed. The final small restore fixture recovered in 6.9 seconds; it is not a
+production-size benchmark or an actual off-server transfer. Browser verification
+covered the checklist, multiline evidence, task links, credential replacement,
+retained resource capacity, and a 375 CSS-pixel layout with no browser errors.
+The disposable service and tab were stopped and closed.
 
-Main-agent review corrected browser retry persistence across sign-in, original
-password re-entry, secret-free storage, narrow account-creation replay across new
-browser sessions, objective revision use, recovery handoff fields, and current
-credential/ownership labels. The same-admin replay helper is limited to account
-creation; task and agent mutations retain session-bound fingerprints. Current
-browser authorization and administrator status are checked under the writer lock.
+Main-agent review corrected manifest/database artifact coverage, atomic
+no-overwrite directory publication, standalone verification parent mutation,
+repository overlap checks, backup schema read-only behavior, deadline coverage,
+old receipt-key reuse, and invalidated integration authorization renewal.
+Independent review found no remaining restore-authority blocker. History cursors
+now use a restore epoch; old cursors must be restarted after restore or upgrade.
+Instruction version 6 explains restore recovery and requires fresh acknowledgment.
 
-Browser verification used disposable data, including a lost response after account
-creation, session expiry, successful same-key replay without a duplicate, account
-and token controls, inspected recovery, objectives, and phone layout. See
-[implementation status](docs/implementation-status.md) for evidence and limits and
-[operator guide](docs/operator-guide.md) for usage. No production account was changed.
+See [implementation status](docs/implementation-status.md),
+[backup and restore operations](docs/backup-restore-guide.md), and
+[storage contract](docs/backup-contract.md). Engine limits are 8 GiB database,
+1,000,000 artifact entries, 64 MiB manifest, 16 MiB per blob, and a cooperative
+45-minute deadline. Full snapshots require their own storage; off-server transport
+and production installation remain operator-selected deployment inputs.
 
-Item 3 remains validated by [CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271).
+Continue sequentially with item 6: Linux packaging/acceptance, clock rollback,
+storage retention, and the 20-project / 50-session / 100,000-task load target.
+Complete remaining items through 6.2 without operator intervention unless missing
+information is essential. MCP is 6.1 and mdBook is 6.2. The operator will commence
+native Windows workstation acceptance as final item 7; CI does not replace it.
 Each concurrent worktree must retain its own Cargo target directory.
 
-Complete remaining items through 6.2 without operator intervention unless missing
-information is essential. Item 6 is Linux acceptance; MCP is 6.1 and mdBook is 6.2.
-The operator will commence native Windows workstation acceptance as final item 7;
-keep Windows CI checks but do not substitute them for that exercise. No production
-deployment, load benchmark, or backup/restore rehearsal has occurred yet.
+Item 4 passed Linux, native Windows, and audit CI at `1fcf9e4` in
+[run 34441512277](https://github.com/marshallr12/agent_coordinator/actions/runs/34441512277).
+Item 5 CI evidence will be recorded after the integrated commit is pushed.

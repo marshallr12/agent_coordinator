@@ -128,9 +128,10 @@ The first-release storage bounds are explicit constants:
 
 The database size is checked from SQLite page count before `VACUUM INTO` and from
 the result afterward. Free space is checked before the database image and each
-artifact copy. The system service also bounds the whole host-local command,
-including authority invalidation and operating-system I/O that an SQLite callback
-cannot interrupt. The 45-minute engine limit supports the one-hour recovery
+artifact copy. The backup systemd unit has an additional 50-minute process limit.
+The engine deadline is cooperative: authority invalidation and operating-system
+I/O may finish after it, but an expired operation cannot publish restored data.
+The 45-minute engine limit supports the one-hour recovery
 target but does not establish that target until the documented exercise measures
 verification, copying, invalidation, administrator recovery, service start, and
 one recovered client on the release host.

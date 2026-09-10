@@ -39,6 +39,8 @@ jobs:
         run: cargo build --workspace --locked
       - name: Exercise two independent CLI harnesses against the service
         run: python3 scripts/smoke.py
+      - name: Exercise live backup and reconciled fresh-directory restore
+        run: python3 scripts/backup_smoke.py
 
   windows-client:
     name: Native Windows client, CLI, and local runner tests

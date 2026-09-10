@@ -6,6 +6,7 @@ ConditionPathExists=/var/lib/agent-coordinator/coordinator.sqlite3
 
 [Service]
 Type=oneshot
+TimeoutStartSec=50min
 User=agent-coordinator
 Group=agent-coordinator
 WorkingDirectory=/var/lib/agent-coordinator-backups

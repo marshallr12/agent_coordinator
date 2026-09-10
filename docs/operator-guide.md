@@ -77,3 +77,24 @@ Objective details also provide older membership-history pages.
 
 See [objective semantics](objective-contract.md), [history pages](history-contract.md),
 and [account lifecycle](operator-access-contract.md) for precise API contracts.
+
+## After restoring a backup
+
+Follow the [host backup and restore guide](backup-restore-guide.md) to restore into
+a fresh directory and recover an existing administrator. Restored credentials,
+passwords, sessions, and ownership are invalidated before the data becomes available.
+
+Open **Access → Restore status** to inspect the captured resource and
+integration holds. Use **Open task evidence** to examine the saved work, then
+record what you found for every hold. An inspection records evidence; it does not
+release a resource or prove that a remote process stopped. Keep uncertain work held.
+
+Record evidence that the previous installation cannot act, and account for work
+performed after the snapshot. Once every required inspection and both records
+are present, **Resume coordination** enables new claims. Existing holds still
+require their normal recovery or reconciliation workflow.
+
+Use **New token for this agent** on a revoked credential row to issue access for
+the same agent identity. Start a fresh local harness session, read the current
+instructions, and recover expired work after inspection. Preserving the identity
+also preserves its contribution history for independent-review checks.

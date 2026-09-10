@@ -12,6 +12,9 @@ The examples use these installation paths:
 - backup repository: `/var/lib/agent-coordinator-backups`
 - service environment: `/etc/agent-coordinator/service.env`
 
+Run the shell command blocks with `set -eu` so an error stops the procedure.
+Replace the uppercase incident and snapshot placeholders before running them.
+
 Keep the backup repository outside the live data and artifact roots. The backup
 command rejects a nested repository because recursive capture cannot produce a
 self-contained recovery set.
@@ -132,9 +135,12 @@ sudo -u agent-coordinator flock --shared \
 
 sudo -u agent-coordinator /usr/local/bin/agent-coordinator-server \
   backup-verify --snapshot "$destination_stage"
+sudo sync -f "$destination_repository"
 sudo -u agent-coordinator flock --exclusive "$destination_repository/.lock" \
   mv --no-clobber --no-target-directory -- \
   "$destination_stage" "$destination_repository/snapshots/$snapshot_name"
+sudo test ! -e "$destination_stage"
+sudo sync -f "$destination_repository"
 ```
 
 The destination is not counted as protected until destination-side verification
@@ -223,9 +229,12 @@ installations cannot act on the same external work.
    sudo mv --no-clobber --no-target-directory -- \
      /var/lib/agent-coordinator \
      /var/lib/agent-coordinator.pre-restore-RESTORE_INCIDENT
+   sudo test ! -e /var/lib/agent-coordinator
    sudo mv --no-clobber --no-target-directory -- \
      /var/lib/agent-coordinator-restore/RESTORE_INCIDENT \
      /var/lib/agent-coordinator
+   sudo test ! -e /var/lib/agent-coordinator-restore/RESTORE_INCIDENT
+   sudo sync -f /var/lib
    sudo chown -R agent-coordinator:agent-coordinator \
      /var/lib/agent-coordinator
    ```
@@ -310,8 +319,9 @@ installations cannot act on the same external work.
     {"restore_id":"<restore-id>","reason":"operator reviewed restored authority and external effects"}
     ```
 
-    This atomically lifts the global pause and leaves preserved holds in their
-    explicitly inspected states. During the pause, ordinary mutations remain
+    This atomically lifts the global pause. Inspection records do not change
+    hold state: held resources remain held until a separate guarded operation
+    releases or resolves them. During the pause, ordinary mutations remain
     rejected; administrator recovery actions and guarded human reconciliation
     remain available. Issue fresh credentials for existing agent principals only
     after deciding that they should reconnect. Credential creation returns a token
