@@ -270,7 +270,7 @@ async fn validate_associations(
     Ok(())
 }
 
-fn store_root(state: &AppState) -> PathBuf {
+pub(crate) fn store_root(state: &AppState) -> PathBuf {
     let path = &state.config.database_path;
     let name = path
         .file_name()
@@ -279,7 +279,7 @@ fn store_root(state: &AppState) -> PathBuf {
     path.with_file_name(format!("{name}.artifacts"))
 }
 
-fn storage_path(root: &FsPath, key: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn storage_path(root: &FsPath, key: &str) -> Result<PathBuf, AppError> {
     let uuid = Uuid::parse_str(key).map_err(|_| AppError::internal())?;
     let canonical = uuid.to_string();
     Ok(root
@@ -321,6 +321,69 @@ async fn ensure_store(root: &FsPath) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+/// Keeps finalized artifact bytes stable while an online database snapshot is
+/// assembled. Physical cleanup takes the corresponding exclusive lock and
+/// defers rather than blocking a request when a backup is active.
+pub(crate) struct ArtifactBackupGuard {
+    _file: std::fs::File,
+}
+
+pub(crate) async fn acquire_backup_guard(
+    state: &AppState,
+) -> Result<ArtifactBackupGuard, AppError> {
+    let root = store_root(state);
+    ensure_store(&root).await?;
+    let path = root.join(".gc.lock");
+    tokio::task::spawn_blocking(move || {
+        let file = open_gc_lock(&path)?;
+        fs2::FileExt::lock_shared(&file).map_err(|_| AppError::internal())?;
+        Ok(ArtifactBackupGuard { _file: file })
+    })
+    .await
+    .map_err(|_| AppError::internal())?
+}
+
+async fn try_acquire_cleanup_guard(root: &FsPath) -> Result<Option<std::fs::File>, AppError> {
+    let path = root.join(".gc.lock");
+    tokio::task::spawn_blocking(move || {
+        let file = open_gc_lock(&path)?;
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(_) => Err(AppError::internal()),
+        }
+    })
+    .await
+    .map_err(|_| AppError::internal())?
+}
+
+fn open_gc_lock(path: &FsPath) -> Result<std::fs::File, AppError> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && (!metadata.is_file() || metadata.file_type().is_symlink())
+    {
+        return Err(AppError::internal());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path).map_err(|_| AppError::internal())?;
+    let metadata = file.metadata().map_err(|_| AppError::internal())?;
+    if !metadata.is_file() {
+        return Err(AppError::internal());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| AppError::internal())?;
+    }
+    Ok(file)
 }
 
 fn check_disk(root: &FsPath, incoming: u64, reserve: u64) -> Result<(), AppError> {
@@ -1242,6 +1305,9 @@ async fn artifact_storage_key(
 
 async fn cleanup_artifact_files(state: &AppState, key: &str) -> Result<(), AppError> {
     let root = store_root(state);
+    let Some(_cleanup_guard) = try_acquire_cleanup_guard(&root).await? else {
+        return Ok(());
+    };
     for path in [storage_path(&root, key)?, staging_path(&root, key, "part")?] {
         match fs::remove_file(path).await {
             Ok(()) => {}
