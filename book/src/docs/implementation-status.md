@@ -2,7 +2,8 @@
 
 The foundation, job/worktree evidence, reviewed completion, shared-record,
 operator-workflow, backup/restore, Linux operational controls, and MCP are implemented.
-Linux release acceptance passed; see the retained evidence below.
+Linux release acceptance and the final native Windows/Linux workstation exercise
+passed; see the retained evidence below.
 The complete release remains
 defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
@@ -178,8 +179,10 @@ Lease timing uses protected service time. Hosts should maintain synchronized tim
 a material rollback pauses new authority until reconciliation, and a restore
 invalidates existing authority. A rollback during downtime that remains above
 the last durable observation cannot be detected without a trusted external clock.
-Deployment hardware, public hostname, off-server backup destination, and the real
-Windows workstation acceptance remain installation or operator inputs.
+Production deployment hardware, a permanent public hostname, and an off-server
+backup destination remain installation or operator inputs. The native Windows
+workstation acceptance used a disposable Linux service and temporary HTTPS tunnel;
+it does not establish those production choices.
 
 ## Evidence and next work
 
@@ -236,7 +239,7 @@ locked dependency audit in
 [CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271).
 The earlier CI link above applies to the prior milestone.
 
-The remaining release item is operator-initiated Windows workstation acceptance (7).
+The operator-initiated native Windows workstation acceptance in item 7 is complete.
 
 
 ### Operator-workflow review evidence
@@ -336,9 +339,10 @@ Browser checks covered clock pause, multiline recovery evidence, reconciliation,
 and a 375-pixel layout without console errors or overflow.
 
 Main-agent review is complete. The [retained acceptance evidence](linux-capacity-evidence.md)
-includes the complete sanitized capacity report and its identity. The mdBook consolidation is complete. The operator will commence the actual Windows
-workstation exercise as item 7; CI does not replace it. Production deployment,
-off-server transport, and full operator-led recovery remain installation checks.
+includes the complete sanitized capacity report and its identity. The mdBook
+consolidation and actual native Windows workstation exercise are complete;
+CI did not replace the workstation exercise. Production deployment, off-server
+transport, and full operator-led recovery remain installation checks.
 
 ### MCP review evidence
 
@@ -379,5 +383,40 @@ client/CLI/local-runner tests, and the locked dependency audit in
 [coordination run 34487175859](https://github.com/marshallr12/agent_coordinator/actions/runs/34487175859).
 The earlier billing-blocked attempts ran no steps and are superseded by these
 passing runs. Main review and the hosted validation follow-up are complete. The
-operator-initiated Windows workstation exercise remains final item 7.
+operator-initiated Windows workstation exercise in final item 7 is complete.
 Local-file book navigation and search passed with networking disabled.
+
+### Native Windows workstation acceptance evidence
+
+The accepted `agent-coordinator 0.1.0` Windows x86-64 CLI from
+[release run 34459987847](https://github.com/marshallr12/agent_coordinator/actions/runs/34459987847)
+ran natively on workstation `MINIAIR` against a disposable service on Linux
+workstation `mxmini` through a temporary Cloudflare HTTPS tunnel. The archive
+SHA-256 was
+`be5e96ec6f8843a63c8be319d9b4f9745f4e0870bebbbc160c2c24f69dc32a1d`,
+matching the downloaded checksum, and the exercised executable SHA-256 was
+`40240c59aeaf012aba6721f378e9dec57419ceb8833aec0187391c3bccb1111d`.
+
+Distinct Windows and Linux principals and sessions exercised two isolated
+projects. Windows completed a claim, checkpoint, and general submission in the
+second project. The contributing Windows principal could not perform its own
+independent agent review; the Linux principal reviewed and approved the exact
+submission, which completed the subject while the first project's race task
+remained isolated.
+
+For the cross-workstation race, Linux and Windows submitted an ordinary claim for
+the same task and revision at a published barrier. Linux received generation 2
+ownership and Windows received `claim_conflict` against that existing attempt.
+Linux checkpointed the observed one-owner result and released the task ready. For
+recovery, Windows checkpointed a separate task and closed its dedicated session;
+Linux then claimed recovery, recorded its inspection, and released the task ready
+without reviving the closed Windows session. Session and credential counts remained
+stable through Linux completion.
+
+The sanitized rendezvous and completion records are retained in
+[commit `c017a69`](https://github.com/marshallr12/agent_coordinator/commit/c017a69152aaf52778bc3e48825446b700a18903).
+The one-time encrypted credential handoff was deleted after use, and the disposable
+public service and tunnel were shut down after the exercise. This evidence is
+specific to the exercised workstations, accepted package, temporary route, and
+disposable data. It is not a claim of production deployment, permanent network
+exposure, hardware attestation, or off-server backup protection.

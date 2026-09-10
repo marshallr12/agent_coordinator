@@ -3,9 +3,9 @@
 Execution instruction: complete the remaining items sequentially. The main agent
 reviews each item's code and validation evidence before starting the next item.
 Continue without operator review; ask only for information or access needed to
-proceed. Complete the remaining items through 6.2 autonomously.
-The operator will start Windows workstation acceptance as final item 7 after Linux acceptance; CI does
-not replace that workstation exercise.
+proceed. The numbered release backlog through item 7 is complete. Item 7 used an
+actual native Windows workstation coordinated with a separate Linux workstation;
+CI did not replace that physical exercise.
 
 The foundation, job/worktree evidence, and reviewed completion milestones are implemented. Use
 [implementation status](docs/implementation-status.md) for precise limits.
@@ -73,11 +73,17 @@ passed in
 [coordination run 34487175859](https://github.com/marshallr12/agent_coordinator/actions/runs/34487175859).
 See [book maintenance](docs/documentation.md).
 
-Next work, preserving the original backlog numbering:
-- **7.** Final operator-initiated native Windows workstation acceptance, including
-   coordination with the Linux service/workstation. The operator will commence
-   this on a Windows machine after items 6 through 6.2; do not substitute CI for this test or
-   claim it passed before the real workstation exercise.
+Completed item 7: the accepted Windows x86-64 CLI ran on the native `MINIAIR`
+workstation against a disposable service on Linux workstation `mxmini` over HTTPS.
+The exercise covered public help and origin-bound authentication, separate
+principals and sessions, two-project isolation, Windows claim/checkpoint/submission,
+same-principal review rejection, independent Linux review, an exactly-one-owner
+cross-workstation claim race, and Linux recovery of checkpointed work after the
+dedicated Windows session was closed. Sanitized evidence is retained in
+[completion commit `c017a69`](https://github.com/marshallr12/agent_coordinator/commit/c017a69152aaf52778bc3e48825446b700a18903).
+The disposable public service and tunnel were shut down afterward. This completes
+the numbered release backlog, but does not claim a production deployment,
+permanent endpoint, hardware attestation, or off-server backup protection.
 
 No unrestricted task-status edit, automatic force recovery, or unverified
 completion shortcut should be added to make these milestones appear complete.

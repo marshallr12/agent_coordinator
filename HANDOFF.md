@@ -1,10 +1,39 @@
 # Implementation handoff — 2026-09-10
 
-Backlog items 6.1 (MCP) and 6.2 (mdBook) are implemented and reviewed.
-The implementation sequence and hosted-CI validation follow-up are complete.
-The operator will commence item 7, native Windows workstation acceptance against
-the Linux service/workstation. Do not substitute native Windows CI or package
-checks for that physical workstation exercise.
+Backlog items 6.1 (MCP), 6.2 (mdBook), and 7 (native Windows workstation
+acceptance) are implemented, exercised, and reviewed. The numbered release
+backlog and hosted-CI validation follow-up are complete. Item 7 used the actual
+native Windows workstation and a separate Linux workstation; it did not
+substitute native Windows CI or package inspection for the physical exercise.
+
+## Native Windows workstation acceptance
+
+The accepted `agent-coordinator 0.1.0` Windows x86-64 CLI from
+[release run 34459987847](https://github.com/marshallr12/agent_coordinator/actions/runs/34459987847)
+ran natively on workstation `MINIAIR` against a disposable service on Linux
+workstation `mxmini` through a temporary Cloudflare HTTPS tunnel. The downloaded
+Windows archive SHA-256 was
+`be5e96ec6f8843a63c8be319d9b4f9745f4e0870bebbbc160c2c24f69dc32a1d`,
+matching its adjacent checksum; the exercised executable SHA-256 was
+`40240c59aeaf012aba6721f378e9dec57419ceb8833aec0187391c3bccb1111d`.
+
+The exercise used distinct Windows and Linux principals and sessions across two
+isolated projects. Windows claimed, checkpointed, and submitted project-two work;
+a same-principal agent review was rejected, while the independent Linux principal
+claimed and approved the exact submission. Project-one work remained isolated.
+At a published barrier, both workstations attempted the same project-one task and
+revision. Linux obtained generation 2 ownership and Windows received the expected
+`claim_conflict`; Linux checkpointed the result and released the task ready. In a
+separate recovery case, Windows checkpointed with a dedicated session, that session
+was closed, and Linux inspected and released the retained work without reviving the
+Windows session.
+
+Sanitized cross-workstation evidence is retained in
+[completion commit `c017a69`](https://github.com/marshallr12/agent_coordinator/commit/c017a69152aaf52778bc3e48825446b700a18903).
+The encrypted one-time handoff branch was removed after Windows decrypted it. The
+disposable public service and tunnel were shut down after acceptance. This proves
+the scoped native two-workstation workflow; it is not a production deployment,
+permanent public endpoint, hardware attestation, or off-server backup exercise.
 
 ## MCP completion
 
