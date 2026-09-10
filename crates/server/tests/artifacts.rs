@@ -525,6 +525,228 @@ async fn reservations_enforce_bounds_expiry_quota_and_revocation() {
 }
 
 #[tokio::test]
+async fn configured_disk_reserve_pressure_is_side_effect_free_and_retryable() {
+    let mut fixture = Fixture::new().await;
+    let project = fixture.project("disk reserve pressure").await;
+    let normal_reserve = fixture.state.config.artifact_disk_reserve_bytes;
+    let reservation_key = "disk-pressure-reservation";
+    let reservation_path = format!("/api/v1/projects/{project}/artifacts/uploads");
+    let reservation_operation = format!("POST {reservation_path}");
+    let upload_bytes = b"disk pressure upload".to_vec();
+    let reservation_body = json!({
+        "filename":"pressure.bin",
+        "media_type":"application/octet-stream",
+        "size_bytes":upload_bytes.len(),
+        "sha256":hex::encode(Sha256::digest(&upload_bytes)),
+    });
+
+    fixture.state.config.artifact_disk_reserve_bytes = u64::MAX;
+    fixture.app = router(fixture.state.clone());
+    fixture
+        .json(
+            &fixture.a,
+            "POST",
+            &reservation_path,
+            reservation_key,
+            reservation_body.clone(),
+        )
+        .await
+        .error(StatusCode::INSUFFICIENT_STORAGE, "artifact_storage_low");
+    let failed_artifacts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM artifacts WHERE project_id=?")
+            .bind(&project)
+            .fetch_one(&fixture.state.pool)
+            .await
+            .unwrap();
+    let failed_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE project_id=? AND kind='artifact.upload_reserved'",
+    )
+    .bind(&project)
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    let failed_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?",
+    )
+    .bind(&fixture.a.principal)
+    .bind(&reservation_operation)
+    .bind(reservation_key)
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(failed_artifacts, 0);
+    assert_eq!(failed_events, 0);
+    assert_eq!(failed_receipts, 0);
+
+    fixture.state.config.artifact_disk_reserve_bytes = normal_reserve;
+    fixture.app = router(fixture.state.clone());
+    let reserved = fixture
+        .json(
+            &fixture.a,
+            "POST",
+            &reservation_path,
+            reservation_key,
+            reservation_body.clone(),
+        )
+        .await;
+    reserved.ok();
+    let replayed = fixture
+        .json(
+            &fixture.a,
+            "POST",
+            &reservation_path,
+            reservation_key,
+            reservation_body,
+        )
+        .await;
+    replayed.ok();
+    let artifact = reserved.json()["data"]["artifact"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(replayed.json()["data"]["artifact"]["id"], artifact);
+    let successful_artifacts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM artifacts WHERE project_id=?")
+            .bind(&project)
+            .fetch_one(&fixture.state.pool)
+            .await
+            .unwrap();
+    let successful_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE project_id=? AND kind='artifact.upload_reserved'",
+    )
+    .bind(&project)
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    let successful_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?",
+    )
+    .bind(&fixture.a.principal)
+    .bind(&reservation_operation)
+    .bind(reservation_key)
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(successful_artifacts, 1);
+    assert_eq!(successful_events, 1);
+    assert_eq!(successful_receipts, 1);
+
+    let upload_key = "disk-pressure-upload";
+    let upload_path = format!("/api/v1/projects/{project}/artifacts/{artifact}/content");
+    let upload_operation = format!("PUT {upload_path}");
+    let storage_key: String = sqlx::query_scalar("SELECT storage_key FROM artifacts WHERE id=?")
+        .bind(&artifact)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+
+    fixture.state.config.artifact_disk_reserve_bytes = u64::MAX;
+    fixture.app = router(fixture.state.clone());
+    fixture
+        .bytes(
+            &fixture.a,
+            "PUT",
+            &upload_path,
+            upload_key,
+            upload_bytes.clone(),
+        )
+        .await
+        .error(StatusCode::INSUFFICIENT_STORAGE, "artifact_storage_low");
+    let failed_upload_state: (String, Option<i64>) =
+        sqlx::query_as("SELECT state,finalized_at FROM artifacts WHERE id=?")
+            .bind(&artifact)
+            .fetch_one(&fixture.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(failed_upload_state, ("reserved".into(), None));
+    let failed_upload_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE project_id=? AND kind='artifact.upload_finalized' AND record_id=?",
+    )
+    .bind(&project)
+    .bind(&artifact)
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    let failed_upload_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?",
+    )
+    .bind(&fixture.a.principal)
+    .bind(&upload_operation)
+    .bind(upload_key)
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(failed_upload_events, 0);
+    assert_eq!(failed_upload_receipts, 0);
+    let store = fixture.state.config.database_path.with_file_name(format!(
+        "{}.artifacts",
+        fixture
+            .state
+            .config
+            .database_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+    ));
+    assert!(
+        !store
+            .join("staging")
+            .join(format!("{storage_key}.lock"))
+            .exists()
+    );
+    assert!(
+        !store
+            .join("staging")
+            .join(format!("{storage_key}.part"))
+            .exists()
+    );
+    assert!(
+        !store
+            .join("blobs")
+            .join(&storage_key[..2])
+            .join(format!("{storage_key}.blob"))
+            .exists()
+    );
+
+    fixture.state.config.artifact_disk_reserve_bytes = normal_reserve;
+    fixture.app = router(fixture.state.clone());
+    let uploaded = fixture
+        .bytes(
+            &fixture.a,
+            "PUT",
+            &upload_path,
+            upload_key,
+            upload_bytes.clone(),
+        )
+        .await;
+    uploaded.ok();
+    let upload_replayed = fixture
+        .bytes(&fixture.a, "PUT", &upload_path, upload_key, upload_bytes)
+        .await;
+    upload_replayed.ok();
+    assert_eq!(uploaded.json()["data"], upload_replayed.json()["data"]);
+    let successful_upload_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE project_id=? AND kind='artifact.upload_finalized' AND record_id=?",
+    )
+    .bind(&project)
+    .bind(&artifact)
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    let successful_upload_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mutation_receipts WHERE principal_id=? AND operation=? AND key=?",
+    )
+    .bind(&fixture.a.principal)
+    .bind(&upload_operation)
+    .bind(upload_key)
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(successful_upload_events, 1);
+    assert_eq!(successful_upload_receipts, 1);
+}
+
+#[tokio::test]
 async fn retention_and_deletion_keep_explicit_unavailable_metadata() {
     let fixture = Fixture::new().await;
     let project = fixture.project("retention").await;
