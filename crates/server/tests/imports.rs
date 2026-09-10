@@ -233,6 +233,17 @@ async fn stale_apply_is_rejected_and_checked_item_records_durable_closure() {
             .unwrap()
             .contains(SITHBIT_REVISION)
     );
+    let (export_status, exported) = f
+        .call(
+            "GET",
+            &format!("/api/v1/projects/{project}/exports?limit=200"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(export_status, StatusCode::OK, "{exported}");
+    let markdown = exported["data"]["markdown"].as_str().unwrap();
+    assert!(markdown.contains(SITHBIT_REVISION));
+    assert!(markdown.contains(fresh["items"][0]["stable_identity"].as_str().unwrap()));
 }
 
 #[tokio::test]
@@ -398,7 +409,7 @@ async fn checked_reimport_cannot_complete_a_task_with_attempt_history() {
 async fn generated_projection_is_not_import_authority_and_export_cursor_is_snapshot_bound() {
     let f = Fixture::new().await;
     let project = f.project("exports").await;
-    let (seeded, _) = f.call("POST",&format!("/api/v1/projects/{project}/tasks"),json!({"title":"Initial exported task","description":"","acceptance_criteria":["exists"],"kind":"general","priority":2,"depends_on":[],"planned":true})).await;
+    let (seeded, seeded_task) = f.call("POST",&format!("/api/v1/projects/{project}/tasks"),json!({"title":"Initial exported task","description":"","acceptance_criteria":["exists"],"kind":"general","priority":2,"depends_on":[],"planned":true})).await;
     assert_eq!(seeded, StatusCode::OK);
     let (status, first) = f
         .call(
@@ -410,6 +421,20 @@ async fn generated_projection_is_not_import_authority_and_export_cursor_is_snaps
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(first["data"]["generated"], true);
     let generated = first["data"]["markdown"].as_str().unwrap();
+    let (complete_status, complete) = f
+        .call(
+            "GET",
+            &format!("/api/v1/projects/{project}/exports?limit=200"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(complete_status, StatusCode::OK, "{complete}");
+    assert!(
+        complete["data"]["markdown"]
+            .as_str()
+            .unwrap()
+            .contains(seeded_task["data"]["id"].as_str().unwrap())
+    );
     let preview = f
         .preview(
             &project,

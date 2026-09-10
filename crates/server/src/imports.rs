@@ -919,9 +919,15 @@ async fn export(
         );
         for record in &records {
             markdown.push_str(&format!(
-                "## {}: {}\n\nStatus: `{}`\n\n{}\n\n",
-                record.kind, record.title, record.status, record.body
+                "## {}: {}\n\nRecord ID: `{}`\n\nStatus: `{}`\n\n{}\n\nProvenance:\n\n",
+                record.kind, record.title, record.id, record.status, record.body
             ));
+            for line in serde_json::to_string_pretty(&record.provenance)?.lines() {
+                markdown.push_str("    ");
+                markdown.push_str(line);
+                markdown.push('\n');
+            }
+            markdown.push('\n');
         }
         let value = json!({"project_id":project,"snapshot_event_revision":snapshot,"generated_at":generated_at,"generated":true,"records":records,"markdown":markdown,"next_cursor":next_cursor,"page_complete":!more,"omissions":[]});
         // Measure the complete envelope shape as returned by `response`, because
