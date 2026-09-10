@@ -43,6 +43,10 @@
 - [Onboarding contract](docs/onboarding-contract.md)
 - [Repository and hook review](docs/repository-review.md)
 
+# Adoption review
+
+- [Self-hosting review](docs/self-hosting-review.md)
+
 # Maintain the documentation
 
 - [Building and maintaining this book](docs/documentation.md)
