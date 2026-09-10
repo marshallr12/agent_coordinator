@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use crate::error::AppError;
 
@@ -115,6 +115,7 @@ pub struct AppState {
     pub(crate) password_workers: Arc<Semaphore>,
     pub(crate) dummy_password_hash: Arc<String>,
     clock_runtime: Arc<Mutex<ClockRuntime>>,
+    authoritative_clock_gate: Arc<AsyncMutex<AuthoritativeClockGate>>,
 }
 
 struct ClockRuntime {
@@ -127,10 +128,22 @@ struct ClockRuntime {
 
 pub(crate) const MATERIAL_CLOCK_ROLLBACK_MS: i64 = 5_000;
 
+#[derive(Clone, Copy)]
 pub(crate) struct ClockSample {
     pub now: i64,
     pub incident_active: bool,
     pub incident_detected: bool,
+}
+
+#[derive(Default)]
+struct AuthoritativeClockGate {
+    published: Option<PublishedClockSample>,
+}
+
+#[derive(Clone, Copy)]
+struct PublishedClockSample {
+    sampled_at: Instant,
+    sample: ClockSample,
 }
 
 pub(crate) struct ClockReconciliation {
@@ -292,10 +305,34 @@ impl AppState {
 
     /// Authenticate reads against a durable, nondecreasing service time. The
     /// short writer transaction never spans request or process work.
+    ///
+    /// Concurrent callers that were already waiting when one caller sampled
+    /// the clock may share that committed sample. `sampled_at` is captured only
+    /// after SQLite grants the writer lock, so a caller that arrived after the
+    /// sample always takes a new sample. This linearizes the time used by read
+    /// authentication without caching credential authority; every request
+    /// still verifies its credential, and every mutation still rechecks time
+    /// and authority while holding its own SQLite writer lock.
     pub(crate) async fn authoritative_now(&self) -> Result<ClockSample, AppError> {
+        let requested_at = Instant::now();
+        self.authoritative_now_requested_at(requested_at).await
+    }
+
+    async fn authoritative_now_requested_at(
+        &self,
+        requested_at: Instant,
+    ) -> Result<ClockSample, AppError> {
+        let mut gate = self.authoritative_clock_gate.lock().await;
+        if let Some(published) = gate.published
+            && published.sampled_at > requested_at
+        {
+            return Ok(published.sample);
+        }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let sampled_at = Instant::now();
         let sample = self.sample_clock(&mut tx).await?;
         tx.commit().await?;
+        gate.published = Some(PublishedClockSample { sampled_at, sample });
         Ok(sample)
     }
 
@@ -495,6 +532,7 @@ impl AppState {
             password_workers: Arc::new(Semaphore::new(2)),
             dummy_password_hash: Arc::new(dummy_password_hash),
             clock_runtime: Arc::new(Mutex::new(clock_runtime)),
+            authoritative_clock_gate: Arc::new(AsyncMutex::new(AuthoritativeClockGate::default())),
         })
     }
 }
@@ -567,5 +605,99 @@ impl LoginLimits {
         }
         count.1 += 1;
         true
+    }
+}
+
+#[cfg(test)]
+mod authoritative_clock_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+
+    struct CountingClock {
+        now: AtomicI64,
+        samples: AtomicUsize,
+    }
+
+    impl Clock for CountingClock {
+        fn now_ms(&self) -> i64 {
+            self.samples.fetch_add(1, Ordering::SeqCst);
+            self.now.load(Ordering::SeqCst)
+        }
+
+        fn use_monotonic_elapsed(&self) -> bool {
+            false
+        }
+    }
+
+    async fn counting_state() -> (tempfile::TempDir, AppState, Arc<CountingClock>) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = AppState::open(Config {
+            database_path: directory.path().join("coalesced-clock.sqlite3"),
+            public_origin: "http://127.0.0.1:8080".into(),
+            allow_insecure_loopback: true,
+            ..Config::default()
+        })
+        .await
+        .unwrap();
+        let durable: i64 =
+            sqlx::query_scalar("SELECT last_safe_time_ms FROM clock_state WHERE singleton=1")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        let clock = Arc::new(CountingClock {
+            now: AtomicI64::new(durable + 10_000),
+            samples: AtomicUsize::new(0),
+        });
+        state.clock = clock.clone();
+        (directory, state, clock)
+    }
+
+    #[tokio::test]
+    async fn waiting_authentication_callers_share_one_committed_clock_sample() {
+        let (_directory, state, clock) = counting_state().await;
+        let held_gate = state.authoritative_clock_gate.lock().await;
+        let mut calls = Vec::new();
+        for _ in 0..32 {
+            let requested_at = Instant::now();
+            let state = state.clone();
+            calls.push(tokio::spawn(async move {
+                state
+                    .authoritative_now_requested_at(requested_at)
+                    .await
+                    .unwrap()
+            }));
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(clock.samples.load(Ordering::SeqCst), 0);
+        drop(held_gate);
+
+        let mut samples = Vec::new();
+        for call in calls {
+            samples.push(call.await.unwrap());
+        }
+        assert_eq!(clock.samples.load(Ordering::SeqCst), 1);
+        assert!(samples.iter().all(|sample| sample.now == samples[0].now));
+        assert!(samples.iter().all(|sample| !sample.incident_detected));
+    }
+
+    #[tokio::test]
+    async fn arrival_after_published_sample_takes_new_sample_and_detects_rollback() {
+        let (_directory, state, clock) = counting_state().await;
+        let first = state.authoritative_now().await.unwrap();
+        assert_eq!(clock.samples.load(Ordering::SeqCst), 1);
+
+        clock
+            .now
+            .store(first.now - MATERIAL_CLOCK_ROLLBACK_MS - 1, Ordering::SeqCst);
+        let second = state.authoritative_now().await.unwrap();
+        assert_eq!(clock.samples.load(Ordering::SeqCst), 2);
+        assert!(second.incident_active);
+        assert!(second.incident_detected);
+        assert!(second.now >= first.now);
+        let status: String = sqlx::query_scalar("SELECT status FROM clock_state WHERE singleton=1")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "clock_reconciliation");
     }
 }
