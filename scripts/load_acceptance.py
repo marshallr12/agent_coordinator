@@ -6,7 +6,7 @@ development checks and are labeled as such. Historical fixtures are seeded in
 SQLite while the service is stopped; all measured operations use HTTP.
 """
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.client
@@ -70,8 +70,14 @@ def cgroup_v2():
     swap_max = value("memory.swap.max")
     cpu_max = value("cpu.max")
     quota, period = (cpu_max or "").split() if cpu_max and len(cpu_max.split()) == 2 else (None, None)
+    cpu_stat = {}
+    for line in (value("cpu.stat") or "").splitlines():
+        key, count = line.split()
+        if key in {"usage_usec", "user_usec", "system_usec", "nr_periods", "nr_throttled", "throttled_usec"}:
+            cpu_stat[key] = int(count)
     return {
         "version": 2,
+        "cpu_stat": cpu_stat,
         "available": (directory / "cgroup.controllers").is_file(),
         "memory_max_bytes": None if memory_max in (None, "max") else int(memory_max),
         "memory_swap_max_bytes": None if swap_max in (None, "max") else int(swap_max),
@@ -163,6 +169,9 @@ def run(args):
             "memory_limit_kind": "RLIMIT_AS per service/backup/restore process; cgroup v2 is required for aggregate baseline acceptance"},
         "transport": "Authenticated loopback HTTP; HTTPS installation is exercised separately."}
     samples, errors = defaultdict(list), Counter()
+    diagnostics = deque(maxlen=120)
+    background_progress = {"upload_started": False, "upload_finished": False,
+        "backup_started": False, "backup_finished": False}
     try:
         report["source_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         report["source_dirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True))
@@ -356,6 +365,7 @@ def run(args):
 
                 def upload_blob():
                     started = time.monotonic()
+                    background_progress["upload_started"] = True
                     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
                     try:
                         connection.putrequest("PUT", upload["upload_path"])
@@ -372,6 +382,7 @@ def run(args):
                         value = json.loads(response.read())
                         assert response.status == 200 and value["data"]["artifact"]["sha256"] == hashlib.sha256(blob).hexdigest()
                         finished = time.monotonic()
+                        background_progress["upload_finished"] = True
                         return {"started": started, "finished": finished, "report": {
                             "passed": True, "bytes": len(blob), "seconds": round(finished - started, 3)}}
                     finally:
@@ -380,6 +391,7 @@ def run(args):
                 def backup():
                     assert upload_streaming.wait(timeout=30), "Artifact upload did not begin before backup."
                     started = time.monotonic()
+                    background_progress["backup_started"] = True
                     # preexec_fn is deliberately avoided after worker threads start.
                     result = subprocess.run(["taskset", "-c", ",".join(map(str, affinity)), "prlimit",
                         f"--as={memory_limit}", "--", *command, "backup", "--repository", str(temporary / "backups")],
@@ -387,11 +399,12 @@ def run(args):
                     assert result.returncode == 0, "Concurrent backup failed; output withheld."
                     value = json.loads(result.stdout)
                     finished = time.monotonic()
+                    background_progress["backup_finished"] = True
                     snapshot = Path(value["snapshot_path"])
                     assert snapshot.is_dir(), "Concurrent backup did not publish its completed snapshot."
                     return {"started": started, "finished": finished, "snapshot": snapshot, "report": {
                         "passed": True, "seconds": round(finished - started, 3),
-                        "snapshot_id": value["snapshot_id"], "database_bytes": value["database_bytes"],
+                        "database_bytes": value["database_bytes"],
                         "snapshot_bytes": value["snapshot_bytes"]}}
 
                 began, last_progress = time.monotonic(), 0
@@ -424,6 +437,13 @@ def run(args):
                             status = Path(f"/proc/{process.pid}/status").read_text()
                             rss = next(int(line.split()[1]) * 1024 for line in status.splitlines() if line.startswith("VmRSS:"))
                             maxima["rss_bytes"] = max(maxima["rss_bytes"], rss)
+                            fields = Path(f"/proc/{process.pid}/stat").read_text().rsplit(")", 1)[1].split()
+                            diagnostics.append({"elapsed_seconds": round(elapsed, 3),
+                                "completed_requests": sum(map(len, samples.values())),
+                                "pending_requests": len(pending), "service_rss_bytes": rss,
+                                "service_cpu_seconds": round((int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK"), 3),
+                                "aggregate_cpu_stat": cgroup_v2().get("cpu_stat", {}),
+                                **background_progress})
                         if elapsed - last_progress >= 60:
                             last_progress = elapsed
                             print(f"Capacity exercise: {int(elapsed)}s, {sum(map(len, samples.values()))} completed requests, {sum(errors.values())} unexpected errors.", flush=True)
@@ -508,6 +528,8 @@ def run(args):
     finally:
         aggregate = cgroup_v2()
         report["host"]["aggregate_cgroup"] = aggregate
+        report["recent_diagnostics"] = list(diagnostics)
+        report["background_progress"] = background_progress
         if not report["passed"]:
             report["partial_operations"] = {kind: {"count": len(values), "p95_ms": percentile(values, 95),
                 "p99_ms": percentile(values, 99)} for kind, values in samples.items()}

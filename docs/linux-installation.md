@@ -71,18 +71,20 @@ sudo -u agent-coordinator /usr/local/bin/agent-coordinator-server \
 The command supports `--password-stdin` for a protected automation pipe. Never
 put the password in arguments, an environment file, shell history, or logs.
 
-Install and start the service and backup timer:
+Install and start the service, hourly backup timer, and daily maintenance timer:
 
 ```sh
 sudo install -o root -g root -m 0644 deploy/agent-coordinator.service \
   deploy/agent-coordinator-backup.service deploy/agent-coordinator-backup.timer \
+  deploy/agent-coordinator-maintenance.service deploy/agent-coordinator-maintenance.timer \
   /etc/systemd/system/
 sudo systemd-analyze verify /etc/systemd/system/agent-coordinator.service \
   /etc/systemd/system/agent-coordinator-backup.service \
-  /etc/systemd/system/agent-coordinator-backup.timer
+  /etc/systemd/system/agent-coordinator-backup.timer \
+  /etc/systemd/system/agent-coordinator-maintenance.service \
+  /etc/systemd/system/agent-coordinator-maintenance.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now agent-coordinator.service
-sudo systemctl enable --now agent-coordinator-backup.timer
 sudo systemctl start agent-coordinator-backup.service
 sudo systemctl --no-pager --full status agent-coordinator.service
 sudo systemctl --no-pager --full status agent-coordinator-backup.service
@@ -90,7 +92,19 @@ sudo systemctl --no-pager --full status agent-coordinator-backup.service
 
 The timer starting successfully is not proof of a usable backup. Inspect the
 oneshot result and verify its reported snapshot as described in
-[the backup and restore guide](backup-restore-guide.md).
+[the backup and restore guide](backup-restore-guide.md). Inspect maintenance
+remaining-work flags and monitor failed units as described in
+[the retention contract](retention-contract.md#daily-maintenance-timer). After
+verifying the first backup, run maintenance and then enable both schedules:
+
+```sh
+sudo systemctl start agent-coordinator-maintenance.service
+sudo systemctl --no-pager --full status agent-coordinator-maintenance.service
+sudo systemctl enable --now agent-coordinator-backup.timer agent-coordinator-maintenance.timer
+```
+
+Persistent timers can immediately run missed schedules when first enabled. The
+manual checks above establish first-run evidence before enabling those schedules.
 
 ## Configure HTTPS
 
@@ -118,10 +132,14 @@ credential, and run `agent-coordinator connect` from a bound repository. Follow
 
 ## Upgrade and rollback boundary
 
-Before upgrading, use the currently installed matching binary to create and
-verify a backup. Stop the service, stage and checksum the new binaries, replace
-both binaries together, then start the service and check HTTPS health, sign-in,
-and native client reconnect. The new server may migrate the database on startup;
+Before upgrading, stop both timers and wait for or stop any running backup and
+maintenance units. Use the currently installed matching binary to create and
+verify a backup. Stop the main service, stage and checksum the new binaries, and
+replace both binaries together. Start the service and check HTTPS health, sign-in,
+and native client reconnect. Run and verify a new backup and inspect a maintenance
+result before restarting both timers. Keep all scheduled and active host commands
+stopped while replacing binaries; stopping only the main service is insufficient.
+The new server may migrate the database on startup;
 the new binary deliberately rejects an older schema for backup rather than
 silently upgrading it during a backup command. Version-1 snapshots from schema 12 onward
 can be verified and restored by this release when their migration history is an
@@ -135,7 +153,17 @@ state for diagnosis. The service never automatically reverses migrations.
 
 ## Removal
 
-Stop and disable the service and timer before removing unit files or binaries.
+Disable and stop both timers, then stop any already-running backup or maintenance
+unit before stopping the main service. Disabling a timer alone does not stop its
+active oneshot. Use this order:
+
+```sh
+sudo systemctl disable --now agent-coordinator-backup.timer agent-coordinator-maintenance.timer
+sudo systemctl stop agent-coordinator-backup.service agent-coordinator-maintenance.service
+sudo systemctl disable --now agent-coordinator.service
+```
+
+Remove the unit files and binaries, then run `sudo systemctl daemon-reload`.
 Keep data and backups until their retention or incident requirements have been
 reviewed. Removing the package does not authorize deleting
 `/var/lib/agent-coordinator` or `/var/lib/agent-coordinator-backups`.

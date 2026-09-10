@@ -70,7 +70,10 @@ version, and GitHub repository, head SHA, ref, workflow, job, run ID, and attemp
 when those CI values exist. Keep it with the exact build's other release evidence.
 The executable digest and CI build job together identify the tested binary; the
 runner never records credentials, request headers, raw errors, or captured server
-output.
+output. The last 120 one-second diagnostic samples retain service CPU time,
+aggregate CPU throttling counters, queue depth, completed counts, and background
+operation progress, including on a failed run. These counters help diagnose
+contention without recording request contents.
 
 Short runs (`--duration 60`, for example) are development checks and have
 `full_acceptance: false`; they may omit `--require-baseline`. The same exact
