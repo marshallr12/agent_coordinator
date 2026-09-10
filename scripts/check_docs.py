@@ -12,6 +12,8 @@ import subprocess
 import tomllib
 import urllib.parse
 
+from package_release import validate_local_markdown_links
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PINNED_MDBOOK_VERSION = "0.5.4"
@@ -119,6 +121,17 @@ def summary_coverage(source_root: Path, files: list[Path]) -> None:
     if missing or extra:
         detail = missing[0] if missing else extra[0]
         raise AssertionError(f"SUMMARY.md does not cover the maintained book exactly: {detail}")
+
+
+def source_package_links(files: list[Path]) -> None:
+    # Check compatibility entry points as well as the rendered canonical pages.
+    sources = [*files, ROOT / "book.toml", *ROOT.glob("*.md"),
+               *(ROOT / "docs").glob("*.md"), *(ROOT / "deploy").iterdir()]
+    entries = {
+        source.relative_to(ROOT).as_posix(): (regular(source, "Documentation source"), 0o644)
+        for source in sources if source.is_file()
+    }
+    validate_local_markdown_links(entries)
 
 
 def authoritative_wrappers(source_root: Path) -> None:
@@ -231,9 +244,10 @@ def main() -> None:
     files = source_files(source_root)
     summary_coverage(source_root, files)
     authoritative_wrappers(source_root)
+    source_package_links(files)
     run_mdbook(executable, output_root)
     generated_links(output_root)
-    print("PASS: pinned mdBook build, source coverage, authority wrappers, and generated local links.")
+    print("PASS: pinned mdBook build, source coverage, authority wrappers, source/package links, and generated local links.")
 
 
 if __name__ == "__main__":
