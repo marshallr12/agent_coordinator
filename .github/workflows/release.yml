@@ -25,6 +25,9 @@ jobs:
     name: Ubuntu 24.04 package and systemd/HTTPS acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      server_sha256: ${{ steps.package.outputs.server_sha256 }}
+      archive_sha256: ${{ steps.package.outputs.archive_sha256 }}
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -35,6 +38,7 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
       - name: Rebuild and package twice
+        id: package
         shell: bash
         run: |
           set -euo pipefail
@@ -54,7 +58,10 @@ jobs:
               "dist/second/agent-coordinator-$version-linux-x86_64.tar.gz.sha256"
           python3 scripts/linux_install_smoke.py \
             --package "dist/first/agent-coordinator-$version-linux-x86_64.tar.gz"
-          echo "PACKAGE=dist/first/agent-coordinator-$version-linux-x86_64.tar.gz" >> "$GITHUB_ENV"
+          package="dist/first/agent-coordinator-$version-linux-x86_64.tar.gz"
+          echo "PACKAGE=$package" >> "$GITHUB_ENV"
+          echo "server_sha256=$(sha256sum target/repro-first/release/agent-coordinator-server | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$(sha256sum "$package" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - name: Download and verify the pinned Caddy fixture
         shell: bash
         run: |
@@ -172,6 +179,7 @@ jobs:
 
   linux-load:
     name: Ubuntu 24.04 release-size load acceptance
+    needs: linux-package
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -179,21 +187,49 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - name: Install the pinned Rust toolchain
+      - name: Download the accepted Linux package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: agent-coordinator-linux-x86_64
+          path: ${{ runner.temp }}/accepted-linux-package
+      - name: Verify and extract the accepted Linux package
+        shell: bash
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.linux-package.outputs.archive_sha256 }}
+          EXPECTED_SERVER_SHA256: ${{ needs.linux-package.outputs.server_sha256 }}
         run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
-      - name: Build the native release server
-        run: cargo build --release --locked -p coordinator-server
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from scripts.linux_install_smoke import extract_checked, sha256, verify_internal, verify_outer_checksum
+
+          package_directory = Path(os.environ["RUNNER_TEMP"]) / "accepted-linux-package"
+          packages = list(package_directory.glob("*.tar.gz"))
+          assert len(packages) == 1, "Expected exactly one accepted Linux package."
+          package = packages[0]
+          verify_outer_checksum(package)
+          assert sha256(package) == os.environ["EXPECTED_ARCHIVE_SHA256"], "Accepted archive digest differs from the package job."
+          extraction = Path(os.environ["RUNNER_TEMP"]) / "accepted-linux-extracted"
+          root = extract_checked(package, extraction)
+          verify_internal(root)
+          server = (root / "bin/agent-coordinator-server").resolve()
+          assert sha256(server) == os.environ["EXPECTED_SERVER_SHA256"], "Accepted server digest differs from the package job."
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as environment:
+              environment.write(f"ACCEPTED_SERVER={server}\n")
+          PY
       - name: Run the 30-minute release-size workload
         shell: bash
+        env:
+          EXPECTED_SERVER_SHA256: ${{ needs.linux-package.outputs.server_sha256 }}
         run: |
           set -euo pipefail
           sudo --preserve-env=CI,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_WORKFLOW,GITHUB_JOB \
             systemd-run --scope --quiet \
             --property=MemoryMax=4G --property=MemorySwapMax=0 --property=CPUQuota=200% \
             runuser -u "$(id -un)" -- \
-            python3 scripts/load_acceptance.py --server target/release/agent-coordinator-server \
+            python3 scripts/load_acceptance.py --server "$ACCEPTED_SERVER" \
+            --expected-server-sha256 "$EXPECTED_SERVER_SHA256" \
             --duration 1800 --rate 50 --history 100000 --require-baseline --report load-acceptance.json
       - name: Upload the sanitized load report
         if: always()

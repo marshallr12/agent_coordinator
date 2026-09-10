@@ -34,6 +34,21 @@ ROOT = Path(__file__).resolve().parents[1]
 BASELINE_MEMORY_BYTES = 4 * 1024 ** 3
 
 
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_argument(value):
+    normalized = value.lower()
+    if len(normalized) != 64 or any(character not in "0123456789abcdef" for character in normalized):
+        raise argparse.ArgumentTypeError("expected a 64-character SHA-256 digest")
+    return normalized
+
+
 def identifier():
     return str(uuid.uuid4())
 
@@ -176,7 +191,11 @@ def run(args):
     try:
         report["source_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         report["source_dirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True))
-        report["executable_sha256"] = hashlib.sha256(server.read_bytes()).hexdigest()
+        report["executable_sha256"] = sha256(server)
+        report["expected_server_sha256"] = args.expected_server_sha256
+        report["executable_matches_expected"] = (
+            None if args.expected_server_sha256 is None
+            else report["executable_sha256"] == args.expected_server_sha256)
         github = {name.lower(): os.environ[name] for name in (
             "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA",
             "GITHUB_REF", "GITHUB_WORKFLOW", "GITHUB_JOB") if os.environ.get(name)}
@@ -190,10 +209,14 @@ def run(args):
         report["baseline"] = baseline
         full_workload = args.duration >= 1800 and args.rate == 50 and args.history == 100000
         report["full_workload"] = full_workload
-        report["full_acceptance_eligible"] = full_workload and baseline["verified"]
+        report["full_acceptance_eligible"] = (
+            full_workload and baseline["verified"]
+            and report["executable_matches_expected"] is not False)
         if args.require_baseline and not baseline["verified"]:
             failed = sorted(name for name, passed in baseline["checks"].items() if not passed)
             raise AssertionError("Required Linux baseline checks failed: " + ", ".join(failed))
+        if report["executable_matches_expected"] is False:
+            raise AssertionError("Selected server SHA-256 does not match the accepted package.")
         with tempfile.TemporaryDirectory(prefix="coordinator-load-") as folder:
             temporary = Path(folder)
             with socket.socket() as listener:
@@ -555,6 +578,8 @@ if __name__ == "__main__":
     parser.add_argument("--rate", type=int, default=50)
     parser.add_argument("--history", type=int, default=100000)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--expected-server-sha256", type=sha256_argument,
+        help="fail before initialization unless --server has this accepted-package digest")
     parser.add_argument("--require-baseline", action="store_true",
         help="fail unless the clean Ubuntu 24.04 x86_64 run inherits the aggregate two-core, 4 GiB, no-swap cgroup v2 baseline")
     options = parser.parse_args()
