@@ -49,7 +49,7 @@
 
         <div class="design-banner" role="note">
           <span class="banner-icon" aria-hidden="true">✦</span>
-          <span><strong>Job evidence stage.</strong> Coordinate tasks, local jobs, and shared resources. Review and integration arrive in a later milestone.</span>
+          <span><strong>Development release.</strong> Coordinate work through checks, review, and integration. Publishing a change does not by itself complete the task.</span>
         </div>
 
         <div id="global-alert" class="global-alert" role="status" aria-live="polite" hidden></div>
@@ -86,8 +86,9 @@
               </div>
               <div class="toolbar">
                 <label class="select-label" for="project-select">Project<select id="project-select"><option value="">Choose a project</option></select></label>
-                <label class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
+                <label class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
                 <button id="refresh-tasks" class="button subtle" type="button" disabled>Refresh</button>
+                <button id="workflow-settings" class="button subtle" type="button">Review & check settings</button>
               </div>
               <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
               <div id="tasks-list" class="tasks-list" hidden></div>
@@ -104,6 +105,7 @@
                   <article class="card lease-card"><div class="card-header"><h2>Ownership</h2><span class="live-label"><span class="status-dot"></span> Observed</span></div><div id="lease-content"></div></article>
                 </div>
                 <article class="card checkpoints-card"><div class="card-header"><div><h2>Checkpoint trail</h2><p class="muted">Progress shared by the active or previous attempt.</p></div></div><div id="checkpoints-content"></div></article>
+                <article class="card workflow-card"><div class="card-header"><div><h2>Submission & completion</h2><p class="muted">Review and checks apply to a specific candidate. Completion requires validation of the integrated result.</p></div></div><div id="workflow-content"></div></article>
                 <article class="card job-evidence-card"><div class="card-header"><div><h2>Jobs & resource holds</h2><p class="muted">A missing observer does not prove a job stopped. Holds remain until explicitly released or resolved.</p></div></div><div id="job-evidence-content"></div></article>
               </div>
             </section>

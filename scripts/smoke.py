@@ -19,6 +19,7 @@ import urllib.request
 import uuid
 
 from job_smoke import exercise_jobs
+from completion_smoke import exercise_completion
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,16 +61,17 @@ def run():
                 urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
             csrf = ""
 
-            def api(path, body=None):
+            def api(path, body=None, method=None):
                 headers = {"Content-Type": "application/json", "Origin": origin,
                            "X-CSRF-Token": csrf, "Idempotency-Key": str(uuid.uuid4())}
                 request = urllib.request.Request(origin + path, headers=headers,
-                           data=None if body is None else json.dumps(body).encode())
+                           data=None if body is None else json.dumps(body).encode(), method=method)
                 try:
                     with opener.open(request, timeout=10) as response:
                         return json.load(response)["data"]
                 except urllib.error.HTTPError as error:
-                    raise AssertionError(f"API {path} failed with {error.code}") from None
+                    failure = json.load(error).get("error", {})
+                    raise AssertionError(f"API {path} failed with {error.code}: {failure.get('code')} {failure.get('message')}") from None
 
             csrf = api("/api/v1/auth/login", {"username": "smoke", "password": password})["csrf_token"]
             project = api("/api/v1/projects", {"name": "Smoke project",
@@ -80,12 +82,16 @@ def run():
             binding.write_text(f'service_url = "{origin}"\nproject_id = "{project}"\n')
             credentials = [api("/api/v1/admin/agents", {"name": f"workstation-{i}"}) for i in range(2)]
 
-            def cli(index, *args, body=None, expected=0):
+            def cli(index, *args, body=None, expected=0, project_id=None):
                 env = {k: v for k, v in os.environ.items() if not k.startswith("AGENT_COORDINATOR_")}
                 env.update(AGENT_COORDINATOR_HOME=str(temporary / f"agent-{index}"),
                            AGENT_COORDINATOR_TOKEN=credentials[index]["token"],
                            AGENT_COORDINATOR_ORIGIN=origin)
-                command = [str(CLI), "--repo-config", str(binding), "--session", f"harness-{index}",
+                selected_binding = binding
+                if project_id is not None:
+                    selected_binding = temporary / f"binding-{project_id}.toml"
+                    selected_binding.write_text(f'service_url = "{origin}"\nproject_id = "{project_id}"\n')
+                command = [str(CLI), "--repo-config", str(selected_binding), "--session", f"harness-{index}",
                            "--allow-insecure-loopback", "--json", *args]
                 if body is not None:
                     command += ["--input", "-"]
@@ -120,6 +126,7 @@ def run():
             assert api(f"/api/v1/projects/{project}/tasks/{task['id']}")["work_status"] == "ready"
 
             exercise_jobs(temporary, api, cli, project, owner)
+            exercise_completion(temporary, api, cli, owner)
 
             # Credential revocation must be visible to the actual CLI on its next call.
             api(f"/api/v1/admin/credentials/{credentials[owner]['credential_id']}/revoke", {})

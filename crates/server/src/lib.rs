@@ -4,6 +4,7 @@ pub mod error;
 pub mod jobs;
 pub mod mutation;
 pub mod state;
+pub mod workflow;
 
 use axum::{
     Json, Router,
@@ -26,6 +27,7 @@ pub fn response(data: Value) -> Json<Value> {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(coordination::routes())
+        .merge(workflow::routes())
         .merge(jobs::routes())
         .merge(auth::routes())
         .route(
@@ -158,7 +160,7 @@ fn asset(content_type: &'static str, body: &'static str) -> Response {
 async fn info() -> Json<Value> {
     response(
         json!({"product":"Agent Coordinator","version":env!("CARGO_PKG_VERSION"),"api_version":"v1","instruction_version":coordinator_core::INSTRUCTION_VERSION,
-        "implementation_stage":"job_evidence","authentication_help":"/api/v1/help/authentication",
+        "implementation_stage":"reviewed_completion","authentication_help":"/api/v1/help/authentication",
         "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events"],
         "unavailable_features":["submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","backup_restore"]}),
     )

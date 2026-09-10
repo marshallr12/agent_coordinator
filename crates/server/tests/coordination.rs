@@ -88,7 +88,7 @@ impl Fixture {
         v["data"].clone()
     }
     async fn ack(&self, c: &Caller, p: &str) {
-        let (status,v)=self.call(c,"POST",&format!("/api/v1/sessions/{}/instruction-acknowledgments",c.session),&Uuid::new_v4().to_string(),json!({"project_id":p,"policy_revision":1,"instruction_version":"2","sections":["coordination-v2"]})).await;
+        let (status,v)=self.call(c,"POST",&format!("/api/v1/sessions/{}/instruction-acknowledgments",c.session),&Uuid::new_v4().to_string(),json!({"project_id":p,"policy_revision":1,"instruction_version":coordinator_core::INSTRUCTION_VERSION,"sections":[coordinator_core::REQUIRED_SECTION]})).await;
         assert_eq!(status, StatusCode::OK, "{v}");
     }
     async fn claim(
@@ -99,7 +99,7 @@ impl Fixture {
         key: &str,
         mode: &str,
     ) -> (StatusCode, Value) {
-        self.call(c,"POST",&format!("/api/v1/projects/{p}/claims"),key,json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":mode,"policy_revision":1,"instruction_version":"2"})).await
+        self.call(c,"POST",&format!("/api/v1/projects/{p}/claims"),key,json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":mode,"policy_revision":1,"instruction_version":coordinator_core::INSTRUCTION_VERSION})).await
     }
 }
 async fn seed(state: &AppState, human: bool, name: &str) -> Caller {
@@ -216,7 +216,7 @@ async fn competing_claims_have_exactly_one_owner_and_one_generation() {
         let c = if i % 2 == 0 { f.a.clone() } else { f.b.clone() };
         let gate = barrier.clone();
         let path = format!("/api/v1/projects/{p}/claims");
-        let body = json!({"task_id":t["id"],"expected_task_revision":1,"policy_revision":1,"instruction_version":"2"});
+        let body = json!({"task_id":t["id"],"expected_task_revision":1,"policy_revision":1,"instruction_version":coordinator_core::INSTRUCTION_VERSION});
         workers.push(tokio::spawn(async move {
             gate.wait().await;
             call(app, &c, "POST", &path, &format!("race-{i}"), body)
@@ -309,7 +309,7 @@ async fn ownership_and_receipts_survive_a_service_restart() {
     f.state.pool.close().await;
     let mut reopened = AppState::open(f.state.config.clone()).await.unwrap();
     reopened.clock = f.clock.clone();
-    let (status, replay) = call(router(reopened), &f.a, "POST", &format!("/api/v1/projects/{p}/claims"), "persisted-claim", json!({"task_id":t["id"],"expected_task_revision":1,"policy_revision":1,"instruction_version":"2"})).await;
+    let (status, replay) = call(router(reopened), &f.a, "POST", &format!("/api/v1/projects/{p}/claims"), "persisted-claim", json!({"task_id":t["id"],"expected_task_revision":1,"policy_revision":1,"instruction_version":coordinator_core::INSTRUCTION_VERSION})).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(attempt(&first), attempt(&replay));
     assert_eq!(replay["data"]["current_authority"]["valid"], true);
@@ -680,5 +680,49 @@ async fn reusing_mutation_key_with_changed_input_is_a_conflict() {
         .await
         .0,
         StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn acceptance_changes_after_work_require_a_human_or_explicit_delegation() {
+    let f = Fixture::new().await;
+    let p = f.project("protected acceptance").await;
+    let t = f.task(&p, "outcome", vec![]).await;
+    f.ack(&f.a, &p).await;
+    let (status, claimed) = f.claim(&f.a, &p, &t, "claim-for-criteria", "work").await;
+    assert_eq!(status, StatusCode::OK);
+    let attempt = &claimed["data"]["claim"]["attempt"];
+    let (status, _) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!(
+                "/api/v1/projects/{p}/attempts/{}/release",
+                attempt["id"].as_str().unwrap()
+            ),
+            "release-for-review",
+            json!({"generation":attempt["generation"],"summary":"Work needs revision."}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let changed = json!({"expected_revision":1,"title":"outcome","description":"Test task",
+        "acceptance_criteria":["A weaker criterion"],"priority":2,"depends_on":[],"planned":false});
+    assert_eq!(
+        f.call(&f.a, "PATCH", &path, "weaken-own-criteria", changed.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, unchanged) = f.call(&f.a, "GET", &path, "read-criteria", json!({})).await;
+    assert_eq!(
+        unchanged["data"]["acceptance_criteria"],
+        t["acceptance_criteria"]
+    );
+    assert_eq!(
+        f.call(&f.admin, "PATCH", &path, "human-revises-criteria", changed)
+            .await
+            .0,
+        StatusCode::OK
     );
 }

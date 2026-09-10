@@ -1,8 +1,10 @@
 //! Vendor-neutral request types shared by the coordination server and clients.
 use serde::{Deserialize, Serialize};
+pub mod workflow;
+pub use workflow::*;
 
-pub const INSTRUCTION_VERSION: &str = "2";
-pub const REQUIRED_SECTION: &str = "coordination-v2";
+pub const INSTRUCTION_VERSION: &str = "3";
+pub const REQUIRED_SECTION: &str = "coordination-v3";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

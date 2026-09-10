@@ -54,6 +54,7 @@
 
   const actorId = () => text(state.actor?.id || state.actor?.principal_id);
   const mutationOperation = (path, method) => {
+    if (['POST', 'PUT', 'PATCH'].includes(method) && /\/projects\/[^/]+\/(workflow-policy|policy|workflow-activities\/[^/]+\/[^/]+|tasks\/[^/]+\/workflow\/reopen)$/.test(path)) return 'workflow_change';
     if (method === 'POST' && path === '/api/v1/resources') return 'create_resource';
     if (method === 'POST' && /\/projects\/[^/]+\/reservations\/[^/]+\/resolve$/.test(path)) return 'resolve_resource';
     if (method === 'POST' && path === '/api/v1/projects') return 'create_project';
@@ -175,8 +176,9 @@
   }
 
   function signOutLocal() {
+    document.querySelectorAll('dialog').forEach(dialog => dialog.close());
     state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
-    state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
+    state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     clearPersistedMutation();
     setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); show($('credentials-list'), false);
     if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null;
@@ -206,6 +208,7 @@
   }
 
   function restoredMutationCallbacks(operation, context = {}) {
+    if (operation === 'workflow_change') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; if (state.selectedTaskId) { showView('task-detail'); await loadTaskDetail(); } else await loadTasks(); setGlobalAlert('Workflow update recorded. Inspect the current candidate and next actions.', 'success'); };
     if (operation === 'create_resource') return async () => { await loadResources(); setGlobalAlert('Resource created.', 'success'); };
     if (operation === 'resolve_resource') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; showView('task-detail'); await loadTaskDetail(); setGlobalAlert('Resolution recorded. Review the updated job and hold evidence.', 'success'); };
     if (operation === 'create_project') return async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); };
@@ -356,10 +359,10 @@
   function renderTaskDetail() {
     const data = state.detail || {}; const task = data.task || data; const project = state.projects.find((item) => text(item.id) === state.projectId);
     setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), task.title || 'Untitled task'); setText($('detail-task-id'), `Task ${task.id || state.selectedTaskId} · Revision ${task.revision || 1}`); setText($('detail-description'), task.description || 'No description provided.');
-    const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); badge.className = `status-badge ${status}`; setText($('detail-kind'), text(task.kind || 'general').toUpperCase());
+    const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); badge.className = `status-badge ${status}`; setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
     const criteria = $('acceptance-list'); clear(criteria); const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
     if (!items.length) add(criteria, el('li', 'muted', 'No acceptance criteria recorded.')); else items.forEach((item) => add(criteria, el('li', '', item)));
-    renderLease(data, task); renderCheckpoints(data); renderJobEvidence(data);
+    renderLease(data, task); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
     show($('task-detail-state'), false); show($('task-detail-content'), true);
   }
 
@@ -367,7 +370,7 @@
     const target = $('lease-content'); clear(target); const attempts = Array.isArray(data.attempts) ? data.attempts : []; const current = attempts.find((attempt) => attempt.id === task.current_attempt_id);
     if (!current) {
       const status = taskStatus(task);
-      const message = task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : 'No active lease. This task is available for eligible work.';
+      const message = task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.';
       add(target, el('p', 'muted', message)); return;
     }
     const dl = el('dl'); const remaining = current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
@@ -507,6 +510,153 @@
     const body = {key: $('resource-key').value.trim(), capacity: Number($('resource-capacity').value), description: $('resource-description').value.trim()};
     startMutation('/api/v1/resources', body, 'resource creation', async () => { $('resource-form').reset(); await loadResources(); setGlobalAlert('Resource created.', 'success'); });
   });
+
+  const projectPath = (projectId = state.projectId) => `/api/v1/projects/${encodeURIComponent(projectId)}`;
+  function workflowDialog(title, description) {
+    const dialog = el('dialog', 'form-dialog'); const form = el('form');
+    add(form, el('h2', '', title)); if (description) add(form, el('p', 'muted', description));
+    const field = (name, label, value = '', kind = 'textarea') => {
+      const id = `workflow-${name}`; const caption = el('label', '', label); caption.htmlFor = id;
+      const input = el(kind); input.id = id; input.name = name; input.value = text(value); input.required = true; input.maxLength = 8192;
+      add(form, caption); add(form, input); return input;
+    };
+    const finish = (label, submit) => {
+      const actions = el('div', 'dialog-actions'); const cancel = el('button', 'button subtle', 'Cancel'); cancel.type = 'button'; cancel.addEventListener('click', () => dialog.close());
+      const save = el('button', 'button primary', label); save.type = 'submit'; add(actions, cancel); add(actions, save); add(form, actions);
+      form.addEventListener('submit', event => { event.preventDefault(); if (!form.reportValidity() || state.mutation) return; submit(new FormData(form), dialog); });
+      add(dialog, form); add(document.body, dialog); dialog.addEventListener('close', () => dialog.remove()); dialog.showModal();
+    };
+    return { dialog, form, field, finish };
+  }
+  function workflowMutation(path, body, label, after) {
+    const projectId = state.projectId, taskId = state.selectedTaskId;
+    startMutation(path, body, label, async data => {
+      if (projectId === state.projectId && taskId === state.selectedTaskId && taskId) await loadTaskDetail();
+      else if (projectId === state.projectId) await loadTasks();
+      if (after) after(data);
+    }, 'POST', null, { projectId, taskId });
+  }
+  function renderWorkflow(data) {
+    const target = $('workflow-content'); clear(target); const workflow = data.workflow || {}; const submission = workflow.submission;
+    if (!submission) { add(target, el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.')); return; }
+    const candidate = el('div', 'workflow-entry'); add(candidate, el('h3', '', 'Current candidate'));
+    add(candidate, el('p', '', submission.summary));
+    const details = el('dl');
+    [['Submission', submission.id], ['Source revision', submission.candidate_revision], ['Source tree', submission.candidate_tree], ['Task revision', submission.task_revision], ['Policy revision', submission.project_policy_revision]].filter(([,value]) => value !== null && value !== undefined).forEach(([label,value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+    add(candidate, details); if (submission.handoff) add(candidate, el('p', '', submission.handoff));
+    (submission.acceptance_evidence || []).forEach(item => add(candidate, el('p', '', `${item.criterion}: ${item.evidence}`)));
+    if (state.actor?.kind === 'human' && workflow.phase !== 'done' && workflow.phase !== 'revision_needed' && submission.task_id) {
+      const reopen = el('button', 'button subtle', 'Reopen for revision'); reopen.type = 'button'; reopen.dataset.mutation = 'true';
+      reopen.addEventListener('click', () => {
+        const view = workflowDialog('Reopen this candidate', 'This preserves the current evidence and cancels its pending activities. A new submission will need fresh reviews. Live jobs or uncertain publication must be resolved first.');
+        view.field('reason', 'Reason for a new revision');
+        view.finish('Reopen for revision', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath()}/tasks/${encodeURIComponent(submission.task_id)}/workflow/reopen`, {submission_id:submission.id, reason:values.get('reason')}, 'candidate revision'); });
+      }); add(candidate, reopen);
+    }
+    add(target, candidate);
+    (workflow.blockers || []).forEach(item => add(target, el('p', 'inline-alert error', typeof item === 'string' ? item : item.message || item.code)));
+    if (workflow.activities_truncated) add(target, el('p', 'muted', 'Showing the latest 100 workflow activities. Older records remain stored.'));
+    (workflow.activities || []).forEach(activity => {
+      const entry = el('div', 'workflow-entry'); add(entry, el('h3', '', displayStatus(activity.kind)));
+      add(entry, el('p', 'muted', `${displayStatus(activity.status)} · ${activity.id}`));
+      if (activity.activity_task_id) { const open = el('button', 'button text-button', 'Inspect activity task and jobs'); open.type = 'button'; open.addEventListener('click', () => openTask(activity.activity_task_id)); add(entry, open); }
+      const attempt = activity.current_attempt || activity.attempt;
+      if (attempt) add(entry, el('p', 'muted', `Owner ${attempt.owner_id} · lease expires ${formatDate(attempt.expires_at)}`));
+      if (activity.review) { add(entry, el('p', '', `${displayStatus(activity.review.decision)}: ${activity.review.summary}`)); (activity.review.findings || []).forEach(finding => add(entry, el('p', '', `${displayStatus(finding.severity)}: ${finding.remedy}`))); }
+      if (activity.intent) add(entry, el('p', 'muted', `Publication intent: ${activity.intent.observed_target_revision} → ${activity.intent.result_revision}`));
+      if (activity.result) add(entry, el('p', '', `Publication: ${displayStatus(activity.result.publication_state)}`));
+      if (activity.hold) add(entry, el('p', '', `Target hold: ${displayStatus(activity.hold.state)} · ${activity.hold.canonical_repository_key} · ${activity.hold.target_branch}`));
+      if (activity.publication_reconciliation) add(entry, el('p', '', `Reconciled ${displayStatus(activity.publication_reconciliation.disposition)}: ${activity.publication_reconciliation.evidence}`));
+      (activity.result?.check_job_ids || []).forEach(id => add(entry, el('p', 'muted', `Check producer: ${id}`)));
+      if (activity.authorization) add(entry, el('p', '', `Human authorization: ${activity.authorization.summary}`));
+      const action = (label, callback) => { const button = el('button', 'button subtle', label); button.type = 'button'; button.dataset.mutation = 'true'; button.addEventListener('click', callback); add(entry, button); };
+      if (state.actor?.kind === 'human' && !['done','completed','canceled'].includes(activity.status)) {
+        if (activity.kind === 'human_review') {
+          const current = attempt?.state === 'active' && attempt.valid_by_time === true && attempt.owner_authorized === true;
+          if (current && attempt.owner_id === actorId() && attempt.session_id === state.actor.session_id) action('Record human review', () => openHumanReview(activity, submission, attempt));
+          else if (!current) action('Claim human review', () => workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/claim`, {expected_submission_id: submission.id, expected_project_policy_revision: submission.project_policy_revision, expected_workflow_policy_revision: submission.workflow_policy_revision}, 'review claim', response => openHumanReview(activity, submission, response.attempt)));
+        }
+        if (activity.kind === 'integration') {
+          if (!activity.authorization && workflow.phase === 'integration' && state.projects.find(project => text(project.id) === state.projectId)?.automatic_integration === false) action('Authorize integration', () => openIntegrationAuthorization(activity, submission));
+          if (activity.intent && !activity.publication_reconciliation) action('Reconcile publication', () => openPublicationReconciliation(activity, submission));
+        }
+      }
+      add(target, entry);
+    });
+    (workflow.next_actions || []).forEach(action => add(target, el('p', 'muted', typeof action === 'string' ? action : action.message)));
+    renderMutationState();
+  }
+  function openHumanReview(activity, submission, attempt) {
+    if (!attempt) { setGlobalAlert('Refresh the activity to inspect its current ownership.', 'error'); return; }
+    const view = workflowDialog('Review this candidate', `This decision applies only to submission ${submission.id}, source ${submission.candidate_revision || 'general task evidence'}. Inspect its acceptance evidence and checks before deciding.`);
+    const decision = view.field('decision', 'Decision', '', 'select'); for (const [value,label] of [['changes_requested','Changes requested'],['approved','Approved']]) { const option = el('option', '', label); option.value = value; add(decision, option); }
+    view.field('summary', 'Review summary'); const findings = view.field('findings', 'Required remedies — one per line'); findings.required = false;
+    decision.addEventListener('change', () => findings.setCustomValidity(''));
+    view.finish('Record review', (values, dialog) => {
+      const remedies = text(values.get('findings')).split('\n').map(v => v.trim()).filter(Boolean);
+      if (values.get('decision') === 'approved' && remedies.length) { findings.setCustomValidity('Required remedies must be resolved before approval. Choose changes requested.'); findings.reportValidity(); findings.addEventListener('input', () => findings.setCustomValidity(''), {once:true}); return; }
+      dialog.close(); workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/review`, {generation: attempt.generation, submission_id: submission.id, decision: values.get('decision'), summary: values.get('summary'), findings: remedies.map(remedy => ({severity:'required',remedy,evidence:text(values.get('summary'))}))}, 'human review');
+    });
+  }
+  function openIntegrationAuthorization(activity, submission) {
+    const view = workflowDialog('Authorize this integration', `Permit agents to integrate submission ${submission.id} after required review and checks. This does not publish source or mark the task done.`);
+    view.field('summary', 'Authorization reason'); view.finish('Authorize integration', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/authorization`, {submission_id:submission.id, expected_project_policy_revision:submission.project_policy_revision, expected_workflow_policy_revision:submission.workflow_policy_revision, summary:values.get('summary')}, 'integration authorization'); });
+  }
+  function openPublicationReconciliation(activity, submission) {
+    const view = workflowDialog('Reconcile publication', 'Inspect the actual remote target and the previous publisher first. An unreachable workstation does not prove publication stopped. Record what is known; this cannot manufacture a check result.');
+    const disposition = view.field('disposition', 'Observed outcome', '', 'select'); for (const [value,label] of [['not_published','Confirmed not published'],['published','Confirmed published'],['target_moved','Target advanced or changed']]) { const option = el('option', '', label); option.value = value; add(disposition, option); }
+    view.field('observed_target_revision', 'Observed remote commit', '', 'input'); view.field('observed_target_tree', 'Observed remote tree', '', 'input'); view.field('evidence', 'Evidence, including publisher termination or isolation');
+    view.finish('Record reconciliation', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/publication-reconciliation`, {submission_id:submission.id, ...Object.fromEntries(values)}, 'publication reconciliation'); });
+  }
+
+  async function openWorkflowSettings() {
+    const projectId = state.projectId, currentActor = actorId();
+    if (!projectId) { setGlobalAlert('Choose a project before opening its settings.', 'error'); return; }
+    try {
+      const [policyReply, orientationReply] = await Promise.all([
+        request(`${projectPath(projectId)}/workflow-policy`).catch(error => {
+          if (error.code === 'workflow_policy_required') return {data:{revision:0,canonical_repository_key:'',required_checks:[]}};
+          throw error;
+        }),
+        request(`${projectPath(projectId)}/orientation`)
+      ]);
+      if (projectId !== state.projectId || currentActor !== actorId()) return;
+      const policy = policyReply.data, project = orientationReply.data.project;
+      const view = workflowDialog('Required checks', 'Use the same repository identity for every project and URL alias sharing a Git repository. Check identities, versions, and environments must match the producer registration exactly. Saving a new roster makes existing candidates require reconciliation.');
+      const rules = el('button', 'button subtle', `Review: ${displayStatus(project.review_mode)} · ${project.automatic_integration ? 'Automatic integration allowed' : 'Human integration authorization required'}`);
+      rules.type = 'button'; rules.addEventListener('click', () => { view.dialog.close(); openReviewSettings(project); }); add(view.form, rules);
+      const key = view.field('canonical_repository_key', 'Shared repository identity', policy.canonical_repository_key || '', 'input'); key.maxLength = 255;
+      const rows = el('div'); add(view.form, rows); let serial = 0;
+      const addRow = (check = {}) => {
+        const row = el('div', 'check-row'); row.dataset.row = String(serial++);
+        for (const [name,label] of [['identity','Check'],['version','Definition version'],['environment','Environment']]) {
+          const wrap = el('div'), id = `check-${row.dataset.row}-${name}`, caption = el('label', '', label), input = el('input');
+          caption.htmlFor = id; input.id = id; input.name = name; input.value = check[name] || ''; input.required = true; input.maxLength = 255;
+          add(wrap, caption); add(wrap, input); add(row, wrap);
+        }
+        const remove = el('button', 'button subtle', 'Remove'); remove.type = 'button'; remove.addEventListener('click', () => row.remove()); add(row, remove); add(rows, row);
+      };
+      const checks = policy.required_checks || []; (checks.length ? checks : [{}]).forEach(addRow);
+      const more = el('button', 'button subtle', 'Add required check'); more.type = 'button'; more.addEventListener('click', () => { if (rows.children.length < 100) addRow(); }); add(view.form, more);
+      view.finish('Save check roster', (_, dialog) => {
+        if (!rows.children.length) { setGlobalAlert('Configure at least one required check.', 'error'); return; }
+        const required_checks = Array.from(rows.children).map(row => Object.fromEntries(Array.from(row.querySelectorAll('input')).map(input => [input.name,input.value.trim()])));
+        dialog.close(); startMutation(`${projectPath(projectId)}/workflow-policy`, {expected_revision:policy.revision || 0, canonical_repository_key:key.value.trim(), required_checks}, 'check roster', async () => { await loadProjects(); setGlobalAlert('Check roster saved. Agents must read the updated workflow policy.', 'success'); }, 'PUT', null, {projectId});
+      });
+    } catch (error) { setGlobalAlert(errorMessage(error), 'error'); }
+  }
+  function openReviewSettings(project) {
+    const projectId = state.projectId;
+    const view = workflowDialog('Review and integration rules', 'These rules apply to new submissions. Existing candidates remain bound to their recorded policy revision and need explicit reconciliation after a policy change.');
+    const mode = view.field('review_mode', 'Required review', '', 'select');
+    for (const [value,label] of [['agent','Independent agent'],['human','Human'],['both','Independent agent and human'],['none','No required review']]) { const option = el('option', '', label); option.value = value; add(mode, option); } mode.value = project.review_mode;
+    const integration = view.field('automatic_integration', 'Integration authorization', '', 'select');
+    for (const [value,label] of [['false','A human must authorize each candidate'],['true','Agents may integrate after required review']]) { const option = el('option', '', label); option.value = value; add(integration, option); } integration.value = String(project.automatic_integration);
+    view.finish('Save review rules', (values, dialog) => {
+      dialog.close(); startMutation(`${projectPath(projectId)}/policy`, {expected_revision:project.policy_revision, review_mode:values.get('review_mode'), recovery_mode:project.recovery_mode, lease_seconds:project.lease_seconds, rules:project.rules, agent_rule_editing:project.agent_rule_editing, automatic_integration:values.get('automatic_integration') === 'true'}, 'review rules', async () => { await loadProjects(); setGlobalAlert('Review rules saved. Agents must read and acknowledge the updated policy.', 'success'); }, 'PATCH', null, {projectId});
+    });
+  }
+  $('workflow-settings').addEventListener('click', openWorkflowSettings);
 
   restoreSession();
 })();

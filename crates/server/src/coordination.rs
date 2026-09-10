@@ -261,6 +261,17 @@ async fn update_policy(
             "Read the current project policy before editing it.",
         ));
     }
+    if sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM integration_holds h JOIN workflow_activities a ON a.id=h.activity_id WHERE a.project_id=? AND h.state='held'",
+    )
+    .bind(&id)
+    .fetch_one(&mut *m.tx)
+    .await? > 0 {
+        return Err(AppError::conflict(
+            "policy_hold_conflict",
+            "Finish or reconcile the held integration before changing its policy. Publication may already be in progress.",
+        ));
+    }
     sqlx::query("UPDATE projects SET policy_revision=policy_revision+1,review_mode=?,recovery_mode=?,lease_seconds=?,rules=?,agent_rule_editing=?,automatic_integration=? WHERE id=?")
         .bind(&input.review_mode).bind(&input.recovery_mode).bind(input.lease_seconds).bind(&input.rules).bind(input.agent_rule_editing).bind(input.automatic_integration).bind(&id).execute(&mut *m.tx).await?;
     let value = serde_json::to_value(project(&mut m.tx, &id).await?)?;
@@ -291,10 +302,16 @@ struct Task {
     attempt_expires: Option<i64>,
     owner_authorized: bool,
     dependencies_ready: bool,
+    workflow_phase: Option<String>,
+    workflow_activity_kind: Option<String>,
+    #[sqlx(default)]
+    workflow_status: Option<String>,
 }
 macro_rules! task_sql {($suffix:literal)=>{concat!(
     "WITH visible AS (SELECT t.*, a.state AS attempt_state,a.expires_at AS attempt_expires, ",
     "COALESCE(p.disabled_at IS NULL AND p.id IS NOT NULL AND CASE WHEN a.credential_id IS NULL THEN b.id IS NOT NULL AND b.revoked_at IS NULL AND b.expires_at>? ELSE c.id IS NOT NULL AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>?) AND ag.id IS NOT NULL AND ag.closed_at IS NULL END,0) AS owner_authorized, ",
+    "(SELECT phase FROM workflow_subjects ws WHERE ws.task_id=t.id) AS workflow_phase, ",
+    "(SELECT kind FROM workflow_activities wa WHERE wa.activity_task_id=t.id) AS workflow_activity_kind, ",
     "NOT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks prerequisite ON prerequisite.id=d.prerequisite_id WHERE d.task_id=t.id AND prerequisite.lifecycle!='done') AS dependencies_ready ",
     "FROM tasks t LEFT JOIN attempts a ON a.id=t.current_attempt_id LEFT JOIN principals p ON p.id=a.owner_id LEFT JOIN credentials c ON c.id=a.credential_id LEFT JOIN agent_sessions ag ON ag.id=a.session_id AND ag.credential_id=a.credential_id LEFT JOIN browser_sessions b ON b.id=a.session_id WHERE t.project_id=?) ",$suffix
 )}}
@@ -313,6 +330,17 @@ impl Task {
                 "recovery_required"
             };
         }
+        if let Some(status) = &self.workflow_status {
+            return status;
+        }
+        match self.workflow_phase.as_deref() {
+            Some("review") => return "waiting_review",
+            Some("integration") => return "waiting_integration",
+            _ => {}
+        }
+        if self.workflow_activity_kind.is_some() {
+            return "waiting_review";
+        }
         if self.blocked_reason.is_some() || !self.dependencies_ready {
             "blocked"
         } else {
@@ -322,20 +350,40 @@ impl Task {
     fn value(&self, now: i64) -> Value {
         json!({"id":self.id,"project_id":self.project_id,"title":self.title,"description":self.description,
         "acceptance_criteria":serde_json::from_str::<Value>(&self.acceptance_json).unwrap_or(Value::Null),"kind":self.kind,"priority":self.priority,
-        "lifecycle":self.lifecycle,"revision":self.revision,"generation":self.generation,"current_attempt_id":self.current_attempt_id,
+        "lifecycle":self.lifecycle,"activity_kind":self.workflow_activity_kind,"revision":self.revision,"generation":self.generation,"current_attempt_id":self.current_attempt_id,
         "work_status":self.status(now),"blocked_reason":self.blocked_reason,"dependencies_ready":self.dependencies_ready,
         "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since)})
     }
 }
 async fn task(c: &mut SqliteConnection, p: &str, id: &str, now: i64) -> Result<Task, AppError> {
-    sqlx::query_as(task_sql!("SELECT * FROM visible WHERE id=?"))
+    let mut value: Task = sqlx::query_as(task_sql!("SELECT * FROM visible WHERE id=?"))
         .bind(now)
         .bind(now)
         .bind(p)
         .bind(id)
-        .fetch_optional(c)
+        .fetch_optional(&mut *c)
         .await?
-        .ok_or_else(AppError::not_found)
+        .ok_or_else(AppError::not_found)?;
+    enrich_workflow_status(c, p, &mut value, now).await?;
+    Ok(value)
+}
+async fn enrich_workflow_status(
+    c: &mut SqliteConnection,
+    p: &str,
+    task: &mut Task,
+    now: i64,
+) -> Result<(), AppError> {
+    if task.lifecycle == "open"
+        && task.current_attempt_id.is_none()
+        && matches!(
+            task.workflow_phase.as_deref(),
+            Some("review" | "integration")
+        )
+    {
+        let snapshot = crate::workflow::workflow_snapshot(c, p, &task.id, now).await?;
+        task.workflow_status = snapshot["work_status"].as_str().map(str::to_owned);
+    }
+    Ok(())
 }
 async fn task_list(
     c: &mut SqliteConnection,
@@ -345,7 +393,7 @@ async fn task_list(
 ) -> Result<Value, AppError> {
     let limit = page.limit()?;
     let mut items: Vec<Task> = sqlx::query_as(task_sql!(
-        "SELECT * FROM visible WHERE (? IS NULL OR id>?) ORDER BY id LIMIT ?"
+        "SELECT * FROM visible WHERE workflow_activity_kind IS NULL AND (? IS NULL OR id>?) ORDER BY id LIMIT ?"
     ))
     .bind(now)
     .bind(now)
@@ -353,10 +401,13 @@ async fn task_list(
     .bind(&page.cursor)
     .bind(&page.cursor)
     .bind(limit + 1)
-    .fetch_all(c)
+    .fetch_all(&mut *c)
     .await?;
     let more = items.len() > limit as usize;
     items.truncate(limit as usize);
+    for item in &mut items {
+        enrich_workflow_status(c, p, item, now).await?;
+    }
     let cursor = if more {
         items.last().map(|v| v.id.clone())
     } else {
@@ -503,6 +554,7 @@ async fn edit_task(
         return Ok(response(v));
     }
     let current = task(&mut m.tx, &p, &id, m.now).await?;
+    crate::workflow::guard_subject_mutation(&mut m.tx, &p, &id).await?;
     if current.revision != input.expected_revision {
         return Err(AppError::conflict(
             "revision_conflict",
@@ -516,6 +568,31 @@ async fn edit_task(
             "task_not_editable",
             "Only unowned open or planned tasks can be edited. Preserve active work and reconcile it first.",
         ));
+    }
+    if m.actor.kind == "agent" {
+        let previous_dependencies: Vec<String> = sqlx::query_scalar(
+            "SELECT prerequisite_id FROM task_dependencies WHERE task_id=? ORDER BY prerequisite_id",
+        ).bind(&id).fetch_all(&mut *m.tx).await?;
+        let mut requested_dependencies = input.depends_on.clone();
+        requested_dependencies.sort();
+        let acceptance_changed = serde_json::from_str::<Vec<String>>(&current.acceptance_json)?
+            != input.acceptance_criteria
+            || current.description != input.description
+            || previous_dependencies != requested_dependencies;
+        if acceptance_changed
+            && sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM task_contributors WHERE task_id=?",
+            )
+            .bind(&id)
+            .fetch_one(&mut *m.tx)
+            .await?
+                > 0
+            && !project(&mut m.tx, &p).await?.agent_rule_editing
+        {
+            return Err(AppError::forbidden(
+                "A human must change acceptance requirements after work has begun, unless this project explicitly delegates rule editing. Do not weaken criteria to make a submission pass.",
+            ));
+        }
     }
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
     sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,revision=revision+1 WHERE id=?")
@@ -553,6 +630,7 @@ async fn unblock_task(
         return Ok(response(v));
     }
     let t = task(&mut m.tx, &p, &id, m.now).await?;
+    crate::workflow::guard_subject_mutation(&mut m.tx, &p, &id).await?;
     if t.revision != input.expected_revision {
         return Err(AppError::conflict(
             "revision_conflict",
@@ -682,6 +760,7 @@ async fn task_detail(
     value["checkouts"] = json!(checkouts.iter().map(checkout_value).collect::<Vec<_>>());
     value["history_limits"] = json!({"attempts":50,"checkpoints":100,"checkouts":50});
     value["job_evidence"] = crate::jobs::task_evidence(&mut c, &p, &id, s.now()).await?;
+    value["workflow"] = crate::workflow::workflow_snapshot(&mut c, &p, &id, s.now()).await?;
     Ok(response(value))
 }
 fn checkout_value(r: &sqlx::sqlite::SqliteRow) -> Value {
@@ -713,20 +792,33 @@ async fn attempt_detail(
     ))
 }
 
-const INSTRUCTIONS: &str = "Connect or resume your own harness session; never reuse another harness's session proof. Read this project's current rules and acknowledge coordination-v2 before claiming. A task listing reserves nothing. Claim a ready task atomically, or inspect an expired task with a recovery claim. Before editing code, register a separate clean worktree and check the task is still undone. Record checkpoints and renew at the returned renew_after_seconds cadence, before the server's deadline. Checkpoints do not renew ownership. Use the same persisted Idempotency-Key when retrying a lost response. On lease loss stop ownership-dependent edits. Recovery must inspect saved work and still-running jobs before resuming. Never restart an unknown job merely because its observer is missing. Release with a handoff if paused; release is not completion. This service implements project/task admission, leases, checkpoints, checkout registration, local job evidence and recovery. Register resource reservations and jobs before local launch. Missing observers never prove a producer stopped; retain resource holds until terminal evidence or explicit human resolution. A scoped reporter can report its job after lease expiry, but never regain task ownership. Use jobs reconnect for observation only; never relaunch an uncertain producer. Release reservations only after jobs terminate, then release the attempt. Submission, review, integration and shared lessons are not yet implemented: do not claim work complete through a generic status edit.";
+const INSTRUCTIONS: &str = "Connect or resume your own harness session; never reuse another harness's session proof. Read this project's current rules and acknowledge coordination-v3 before claiming. A task listing reserves nothing. Claim a ready task atomically, or inspect an expired task with a recovery claim. Before editing code, register a separate clean worktree and check the task is still undone. Record checkpoints and renew at the returned renew_after_seconds cadence, before the server's deadline. Checkpoints do not renew ownership. Use the same persisted Idempotency-Key when retrying a lost response. On lease loss stop ownership-dependent edits. Recovery must inspect saved work and still-running jobs before resuming. Never restart an unknown job merely because its observer is missing. Release with a handoff if paused; release is not completion. This service implements project/task admission, leases, checkpoints, checkout registration, local job evidence and recovery. Register resource reservations and jobs before local launch. Missing observers never prove a producer stopped; retain resource holds until terminal evidence or explicit human resolution. A scoped reporter can report its job after lease expiry, but never regain task ownership. Use jobs reconnect for observation only; never relaunch an uncertain producer. Release reservations only after jobs terminate, then release the attempt. For completion read completion_workflow below. Submit an immutable candidate with acceptance evidence; submission ends implementation ownership and starts separate review and integration activities. Claim those activities through the workflow API, never ordinary claims. Required checks use registered terminal producers for the exact integrated source and the configured check identity/version/environment. Review decisions and integration authorization apply only to the current candidate and pinned policies. Persist publication intent before Git compare-and-swap; an uncertain publish retains the global target hold. Only finalization after required approvals, known publication, exact checks, and resource release completes code work. General submissions use acceptance evidence and their required reviews. Shared lessons are still a later milestone. Never write a generic done status.";
 async fn orientation(State(s): State<AppState>, auth: Auth, Path(p): Path<String>) -> Reply {
     let mut c = s.pool.acquire().await?;
     let proj = project(&mut c, &p).await?;
     let now = s.now();
-    let candidates:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND blocked_reason IS NULL AND dependencies_ready AND current_attempt_id IS NULL ORDER BY priority,ready_since,id LIMIT 20"))
+    let candidates:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND current_attempt_id IS NULL ORDER BY priority,ready_since,id LIMIT 20"))
         .bind(now).bind(now).bind(&p).fetch_all(&mut *c).await?;
     let active:Vec<Attempt>=sqlx::query_as("SELECT * FROM attempts WHERE project_id=? AND owner_id=? AND session_id=? AND state='active' ORDER BY created_at LIMIT 50")
         .bind(&p).bind(&auth.actor.id).bind(&auth.actor.session_id).fetch_all(&mut *c).await?;
-    let recovery:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized) ORDER BY priority,ready_since,id LIMIT 20"))
+    let recovery:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized) ORDER BY priority,ready_since,id LIMIT 20"))
         .bind(now).bind(now).bind(&p).bind(now).fetch_all(&mut *c).await?;
     Ok(response(
         json!({"project":proj,"policy_revision":proj.policy_revision,"instruction_version":INSTRUCTION_VERSION,"required_sections":[REQUIRED_SECTION],"instructions":INSTRUCTIONS,"instructions_complete":true,
-        "candidates":candidates.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"active_attempts":active.iter().map(Attempt::value).collect::<Vec<_>>(),"recovery_candidates":recovery.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"implemented_stage":"job_evidence", "job_workflow": {
+        "candidates":candidates.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"active_attempts":active.iter().map(Attempt::value).collect::<Vec<_>>(),"recovery_candidates":recovery.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"implemented_stage":"reviewed_completion", "completion_workflow": {
+          "workflow_policy":format!("/api/v1/projects/{p}/workflow-policy"),
+          "activity_listing":"List tasks waiting for review or integration; use reviews list --task TASK_ID or integrations list --task TASK_ID to inspect their linked activities.",
+          "steps":[
+            "1. Read the operator-configured required check roster and shared repository identity. Preserve exact task/project/workflow policy revisions; changed policy requires reconciliation, not reuse of historical approvals.",
+            "2. Complete implementation in its isolated worktree, commit clean source, make the candidate available through your Git remote to other workstations, and release terminal job resources. Use submissions code (or general) with one evidence entry per acceptance criterion and a handoff. The service creates independent review/integration activities and ends implementation ownership.",
+            "3. Use reviews list/status and reviews claim for an eligible current candidate. Read its source and evidence. Reviewers must be independent of recorded contributors; human review requires a human browser account. Use reviews decide with approved or changes_requested and findings. Required findings block integration; revisions create fresh submissions.",
+            "4. Use integrations claim only after required approvals and any required human authorization. This acquires a global target hold. Prepare the isolated integrated result with integrations prepare. Run every roster check as a jobs run --activity ACTIVITY_ID producer with check_identity, check_version and check_environment matching policy. Check jobs must succeed with exit0 and unchanged exact source; then explicitly release job resource reservations.",
+            "5. After prepare saves publication intent, use integrations publish to recheck current authority, compare the remote target with the observed base, and publish the exact prepared result. Never force an unexpected target or retry an uncertain side effect as a new publication. Use integrations reconcile to observe the retained intent; uncertainty keeps the global hold. Human publication reconciliation needs actual remote and old-publisher evidence.",
+            "6. Use integrations finish with all required check job IDs. It records the known outcome, freshly observes the remote commit/tree, and requests finalization. Only the final transaction completes the subject and releases dependents. Publishing alone does not complete work. Keep renewing activity leases while checking; their checkpoint/renewal commands use their own attempt IDs.",
+            "7. If requirements changed, ask an operator to inspect and reopen the obsolete candidate through its workflow. Reopen cannot bypass publication uncertainty or live resources. Historical results remain visible."
+          ],
+          "cli_help":["agent-coordinator submissions --help","agent-coordinator reviews --help","agent-coordinator integrations --help","agent-coordinator jobs run --help"]
+        }, "job_workflow": {
           "steps":[
             "1. Claim the task and retain attempt.id and generation. Before editing, use worktree prepare with that attempt, a new path and branch, and the configured repository source/base. Do not reset or reuse another task checkout.",
             "2. Commit the exact source to test. This milestone requires clean committed inputs. List resources; select the existing canonical identities, then reserve all needed units atomically for this attempt. Ask an operator to define missing resource identities.",
@@ -859,12 +951,13 @@ async fn claim(
     let chosen = if let Some(id) = &input.task_id {
         Some(task(&mut m.tx, &p, id, m.now).await?)
     } else {
-        sqlx::query_as::<_,Task>(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND blocked_reason IS NULL AND dependencies_ready AND ((?='work' AND current_attempt_id IS NULL) OR (?='recovery' AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized))) ORDER BY priority,ready_since,id LIMIT 1"))
+        sqlx::query_as::<_,Task>(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND ((?='work' AND current_attempt_id IS NULL) OR (?='recovery' AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized))) ORDER BY priority,ready_since,id LIMIT 1"))
             .bind(m.now).bind(m.now).bind(&p).bind(&input.mode).bind(&input.mode).bind(m.now).fetch_optional(&mut *m.tx).await?
     };
     let Some(t) = chosen else {
         return Ok(response(m.finish(json!({"claim":null,"reasons":["No eligible task in this project and mode. Inspect task blockers, active owners, or recovery candidates."],"retry_after_seconds":30}),Some(&p),"claim.empty",&p).await?));
     };
+    crate::workflow::guard_normal_claim(&mut m.tx, &p, &t.id).await?;
     if input
         .expected_task_revision
         .is_some_and(|v| v != t.revision)
@@ -892,13 +985,15 @@ async fn claim(
     let id = Uuid::new_v4().to_string();
     let generation = t.generation + 1;
     let expires = m.now + proj.lease_seconds * 1000;
-    sqlx::query("INSERT INTO attempts(id,project_id,task_id,owner_id,session_id,credential_id,generation,state,mode,expires_at,last_heartbeat_at,last_progress_at,created_at) VALUES(?,?,?,?,?,?,?,'active',?,?,?,?,?)")
-        .bind(&id).bind(&p).bind(&t.id).bind(&m.actor.id).bind(&owner_session).bind(&m.actor.credential_id).bind(generation).bind(&input.mode).bind(expires).bind(m.now).bind(m.now).bind(m.now).execute(&mut *m.tx).await?;
+    sqlx::query("INSERT INTO attempts(id,project_id,task_id,owner_id,session_id,credential_id,generation,state,mode,expires_at,last_heartbeat_at,last_progress_at,created_at,task_revision,policy_revision) VALUES(?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?)")
+        .bind(&id).bind(&p).bind(&t.id).bind(&m.actor.id).bind(&owner_session).bind(&m.actor.credential_id).bind(generation).bind(&input.mode).bind(expires).bind(m.now).bind(m.now).bind(m.now).bind(t.revision).bind(proj.policy_revision).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE tasks SET current_attempt_id=?,generation=? WHERE id=?")
         .bind(&id)
         .bind(generation)
         .bind(&t.id)
         .execute(&mut *m.tx)
+        .await?;
+    crate::workflow::record_contributor(&mut m.tx, &t.id, &m.actor.id, &owner_session, m.now)
         .await?;
     let a = attempt(&mut m.tx, &p, &id).await?;
     let updated = task(&mut m.tx, &p, &t.id, m.now).await?;
@@ -1025,6 +1120,7 @@ async fn release(
         return Ok(response(v));
     }
     let a = owned(&mut m, &p, &id, input.generation).await?;
+    crate::workflow::guard_release_or_recovery(&mut m.tx, &p, &a.task_id).await?;
     if !input.blocked {
         crate::jobs::ensure_attempt_quiescent(&mut m.tx, &p, &a.task_id).await?;
     }
@@ -1102,6 +1198,7 @@ async fn recovery_resolution(
     )
     .await?;
     let a = owned(&mut m, &p, &id, input.generation).await?;
+    crate::workflow::guard_release_or_recovery(&mut m.tx, &p, &a.task_id).await?;
     if let Some(v) = m.replay {
         return Ok(response(v));
     }
@@ -1172,6 +1269,9 @@ async fn register_checkout(
     )
     .await?;
     let a = owned(&mut m, &p, &id, input.generation).await?;
+    crate::workflow::guard_activity_work(&mut m.tx, &p, &a.task_id, m.now).await?;
+    crate::workflow::record_contributor(&mut m.tx, &a.task_id, &m.actor.id, &a.session_id, m.now)
+        .await?;
     if let Some(v) = m.replay {
         return Ok(response(v));
     }

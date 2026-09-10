@@ -350,6 +350,13 @@ async fn create_reservation(
     )
     .await?;
     let owned_attempt = owned(&mut mutation, &project, &attempt, input.generation).await?;
+    crate::workflow::guard_activity_work(
+        &mut mutation.tx,
+        &project,
+        &owned_attempt.task_id,
+        mutation.now,
+    )
+    .await?;
     if owned_attempt.mode != "work" {
         return Err(AppError::conflict(
             "recovery_unresolved",
@@ -775,6 +782,12 @@ struct JobInput {
     label: String,
     source_revision: String,
     source_tree: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    check_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    check_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    check_environment: Option<String>,
     reservation_id: String,
     reporter_id: String,
     reporter_proof: String,
@@ -812,6 +825,32 @@ async fn register_job(
     bounded(&input.label, "label", 255, true)?;
     bounded(&input.source_revision, "source_revision", 255, true)?;
     bounded(&input.source_tree, "source_tree", 255, true)?;
+    match (
+        &input.check_identity,
+        &input.check_version,
+        &input.check_environment,
+    ) {
+        (Some(identity), Some(version), Some(environment)) => {
+            bounded(identity, "check_identity", 255, true)?;
+            bounded(version, "check_version", 255, true)?;
+            bounded(environment, "check_environment", 255, true)?;
+            for revision in [&input.source_revision, &input.source_tree] {
+                if ![40, 64].contains(&revision.len())
+                    || !revision.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Err(AppError::bad_request(
+                        "Check jobs require full Git commit and tree object IDs.",
+                    ));
+                }
+            }
+        }
+        (None, None, None) => {}
+        _ => {
+            return Err(AppError::bad_request(
+                "Provide check_identity, check_version, and check_environment together.",
+            ));
+        }
+    }
     let proof = hex::decode(&input.reporter_proof)
         .map_err(|_| AppError::bad_request("reporter_proof must encode 32 random bytes as hex."))?;
     if proof.len() != 32
@@ -834,6 +873,13 @@ async fn register_job(
     )
     .await?;
     let owned_attempt = owned(&mut mutation, &project, &attempt, input.generation).await?;
+    crate::workflow::guard_activity_work(
+        &mut mutation.tx,
+        &project,
+        &owned_attempt.task_id,
+        mutation.now,
+    )
+    .await?;
     if owned_attempt.mode != "work" || mutation.actor.kind != "agent" {
         return Err(AppError::forbidden(
             "A live agent work attempt is required to register a producer.",
@@ -905,8 +951,8 @@ async fn register_job(
         .as_deref()
         .ok_or_else(|| AppError::forbidden("Reporter credentials require an agent parent."))?;
     sqlx::query(
-        "INSERT INTO jobs(id,producer_id,project_id,task_id,attempt_id,generation,runner_instance_id,workstation_id,label,source_revision,source_tree,reservation_id,created_at) \
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO jobs(id,producer_id,project_id,task_id,attempt_id,generation,runner_instance_id,workstation_id,label,source_revision,source_tree,reservation_id,created_at,check_identity,check_version,check_environment) \
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&input.job_id)
     .bind(&input.producer_id)
@@ -921,6 +967,9 @@ async fn register_job(
     .bind(&input.source_tree)
     .bind(&input.reservation_id)
     .bind(mutation.now)
+    .bind(&input.check_identity)
+    .bind(&input.check_version)
+    .bind(&input.check_environment)
     .execute(&mut *mutation.tx)
     .await?;
     let expires_at = mutation.now + REPORTER_LIFETIME_MS;
@@ -1039,6 +1088,9 @@ fn job_value(row: &sqlx::sqlite::SqliteRow, now: i64) -> Value {
         "runner_instance_id":row.get::<String,_>("runner_instance_id"),"workstation_id":row.get::<String,_>("workstation_id"),
         "label":row.get::<String,_>("label"),"source_revision":row.get::<String,_>("source_revision"),
         "source_tree":row.get::<String,_>("source_tree"),"reservation_id":row.get::<String,_>("reservation_id"),
+        "check_identity":row.get::<Option<String>,_>("check_identity"),
+        "check_version":row.get::<Option<String>,_>("check_version"),
+        "check_environment":row.get::<Option<String>,_>("check_environment"),
         "state":row.get::<String,_>("state"),"last_sequence":row.get::<i64,_>("last_sequence"),
         "last_observed_at":last.map(timestamp),
         "observation_freshness":match last { None=>"unobserved",Some(value) if now-value<=90_000=>"fresh",Some(_)=>"stale" },
@@ -1142,6 +1194,17 @@ async fn reporter_can_launch(
     row: &sqlx::sqlite::SqliteRow,
     now: i64,
 ) -> Result<bool, AppError> {
+    if crate::workflow::guard_activity_work(
+        connection,
+        &row.get::<String, _>("project_id"),
+        &row.get::<String, _>("task_id"),
+        now,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(false);
+    }
     if row.get::<String, _>("state") != "registered" {
         return Ok(false);
     }
