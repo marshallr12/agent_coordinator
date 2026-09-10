@@ -238,9 +238,12 @@ async fn retention_keeps_24_hourly_and_30_daily_buckets() {
     let repository = fixture.repository();
     let day = 86_400_000_i64;
     let hour = 3_600_000_i64;
-    let base = chrono::DateTime::parse_from_rfc3339("2027-01-31T00:00:00Z")
+    let base = chrono::DateTime::parse_from_rfc3339("2027-03-01T00:00:00Z")
         .unwrap()
         .timestamp_millis();
+    // Keep every fixture snapshot after initialization: protected service time
+    // correctly clamps a rollback, which would collapse historical buckets.
+    assert!(base - 30 * day > fixture.state.now());
     for days_ago in (0..=30).rev() {
         fixture
             .clock
