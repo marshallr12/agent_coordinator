@@ -17,6 +17,12 @@ impl Clock for TestClock {
     fn now_ms(&self) -> i64 {
         self.0.load(Ordering::SeqCst)
     }
+
+    // Retention boundary tests need an exact, explicitly advanced service
+    // clock. Monotonic elapsed behavior is covered by clock_safety.rs.
+    fn use_monotonic_elapsed(&self) -> bool {
+        false
+    }
 }
 
 struct Fixture {
@@ -179,8 +185,9 @@ async fn only_exact_duplicate_middle_running_summaries_are_elided() {
     .await
     .unwrap();
     assert_eq!(result["observation_payloads_compacted"], 2);
+    assert_eq!(result["observation_rows_inspected"], 6);
     let rows = sqlx::query(
-        "SELECT sequence,request_hash,summary,payload_compacted_at \
+        "SELECT sequence,request_hash,summary,payload_compacted_at,retention_checked_at \
          FROM job_observations WHERE reporter_id=? ORDER BY sequence",
     )
     .bind(&reporter)
@@ -195,6 +202,7 @@ async fn only_exact_duplicate_middle_running_summaries_are_elided() {
             row.get::<String, _>("request_hash"),
             format!("request-{sequence}")
         );
+        assert_eq!(row.get::<Option<i64>, _>("retention_checked_at"), Some(NOW));
         if matches!(sequence, 2 | 3) {
             assert_eq!(row.get::<String, _>("summary"), "");
             assert_eq!(row.get::<Option<i64>, _>("payload_compacted_at"), Some(NOW));
@@ -208,6 +216,60 @@ async fn only_exact_duplicate_middle_running_summaries_are_elided() {
         .await
         .unwrap();
     assert_eq!(projected, "terminal result");
+}
+
+#[tokio::test]
+async fn observation_inspection_is_bounded_even_when_nothing_can_be_compacted() {
+    let fixture = Fixture::new().await;
+    let reporter = seed_job(&fixture).await;
+    for sequence in 1..=12_i64 {
+        sqlx::query(
+            "INSERT INTO job_observations( \
+               reporter_id,sequence,request_hash,producer_id,state,summary,observed_at \
+             ) VALUES(?,?,?,'00000000-0000-0000-0000-000000000111','running',?,?)",
+        )
+        .bind(&reporter)
+        .bind(sequence)
+        .bind(format!("request-{sequence}"))
+        .bind(format!("distinct progress {sequence}"))
+        .bind(NOW - 31 * DAY_MS + sequence)
+        .execute(&fixture.state.pool)
+        .await
+        .unwrap();
+    }
+
+    let first = run_maintenance(
+        &fixture.state,
+        MaintenanceOptions {
+            batch_size: 3,
+            max_batches: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["observation_rows_inspected"], 3);
+    assert_eq!(first["observation_payloads_compacted"], 0);
+    assert_eq!(first["remaining"]["observation_rows_to_inspect"], true);
+    let checked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM job_observations WHERE retention_checked_at IS NOT NULL",
+    )
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(checked, 3);
+
+    let second = run_maintenance(
+        &fixture.state,
+        MaintenanceOptions {
+            batch_size: 3,
+            max_batches: 3,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(second["observation_rows_inspected"], 9);
+    assert_eq!(second["observation_payloads_compacted"], 0);
+    assert_eq!(second["remaining"]["observation_rows_to_inspect"], false);
 }
 
 #[tokio::test]

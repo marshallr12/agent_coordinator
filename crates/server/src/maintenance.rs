@@ -4,7 +4,7 @@ use crate::state::AppState;
 use anyhow::{Context, ensure};
 use coordinator_core::timestamp;
 use serde_json::{Value, json};
-use sqlx::{Sqlite, Transaction};
+use sqlx::{QueryBuilder, Sqlite, Transaction};
 use uuid::Uuid;
 
 pub const DEFAULT_MAINTENANCE_BATCH_SIZE: usize = 500;
@@ -40,6 +40,7 @@ pub async fn run_maintenance(
     let (started_at, cutoff_at) = begin_run(state, &run_id, options).await?;
     let mut receipts = 0_u64;
     let mut observations = 0_u64;
+    let mut observation_rows_inspected = 0_u64;
     let mut batches = 0_usize;
     let mut artifact_cleanup_passes = 0_usize;
     let mut receipts_remaining = false;
@@ -50,6 +51,8 @@ pub async fn run_maintenance(
         batches = batch;
         receipts = receipts.saturating_add(result.receipts);
         observations = observations.saturating_add(result.observations);
+        observation_rows_inspected =
+            observation_rows_inspected.saturating_add(result.observation_rows_inspected);
         receipts_remaining = result.receipts_remaining;
         observations_remaining = result.observations_remaining;
         crate::artifacts::reconcile_store(state)
@@ -60,16 +63,15 @@ pub async fn run_maintenance(
             break;
         }
     }
-    let completed_at = complete_run(
-        state,
-        &run_id,
+    let completion = Completion {
         receipts,
         observations,
+        observation_rows_inspected,
         batches,
         receipts_remaining,
         observations_remaining,
-    )
-    .await?;
+    };
+    let completed_at = complete_run(state, &run_id, &completion).await?;
     Ok(json!({
         "run_id":run_id,
         "state":"complete",
@@ -78,11 +80,13 @@ pub async fn run_maintenance(
         "receipt_result_cutoff":timestamp(cutoff_at),
         "receipt_results_compacted":receipts,
         "observation_payloads_compacted":observations,
+        "observation_rows_inspected":observation_rows_inspected,
         "artifact_cleanup_passes":artifact_cleanup_passes,
         "batches":batches,
         "remaining":{
             "receipt_results":receipts_remaining,
             "observation_payloads":observations_remaining,
+            "observation_rows_to_inspect":observations_remaining,
         },
         "limits":{
             "batch_size":options.batch_size,
@@ -139,6 +143,16 @@ async fn begin_run(
 struct BatchResult {
     receipts: u64,
     observations: u64,
+    observation_rows_inspected: u64,
+    receipts_remaining: bool,
+    observations_remaining: bool,
+}
+
+struct Completion {
+    receipts: u64,
+    observations: u64,
+    observation_rows_inspected: u64,
+    batches: usize,
     receipts_remaining: bool,
     observations_remaining: bool,
 }
@@ -166,7 +180,7 @@ async fn run_batch(
         i64::try_from(options.batch_size).context("maintenance batch_size overflowed")?,
     )
     .await?;
-    let observations = compact_observations(
+    let (observations, observation_rows_inspected) = compact_observations(
         &mut tx,
         cutoff_at,
         sample.now,
@@ -177,11 +191,16 @@ async fn run_batch(
     let observations_remaining = has_observations(&mut tx, cutoff_at).await?;
     let updated = sqlx::query(
         "UPDATE maintenance_runs SET batches=?,receipt_results_compacted=receipt_results_compacted+?, \
-         observation_payloads_compacted=observation_payloads_compacted+? WHERE id=? AND state='running'",
+         observation_payloads_compacted=observation_payloads_compacted+?, \
+         observation_rows_inspected=observation_rows_inspected+? WHERE id=? AND state='running'",
     )
     .bind(i64::try_from(batch).context("maintenance batch number overflowed")?)
     .bind(i64::try_from(receipts).context("receipt compaction count overflowed")?)
     .bind(i64::try_from(observations).context("observation compaction count overflowed")?)
+    .bind(
+        i64::try_from(observation_rows_inspected)
+            .context("observation inspection count overflowed")?,
+    )
     .bind(run_id)
     .execute(&mut *tx)
     .await?;
@@ -193,6 +212,7 @@ async fn run_batch(
     Ok(BatchResult {
         receipts,
         observations,
+        observation_rows_inspected,
         receipts_remaining,
         observations_remaining,
     })
@@ -201,11 +221,7 @@ async fn run_batch(
 async fn complete_run(
     state: &AppState,
     run_id: &str,
-    receipts: u64,
-    observations: u64,
-    batches: usize,
-    receipts_remaining: bool,
-    observations_remaining: bool,
+    completion: &Completion,
 ) -> anyhow::Result<i64> {
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
     let sample = state.sample_clock(&mut tx).await?;
@@ -218,15 +234,22 @@ async fn complete_run(
     require_safe_clock_for_write(&sample)?;
     let updated = sqlx::query(
         "UPDATE maintenance_runs SET state='complete',completed_at=?,batches=?, \
-         receipt_results_compacted=?,observation_payloads_compacted=?, \
+         receipt_results_compacted=?,observation_payloads_compacted=?,observation_rows_inspected=?, \
          receipts_remaining=?,observations_remaining=? WHERE id=? AND state='running'",
     )
     .bind(sample.now)
-    .bind(i64::try_from(batches).context("maintenance batch count overflowed")?)
-    .bind(i64::try_from(receipts).context("receipt compaction count overflowed")?)
-    .bind(i64::try_from(observations).context("observation compaction count overflowed")?)
-    .bind(receipts_remaining)
-    .bind(observations_remaining)
+    .bind(i64::try_from(completion.batches).context("maintenance batch count overflowed")?)
+    .bind(i64::try_from(completion.receipts).context("receipt compaction count overflowed")?)
+    .bind(
+        i64::try_from(completion.observations)
+            .context("observation compaction count overflowed")?,
+    )
+    .bind(
+        i64::try_from(completion.observation_rows_inspected)
+            .context("observation inspection count overflowed")?,
+    )
+    .bind(completion.receipts_remaining)
+    .bind(completion.observations_remaining)
     .bind(run_id)
     .execute(&mut *tx)
     .await?;
@@ -284,39 +307,83 @@ async fn compact_observations(
     cutoff_at: i64,
     now: i64,
     limit: i64,
-) -> anyhow::Result<u64> {
-    let result = sqlx::query(
-        "UPDATE job_observations SET summary='',payload_compacted_at=? WHERE rowid IN ( \
-           SELECT current.rowid FROM job_observations current \
-           WHERE current.payload_compacted_at IS NULL AND current.observed_at<? \
-             AND current.state='running' AND current.summary<>'' \
-             AND current.sequence<>(SELECT min(first.sequence) FROM job_observations first WHERE first.reporter_id=current.reporter_id) \
-             AND current.sequence<>(SELECT max(last.sequence) FROM job_observations last WHERE last.reporter_id=current.reporter_id) \
-             AND EXISTS(SELECT 1 FROM job_observations previous \
-               WHERE previous.reporter_id=current.reporter_id \
-                 AND previous.sequence=(SELECT max(p.sequence) FROM job_observations p WHERE p.reporter_id=current.reporter_id AND p.sequence<current.sequence) \
-                 AND previous.state=current.state AND previous.pid IS current.pid \
-                 AND previous.process_started_at IS current.process_started_at \
-                 AND previous.exit_code IS current.exit_code \
-                 AND previous.inputs_unchanged IS current.inputs_unchanged \
-                 AND previous.summary=current.summary) \
-             AND EXISTS(SELECT 1 FROM job_observations following \
-               WHERE following.reporter_id=current.reporter_id \
-                 AND following.sequence=(SELECT min(n.sequence) FROM job_observations n WHERE n.reporter_id=current.reporter_id AND n.sequence>current.sequence) \
-                 AND following.state=current.state AND following.pid IS current.pid \
-                 AND following.process_started_at IS current.process_started_at \
-                 AND following.exit_code IS current.exit_code \
-                 AND following.inputs_unchanged IS current.inputs_unchanged \
-                 AND following.summary=current.summary) \
-           ORDER BY current.observed_at,current.reporter_id,current.sequence LIMIT ? \
-         )",
+) -> anyhow::Result<(u64, u64)> {
+    // Select before running the correlated neighbor checks. The retention scan
+    // index makes this an explicit per-transaction work bound even when a large
+    // history contains no redundant payloads at all.
+    let candidates = sqlx::query_scalar::<_, i64>(
+        "SELECT rowid FROM job_observations \
+         WHERE retention_checked_at IS NULL AND observed_at<? \
+         ORDER BY observed_at,reporter_id,sequence LIMIT ?",
     )
-    .bind(now)
     .bind(cutoff_at)
     .bind(limit)
-    .execute(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
-    Ok(result.rows_affected())
+    if candidates.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let mut eligible_query = QueryBuilder::<Sqlite>::new(
+        "SELECT current.rowid FROM job_observations current WHERE current.rowid IN (",
+    );
+    push_rowids(&mut eligible_query, &candidates);
+    eligible_query.push(
+        ") AND current.payload_compacted_at IS NULL \
+         AND current.state='running' AND current.summary<>'' \
+         AND EXISTS(SELECT 1 FROM job_observations previous \
+           WHERE previous.reporter_id=current.reporter_id \
+             AND previous.sequence=(SELECT max(p.sequence) FROM job_observations p WHERE p.reporter_id=current.reporter_id AND p.sequence<current.sequence) \
+             AND previous.state=current.state AND previous.pid IS current.pid \
+             AND previous.process_started_at IS current.process_started_at \
+             AND previous.exit_code IS current.exit_code \
+             AND previous.inputs_unchanged IS current.inputs_unchanged \
+             AND previous.summary=current.summary) \
+         AND EXISTS(SELECT 1 FROM job_observations following \
+           WHERE following.reporter_id=current.reporter_id \
+             AND following.sequence=(SELECT min(n.sequence) FROM job_observations n WHERE n.reporter_id=current.reporter_id AND n.sequence>current.sequence) \
+             AND following.state=current.state AND following.pid IS current.pid \
+             AND following.process_started_at IS current.process_started_at \
+             AND following.exit_code IS current.exit_code \
+             AND following.inputs_unchanged IS current.inputs_unchanged \
+             AND following.summary=current.summary)",
+    );
+    let eligible = eligible_query
+        .build_query_scalar::<i64>()
+        .fetch_all(&mut **tx)
+        .await?;
+
+    if !eligible.is_empty() {
+        let mut update = QueryBuilder::<Sqlite>::new(
+            "UPDATE job_observations SET summary='',payload_compacted_at=",
+        );
+        update.push_bind(now).push(" WHERE rowid IN (");
+        push_rowids(&mut update, &eligible);
+        update.push(")");
+        let result = update.build().execute(&mut **tx).await?;
+        ensure!(
+            result.rows_affected() == eligible.len() as u64,
+            "observation payload candidates changed unexpectedly"
+        );
+    }
+
+    let mut mark = QueryBuilder::<Sqlite>::new("UPDATE job_observations SET retention_checked_at=");
+    mark.push_bind(now).push(" WHERE rowid IN (");
+    push_rowids(&mut mark, &candidates);
+    mark.push(") AND retention_checked_at IS NULL");
+    let marked = mark.build().execute(&mut **tx).await?;
+    ensure!(
+        marked.rows_affected() == candidates.len() as u64,
+        "observation retention candidates changed unexpectedly"
+    );
+    Ok((eligible.len() as u64, marked.rows_affected()))
+}
+
+fn push_rowids(query: &mut QueryBuilder<Sqlite>, rowids: &[i64]) {
+    let mut separated = query.separated(",");
+    for rowid in rowids {
+        separated.push_bind(*rowid);
+    }
 }
 
 async fn has_observations(
@@ -324,27 +391,8 @@ async fn has_observations(
     cutoff_at: i64,
 ) -> anyhow::Result<bool> {
     let row = sqlx::query(
-        "SELECT current.reporter_id,current.sequence FROM job_observations current \
-         WHERE current.payload_compacted_at IS NULL AND current.observed_at<? \
-           AND current.state='running' AND current.summary<>'' \
-           AND current.sequence<>(SELECT min(first.sequence) FROM job_observations first WHERE first.reporter_id=current.reporter_id) \
-           AND current.sequence<>(SELECT max(last.sequence) FROM job_observations last WHERE last.reporter_id=current.reporter_id) \
-           AND EXISTS(SELECT 1 FROM job_observations previous \
-             WHERE previous.reporter_id=current.reporter_id \
-               AND previous.sequence=(SELECT max(p.sequence) FROM job_observations p WHERE p.reporter_id=current.reporter_id AND p.sequence<current.sequence) \
-               AND previous.state=current.state AND previous.pid IS current.pid \
-               AND previous.process_started_at IS current.process_started_at \
-               AND previous.exit_code IS current.exit_code \
-               AND previous.inputs_unchanged IS current.inputs_unchanged \
-               AND previous.summary=current.summary) \
-           AND EXISTS(SELECT 1 FROM job_observations following \
-             WHERE following.reporter_id=current.reporter_id \
-               AND following.sequence=(SELECT min(n.sequence) FROM job_observations n WHERE n.reporter_id=current.reporter_id AND n.sequence>current.sequence) \
-               AND following.state=current.state AND following.pid IS current.pid \
-               AND following.process_started_at IS current.process_started_at \
-               AND following.exit_code IS current.exit_code \
-               AND following.inputs_unchanged IS current.inputs_unchanged \
-               AND following.summary=current.summary) LIMIT 1",
+        "SELECT rowid FROM job_observations \
+         WHERE retention_checked_at IS NULL AND observed_at<? LIMIT 1",
     )
     .bind(cutoff_at)
     .fetch_optional(&mut **tx)

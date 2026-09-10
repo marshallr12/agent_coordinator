@@ -21,13 +21,14 @@ maintenance::run_maintenance(
 ) -> anyhow::Result<serde_json::Value>
 ```
 
-`batch_size` defaults to 500 and is limited to 1–1,000 rows of each payload
-class per transaction. `max_batches` defaults to 20 and is limited to 1–100.
-The command reports its run ID and timestamps, cutoff, affected rows, batch
-count, limits, and whether eligible rows remain. An operator can run it again
-when either remaining flag is true. It never runs `VACUUM`; ordinary backup and
-database-size operations remain separate and maintenance does not hold one
-writer transaction across the whole invocation.
+`batch_size` defaults to 500 and is limited to 1–1,000 receipt rows and 1–1,000
+old observation rows per transaction. `max_batches` defaults to 20 and is
+limited to 1–100. The command reports its run ID and timestamps, cutoff,
+affected rows, observation rows inspected, batch count, limits, and whether
+receipt results or old observation rows remain to inspect. An operator can run
+it again when either remaining flag is true. It never runs `VACUUM`; ordinary
+backup and database-size operations remain separate and maintenance does not
+hold one writer transaction across the whole invocation.
 
 After each committed database batch, the command invokes one existing bounded
 artifact reconciliation pass and reports only the number of passes attempted.
@@ -72,8 +73,8 @@ exactly-once mutation identity.
 
 ## Redundant producer observations
 
-Producer observation rows and their insertion row IDs remain permanent. The
-engine may clear only the `summary` of an old, strictly redundant intermediate
+Producer observation rows and sequence identities remain permanent. The engine
+may clear only the `summary` of an old, strictly redundant intermediate
 `running` observation. Both its immediately preceding and following observations
 must have exactly the same state, PID, process-start identity, exit/input fields,
 and summary. The row must be older than the same 30-day cutoff and cannot be the
@@ -86,6 +87,23 @@ projection is never cleared. First and last evidence, terminal states, `unknown`
 state transitions, changed summaries, and nonempty progress transitions are
 always retained. Request replay identity therefore remains trustworthy even
 when a redundant middle display payload is gone.
+
+Each batch first selects at most `batch_size` old, previously uninspected rows
+through the retention-scan index. Only those rows run the neighbor checks, and
+all selected rows receive `retention_checked_at` whether or not their summaries
+are eligible. The indexed remaining check looks only for old uninspected rows.
+Thus a history containing arbitrarily many distinct progress messages cannot
+turn one batch into an unbounded scan under the SQLite writer lock.
+
+Summary elision is conservative and best effort. Clearing one eligible summary
+can prevent an adjacent row considered in a later batch from proving that its
+original neighboring summary matched. The engine leaves such a row intact; it
+does not retain hidden copies of display text merely to maximize compaction.
+The compacted count therefore reports actual cleared summaries and does not
+promise that every duplicate middle summary will eventually be removed.
+While rows remain uninspected, `remaining.observation_payloads` is a
+conservative compatibility flag; `remaining.observation_rows_to_inspect`
+states its precise meaning.
 
 ## Records retained in full
 
