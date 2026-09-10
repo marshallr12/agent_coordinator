@@ -371,10 +371,13 @@ Package checks verify checksums, offline Markdown links, bounded member counts
 and expanded size, and a complete book build from an extracted archive. The final
 local structural fixture used stripped copies of the current debug binaries;
 it does not replace the retained Linux release/capacity evidence. Documentation
-CI could not start because GitHub reported an account billing/spending-limit
-condition. No steps ran in
-[documentation run 34470307262](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307262)
-or [coordination run 34470307047](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307047).
-Main review is complete; rerun hosted validation after that account condition is
-resolved. The operator-initiated Windows workstation exercise remains final item 7.
+CI passed on main commit `ebf72f7` in
+[documentation run 34487173043](https://github.com/marshallr12/agent_coordinator/actions/runs/34487173043).
+The same commit passed Linux formatting, warnings-denied Clippy, all workspace
+tests, the workspace build, both service/CLI smoke exercises, native Windows
+client/CLI/local-runner tests, and the locked dependency audit in
+[coordination run 34487175859](https://github.com/marshallr12/agent_coordinator/actions/runs/34487175859).
+The earlier billing-blocked attempts ran no steps and are superseded by these
+passing runs. Main review and the hosted validation follow-up are complete. The
+operator-initiated Windows workstation exercise remains final item 7.
 Local-file book navigation and search passed with networking disabled.

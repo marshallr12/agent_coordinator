@@ -9,8 +9,8 @@ mdbook build
 
 Open `target/book/index.html` in a browser. Navigation, search, styles, and fonts
 are bundled with the generated book. External source and reference links still
-need network access; the private GitHub repository requires appropriate access.
-No public documentation site is deployed by this build.
+need network access. The source repository is public, but no public documentation
+site is deployed by this build.
 
 ## Edit the maintained source
 

@@ -1,10 +1,10 @@
 # Implementation handoff — 2026-09-10
 
 Backlog items 6.1 (MCP) and 6.2 (mdBook) are implemented and reviewed.
-The implementation sequence is complete. A hosted-CI validation follow-up is
-blocked by GitHub account billing/spending limits. The operator will commence
-item 7, native Windows workstation acceptance against the Linux service/workstation. Do not substitute native
-Windows CI or package checks for that physical workstation exercise.
+The implementation sequence and hosted-CI validation follow-up are complete.
+The operator will commence item 7, native Windows workstation acceptance against
+the Linux service/workstation. Do not substitute native Windows CI or package
+checks for that physical workstation exercise.
 
 ## MCP completion
 
@@ -45,14 +45,16 @@ local structural package used stripped copies of the current local debug binarie
 it is documentation validation, not new release-binary or capacity acceptance.
 Local-file navigation and search also passed with networking disabled.
 
-Hosted CI could not start: GitHub reported failed recent account payments or a
-spending limit requiring attention. No steps ran in
-[documentation run 34470307262](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307262)
-or [coordination run 34470307047](https://github.com/marshallr12/agent_coordinator/actions/runs/34470307047).
-After the operator resolves the account condition, rerun both workflows on the
-then-current main commit. Runtime Rust code is unchanged from MCP's passing CI;
-these failed-to-start runs are not test failures or successful validation. No
-billing settings were changed.
+After the repository became public, hosted validation was retried on main commit
+`ebf72f7`. The pinned mdBook build and documentation checks passed in
+[documentation run 34487173043](https://github.com/marshallr12/agent_coordinator/actions/runs/34487173043).
+Linux formatting, warnings-denied Clippy, all workspace tests, the workspace build,
+both service/CLI smoke exercises, native Windows client/CLI/local-runner tests,
+and the locked dependency audit passed in
+[coordination run 34487175859](https://github.com/marshallr12/agent_coordinator/actions/runs/34487175859).
+These runs supersede the earlier failed-to-start billing-blocked attempts; no job
+steps ran in those attempts, so they remain historical scheduling failures rather
+than test results.
 
 Use `mdbook build` or `python3 scripts/check_docs.py` from a source checkout; output
 is `target/book/index.html`. See [book maintenance](docs/documentation.md).
