@@ -49,6 +49,17 @@ struct Options {
 enum Command {
     /// Start the service on its private loopback listener.
     Serve,
+    /// Recover a human account locally and invalidate all of its browser sessions.
+    RecoverOperatorPassword {
+        #[arg(long)]
+        username: String,
+        /// Audited reason; never include the password.
+        #[arg(long)]
+        reason: String,
+        /// Read a single new password from stdin; otherwise use a hidden prompt.
+        #[arg(long)]
+        password_stdin: bool,
+    },
     /// Create the first local administrator in an empty installation.
     InitAdmin {
         #[arg(long)]
@@ -81,35 +92,24 @@ async fn main() -> anyhow::Result<()> {
             username,
             password_stdin,
         } => {
-            let password = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                if password_stdin {
-                    let mut password = String::new();
-                    io::stdin()
-                        .lock()
-                        .take(1027)
-                        .read_to_string(&mut password)?;
-                    if password.ends_with('\n') {
-                        password.pop();
-                        if password.ends_with('\r') {
-                            password.pop();
-                        }
-                    }
-                    anyhow::ensure!(
-                        !password.contains(['\n', '\r']) && password.len() <= 1024,
-                        "Read one password of at most 1024 bytes from stdin."
-                    );
-                    Ok(password)
-                } else {
-                    let password = rpassword::prompt_password("Administrator password: ")?;
-                    let confirmation = rpassword::prompt_password("Confirm password: ")?;
-                    anyhow::ensure!(password == confirmation, "Passwords did not match.");
-                    Ok(password)
-                }
-            })
-            .await??;
+            let password = read_password(password_stdin).await?;
             init_admin(&state, &username, password).await?;
             println!(
                 "Administrator created. Start the service and sign in through its configured HTTPS origin."
+            );
+        }
+        Command::RecoverOperatorPassword {
+            username,
+            reason,
+            password_stdin,
+        } => {
+            let password = read_password(password_stdin).await?;
+            coordinator_server::operator_access::recover_operator_password(
+                &state, &username, password, &reason,
+            )
+            .await?;
+            println!(
+                "Account recovered. All of its browser sessions have ended. Sign in with the new password."
             );
         }
         Command::Serve => {
@@ -142,4 +142,33 @@ async fn shutdown() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
     tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
+}
+
+async fn read_password(password_stdin: bool) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        if password_stdin {
+            let mut password = String::new();
+            io::stdin()
+                .lock()
+                .take(1027)
+                .read_to_string(&mut password)?;
+            if password.ends_with('\n') {
+                password.pop();
+                if password.ends_with('\r') {
+                    password.pop();
+                }
+            }
+            anyhow::ensure!(
+                !password.contains(['\n', '\r']) && password.len() <= 1024,
+                "Read one password of at most 1024 bytes from stdin."
+            );
+            Ok(password)
+        } else {
+            let password = rpassword::prompt_password("New password: ")?;
+            let confirmation = rpassword::prompt_password("Confirm password: ")?;
+            anyhow::ensure!(password == confirmation, "Passwords did not match.");
+            Ok(password)
+        }
+    })
+    .await?
 }

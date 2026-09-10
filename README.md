@@ -3,13 +3,14 @@
 A vendor-agnostic service for AI agents on different workstations to coordinate
 tasks, report progress, and share handoffs and lessons across multiple projects.
 
-**Status: coordinated completion and shared records implemented; full release in development.**
+**Status: operator workflows and shared records implemented; full release in development.**
 The Rust service, embedded web dashboard, and native CLI now support authentication,
 multiple projects, task admission, atomic ownership, renewable leases, checkpoints,
 inspected recovery, worktree preparation, local job reporting, and shared resource
 reservations, immutable submissions, independent review, serialized integration,
 completion after exact integrated checks, revisioned lessons, scoped decisions,
-bounded evidence uploads, and authoritative Markdown imports/exports. [Current implementation and limits](docs/implementation-status.md)
+bounded evidence uploads, authoritative Markdown imports/exports, operator account
+management, project policy editing, objective grouping, and complete task history. [Current implementation and limits](docs/implementation-status.md)
 distinguish working behavior from the complete release design.
 
 ## Try it locally
@@ -46,6 +47,13 @@ CLI processes against the server. Install `cargo-audit` separately to run the la
 command. Linux and native Windows client checks are defined in GitHub Actions.
 
 ## Design documents
+
+- [Operator guide](docs/operator-guide.md): account recovery, credential rotation,
+  policy editing, objectives, task history, and inspected recovery.
+- [Operator access contract](docs/operator-access-contract.md): current account and
+  session authorization and safe account-creation retries.
+- [Objective contract](docs/objective-contract.md): child membership and completion gates.
+- [Task history contract](docs/history-contract.md): bounded evidence pagination.
 
 - [Implementation plan](PLAN.md): requirements, confirmed decisions, open
   installation inputs, data model, milestones, and acceptance scenarios.

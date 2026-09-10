@@ -771,3 +771,57 @@ does not upload again. Download with
 must not exist. Downloaded size and SHA-256 are verified before publishing the
 file. Transfers are bounded to 16 MiB and ordinary JSON responses are
 bounded to 16 MiB. Use `--json` for the full transfer receipt.
+
+
+## Operator and objective commands
+
+The native client authenticates as an agent; administrative human actions use the
+browser or the host-local service command. Native commands retain service role
+checks and the same exact-request mutation journal as claims.
+
+```sh
+agent-coordinator tasks show --id TASK_ID
+agent-coordinator tasks edit --id TASK_ID --input revised-task.json
+agent-coordinator tasks history --id TASK_ID --kind attempts --limit 50
+agent-coordinator policy show
+agent-coordinator policy history --limit 50
+agent-coordinator policy edit --input revised-policy.json
+agent-coordinator objectives list
+agent-coordinator objectives create --input objective.json
+agent-coordinator objectives show --id OBJECTIVE_ID
+agent-coordinator objectives children --id OBJECTIVE_ID --input membership.json
+```
+
+Use `--cursor` from a returned page for task history, task lists, objective lists,
+and policy history. History kinds include attempts, checkpoints, checkouts, jobs,
+job_observations, resources, artifacts, submissions, reviews, integrations,
+task_revisions, and events. History pages bind the project, task, record kind, and
+insertion snapshot; start a new query to include new records.
+
+Task edits provide `expected_revision`, `title`, `description`,
+`acceptance_criteria`, `priority`, `depends_on`, and `planned`. Only unowned open or
+planned tasks may be edited, subject to workflow and policy checks. Changing
+`planned` to false admits work; it does not bypass dependencies or objective gates.
+
+Objective creation provides a title, description, acceptance criteria, priority,
+planned flag, and `children` entries containing `task_id` and `required`. Child
+replacement provides `expected_revision` from the objective's `objective_revision`
+and the full children list. Required children must finish before the objective's
+own work and completion evidence; optional children remain visible. The objective
+is a general task with its own review, never an automatic done rollup.
+
+Use the dashboard's **Access** page for human accounts, agent token rotation, and
+browser session revocation. **My account** changes the current operator's password
+and ends all their browser sessions. An administrator with local host access can
+recover a lost password without publishing a recovery endpoint:
+
+```sh
+agent-coordinator-server --database /path/to/coordinator.sqlite3 \
+  recover-operator-password --username OPERATOR --reason 'Verified local account recovery'
+```
+
+The command prompts invisibly for the new password twice, or accepts
+`--password-stdin`. It enables the human account and ends its browser sessions;
+existing agent credentials, producers, resource holds, and saved work remain subject
+to their original authority and recovery rules. Never include a password in command
+arguments or the audited reason.

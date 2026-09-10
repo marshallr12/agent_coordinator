@@ -161,12 +161,12 @@ impl Fixture {
         v["data"].clone()
     }
     async fn ack(&self, c: &Caller, p: &str, policy: i64) {
-        let (s,v)=self.call(c,"POST",&format!("/api/v1/sessions/{}/instruction-acknowledgments",c.session),json!({"project_id":p,"policy_revision":policy,"instruction_version":"4","sections":["coordination-v4"]})).await;
+        let (s,v)=self.call(c,"POST",&format!("/api/v1/sessions/{}/instruction-acknowledgments",c.session),json!({"project_id":p,"policy_revision":policy,"instruction_version":"5","sections":["coordination-v5"]})).await;
         assert_eq!(s, StatusCode::OK, "{v}");
     }
     async fn claim(&self, c: &Caller, p: &str, t: &Value, policy: i64) -> Value {
         self.ack(c, p, policy).await;
-        let (s,v)=self.call(c,"POST",&format!("/api/v1/projects/{p}/claims"),json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":"work","policy_revision":policy,"instruction_version":"4"})).await;
+        let (s,v)=self.call(c,"POST",&format!("/api/v1/projects/{p}/claims"),json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":"work","policy_revision":policy,"instruction_version":"5"})).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         v["data"]["claim"]["attempt"].clone()
     }
@@ -753,7 +753,7 @@ async fn next_selection_skips_decision_blocked_work() {
     let candidates = orientation["data"]["candidates"].as_array().unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0]["id"], ready["id"]);
-    let mut input = json!({"task_id":blocked["id"],"expected_task_revision":blocked["revision"],"mode":"work","policy_revision":1,"instruction_version":"4"});
+    let mut input = json!({"task_id":blocked["id"],"expected_task_revision":blocked["revision"],"mode":"work","policy_revision":1,"instruction_version":"5"});
     let (status, refusal) = f
         .call(
             &f.a,

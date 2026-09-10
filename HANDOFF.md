@@ -1,43 +1,35 @@
-# Implementation handoff — 2026-09-09
+# Implementation handoff — 2026-09-10
 
-Backlog item 3 is implemented and reviewed: shared knowledge, scoped decisions,
-bounded artifacts, and authoritative Markdown imports/exports. All 114 tests, local build/smoke/browser checks, and Linux/Windows CI passed.
-Continue sequentially with item 4.
+Backlog item 4 is implemented and reviewed locally: operator account/session
+management, password recovery, agent credential rotation, policy editing,
+objective grouping, full task history, inspected operator recovery, and native
+commands. All 129 workspace tests, warnings-denied Clippy, formatting, workspace
+build, JavaScript checks, the full smoke exercise, and browser verification passed.
+Required Linux/Windows CI is pending for this milestone; integrate only after it passes.
+Then continue sequentially with item 5, backups and restore authority invalidation.
 
-Instruction version 4 describes the implemented shared-record workflow and CLI
-commands. Existing harnesses must read and acknowledge it before new claims.
-Knowledge revisions keep source/applicability, explicit sharing, feedback, and
-immutable history. Submission lessons and finalized artifact references commit
-in the same transaction as the submission; subsequent corrections cannot rewrite
-submitted evidence. Binding-rule revisions preserve their source/reason.
+Instruction version 5 describes the implemented workflow. Existing harnesses must
+read and acknowledge it before new claims. Objective membership freezes after work
+begins; required children must complete before parent work, and the parent still
+has its own acceptance and review. History pages preserve evidence from associated
+review/integration activities. Row-based cursors must be invalidated if restore or
+future maintenance changes their identifiers.
 
-Typed decision answers pin current task/policy revisions and conditions. Denied,
-pending, expired, and stale decisions block dependent work and authority displays.
-Inspection, checkpointing, and release remain available. Recovery receipts use
-current attempt mode and decisions; they cannot resurrect old permission.
+Main-agent review corrected browser retry persistence across sign-in, original
+password re-entry, secret-free storage, narrow account-creation replay across new
+browser sessions, objective revision use, recovery handoff fields, and current
+credential/ownership labels. The same-admin replay helper is limited to account
+creation; task and agent mutations retain session-bound fingerprints. Current
+browser authorization and administrator status are checked under the writer lock.
 
-Artifact uploads have a 16 MiB hard bound, configurable 10 GiB default quota and
-256 MiB disk reserve, exact size/digest, bounded streaming, and explicit tombstones.
-Native retries preserve exact bytes/key, reauthenticate, and reconcile matching
-finalized metadata. Downloads verify recorded size and SHA-256 before publishing
-new files. Source checkpoints travel through Git remotes, not artifact bundles.
+Browser verification used disposable data, including a lost response after account
+creation, session expiry, successful same-key replay without a duplicate, account
+and token controls, inspected recovery, objectives, and phone layout. See
+[implementation status](docs/implementation-status.md) for evidence and limits and
+[operator guide](docs/operator-guide.md) for usage. No production account was changed.
 
-Markdown apply requires a human actor after an immutable preview. Agents can
-preview and export. Imports never reopen historical closure or complete active
-work; changed service records invalidate stale previews. Historical knowledge
-reimports preserve immutable kind, append revisions in trigger-safe order, and
-use the standard searchable/correctable scope and provenance shapes. Sanitized
-SithBit/Submission fixtures came from read-only source review; those repositories
-and Submission's pre-existing edits were preserved.
-
-Implementation commit `ca59ee0` passed
-[CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271),
-including native Windows tests and the locked dependency audit.
-Current local tests, service/CLI smoke, and browser evidence are described in
-[implementation status](docs/implementation-status.md). Each worktree must use its
-own Cargo target directory. Main-agent review corrected decision authority/read
-projections, historical revision ordering, SQL parameter binding, native transfer
-integrity/current authentication, and a dashboard project-selector mismatch.
+Item 3 remains validated by [CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271).
+Each concurrent worktree must retain its own Cargo target directory.
 
 Complete remaining items through 6.2 without operator intervention unless missing
 information is essential. Item 6 is Linux acceptance; MCP is 6.1 and mdBook is 6.2.

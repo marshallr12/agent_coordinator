@@ -178,3 +178,5 @@ textarea { min-height: 108px; resize: vertical; }
 .checkbox-label input { width: auto; }
 #context-search { align-items: end; }
 #shared-view .toolbar { flex-wrap: wrap; }
+
+#admin-content > .card { margin-bottom: 15px; }

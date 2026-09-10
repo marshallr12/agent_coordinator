@@ -1,12 +1,13 @@
 # Agent and operator onboarding contract
 
-Status: implementation design, not implemented. Public HTTPS, service-authoritative
+Status: mixed implementation and release design. Authentication, native session
+connection, task coordination, and the repository bootstrap below are implemented.
+Backup, packaging, and final acceptance sections remain release requirements. Public HTTPS, service-authoritative
 records, access to all projects for every authenticated caller, local password
 accounts for people, and revocable API tokens for agents are confirmed. The
 server runs as a native Linux service under systemd; CLI and job-reporter clients
 support Linux and native Windows. Operation roles are specified in
-[implementation-spec.md](implementation-spec.md). CLI spelling below is the
-planned interface and will be verified against the implementation.
+[implementation-spec.md](implementation-spec.md). Use [the CLI guide](CLI.md) for implemented commands.
 
 ## Repository binding and workstation credentials
 
@@ -300,12 +301,16 @@ Every authenticated user can select and access any project.
 
 ## Proposed short AGENTS.md / CLAUDE.md snippet
 
-The command shown here does not exist yet. Implementation must verify this exact
-workflow end to end before the snippet is presented as usable documentation.
+After installing the native CLI and configuring the repository binding and an
+origin-bound workstation credential, use this snippet in AGENTS.md or CLAUDE.md.
+Replace UNIQUE_HARNESS_NAME with a name unique to this harness on this workstation;
+keep it stable when resuming and pass it on every command.
 
 ```text
 This project coordinates work through Agent Coordinator.
-Read .agent-coordinator.toml and run `agent-coordinator connect`.
+Read .agent-coordinator.toml. Select a unique, stable name for this harness.
+Run `agent-coordinator --session UNIQUE_HARNESS_NAME connect`; use that
+same --session value on every following command. Connection reserves no task.
 Follow the returned workflow alongside this repository's applicable rules.
 Claim a task before changing code; use its separate worktree.
 Report progress and renew ownership as instructed; submit results and lessons.

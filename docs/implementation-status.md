@@ -1,7 +1,7 @@
 # Implementation status
 
-The foundation, job/worktree evidence, reviewed completion, and shared-record
-milestones are implemented.
+The foundation, job/worktree evidence, reviewed completion, shared-record,
+and operator-workflow milestones are implemented.
 The complete release remains
 defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
@@ -94,6 +94,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 - Dashboard and CLI access to lessons, decisions, context, artifact metadata,
   imports, and exports; the dashboard includes correction, human decision answers,
   rule editing/history, readable import previews, and snapshot downloads.
+- Human account creation, revision-checked access changes, self-service password
+  changes, browser-session inspection/revocation, and audited host password recovery.
+  Agent credential rotation preserves the agent principal and returns the new secret once.
+- Full policy editing, planned-task admission, inspected human recovery and blocker
+  resolution, with matching native task, policy, objective, and history commands.
+- Objectives with required/optional children, revisioned membership frozen once work
+  starts, combined dependency-cycle checks, and their own acceptance/review workflow.
+- Complete task evidence pagination across 12 record kinds, including associated
+  review/integration activities, with bounded pages and scoped insertion snapshots.
 - Linux systemd and Caddy examples, locked dependencies, and Linux/Windows CI.
 
 ## Deliberate limits of this milestone
@@ -118,19 +127,21 @@ client attestations, not remote filesystem inspection or hardware fencing.
 Supported commands do their work in the foreground; a launcher exiting does not
 verify completion of detached child or external work. Retain holds for that work.
 
-Human accounts currently have first-admin initialization only; password changes,
-account recovery, additional human administration, and token replacement for an
-existing agent principal remain work. A lost issuance response can recover the
-credential identity, but never its secret: revoke it and enroll a fresh name.
+Human administrators manage human access and agent credentials through the dashboard.
+Host recovery requires access to the service host and records the supplied reason.
+A lost token response never replays the secret: rotate the replacement credential
+again using its returned identity. Account-creation retries retain their original
+key and require the original password, which the dashboard never persists; the
+same administrator can authenticate again to reconcile that request safely.
 
-Instruction version 4 includes worktree/resource/job evidence, reviewed completion,
-and the shared-record sequence.
+Instruction version 5 includes operator tools, objective gates, and complete history
+alongside worktree/resource/job evidence, reviewed completion, and shared records.
 Existing sessions must fetch and acknowledge the new instructions before new claims.
 
 JSON requests default to 1 MiB and can be configured lower; artifact bytes use a
 separate 16 MiB hard limit. Task details return the latest 50 attempts,
 100 checkpoints, 50 checkouts, and bounded job/resource evidence; old records remain stored, with complete history
-pagination still to be added. Mutation receipts replay for 30 days; expired keys
+pagination available separately. Mutation receipts replay for 30 days; expired keys
 remain reserved so a late retry cannot duplicate an old operation. Artifact retention cleanup and storage quota enforcement are implemented;
 general event/receipt/history retention remains backlog work.
 
@@ -194,5 +205,27 @@ locked dependency audit in
 [CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271).
 The earlier CI link above applies to the prior milestone.
 
-The remaining release sequence is operator management, backups/restore, Linux
+The remaining release sequence is backups/restore, Linux
 acceptance, MCP (6.1), mdBook (6.2), and operator-initiated Windows acceptance (7).
+
+
+### Operator-workflow review evidence
+
+All 129 workspace tests pass, along with warnings-denied Clippy, formatting,
+JavaScript syntax checks, the workspace build, and the complete built service/CLI
+smoke exercise. Additional regressions cover account access races, the last
+administrator, password/session invalidation, same-principal token rotation,
+reauthenticated account-creation replay, objective gates/cycles/revisions, and
+complete history pagination with exact workflow evidence and credential redaction.
+
+Browser checks covered policy changes, task admission, history revisions,
+objective membership, inspected recovery, blocked release and human resolution,
+account disabling, token rotation, session revocation, password change and new
+sign-in. A proxy dropped an account-creation response after commit; after session
+expiry and reauthentication, re-entering the original password recovered exactly
+one account and one receipt. Final embedded assets matched their source, no browser
+errors were reported, and the phone view fit 375 CSS pixels without overflow.
+
+History cursors use insertion row identifiers. Future database maintenance must
+preserve those identifiers or explicitly invalidate outstanding cursors; never
+silently reuse them after an in-place VACUUM or a restore.

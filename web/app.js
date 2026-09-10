@@ -56,6 +56,12 @@
   const mutationOperation = (path, method) => {
     if (['POST', 'PUT', 'PATCH'].includes(method) && /\/projects\/[^/]+\/(workflow-policy|policy|workflow-activities\/[^/]+\/[^/]+|tasks\/[^/]+\/workflow\/reopen)$/.test(path)) return 'workflow_change';
     if (['POST','PATCH'].includes(method) && /\/projects\/[^/]+\/(knowledge|decisions|artifacts|imports)(\/|$)/.test(path)) return 'shared_change';
+    if (['POST','PATCH'].includes(method) && /\/projects\/[^/]+\/(objectives|claims|attempts|tasks)(\/|$)/.test(path)) return 'operator_work';
+    if (method === 'POST' && /\/admin\/operators\/[^/]+\/access$/.test(path)) return 'operator_access';
+    if (method === 'POST' && /\/browser-sessions\/[^/]+\/revoke$/.test(path)) return 'browser_revoke';
+    if (method === 'POST' && /\/admin\/credentials\/[^/]+\/rotate$/.test(path)) return 'rotate_credential';
+    if (method === 'POST' && path === '/api/v1/admin/operators') return 'create_operator';
+    if (method === 'POST' && path === '/api/v1/auth/password') return 'change_password';
     if (method === 'POST' && path === '/api/v1/resources') return 'create_resource';
     if (method === 'POST' && /\/projects\/[^/]+\/reservations\/[^/]+\/resolve$/.test(path)) return 'resolve_resource';
     if (method === 'POST' && path === '/api/v1/projects') return 'create_project';
@@ -75,7 +81,7 @@
     try { sessionStorage.setItem(PENDING_MUTATION_KEY, JSON.stringify({ actor_id: actorId(), operation: mutation.operation, path: mutation.path, method: mutation.method, key: mutation.key, body: sanitizeForSession(mutation.body), context: mutation.context || {} })); }
     catch (_) { throw new Error('Pending request storage unavailable'); }
   }
-  function clearPersistedMutation() { try { sessionStorage.removeItem(PENDING_MUTATION_KEY); } catch (_) { /* no-op */ } }
+  function clearPersistedMutation(key = null) { try { const saved = sessionStorage.getItem(PENDING_MUTATION_KEY); if (key === null || (saved && JSON.parse(saved).key === key)) sessionStorage.removeItem(PENDING_MUTATION_KEY); } catch (_) { /* no-op */ } }
   function readPersistedMutation() { try { const raw = sessionStorage.getItem(PENDING_MUTATION_KEY); return raw ? JSON.parse(raw) : null; } catch (_) { clearPersistedMutation(); return null; } }
 
   async function request(path, options = {}) {
@@ -131,20 +137,23 @@
   }
 
   async function executeMutation(mutation) {
-    if (!mutation || mutation.inFlight) return;
+    if (!mutation || mutation.inFlight || mutation.awaitingSecret) return;
     mutation.inFlight = true; renderMutationState();
     setGlobalAlert(`Saving ${mutation.label}…`, 'success');
     try {
       const result = await request(mutation.path, { method: mutation.method, body: mutation.body, idempotencyKey: mutation.key });
-      state.mutation = null; clearPersistedMutation(); renderMutationState(); setGlobalAlert('', 'success');
+      state.mutation = null; clearPersistedMutation(mutation.key); renderMutationState(); setGlobalAlert('', 'success');
       try { await mutation.onSuccess(result.data); }
       catch (error) { setGlobalAlert(`Saved, but the latest view could not refresh: ${errorMessage(error)}`, 'error'); }
     } catch (error) {
       mutation.inFlight = false;
-      if (error.code === 'authentication_required' || error.status === 401) { state.mutation = null; clearPersistedMutation(); signOutLocal(); if (mutation.onError) mutation.onError(error); }
+      if (error.code === 'authentication_required' || error.status === 401) {
+        if (['logout', 'change_password'].includes(mutation.operation)) clearPersistedMutation(mutation.key);
+        state.mutation = null; signOutLocal(true); if (mutation.onError) mutation.onError(error);
+      }
       else if (error.uncertain && mutation.operation) { state.mutation = mutation; setGlobalAlert(`${mutation.label} may still be processing. The original request is retained for a safe retry.`, 'error', true); if (mutation.onError) mutation.onError(error); }
       else if (error.uncertain) { state.mutation = null; if (mutation.onError) mutation.onError(new ApiError('Sign-in may still be processing. Try again after checking the session.', error.status, error.code, error.details, false)); else setGlobalAlert(errorMessage(error), 'error'); }
-      else { state.mutation = null; clearPersistedMutation(); if (mutation.onError) mutation.onError(error); else setGlobalAlert(errorMessage(error), 'error'); }
+      else { state.mutation = null; clearPersistedMutation(mutation.key); if (mutation.onError) mutation.onError(error); else setGlobalAlert(errorMessage(error), 'error'); }
       renderMutationState();
     }
   }
@@ -162,7 +171,7 @@
 
   function renderMutationState() {
     const busy = Boolean(state.mutation);
-    document.querySelectorAll('form button[type="submit"], [data-mutation="true"]').forEach((button) => { button.disabled = busy; });
+    document.querySelectorAll('form button[type="submit"], [data-mutation="true"]').forEach((button) => { button.disabled = busy && !(state.mutation?.awaitingSecret && button.closest('form')?.dataset.resumeSecret === 'true'); });
     if ($('logout-button')) $('logout-button').disabled = busy;
   }
 
@@ -176,14 +185,14 @@
     show($('loading-view'), false); show($('login-view'), false); show($('dashboard-view'), true);
   }
 
-  function signOutLocal() {
+  function signOutLocal(preservePending = false) {
     document.querySelectorAll('dialog').forEach(dialog => dialog.close());
-    state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
+    state.mutation = null; state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
     ++state.sharedSeq; state.sharedCursor = null; clear($('shared-list')); setText($('shared-freshness'), '');
     $('context-search').reset();
     state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
-    clearPersistedMutation();
-    setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); show($('credentials-list'), false);
+    if (!preservePending) clearPersistedMutation();
+    setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('task-operator-actions')); show($('credentials-list'), false);
     if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null;
     show($('dashboard-view'), false); show($('loading-view'), false); show($('login-view'), true);
     $('login-form')?.reset(); $('username')?.focus();
@@ -211,6 +220,12 @@
   }
 
   function restoredMutationCallbacks(operation, context = {}) {
+    if (operation === 'create_operator') return async () => { await loadOperators(); setGlobalAlert('Operator account created.', 'success'); };
+    if (operation === 'change_password') return async () => { signOutLocal(); showLoginError('Password changed. Sign in with your new password.'); };
+    if (operation === 'operator_work') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || ''; if (state.selectedTaskId) { showView('task-detail'); await loadTaskDetail(); } else { showView('tasks'); await loadTasks(); } setGlobalAlert('Update recorded. Inspect the current task and ownership.', 'success'); };
+    if (operation === 'operator_access') return async () => { await loadOperators(); setGlobalAlert('Account access updated.', 'success'); };
+    if (operation === 'browser_revoke') return async () => { await restoreSession(); setGlobalAlert('Browser session revoked.', 'success'); };
+    if (operation === 'rotate_credential') return async data => { showToken(data.token); await loadCredentials(); setIssueFeedback(data.token ? 'Replacement token issued for the same agent. Copy it now.' : 'This replacement token cannot be shown again. Rotate the replacement credential to obtain a new token.', data.token ? 'success' : 'error'); };
     if (operation === 'shared_change') return async (data) => { state.projectId = context.projectId || state.projectId; showView('shared'); if (context.preview) showImportPreview(data, state.projectId); else { await loadShared(); setGlobalAlert('Shared record saved.', 'success'); } };
     if (operation === 'workflow_change') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; if (state.selectedTaskId) { showView('task-detail'); await loadTaskDetail(); } else await loadTasks(); setGlobalAlert('Workflow update recorded. Inspect the current candidate and next actions.', 'success'); };
     if (operation === 'create_resource') return async () => { await loadResources(); setGlobalAlert('Resource created.', 'success'); };
@@ -227,6 +242,7 @@
     const saved = readPersistedMutation();
     if (!saved) return;
     if (!actorId() || saved.actor_id !== actorId() || !saved.operation || !saved.path || !saved.key || !restoredMutationCallbacks(saved.operation, saved.context)) { clearPersistedMutation(); return; }
+    if (['create_operator','change_password'].includes(saved.operation)) { restoreSecretRequest(saved); return; }
     state.projectId = saved.context?.projectId || state.projectId;
     state.mutation = { path: saved.path, body: saved.body || {}, label: `${displayStatus(saved.operation)}`, method: saved.method || 'POST', key: saved.key, operation: saved.operation, context: saved.context || {}, onSuccess: restoredMutationCallbacks(saved.operation, saved.context), onError: null, inFlight: false };
     renderMutationState();
@@ -367,7 +383,7 @@
     const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); badge.className = `status-badge ${status}`; setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
     const criteria = $('acceptance-list'); clear(criteria); const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
     if (!items.length) add(criteria, el('li', 'muted', 'No acceptance criteria recorded.')); else items.forEach((item) => add(criteria, el('li', '', item)));
-    renderLease(data, task); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
+    renderTaskActions(data, task); renderLease(data, task); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
     show($('task-detail-state'), false); show($('task-detail-content'), true);
   }
 
@@ -378,7 +394,7 @@
       const message = task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.';
       add(target, el('p', 'muted', message)); return;
     }
-    const dl = el('dl'); const remaining = current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
+    const dl = el('dl'); const remaining = taskStatus(task) === 'recovery_required' ? 'Ownership ended; recovery required' : current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
     [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]].forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, el('dd', '', value)); add(dl, line); }); add(target, dl);
   }
 
@@ -414,14 +430,14 @@
     catch (error) { if (!silent) setState($('credentials-state'), errorMessage(error), false, true); } finally { state.fetching.delete('credentials'); }
   }
 
-  function renderCredentials() { const target = $('credentials-list'); clear(target); if (!state.credentials.length) { show(target, false); setState($('credentials-state'), 'No agent credentials have been issued.', false); return; } show($('credentials-state'), false); show(target, true); state.credentials.forEach((credential) => { const row = el('div', 'credential-row'); const info = el('div'); add(info, el('div', 'credential-name', credential.name || credential.principal_name || credential.id)); add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`)); if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`)); add(row, info); if (!credential.revoked_at) { const revoke = el('button', 'button danger', 'Revoke'); revoke.type = 'button'; revoke.dataset.mutation = 'true'; revoke.addEventListener('click', () => revokeCredential(credential.id)); add(row, revoke); } add(target, row); }); renderMutationState(); }
+  function renderCredentials() { const target = $('credentials-list'); clear(target); if (!state.credentials.length) { show(target, false); setState($('credentials-state'), 'No agent credentials have been issued.', false); return; } show($('credentials-state'), false); show(target, true); state.credentials.forEach((credential) => { const row = el('div', 'credential-row'); const info = el('div'); add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}`)); add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`)); if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`)); add(row, info); if (!credential.revoked_at) { const rotate = actionButton('Rotate', () => rotateCredential(credential)); add(row, rotate); const revoke = el('button', 'button danger', 'Revoke'); revoke.type = 'button'; revoke.dataset.mutation = 'true'; revoke.addEventListener('click', () => revokeCredential(credential.id)); add(row, revoke); } add(target, row); }); renderMutationState(); }
   function revokeCredential(id) { startMutation(`/api/v1/admin/credentials/${encodeURIComponent(id)}/revoke`, {}, 'credential revocation', async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); }); }
 
   function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = setInterval(() => { if (!state.actor || state.mutation) return; if (state.currentView === 'overview') loadProjects(true); else if (state.currentView === 'tasks') loadTasks(true); else if (state.currentView === 'task-detail') loadTaskDetail(true); else if (state.currentView === 'admin') loadCredentials(true); else if (state.currentView === 'resources' && !state.resourcePagesExtended) loadResources(true); }, 5000); }
 
-  $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; await loadProjects(); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
+  $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
   $('logout-button').addEventListener('click', () => startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()));
-  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') loadCredentials(); if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
+  document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
   $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); }); });
@@ -528,7 +544,7 @@
     const finish = (label, submit) => {
       const actions = el('div', 'dialog-actions'); const cancel = el('button', 'button subtle', 'Cancel'); cancel.type = 'button'; cancel.addEventListener('click', () => dialog.close());
       const save = el('button', 'button primary', label); save.type = 'submit'; add(actions, cancel); add(actions, save); add(form, actions);
-      form.addEventListener('submit', event => { event.preventDefault(); if (!form.reportValidity() || state.mutation) return; submit(new FormData(form), dialog); });
+      form.addEventListener('submit', event => { event.preventDefault(); if (!form.reportValidity() || (state.mutation && form.dataset.resumeSecret !== 'true')) return; submit(new FormData(form), dialog); });
       add(dialog, form); add(document.body, dialog); dialog.addEventListener('close', () => dialog.remove()); dialog.showModal();
     };
     return { dialog, form, field, finish };
@@ -845,6 +861,291 @@
   $('binding-rules').addEventListener('click', bindingRules);
   $('import-markdown').addEventListener('click', importDialog);
   $('export-markdown').addEventListener('click', exportSnapshot);
+
+  // Operator tools use the same guarded operations as agents.
+  function actionButton(label, action, mutation = true) {
+    const button = el('button', 'button subtle', label); button.type = 'button';
+    if (mutation) button.dataset.mutation = 'true';
+    button.addEventListener('click', action); return button;
+  }
+  function selectField(view, name, label, value, choices) {
+    const select = view.field(name, label, '', 'select');
+    choices.forEach(([key, caption]) => { const option = el('option', '', caption); option.value = key; add(select, option); });
+    select.value = String(value); return select;
+  }
+  function lines(value) { return text(value).split('\n').map(line => line.trim()).filter(Boolean); }
+  async function openProjectPolicy() {
+    if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    const projectId = state.projectId, currentActor = actorId();
+    try {
+      const project = (await request(`${projectPath(projectId)}/orientation`)).data.project;
+      if (state.projectId !== projectId || actorId() !== currentActor) return;
+      const view = workflowDialog('Project policy', 'Changes create a new policy revision. Agents must reread the policy before claiming work; existing submissions may need reconciliation.');
+      selectField(view, 'review_mode', 'Required review', project.review_mode, [['agent','Independent agent'],['human','Human'],['both','Independent agent and human'],['none','No required review']]);
+      selectField(view, 'recovery_mode', 'Expired work recovery', project.recovery_mode, [['agent','Agents may inspect and recover'],['manual','A human must inspect and recover']]);
+      selectField(view, 'automatic_integration', 'Integration authorization', project.automatic_integration, [['false','Human authorization for each candidate'],['true','Agents may integrate approved candidates']]);
+      selectField(view, 'agent_rule_editing', 'Agent policy changes', project.agent_rule_editing, [['false','Only humans may change binding rules'],['true','Agents may change binding project rules']]);
+      const lease = view.field('lease_seconds','Ownership lease (seconds)',project.lease_seconds,'input'); lease.type = 'number'; lease.min = '30'; lease.max = '3600';
+      const rules = view.field('rules','Binding rules',project.rules); rules.maxLength = 32768; rules.required = false;
+      view.field('provenance','Reason and supporting source').maxLength = 4096;
+      view.finish('Save policy', (values, dialog) => {
+        const body = {expected_revision:project.policy_revision, review_mode:values.get('review_mode'), recovery_mode:values.get('recovery_mode'), automatic_integration:values.get('automatic_integration') === 'true', agent_rule_editing:values.get('agent_rule_editing') === 'true', lease_seconds:Number(values.get('lease_seconds')), rules:values.get('rules'), provenance:values.get('provenance')};
+        dialog.close(); startMutation(`${projectPath(projectId)}/policy`, body, 'project policy', async () => { await loadProjects(); setGlobalAlert('Project policy saved.', 'success'); }, 'PATCH', null, {projectId});
+      });
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  function renderTaskActions(data, task) {
+    const target = $('task-operator-actions'); clear(target);
+    if (!task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, actionButton('Edit task', () => editTask(task, data)));
+    if (!task.current_attempt_id && task.blocked_reason) add(target, actionButton('Resolve blocker', () => {
+      const projectId = state.projectId, taskId = task.id;
+      const view = workflowDialog('Resolve saved blocker', task.blocked_reason);
+      view.field('reason','Resolution evidence');
+      view.finish('Record resolution', (values, dialog) => { dialog.close(); startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/unblock`, {expected_revision:task.revision,reason:values.get('reason')}, 'blocker resolution', () => loadTaskDetail(), 'POST', null, {projectId,taskId}); });
+    }));
+    if (taskStatus(task) === 'recovery_required' && !task.activity_kind) add(target, actionButton('Inspect for recovery', () => claimRecovery(task)));
+    const attempt = (data.attempts || []).find(item => item.id === task.current_attempt_id);
+    if (attempt && attempt.owner_id === actorId() && attempt.session_id === state.actor?.session_id && attempt.state === 'active' && taskStatus(task) !== 'recovery_required') {
+      if (attempt.mode === 'recovery') add(target, actionButton('Review recovery evidence', () => recoveryEvidence(task, attempt)));
+      add(target, actionButton('Renew my ownership', () => workflowMutation(`${projectPath()}/attempts/${encodeURIComponent(attempt.id)}/renew`, {generation:attempt.generation}, 'ownership renewal')));
+      add(target, actionButton('Release with handoff', () => releaseOwnedAttempt(attempt)));
+    }
+    if (task.objective_id) add(target, actionButton('View objective children', () => showObjective(task.objective_id), false));
+    if (task.parent_objective_id) add(target, actionButton('View parent objective', () => showObjective(task.parent_objective_id), false));
+    renderMutationState();
+  }
+  function editTask(task, data) {
+    const projectId = state.projectId, taskId = task.id;
+    const view = workflowDialog('Edit task', 'Only unowned work can be edited. Admitting planned work makes it eligible when its dependencies and other requirements are satisfied.');
+    view.field('title','Title',task.title,'input').maxLength = 300;
+    const description = view.field('description','Description',task.description); description.required = false; description.maxLength = 32768;
+    view.field('criteria','Acceptance criteria — one per line',(task.acceptance_criteria || []).join('\n')).maxLength = 205000;
+    const dependencies = task.depends_on || data.depends_on || data.dependencies || [];
+    view.field('depends_on','Prerequisite task IDs — one per line',dependencies.map(item => typeof item === 'string' ? item : item.prerequisite_id || item.id).join('\n')).required = false;
+    const priority = view.field('priority','Priority (0 highest, 3 lowest)',task.priority,'input'); priority.type = 'number'; priority.min = '0'; priority.max = '3';
+    selectField(view,'planned','Admission',task.lifecycle === 'planned',[['true','Keep planned'],['false','Admit to ready queue']]);
+    view.finish('Save task', (values, dialog) => {
+      dialog.close(); startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}`, {expected_revision:task.revision,title:values.get('title'),description:values.get('description'),acceptance_criteria:lines(values.get('criteria')),depends_on:lines(values.get('depends_on')),priority:Number(values.get('priority')),planned:values.get('planned') === 'true'}, 'task edit', () => loadTaskDetail(), 'PATCH', null, {projectId,taskId});
+    });
+  }
+  async function claimRecovery(task) {
+    const projectId = state.projectId, taskId = task.id, currentActor = actorId();
+    try {
+      const orientation = (await request(`${projectPath(projectId)}/orientation`)).data;
+      if (state.projectId !== projectId || state.selectedTaskId !== taskId || actorId() !== currentActor) return;
+      const view = workflowDialog('Begin recovery inspection', 'This reserves an inspection attempt. Inspect saved source, checkpoints, and still-running jobs before deciding how work continues. Unknown jobs keep their resource holds.');
+      recordDetails(view.form,'Current project rules',orientation.project);
+      view.finish('Claim recovery inspection', (_, dialog) => { dialog.close(); startMutation(`${projectPath(projectId)}/claims`, {task_id:taskId,expected_task_revision:task.revision,mode:'recovery',policy_revision:orientation.project.policy_revision,instruction_version:orientation.instruction_version}, 'recovery inspection', async data => { await loadTaskDetail(); if (data.current_authority?.valid === false) setGlobalAlert('The saved claim no longer grants ownership. Inspect the current task.'); }, 'POST', null, {projectId,taskId}); });
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  async function recoveryEvidence(task, attempt) {
+    const projectId = state.projectId, currentActor = actorId();
+    try {
+      const evidence = (await request(`${projectPath(projectId)}/attempts/${encodeURIComponent(attempt.id)}`)).data;
+      if (projectId !== state.projectId || task.id !== state.selectedTaskId || actorId() !== currentActor) return;
+      const view = workflowDialog('Resolve recovery inspection', 'Inspect the original worktree or remote checkpoint and account for every producer. The service checks unresolved job and resource holds before allowing work to resume.');
+      recordDetails(view.form,'Inspection ownership',evidence);
+      recordDetails(view.form,'Recent saved work, checkpoints, and job holds',state.detail);
+      add(view.form,actionButton('Browse older task evidence',taskHistory,false));
+      selectField(view,'disposition','Continue work', 'resume', [['resume','Resume saved work'],['restart','Restart implementation after inspection']]);
+      view.field('summary','Inspection findings and next steps');
+      for (const [name,label] of [['saved_work_checked','I checked saved work and its source checkpoints'],['running_jobs_checked','I checked still-running and uncertain jobs']]) { const input = view.field(name,label,'','input'); input.type = 'checkbox'; input.value = 'checked'; }
+      view.finish('Record recovery decision', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath(projectId)}/attempts/${encodeURIComponent(attempt.id)}/recovery-resolution`, {generation:attempt.generation,disposition:values.get('disposition'),summary:values.get('summary'),saved_work_checked:values.get('saved_work_checked') === 'checked',running_jobs_checked:values.get('running_jobs_checked') === 'checked'}, 'recovery decision'); });
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  function releaseOwnedAttempt(attempt) {
+    const view = workflowDialog('Release ownership with a handoff', 'Release leaves the task unfinished. All jobs must have terminal evidence and resource reservations must be released first.');
+    view.field('summary','Work completed and saved source'); view.field('next_step','Next step');
+    selectField(view,'blocked','Next owner',false,[['false','Task may be claimed again'],['true','Leave blocked until the issue is resolved']]);
+    view.finish('Release ownership', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath()}/attempts/${encodeURIComponent(attempt.id)}/release`, {generation:attempt.generation,summary:`${values.get('summary')}\nNext step: ${values.get('next_step')}`,blocked:values.get('blocked') === 'true'}, 'ownership release'); });
+  }
+  function taskHistory() {
+    const projectId = state.projectId, taskId = state.selectedTaskId, currentActor = actorId();
+    const view = workflowDialog('Complete task history', 'Pages preserve a snapshot of inserted records. Start a fresh history view to include newer records.');
+    const kinds = ['attempts','checkpoints','checkouts','jobs','job_observations','resources','artifacts','submissions','reviews','integrations','task_revisions','events'];
+    const kind = selectField(view,'kind','Record type','attempts',kinds.map(value => [value,displayStatus(value)]));
+    const list = add(view.form, el('div')), more = actionButton('Load more records', () => load(true), false); add(view.form, more); let cursor = null, sequence = 0;
+    async function load(append = false) {
+      const current = ++sequence, selectedKind = kind.value; more.disabled = true;
+      try {
+        const page = (await request(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/history?kind=${encodeURIComponent(selectedKind)}&limit=50${append && cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
+        if (current !== sequence || currentActor !== actorId() || !view.dialog.isConnected) return;
+        if (!append) clear(list);
+        for (const item of page.items || []) recordDetails(list,`${formatDate(item.occurred_at)} · ${displayStatus(item.relation)} · ${text(item.record.summary || item.record.outcome || item.record.definition?.title || item.task_id).slice(0,300)}`,item.record);
+        if (!append && !(page.items || []).length) add(list,el('p','muted','No preserved records of this type.'));
+        cursor = page.next_cursor; show(more, Boolean(cursor));
+      } catch (error) { if (current === sequence) { if (!append) clear(list); add(list,el('p','error',errorMessage(error))); } }
+      finally { if (current === sequence) more.disabled = false; }
+    }
+    kind.addEventListener('change', () => load()); view.finish('Close', (_,dialog) => dialog.close()); load();
+  }
+  async function objectives() {
+    if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    const projectId = state.projectId, currentActor = actorId();
+    const view = workflowDialog('Project objectives', 'Each objective is a general task with its own acceptance criteria. Required child tasks must complete before its own work and review can finish.');
+    add(view.form, actionButton('New objective', () => { view.dialog.close(); objectiveDialog(); }));
+    const list = add(view.form,el('div')), more = actionButton('Load more objectives', () => load(true), false); add(view.form,more); let cursor = null, busy = false;
+    async function load(append = false) {
+      if (busy) return; busy = true; more.disabled = true;
+      try {
+        const page = (await request(`${projectPath(projectId)}/objectives?limit=50${append && cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
+        if (!view.dialog.isConnected || actorId() !== currentActor) return;
+        if (!append) clear(list);
+        for (const item of page.items || []) add(list,actionButton(`${item.title || item.id} · Required children ${item.completed_required_child_count}/${item.required_child_count} · ${displayStatus(item.work_status)}`, () => { view.dialog.close(); showObjective(item.id || item.task_id); },false));
+        if (!append && !(page.items || []).length) add(list,el('p','muted','No objectives yet.'));
+        cursor = page.next_cursor; show(more, Boolean(cursor));
+      } catch (error) { add(list,el('p','error',errorMessage(error))); }
+      finally { busy = false; more.disabled = false; }
+    }
+    view.finish('Close', (_,dialog) => dialog.close()); load();
+  }
+  async function showObjective(id) {
+    const projectId = state.projectId, currentActor = actorId();
+    try {
+      const data = (await request(`${projectPath(projectId)}/objectives/${encodeURIComponent(id)}`)).data;
+      if (projectId !== state.projectId || actorId() !== currentActor) return;
+      const objective = data.objective || data;
+      const view = workflowDialog(objective.title || 'Objective', 'Required children gate objective work. The objective needs its own acceptance evidence and required review.');
+      for (const child of objective.children || data.children || []) add(view.form,actionButton(`${child.title || child.task_id} · ${child.required ? 'Required' : 'Optional'} · ${displayStatus(child.work_status || child.lifecycle || child.status)}`, () => { view.dialog.close(); openTask(child.task_id); },false));
+      add(view.form,actionButton('Open objective task', () => { view.dialog.close(); openTask(objective.task_id || objective.id || id); },false));
+      if (!objective.membership_frozen) add(view.form,actionButton('Edit child membership', () => { view.dialog.close(); objectiveDialog({...objective,id,children:objective.children || data.children || []}); }));
+      recordDetails(view.form,'Objective record and membership history',data);
+      let cursor = objective.membership_history_next_cursor;
+      const more = actionButton('Load older membership history', async () => {
+        more.disabled = true;
+        try {
+          const page = (await request(`${projectPath(projectId)}/objectives/${encodeURIComponent(id)}?cursor=${encodeURIComponent(cursor)}&limit=50`)).data;
+          if (!view.dialog.isConnected || actorId() !== currentActor) return;
+          recordDetails(view.form,'Earlier membership revisions',page.membership_history);
+          cursor = page.membership_history_next_cursor; show(more,Boolean(cursor));
+        } catch (error) { setGlobalAlert(errorMessage(error)); }
+        finally { more.disabled = false; }
+      },false); add(view.form,more); show(more,Boolean(cursor));
+      view.finish('Close', (_,dialog) => dialog.close());
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  function objectiveDialog(existing = null) {
+    const projectId = state.projectId;
+    const view = workflowDialog(existing ? 'Edit objective children' : 'New objective', 'Use task IDs from this project. A task has at most one parent objective. Membership freezes once objective work begins.');
+    if (!existing) { view.field('title','Title','','input'); view.field('description','Description').required = false; view.field('criteria','Acceptance criteria — one per line'); }
+    view.field('required','Required child task IDs — one per line',(existing?.children || []).filter(child => child.required).map(child => child.task_id).join('\n')).required = false;
+    view.field('optional','Optional child task IDs — one per line',(existing?.children || []).filter(child => !child.required).map(child => child.task_id).join('\n')).required = false;
+    view.finish(existing ? 'Save membership' : 'Create objective', (values, dialog) => {
+      const children = [...lines(values.get('required')).map(task_id => ({task_id,required:true})),...lines(values.get('optional')).map(task_id => ({task_id,required:false}))];
+      const body = existing ? {expected_revision:existing.objective_revision,children} : {title:values.get('title'),description:values.get('description'),acceptance_criteria:lines(values.get('criteria')),children,priority:2,planned:false};
+      dialog.close(); startMutation(`${projectPath(projectId)}/objectives${existing ? `/${encodeURIComponent(existing.id)}/children` : ''}`,body,'objective',async () => { await loadTasks(); setGlobalAlert('Objective saved.', 'success'); },existing ? 'PATCH' : 'POST',null,{projectId});
+    });
+  }
+  $('project-policy-button').addEventListener('click',openProjectPolicy);
+  $('task-history-button').addEventListener('click',taskHistory);
+  $('objective-list-button').addEventListener('click',objectives);
+
+  async function loadOperators(append = false, cursor = null) {
+    if (state.actor?.role !== 'admin') return;
+    const currentActor = actorId(), target = $('operators-list');
+    try {
+      const page = (await request(`/api/v1/admin/operators${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
+      if (actorId() !== currentActor || state.actor?.role !== 'admin') return;
+      if (!append) clear(target);
+      for (const operator of page.items || []) {
+        const row = el('div','credential-row'); add(row,el('span','',`${operator.name} · ${displayStatus(operator.role)} · ${operator.enabled ? 'Enabled' : 'Disabled'}`));
+        add(row,actionButton('Change access', () => {
+          const view = workflowDialog(`Access for ${operator.name}`, 'Access changes end this account’s existing browser sessions. The last enabled administrator must remain enabled with administrator access.');
+          selectField(view,'role','Role',operator.role,[['operator','Operator'],['admin','Administrator']]);
+          selectField(view,'enabled','Account access',operator.enabled,[['true','Enabled'],['false','Disabled']]);
+          view.finish('Save access', (values, dialog) => { dialog.close(); startMutation(`/api/v1/admin/operators/${encodeURIComponent(operator.id)}/access`, {expected_revision:operator.revision,role:values.get('role'),enabled:values.get('enabled') === 'true'},'account access',async data => { if (operator.id === actorId() && data.sessions_revoked) { signOutLocal(); showLoginError('Access updated. Sign in again if your account remains enabled.'); } else await loadOperators(); }); });
+        }));
+        add(row,actionButton('Browser sessions', () => browserSessions(operator.id,operator.name),false)); add(target,row);
+      }
+      target.querySelector('[data-more-operators]')?.remove();
+      if (page.next_cursor) { const more = actionButton('Load more accounts', () => { more.disabled = true; loadOperators(true,page.next_cursor); },false); more.dataset.moreOperators = 'true'; add(target,more); }
+      renderMutationState();
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  function createOperator() {
+    const view = workflowDialog('Add operator', 'All authenticated people and agents can access every project. Administrators also manage operator accounts and agent credentials.');
+    view.field('name','Username','','input').maxLength = 100;
+    selectField(view,'role','Role','operator',[['operator','Operator'],['admin','Administrator']]);
+    const password = view.field('password','Initial password (at least 12 characters)','','input'); password.type = 'password'; password.autocomplete = 'new-password'; password.maxLength = 1024; password.minLength = 12;
+    const confirmation = view.field('confirmation','Confirm initial password','','input'); confirmation.type = 'password'; confirmation.autocomplete = 'new-password';
+    view.finish('Create account', (values, dialog) => {
+      if (values.get('password') !== values.get('confirmation')) { confirmation.setCustomValidity('Passwords must match.'); confirmation.reportValidity(); confirmation.addEventListener('input', () => confirmation.setCustomValidity(''),{once:true}); return; }
+      const body = {name:values.get('name'),role:values.get('role'),password:values.get('password')};
+      dialog.close(); startMutation('/api/v1/admin/operators',body,'operator creation',async () => { await loadOperators(); setGlobalAlert('Operator account created.', 'success'); });
+    });
+  }
+  async function myAccount() {
+    const currentActor = actorId();
+    try {
+      const operator = (await request('/api/v1/auth/account')).data.operator;
+      if (actorId() !== currentActor) return;
+      const view = workflowDialog('My account', `${operator.name} · ${displayStatus(operator.role)}. Changing your password signs out every browser session for this account.`);
+      add(view.form,actionButton('View my browser sessions', () => { view.dialog.close(); browserSessions(operator.id,operator.name); },false));
+      const current = view.field('current_password','Current password','','input'); current.type = 'password'; current.autocomplete = 'current-password'; current.maxLength = 1024;
+      const next = view.field('new_password','New password (at least 12 characters)','','input'); next.type = 'password'; next.autocomplete = 'new-password'; next.maxLength = 1024; next.minLength = 12;
+      const confirmation = view.field('confirmation','Confirm new password','','input'); confirmation.type = 'password'; confirmation.autocomplete = 'new-password';
+      view.finish('Change password and sign out', (values, dialog) => {
+        if (values.get('new_password') !== values.get('confirmation')) { confirmation.setCustomValidity('Passwords must match.'); confirmation.reportValidity(); confirmation.addEventListener('input', () => confirmation.setCustomValidity(''),{once:true}); return; }
+        const body = {expected_revision:operator.revision,current_password:values.get('current_password'),new_password:values.get('new_password')};
+        dialog.close(); startMutation('/api/v1/auth/password',body,'password change',async () => { signOutLocal(); showLoginError('Password changed. Sign in with your new password.'); }, 'POST', error => { if (error.status === 401) showLoginError('This session could not authorize the password change. Sign in again. If an earlier attempt had an uncertain response, try the new password.'); else setGlobalAlert(error.uncertain ? 'The password change may have succeeded. Retry the retained request, or reload and sign in with the new password to inspect your account.' : errorMessage(error),'error',error.uncertain); });
+      });
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  function browserSessions(principalId, name) {
+    const currentActor = actorId(), view = workflowDialog(`Browser sessions for ${name}`, 'Revoking a session signs out that browser. This does not replace or recreate task ownership.');
+    const list = add(view.form,el('div')), more = actionButton('Load more sessions', () => load(true),false); add(view.form,more); let cursor = null, busy = false;
+    async function load(append = false) {
+      if (busy) return; busy = true; more.disabled = true;
+      try {
+        const page = (await request(`/api/v1/browser-sessions?principal_id=${encodeURIComponent(principalId)}${append && cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
+        if (!view.dialog.isConnected || actorId() !== currentActor) return;
+        if (!append) clear(list);
+        for (const session of page.items || []) {
+          const row = el('div','shared-card'); add(row,el('p','',`${session.current ? 'This browser' : session.id} · Created ${formatDate(session.created_at)} · Expires ${formatDate(session.expires_at)}`));
+          if (session.revoked_at) add(row,el('p','muted',`Revoked ${formatDate(session.revoked_at)}`));
+          else add(row,actionButton('Revoke session', () => startMutation(`/api/v1/browser-sessions/${encodeURIComponent(session.id)}/revoke`,{},'browser session revocation',async () => { if (session.current) { view.dialog.close(); signOutLocal(); } else await load(); })));
+          add(list,row);
+        }
+        cursor = page.next_cursor; show(more,Boolean(cursor)); renderMutationState();
+      } catch (error) { add(list,el('p','error',errorMessage(error))); }
+      finally { busy = false; more.disabled = false; }
+    }
+    view.finish('Close', (_,dialog) => dialog.close()); load();
+  }
+  function rotateCredential(credential) {
+    const view = workflowDialog('Rotate agent credential', 'The replacement retains the same agent identity. Revoking the old credential ends its sessions and task authority; recovery must inspect saved work and jobs.');
+    view.field('name','Replacement credential name',credential.credential_name || credential.name || credential.principal_name || 'replacement','input').maxLength = 100;
+    selectField(view,'revoke_old','Old credential','true',[['true','Revoke when replacement is issued'],['false','Keep active for a staged transition']]);
+    view.finish('Issue replacement token', (values,dialog) => { dialog.close(); startMutation(`/api/v1/admin/credentials/${encodeURIComponent(credential.id)}/rotate`,{name:values.get('name'),revoke_old:values.get('revoke_old') === 'true'},'credential rotation',restoredMutationCallbacks('rotate_credential')); });
+  }
+  function restoreSecretRequest(saved) {
+    if (saved.path === '/api/v1/auth/password') {
+      clearPersistedMutation();
+      setGlobalAlert('A password change had an uncertain response. If your old session ended, sign in with the new password and inspect My account. Passwords were not saved in this browser.'); return;
+    }
+    const view = workflowDialog('Resume account creation', 'Re-enter the original initial password to retry the saved request. The request key, username, and role are preserved; the password was not saved.');
+    add(view.form,el('p','',`${saved.body.name} · ${displayStatus(saved.body.role)}`));
+    const password = view.field('password','Original initial password','','input'); password.type = 'password'; password.autocomplete = 'new-password';
+    // Reserve the original operation until the operator supplies its missing secret.
+    state.mutation = { ...saved, label:'operator creation', inFlight:false, awaitingSecret:true };
+    view.finish('Retry original creation', (values,dialog) => {
+      const body = {...saved.body,password:values.get('password')}; dialog.close();
+      state.mutation = {...saved,body,label:'operator creation',onSuccess:restoredMutationCallbacks('create_operator'),onError:null,inFlight:false};
+      executeMutation(state.mutation);
+    });
+    view.form.dataset.resumeSecret = 'true';
+    renderMutationState();
+    view.dialog.addEventListener('close', () => {
+      if (state.mutation?.awaitingSecret) {
+        setGlobalAlert('Account creation remains pending. Re-enter the original password to resume it.');
+        add($('global-alert'), actionButton('Re-enter original password', () => restoreSecretRequest(saved), false));
+      }
+    });
+
+  }
+  $('account-button').addEventListener('click',myAccount);
+  $('new-operator-button').addEventListener('click',createOperator);
+  $('refresh-operators').addEventListener('click',() => loadOperators());
 
   restoreSession();
 })();

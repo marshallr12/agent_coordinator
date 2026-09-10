@@ -1,6 +1,7 @@
 mod artifact_transfer;
 mod config;
 mod job_state;
+mod operator;
 mod shared;
 mod state;
 mod worktree;
@@ -47,6 +48,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Group child tasks under a general objective with its own completion evidence.
+    Objectives {
+        #[command(subcommand)]
+        command: operator::ObjectivesCommand,
+    },
+    /// Read or revise current project policy and inspect its history.
+    Policy {
+        #[command(subcommand)]
+        command: operator::PolicyCommand,
+    },
     /// Search bounded project context and explicitly shared knowledge.
     Context(shared::ContextArgs),
     /// Read and revise shared lessons, facts, and historical context.
@@ -484,6 +495,12 @@ enum ProjectsCommand {
 enum TasksCommand {
     List(ListArgs),
     Create(InputArgs),
+    /// Read a task, its current ownership, and recent evidence.
+    Show(operator::RecordArgs),
+    /// Page through complete task and workflow evidence by record kind.
+    History(operator::HistoryArgs),
+    /// Edit an unowned task using its expected revision.
+    Edit(operator::RecordInput),
 }
 
 #[derive(Args)]
@@ -865,6 +882,8 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
     }
     let context = build_context(cli).await?;
     match &cli.command {
+        Command::Objectives { command } => operator::objectives(cli, &context, command).await,
+        Command::Policy { command } => operator::policy(cli, &context, command).await,
         Command::Connect(args) => connect(cli, &context, args).await,
         Command::Projects { command } => match command {
             ProjectsCommand::List(args) => finish(
@@ -890,6 +909,11 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
                 TasksCommand::Create(input) => {
                     let body = read_json(&input.input).map_err(Failure::invalid)?;
                     mutate(cli, &context, &path, body, true).await
+                }
+                TasksCommand::History(args) => operator::history(cli, &context, args).await,
+                TasksCommand::Show(args) => operator::task_show(cli, &context, args).await,
+                TasksCommand::Edit(args) => {
+                    operator::task_write(cli, &context, args, "", HttpMethod::Patch).await
                 }
             }
         }

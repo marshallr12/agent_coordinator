@@ -123,7 +123,7 @@ impl Fixture {
                     "/api/v1/sessions/{}/instruction-acknowledgments",
                     self.agent.session
                 ),
-                json!({"project_id":project,"policy_revision":policy_revision,"instruction_version":"4","sections":["coordination-v4"]}),
+                json!({"project_id":project,"policy_revision":policy_revision,"instruction_version":"5","sections":["coordination-v5"]}),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{value}");
@@ -511,7 +511,7 @@ async fn submission_lesson_helper_validates_the_batch_before_inserting() {
             &fixture.agent,
             "POST",
             &format!("/api/v1/projects/{project}/claims"),
-            json!({"task_id":task["id"],"expected_task_revision":1,"mode":"work","policy_revision":1,"instruction_version":"4"}),
+            json!({"task_id":task["id"],"expected_task_revision":1,"mode":"work","policy_revision":1,"instruction_version":"5"}),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{claim}");

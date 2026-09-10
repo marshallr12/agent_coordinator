@@ -3,7 +3,7 @@
 Execution instruction: complete the remaining items sequentially. The main agent
 reviews each item's code and validation evidence before starting the next item.
 Continue without operator review; ask only for information or access needed to
-proceed. Complete items 4 through 6.2 autonomously, including Linux acceptance.
+proceed. Complete items 5 through 6.2 autonomously, including Linux acceptance.
 The operator will start Windows workstation acceptance as final item 7 after Linux acceptance; CI does
 not replace that workstation exercise.
 
@@ -28,10 +28,13 @@ exercise, browser checks, Linux/Windows CI, and dependency audit passed. Audited
 SithBit/Submission fixtures preserve historical closure and leave source
 repositories unchanged.
 
+Completed item 4: operator accounts and browser sessions, password recovery,
+agent credential rotation, full policy editing, revisioned objective grouping,
+complete task history pagination, inspected operator recovery controls, and named
+native commands. Main-agent review and all 129 local tests, Clippy, build, smoke,
+and browser checks passed. Required CI is tracked in the handoff.
+
 Next work, preserving the original backlog numbering:
-4. Expand operator account management, recovery/rotation, policy editor, objective grouping and full task
-   history pagination, operator recovery controls, and native client commands.
-   Keep the short bootstrap snippet and returned instructions aligned with behavior.
 5. Implement consistent backups and restore authority invalidation; retention of
    24 hourly and 30 daily copies, documented off-server copying, and restore exercise.
 6. Complete Linux packaging and Linux acceptance, the 20-project /

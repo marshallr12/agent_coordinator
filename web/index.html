@@ -42,6 +42,7 @@
             </button>
             <div class="topbar-actions">
               <span id="actor-chip" class="actor-chip"></span>
+              <button id="account-button" class="button ghost" type="button">My account</button>
               <button id="logout-button" class="button ghost" type="button">Sign out</button>
             </div>
           </div>
@@ -89,6 +90,8 @@
                 <label class="select-label" for="project-select">Project<select id="project-select"><option value="">Choose a project</option></select></label>
                 <label class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
                 <button id="refresh-tasks" class="button subtle" type="button" disabled>Refresh</button>
+                <button id="objective-list-button" class="button subtle" type="button">Objectives</button>
+                <button id="project-policy-button" class="button subtle" type="button">Project policy</button>
                 <button id="workflow-settings" class="button subtle" type="button">Review & check settings</button>
               </div>
               <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
@@ -101,10 +104,12 @@
               <div id="task-detail-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Loading task…</span></div>
               <div id="task-detail-content" hidden>
                 <div class="page-heading detail-heading"><div><p id="detail-project-label" class="eyebrow"></p><h1 id="task-detail-heading"></h1><p id="detail-task-id" class="muted"></p></div><span id="detail-status" class="status-badge"></span></div>
+                <div id="task-operator-actions" class="toolbar"></div>
                 <div class="detail-grid">
                   <article class="card detail-card"><div class="card-header"><h2>Task brief</h2><span id="detail-kind" class="meta-pill"></span></div><p id="detail-description" class="detail-description"></p><h3>Acceptance criteria</h3><ul id="acceptance-list" class="criteria-list"></ul></article>
                   <article class="card lease-card"><div class="card-header"><h2>Ownership</h2><span class="live-label"><span class="status-dot"></span> Observed</span></div><div id="lease-content"></div></article>
                 </div>
+                <article class="card"><div class="card-header"><h2>Complete task history</h2><button id="task-history-button" class="button subtle" type="button">Browse history</button></div><p class="muted">Browse all preserved records, including earlier attempts and review or integration activities.</p></article>
                 <article class="card checkpoints-card"><div class="card-header"><div><h2>Checkpoint trail</h2><p class="muted">Progress shared by the active or previous attempt.</p></div></div><div id="checkpoints-content"></div></article>
                 <article class="card workflow-card"><div class="card-header"><div><h2>Submission & completion</h2><p class="muted">Review and checks apply to a specific candidate. Code completion requires validation of the integrated result.</p></div></div><div id="workflow-content"></div></article>
                 <article class="card job-evidence-card"><div class="card-header"><div><h2>Jobs & resource holds</h2><p class="muted">A missing observer does not prove a job stopped. Holds remain until explicitly released or resolved.</p></div></div><div id="job-evidence-content"></div></article>
@@ -146,6 +151,7 @@
               <div class="page-heading"><div><p class="eyebrow">Administration</p><h1 id="admin-heading">Access & credentials</h1><p class="muted">Issue a coordinator credential for an agent and revoke it when its work ends.</p></div></div>
               <div id="admin-denied" class="state-panel" role="status" hidden>Admin access is limited to administrator accounts.</div>
               <div id="admin-content">
+                <article class="card"><div class="card-header"><h2>Operator accounts</h2><button id="new-operator-button" class="button primary" type="button" data-mutation="true">Add operator</button></div><div id="operators-list"></div><button id="refresh-operators" class="button subtle" type="button">Refresh accounts</button></article>
                 <div class="admin-grid">
                   <article class="card issue-card"><div class="card-header"><div><h2>Issue agent credential</h2><p class="muted">The token is shown once and clears when you dismiss it.</p></div></div><div id="issue-feedback" class="inline-alert" role="status" hidden></div><form id="issue-form"><label for="agent-name">Agent name</label><input id="agent-name" name="agent-name" placeholder="e.g. build-runner" required maxlength="120"><button class="button primary" type="submit">Issue credential</button></form><div id="token-reveal" class="token-reveal" hidden><div class="token-reveal-header"><strong>Copy this token now</strong><button id="clear-token" class="icon-button" type="button" aria-label="Clear token">×</button></div><code id="issued-token"></code><button id="copy-token" class="button subtle" type="button">Copy token</button></div></article>
                   <article class="card credentials-card"><div class="card-header"><div><h2>Issued credentials</h2><p class="muted">Revoked credentials cannot create new sessions.</p></div><button id="refresh-credentials" class="button subtle" type="button">Refresh</button></div><div id="credentials-state" class="state-panel compact" role="status"><span class="spinner" aria-hidden="true"></span><span>Loading credentials…</span></div><div id="credentials-list" hidden></div></article>
