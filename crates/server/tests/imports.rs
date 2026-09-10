@@ -278,6 +278,115 @@ async fn duplicate_implicit_checklist_identity_is_a_blocking_conflict() {
 }
 
 #[tokio::test]
+async fn historical_reimport_advances_projection_and_search_without_shape_drift() {
+    let f = Fixture::new().await;
+    let project = f.project("historical-correction").await;
+    let chunks = json!([{
+        "path":"HISTORY.md",
+        "markdown":"# Retrospective\nThe prose is historical evidence only.\n"
+    }]);
+    let first = f
+        .preview(
+            &project,
+            f.source("historical-correction"),
+            chunks.clone(),
+            json!([{
+                "path":"HISTORY.md",
+                "section_identity":"Retrospective / Finding",
+                "title":"Corrected historical finding",
+                "disposition":"closed",
+                "evidence":"obsoleteuniqueterm was the first evidence"
+            }]),
+        )
+        .await;
+    assert_eq!(
+        f.apply(&project, &first, &Uuid::new_v4().to_string())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let second = f
+        .preview(
+            &project,
+            f.source("historical-correction"),
+            chunks,
+            json!([{
+                "path":"HISTORY.md",
+                "section_identity":"Retrospective / Finding",
+                "title":"Corrected historical finding",
+                "disposition":"rejected",
+                "evidence":"replacementuniqueterm is the corrected evidence"
+            }]),
+        )
+        .await;
+    let (status, value) = f
+        .apply(&project, &second, &Uuid::new_v4().to_string())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let row = sqlx::query("SELECT current_revision,kind,scope_json,provenance_json FROM knowledge_records WHERE source_project_id=?")
+        .bind(&project).fetch_one(&f.state.pool).await.unwrap();
+    assert_eq!(row.get::<i64, _>("current_revision"), 2);
+    assert_eq!(row.get::<String, _>("kind"), "fact");
+    assert_eq!(
+        serde_json::from_str::<Value>(&row.get::<String, _>("scope_json")).unwrap(),
+        json!({"task_ids":[],"components":[],"environments":[],"versions":[]})
+    );
+    let provenance =
+        serde_json::from_str::<Value>(&row.get::<String, _>("provenance_json")).unwrap();
+    assert_eq!(
+        provenance
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "source_submission_id",
+            "source_task_id",
+            "source_uri",
+            "summary"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    let current: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_search WHERE source_project_id=? AND knowledge_search MATCH 'replacementuniqueterm'",
+    )
+    .bind(&project).fetch_one(&f.state.pool).await.unwrap();
+    let obsolete: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_search WHERE source_project_id=? AND knowledge_search MATCH 'obsoleteuniqueterm'",
+    )
+    .bind(&project).fetch_one(&f.state.pool).await.unwrap();
+    assert_eq!((current, obsolete), (1, 0));
+    let knowledge_id: String =
+        sqlx::query_scalar("SELECT knowledge_id FROM import_records WHERE project_id=?")
+            .bind(&project)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    let (correction_status, correction) = f
+        .call(
+            "PATCH",
+            &format!("/api/v1/projects/{project}/knowledge/{knowledge_id}"),
+            json!({
+                "expected_revision":2,
+                "title":"Corrected historical finding",
+                "body":"Operator-attributed correction after import",
+                "status":"validated",
+                "scope":serde_json::from_str::<Value>(&row.get::<String,_>("scope_json")).unwrap(),
+                "tags":["imported","historical","corrected"],
+                "applicability":"Historical evidence only; this record is not task, policy, hook, or execution authority.",
+                "provenance":provenance,
+                "superseded_by_id":null
+            }),
+        )
+        .await;
+    assert_eq!(correction_status, StatusCode::OK, "{correction}");
+    assert_eq!(correction["data"]["revision"], 3);
+}
+
+#[tokio::test]
 async fn reimport_never_reopens_closed_item_and_preserves_newer_service_edit() {
     let f = Fixture::new().await;
     let project = f.project("reimport").await;

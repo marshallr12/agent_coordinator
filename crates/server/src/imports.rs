@@ -799,42 +799,52 @@ async fn save_imported_knowledge(
     item: &ImportItem,
     source: &ImportSource,
 ) -> Result<(), AppError> {
-    let (kind, status) = match item.disposition.as_str() {
+    let (new_kind, status) = match item.disposition.as_str() {
         "rejected" => ("rejected_approach", "validated"),
         "superseded" => ("checkpoint", "superseded"),
         _ => ("fact", "validated"),
     };
-    let scope = json!({
-        "source_context":source.context,
-        "source_path":item.source_path,
-        "section_identity":item.section_identity,
-        "branch":source.branch,
-        "environment":source.environment
-    });
+    // Knowledge kind is immutable after creation. Later source classifications
+    // update status/evidence without rewriting the record's semantic type.
+    let kind = if revision > 1 {
+        sqlx::query_scalar("SELECT kind FROM knowledge_records WHERE source_project_id=? AND id=?")
+            .bind(project)
+            .bind(knowledge_id)
+            .fetch_one(&mut *mutation.tx)
+            .await?
+    } else {
+        new_kind.to_owned()
+    };
+    let scope = json!({"task_ids":[],"components":[],"environments":[],"versions":[]});
     let tags = json!(["imported", "historical"]);
     let applicability =
         "Historical evidence only; this record is not task, policy, hook, or execution authority.";
     let provenance = json!({
-        "imported":true,
-        "git_revision":source.git_revision,
-        "observed_at":source.observed_at,
-        "stable_identity":item.stable_identity
+        "summary":format!(
+            "Imported historical evidence from {}:{} / {} at Git revision {} (observed {}; branch {}; environment {}). Stable identity {}.",
+            source.context,item.source_path,item.section_identity,source.git_revision,
+            source.observed_at,source.branch,source.environment,item.stable_identity
+        ),
+        "source_uri":null,
+        "source_task_id":null,
+        "source_submission_id":null
     });
     if revision == 1 {
         sqlx::query("INSERT INTO knowledge_records(id,source_project_id,collection,current_revision,kind,status,title,body,scope_json,tags_json,applicability,provenance_json,created_by,created_at,updated_at) VALUES(?,?,'project',1,?,?,?,?,?,?,?,?,?,?,?)")
-            .bind(knowledge_id).bind(project).bind(kind).bind(status).bind(&item.title).bind(&item.evidence)
+            .bind(knowledge_id).bind(project).bind(&kind).bind(status).bind(&item.title).bind(&item.evidence)
             .bind(scope.to_string()).bind(tags.to_string()).bind(applicability).bind(provenance.to_string())
             .bind(&mutation.actor.id).bind(mutation.now).bind(mutation.now).execute(&mut *mutation.tx).await?;
-    } else {
+    }
+    sqlx::query("INSERT INTO knowledge_revisions(knowledge_id,revision,kind,status,title,body,scope_json,tags_json,applicability,provenance_json,superseded_by_id,actor_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?)")
+        .bind(knowledge_id).bind(revision).bind(&kind).bind(status).bind(&item.title).bind(&item.evidence)
+        .bind(scope.to_string()).bind(tags.to_string()).bind(applicability).bind(provenance.to_string()).bind(&mutation.actor.id).bind(mutation.now)
+        .execute(&mut *mutation.tx).await?;
+    if revision > 1 {
         sqlx::query("UPDATE knowledge_records SET current_revision=?,kind=?,status=?,title=?,body=?,scope_json=?,tags_json=?,applicability=?,provenance_json=?,superseded_by_id=NULL,updated_at=? WHERE source_project_id=? AND id=? AND current_revision=?")
-            .bind(revision).bind(kind).bind(status).bind(&item.title).bind(&item.evidence).bind(scope.to_string()).bind(tags.to_string())
+            .bind(revision).bind(&kind).bind(status).bind(&item.title).bind(&item.evidence).bind(scope.to_string()).bind(tags.to_string())
             .bind(applicability).bind(provenance.to_string()).bind(mutation.now).bind(project).bind(knowledge_id).bind(revision-1)
             .execute(&mut *mutation.tx).await?;
     }
-    sqlx::query("INSERT INTO knowledge_revisions(knowledge_id,revision,kind,status,title,body,scope_json,tags_json,applicability,provenance_json,superseded_by_id,actor_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?)")
-        .bind(knowledge_id).bind(revision).bind(kind).bind(status).bind(&item.title).bind(&item.evidence)
-        .bind(scope.to_string()).bind(tags.to_string()).bind(applicability).bind(provenance.to_string()).bind(&mutation.actor.id).bind(mutation.now)
-        .execute(&mut *mutation.tx).await?;
     Ok(())
 }
 
