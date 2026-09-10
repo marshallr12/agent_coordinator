@@ -1,0 +1,35 @@
+{
+  "schema": "agent-coordinator-item7-linux-completion-v1",
+  "workstation": "mxmini",
+  "review": {
+    "project_id": "624361be-a631-48b5-8c8c-971a4c919422",
+    "activity_id": "7903e0d6-dc25-43ae-ac71-533a849f1041",
+    "decision": "approved",
+    "status": "completed"
+  },
+  "recovery": {
+    "project_id": "7d9f4b62-0e09-4c7c-a5ca-07c6bddbf76a",
+    "task_id": "723c3e9c-164a-48ad-9e84-c302c081fffc",
+    "recovery_attempt_id": "5976c898-b16f-443c-9568-276b9786e073",
+    "generation": 2,
+    "windows_session_remained_closed": true,
+    "work_status_after_release": "ready"
+  },
+  "race": {
+    "project_id": "7d9f4b62-0e09-4c7c-a5ca-07c6bddbf76a",
+    "task_id": "e0ef5166-0ea3-4bac-aa46-80f37264810c",
+    "linux_attempt_id": "06619f1d-ed75-4d66-8bd9-0e82b2ce38f0",
+    "generation": 2,
+    "windows_outcome": "claim_conflict",
+    "checkpoint_id": "500a38ab-f871-43d8-873a-9e39f8fd4624",
+    "work_status_after_release": "ready"
+  },
+  "identity_counts": {
+    "sessions": 6,
+    "credentials": 3,
+    "active_credentials": 2,
+    "unchanged_during_linux_completion": true
+  },
+  "public_health": "ok",
+  "secrets_included": false
+}
