@@ -43,6 +43,10 @@
 - [Onboarding contract](docs/onboarding-contract.md)
 - [Repository and hook review](docs/repository-review.md)
 
+# Maintain the documentation
+
+- [Building and maintaining this book](docs/documentation.md)
+
 # Live repository records (included from root)
 
 - [Repository instructions](AGENTS.md)

@@ -1,40 +1,53 @@
 # Implementation handoff — 2026-09-10
 
-Backlog item 6.1 is implemented and reviewed on top of accepted Linux item 6.
+Backlog items 6.1 (MCP) and 6.2 (mdBook) are implemented and reviewed.
+Only item 7 remains: the operator will commence native Windows workstation
+acceptance against the Linux service/workstation. Do not substitute native
+Windows CI or package checks for that physical workstation exercise.
+
+## MCP completion
+
 The authenticated stateless `/mcp` endpoint exposes 56 closed, typed tools through
-the same guarded REST handlers. Modern discovery and legacy initialization use
-the pinned official Rust MCP SDK. Each call rechecks current credentials and
-coordination authority; connections, ping, and receipt replay never renew a lease.
+the same guarded REST handlers. Connections, discovery, ping, and receipt replay
+never renew ownership. The native `mcp-client` launcher securely shares one saved
+harness session with a trusted foreground MCP client and its native CLI children.
+Git, local producers, and binary transfer remain native operations. The launcher
+requires an absolute executable path and does not supervise background clients.
+No service-side execution or OAuth discovery is introduced.
 
-The native `mcp-client` launcher validates and shares the exact protected CLI
-session with one trusted foreground client through its child environment. It
-requires an absolute executable path and preserves native CLI continuity for Git,
-local jobs, and binary transfers. It does not supervise background client trees.
-No service-side execution or OAuth discovery is introduced. See the
-[MCP connection guide](docs/mcp-guide.md) for configuration and limits.
+Candidate `cd9a633` passed all 182 local workspace tests, formatting,
+warnings-denied Clippy, build, and both smoke exercises. Linux workspace/smoke,
+native Windows client/CLI/local-runner tests, and the dependency audit passed in
+[CI run 34468585302](https://github.com/marshallr12/agent_coordinator/actions/runs/34468585302).
+The integrated `677253a` also passed
+[CI run 34468821269](https://github.com/marshallr12/agent_coordinator/actions/runs/34468821269).
+Official SDK tests exercise modern and legacy protocols over real TCP; wire tests
+cover revocation, races, policies, shared REST receipts, and generation/lease guards.
+See the [MCP guide](docs/mcp-guide.md) for configuration and compatibility limits.
 
-Implementation candidate `cd9a633` passed all 182 workspace tests, formatting,
-warnings-denied Clippy, workspace build, and both service/CLI smoke exercises.
-Official SDK tests use real TCP for modern and legacy connections. Wire tests
-cover competing claims, revocation after outer admission, stale generations,
-exact shared REST receipts, policy/review restrictions, and clock pause. The live
-launcher smoke records a checkpoint on the CLI-owned attempt and proves that
-reconnect does not renew it. Native Windows CI and dependency audit are pending.
+## Documentation completion
 
-Main-agent review covered transport credential stripping, disabled SDK payload
-logging, Host/Origin guards, fixed route/schema dispatch, current authorization,
-atomic receipt reuse, protected environment injection, and the assertions behind
-protocol compatibility. Raw REST results are capped before their duplicated MCP
-structured/text representation; this is not a 1 MiB encoded-message guarantee.
+Canonical guides, contracts, the plan, and README content now live in `book/src`.
+The original docs/README/PLAN entry paths remain short compatibility links.
+Root AGENTS.md, HANDOFF.md, BACKLOG.md, and DURABLE-RECORD.md remain authoritative;
+their book chapters include them at build time. Edit those root files directly.
 
-Continue with item 6.2, mdBook documentation consolidation. Complete it without
-operator intervention unless essential information is missing. Retain the
-[Linux acceptance evidence](docs/linux-capacity-evidence.md), including exact
-packaged identities and the measured limits. Existing schema-12 snapshots remain
-compatible through private migration to schema 16; instruction version is 7.
-The operator will commence actual Windows workstation acceptance as item 7;
-native Windows CI and packages do not replace that exercise. No production
-deployment or actual off-server transfer is claimed.
+The pinned mdBook 0.5.4 build covers all 35 chapters. Main review verified retained
+acceptance evidence, proposal/current-status distinctions, source references,
+rendered internal links and fragments, search, live includes, and desktop/390-pixel
+phone layout without page overflow or JavaScript errors. Release packages retain
+bounded Markdown sources and book configuration, without generated HTML.
 
-Keep a separate Cargo target directory in every concurrent worktree. See
-[implementation status](docs/implementation-status.md) and [backlog](BACKLOG.md).
+Package checks passed for layout, checksums, permissions, offline links, explicit
+member/size limits, and building the book from an extracted archive. The final
+local structural package used stripped copies of the current local debug binaries;
+it is documentation validation, not new release-binary or capacity acceptance.
+Documentation CI is configured; its first run is pending.
+
+Use `mdbook build` or `python3 scripts/check_docs.py` from a source checkout; output
+is `target/book/index.html`. See [book maintenance](docs/documentation.md).
+The retained [Linux acceptance evidence](docs/linux-capacity-evidence.md) remains
+unchanged and identifies its exact accepted package and server. Schema version is
+16 and instruction version is 7. No production deployment or actual off-server
+transfer is claimed. Host/domain/backup-destination choices remain installation
+inputs. Keep separate Cargo targets for concurrent worktrees.

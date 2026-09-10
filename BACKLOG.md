@@ -56,12 +56,18 @@ REST session, policy, ownership, and receipt checks. The native client launcher
 securely shares its saved harness identity with a trusted foreground MCP client.
 All 182 workspace tests, formatting, Clippy, build, and both smoke exercises pass.
 Main-agent review is complete; see [MCP guidance](docs/mcp-guide.md) for compatibility
-and local-operation limits. Native Windows CI for this change is pending.
+and local-operation limits. Linux/native Windows CI and the dependency audit passed
+in [CI run 34468585302](https://github.com/marshallr12/agent_coordinator/actions/runs/34468585302).
+
+Completed item 6.2: all guides and README content are consolidated into a 35-chapter
+mdBook with pinned builds, source coverage and link checks, concise compatibility
+entry points, and live includes of root agent/handoff/backlog/lesson records.
+Main-agent review, the rendered link/fragment checks, browser navigation/search
+and phone layout, package bounds/checksums/offline links, and a book build from
+an extracted package passed. Documentation CI is configured; its first run is
+pending. See [book maintenance](docs/documentation.md).
 
 Next work, preserving the original backlog numbering:
-- **6.2.** Consolidate project documentation and README content into an mdBook project
-   with a coherent navigation structure, maintained source links, build checks,
-   and concise repository entry points that direct readers to the book.
 - **7.** Final operator-initiated native Windows workstation acceptance, including
    coordination with the Linux service/workstation. The operator will commence
    this on a Windows machine after items 6 through 6.2; do not substitute CI for this test or

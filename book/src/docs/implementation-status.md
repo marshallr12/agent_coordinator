@@ -236,8 +236,7 @@ locked dependency audit in
 [CI run 34431398271](https://github.com/marshallr12/agent_coordinator/actions/runs/34431398271).
 The earlier CI link above applies to the prior milestone.
 
-The remaining release sequence is mdBook (6.2) and operator-initiated Windows
-acceptance (7).
+The remaining release item is operator-initiated Windows workstation acceptance (7).
 
 
 ### Operator-workflow review evidence
@@ -337,7 +336,7 @@ Browser checks covered clock pause, multiline recovery evidence, reconciliation,
 and a 375-pixel layout without console errors or overflow.
 
 Main-agent review is complete. The [retained acceptance evidence](linux-capacity-evidence.md)
-includes the complete sanitized capacity report and its identity. The next documentation item is mdBook 6.2. The operator will commence the actual Windows
+includes the complete sanitized capacity report and its identity. The mdBook consolidation is complete. The operator will commence the actual Windows
 workstation exercise as item 7; CI does not replace it. Production deployment,
 off-server transport, and full operator-led recovery remain installation checks.
 
@@ -352,8 +351,25 @@ and clock/lease semantics. The live launcher exercise shares one saved harness
 with native CLI commands and MCP, writes a checkpoint, rejects a second launcher,
 and verifies that connection traffic does not renew ownership.
 
-Main-agent review is complete. Native Windows CI and dependency audit for this
-candidate are pending. Compatibility is established for the exercised protocol
+Main-agent review is complete. Linux workspace checks and smoke, native Windows
+client/CLI/local-runner tests, and the dependency audit passed in
+[CI run 34468585302](https://github.com/marshallr12/agent_coordinator/actions/runs/34468585302). Compatibility is established for the exercised protocol
 and SDK paths, not every vendor GUI. OAuth-only clients lacking protected custom
 headers cannot connect directly. Git, job launch/reporting, and binary transfer
 remain native operations; the service does not execute workstation commands.
+
+### Documentation review evidence
+
+The 35-chapter mdBook consolidates the canonical guides and preserved design
+records. Root live records are included at build time; prior document paths retain
+compatibility links. Pinned mdBook 0.5.4 checks verify exact chapter coverage,
+source/include rules, generated targets, fragments, and assets. Main-agent browser
+review covered navigation, search, live handoff content, desktop layout, and a
+390-pixel phone view without page overflow or JavaScript errors.
+
+Package checks verify checksums, offline Markdown links, bounded member counts
+and expanded size, and a complete book build from an extracted archive. The final
+local structural fixture used stripped copies of the current debug binaries;
+it does not replace the retained Linux release/capacity evidence. Documentation
+CI is configured; its first run is pending. Main review is complete; only the
+operator-initiated Windows workstation acceptance remains on the backlog.

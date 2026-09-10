@@ -18,8 +18,10 @@ Build the documentation with the pinned tool version. Generated output stays in
 ```sh
 cargo install mdbook --version 0.5.4 --locked
 mdbook build
+python3 scripts/check_docs.py
 ```
 
+See [book maintenance](book/src/docs/documentation.md) for source and verification rules.
 Open `target/book/index.html` locally. The original `docs/*.md`, `PLAN.md`, and
 `deploy/README.md` paths remain as compatibility links; edit canonical chapters
 under `book/src`.

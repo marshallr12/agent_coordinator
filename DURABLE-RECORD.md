@@ -119,3 +119,9 @@
   before an SDK sees request headers and suppress SDK payload logging. A native
   client bridge must carry the exact saved harness proof; matching names alone
   cannot share ownership.
+
+- **A book needs one maintained source per record.** Include live root handoff,
+  backlog, and instruction files at build time. Check rendered links and anchors
+  as well as chapter coverage; a successful Markdown build can still leave a
+  broken destination. Retain compatibility links and exact acceptance evidence
+  when moving documents.
