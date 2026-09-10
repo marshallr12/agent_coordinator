@@ -139,7 +139,7 @@ jobs:
           assert outer == [hashlib.sha256(package.read_bytes()).hexdigest(), package.name]
           with zipfile.ZipFile(package) as archive:
               names = archive.namelist()
-              assert len(names) == len(set(names)) and len(names) <= 64
+              assert len(names) == len(set(names)) and len(names) <= 256
               assert all(not PurePosixPath(name).is_absolute() and ".." not in PurePosixPath(name).parts for name in names)
               manifest_name = next(name for name in names if name.endswith("/SHA256SUMS"))
               root = manifest_name.removesuffix("SHA256SUMS")
@@ -148,7 +148,14 @@ jobs:
                   for digest, name in (line.split() for line in archive.read(manifest_name).decode("ascii").splitlines())
               }
               actual = {name.removeprefix(root) for name in names if name != manifest_name}
-              assert set(expected) == actual and "agent-coordinator.exe" in actual
+              required = {
+                  "agent-coordinator.exe", "book.toml", "book/src/SUMMARY.md",
+                  "book/src/README.md", "book/src/PLAN.md", "book/src/AGENTS.md",
+                  "book/src/BACKLOG.md", "book/src/DURABLE-RECORD.md", "book/src/HANDOFF.md",
+              }
+              assert set(expected) == actual and required <= actual
+              book_sources = {name for name in actual if name.startswith("book/src/")}
+              assert book_sources and all(PurePosixPath(name).suffix.lower() == ".md" for name in book_sources)
               for name, digest in expected.items():
                   assert hashlib.sha256(archive.read(root + name)).hexdigest() == digest
           '@ | python -

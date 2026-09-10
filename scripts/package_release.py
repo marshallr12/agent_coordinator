@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = ("linux-x86_64", "windows-x86_64")
 VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}\Z")
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))")
+MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 256
 
 
 def sha256(path: Path) -> str:
@@ -55,6 +57,7 @@ def checked_file(path: Path, label: str) -> Path:
 def source_entries(platform: str, server: Path | None, cli: Path) -> dict[str, tuple[Path, int]]:
     docs = ROOT / "docs"
     deploy = ROOT / "deploy"
+    book_source = ROOT / "book/src"
     entries: dict[str, tuple[Path, int]] = {}
     for source in sorted(ROOT.glob("*.md")):
         entries[source.name] = (checked_file(source, "top-level guide"), 0o644)
@@ -64,6 +67,20 @@ def source_entries(platform: str, server: Path | None, cli: Path) -> dict[str, t
         if source.is_file() and not source.is_symlink():
             mode = 0o600 if source.name == "service.env.example" else 0o644
             entries[f"deploy/{source.name}"] = (checked_file(source, "deployment file"), mode)
+    entries["book.toml"] = (checked_file(ROOT / "book.toml", "book configuration"), 0o644)
+    if not book_source.is_dir() or book_source.is_symlink():
+        raise SystemExit("book/src must be a real directory")
+    for source in sorted(book_source.rglob("*")):
+        relative = source.relative_to(book_source)
+        if source.is_symlink():
+            raise SystemExit(f"book source must not contain links: {relative}")
+        if source.is_dir():
+            if source.name.startswith(".") or source.name in {"target", "node_modules"}:
+                raise SystemExit(f"book source contains a forbidden directory: {relative}")
+            continue
+        if source.suffix.lower() != ".md" or any(part.startswith(".") for part in relative.parts):
+            raise SystemExit(f"book source must contain only Markdown: {relative}")
+        entries[f"book/src/{relative.as_posix()}"] = (checked_file(source, "book source"), 0o644)
     if platform == "linux-x86_64":
         if server is None:
             raise SystemExit("--server is required for the Linux package")
@@ -87,8 +104,11 @@ def validate_local_markdown_links(entries: dict[str, tuple[Path, int]]) -> None:
             parsed = urllib.parse.urlsplit(raw)
             if parsed.scheme or parsed.netloc or not parsed.path or parsed.path.startswith("/"):
                 continue
+            path = urllib.parse.unquote(parsed.path)
+            if path.endswith("/"):
+                path += "README.md"
             target = posixpath.normpath(
-                posixpath.join(str(PurePosixPath(name).parent), urllib.parse.unquote(parsed.path))
+                posixpath.join(str(PurePosixPath(name).parent), path)
             )
             if target == ".." or target.startswith("../") or target not in entries:
                 raise SystemExit(f"local Markdown link is missing from the package: {name}")
@@ -107,6 +127,19 @@ def directories(entries: dict[str, tuple[Path, int]]) -> list[str]:
             values.add(str(parent))
             parent = parent.parent
     return sorted(values, key=lambda value: (value.count("/"), value))
+
+
+def validate_archive_bounds(
+    platform: str, entries: dict[str, tuple[Path, int]], manifest: bytes
+) -> None:
+    expanded = len(manifest) + sum(source.stat().st_size for source, _ in entries.values())
+    if expanded > MAX_ARCHIVE_BYTES:
+        raise SystemExit("expanded release content exceeds the 256 MiB package bound")
+    members = len(entries) + 1
+    if platform == "linux-x86_64":
+        members += 1 + len(directories(entries))
+    if members > MAX_ARCHIVE_MEMBERS:
+        raise SystemExit("release archive exceeds the 256-member inspection bound")
 
 
 def tar_info(name: str, size: int, mode: int, epoch: int, kind: bytes = tarfile.REGTYPE) -> tarfile.TarInfo:
@@ -191,6 +224,7 @@ def main() -> None:
     entries = source_entries(args.platform, args.server, args.cli)
     validate_local_markdown_links(entries)
     manifest = checksum_manifest(entries)
+    validate_archive_bounds(args.platform, entries, manifest)
     root_name = f"agent-coordinator-{args.version}-{args.platform}"
     suffix = ".tar.gz" if args.platform == "linux-x86_64" else ".zip"
     archive = args.output_dir / f"{root_name}{suffix}"

@@ -1,0 +1,36 @@
+name: Documentation checks
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: documentation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.98.1
+  MDBOOK_VERSION: 0.5.4
+
+jobs:
+  book:
+    name: Pinned mdBook build and local-link validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Install the pinned mdBook release
+        run: cargo install mdbook --version "=$MDBOOK_VERSION" --locked
+      - name: Build and validate maintained documentation
+        run: python3 scripts/check_docs.py --mdbook "$(command -v mdbook)"

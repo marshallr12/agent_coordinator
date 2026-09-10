@@ -24,7 +24,7 @@ import uuid
 
 
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
-MAX_FILES = 64
+MAX_FILES = 256
 REQUIRED = {
     "AGENTS.md",
     "BACKLOG.md",
@@ -33,6 +33,14 @@ REQUIRED = {
     "PLAN.md",
     "README.md",
     "SHA256SUMS",
+    "book.toml",
+    "book/src/AGENTS.md",
+    "book/src/BACKLOG.md",
+    "book/src/DURABLE-RECORD.md",
+    "book/src/HANDOFF.md",
+    "book/src/PLAN.md",
+    "book/src/README.md",
+    "book/src/SUMMARY.md",
     "bin/agent-coordinator",
     "bin/agent-coordinator-server",
     "deploy/Caddyfile.example",
@@ -107,6 +115,12 @@ def extract_checked(package: Path, destination: Path) -> Path:
     assert all(
         (name.endswith(".md") and "/" not in name)
         or name == "SHA256SUMS"
+        or name == "book.toml"
+        or (
+            name.startswith("book/src/")
+            and PurePosixPath(name).suffix.lower() == ".md"
+            and all(not part.startswith(".") for part in PurePosixPath(name).parts)
+        )
         or (name.startswith("docs/") and name.endswith(".md") and name.count("/") == 1)
         or (name.startswith("deploy/") and name.count("/") == 1)
         or name in {"bin/agent-coordinator", "bin/agent-coordinator-server"}
@@ -154,6 +168,8 @@ def verify_markdown_links(root: Path) -> None:
             if parsed.scheme or parsed.netloc or not parsed.path or parsed.path.startswith("/"):
                 continue
             target = (source.parent / urllib.parse.unquote(parsed.path)).resolve()
+            if parsed.path.endswith("/"):
+                target /= "README.md"
             try:
                 target.relative_to(package_root)
             except ValueError as error:
