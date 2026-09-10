@@ -73,15 +73,24 @@ recorded as a contributor to any revision of the subject task; contributor histo
 survives releases, recoveries, changes requested, and later submissions. Integration
 claims require all current approvals and, if automatic integration is disabled, a
 current human authorization. Integration claims atomically acquire the exclusive
-hold for the project's canonical repository URL plus target branch. The hold is
+hold for the project's canonical repository key plus target branch. The hold is
 global across projects and survives attempt/session/credential expiry.
+
+Expired or revoked activity ownership respects the project's recovery mode.
+In manual mode, agents cannot take over. A human inspects saved work and physical
+resources. Before publication intent exists, the human may reopen an expired,
+revoked, or policy-stale candidate; this fences its linked attempts and requires a
+new submission and new reviews. Live current owners must release first, and
+unresolved jobs/resources always block reopening. After publication intent, use
+publication reconciliation. Completed workflows cannot be reopened.
 
 Activity attempts renew through the existing
 `POST /api/v1/projects/{project}/attempts/{attempt}/renew` endpoint and use existing
 checkout, reservation, and job endpoints. They release through
 `POST /api/v1/projects/{project}/workflow-activities/{activity}/release` with
 `{generation, summary, blocked:false}`; a release after publication intent is
-refused until a result and reconciliation are recorded. Workflow state changes
+refused. Inspect and reconcile that publication instead; reconciliation creates
+a replacement activity and retains the historical result. Workflow state changes
 always require the activity ID as an additional candidate/type guard.
 
 `POST /api/v1/projects/{project}/workflow-activities/{activity}/review` accepts:

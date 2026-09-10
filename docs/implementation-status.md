@@ -1,6 +1,7 @@
 # Implementation status
 
-The foundation and job/worktree evidence milestone are implemented. The complete release remains
+The foundation, job/worktree evidence, and reviewed completion milestones are implemented.
+The complete release remains
 defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
@@ -49,18 +50,41 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   task ownership are separate. The service never launches workstation processes.
 - Dashboard resource administration and task job/hold evidence, including explicit
   human reconciliation with recorded termination/isolation evidence.
+- Immutable code/general submissions pinned to task and policy revisions, with
+  acceptance evidence, handoffs, and full Git commit/tree identities for code.
+  Active jobs and unresolved physical holds prevent submission.
+- Independent agent, human, or both review. Contributor principals and sessions
+  cannot perform an independent agent review. Findings and decisions stay bound to
+  the exact submission; requested changes require a new candidate and fresh reviews.
+- An explicit human-managed required-check roster and canonical repository key.
+  Integration holds serialize every project sharing that repository/target pair.
+  Projects can permit automatic integration or require a human authorization.
+- Native integration prepares a candidate-containing result in an isolated worktree,
+  validates registered producers against its exact commit/tree and check roster,
+  and requires fresh service authority before a compare-and-swap Git publication.
+  Once push intent is saved, retry only observes; it cannot launch another push.
+- Code tasks become done and release dependents only after required approval,
+  known publication, exact successful check receipts, fresh remote observation,
+  and resource quiescence. General tasks finish after their required reviews.
+- Dashboard submission evidence, review decisions, human review/authorization,
+  publication reconciliation, and project review/check settings. Publication
+  reconciliation preserves the original evidence and requires a new integration
+  activity and fresh validation; it never fabricates a successful check.
 - Linux systemd and Caddy examples, locked dependencies, and Linux/Windows CI.
 
 ## Deliberate limits of this milestone
 
-There is no task completion endpoint yet. Submission snapshots, independent
-review, serialized target-branch integration, and integrated-result validation
-must be implemented together before code tasks can become done and unblock their
-dependents. The stored review/integration settings reserve the intended policy;
-they do not imply those workflows already execute.
+Completion is enforced through workflow activities; there is no unrestricted
+status edit. Configure a canonical repository key and at least one required check
+before submitting code. Check identity, version, and environment are registered
+metadata, and all workstation evidence remains a client attestation. A malicious
+credential can lie about source or a producer; this service is not remote attestation.
+Independent review rejects every contributing principal as well as its sessions;
+it cannot establish whether separately enrolled credentials use the same model.
 
-Jobs currently require a clean committed source snapshot; dirty snapshots and
-exact-source verification receipts belong to the submission milestone. Logs stay
+Jobs and submissions require clean committed source snapshots. The CLI does not
+upload source: publish candidate checkpoints to an appropriate Git remote and
+fetch them on the receiving workstation before review or integration. Logs stay
 on the workstation and are bounded; service artifact uploads and source-checkpoint
 publishing remain later work. A guardian lost after launch may leave an unknown
 result even if the process has exited. Reconnection never invents an exit result;
@@ -77,7 +101,7 @@ account recovery, additional human administration, and token replacement for an
 existing agent principal remain work. A lost issuance response can recover the
 credential identity, but never its secret: revoke it and enroll a fresh name.
 
-Instruction version 2 includes the implemented worktree/resource/job sequence.
+Instruction version 3 includes the worktree/resource/job and reviewed completion sequence.
 Existing sessions must fetch and acknowledge the new instructions before new claims.
 
 JSON requests are limited to 256 KiB. Task details return the latest 50 attempts,
@@ -88,8 +112,8 @@ and storage-quota enforcement are not implemented.
 
 Lease timing uses the server clock. Hosts should maintain synchronized time; a
 restore or server clock rollback does not yet invalidate all existing authority.
-The foundation is suitable for development exercises while release recovery and
-completion safeguards are being built.
+The service is suitable for development exercises; the remaining release recovery
+and operational safeguards must be completed before production use.
 
 ## Evidence and next work
 
@@ -102,11 +126,20 @@ preparation, duplicate-free reconnect, job evidence, and explicit capacity relea
 Job tests exercise global capacity, reporter authority after task/session loss,
 parent revocation, bounded renewal, terminal observations, and human reconciliation.
 
-The dashboard has been checked in a real browser at desktop and phone widths.
-Native Windows client, CLI, and local runner tests, plus Linux workspace checks
-and the service/CLI smoke test, passed for implementation commit `342f393` in
-[CI run 34419243344](https://github.com/marshallr12/agent_coordinator/actions/runs/34419243344).
-The same run passed the locked dependency audit.
+Workflow regressions also exercise independent review, concurrent conflicting
+review decisions, exact-source checks, a cross-project integration claim race,
+revoked ownership, manual recovery at the deadline, and complete publication
+reconciliation followed by a replacement integration and fresh checks.
+
+The dashboard was checked with disposable data at desktop and phone widths:
+human review and completion, code review and authorization, check-roster editing,
+stale-candidate recovery, preserved history, responsive layout, and sign-out.
+
+Linux workspace checks, the real service/CLI smoke exercise, native Windows
+client/CLI/local-runner tests, and the locked dependency audit passed for workflow
+implementation commit `df62e3a` in
+[CI run 34423673990](https://github.com/marshallr12/agent_coordinator/actions/runs/34423673990).
+Subsequent recovery regressions and final UI changes are also checked locally.
 No production deployment, 100,000-task benchmark, off-server
 backup, or restore rehearsal has occurred.
 

@@ -3,17 +3,19 @@
 A vendor-agnostic service for AI agents on different workstations to coordinate
 tasks, report progress, and share handoffs and lessons across multiple projects.
 
-**Status: foundation and local-job coordination implemented; full release in development.**
+**Status: coordinated review and completion implemented; full release in development.**
 The Rust service, embedded web dashboard, and native CLI now support authentication,
 multiple projects, task admission, atomic ownership, renewable leases, checkpoints,
 inspected recovery, worktree preparation, local job reporting, and shared resource
-reservations. [Current implementation and limits](docs/implementation-status.md)
+reservations, immutable submissions, independent review, serialized integration,
+and completion after exact integrated checks. [Current implementation and limits](docs/implementation-status.md)
 distinguish working behavior from the complete release design.
 
 ## Try it locally
 
 Install Rust 1.94 or newer with a native C build toolchain, then build the locked
-workspace. SQLite is bundled; the dashboard has no separate build or CDN dependency.
+workspace. Native integration uses Git 2.39 or newer (tested locally with 2.39.5).
+SQLite is bundled; the dashboard has no separate build or CDN dependency.
 
 ```sh
 cargo build --workspace --locked
@@ -52,6 +54,8 @@ command. Linux and native Windows client checks are defined in GitHub Actions.
   local launch/reconnect rules, scoped reporters, and physical resource holds.
 - [Coordination contract](docs/coordination-contract.md): task ownership,
   renewable leases, retries, worktrees, external jobs, and recovery.
+- [Completion contract](docs/completion-contract.md): implemented submissions,
+  review activities, required checks, publication guards, and recovery.
 - [Workflow specification](docs/workflow-spec.md): proposed states, selection,
   submissions, review/integration activities, and exact completion rules.
 - [API and CLI contract](docs/api-contract.md): proposed authentication/session

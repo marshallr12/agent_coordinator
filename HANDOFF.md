@@ -1,59 +1,49 @@
 # Implementation handoff — 2026-09-09
 
-The job/worktree evidence milestone is implemented on top of the executable
-foundation. The complete design remains in PLAN.md; product decisions are settled.
-See docs/implementation-status.md for the working subset and BACKLOG.md for next
-work: immutable submissions, exact-source checks, independent review, serialized
-integration, and integrated-result validation. Task completion remains unavailable
-until that entire workflow is enforced.
+Backlog item 2 is implemented: immutable submissions, independent review, serialized
+integration, exact-result checks, publication recovery, and done/dependency release.
+Continue with item 3 in BACKLOG.md: shared lessons, binding rules/provenance,
+decision records, bounded context, artifacts, and Markdown import/export.
+The complete design remains in PLAN.md; product decisions are settled.
 
-Agents now prepare isolated worktrees with durable preparation intents and reserve
-named shared capacity before launching a local producer. Jobs have durable producer
-identities, protected journals, bounded local logs, scoped reporters, and optional
-bounded renewal tied to an exact live harness process. Reconnect only observes;
-uncertain launch intent never authorizes a replacement producer. The service never
-runs workstation commands. Supported producer programs keep their work in the
-foreground; detached or external work requires separate inspection before release.
+Code owners submit clean committed candidates with acceptance evidence and a
+handoff. Submission ends implementation ownership and creates separate review and
+integration activities. Projects require independent agent, human, both, or no
+review; independent agent review is the default. Contributor principals and
+sessions cannot independently review their own work. Changes requested cancel the
+candidate's pending activities; a new submission receives fresh reviews.
 
-Physical resource holds survive lease expiry, session closure, credential
-revocation, and observer loss. Task requeue, recovery resolution, and checkout
-changes cannot bypass unresolved evidence. A recovery owner may release an old
-reservation after its jobs have terminal results. Humans may reconcile uncertain
-holds with termination/isolation evidence; this preserves the producer's original
-reported state. The dashboard shows both records separately.
+A human configures the canonical repository key and an explicit required-check
+roster. Projects sharing a repository/target share one integration hold. Agents
+prepare the exact integrated source in a separate worktree, run registered checks
+with matching identity/version/environment, release job resources, then request
+fresh publication authority. Native Git requires a clean candidate-containing
+result, an exact expected target, and a conservative remaining deadline. Once
+push intent is durable, retry only observes; it never launches a second push.
 
-Instruction version 2 returns the worktree/resource/job sequence and examples.
-Existing sessions must reconnect and read the new instructions before claiming.
-Use docs/CLI.md for Linux and native Windows commands. The CLI's producer environment
-is cleared except for a narrow platform allowlist; configure needed toolchain
-variables and never supply coordinator agent credentials to the producer.
-Native Windows Git calls normalize canonical drive/UNC paths at the command
-boundary, preserving canonical paths for checkout identity checks. Unsupported
-device namespaces are refused; UNC conversion is not a network-filesystem
-durability guarantee.
+Only known publication, exact successful check receipts, fresh remote observation,
+and quiescent resources permit finalization and dependency release. Human recovery
+records old-publisher termination/isolation and remote evidence; it preserves the
+original result and transfers the hold to a fresh integration activity. That
+activity prepares against the actual target and reruns checks. Recovery cannot
+manufacture a passing result or quietly discard already published work.
 
-Linux validation: the integrated workspace tests, warnings-denied Clippy, formatting,
-and JavaScript syntax checks pass. The extended service/CLI smoke exercise passes
-worktree reconciliation with spaces, job launch, two reconnects without relaunch,
-live-work release rejection, terminal reporting, and explicit capacity release,
-alongside the original two-harness/two-project coordination checks. The locked
-advisory audit reports no known vulnerabilities.
+Instruction version 3 returns the implemented completion sequence and CLI help.
+Use docs/CLI.md and docs/completion-contract.md for exact commands and bodies.
+Independent reviewers need separately enrolled principals. The CLI now performs
+instruction acknowledgment before review/integration claims as well as ordinary
+claims. Git 2.39.5 was used locally; native integration requires Git 2.39 or newer.
 
-Browser validation used a disposable database and account: resource creation,
-stale/unknown job evidence, human resource reconciliation without fabricated
-success, released capacity counts, sign-out, and desktop/phone layouts were checked.
-Temporary servers were stopped. No source projects or their histories were changed.
+Validation results are recorded in docs/implementation-status.md. The complete
+Linux service/CLI exercise passes real Git preparation/publication, both reviews,
+human authorization, refusal before required checks, exact producer evidence,
+historical publish retry, and dependency release only after finalization. Browser
+checks use disposable data; no source projects or histories were modified.
 
-Native Windows client, CLI, and local runner tests passed in
-[CI run 34419243344](https://github.com/marshallr12/agent_coordinator/actions/runs/34419243344),
-which also passed Linux workspace checks, the built service/CLI smoke test,
-and the locked dependency audit.
-The checked implementation is commit `342f393`. Windows validation found and fixed
-append-only log truncation and Git's handling of canonical Windows path prefixes.
-Full two-workstation release acceptance remains separate work.
-
-The service has not been deployed publicly. Host, DNS name, and backup destination
-remain installation choices. The 20-project/50-session/100,000-task target, backups,
-restore fencing, retention, and two physical-workstation release exercise remain
-unverified release work. Source inputs must currently be clean committed snapshots;
-logs remain local and service artifact upload is deferred.
+No public deployment occurred. Host, DNS name, and backup destination remain
+installation choices. Backups/restore fencing, clock rollback, retention/load,
+and two physical-workstation release acceptance remain backlog work. Source
+snapshots must be clean and committed. Candidate source travels through Git
+remotes; submission does not upload it. Logs remain local and service artifact
+uploads remain deferred. Unknown remote trees require fetching the target for
+inspection; a deleted target requires operator repair before continuing.

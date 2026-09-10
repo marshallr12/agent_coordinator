@@ -48,3 +48,19 @@
 - **Native identity paths and tool arguments have different requirements.** Keep
   canonical Windows paths for identity comparisons, but convert verbatim drive/UNC
   prefixes at the Git boundary. Git may reject the native extended path syntax.
+- **Publication intent is a boundary for retries.** Save intent before spawning
+  Git, require fresh service authority and a conservative local deadline, and use
+  an exact expected target for compare-and-swap. Once launch intent exists, retry
+  observes; seeing an unchanged remote does not prove an old publisher stopped.
+- **Checks verify an immutable source and definition.** Resolve registered producer
+  receipts against the exact result commit/tree, check identity/version/environment,
+  successful exit, and unchanged inputs. A generic successful job or reconciled
+  unknown result cannot substitute for required evidence.
+- **Recovery must preserve policy and target ownership together.** Releasing an old
+  integration hold and creating its replacement in separate transactions permits
+  competing integration or policy changes to strand an already published result.
+  Transfer the hold atomically, retain historical publication evidence, and run
+  fresh checks under the replacement activity.
+- **Every claim path needs onboarding.** Review and integration claims must follow
+  the same durable instruction acknowledgment flow as implementation claims. A
+  reviewer may have connected without ever claiming an implementation task.
