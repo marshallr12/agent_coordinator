@@ -1,0 +1,17 @@
+{
+  "schema": "agent-coordinator-item7-barrier-result-v1",
+  "workstation": "MINIAIR",
+  "submitted_at": "2026-09-10T16:26:20.887093969Z",
+  "project_id": "7d9f4b62-0e09-4c7c-a5ca-07c6bddbf76a",
+  "task_id": "e0ef5166-0ea3-4bac-aa46-80f37264810c",
+  "expected_task_revision": 1,
+  "outcome": "existing_owner_conflict",
+  "existing_attempt_id": "06619f1d-ed75-4d66-8bd9-0e82b2ce38f0",
+  "generation": 2,
+  "principal_id": "70be59a7-424d-45ef-915d-29b89735b1c8",
+  "session_id": "63d3f12c-99e9-49f0-80c0-66f9c17304d6",
+  "task_status": "in_progress",
+  "error_code": "claim_conflict",
+  "request_id": "f2595e41-27af-4563-9356-6a7c39b9796f",
+  "secrets_included": false
+}
