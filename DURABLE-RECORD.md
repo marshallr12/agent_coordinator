@@ -112,3 +112,10 @@
   transaction commits, and resample for later arrivals. Every request still
   verifies current credentials; mutations recheck time and ownership under their
   own writer lock. A failed clock commit cannot be published to waiting callers.
+
+- **Protocol connection is not coordination authority.** Route each MCP tool
+  through the same guarded operation as REST, and preserve its original receipt.
+  Discovery, reconnect, and ping must not renew task ownership. Strip credentials
+  before an SDK sees request headers and suppress SDK payload logging. A native
+  client bridge must carry the exact saved harness proof; matching names alone
+  cannot share ownership.

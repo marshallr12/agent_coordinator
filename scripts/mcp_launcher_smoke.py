@@ -54,6 +54,10 @@ def probe(binary, attempt, generation):
 
     rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
                        "clientInfo": {"name": "launcher-smoke", "version": "1"}})
+    initialized = urllib.request.Request(os.environ["AGENT_COORDINATOR_MCP_URL"],
+        data=json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode(), headers=headers)
+    with opener.open(initialized, timeout=5) as response:
+        assert response.status == 202 and response.read() == b""
     state = rpc("tools/call", {"name": "coordinator_session_get", "arguments": {"session": session}})
     assert state.get("isError") is not True
     assert state["structuredContent"]["data"]["session_id"] == session

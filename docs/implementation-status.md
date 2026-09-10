@@ -1,12 +1,17 @@
 # Implementation status
 
 The foundation, job/worktree evidence, reviewed completion, shared-record,
-operator-workflow, backup/restore, and Linux operational controls are implemented.
+operator-workflow, backup/restore, Linux operational controls, and MCP are implemented.
 Linux release acceptance passed; see the retained evidence below.
 The complete release remains
 defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
+
+- Authenticated stateless Streamable HTTP at `/mcp` with 56 typed tools routed
+  through the existing REST authorization and mutation checks. A protected native
+  launcher shares the exact saved harness identity with a trusted foreground MCP
+  client and its native CLI children. See the [MCP guide](mcp-guide.md).
 
 - Axum HTTP service with embedded vanilla JavaScript/CSS dashboard; SQLite WAL,
   foreign keys, migrations, transactional event records and mutation receipts.
@@ -332,7 +337,6 @@ Browser checks covered clock pause, multiline recovery evidence, reconciliation,
 and a 375-pixel layout without console errors or overflow.
 
 Main-agent review is complete. The [retained acceptance evidence](linux-capacity-evidence.md)
-includes the complete sanitized capacity report and its identity. Continue with
-MCP item 6.1, then mdBook item 6.2. The operator will commence the actual Windows
+includes the complete sanitized capacity report and its identity. The next documentation item is mdBook 6.2. The operator will commence the actual Windows
 workstation exercise as item 7; CI does not replace it. Production deployment,
 off-server transport, and full operator-led recovery remain installation checks.

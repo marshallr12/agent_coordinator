@@ -811,6 +811,17 @@ async fn mcp_replays_the_exact_rest_receipt_once_and_rejects_changed_input() {
         .tool(&fixture.a, "coordinator_task_create", arguments)
         .await;
     assert_eq!(first.tool_payload()["data"], replay.tool_payload()["data"]);
+    let rest_replay = rest(
+        fixture.app.clone(),
+        &fixture.a,
+        "POST",
+        &format!("/api/v1/projects/{project}/tasks"),
+        "mcp-exact-receipt-key",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(rest_replay.status, StatusCode::OK);
+    assert_eq!(rest_replay.body["data"], first.tool_payload()["data"]);
     let mut changed = body;
     changed["title"] = json!("Changed input");
     fixture
@@ -846,7 +857,7 @@ async fn revocation_while_mcp_body_is_waiting_is_observed_before_the_inner_write
             .unwrap();
     fixture.clock.0.store(initial_clock + 1, Ordering::SeqCst);
 
-    let (reader, mut writer) = tokio::io::duplex(16 * 1024);
+    let (reader, mut writer) = tokio::io::duplex(1);
     let body = modern_rpc(
         "tools/call",
         json!({
@@ -880,20 +891,15 @@ async fn revocation_while_mcp_body_is_waiting_is_observed_before_the_inner_write
         .await
     });
 
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let sampled: i64 =
-                sqlx::query_scalar("SELECT last_safe_time_ms FROM clock_state WHERE singleton=1")
-                    .fetch_one(&fixture.state.pool)
-                    .await
-                    .unwrap();
-            if sampled == initial_clock + 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    // With a one-byte pipe, completing two bytes proves the SDK polled the
+    // body after the outer guard finished authenticating. Merely observing its
+    // clock sample does not prove its credential lookup has completed.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        writer.write_all(&body.as_bytes()[..2]),
+    )
     .await
+    .unwrap()
     .unwrap();
     let mut tx = fixture
         .state
@@ -901,7 +907,7 @@ async fn revocation_while_mcp_body_is_waiting_is_observed_before_the_inner_write
         .begin_with("BEGIN IMMEDIATE")
         .await
         .unwrap();
-    writer.write_all(body.as_bytes()).await.unwrap();
+    writer.write_all(&body.as_bytes()[2..]).await.unwrap();
     writer.shutdown().await.unwrap();
     sqlx::query("UPDATE credentials SET revoked_at=? WHERE id=?")
         .bind(initial_clock + 1)

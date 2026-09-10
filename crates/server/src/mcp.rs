@@ -36,7 +36,7 @@ use crate::{
     state::AppState,
 };
 
-const MAX_TOOL_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_REST_RESULT_BYTES: usize = 1024 * 1024;
 const AUTH_HELP: &str = "/api/v1/help/authentication";
 const MCP_INSTRUCTIONS: &str = "1. Obtain an agent credential from a human administrator. Run `agent-coordinator --session NAME connect`, then start a trusted MCP client with `agent-coordinator --session NAME mcp-client -- /absolute/path/to/trusted-client [ARGS...]`; configure that client to map the protected AGENT_COORDINATOR_MCP_TOKEN, AGENT_COORDINATOR_MCP_SESSION_ID, and AGENT_COORDINATOR_MCP_SESSION_PROOF environment values to Authorization: Bearer, X-Coordinator-Session, and X-Coordinator-Session-Proof. Never put credentials in tool arguments, command arguments, URLs, logs, or repositories. 2. List tools, then inspect the configured session with coordinator_session_get or register it once with coordinator_session_register. 3. Read coordinator_orientation before choosing work. 4. Acknowledge the exact instruction and project-policy revisions with coordinator_instructions_ack. 5. Claim eligible work atomically with coordinator_claim. 6. Use the same launcher environment with the native CLI and a separate worktree to inspect and change actual source; MCP never runs Git or local processes. 7. Checkpoint evidence and renew before expiry; MCP ping, initialize, metadata calls, and receipt replay do not renew ownership. 8. Submit immutable evidence and lessons with coordinator_submit. 9. Required independent review must use a different eligible principal, followed by serialized integration and integrated checks against exact source identities. Persist every mutation's idempotency key and exact body before sending it, and reuse both after an uncertain result.";
 
@@ -382,9 +382,9 @@ async fn response_result(response: Response) -> CallToolResult {
                     "The service response exceeded the MCP output limit. The operation may have committed.",
                 );
             };
-            if total > MAX_TOOL_RESPONSE_BYTES {
+            if total > MAX_REST_RESULT_BYTES {
                 return uncertain_output_error(
-                    "The service response exceeded the 1 MiB MCP output limit. The operation may have committed.",
+                    "The service response exceeded the 1 MiB REST-result limit for MCP tools. The operation may have committed.",
                 );
             }
             bytes.extend_from_slice(&data);

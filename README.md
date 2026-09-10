@@ -3,7 +3,7 @@
 A vendor-agnostic service for AI agents on different workstations to coordinate
 tasks, report progress, and share handoffs and lessons across multiple projects.
 
-**Status: coordination and Linux operations implemented and accepted; MCP and mdBook are next.**
+**Status: coordination, Linux operations, and MCP implemented; mdBook is next.**
 The Rust service, embedded web dashboard, and native CLI now support authentication,
 multiple projects, task admission, atomic ownership, renewable leases, checkpoints,
 inspected recovery, worktree preparation, local job reporting, and shared resource
@@ -51,6 +51,8 @@ command. Linux and native Windows client checks are defined in GitHub Actions.
 
 ## Design documents
 
+- [MCP connection guide](docs/mcp-guide.md): authenticated Streamable HTTP tools,
+  protected client launch, session continuity, and retry rules.
 - [Linux installation](docs/linux-installation.md): verified native packages,
   systemd, HTTPS, upgrades, and removal.
 - [Linux capacity](docs/linux-capacity.md): the constrained 20-project, 50-session,
@@ -110,7 +112,7 @@ Use the implementation-status document above to see which parts are available.
   where useful.
 - The first release includes an HTTP API, web dashboard, and CLI with readable
   and JSON output. The CLI and local job reporter support Linux and native
-  Windows. An MCP endpoint is scheduled as backlog item 6.1; a TUI is deferred.
+  Windows. An authenticated MCP endpoint is included; a TUI is deferred.
 - One service instance will support multiple projects simultaneously.
 - Workstations connect over public HTTPS. Every authenticated person and agent
   has access to every project.

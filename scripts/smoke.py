@@ -100,7 +100,11 @@ def run():
                     command += ["--input", "-"]
                 result = subprocess.run(command, input=None if body is None else json.dumps(body),
                                         text=True, capture_output=True, env=env, timeout=15)
-                assert credentials[index]["token"] not in result.stdout, "Token leaked into CLI output."
+                assert credentials[index]["token"] not in result.stdout + result.stderr, "Token leaked into CLI output."
+                for saved_path in (Path(env["AGENT_COORDINATOR_HOME"]) / "sessions").glob("*.json"):
+                    saved = json.loads(saved_path.read_text())
+                    proof = saved.get("session", {}).get("proof")
+                    assert not proof or proof not in result.stdout + result.stderr, "Session proof leaked into CLI output."
                 payload = json.loads(result.stdout)
                 failure = payload.get("error", {})
                 assert result.returncode == expected, f"CLI {args[0]} returned {result.returncode}, expected {expected}: {failure.get('code')} {failure.get('message')}"

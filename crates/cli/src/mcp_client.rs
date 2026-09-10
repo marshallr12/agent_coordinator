@@ -1,5 +1,5 @@
 //! Launch-time environment injection, not an MCP proxy or remote runner.
-use std::{ffi::OsString, process::Stdio};
+use std::{ffi::OsString, path::Path, process::Stdio};
 
 use clap::Args;
 use serde_json::{Value, json};
@@ -12,7 +12,7 @@ use crate::{
 
 #[derive(Args)]
 pub struct LaunchArgs {
-    /// Trusted local MCP client executable followed by its arguments. Configure
+    /// Absolute path to a trusted foreground MCP client, followed by its arguments. Configure
     /// its endpoint to this binding's exact /mcp URL and headers from the injected environment.
     #[arg(required = true, trailing_var_arg = true, num_args = 1..)]
     command: Vec<OsString>,
@@ -92,6 +92,11 @@ fn child_command(
     let executable = command.first().ok_or_else(|| {
         Failure::invalid("Specify a trusted local MCP client executable after --.")
     })?;
+    if !Path::new(executable).is_absolute() {
+        return Err(Failure::invalid(
+            "Use an absolute path to a trusted foreground MCP client executable; PATH lookup is disabled.",
+        ));
+    }
     let mut child = Command::new(executable);
     child
         .args(&command[1..])
@@ -133,7 +138,7 @@ mod tests {
         );
         let command = child_command(
             &[
-                OsString::from("trusted-client"),
+                std::env::current_exe().unwrap().into_os_string(),
                 OsString::from("arg with spaces"),
             ],
             &saved.service_origin,
@@ -170,5 +175,33 @@ mod tests {
         drop(native);
         drop(launcher);
         assert!(state::lock(&launcher_path).is_ok());
+    }
+
+    #[test]
+    fn launcher_rejects_path_search_before_exposing_credentials() {
+        let saved = state::SessionState::new(
+            "https://example.test".into(),
+            "project".into(),
+            "local".into(),
+            "digest".into(),
+            SessionAuth {
+                id: "session".into(),
+                proof: "fixture-proof".into(),
+            },
+            "workstation".into(),
+            "harness".into(),
+            vec![],
+        );
+        for executable in ["trusted-client", "./trusted-client", ""] {
+            assert!(
+                child_command(
+                    &[executable.into()],
+                    &saved.service_origin,
+                    "fixture-token",
+                    &saved
+                )
+                .is_err()
+            );
+        }
     }
 }
