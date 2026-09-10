@@ -438,7 +438,13 @@ fn definition(op: &Operation) -> Tool {
             field.into(),
             json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_.-]+$"}),
         );
-        required.push(field);
+        if field == "session" {
+            properties.get_mut(field).unwrap()["description"] = json!(
+                "Optional; defaults to the configured X-Coordinator-Session. If supplied, it must match that header."
+            );
+        } else {
+            required.push(field);
+        }
     }
     if let Some(body) = &op.body {
         properties.insert("body".into(), body.clone());
@@ -484,7 +490,12 @@ pub(super) fn prepare(
         .ok_or_else(|| AppError::bad_request("Unknown coordination tool. Refresh tools/list."))?;
     let mut path = op.path.to_owned();
     for field in path_fields(op.path) {
-        let value = args.remove(field).and_then(|v| v.as_str().map(str::to_owned))
+        let supplied = if field == "session" && !args.contains_key(field) {
+            Some(json!(header_value(headers, SESSION_HEADER)?))
+        } else {
+            args.remove(field)
+        };
+        let value = supplied.and_then(|v| v.as_str().map(str::to_owned))
             .filter(|v| valid_id(v) && v != "." && v != "..")
             .ok_or_else(|| AppError::bad_request("Provide every path identity using letters, digits, underscore, dash, or dot; path traversal is forbidden."))?;
         if field == "session" && header_value(headers, SESSION_HEADER)? != value {
@@ -649,5 +660,21 @@ mod tests {
             "x&limit=999#fragment?"
         );
         assert!(request.extensions().is_empty());
+    }
+
+    #[test]
+    fn session_defaults_to_configured_identity_and_cannot_be_switched() {
+        let mut headers = HeaderMap::new();
+        headers.insert(SESSION_HEADER, "saved-session".parse().unwrap());
+        let request = prepare("coordinator_session_get", Map::new(), &headers).unwrap();
+        assert_eq!(request.uri().path(), "/api/v1/sessions/saved-session");
+        assert!(
+            prepare(
+                "coordinator_session_get",
+                json!({"session":"other"}).as_object().unwrap().clone(),
+                &headers
+            )
+            .is_err()
+        );
     }
 }
