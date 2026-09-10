@@ -195,7 +195,50 @@ class Browser:
         self.csrf = self.call("/api/v1/auth/login", {"username": "package-admin", "password": password})["csrf_token"]
 
 
-def wait_for(path: Path | None, url: str | None = None, context: ssl.SSLContext | None = None) -> None:
+def readiness_error(error: BaseException) -> str:
+    if isinstance(error, urllib.error.HTTPError):
+        return f"http_{error.code}"
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return "tls_certificate"
+        if isinstance(reason, ssl.SSLError):
+            return "tls_error"
+        if isinstance(reason, ConnectionRefusedError):
+            return "connection_refused"
+        if isinstance(reason, TimeoutError):
+            return "timeout"
+        return "url_error"
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    return "unknown"
+
+
+def unit_state(unit: str) -> str:
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", unit],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    state = result.stdout.strip()
+    if state in {"active", "activating", "deactivating", "failed", "inactive"}:
+        return state
+    return "unknown"
+
+
+def wait_for(
+    path: Path | None,
+    url: str | None = None,
+    context: ssl.SSLContext | None = None,
+    *,
+    stage: str = "service",
+    units: dict[str, str] | None = None,
+) -> None:
+    error_class = "not_observed"
     for _ in range(200):
         if path is not None and path.is_file():
             return
@@ -203,10 +246,13 @@ def wait_for(path: Path | None, url: str | None = None, context: ssl.SSLContext 
             try:
                 with urllib.request.urlopen(url, context=context, timeout=1):
                     return
-            except (urllib.error.URLError, TimeoutError):
-                pass
+            except (urllib.error.URLError, TimeoutError) as error:
+                error_class = readiness_error(error)
         time.sleep(0.1)
-    raise AssertionError("The disposable service did not become ready.")
+    states = ""
+    if units:
+        states = "; units=" + ",".join(f"{role}:{unit_state(unit)}" for role, unit in units.items())
+    raise AssertionError(f"{stage} readiness failed (error={error_class}{states}).")
 
 
 def ubuntu_2404() -> bool:
@@ -265,7 +311,7 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
         environment.chmod(0o600)
         caddyfile = config / "Caddyfile"
         caddyfile.write_text(
-            "{\n    admin off\n    skip_install_trust\n}\n"
+            "{\n    admin off\n    auto_https disable_redirects\n    skip_install_trust\n}\n"
             f"{origin} {{\n    tls internal\n    request_body {{\n        max_size 256KiB\n    }}\n"
             f"    reverse_proxy 127.0.0.1:{server_port}\n}}\n"
         )
@@ -314,12 +360,27 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
         ])
         run(["systemctl", "daemon-reload"])
         run(["systemctl", "start", service_unit])
-        wait_for(None, f"http://127.0.0.1:{server_port}/healthz")
+        wait_for(
+            None,
+            f"http://127.0.0.1:{server_port}/healthz",
+            stage="backend",
+            units={"backend": service_unit},
+        )
         run(["systemctl", "start", caddy_unit])
         ca = data / "caddy-data/caddy/pki/authorities/local/root.crt"
-        wait_for(ca)
+        wait_for(
+            ca,
+            stage="proxy_ca",
+            units={"backend": service_unit, "proxy": caddy_unit},
+        )
         tls = ssl.create_default_context(cafile=str(ca))
-        wait_for(None, origin + "/healthz", tls)
+        wait_for(
+            None,
+            origin + "/healthz",
+            tls,
+            stage="https",
+            units={"backend": service_unit, "proxy": caddy_unit},
+        )
         browser = Browser(origin, ca)
         browser.login(password)
         project = browser.call("/api/v1/projects", {
@@ -349,7 +410,13 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
         assert credential["token"] not in connected.stdout and credential["token"] not in connected.stderr
         assert json.loads(connected.stdout)["data"]["session"]["id"]
         run(["systemctl", "restart", service_unit])
-        wait_for(None, origin + "/healthz", tls)
+        wait_for(
+            None,
+            origin + "/healthz",
+            tls,
+            stage="https_after_restart",
+            units={"backend": service_unit, "proxy": caddy_unit},
+        )
         listed = run([
             "runuser", "-u", name, "--", str(install / "agent-coordinator"), "--repo-config", str(binding),
             "--session", "package-acceptance", "--json", "tasks", "list",
