@@ -28,6 +28,7 @@ const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const FORMAT_VERSION: u32 = 1;
 const HOURLY_BUCKETS: usize = 24;
 const DAILY_BUCKETS: usize = 30;
+const MAX_REPOSITORY_SNAPSHOTS: usize = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,18 +138,16 @@ pub async fn create_backup(state: &AppState, repository: &Path) -> anyhow::Resul
         }
     };
     let published = repository.join("snapshots").join(&directory_name);
-    ensure!(
-        fs::symlink_metadata(&published).is_err(),
-        "Generated snapshot destination already exists."
-    );
-    if let Err(error) = rename_noreplace(&staging, &published)
-        .context("Could not atomically publish the snapshot without overwrite.")
-    {
+    let publication = check_deadline(started, "Backup").and_then(|()| {
+        rename_noreplace(&staging, &published)
+            .context("Could not atomically publish the snapshot without overwrite.")
+    });
+    if let Err(error) = publication {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
     sync_directory(&repository.join("snapshots"))?;
-    let retention = apply_retention(repository);
+    let retention = apply_retention(repository, started);
     let (retention_value, retention_warning) = match retention {
         Ok(retention) => (
             json!({
@@ -344,7 +343,7 @@ pub async fn verify_backup(snapshot: &Path) -> anyhow::Result<Value> {
         started,
     )
     .await?;
-    Ok(verification_value(snapshot, &verified, true)?)
+    verification_value(snapshot, &verified, true)
 }
 
 /// Restores a verified snapshot into a newly published data directory.
@@ -393,7 +392,7 @@ pub async fn restore_backup(
     };
     let publication = (|| -> anyhow::Result<()> {
         check_deadline(started, "Restore")?;
-        sync_tree_directories(&staging)?;
+        sync_tree_directories(&staging, started)?;
         check_deadline(started, "Restore")?;
         rename_noreplace(&staging, destination)
             .context("Could not atomically publish restored data without overwrite.")?;
@@ -463,7 +462,7 @@ async fn assemble_restore(
             "Restored artifact copy failed digest verification."
         );
     }
-    sync_tree_directories(&artifact_root)?;
+    sync_tree_directories(&artifact_root, started)?;
     check_deadline(started, "Restore")?;
 
     let config = crate::state::Config {
@@ -587,6 +586,7 @@ fn verify_snapshot_files(
         snapshot,
         MAX_BACKUP_DATABASE_BYTES
             .saturating_add(artifact_bytes.saturating_add(MAX_BACKUP_MANIFEST_BYTES)),
+        started,
     )?;
     Ok(VerifiedSnapshot {
         manifest,
@@ -777,10 +777,18 @@ async fn schema_version(pool: &SqlitePool) -> anyhow::Result<i64> {
         .context("Could not read snapshot schema version.")
 }
 
-fn apply_retention(repository: &Path) -> anyhow::Result<RetentionResult> {
+fn apply_retention(
+    repository: &Path,
+    started: std::time::Instant,
+) -> anyhow::Result<RetentionResult> {
     let snapshots = repository.join("snapshots");
     let mut candidates = Vec::new();
     for entry in fs::read_dir(&snapshots).context("Could not list backup snapshots.")? {
+        check_deadline(started, "Backup retention")?;
+        ensure!(
+            candidates.len() < MAX_REPOSITORY_SNAPSHOTS,
+            "Backup repository contains more than 10,000 snapshots."
+        );
         let entry = entry?;
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path)?;
@@ -791,7 +799,7 @@ fn apply_retention(repository: &Path) -> anyhow::Result<RetentionResult> {
         let manifest = read_manifest_metadata(&path)?;
         candidates.push((manifest.created_at_ms, path, manifest));
     }
-    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
     let mut keep = HashSet::new();
     let mut hours = HashSet::new();
     let mut days = HashSet::new();
@@ -808,11 +816,14 @@ fn apply_retention(repository: &Path) -> anyhow::Result<RetentionResult> {
     }
     let mut result = RetentionResult::default();
     for (_, path, _) in candidates {
+        check_deadline(started, "Backup retention")?;
         if keep.contains(&path) {
             result.kept_snapshots += 1;
-            result.retained_bytes = result
-                .retained_bytes
-                .saturating_add(directory_size(&path, u64::MAX - result.retained_bytes)?);
+            result.retained_bytes = result.retained_bytes.saturating_add(directory_size(
+                &path,
+                u64::MAX - result.retained_bytes,
+                started,
+            )?);
         } else {
             fs::remove_dir_all(&path).context("Could not prune an expired backup snapshot.")?;
             result.pruned_snapshots += 1;
@@ -842,8 +853,11 @@ fn read_manifest_metadata(snapshot: &Path) -> anyhow::Result<Manifest> {
 fn cleanup_staging(repository: &Path) -> anyhow::Result<()> {
     let staging = repository.join(".staging");
     let mut removed = 0;
-    for entry in fs::read_dir(&staging).context("Could not inspect backup staging.")? {
-        if removed >= 100 {
+    for (inspected, entry) in fs::read_dir(&staging)
+        .context("Could not inspect backup staging.")?
+        .enumerate()
+    {
+        if removed >= 100 || inspected >= 1_000 {
             break;
         }
         let entry = entry?;
@@ -1047,13 +1061,15 @@ fn hash_file(
     Ok((size, hex::encode(hasher.finalize())))
 }
 
-fn directory_size(path: &Path, limit: u64) -> anyhow::Result<u64> {
+fn directory_size(path: &Path, limit: u64, started: std::time::Instant) -> anyhow::Result<u64> {
     validate_directory(path, "snapshot directory")?;
     let mut total = 0_u64;
     let mut entries = 0_usize;
     let mut pending = vec![path.to_owned()];
     while let Some(directory) = pending.pop() {
+        check_deadline(started, "Snapshot inspection")?;
         for entry in fs::read_dir(directory)? {
+            check_deadline(started, "Snapshot inspection")?;
             entries += 1;
             ensure!(
                 entries <= MAX_BACKUP_ARTIFACTS + 16,
@@ -1223,13 +1239,15 @@ fn sync_directory(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sync_tree_directories(root: &Path) -> anyhow::Result<()> {
+fn sync_tree_directories(root: &Path, started: std::time::Instant) -> anyhow::Result<()> {
     let mut directories = vec![root.to_owned()];
     let mut cursor = 0;
     while cursor < directories.len() {
+        check_deadline(started, "Restore")?;
         let directory = directories[cursor].clone();
         cursor += 1;
         for entry in fs::read_dir(&directory)? {
+            check_deadline(started, "Restore")?;
             let entry = entry?;
             let metadata = fs::symlink_metadata(entry.path())?;
             ensure!(
