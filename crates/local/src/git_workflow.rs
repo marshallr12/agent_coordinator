@@ -81,6 +81,7 @@ pub struct IntegrationIntentSummary {
     pub remote: CanonicalRemoteIdentity,
     pub target_branch: String,
     pub expected_target: String,
+    pub expected_target_tree: String,
     pub candidate_base: String,
     pub candidate: String,
     pub candidate_tree: String,
@@ -103,6 +104,7 @@ pub struct RemoteTargetObservation {
 pub struct PublicationAuthorizationContext {
     pub target_branch: String,
     pub expected_target: String,
+    pub expected_target_tree: String,
     pub candidate: String,
     pub result: String,
     pub result_tree: String,
@@ -163,6 +165,7 @@ struct IntegrationIntent {
     remote: CanonicalRemoteIdentity,
     target_branch: String,
     expected_target: String,
+    expected_target_tree: String,
     candidate_base: String,
     candidate: String,
     candidate_tree: String,
@@ -301,6 +304,7 @@ pub fn prepare_integration(request: PrepareIntegration<'_>) -> Result<Integratio
         snapshot.revision == expected_target,
         "integration checkout is not at the expected target commit"
     );
+    let expected_target_tree = snapshot.tree.clone();
     let candidate_base = resolve_exact_commit(&snapshot.checkout, request.candidate_base)?;
     let candidate = resolve_exact_commit(&snapshot.checkout, request.candidate)?;
     ensure_ancestor(
@@ -319,6 +323,10 @@ pub fn prepare_integration(request: PrepareIntegration<'_>) -> Result<Integratio
         observation.revision.as_deref() == Some(expected_target.as_str()),
         "configured remote target does not equal the expected target commit"
     );
+    ensure!(
+        observation.tree.as_deref() == Some(expected_target_tree.as_str()),
+        "configured remote target tree does not equal the expected target tree"
+    );
     let candidate_tree = git_text(
         &snapshot.checkout,
         ["rev-parse", &format!("{candidate}^{{tree}}")],
@@ -334,6 +342,7 @@ pub fn prepare_integration(request: PrepareIntegration<'_>) -> Result<Integratio
         remote: snapshot.remote,
         target_branch: request.target_branch.to_owned(),
         expected_target,
+        expected_target_tree,
         candidate_base,
         candidate,
         candidate_tree,
@@ -543,6 +552,7 @@ where
     let context = PublicationAuthorizationContext {
         target_branch: intent.target_branch.clone(),
         expected_target: intent.expected_target.clone(),
+        expected_target_tree: intent.expected_target_tree.clone(),
         candidate: intent.candidate.clone(),
         result: result.clone(),
         result_tree: intent
@@ -915,6 +925,7 @@ fn summary(state_file: &Path, intent: &IntegrationIntent) -> IntegrationIntentSu
         remote: intent.remote.clone(),
         target_branch: intent.target_branch.clone(),
         expected_target: intent.expected_target.clone(),
+        expected_target_tree: intent.expected_target_tree.clone(),
         candidate_base: intent.candidate_base.clone(),
         candidate: intent.candidate.clone(),
         candidate_tree: intent.candidate_tree.clone(),
@@ -1657,18 +1668,29 @@ mod tests {
     async fn successful_publish_uses_cas_and_retry_only_observes() {
         let repository = repository();
         let candidate = candidate(&repository, "candidate", "candidate\n");
+        let expected_target_tree = git_text(
+            &repository.integration,
+            ["rev-parse", &format!("{}^{{tree}}", repository.base)],
+        )
+        .unwrap();
         let state = repository
             ._directory
             .path()
             .join("publish state")
             .join("intent.json");
         let prepared = prepare_integration(request(&repository, &state, &candidate)).unwrap();
+        assert_eq!(prepared.expected_target_tree, expected_target_tree);
         let result = prepared.result.unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let first_calls = calls.clone();
-        let outcome = publish_prepared(&state, repository.remote.to_str().unwrap(), move |_| {
+        let callback_tree = expected_target_tree.clone();
+        let outcome = publish_prepared(&state, repository.remote.to_str().unwrap(), move |ctx| {
             first_calls.fetch_add(1, Ordering::SeqCst);
-            async { FreshPublicationAuthority::valid_for(Duration::from_secs(30)) }
+            let callback_tree = callback_tree.clone();
+            async move {
+                ensure!(ctx.expected_target_tree == callback_tree);
+                FreshPublicationAuthority::valid_for(Duration::from_secs(30))
+            }
         })
         .await
         .unwrap();
