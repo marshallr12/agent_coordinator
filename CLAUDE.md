@@ -26,6 +26,8 @@ explicit session-specific user request instead when it changes this scope.
    Then use the configured CLI or MCP connection and protected agent credentials.
    Create a unique, stable harness session; resume the same session after
    interruption and never share it with an independent harness.
+   Run CLI commands for the same session sequentially, including reads: they
+   may share locked local state. Do not start parallel connect/list/check calls.
 2. Read the complete live orientation, project rules, relevant decisions, and
    task queue. The service is authoritative for work status and ownership;
    local backlog and handoff files are reference material only.
@@ -45,6 +47,9 @@ explicit session-specific user request instead when it changes this scope.
    the same saved request and key. Stop ownership-dependent work if authority is
    lost. If access is unavailable or no eligible task exists, report the specific
    blocker; do not invent tasks or fall back to uncoordinated work.
+   Release ends ownership. Before resuming released work, read its fresh revision
+   and successfully claim it again, then prepare a worktree or make edits. State
+   that reclaim requirement explicitly in any release handoff or next-step report.
 
 Keep tokens, session proofs, and passwords outside the repository and never
 print them. Ask for human input only when a required decision, access, or approval
@@ -75,6 +80,10 @@ $coordSession = 'claude-' + [guid]::NewGuid().ToString('N')
 ./scripts/coordinator.ps1 -Session $coordSession tasks list --limit 50 --json
 ./scripts/coordinator.ps1 -Session $coordSession checks list --json
 ```
+
+Run those commands one at a time and check each result before continuing.
+Keep temporary session-name markers and request files outside the Git checkout
+or under its ignored `target` directory so they do not dirty the source checkout.
 
 Read the complete orientation, current rules, decisions, and relevant task
 evidence. If `instructions_complete` is false, fetch the missing instructions
