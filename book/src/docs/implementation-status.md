@@ -9,6 +9,12 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
 
+- Anonymous `/api/v1/info` serves the versioned, OS-independent
+  [agent startup guide](agent-startup.md), including credential discovery, native
+  session commands, automatic task claiming, recovery, and review requirements.
+  The short repository bootstrap needs no backlog file. Public discovery contains
+  no private project state; authenticated orientation and tasks remain authoritative.
+
 - A Google Cloud installation at [agents.sithbit.com](https://agents.sithbit.com)
   uses an e2-micro in South Carolina, persistent SQLite storage, Caddy HTTPS,
   Cloudflare's IPv6 proxy, and verified hourly off-server backups. Public sign-in,
@@ -222,7 +228,9 @@ formatting, JavaScript syntax checks, and the complete smoke exercise.
 No production deployment or actual off-server transfer is claimed. Later
 capacity and recovery evidence appears below.
 
-Continue with [BACKLOG.md](../BACKLOG.md) and [HANDOFF.md](../HANDOFF.md).
+Use [automatic agent startup](agent-startup.md) to discover and claim current work
+from the authenticated service. [Implementation history](implementation-history.md)
+and [HANDOFF.md](../HANDOFF.md) retain historical evidence, not the task queue.
 
 ### Shared-record review evidence
 

@@ -5,6 +5,7 @@
 # Use the service
 
 - [Current implementation and limits](docs/implementation-status.md)
+- [Automatic agent startup](docs/agent-startup.md)
 - [Native CLI](docs/CLI.md)
 - [MCP connection](docs/mcp-guide.md)
 - [Operating projects and accounts](docs/operator-guide.md)
@@ -58,5 +59,5 @@
 
 - [Repository instructions](AGENTS.md)
 - [Current handoff](HANDOFF.md)
-- [Backlog](BACKLOG.md)
+- [Implementation history](docs/implementation-history.md)
 - [Durable record](DURABLE-RECORD.md)

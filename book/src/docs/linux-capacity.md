@@ -94,7 +94,7 @@ still run, although a backup may finish after short metadata traffic ends. A
 `full_acceptance: false`. Neither substitutes for the constrained release run.
 Local CPU contention from unrelated builds can affect the result and should be
 avoided for final measurements. The native Windows workstation exercise remains
-[backlog item 7](../BACKLOG.md), separate from all of these checks.
+[backlog item 7](implementation-history.md), separate from all of these checks.
 
 ## Search index change
 

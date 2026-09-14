@@ -20,7 +20,7 @@ PINNED_MDBOOK_VERSION = "0.5.4"
 MAX_SOURCE_FILES = 256
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 SUMMARY_LINK = re.compile(r"\[[^\]]+\]\((?:<([^>]+)>|([^\s)]+))")
-AUTHORITATIVE_WRAPPERS = ("AGENTS.md", "BACKLOG.md", "DURABLE-RECORD.md", "HANDOFF.md")
+AUTHORITATIVE_WRAPPERS = ("AGENTS.md", "DURABLE-RECORD.md", "HANDOFF.md")
 FORBIDDEN_NAMES = {
     ".env",
     "credentials",

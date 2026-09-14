@@ -61,7 +61,7 @@ The small end-to-end recovery smoke separately passed in 7.3 seconds. An actual
 prior schema-12 executable's database upgraded to schema 16 with work retained;
 its snapshot verified unchanged and restored with old access rejected. No
 production installation or actual off-server transfer is claimed. The real
-Windows workstation exercise remains [backlog item 7](../BACKLOG.md).
+Windows workstation exercise remains [backlog item 7](implementation-history.md).
 
 ## Retained machine-readable report
 

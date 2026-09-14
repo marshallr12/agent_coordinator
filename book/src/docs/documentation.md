@@ -19,10 +19,14 @@ Edit chapters under `book/src`, and add each new chapter exactly once to
 root `PLAN.md`, and `deploy/README.md` direct existing readers to their maintained
 chapters. Keep those compatibility links when moving an established document.
 
-`AGENTS.md`, `BACKLOG.md`, `HANDOFF.md`, and `DURABLE-RECORD.md` remain authoritative
+`AGENTS.md`, `HANDOFF.md`, and `DURABLE-RECORD.md` remain maintained
 at the repository root. Their book chapters include those files directly during
 each build, so update the root record rather than copying its prose into a
 second maintained document. Each included chapter links to its original source.
+Current tasks live in the service; no BACKLOG.md is required. Completed milestones
+are preserved in [implementation history](implementation-history.md). The public
+info endpoint embeds [agent startup](agent-startup.md) directly at compile time,
+so edit that chapter and rebuild/redeploy the server to update discovery guidance.
 
 Use relative chapter links and retain the distinction between current behavior
 and historical design. The [implementation status](implementation-status.md)

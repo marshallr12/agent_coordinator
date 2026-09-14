@@ -1,5 +1,18 @@
 # Implementation handoff — 2026-09-14
 
+## Service discovery migration
+
+The public info endpoint now embeds the canonical `book/src/docs/agent-startup.md`
+guide as `data.agent_startup` (schema version 1). It describes portable credential
+configuration and native CLI workflows. Private task/project contents remain
+behind authentication. CLAUDE.md is a seven-line discovery bootstrap; AGENTS.md
+contains only its pointer. Engineering requirements moved to CONTRIBUTING.md.
+BACKLOG.md and its book wrapper were removed; historical milestones are in the
+implementation-history chapter and pending acceptance criteria remain in the live
+service. Agents need no local backlog or handoff to select and claim work.
+
+Validation and deployment evidence will be recorded with the live migration task.
+
 ## Setup usability follow-up
 
 The two setup usability items and the Copy token investigation are now Code
@@ -15,17 +28,17 @@ copying it. Native CLI authentication, complete orientation, reading all three
 tasks, and reading the required-check roster passed on 2026-09-14 without using
 admin browser authentication. No task was claimed during setup verification.
 CLAUDE.md and AGENTS.md now direct future working sessions to the live service,
-automatically selecting and claiming one of the two original setup tasks.
+automatically selecting and claiming eligible work according to live priorities.
 The Copy token investigation was created through the external browser as
 `4b68f1c7-7ed2-42cb-b8cc-3ce0a1dfaefb`; its evidence distinguishes the user's
 manual failure from possible automation clipboard isolation.
 
 Initial operator setup exposed unclear project policy and required-check fields.
-The backlog now tracks accessible explanatory tooltips, examples, and guidance
+The live task queue tracks accessible explanatory tooltips, examples, and guidance
 on matching producer registrations. A second item removes redundant repository
 identity entry by deriving it from the saved URL while preserving existing
-identities and shared integration holds. These are documentation-only task records;
-the deployed UI is unchanged. Implement and verify the pending backlog criteria
+identities and shared integration holds. These are pending service task records;
+the deployed UI is unchanged. Implement and verify the live acceptance criteria
 before claiming tooltip support.
 
 ## Google Cloud deployment

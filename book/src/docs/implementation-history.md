@@ -1,14 +1,10 @@
-# Implementation backlog
+# Implementation history
 
-The live Agent Coordinator service is authoritative for current tasks, ownership,
-progress, and completion. This document retains historical milestones and task
-design context; do not select work from it instead of the service. The numbered
-release backlog through item 7 is complete. Item 7 used an
-actual native Windows workstation coordinated with a separate Linux workstation;
-CI did not replace that physical exercise.
+Historical release milestones; current work, ownership, and acceptance criteria
+live in the authenticated service task queue. This chapter is not a backlog.
 
 The foundation, job/worktree evidence, and reviewed completion milestones are implemented. Use
-[implementation status](docs/implementation-status.md) for precise limits.
+[implementation status](implementation-status.md) for precise limits.
 
 Completed: native worktree preparation, stable producer identity, durable local
 job reports, global named resource reservations, scoped health reporting,
@@ -49,13 +45,13 @@ completed 90,000 requests over 30 minutes at 50 requests/second with 20 projects
 50 sessions, and 100,000 historical tasks under a shared two-CPU/4-GiB/no-swap limit.
 Overall p95 was 21.0 ms, with no unexpected errors and exact ownership preserved.
 The snapshot restore stage passed in 6.511 seconds. Main-agent review is complete;
-see [retained acceptance evidence](docs/linux-capacity-evidence.md) for scope and limits.
+see [retained acceptance evidence](linux-capacity-evidence.md) for scope and limits.
 
 Completed item 6.1: authenticated stateless MCP with 56 typed tools sharing the
 REST session, policy, ownership, and receipt checks. The native client launcher
 securely shares its saved harness identity with a trusted foreground MCP client.
 All 182 workspace tests, formatting, Clippy, build, and both smoke exercises pass.
-Main-agent review is complete; see [MCP guidance](docs/mcp-guide.md) for compatibility
+Main-agent review is complete; see [MCP guidance](mcp-guide.md) for compatibility
 and local-operation limits. Linux/native Windows CI and the dependency audit passed
 in [CI run 34468585302](https://github.com/marshallr12/agent_coordinator/actions/runs/34468585302).
 
@@ -71,7 +67,7 @@ passed on main in
 and the complete Linux/native-Windows coordination workflow and dependency audit
 passed in
 [coordination run 34487175859](https://github.com/marshallr12/agent_coordinator/actions/runs/34487175859).
-See [book maintenance](docs/documentation.md).
+See [book maintenance](documentation.md).
 
 Completed item 7: the accepted Windows x86-64 CLI ran on the native `MINIAIR`
 workstation against a disposable service on Linux workstation `mxmini` over HTTPS.
@@ -85,66 +81,6 @@ The disposable public service and tunnel were shut down afterward. This complete
 the numbered release backlog, but does not claim a production deployment,
 permanent endpoint, hardware attestation, or off-server backup protection.
 
-## Pending usability work
-
-Both items below are Code tasks in the live Agent Coordinator project; query
-the service for their current status. Local agent authentication and task/check
-roster reads passed. CLAUDE.md supplies automatic next-session selection and
-claim instructions without requiring the operator to log in as admin.
-
-An additional Code task, **Investigate and fix Copy token clipboard failure**
-(`4b68f1c7-7ed2-42cb-b8cc-3ce0a1dfaefb`), was added through the external browser.
-It covers the reported Brave/Windows button failure, distinguishes automation
-clipboard isolation, and requires truthful copy feedback and a manual fallback.
-Its full acceptance criteria and current status live in the service.
-
-### Explain setup fields with accessible tooltips
-
-Requested during initial setup on 2026-09-14. Add explanatory tooltips to
-project setup fields, covering Project policy and Review & check settings.
-The Required checks dialog must explain Shared repository identity, Check,
-Definition version, and Environment with concrete example values and where
-the matching producer configuration comes from.
-
-Acceptance criteria:
-
-- Help appears on hover and keyboard focus, with a tap-accessible help control
-  on touch devices and accessible associations to the relevant fields.
-- Explain that the repository identity groups URL aliases of the same Git
-  repository, and check identity/version/environment must exactly match the
-  registered producer. The version identifies the check definition, not the app.
-- Explain that saving a roster neither creates nor runs checks, that at least
-  one check is required, and that roster changes affect existing candidates.
-- Include practical examples without presenting them as configured checks;
-  explain review and integration choices in plain language.
-- Verify hover, keyboard, touch/narrow layouts, and screen-reader labeling;
-  run the required UI and workspace checks when implementing this task.
-
-Status: pending; no tooltip behavior has been implemented or deployed.
-
-### Derive repository identity instead of asking for it again
-
-The operator already supplies a repository URL when creating a project. Remove
-the editable Shared repository identity field from normal check-roster setup;
-derive and reuse the internal identity from that URL. If displayed for context,
-show a read-only repository summary rather than another required input.
-
-Acceptance criteria:
-
-- Equivalent supported GitHub HTTPS and SSH clone URLs, including optional
-  `.git` suffixes and trailing slashes, resolve to the same repository identity.
-  Distinct hosts or repositories remain distinct.
-- Keep the internal shared identity for cross-project integration serialization.
-  Provide a separate advanced administrator flow for aliases that cannot be
-  inferred, such as custom SSH hosts; do not guess arbitrary alias equivalence.
-- Preserve existing saved identities, submissions, and integration holds. A
-  repository URL edit must not silently rebind historical work or split an
-  existing shared integration lock.
-- Check-roster setup works without manually entering an identity. Test new and
-  existing projects, equivalent URLs, distinct repositories, and guarded alias
-  changes. Update field help and canonical operator/API guidance accordingly.
-
-Status: pending; the deployed form and saved project identity are unchanged.
 
 ## Google Cloud deployment follow-up — 2026-09-14
 

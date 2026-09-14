@@ -151,7 +151,7 @@ jobs:
               required = {
                   "agent-coordinator.exe", "book.toml", "book/src/SUMMARY.md",
                   "book/src/README.md", "book/src/PLAN.md", "book/src/AGENTS.md",
-                  "book/src/BACKLOG.md", "book/src/DURABLE-RECORD.md", "book/src/HANDOFF.md",
+                  "book/src/docs/agent-startup.md", "book/src/docs/implementation-history.md", "book/src/DURABLE-RECORD.md", "book/src/HANDOFF.md",
               }
               assert set(expected) == actual and required <= actual
               book_sources = {name for name in actual if name.startswith("book/src/")}

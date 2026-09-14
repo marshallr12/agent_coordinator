@@ -26,6 +26,8 @@ Open `target/book/index.html` locally. The original `docs/*.md`, `PLAN.md`, and
 `deploy/README.md` paths remain as compatibility links; edit canonical chapters
 under `book/src`.
 
-Repository instructions and live project records remain authoritative at the
-repository root: [AGENTS.md](AGENTS.md), [HANDOFF.md](HANDOFF.md),
-[BACKLOG.md](BACKLOG.md), and [DURABLE-RECORD.md](DURABLE-RECORD.md).
+Current work is coordinated through the live service, discovered using the short
+[CLAUDE.md](CLAUDE.md) bootstrap. See [engineering requirements](CONTRIBUTING.md),
+[automatic agent startup](book/src/docs/agent-startup.md), and
+[implementation history](book/src/docs/implementation-history.md). Historical
+[handoff](HANDOFF.md) and [lessons](DURABLE-RECORD.md) remain reference records.

@@ -173,6 +173,63 @@ impl Browser {
 }
 
 #[tokio::test]
+async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
+    let fixture = Fixture::new().await;
+    let browser = fixture.login().await;
+    let (token, credential_id) = fixture.issue(&browser, "private-workstation-marker").await;
+    let discovery = fixture.call("GET", "/api/v1/info", &[], None).await;
+    discovery.ok();
+    assert_eq!(discovery.headers["cache-control"], "no-store");
+    let data = &discovery.body["data"];
+    assert_eq!(data["api_version"], "v1");
+    assert_eq!(data["agent_startup"]["schema_version"], 1);
+    let guide = data["agent_startup"]["guide"].as_str().unwrap();
+    assert_eq!(
+        guide,
+        include_str!("../../../book/src/docs/agent-startup.md")
+    );
+    for required in [
+        "credentials.toml",
+        "SESSION_NAME",
+        "claim --task",
+        "checkpoint",
+        "release",
+        "Human",
+        "CONTRIBUTING.md",
+    ] {
+        assert!(
+            guide.to_lowercase().contains(&required.to_lowercase()),
+            "missing bootstrap step: {required}"
+        );
+    }
+    for private in [
+        token.as_str(),
+        credential_id.as_str(),
+        "private-workstation-marker",
+        PASSWORD,
+    ] {
+        assert!(!discovery.text.contains(private));
+    }
+    let help_path = data["authentication_help"].as_str().unwrap();
+    assert!(help_path.starts_with("/api/v1/"));
+    let help = fixture.call("GET", help_path, &[], None).await;
+    help.ok();
+    assert_eq!(help.body["data"]["public_registration"], false);
+    let registration = help.body["data"]["registration_path"].as_str().unwrap();
+    fixture
+        .call("POST", registration, &[], Some(json!({})))
+        .await
+        .error(StatusCode::UNAUTHORIZED, "authentication_required");
+    let projects = data["agent_startup"]["routes"]["projects"]
+        .as_str()
+        .unwrap();
+    fixture
+        .call("GET", projects, &[], None)
+        .await
+        .error(StatusCode::UNAUTHORIZED, "authentication_required");
+}
+
+#[tokio::test]
 async fn public_setup_assets_and_private_route_authentication_order() {
     let fixture = Fixture::new().await;
     for path in ["/healthz", "/api/v1/info", "/api/v1/help/authentication"] {

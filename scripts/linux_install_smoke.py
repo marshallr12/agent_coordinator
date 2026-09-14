@@ -27,7 +27,8 @@ MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_FILES = 256
 REQUIRED = {
     "AGENTS.md",
-    "BACKLOG.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
     "DURABLE-RECORD.md",
     "HANDOFF.md",
     "PLAN.md",
@@ -35,7 +36,8 @@ REQUIRED = {
     "SHA256SUMS",
     "book.toml",
     "book/src/AGENTS.md",
-    "book/src/BACKLOG.md",
+    "book/src/docs/agent-startup.md",
+    "book/src/docs/implementation-history.md",
     "book/src/DURABLE-RECORD.md",
     "book/src/HANDOFF.md",
     "book/src/PLAN.md",
