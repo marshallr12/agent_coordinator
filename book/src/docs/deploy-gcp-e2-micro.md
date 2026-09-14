@@ -11,9 +11,81 @@ The e2-micro (2 shared vCPUs, 1 GiB) is included in Google Cloud's Always Free
 tier when it runs in `us-west1`, `us-central1`, or `us-east1` with a standard
 persistent disk of at most 30 GB, and the tier also covers a small amount of
 Cloud Storage. The accepted package peaked at 84.6 MiB resident memory under
-the [capacity exercise](linux-capacity-evidence.md), so the size is adequate.
+the [capacity exercise](linux-capacity-evidence.md), which used a different
+two-CPU/4-GiB host; that result does not establish e2-micro capacity.
 Free-tier terms change, so confirm them in Google's pricing pages before
 relying on them. The steps use the `gcloud` CLI from a workstation.
+
+Public IPv4 is billed separately, including addresses on free-tier VMs.
+Google currently charges $0.005/hour after one free hour per month. An external
+IPv6 address has no address charge. A proxied Cloudflare AAAA record can expose
+an IPv6 origin to both IPv4 and IPv6 clients. Billing must still be enabled,
+and compute, disk, backup storage, operations, and egress must remain within
+their account-wide free allowances. Check [Google's free-tier limits](https://docs.cloud.google.com/free/docs/free-cloud-features)
+and [network pricing](https://cloud.google.com/vpc/network-pricing).
+
+## Installation record — 2026-09-14
+
+The selected host is `agent-coordinator` in project `sithbit-19b44`, zone
+`us-east1-b` (South Carolina): Ubuntu 24.04 x86-64, e2-micro, one 30-GB
+`pd-standard` boot disk, and 1 GiB swap. The disk is preserved on instance
+deletion and instance deletion protection is enabled. The reserved external
+IPv6 address is `2600:1900:4020:671::`; the final interface has no public IPv4.
+An IPv4 address was attached briefly for initial package installation and then
+removed. Ubuntu package sources now use mirrors with IPv6 support.
+
+The origin is [agents.sithbit.com](https://agents.sithbit.com); public HTTPS,
+administrator login, secure cookies, CSRF rejection, and logout were verified.
+The record is `AAAA agents 2600:1900:4020:671::`, proxied, with automatic TTL.
+A hostname-specific Cloudflare configuration rule applies Full (strict) TLS
+and disables Browser Integrity Check for API clients after Python's default
+client received Cloudflare error 1010. The origin has a Let's Encrypt
+certificate. Managing these records requires a
+token scoped to `sithbit.com` with Zone DNS Edit, Zone Read, and Config Rules Edit.
+Keep it in the operator's protected local configuration, never in the repository.
+SSH is restricted
+to Google IAP's IPv4 forwarding range; ports 80 and 443 are exposed over IPv6,
+and the application listens only on `127.0.0.1:8080`. The custom VPC and subnet
+are `agent-coordinator` and `agent-coordinator-us-east1`.
+
+The installed package is built from deployment commit `019ffb6`
+by [release run 34891009689](https://github.com/marshallr12/agent_coordinator/actions/runs/34891009689).
+Its Linux package/build/systemd/HTTPS and native Windows jobs passed. The
+deployment updates rustls to 0.23.45 for RUSTSEC-2026-0285; the server executable
+is unchanged by that client TLS patch. Full Linux/native Windows coordination
+checks and dependency audit passed in
+[run 34891009230](https://github.com/marshallr12/agent_coordinator/actions/runs/34891009230).
+See the live handoff for exact binary identities and validation scope.
+
+The service uses the standard hourly backup and daily maintenance units.
+The live artifact quota is 256 MiB, with a 2-GiB disk reserve; history and
+backup growth still require monitoring. Local retention keeps the represented
+24 hourly and 30 daily snapshots described in the backup contract.
+
+The private bucket `gs://sithbit-19b44-agent-coordinator-backups-east` is in
+`us-east1`, with uniform access and public-access prevention. The VM identity
+`agent-coordinator-vm@sithbit-19b44.iam.gserviceaccount.com` has object-user access
+on this bucket, without a service-account key or project-wide storage grant.
+
+The deployment-specific helper `deploy/gcp-backup-transfer.py` is installed as
+`/usr/local/sbin/agent-coordinator-backup-transfer`. Install its adjacent
+`agent-coordinator-backup-transfer.service` and `.timer` into
+`/etc/systemd/system`. The helper names this installation's bucket and paths;
+edit them before reusing it elsewhere. It holds the source repository lock,
+verifies and archives a complete snapshot, uploads it, downloads it again,
+compares its SHA-256, and verifies the downloaded snapshot before saving an
+atomic receipt or pruning remote archives absent from local retention. Its
+root-only receipt is `/var/lib/agent-coordinator-transfer/last-verified.json`.
+The timer runs hourly at five minutes past the hour. Inspect failed units and
+receipt age; an enabled timer alone is not evidence of a successful transfer.
+The bucket also retains soft-deleted objects for Google's default seven days,
+which adds storage beyond the live snapshot set and counts toward billing.
+
+Keep the bootstrap administrator password outside source control. The
+administrator is `admin`; change its initial password after first sign-in.
+This deployment does not enroll agents or bind any repository automatically.
+
+The general IPv4-based installation instructions below remain an alternative.
 
 ## 1. Build or download the package
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Upload and download-verify Agent Coordinator snapshots in Cloud Storage
+After=network-online.target agent-coordinator-backup.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/agent-coordinator/coordinator.sqlite3
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+ExecStart=/usr/local/sbin/agent-coordinator-backup-transfer
+TimeoutStartSec=45min
+Nice=10

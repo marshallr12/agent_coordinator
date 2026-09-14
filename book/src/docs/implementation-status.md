@@ -9,6 +9,14 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
 
+- A Google Cloud installation at [agents.sithbit.com](https://agents.sithbit.com)
+  uses an e2-micro in South Carolina, persistent SQLite storage, Caddy HTTPS,
+  Cloudflare's IPv6 proxy, and verified hourly off-server backups. Public sign-in,
+  CSRF protection, restart, and an initial independent restore were exercised.
+  See [deployment details](deploy-gcp-e2-micro.md) and the live handoff for exact
+  package identities, free-tier limits, and capacity/recovery scope. No repository
+  is automatically bound and no agent is automatically enrolled.
+
 - Authenticated stateless Streamable HTTP at `/mcp` with 56 typed tools routed
   through the existing REST authorization and mutation checks. A protected native
   launcher shares the exact saved harness identity with a trusted foreground MCP
@@ -179,8 +187,9 @@ Lease timing uses protected service time. Hosts should maintain synchronized tim
 a material rollback pauses new authority until reconciliation, and a restore
 invalidates existing authority. A rollback during downtime that remains above
 the last durable observation cannot be detected without a trusted external clock.
-Production deployment hardware, a permanent public hostname, and an off-server
-backup destination remain installation or operator inputs. The native Windows
+The selected Google Cloud host, public hostname, and off-server destination
+are recorded in [the deployment guide](deploy-gcp-e2-micro.md). Additional
+installations still require their own operator choices. The native Windows
 workstation acceptance used a disposable Linux service and temporary HTTPS tunnel;
 it does not establish those production choices.
 

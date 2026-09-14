@@ -85,5 +85,23 @@ The disposable public service and tunnel were shut down afterward. This complete
 the numbered release backlog, but does not claim a production deployment,
 permanent endpoint, hardware attestation, or off-server backup protection.
 
+## Google Cloud deployment follow-up — 2026-09-14
+
+The service is installed on the free-tier-sized South Carolina VM with
+persistent disk, IPv6, loopback application access, Caddy, local backup and
+maintenance timers, and verified hourly Cloud Storage transfer. An independent
+workstation restore rehearsal passed for the initial database. Deployment does
+not bind this repository or create agent credentials.
+
+Completed: proxied `agents.sithbit.com` AAAA record, hostname-specific strict
+TLS, public HTTPS and browser checks, administrator login/logout, Secure cookies,
+and CSRF enforcement. Updated rustls to 0.23.45 for RUSTSEC-2026-0285; Linux and
+native Windows checks, audit, and both native release-package jobs pass.
+The exact installed server also passed the release-size load/restore job;
+the duplicate load run after the client-only TLS patch was cancelled. See the
+handoff for exact job scopes and evidence.
+The initial administrator should change its generated password after sign-in.
+Capacity and recovery must be re-evaluated as real data and traffic grow.
+
 No unrestricted task-status edit, automatic force recovery, or unverified
 completion shortcut should be added to make these milestones appear complete.

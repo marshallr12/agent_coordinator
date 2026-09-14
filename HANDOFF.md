@@ -1,4 +1,62 @@
-# Implementation handoff — 2026-09-10
+# Implementation handoff — 2026-09-14
+
+## Google Cloud deployment
+
+The application from deployment commit `019ffb6` is
+installed on the `agent-coordinator` e2-micro VM in `sithbit-19b44`,
+`us-east1-b` (South Carolina). It has a 30-GB standard persistent boot disk,
+deletion protection, 1 GiB swap, and reserved IPv6 `2600:1900:4020:671::`.
+The temporary installation IPv4 address was removed. The earlier empty
+central-region VM, disk, address, subnet, and backup bucket were removed.
+No unrelated project resources were changed.
+
+The service, Caddy, hourly local backups, daily maintenance, and hourly
+download-verified Cloud Storage backup transfer are running. The origin is
+live at `https://agents.sithbit.com`. Cloudflare proxies its AAAA record and
+applies Full (strict) TLS through a hostname-specific configuration rule.
+Browser Integrity Check is disabled for this API hostname after it blocked
+Python clients with error 1010. The administrator is `admin`;
+its initial password is in the operator's protected local deployment directory,
+outside this repository, and was never printed. No repository is enrolled or
+bound to this service yet.
+
+Installed package identity from [release run 34891009689](https://github.com/marshallr12/agent_coordinator/actions/runs/34891009689):
+
+- Archive SHA-256: `199c254e0c52b99eaf932b7a41a7c68c37f777688c5db33c3e921f75cdce6699`.
+- Server SHA-256: `06f10eb72d4a0ac173ed795786048552b31e5c1aee294078afa37714b238e720`.
+- CLI SHA-256: `4ae4d9e3e0e51c2035f4de8ac6676412b45f97064f19edd668645dd66f45b716`.
+
+The Linux package build/systemd/HTTPS and native Windows release jobs passed,
+as did local Linux package layout/checksum/link checks. Formatting, warnings-
+denied Clippy, workspace tests/build, both smoke exercises, native Windows tests,
+and dependency audit passed in [coordination run 34891009230](https://github.com/marshallr12/agent_coordinator/actions/runs/34891009230).
+The initial deployment check found the newly published RUSTSEC-2026-0285 in
+rustls 0.23.44; deployment commit `019ffb6` updates it to 0.23.45. An earlier
+release Windows timing-test failure was not reproduced by the patched runs.
+The server binary is byte-identical before and after the client TLS update.
+That exact server passed the 30-minute release-size load/restore job in
+[run 34888396240](https://github.com/marshallr12/agent_coordinator/actions/runs/34888396240).
+The second run's redundant load job was cancelled after its Linux and Windows
+package jobs passed; the second run is not claimed as an aggregate green run.
+This CI workload is not an e2-micro capacity measurement.
+
+Live checks confirmed the rendered browser sign-in page, public HTTPS from
+Windows and the VM, administrator login/logout, Secure cookies, CSRF rejection,
+unauthenticated project denial, synchronized time, restart health, and IPv6
+access to package mirrors and Cloud Storage after public IPv4 removal.
+A complete backup was uploaded to the private
+`sithbit-19b44-agent-coordinator-backups-east` bucket, downloaded, and verified.
+An independent download on the Ubuntu 24.04 WSL workstation matched SHA-256
+`552b597b95fd0e7360760235f71073c4f3bf030e3c43fa5ab77b2da0a52e8650` and restored
+snapshot `94f708d6-83f6-4f37-a1c3-ca2d8edbb46f` into an absent directory in
+0.425 seconds, ending at `restore_reconciliation`. This is an initial,
+artifact-free database rehearsal, not a production-size recovery benchmark.
+
+See [Google Cloud installation](docs/deploy-gcp-e2-micro.md) for
+resources, backup-transfer behavior, and cost limits. Free-tier eligibility
+depends on total billing-account usage; no zero-cost guarantee is claimed.
+
+## Previous implementation acceptance
 
 Backlog items 6.1 (MCP), 6.2 (mdBook), and 7 (native Windows workstation
 acceptance) are implemented, exercised, and reviewed. The numbered release
