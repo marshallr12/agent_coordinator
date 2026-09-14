@@ -13,9 +13,19 @@ Coordinator service configured for this repository and begin eligible work.
 Do not wait for the user to choose a task or tell you to start. Follow any
 explicit session-specific user request instead when it changes this scope.
 
-1. Use the repository's configured CLI or MCP connection and protected agent
-   credentials. Create a unique, stable harness session; resume the same session
-   after interruption and never share it with an independent harness.
+1. Read `.agent-coordinator.toml` at the repository root for `service_url` and
+   `project_id`. Before sending credentials, fetch
+   `{service_url}/api/v1/info` anonymously and read the response's
+   `authentication_help` endpoint. This explicit bootstrap path is the discovery
+   convention; a bare service URL does not identify an authentication protocol.
+   Require HTTPS and keep discovery/help requests on the configured origin;
+   reject redirects and cross-origin help links. Read the advertised API version,
+   authentication steps, session registration, and optional MCP transport.
+   If binding, discovery, or supported protocol information is missing, report
+   the setup error rather than guessing an endpoint or sending the token.
+   Then use the configured CLI or MCP connection and protected agent credentials.
+   Create a unique, stable harness session; resume the same session after
+   interruption and never share it with an independent harness.
 2. Read the complete live orientation, project rules, relevant decisions, and
    task queue. The service is authoritative for work status and ownership;
    local backlog and handoff files are reference material only.
@@ -46,6 +56,13 @@ At the start of the next working session, connect and choose one of the two
 original setup tasks below, claim it, and begin implementation without asking
 the user to select a task or log in as admin. A later explicit user request
 can change this priority or limit the session to a question/review.
+
+First perform the anonymous discovery above using the binding's service URL.
+The discovery and help responses use a `data` envelope. Use an unauthenticated
+HTTP client with redirects disabled; do not inspect the credential file to make
+these requests. For example, PowerShell's `Invoke-RestMethod` accepts
+`-MaximumRedirection 0`. Resolve the advertised help path against the trusted
+origin, validate that its scheme/host/port still match, and read it before connect.
 
 From this Windows checkout, create one unique session name and keep it unchanged
 for every command in this harness. Resume that same name after an interruption;
@@ -104,6 +121,11 @@ work. Publishing alone does not finish a task; follow service finalization.
 ## Authentication
 
 `.agent-coordinator.toml` contains the verified service URL and project ID.
+The public info endpoint identifies the API and points to authentication help;
+that help explains bearer authentication, session headers, registration, and
+the MCP endpoint. It does not issue credentials. The native CLI implements the
+protocol and manages session proofs and retry state; do not construct ad hoc
+authentication requests when the configured CLI can perform the operation.
 `scripts/coordinator.ps1` invokes the installed native CLI under
 `%LOCALAPPDATA%/AgentCoordinator/bin`. The credential for agent `codex-miniair`
 is already stored outside this repository in the protected Windows user
