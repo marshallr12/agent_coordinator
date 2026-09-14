@@ -1,5 +1,33 @@
 # Implementation handoff — 2026-09-14
 
+## Setup usability follow-up
+
+The two setup usability items and the Copy token investigation are now Code
+tasks in the live Agent Coordinator project. Read their current state from the
+service; this document is historical context, not the work queue.
+The repository binding names project
+`fe95a6c5-2aad-463f-8446-4366d9a281c7` at `https://agents.sithbit.com`.
+The verified Windows CLI from release run 34891009689 is installed under
+`%LOCALAPPDATA%/AgentCoordinator/bin`; `scripts/coordinator.ps1` supplies the
+binding and requires an explicit, stable harness session name. The operator
+saved the `codex-miniair` token in protected Windows configuration after manually
+copying it. Native CLI authentication, complete orientation, reading all three
+tasks, and reading the required-check roster passed on 2026-09-14 without using
+admin browser authentication. No task was claimed during setup verification.
+CLAUDE.md and AGENTS.md now direct future working sessions to the live service,
+automatically selecting and claiming one of the two original setup tasks.
+The Copy token investigation was created through the external browser as
+`4b68f1c7-7ed2-42cb-b8cc-3ce0a1dfaefb`; its evidence distinguishes the user's
+manual failure from possible automation clipboard isolation.
+
+Initial operator setup exposed unclear project policy and required-check fields.
+The backlog now tracks accessible explanatory tooltips, examples, and guidance
+on matching producer registrations. A second item removes redundant repository
+identity entry by deriving it from the saved URL while preserving existing
+identities and shared integration holds. These are documentation-only task records;
+the deployed UI is unchanged. Implement and verify the pending backlog criteria
+before claiming tooltip support.
+
 ## Google Cloud deployment
 
 The application from deployment commit `019ffb6` is

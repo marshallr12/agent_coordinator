@@ -1,7 +1,10 @@
 # Working on Agent Coordinator
 
-Read README.md, HANDOFF.md, BACKLOG.md, and
-book/src/docs/implementation-status.md first. book/src/PLAN.md and the contract
+Read README.md and book/src/docs/implementation-status.md first. Use the live
+Agent Coordinator service for task selection, ownership, progress, and completion;
+HANDOFF.md and BACKLOG.md are historical/reference context, not the work queue.
+Follow CLAUDE.md's automatic startup and claim procedure for the next working
+session, including its two preferred setup tasks. book/src/PLAN.md and the contract
 documents in book/src/docs define the intended release; implemented
 features are listed separately. Do not describe planned endpoints as working.
 
@@ -32,5 +35,13 @@ authoritative and are included directly in the book.
 Native Windows claims require actual Windows CI evidence. Update the
 handoff and backlog with completed behavior, tests, limitations, and next steps.
 
-This repository is not yet bound to a running coordination service. Do not invent
-a service URL, enrollment token, task completion record, or production deployment.
+This repository's .agent-coordinator.toml binds it to the deployed service and
+Agent Coordinator project. On this Windows workstation, use
+`./scripts/coordinator.ps1 -Session <unique-stable-harness-name> connect --json`.
+Reuse that session name for the same harness; independent harnesses need distinct
+names. Credentials belong in the protected user configuration, never this repo.
+Read the complete returned orientation before claiming a task. Do not change
+task implementation code before a successful claim; renew, checkpoint, and
+release using the exact attempt ID and generation. If credentials or service
+access are unavailable, report the setup error rather than silently working
+outside coordination. Never print secrets or invent ownership/completion records.
