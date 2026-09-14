@@ -13,6 +13,17 @@ Coordinator service configured for this repository and begin eligible work.
 Do not wait for the user to choose a task or tell you to start. Follow any
 explicit session-specific user request instead when it changes this scope.
 
+Startup is not complete after connecting or listing tasks. When eligible work
+exists, you must inspect and successfully claim a task without another user
+prompt. Claiming is part of the authorized startup procedure, not an optional
+implementation step. A boundary that says "stop before source edits or builds"
+does not prohibit service claims: in that bounded test, inspect and claim a task,
+then record a checkpoint/handoff and release it before reporting. Only skip the
+claim if the user explicitly prohibits service mutations, the request is limited
+to a question/review, or the live service supplies an actual blocking condition.
+Report a concrete blocker; do not invent a read-only restriction from the word
+"test" or stop merely because the claim changes service state.
+
 1. Read `.agent-coordinator.toml` at the repository root for `service_url` and
    `project_id`. Before sending credentials, fetch
    `{service_url}/api/v1/info` anonymously and read the response's
