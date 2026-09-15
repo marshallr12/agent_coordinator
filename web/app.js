@@ -308,7 +308,15 @@
       add(bindingContent, copy); add(binding, summary); add(binding, bindingContent);
       const footer = el('div', 'project-card-footer');
       add(footer, el('span', 'project-meta', project.target_branch ? `Branch · ${project.target_branch}` : 'Branch not set'));
-      const open = el('button', 'project-open', 'Open tasks →'); open.type = 'button'; open.addEventListener('click', () => openProject(project.id));
+      const open = el('button', 'project-open', 'Open project →'); open.type = 'button';
+      open.setAttribute('aria-label', `Open project ${project.name || projectId}`);
+      open.addEventListener('click', () => openProject(project.id));
+      card.addEventListener('click', (event) => {
+        if (event.target.closest('button, a, details, input, select, textarea')) return;
+        const selection = window.getSelection();
+        if (selection && !selection.isCollapsed && (card.contains(selection.anchorNode) || card.contains(selection.focusNode))) return;
+        openProject(project.id);
+      });
       add(footer, open); add(card, name); add(card, repo); add(card, idLabel); add(card, binding); add(card, footer); add(target, card);
     });
   }

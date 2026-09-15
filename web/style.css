@@ -100,7 +100,9 @@ textarea { min-height: 108px; resize: vertical; }
 .state-panel.compact { min-height: 76px; padding: 16px; }
 .project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 15px; }
 .project-card { min-height: 180px; padding: 20px; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 3px 8px rgba(29, 50, 63, .025); }
-.project-card:hover { border-color: #a9c5ca; box-shadow: var(--shadow); }
+.project-card { cursor: pointer; }
+.project-card:hover, .project-card:focus-within { border-color: #a9c5ca; box-shadow: var(--shadow); }
+.project-binding { cursor: auto; }
 .project-card h3 { margin: 0 0 5px; color: var(--navy); font-size: 17px; text-transform: none; letter-spacing: normal; }
 .project-card .repo { min-height: 20px; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .project-id { margin: 12px 0 0; overflow-wrap: anywhere; color: var(--navy); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
