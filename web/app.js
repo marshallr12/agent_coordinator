@@ -559,6 +559,23 @@
   });
 
   const projectPath = (projectId = state.projectId) => `/api/v1/projects/${encodeURIComponent(projectId)}`;
+  let helpSerial = 0;
+  function contextualHelp(target, control, label, description) {
+    const wrapper = el('div', 'contextual-help');
+    const button = el('button', 'button text-button', `Help: ${label}`); button.type = 'button';
+    const help = el('p', 'help-text', description); help.id = `context-help-${++helpSerial}`; help.hidden = true;
+    button.setAttribute('aria-controls', help.id); button.setAttribute('aria-expanded', 'false');
+    control.setAttribute('aria-describedby', [control.getAttribute('aria-describedby'), help.id].filter(Boolean).join(' '));
+    let pinned = false, hovered = false, focused = false;
+    const update = () => { const visible = pinned || hovered || focused; show(help, visible); button.setAttribute('aria-expanded', String(visible)); };
+    wrapper.addEventListener('mouseenter', () => { hovered = true; update(); });
+    wrapper.addEventListener('mouseleave', () => { hovered = false; update(); });
+    button.addEventListener('focus', () => { focused = true; update(); });
+    button.addEventListener('blur', () => { focused = false; update(); });
+    button.addEventListener('click', () => { pinned = !pinned; hovered = false; focused = false; update(); });
+    wrapper.addEventListener('keydown', event => { if (event.key === 'Escape' && !help.hidden) { event.preventDefault(); event.stopPropagation(); pinned = hovered = focused = false; update(); } });
+    add(wrapper, button); add(wrapper, help); add(target, wrapper);
+  }
   function workflowDialog(title, description) {
     const dialog = el('dialog', 'form-dialog'); const form = el('form');
     add(form, el('h2', '', title)); if (description) add(form, el('p', 'muted', description));
@@ -573,7 +590,8 @@
       form.addEventListener('submit', event => { event.preventDefault(); if (!form.reportValidity() || (state.mutation && form.dataset.resumeSecret !== 'true')) return; submit(new FormData(form), dialog); });
       add(dialog, form); add(document.body, dialog); dialog.addEventListener('close', () => dialog.remove()); dialog.showModal();
     };
-    return { dialog, form, field, finish };
+    const help = (input, label, description) => contextualHelp(form, input, label, description);
+    return { dialog, form, field, help, finish };
   }
   function workflowMutation(path, body, label, after) {
     const projectId = state.projectId, taskId = state.selectedTaskId;
@@ -586,6 +604,13 @@
   function renderWorkflow(data) {
     const target = $('workflow-content'); clear(target); const workflow = data.workflow || {}; const submission = workflow.submission;
     if (!submission) { add(target, el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.')); return; }
+    const guidance = {
+      review: 'Work has been submitted for review. The submission is a saved version of the result and its evidence; edits require a new submission. ' + ((workflow.activities || []).some(activity => activity.kind === 'human_review') ? 'Review the evidence below, then claim an available human review to approve it or request changes. Claiming reserves the review for you; it does not approve the work.' : 'An independent agent must claim the required review and approve the work or request changes.'),
+      integration: 'The submitted code is awaiting integration: an agent must validate the required checks, publish the result, and finalize the task. If shown, Authorize integration gives permission to proceed.',
+      revision_needed: 'Changes are needed. An agent must claim the task, revise the work, and submit a new version for review. The previous submission stays in the history.',
+      done: 'This submission has completed the required workflow.'
+    };
+    if (guidance[workflow.phase]) add(target, el('p', 'inline-alert', guidance[workflow.phase]));
     const candidate = el('div', 'workflow-entry'); add(candidate, el('h3', '', workflow.phase === 'revision_needed' ? 'Previous candidate' : 'Current candidate'));
     add(candidate, el('p', '', submission.summary));
     const details = el('dl');
@@ -618,12 +643,12 @@
       if (activity.publication_reconciliation) add(entry, el('p', '', `Reconciled ${displayStatus(activity.publication_reconciliation.disposition)}: ${activity.publication_reconciliation.evidence}`));
       (activity.result?.check_job_ids || []).forEach(id => add(entry, el('p', 'muted', `Check producer: ${id}`)));
       if (activity.authorization) add(entry, el('p', '', `${activity.authorization.valid === false ? 'Invalidated authorization' : 'Human authorization'}: ${activity.authorization.summary}`));
-      const action = (label, callback) => { const button = el('button', 'button subtle', label); button.type = 'button'; button.dataset.mutation = 'true'; button.addEventListener('click', callback); add(entry, button); };
+      const action = (label, callback, help) => { const button = el('button', 'button subtle', label); button.type = 'button'; button.dataset.mutation = 'true'; button.addEventListener('click', callback); add(entry, button); if (help) contextualHelp(entry, button, label, help); };
       if (state.actor?.kind === 'human' && !['done','completed','canceled'].includes(activity.status)) {
         if (activity.kind === 'human_review' && !(workflow.blockers || []).length) {
           const current = attempt?.state === 'active' && attempt.valid_by_time === true && attempt.owner_authorized === true;
           if (current && attempt.owner_id === actorId() && attempt.session_id === state.actor.session_id) action('Record human review', () => openHumanReview(activity, submission, attempt));
-          else if (!current) action('Claim human review', () => workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/claim`, {expected_submission_id: submission.id, expected_project_policy_revision: submission.project_policy_revision, expected_workflow_policy_revision: submission.workflow_policy_revision}, 'review claim', response => openHumanReview(activity, submission, response.attempt)));
+          else if (!current) action('Claim human review', () => workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/claim`, {expected_submission_id: submission.id, expected_project_policy_revision: submission.project_policy_revision, expected_workflow_policy_revision: submission.workflow_policy_revision}, 'review claim', response => openHumanReview(activity, submission, response.attempt)), 'Reserve this review for your signed-in session and open the review form. Read the submission and acceptance evidence first. You will make a separate decision to approve or request changes. Code still needs integration and required checks after approval.');
         }
         if (activity.kind === 'integration') {
           if ((!activity.authorization || activity.authorization.valid === false) && !(workflow.blockers || []).length && workflow.phase === 'integration' && state.projects.find(project => text(project.id) === state.projectId)?.automatic_integration === false) action('Authorize integration', () => openIntegrationAuthorization(activity, submission));
@@ -639,7 +664,11 @@
     if (!attempt) { setGlobalAlert('Refresh the activity to inspect its current ownership.', 'error'); return; }
     const view = workflowDialog('Review this candidate', `This decision applies only to submission ${submission.id}, source ${submission.candidate_revision || 'general task evidence'}. Inspect its acceptance evidence and checks before deciding.`);
     const decision = view.field('decision', 'Decision', '', 'select'); for (const [value,label] of [['changes_requested','Changes requested'],['approved','Approved']]) { const option = el('option', '', label); option.value = value; add(decision, option); }
-    view.field('summary', 'Review summary'); const findings = view.field('findings', 'Required remedies — one per line'); findings.required = false;
+    view.help(decision, 'Decision', 'Choose Approved when the submitted evidence satisfies the acceptance criteria. Choose Changes requested when more work is needed; a revised submission will need fresh review. Approval completes a general task after all required reviews; code must also pass integration.');
+    const summary = view.field('summary', 'Review summary');
+    view.help(summary, 'Review summary', 'Describe what you inspected and why you approve or request changes. Refer to acceptance criteria, results, or evidence links. For example: Checked the reported test results; the keyboard interaction still needs verification.');
+    const findings = view.field('findings', 'Required remedies — one per line'); findings.required = false;
+    view.help(findings, 'Required remedies', 'For changes requested, describe each required fix on its own line so the next agent knows what to change. Leave this empty when approving.');
     decision.addEventListener('change', () => findings.setCustomValidity(''));
     view.finish('Record review', (values, dialog) => {
       const remedies = text(values.get('findings')).split('\n').map(v => v.trim()).filter(Boolean);
@@ -922,11 +951,16 @@
   }
   function renderTaskActions(data, task) {
     const target = $('task-operator-actions'); clear(target);
-    if (!task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, actionButton('Edit task', () => editTask(task, data)));
-    if (!task.current_attempt_id && task.blocked_reason) add(target, actionButton('Resolve blocker', () => {
+    const completionPending = data.workflow?.submission && data.workflow.phase !== 'revision_needed';
+    if (!completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, actionButton('Edit task', () => editTask(task, data)));
+    if (!completionPending && !task.activity_kind && task.lifecycle === 'open' && !task.current_attempt_id && task.blocked_reason) add(target, actionButton('Resolve blocker', () => {
       const projectId = state.projectId, taskId = task.id;
-      const view = workflowDialog('Resolve saved blocker', task.blocked_reason);
-      view.field('reason','Resolution evidence');
+      const view = workflowDialog('Resolve saved blocker', 'Use this after the problem that stopped work has been fixed. Record what changed and how you checked it. This clears the saved blocker so an agent can claim the task when its other requirements are met.');
+      add(view.form, el('h3', '', 'What stopped work'));
+      add(view.form, el('p', 'saved-blocker', task.blocked_reason));
+      const reason = view.field('reason','What changed and how you verified it'); reason.maxLength = 4096;
+      reason.placeholder = 'Example: Repository access was restored. Verified that the assigned workstation can fetch the required branch.';
+      view.help(reason, 'Resolution evidence', 'Write the concrete fix and the observation, check result, or link that confirms work can resume. Use your actual evidence, not the example. This records the resolution in task history; it does not approve submitted work or mark the task complete.');
       view.finish('Record resolution', (values, dialog) => { dialog.close(); startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/unblock`, {expected_revision:task.revision,reason:values.get('reason')}, 'blocker resolution', () => loadTaskDetail(), 'POST', null, {projectId,taskId}); });
     }));
     if (taskStatus(task) === 'recovery_required' && !task.activity_kind) add(target, actionButton('Inspect for recovery', () => claimRecovery(task)));
