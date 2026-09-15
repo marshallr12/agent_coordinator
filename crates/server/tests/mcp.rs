@@ -557,6 +557,12 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
             .unwrap()
             .contains(coordinator_server::discovery::CONTINUATION_INSTRUCTIONS)
     );
+    assert!(
+        legacy.body["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(coordinator_server::discovery::REVIEW_SELECTION_INSTRUCTIONS)
+    );
     let bootstrap = coordinator_server::discovery::agent_startup();
     assert_eq!(
         bootstrap["connection_preference"][0],
@@ -622,6 +628,12 @@ async fn cli_free_bootstrap_claims_and_releases_when_local_capability_is_missing
         .await;
     let orientation = &orientation.tool_payload()["data"];
     assert_eq!(orientation["instructions_complete"], true);
+    assert!(
+        orientation["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(coordinator_server::discovery::REVIEW_SELECTION_INSTRUCTIONS)
+    );
     assert!(
         orientation["instructions"]
             .as_str()

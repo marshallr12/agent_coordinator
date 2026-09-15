@@ -200,6 +200,10 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
         "same session after completing or submitting each task",
         "user's request narrows the scope",
         "service does not launch or wake agents",
+        "Review before new implementation",
+        "highest-priority eligible `agent_review`",
+        "If no agent review is eligible",
+        "coordinator_activity_claim",
     ] {
         assert!(
             guide.to_lowercase().contains(&required.to_lowercase()),
@@ -211,6 +215,12 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
             .as_str()
             .unwrap()
             .contains(coordinator_server::discovery::CONTINUATION_INSTRUCTIONS)
+    );
+    assert!(
+        data["agent_startup"]["mcp"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(coordinator_server::discovery::REVIEW_SELECTION_INSTRUCTIONS)
     );
     for private in [
         token.as_str(),

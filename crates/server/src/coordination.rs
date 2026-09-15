@@ -836,7 +836,7 @@ async fn orientation(State(s): State<AppState>, auth: Auth, Path(p): Path<String
     let recovery:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized) ORDER BY priority,ready_since,id LIMIT 20"))
         .bind(now).bind(now).bind(now).bind(&p).bind(now).fetch_all(&mut *c).await?;
     Ok(response(
-        json!({"project":proj,"policy_revision":proj.policy_revision,"instruction_version":INSTRUCTION_VERSION,"required_sections":[REQUIRED_SECTION],"instructions":format!("{INSTRUCTIONS}\n\n{}",crate::discovery::CONTINUATION_INSTRUCTIONS),"instructions_complete":true,
+        json!({"project":proj,"policy_revision":proj.policy_revision,"instruction_version":INSTRUCTION_VERSION,"required_sections":[REQUIRED_SECTION],"instructions":format!("{INSTRUCTIONS}\n\n{}\n\n{}",crate::discovery::REVIEW_SELECTION_INSTRUCTIONS,crate::discovery::CONTINUATION_INSTRUCTIONS),"instructions_complete":true,
         "candidates":candidates.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"active_attempts":active.iter().map(Attempt::value).collect::<Vec<_>>(),"recovery_candidates":recovery.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"implemented_stage":"backup_restore", "operator_tools": {
             "bootstrap":"Run agent-coordinator --session UNIQUE_HARNESS_NAME connect with a unique stable harness name; retain that session name on every command. Connection reserves no work.",
             "objectives_path":format!("/api/v1/projects/{p}/objectives"),

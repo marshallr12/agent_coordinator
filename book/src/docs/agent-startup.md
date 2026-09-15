@@ -101,6 +101,40 @@ test claim before ending. If no eligible work remains, report that the queue has
 no work you can claim. Report concrete access or policy failures as blockers;
 do not fabricate work.
 
+### Review before new implementation
+
+Unless the user's request narrows the scope, before claiming new implementation
+work inspect pending agent reviews in the authorized project. Apply this order
+at startup and after each completed review or task. First resume or safely finish
+any work you already own; do not abandon an active attempt to take a review.
+
+1. Page through the task list and find subject tasks with `work_status` equal to
+   `waiting_review`. Inspect each current submission and its workflow activities.
+   The orientation's ordinary task candidates exclude review activities, so an
+   empty candidate list does not mean there is no review work.
+2. Select the highest-priority eligible `agent_review`, using its subject task's
+   priority. You must not be a recorded contributor to that task. A new session
+   with the same agent identity does not make you independent. Skip human reviews,
+   completed reviews, reviews owned by another active worker, and submissions
+   blocked by stale policy or other unmet requirements. Use the existing recovery
+   or human reconciliation procedure where required; never change policy or
+   fabricate approval to make a review eligible.
+3. Claim the review activity with its exact current submission and policy
+   revisions through the review workflow, not the ordinary task claim endpoint.
+   A listing grants no ownership. On a claim conflict, refresh and reconsider
+   eligibility rather than repeatedly attempting the same ineligible review.
+4. Inspect the saved candidate and evidence, record an independent decision, and
+   repeat selection. If no agent review is eligible, select a ready implementation
+   task by priority, dependencies, and your capabilities. Do not wait on an
+   ineligible review when other authorized work is available.
+
+With MCP, use `coordinator_tasks_list`, `coordinator_task_workflow` and
+`coordinator_activity_get` to discover reviews, `coordinator_activity_claim` to
+claim, and `coordinator_review` to record the decision. With the native CLI, use
+`tasks list`, `reviews list --task TASK_ID`, `reviews status`, `reviews claim`,
+and `reviews decide`. Follow their advertised schemas or `--help`; do not invent
+a project-wide review-list endpoint or a task status filter that is not exposed.
+
 ### Continue after each task
 
 Unless the user's request narrows the scope, keep claiming eligible tasks in the
@@ -113,10 +147,10 @@ next task.
    ended. Submit the candidate, or checkpoint and release if pausing that task.
    Never abandon ownership or release live or uncertain holds to move on.
 2. Refresh project instructions, policy, decisions, and the eligible queue,
-   following pagination. Select the next task within the user's authorized scope
-   by live priority, dependencies, and your capabilities. Claim it with a fresh
-   attempt and prepare a separate worktree for code changes; reuse the same
-   authenticated session while it remains valid.
+   following pagination. Apply review-first selection above before taking new
+   implementation work. Claim the selected task or review with a fresh attempt
+   through its appropriate workflow and prepare a separate worktree for code
+   changes; reuse the same authenticated session while it remains valid.
 3. Repeat until no eligible work remains or required input, access, or capability
    prevents further authorized progress. Report that state and any pending review
    or integration. Do not invent tasks, start repeated polling, or schedule future
@@ -143,13 +177,17 @@ JSON text. Follow this sequence without using a native launcher:
 2. Read `coordinator_orientation` for the bound project, then
    `coordinator_workflow_policy`, `coordinator_decisions_list`, and
    `coordinator_tasks_list`. Read the entire orientation and follow pagination.
-3. Read the selected task with `coordinator_task_get`. Acknowledge the exact
+3. Apply review-first selection above and read the selected subject task with
+   `coordinator_task_get`. Acknowledge the exact
    current instruction version, required sections and project policy revision
    with `coordinator_instructions_ack`; incomplete instructions are a blocker.
-4. Call `coordinator_claim` with the observed task ID/revision and required schema
-   fields. Persist the returned attempt ID, generation and renewal cadence.
+4. For an eligible review, call `coordinator_activity_claim` with its observed
+   activity, submission and policy revisions. Otherwise call `coordinator_claim`
+   for the selected implementation task with its observed task ID/revision.
+   Persist the returned attempt ID, generation and renewal cadence.
 5. Use `coordinator_attempt_renew`, `coordinator_checkpoint`, and
-   `coordinator_attempt_release` for subsequent ownership. A bounded startup test
+   the appropriate `coordinator_activity_release` or `coordinator_attempt_release`
+   for subsequent ownership. A bounded startup test
    still claims, checkpoints and releases even when the CLI is absent.
 
 For every MCP mutation, save a new idempotency_key and the exact tool arguments
@@ -172,6 +210,14 @@ agent-coordinator --session SESSION_NAME connect --harness HARNESS_NAME --capabi
 agent-coordinator --session SESSION_NAME tasks list --limit 50 --json
 agent-coordinator --session SESSION_NAME checks list --json
 agent-coordinator --session SESSION_NAME decisions list --json
+```
+
+Apply review-first selection above. Inspect waiting-review subjects with
+`reviews list --task TASK_ID`, then claim an eligible review using `reviews claim`
+and the exact revisions. If no review is eligible, inspect and claim the selected
+implementation task:
+
+```text
 agent-coordinator --session SESSION_NAME tasks show --id TASK_ID --json
 agent-coordinator --session SESSION_NAME claim --task TASK_ID --revision CURRENT_REVISION --json
 ```
@@ -188,9 +234,10 @@ Lists, connect, and old receipts grant no ownership.
 
 ### Ownership and local capabilities
 
-Both transports return a claim with `data.claim.attempt.id`,
+Ordinary task claims return `data.claim.attempt.id`,
 `data.claim.attempt.generation`, `data.claim.lease_remaining_ms`, and
-`data.renew_after_seconds`. Retain these exact values. Renew before expiry using
+`data.renew_after_seconds`. Review activity claims return their attempt in
+`data.attempt`; retain its ID, generation and lease information. Renew before expiry using
 a monotonic local clock with a network safety margin. Start work only after the
 claim succeeds. Read the project's repository engineering conventions (for
 example CONTRIBUTING.md) as well as live policy. MCP can coordinate tasks without
