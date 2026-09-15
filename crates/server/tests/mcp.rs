@@ -563,6 +563,12 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
             .unwrap()
             .contains(coordinator_server::discovery::REVIEW_SELECTION_INSTRUCTIONS)
     );
+    assert!(
+        legacy.body["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(coordinator_server::discovery::WORKTREE_CLEANUP_INSTRUCTIONS)
+    );
     let bootstrap = coordinator_server::discovery::agent_startup();
     assert_eq!(
         bootstrap["connection_preference"][0],
@@ -639,6 +645,23 @@ async fn cli_free_bootstrap_claims_and_releases_when_local_capability_is_missing
             .as_str()
             .unwrap()
             .contains(coordinator_server::discovery::CONTINUATION_INSTRUCTIONS)
+    );
+    assert!(
+        orientation["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(coordinator_server::discovery::WORKTREE_CLEANUP_INSTRUCTIONS)
+    );
+    assert_eq!(
+        orientation["completion_workflow"]["steps"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        &format!(
+            "8. {}",
+            coordinator_server::discovery::WORKTREE_CLEANUP_INSTRUCTIONS
+        )
     );
     let ack = fixture.tool(&caller, "coordinator_instructions_ack", tool_args(json!({
         "project_id":project,"policy_revision":orientation["policy_revision"],

@@ -161,6 +161,8 @@ next task.
    to termination, and release reservations only when their resource use has
    ended. Submit the candidate, or checkpoint and release if pausing that task.
    Never abandon ownership or release live or uncertain holds to move on.
+   Retain worktrees while review or integration is pending. After service-confirmed
+   completion, remove eligible task worktrees as described below before continuing.
 2. Refresh project instructions, policy, decisions, and the eligible queue,
    following pagination. Apply review-first selection above before taking new
    implementation work. Claim the selected task or review with a fresh attempt
@@ -366,6 +368,27 @@ eligible principal. Integration validates exact source and serializes publicatio
 to a shared repository/target. An uncertain push must be reconciled, not repeated
 as a new side effect. A commit or push alone is not task completion; only the
 guarded service finalization records done and releases dependencies.
+
+### Remove completed task worktrees
+
+After a fresh task read confirms the subject task is `done`, the completing agent
+removes its task-specific implementation and integration worktrees. Submission,
+review approval, or publication alone does not authorize removal. Always preserve
+the main parent checkout and any main target checkout, even when they were used
+for the task; preserve unrelated worktrees and branches unless separately authorized.
+
+Save commits, handoff, and required logs/artifacts outside the worktrees first.
+Match each exact resolved path and Git worktree identity against the task's
+registered checkout and `git worktree list --porcelain`; never infer ownership
+from a directory name. Confirm no agent or live/uncertain job still uses the tree.
+Inspect tracked changes, untracked files, and meaningful ignored files before
+removal; a clean tracked-file status alone is insufficient. Retain the tree if
+work or evidence is unsaved, ownership is unclear, or inspection fails.
+
+From outside the worktree, run `git worktree remove` with its verified absolute
+path, without `--force` or recursive filesystem deletion. Verify removal and
+report the removed path, or the retained path and concrete blocker, in the final
+handoff. Cleanup is local agent work; the service does not delete worktrees.
 
 Use live `context`, `knowledge`, `decisions`, task history, and artifact records
 for shared facts and progress. No local BACKLOG.md or HANDOFF.md is required to

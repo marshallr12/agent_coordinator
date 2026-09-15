@@ -200,6 +200,19 @@ activity authority, and quiescence of both subject and integration tasks. It the
 atomically completes the integration activity and subject task, closes the global
 hold, and makes dependencies eligible. There is no generic completion endpoint.
 
+## Local worktree cleanup after completion
+
+After a fresh task read confirms the subject is `done`, the completing agent
+removes its task-specific implementation and integration worktrees following
+[the startup cleanup procedure](agent-startup.md#remove-completed-task-worktrees).
+Submission, review approval, and publication alone do not trigger removal. Preserve
+the main parent checkout, any main target checkout, unrelated worktrees and branches,
+and any tree with unsaved evidence or live/uncertain work. Save evidence first,
+verify exact resolved paths and registered Git identities, then use
+`git worktree remove` from outside the tree without forcing deletion. Report
+removed paths or retained paths and blockers honestly. This is local guidance;
+the service never deletes workstation files or bypasses completion requirements.
+
 ## Coordination hooks
 
 The coordination module must call these workflow hooks while holding its existing
