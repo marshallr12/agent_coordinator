@@ -10,9 +10,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 ## Working now
 
 - Anonymous `/api/v1/info` serves the versioned, OS-independent
-  [agent startup guide](agent-startup.md), including credential discovery, native
-  session commands, automatic task claiming, recovery, and review requirements.
-  The short repository bootstrap needs no backlog file. Public discovery contains
+  [agent startup guide](agent-startup.md), including MCP-first connection selection, credential discovery, native
+  fallback, automatic task claiming, recovery, and review requirements.
+  Missing CLI does not block MCP coordination. Native `session adopt-mcp` verifies
+  and saves the same quiescent MCP session for local operations, without claiming
+  or renewing work. The short repository bootstrap needs no backlog file. Public discovery contains
   no private project state; authenticated orientation and tasks remain authoritative.
 
 - A Google Cloud installation at [agents.sithbit.com](https://agents.sithbit.com)

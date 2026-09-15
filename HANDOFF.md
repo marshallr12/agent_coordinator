@@ -1,5 +1,16 @@
 # Implementation handoff — 2026-09-14
 
+## MCP-first bootstrap
+
+Startup now prefers a configured authenticated MCP connection and uses the native
+CLI as fallback. Public discovery schema 2 separates coordination from local
+workstation capabilities and gives explicit missing-client and ownership-safe
+transition procedures. MCP's own instructions no longer require a native launcher.
+The native `session adopt-mcp` command validates and adopts an existing quiescent
+MCP session using protected environment values; it never claims or renews work.
+CLAUDE.md remains a minimal bootstrap. Deployment/test evidence belongs to the
+live service task, not a local task queue.
+
 ## Service discovery migration
 
 The public info endpoint now embeds the canonical `book/src/docs/agent-startup.md`

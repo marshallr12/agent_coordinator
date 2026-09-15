@@ -182,7 +182,7 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
     assert_eq!(discovery.headers["cache-control"], "no-store");
     let data = &discovery.body["data"];
     assert_eq!(data["api_version"], "v1");
-    assert_eq!(data["agent_startup"]["schema_version"], 1);
+    assert_eq!(data["agent_startup"]["schema_version"], 2);
     let guide = data["agent_startup"]["guide"].as_str().unwrap();
     assert_eq!(
         guide,

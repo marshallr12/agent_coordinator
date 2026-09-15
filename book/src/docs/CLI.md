@@ -66,6 +66,47 @@ For local development only, `--allow-insecure-loopback` permits `http://localhos
 or a loopback IP address. Other HTTP origins are rejected. Redirects are never
 followed, and the CLI accepts only `/api/v1` and `/healthz` request paths.
 
+## Adopt an existing MCP session
+
+An authenticated MCP connection can coordinate work without this CLI. To perform
+local work using the same independently provisioned session, pause MCP writes and
+resolve any uncertain requests using their retained keys and bodies, then run:
+
+```text
+agent-coordinator --session LOCAL_NAME session adopt-mcp --mcp-writes-quiescent --json
+```
+
+The trusted host must supply these full environment variables privately:
+
+| Variable | Value |
+| --- | --- |
+| AGENT_COORDINATOR_MCP_TOKEN | Existing service credential |
+| AGENT_COORDINATOR_MCP_SESSION_ID | Existing unique harness session ID |
+| AGENT_COORDINATOR_MCP_SESSION_PROOF | Existing secret session proof |
+| AGENT_COORDINATOR_MCP_URL | Exact bound origin followed by /mcp |
+| AGENT_COORDINATOR_MCP_PROJECT_ID | Project ID from the repository binding |
+
+These variable names and command arguments work on both supported operating
+systems. Use the host's protected environment/secret facility; do not put values
+in command arguments, repository configuration, request JSON, logs or model output.
+The host supplies the same protected environment for subsequent CLI operations.
+The CLI accepts the origin-bound MCP credential when a regular CLI credential
+override is not configured, without copying that token into another store.
+
+Adoption verifies the existing open remote session, credential and workstation,
+reads project orientation, and atomically stores private native session state.
+It does not register a session, claim work, renew a lease, or migrate the MCP
+pending-request journal. Repeating identical adoption is safe; conflicting local
+identity or pending native work is rejected. The --mcp-writes-quiescent flag is an
+explicit assertion that MCP writes are paused, not a remote locking mechanism.
+The default workstation is the local host identity; use --workstation only for
+an explicit identity already configured for this same workstation and harness.
+
+After adoption, inspect the attempt and its current generation before local work.
+Serialize native and MCP mutations. If sharing protected session state is not
+possible, checkpoint and release through MCP before claiming through a separate
+CLI session. Never use another session's task authority or bypass recovery.
+
 ## Foundation workflow
 
 Connect creates a harness session on its first run and reconciles the saved

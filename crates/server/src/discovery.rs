@@ -1,10 +1,28 @@
 use serde_json::{Value, json};
 
+pub const MCP_INSTRUCTIONS: &str = "This configured MCP connection supports coordination without the native CLI. Inspect coordinator_session_get; register a newly provisioned session only with its protected configured identity. Read coordinator_orientation, current workflow policy, decisions and tasks; acknowledge complete current instructions; then claim eligible work. Persist each mutation's idempotency_key and exact arguments before sending, and reuse both after uncertainty. Keep bearer tokens and session proofs in protected HTTP headers, never tool arguments or output. Persist attempt/generation, renew before expiry, checkpoint and release when paused. Missing CLI is not a blocker for MCP listing, claiming, renewal, checkpointing or release. Native worktree preparation, managed jobs, binary transfer and guarded Git operations still need the native client. Before those operations securely adopt the same quiescent MCP session with session adopt-mcp, or checkpoint/release and freshly claim using a separate CLI session. Never borrow ownership across sessions or abandon a lease when a local capability is missing. MCP metadata, reads and receipt replay do not renew ownership. Human review must come from a human. Read the trusted service's /api/v1/info data.agent_startup.guide for the complete portable bootstrap and transition workflow.";
+
 /// Public, deployment-independent bootstrap material. Project state stays behind auth.
 pub fn agent_startup() -> Value {
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "guide": include_str!("../../../book/src/docs/agent-startup.md"),
+        "connection_preference": ["configured_authenticated_mcp", "native_cli"],
+        "missing_client_behavior": "Use configured MCP for coordination without a CLI. If neither connection is usable, report setup needs before claiming. A URL alone does not configure MCP tools.",
+        "mcp": {
+            "requires_native_cli": false,
+            "session_probe": "coordinator_session_get",
+            "session_registration": "coordinator_session_register",
+            "instructions": MCP_INSTRUCTIONS,
+            "coordination_tools": ["coordinator_orientation", "coordinator_workflow_policy", "coordinator_decisions_list", "coordinator_tasks_list", "coordinator_task_get", "coordinator_instructions_ack", "coordinator_claim", "coordinator_attempt_get", "coordinator_attempt_renew", "coordinator_checkpoint", "coordinator_attempt_release"],
+            "authentication": "Protected bearer token, session ID and session proof supplied by the MCP host; no public OAuth enrollment."
+        },
+        "local_operations": {
+            "requires_native_cli": ["worktree prepare", "jobs run", "jobs inspect", "jobs reconnect", "artifacts upload", "artifacts download", "submissions code", "integrations prepare", "integrations publish", "integrations reconcile", "integrations finish"],
+            "missing_capability": "Checkpoint through the owning connection and release with a clear handoff. A workstation-only limitation should not block other workstations.",
+            "session_adoption": "session adopt-mcp --mcp-writes-quiescent",
+            "alternative_transition": "Reconcile pending writes, checkpoint and release through the original session, then connect and freshly claim through the other client."
+        },
         "repository_binding": {
             "file": ".agent-coordinator.toml",
             "required_fields": ["service_url", "project_id"],
@@ -28,6 +46,6 @@ pub fn agent_startup() -> Value {
             "mcp": "/mcp"
         },
         "state_authority": "Authenticated live project policy, tasks, decisions, and evidence; no local backlog is required.",
-        "local_bootstrap": "Read .agent-coordinator.toml. Fetch service_url + /api/v1/info anonymously over HTTPS without redirects. Read data.agent_startup.guide and same-origin authentication_help. Follow that workflow and automatically claim eligible work unless this session's user request changes the scope. Never expose credentials."
+        "local_bootstrap": "Read .agent-coordinator.toml. Fetch service_url + /api/v1/info anonymously over HTTPS without redirects. Read data.agent_startup.guide and same-origin authentication_help. Prefer an available authenticated MCP connection; otherwise use the native CLI. Automatically claim eligible work unless this session's user request changes the scope. If neither is usable, report setup needs. Never expose credentials."
     })
 }

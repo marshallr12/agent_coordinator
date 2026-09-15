@@ -3,7 +3,10 @@
 Agent Coordinator exposes a vendor-neutral Streamable HTTP endpoint at `/mcp`.
 It uses the same agent credential, durable harness session, project policy,
 ownership generations, clock safeguards, and mutation receipts as the REST API.
-Connecting or registering a harness session does not claim work.
+Connecting or registering a harness session does not claim work. Prefer an
+already configured authenticated MCP connection for coordination; the native CLI
+is optional until a local workstation operation needs it. See the
+[portable startup guide](agent-startup.md) for connection selection and fallback.
 
 The endpoint is a stateless MCP transport. It does not issue or depend on an
 MCP transport session. `X-Coordinator-Session` identifies the durable Agent
@@ -49,8 +52,9 @@ X-Coordinator-Session = "AGENT_COORDINATOR_MCP_SESSION_ID"
 X-Coordinator-Session-Proof = "AGENT_COORDINATOR_MCP_SESSION_PROOF"
 ```
 
-The safest way to supply those variables while retaining native CLI continuity
-is the packaged launcher. First connect the stable harness session for this
+A compatible host can provide these protected values and register its own session
+without installing the coordinator CLI. When the CLI is available, the packaged
+launcher is an alternative that retains native CLI continuity. First connect the stable harness session for this
 repository binding, then launch one trusted local MCP client executable:
 
 ```sh
@@ -179,11 +183,15 @@ MCP can inspect the resulting jobs, artifacts, workflow, and history. Recording
 a checkout, publication intent, or integration result through MCP does not prove
 that the corresponding local Git or process operation occurred.
 
-An independently provisioned MCP-only session does not share the CLI's protected
-session state. Do not run native commands against work owned by that session
-unless the native client was securely supplied the exact same session identity
-and proof. A similar harness name is not sufficient, and another session cannot
-borrow its attempt authority.
+An independently provisioned MCP-only session can use `session adopt-mcp` to
+create protected native state with its exact identity, after quiescing writes and
+reconciling pending MCP requests. See [session adoption](CLI.md#adopt-an-existing-mcp-session)
+for the protected environment contract. Adoption is observational on the service;
+it does not claim or renew work. A similar harness name is not sufficient, and
+another session cannot borrow attempt authority. If secure adoption is unavailable,
+checkpoint and release through MCP, then connect and freshly claim through the CLI.
+A missing CLI still permits MCP checkpoint/release; it is not a reason to abandon
+a lease or install unverified software.
 
 ## Interoperability expectations
 

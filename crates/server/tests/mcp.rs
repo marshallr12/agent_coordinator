@@ -546,6 +546,22 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
     .await;
     assert_eq!(legacy.status, StatusCode::OK);
     assert_eq!(legacy.body["result"]["protocolVersion"], LEGACY_PROTOCOL);
+    assert_eq!(
+        legacy.body["result"]["instructions"],
+        coordinator_server::discovery::MCP_INSTRUCTIONS
+    );
+    let bootstrap = coordinator_server::discovery::agent_startup();
+    assert_eq!(
+        bootstrap["connection_preference"][0],
+        "configured_authenticated_mcp"
+    );
+    assert_eq!(bootstrap["mcp"]["requires_native_cli"], false);
+    for advertised in bootstrap["mcp"]["coordination_tools"].as_array().unwrap() {
+        assert!(
+            names.contains(&advertised.as_str().unwrap()),
+            "Bootstrap advertised an unavailable MCP tool"
+        );
+    }
     assert!(!legacy.headers.contains_key("mcp-session-id"));
 
     let mut legacy_list = Request::builder()
@@ -570,6 +586,108 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
         legacy_list.body["result"]["tools"],
         modern.body["result"]["tools"]
     );
+}
+
+#[tokio::test]
+async fn cli_free_bootstrap_claims_and_releases_when_local_capability_is_missing() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("mcp-only-bootstrap").await;
+    let task = fixture
+        .task(&project, "Coordinate without a native client")
+        .await;
+    let mut caller = fixture.a.clone();
+    caller.session = Uuid::new_v4().to_string();
+    caller.proof = secret();
+    let registered = fixture.tool(&caller, "coordinator_session_register", tool_args(json!({
+        "session_id":caller.session,"workstation_id":"mcp-only-host","harness":"mcp-only","capabilities":["code"]
+    }), "bootstrap-register")).await;
+    registered.tool_payload();
+    let session = fixture
+        .tool(&caller, "coordinator_session_get", json!({}))
+        .await;
+    assert_eq!(session.tool_payload()["data"]["id"], caller.session);
+    let orientation = fixture
+        .tool(
+            &caller,
+            "coordinator_orientation",
+            json!({"project":project}),
+        )
+        .await;
+    let orientation = &orientation.tool_payload()["data"];
+    assert_eq!(orientation["instructions_complete"], true);
+    let ack = fixture.tool(&caller, "coordinator_instructions_ack", tool_args(json!({
+        "project_id":project,"policy_revision":orientation["policy_revision"],
+        "instruction_version":coordinator_core::INSTRUCTION_VERSION,"sections":orientation["required_sections"]
+    }), "bootstrap-ack")).await;
+    ack.tool_payload();
+    let tasks = fixture
+        .tool(
+            &caller,
+            "coordinator_tasks_list",
+            json!({"project":project}),
+        )
+        .await;
+    assert_eq!(tasks.tool_payload()["data"]["items"][0]["id"], task["id"]);
+    let claim = fixture
+        .tool(
+            &caller,
+            "coordinator_claim",
+            json!({
+                "project":project,"body":claim_body(&task),"idempotency_key":"bootstrap-claim"
+            }),
+        )
+        .await;
+    let attempt = &claim.tool_payload()["data"]["claim"]["attempt"];
+    let checkpoint = fixture.tool(&caller, "coordinator_checkpoint", json!({
+        "project":project,"attempt":attempt["id"],"idempotency_key":"bootstrap-checkpoint",
+        "body":{"generation":attempt["generation"],"summary":"Local CLI unavailable on this workstation","next_step":"Release; another equipped workstation can freshly claim."}
+    })).await;
+    checkpoint.tool_payload();
+    let wrong_session = fixture.tool(&fixture.b, "coordinator_attempt_release", json!({
+        "project":project,"attempt":attempt["id"],"idempotency_key":"bootstrap-wrong-session",
+        "body":{"generation":attempt["generation"],"summary":"Borrowed ownership","blocked":false}
+    })).await;
+    wrong_session.tool_error("operation_not_permitted");
+    let inspected = fixture
+        .tool(
+            &caller,
+            "coordinator_attempt_get",
+            json!({"project":project,"attempt":attempt["id"]}),
+        )
+        .await;
+    assert_eq!(
+        inspected.tool_payload()["data"]["attempt"]["expires_at"],
+        attempt["expires_at"]
+    );
+    let release = fixture.tool(&caller, "coordinator_attempt_release", json!({
+        "project":project,"attempt":attempt["id"],"idempotency_key":"bootstrap-release",
+        "body":{"generation":attempt["generation"],"summary":"Workstation limitation only; reclaim with a fresh revision before edits.","blocked":false}
+    })).await;
+    release.tool_payload();
+    let task = fixture
+        .tool(
+            &caller,
+            "coordinator_task_get",
+            json!({"project":project,"task":task["id"]}),
+        )
+        .await;
+    assert_eq!(task.tool_payload()["data"]["work_status"], "ready");
+    assert!(task.tool_payload()["data"]["current_attempt_id"].is_null());
+    for reply in [
+        registered,
+        session,
+        ack,
+        tasks,
+        claim,
+        checkpoint,
+        wrong_session,
+        inspected,
+        release,
+        task,
+    ] {
+        assert!(!reply.text.contains(&caller.token));
+        assert!(!reply.text.contains(&caller.proof));
+    }
 }
 
 #[tokio::test]
