@@ -210,9 +210,9 @@
 
   function showView(view) {
     state.currentView = view;
-    ['overview', 'tasks', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
-    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (view === 'task-detail' && button.dataset.view === 'tasks')));
-    if (view === 'tasks') { fillProjectSelect(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
+    ['overview', 'project', 'tasks', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
+    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (view === 'project' && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
+    if (view === 'tasks') { fillProjectSelect(); $('back-to-project').disabled = !state.projectId; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
   }
 
   function issuedCredentialFeedback(data) {
@@ -329,7 +329,25 @@
     fillSharedProject();
   }
 
-  function openProject(id) { state.projectId = text(id); state.taskCursor = null; state.tasks = []; $('project-select').value = state.projectId; $('new-task-button').disabled = false; $('refresh-tasks').disabled = false; showView('tasks'); loadTasks(); }
+  function openProject(id) {
+    const project = state.projects.find(item => text(item.id) === text(id));
+    if (!project) { showView('overview'); return; }
+    if (state.projectId !== text(id)) { state.taskCursor = null; state.tasks = []; }
+    state.projectId = text(id); state.selectedTaskId = '';
+    setText($('project-heading'), project.name || 'Unnamed project');
+    setText($('project-repository'), `${project.repository_url || 'Repository not configured'} · ${project.target_branch || 'Branch not set'}`);
+    showView('project'); $('project-heading').focus();
+  }
+  $('back-to-projects').addEventListener('click', () => showView('overview'));
+  $('back-to-project').addEventListener('click', () => openProject(state.projectId));
+  $('project-tasks-button').addEventListener('click', () => { showView('tasks'); loadTasks(); });
+  $('project-review-button').addEventListener('click', async () => {
+    const projectId = state.projectId;
+    try {
+      const reply = await request(`${projectPath(projectId)}/orientation`);
+      if (projectId === state.projectId && state.currentView === 'project') openReviewSettings(reply.data.project);
+    } catch (error) { setGlobalAlert(errorMessage(error), 'error'); }
+  });
 
   async function loadTasks(silent = false, append = false) {
     // Keep later pages readable until the operator explicitly refreshes them.

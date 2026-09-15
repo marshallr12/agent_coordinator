@@ -81,7 +81,23 @@
               <div id="projects-grid" class="project-grid" hidden></div>
             </section>
 
+            <section id="project-view" class="page-view" aria-labelledby="project-heading" hidden>
+              <div class="detail-back-row"><button id="back-to-projects" class="button text-button" type="button">← All projects</button></div>
+              <div class="page-heading"><div><p class="eyebrow">Project</p><h1 id="project-heading" tabindex="-1"></h1><p id="project-repository" class="muted"></p></div></div>
+              <article class="card project-work-card">
+                <div><h2>Tasks</h2><p class="muted">Create tasks, follow progress, and review submitted work for this project.</p></div>
+                <button id="project-tasks-button" class="button primary" type="button">Open task queue →</button>
+              </article>
+              <div class="section-heading"><div><h2>Project settings</h2><p class="muted">These settings apply across the project.</p></div></div>
+              <div class="project-settings-grid">
+                <article class="card"><h3>Policy & instructions</h3><p class="muted">Set project-wide instructions, ownership leases, and recovery rules.</p><button id="project-policy-button" class="button subtle" type="button">Project policy</button></article>
+                <article class="card"><h3>Review & integration</h3><p class="muted">Choose who reviews submitted work and whether integration needs human authorization.</p><button id="project-review-button" class="button subtle" type="button">Review & integration rules</button></article>
+                <article class="card"><h3>Required checks</h3><p class="muted">Configure the validation checks required before code can be integrated.</p><button id="workflow-settings" class="button subtle" type="button">Required check settings</button></article>
+              </div>
+            </section>
+
             <section id="tasks-view" class="page-view" aria-labelledby="tasks-heading" hidden>
+              <div class="detail-back-row"><button id="back-to-project" class="button text-button" type="button">← Project overview</button></div>
               <div class="page-heading">
                 <div><p class="eyebrow">Execution</p><h1 id="tasks-heading">Task queue</h1><p id="tasks-subtitle" class="muted">Choose a project to inspect its work.</p></div>
                 <button id="new-task-button" class="button primary" data-mutation="true" type="button" disabled><span aria-hidden="true">＋</span> New task</button>
@@ -91,8 +107,6 @@
                 <label class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
                 <button id="refresh-tasks" class="button subtle" type="button" disabled>Refresh</button>
                 <button id="objective-list-button" class="button subtle" type="button">Objectives</button>
-                <button id="project-policy-button" class="button subtle" type="button">Project policy</button>
-                <button id="workflow-settings" class="button subtle" type="button">Review & check settings</button>
               </div>
               <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
               <div id="tasks-list" class="tasks-list" hidden></div>
