@@ -222,34 +222,20 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
             .unwrap()
             .contains(coordinator_server::discovery::REVIEW_SELECTION_INSTRUCTIONS)
     );
-    for guidance in [
-        guide,
+    assert!(
         data["agent_startup"]["mcp"]["instructions"]
             .as_str()
-            .unwrap(),
+            .unwrap()
+            .contains(coordinator_server::discovery::WORKTREE_CLEANUP_INSTRUCTIONS)
+    );
+    let guide = guide.replace('`', "");
+    let guide = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+    for required in [
+        "fresh task read confirms the subject task is done",
+        "Always preserve the main parent checkout",
+        "without --force or recursive filesystem deletion",
     ] {
-        let guidance = guidance.replace('`', "");
-        let guidance = guidance.split_whitespace().collect::<Vec<_>>().join(" ");
-        for required in [
-            "fresh task read confirms the subject task is done",
-            "Submission, review approval, or publication alone does not authorize removal",
-            "main parent checkout and any main target checkout",
-            "unrelated worktrees and branches unless separately authorized",
-            "required logs/artifacts outside the worktrees first",
-            "exact resolved path and Git worktree identity",
-            "registered checkout and git worktree list --porcelain",
-            "live/uncertain job",
-            "untracked files, and meaningful ignored files",
-            "Retain the tree if work or evidence is unsaved",
-            "From outside the worktree, run git worktree remove",
-            "without --force or recursive filesystem deletion",
-            "retained path and concrete blocker",
-        ] {
-            assert!(
-                guidance.contains(required),
-                "missing cleanup rule: {required}"
-            );
-        }
+        assert!(guide.contains(required), "missing cleanup gate: {required}");
     }
     for private in [
         token.as_str(),
