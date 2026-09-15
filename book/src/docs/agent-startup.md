@@ -184,7 +184,10 @@ If MCP was launched with `agent-coordinator ... mcp-client`, it already shares t
 CLI's protected session; use that same local session name, serialize operations,
 and inspect the current attempt before ownership-dependent local work.
 
-An independently provisioned MCP session can be adopted by the native client:
+An independently provisioned MCP session can be adopted by the native client.
+First check `agent-coordinator session adopt-mcp --help`; an older installed
+client may lack this command even when its package version looks the same.
+If unavailable, use the checkpoint/release/fresh-claim alternative below.
 
 ```text
 agent-coordinator --session LOCAL_NAME session adopt-mcp --mcp-writes-quiescent --json

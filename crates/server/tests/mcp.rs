@@ -182,6 +182,7 @@ struct Reply {
 }
 
 impl Reply {
+    #[track_caller]
     fn tool_payload(&self) -> &Value {
         assert_eq!(self.status, StatusCode::OK);
         assert_ne!(self.body["result"]["isError"], true);
@@ -605,7 +606,7 @@ async fn cli_free_bootstrap_claims_and_releases_when_local_capability_is_missing
     let session = fixture
         .tool(&caller, "coordinator_session_get", json!({}))
         .await;
-    assert_eq!(session.tool_payload()["data"]["id"], caller.session);
+    assert_eq!(session.tool_payload()["data"]["session_id"], caller.session);
     let orientation = fixture
         .tool(
             &caller,
@@ -618,7 +619,7 @@ async fn cli_free_bootstrap_claims_and_releases_when_local_capability_is_missing
     let ack = fixture.tool(&caller, "coordinator_instructions_ack", tool_args(json!({
         "project_id":project,"policy_revision":orientation["policy_revision"],
         "instruction_version":coordinator_core::INSTRUCTION_VERSION,"sections":orientation["required_sections"]
-    }), "bootstrap-ack")).await;
+    }), "bootstrap-ack-instructions")).await;
     ack.tool_payload();
     let tasks = fixture
         .tool(
@@ -633,7 +634,7 @@ async fn cli_free_bootstrap_claims_and_releases_when_local_capability_is_missing
             &caller,
             "coordinator_claim",
             json!({
-                "project":project,"body":claim_body(&task),"idempotency_key":"bootstrap-claim"
+                "project":project,"body":claim_body(&task),"idempotency_key":"bootstrap-claim-task"
             }),
         )
         .await;
