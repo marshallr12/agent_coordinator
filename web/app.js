@@ -293,23 +293,16 @@
       const repo = el('p', 'repo', project.repository_url || 'Repository not configured');
       const projectId = text(project.id);
       const idLabel = el('p', 'project-id', `Project ID · ${projectId || 'Unavailable'}`);
-      const binding = document.createElement('details'); binding.className = 'project-binding';
-      const summary = el('summary', '', 'Repository binding');
-      const bindingContent = el('div', 'binding-content');
-      add(bindingContent, el('p', 'binding-help', 'Add this non-secret file as .agent-coordinator.toml before running the agent CLI.'));
-      const snippet = `service_url = ${JSON.stringify(location.origin)}\nproject_id = ${JSON.stringify(projectId)}`;
-      add(bindingContent, el('code', 'binding-snippet', snippet));
-      const copy = el('button', 'button subtle', 'Copy binding'); copy.type = 'button';
-      copy.addEventListener('click', async () => {
-        try { await navigator.clipboard.writeText(snippet); setText(copy, 'Copied'); }
-        catch (_) { setText(copy, 'Copy unavailable'); }
-        window.setTimeout(() => setText(copy, 'Copy binding'), 1600);
-      });
-      add(bindingContent, copy); add(binding, summary); add(binding, bindingContent);
+      const header = el('div', 'project-card-header');
+      const settings = el('button', 'button project-settings-button'); settings.type = 'button';
+      const gear = el('span', '', '⚙'); gear.setAttribute('aria-hidden', 'true'); add(settings, gear);
+      settings.setAttribute('aria-label', `Project settings for ${project.name || projectId}`);
+      settings.title = 'Project settings'; settings.addEventListener('click', () => openProjectSettings(project.id));
+      add(header, name); add(header, settings);
       const footer = el('div', 'project-card-footer');
       add(footer, el('span', 'project-meta', project.target_branch ? `Branch · ${project.target_branch}` : 'Branch not set'));
-      const open = el('button', 'project-open', 'Open project →'); open.type = 'button';
-      open.setAttribute('aria-label', `Open project ${project.name || projectId}`);
+      const open = el('button', 'project-open', 'Open tasks →'); open.type = 'button';
+      open.setAttribute('aria-label', `Open tasks for ${project.name || projectId}`);
       open.addEventListener('click', () => openProject(project.id));
       card.addEventListener('click', (event) => {
         if (event.target.closest('button, a, details, input, select, textarea')) return;
@@ -317,7 +310,7 @@
         if (selection && !selection.isCollapsed && (card.contains(selection.anchorNode) || card.contains(selection.focusNode))) return;
         openProject(project.id);
       });
-      add(footer, open); add(card, name); add(card, repo); add(card, idLabel); add(card, binding); add(card, footer); add(target, card);
+      add(footer, open); add(card, header); add(card, repo); add(card, idLabel); add(card, footer); add(target, card);
     });
   }
 
@@ -330,17 +323,30 @@
   }
 
   function openProject(id) {
+    state.projectId = text(id); state.selectedTaskId = ''; state.taskCursor = null; state.tasks = [];
+    showView('tasks'); loadTasks();
+  }
+  function openProjectSettings(id) {
     const project = state.projects.find(item => text(item.id) === text(id));
     if (!project) { showView('overview'); return; }
     if (state.projectId !== text(id)) { state.taskCursor = null; state.tasks = []; }
     state.projectId = text(id); state.selectedTaskId = '';
-    setText($('project-heading'), project.name || 'Unnamed project');
+    setText($('project-heading'), `${project.name || 'Unnamed project'} settings`);
     setText($('project-repository'), `${project.repository_url || 'Repository not configured'} · ${project.target_branch || 'Branch not set'}`);
+    const binding = $('project-binding-content'); clear(binding);
+    const snippet = `service_url = ${JSON.stringify(location.origin)}\nproject_id = ${JSON.stringify(state.projectId)}`;
+    add(binding, el('code', 'binding-snippet', snippet));
+    const copy = el('button', 'button subtle', 'Copy binding'); copy.type = 'button';
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(snippet); setText(copy, 'Copied'); }
+      catch (_) { setText(copy, 'Copy unavailable'); }
+      window.setTimeout(() => setText(copy, 'Copy binding'), 1600);
+    });
+    add(binding, copy);
     showView('project'); $('project-heading').focus();
   }
   $('back-to-projects').addEventListener('click', () => showView('overview'));
-  $('back-to-project').addEventListener('click', () => openProject(state.projectId));
-  $('project-tasks-button').addEventListener('click', () => { showView('tasks'); loadTasks(); });
+  $('back-to-project').addEventListener('click', () => showView('overview'));
   $('project-review-button').addEventListener('click', async () => {
     const projectId = state.projectId;
     try {

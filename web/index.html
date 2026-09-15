@@ -84,20 +84,17 @@
             <section id="project-view" class="page-view" aria-labelledby="project-heading" hidden>
               <div class="detail-back-row"><button id="back-to-projects" class="button text-button" type="button">← All projects</button></div>
               <div class="page-heading"><div><p class="eyebrow">Project</p><h1 id="project-heading" tabindex="-1"></h1><p id="project-repository" class="muted"></p></div></div>
-              <article class="card project-work-card">
-                <div><h2>Tasks</h2><p class="muted">Create tasks, follow progress, and review submitted work for this project.</p></div>
-                <button id="project-tasks-button" class="button primary" type="button">Open task queue →</button>
-              </article>
-              <div class="section-heading"><div><h2>Project settings</h2><p class="muted">These settings apply across the project.</p></div></div>
+              <p class="muted">These settings apply across the project.</p>
               <div class="project-settings-grid">
                 <article class="card"><h3>Policy & instructions</h3><p class="muted">Set project-wide instructions, ownership leases, and recovery rules.</p><button id="project-policy-button" class="button subtle" type="button">Project policy</button></article>
                 <article class="card"><h3>Review & integration</h3><p class="muted">Choose who reviews submitted work and whether integration needs human authorization.</p><button id="project-review-button" class="button subtle" type="button">Review & integration rules</button></article>
                 <article class="card"><h3>Required checks</h3><p class="muted">Configure the validation checks required before code can be integrated.</p><button id="workflow-settings" class="button subtle" type="button">Required check settings</button></article>
               </div>
+              <article class="card project-binding-card"><h2>Repository binding</h2><p class="muted">Save this as <code>.agent-coordinator.toml</code> in the root of your repository so agents connect to this project. It contains no credentials.</p><div id="project-binding-content" class="binding-content"></div></article>
             </section>
 
             <section id="tasks-view" class="page-view" aria-labelledby="tasks-heading" hidden>
-              <div class="detail-back-row"><button id="back-to-project" class="button text-button" type="button">← Project overview</button></div>
+              <div class="detail-back-row"><button id="back-to-project" class="button text-button" type="button">← All projects</button></div>
               <div class="page-heading">
                 <div><p class="eyebrow">Execution</p><h1 id="tasks-heading">Task queue</h1><p id="tasks-subtitle" class="muted">Choose a project to inspect its work.</p></div>
                 <button id="new-task-button" class="button primary" data-mutation="true" type="button" disabled><span aria-hidden="true">＋</span> New task</button>
