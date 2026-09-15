@@ -292,7 +292,7 @@ async fn fetch_rows(
             .bind(subject).bind(subject).bind(project).bind(subject).bind(project).bind(subject).bind(project).bind(subject).bind(project).bind(subject).bind(project).bind(subject).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
         "submissions" => sqlx::query("SELECT s.rowid cursor_id,'subject' relation,s.task_id related_task_id,s.* FROM submissions s WHERE s.project_id=? AND s.task_id=? AND s.rowid>? AND s.rowid<=? ORDER BY s.rowid LIMIT ?")
             .bind(project).bind(subject).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
-        "reviews" => sqlx::query("SELECT wa.rowid cursor_id,'workflow_activity' relation,wa.activity_task_id related_task_id,wa.* FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.kind IN ('agent_review','human_review') AND wa.rowid>? AND wa.rowid<=? ORDER BY wa.rowid LIMIT ?")
+        "reviews" => sqlx::query("SELECT wa.rowid cursor_id,'workflow_activity' relation,wa.activity_task_id related_task_id,wa.* FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.kind IN ('agent_review','human_review','either_review') AND wa.rowid>? AND wa.rowid<=? ORDER BY wa.rowid LIMIT ?")
             .bind(project).bind(subject).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,
         "integrations" => sqlx::query("SELECT wa.rowid cursor_id,'workflow_activity' relation,wa.activity_task_id related_task_id,wa.* FROM workflow_activities wa WHERE wa.project_id=? AND wa.subject_task_id=? AND wa.kind='integration' AND wa.rowid>? AND wa.rowid<=? ORDER BY wa.rowid LIMIT ?")
             .bind(project).bind(subject).bind(last).bind(cutoff).bind(take).fetch_all(c).await?,

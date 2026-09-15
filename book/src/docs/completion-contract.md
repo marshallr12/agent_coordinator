@@ -53,8 +53,17 @@ contributor session, blocks ordinary subject claims, and creates the applicable
 review and integration activities. The response is
 `{submission, subject_task_id, activities, next_actions}`.
 
-A code submission creates one `agent_review` and/or `human_review` activity from
-the pinned `review_mode`, plus one `integration` activity. A general submission
+A code submission creates review activities from the pinned `review_mode`,
+plus one `integration` activity. The modes are `agent`, `human`, `both`, `either`,
+and `none`. `both` requires an `agent_review` and a `human_review` approval.
+`either` creates one shared `either_review` activity: an eligible independent
+agent or a human may claim it, and one approval satisfies the review requirement.
+Only one session can own that slot at a time. Requesting changes requires a new
+submission; another reviewer cannot override the decision on the old candidate.
+Agent independence is enforced both when claiming and when deciding this shared
+review, including the existing opt-in rules for non-contributing subagents.
+The existing agent-only, human-only and no-review modes retain their behavior.
+A general submission
 creates only its configured reviews; with no review it completes atomically.
 Activities have stable IDs and linked internal task IDs. They are returned from
 `GET /api/v1/projects/{project}/tasks/{task}/workflow` and

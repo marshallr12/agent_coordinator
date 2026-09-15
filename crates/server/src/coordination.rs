@@ -226,7 +226,7 @@ async fn update_policy(
     body: Result<Json<PolicyInput>, JsonRejection>,
 ) -> Reply {
     let input = payload(body)?;
-    if !["none", "agent", "human", "both"].contains(&input.review_mode.as_str())
+    if !["none", "agent", "human", "both", "either"].contains(&input.review_mode.as_str())
         || !["agent", "manual"].contains(&input.recovery_mode.as_str())
         || !(30..=3600).contains(&input.lease_seconds)
     {

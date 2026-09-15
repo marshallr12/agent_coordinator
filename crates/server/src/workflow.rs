@@ -480,7 +480,8 @@ async fn submit(
 
     let need_agent = matches!(subject.review_mode.as_str(), "agent" | "both");
     let need_human = matches!(subject.review_mode.as_str(), "human" | "both");
-    let phase = if need_agent || need_human {
+    let need_either = subject.review_mode == "either";
+    let phase = if need_agent || need_human || need_either {
         "review"
     } else if input.kind == "code" {
         "integration"
@@ -514,6 +515,18 @@ async fn submit(
         )
         .await?;
     }
+    if need_either {
+        create_activity(
+            &mut mutation.tx,
+            &project,
+            &subject,
+            &submission,
+            "either_review",
+            1,
+            mutation.now,
+        )
+        .await?;
+    }
     if input.kind == "code" {
         let integration_activity = create_activity(
             &mut mutation.tx,
@@ -525,7 +538,7 @@ async fn submit(
             mutation.now,
         )
         .await?;
-        if need_agent || need_human {
+        if need_agent || need_human || need_either {
             sqlx::query("UPDATE tasks SET blocked_reason='Required reviews are pending.' WHERE id=(SELECT activity_task_id FROM workflow_activities WHERE id=?)").bind(integration_activity).execute(&mut *mutation.tx).await?;
         }
     } else if phase == "done" {
@@ -1191,7 +1204,7 @@ async fn publication_readiness(
 }
 
 async fn approvals_satisfied(c: &mut SqliteConnection, submission: &str) -> Result<bool, AppError> {
-    Ok(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM workflow_activities wa LEFT JOIN review_decisions rd ON rd.activity_id=wa.id AND rd.decision='approved' WHERE wa.submission_id=? AND wa.kind IN ('agent_review','human_review') AND rd.activity_id IS NULL")
+    Ok(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM workflow_activities wa LEFT JOIN review_decisions rd ON rd.activity_id=wa.id AND rd.decision='approved' WHERE wa.submission_id=? AND wa.kind IN ('agent_review','human_review','either_review') AND rd.activity_id IS NULL")
         .bind(submission).fetch_one(&mut *c).await?==0)
 }
 
@@ -1267,12 +1280,7 @@ async fn claim_activity(
         }
     }
     match ctx.kind.as_str() {
-        "agent_review" => {
-            if m.actor.kind != "agent" {
-                return Err(AppError::forbidden(
-                    "An agent session must own an independent agent review.",
-                ));
-            }
+        "agent_review" | "either_review" if m.actor.kind == "agent" => {
             ensure_independent_reviewer(
                 &mut m.tx,
                 &project,
@@ -1282,7 +1290,12 @@ async fn claim_activity(
             )
             .await?;
         }
-        "human_review" => human(&m.actor)?,
+        "human_review" | "either_review" => human(&m.actor)?,
+        "agent_review" => {
+            return Err(AppError::forbidden(
+                "An agent session must own an independent agent review.",
+            ));
+        }
         "integration" => {
             if !approvals_satisfied(&mut m.tx, &ctx.submission).await? {
                 return Err(AppError::conflict(
@@ -1628,7 +1641,7 @@ async fn review(
     let raw = activity_context(&mut m.tx, &project, &id).await?;
     let ctx = owned_activity(&mut m, &project, &id, input.generation, &raw.kind).await?;
     ensure_activity_decisions(&mut m, &project, &ctx).await?;
-    if !["agent_review", "human_review"].contains(&ctx.kind.as_str())
+    if !["agent_review", "human_review", "either_review"].contains(&ctx.kind.as_str())
         || input.submission_id != ctx.submission
     {
         return Err(AppError::conflict(
@@ -1643,7 +1656,7 @@ async fn review(
             "The authenticated actor type does not match this review slot.",
         ));
     }
-    if ctx.kind == "agent_review" {
+    if m.actor.kind == "agent" {
         let reviewer_session = session(&m.actor)?.to_owned();
         ensure_independent_reviewer(
             &mut m.tx,
@@ -2454,6 +2467,7 @@ async fn create_activity(
     let title = match kind {
         "agent_review" => format!("Agent review: {}", subject.title),
         "human_review" => format!("Human review: {}", subject.title),
+        "either_review" => format!("Agent or human review: {}", subject.title),
         _ => format!("Integrate: {}", subject.title),
     };
     let acceptance = serde_json::to_string(&vec![match kind {

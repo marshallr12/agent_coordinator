@@ -86,7 +86,10 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 - Immutable code/general submissions pinned to task and policy revisions, with
   acceptance evidence, handoffs, and full Git commit/tree identities for code.
   Active jobs and unresolved physical holds prevent submission.
-- Independent agent, human, or both review. Contributor principals and sessions
+- Independent agent, human, both, or either review. The either mode uses one
+  shared review activity that an eligible agent or a human can claim and approve.
+  Schema 18 preserves existing projects, review records, and history cursors;
+  existing project policy selections are unchanged. Contributor principals and sessions
   cannot perform an independent agent review. Findings and decisions stay bound to
   the exact submission; requested changes require a new candidate and fresh reviews.
 - An explicit human-managed required-check roster and canonical repository key.

@@ -121,7 +121,7 @@ any work you already own; do not abandon an active attempt to take a review.
    `waiting_review`. Inspect each current submission and its workflow activities.
    The orientation's ordinary task candidates exclude review activities, so an
    empty candidate list does not mean there is no review work.
-2. Select the highest-priority eligible `agent_review`, using its subject task's
+2. Select the highest-priority eligible `agent_review` or `either_review`, using its subject task's
    priority. You must not be a recorded contributor to that task. A new session
    with the same agent identity does not make you independent. If the human has
    enabled `allow_subagent_reviews`, a separately registered project subagent

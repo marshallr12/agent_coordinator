@@ -1696,7 +1696,10 @@ async fn workflow_list(
         activities.retain(|activity| {
             let kind = activity.get("kind").and_then(Value::as_str);
             match activity_kind {
-                "review" => matches!(kind, Some("agent_review" | "human_review")),
+                "review" => matches!(
+                    kind,
+                    Some("agent_review" | "human_review" | "either_review")
+                ),
                 expected => kind == Some(expected),
             }
         });
@@ -1788,7 +1791,10 @@ async fn require_activity_attempt(
         .unwrap_or(&body);
     let kind = activity.get("kind").and_then(Value::as_str);
     let kind_matches = match expected_kind {
-        "review" => matches!(kind, Some("agent_review" | "human_review")),
+        "review" => matches!(
+            kind,
+            Some("agent_review" | "human_review" | "either_review")
+        ),
         expected => kind == Some(expected),
     };
     if !kind_matches {

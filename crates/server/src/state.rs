@@ -507,7 +507,22 @@ impl AppState {
             .connect_with(options)
             .await?;
         if initialize {
-            sqlx::migrate!("./migrations").run(&pool).await?;
+            // Table-rebuilding migrations need foreign keys disabled outside their
+            // transaction. Migration 18 checks every foreign key before committing.
+            // Restore enforcement before returning this connection to the pool;
+            // close it on error so requests can never inherit disabled enforcement.
+            let mut migration_connection = pool.acquire().await?;
+            migration_connection.close_on_drop();
+            sqlx::query("PRAGMA foreign_keys=OFF")
+                .execute(&mut *migration_connection)
+                .await?;
+            sqlx::migrate!("./migrations")
+                .run(&mut *migration_connection)
+                .await?;
+            sqlx::query("PRAGMA foreign_keys=ON")
+                .execute(&mut *migration_connection)
+                .await?;
+            migration_connection.return_to_pool().await;
         } else {
             validate_current_schema(&pool).await?;
         }

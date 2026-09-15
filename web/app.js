@@ -637,7 +637,7 @@
     const target = $('workflow-content'); clear(target); const workflow = data.workflow || {}; const submission = workflow.submission;
     if (!submission) { add(target, el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.')); return; }
     const guidance = {
-      review: 'Work has been submitted for review. The submission is a saved version of the result and its evidence; edits require a new submission. ' + ((workflow.activities || []).some(activity => activity.kind === 'human_review') ? 'Review the evidence below, then claim an available human review to approve it or request changes. Claiming reserves the review for you; it does not approve the work.' : 'An independent agent must claim the required review and approve the work or request changes.'),
+      review: 'Work has been submitted for review. The submission is a saved version of the result and its evidence; edits require a new submission. ' + ((workflow.activities || []).some(activity => activity.kind === 'either_review') ? 'An independent agent or a human may claim this review. One approval satisfies the review requirement; requesting changes requires a new submission. Claiming reserves the review and does not approve the work.' : (workflow.activities || []).some(activity => activity.kind === 'human_review') ? 'Review the evidence below, then claim an available human review to approve it or request changes. Claiming reserves the review for you; it does not approve the work.' : 'An independent agent must claim the required review and approve the work or request changes.'),
       integration: 'The submitted code is awaiting integration: an agent must validate the required checks, publish the result, and finalize the task. If shown, Authorize integration gives permission to proceed.',
       revision_needed: 'Changes are needed. An agent must claim the task, revise the work, and submit a new version for review. The previous submission stays in the history.',
       done: 'This submission has completed the required workflow.'
@@ -677,7 +677,7 @@
       if (activity.authorization) add(entry, el('p', '', `${activity.authorization.valid === false ? 'Invalidated authorization' : 'Human authorization'}: ${activity.authorization.summary}`));
       const action = (label, callback, help) => { const button = el('button', 'button subtle', label); button.type = 'button'; button.dataset.mutation = 'true'; button.addEventListener('click', callback); add(entry, button); if (help) contextualHelp(entry, button, label, help); };
       if (state.actor?.kind === 'human' && !['done','completed','canceled'].includes(activity.status)) {
-        if (activity.kind === 'human_review' && !(workflow.blockers || []).length) {
+        if (['human_review', 'either_review'].includes(activity.kind) && !(workflow.blockers || []).length) {
           const current = attempt?.state === 'active' && attempt.valid_by_time === true && attempt.owner_authorized === true;
           if (current && attempt.owner_id === actorId() && attempt.session_id === state.actor.session_id) action('Record human review', () => openHumanReview(activity, submission, attempt));
           else if (!current) action('Claim human review', () => workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/claim`, {expected_submission_id: submission.id, expected_project_policy_revision: submission.project_policy_revision, expected_workflow_policy_revision: submission.workflow_policy_revision}, 'review claim', response => openHumanReview(activity, submission, response.attempt)), 'Reserve this review for your signed-in session and open the review form. Read the submission and acceptance evidence first. You will make a separate decision to approve or request changes. Code still needs integration and required checks after approval.');
@@ -759,7 +759,7 @@
     const projectId = state.projectId;
     const view = workflowDialog('Review and integration rules', 'These rules apply to new submissions. Existing candidates remain bound to their recorded policy revision and need explicit reconciliation after a policy change.');
     const mode = view.field('review_mode', 'Required review', '', 'select');
-    for (const [value,label] of [['agent','Independent agent'],['human','Human'],['both','Independent agent and human'],['none','No required review']]) { const option = el('option', '', label); option.value = value; add(mode, option); } mode.value = project.review_mode;
+    for (const [value,label] of [['agent','Independent agent'],['human','Human'],['both','Independent agent and human'],['either','Independent agent or human'],['none','No required review']]) { const option = el('option', '', label); option.value = value; add(mode, option); } mode.value = project.review_mode;
     const integration = view.field('automatic_integration', 'Integration authorization', '', 'select');
     selectField(view, 'allow_subagent_reviews', 'Who may perform agent review?', project.allow_subagent_reviews || false, [['false','A separate credential principal'],['true','Also allow a registered, non-contributing subagent']]);
     for (const [value,label] of [['false','A human must authorize each candidate'],['true','Agents may integrate after required review']]) { const option = el('option', '', label); option.value = value; add(integration, option); } integration.value = String(project.automatic_integration);
@@ -969,7 +969,7 @@
       const project = (await request(`${projectPath(projectId)}/orientation`)).data.project;
       if (state.projectId !== projectId || actorId() !== currentActor) return;
       const view = workflowDialog('Project policy', 'Changes create a new policy revision. Agents must reread the policy before claiming work; existing submissions may need reconciliation.');
-      selectField(view, 'review_mode', 'Required review', project.review_mode, [['agent','Independent agent'],['human','Human'],['both','Independent agent and human'],['none','No required review']]);
+      selectField(view, 'review_mode', 'Required review', project.review_mode, [['agent','Independent agent'],['human','Human'],['both','Independent agent and human'],['either','Independent agent or human'],['none','No required review']]);
       selectField(view, 'recovery_mode', 'Expired work recovery', project.recovery_mode, [['agent','Agents may inspect and recover'],['manual','A human must inspect and recover']]);
       selectField(view, 'automatic_integration', 'Integration authorization', project.automatic_integration, [['false','Human authorization for each candidate'],['true','Agents may integrate approved candidates']]);
       selectField(view, 'agent_rule_editing', 'Agent policy changes', project.agent_rule_editing, [['false','Only humans may change binding rules'],['true','Agents may change binding project rules']]);

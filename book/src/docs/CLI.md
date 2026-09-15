@@ -629,7 +629,16 @@ agent-coordinator reviews decide \
 ```
 
 `decision` is `approved` or `changes_requested`; finding severity is `required`
-or `advisory`. An agent command cannot record a human review. The service checks
+or `advisory`. An agent command cannot record a human-only review. Under the
+**Independent agent or human** project policy (`review_mode: "either"`),
+`reviews list`, `status`, `claim`, and `decide` also handle the shared
+`either_review` activity. An independent agent uses these same commands; a human
+uses **Claim human review** in the dashboard. One approval is sufficient, and
+only one session can own the review at a time. A changes-requested decision
+requires a new submission. **Independent agent and human** (`both`) still
+requires both approvals. Changing project review policy does not convert
+existing submissions: stale candidates require reopening and fresh submission.
+The service checks
 the authenticated principal and independent contributor history, so changing a
 token or session cannot turn a contributor into an independent reviewer.
 

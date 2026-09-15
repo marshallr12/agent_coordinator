@@ -10,6 +10,7 @@ use coordinator_server::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sqlx::Connection;
 use std::sync::{
     Arc,
     atomic::{AtomicI64, Ordering},
@@ -219,8 +220,437 @@ impl Fixture {
         policy: i64,
         workflow_policy: i64,
     ) -> (StatusCode, Value) {
-        self.ack(c, p, policy).await;
+        if !c.human {
+            self.ack(c, p, policy).await;
+        }
         self.call(c,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/claim",a["id"].as_str().unwrap()),json!({"expected_submission_id":a["submission_id"],"expected_project_policy_revision":policy,"expected_workflow_policy_revision":workflow_policy})).await
+    }
+
+    async fn review_policy(&self, p: &str, mode: &str) {
+        let (status, result) = self.call(&self.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":1,"review_mode":mode,"recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true})).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["data"]["review_mode"], mode);
+    }
+}
+
+#[tokio::test]
+async fn either_review_accepts_each_actor_for_general_and_code_with_exact_receipts() {
+    let f = Fixture::new().await;
+    for human in [false, true] {
+        for kind in ["general", "code"] {
+            let repo = format!("https://example.test/either-{human}-{kind}.git");
+            let p = f.project(&format!("either-{human}-{kind}"), &repo).await;
+            f.review_policy(&p, "either").await;
+            if kind == "code" {
+                f.workflow_policy(&p, &repo).await;
+            }
+            let t = f.task(&p, kind, "Either reviewer").await;
+            let owner = f.claim(&f.a, &p, &t, 2).await;
+            let base = "1111111111111111111111111111111111111111";
+            let candidate = "2222222222222222222222222222222222222222";
+            let tree = "3333333333333333333333333333333333333333";
+            if kind == "code" {
+                f.checkout(&f.a, &p, &owner, base).await;
+            }
+            let submitted = f
+                .submit(
+                    &f.a,
+                    &p,
+                    &t,
+                    &owner,
+                    kind,
+                    2,
+                    (kind == "code").then_some(repo.as_str()),
+                    (kind == "code").then_some(base),
+                    (kind == "code").then_some(candidate),
+                    (kind == "code").then_some(tree),
+                )
+                .await;
+            assert_eq!(submitted["work_status"], "waiting_review");
+            assert_eq!(
+                submitted["activities"].as_array().unwrap().len(),
+                if kind == "code" { 2 } else { 1 }
+            );
+            let review = activity(&submitted, "either_review");
+            let workflow_revision = i64::from(kind == "code");
+            if kind == "code" {
+                let (status, _) = f
+                    .claim_activity(&f.c, &p, activity(&submitted, "integration"), 2, 1)
+                    .await;
+                assert_eq!(status, StatusCode::CONFLICT);
+            }
+            let (status, denied) = f
+                .claim_activity(&f.a, &p, review, 2, workflow_revision)
+                .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+            assert_eq!(denied["error"]["code"], "reviewer_not_independent");
+            let reviewer = if human { &f.admin } else { &f.b };
+            let (status, claimed) = f
+                .claim_activity(reviewer, &p, review, 2, workflow_revision)
+                .await;
+            assert_eq!(status, StatusCode::OK, "{claimed}");
+            let path = format!(
+                "/api/v1/projects/{p}/workflow-activities/{}/review",
+                review["id"].as_str().unwrap()
+            );
+            let body = json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Reviewed exact evidence","findings":[]});
+            let mut invalid = body.clone();
+            invalid["findings"] = json!([{"severity":"required","remedy":"Still needs work","evidence":"Unresolved"}]);
+            let (status, _) = f.call(reviewer, "POST", &path, invalid).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let key = Uuid::new_v4().to_string();
+            let (status, approved) =
+                call(f.app.clone(), reviewer, "POST", &path, &key, body.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{approved}");
+            assert_eq!(
+                approved["data"]["work_status"],
+                if kind == "code" {
+                    "waiting_integration"
+                } else {
+                    "done"
+                }
+            );
+            let (status, replay) = call(f.app.clone(), reviewer, "POST", &path, &key, body).await;
+            assert_eq!(status, StatusCode::OK, "{replay}");
+            assert_eq!(approved["data"], replay["data"]);
+            let (status, _) = f
+                .claim_activity(
+                    if human { &f.b } else { &f.admin },
+                    &p,
+                    review,
+                    2,
+                    workflow_revision,
+                )
+                .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            let (status, history) = f
+                .call(
+                    &f.a,
+                    "GET",
+                    &format!(
+                        "/api/v1/projects/{p}/tasks/{}/history?kind=reviews",
+                        t["id"].as_str().unwrap()
+                    ),
+                    Value::Null,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{history}");
+            assert!(history.to_string().contains("either_review"));
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM review_decisions WHERE submission_id=?"
+                )
+                .bind(review["submission_id"].as_str().unwrap())
+                .fetch_one(&f.state.pool)
+                .await
+                .unwrap(),
+                1
+            );
+            if kind == "code" {
+                let (status, result) = f
+                    .claim_activity(&f.c, &p, activity(&submitted, "integration"), 2, 1)
+                    .await;
+                assert_eq!(status, StatusCode::OK, "{result}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn either_review_claim_race_has_one_owner_and_changes_cannot_be_overruled() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("either-race", "https://example.test/race.git")
+        .await;
+    f.review_policy(&p, "either").await;
+    let t = f.task(&p, "general", "Concurrent reviewers").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+        .await;
+    let review = activity(&submitted, "either_review");
+    f.ack(&f.b, &p, 2).await;
+    let path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/claim",
+        review["id"].as_str().unwrap()
+    );
+    let body = json!({"expected_submission_id":review["submission_id"],"expected_project_policy_revision":2,"expected_workflow_policy_revision":0});
+    let (agent, human) = tokio::join!(
+        f.call(&f.b, "POST", &path, body.clone()),
+        f.call(&f.admin, "POST", &path, body)
+    );
+    assert_eq!(
+        [agent.0, human.0]
+            .iter()
+            .filter(|s| **s == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        [agent.0, human.0]
+            .iter()
+            .filter(|s| **s == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let (winner, loser, claimed) = if agent.0 == StatusCode::OK {
+        (&f.b, &f.admin, agent.1)
+    } else {
+        (&f.admin, &f.b, human.1)
+    };
+    let path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/review",
+        review["id"].as_str().unwrap()
+    );
+    let body = json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"changes_requested","summary":"Fix the issue","findings":[{"severity":"required","remedy":"Correct the behavior","evidence":"Review evidence"}]});
+    let (status, _) = f.call(loser, "POST", &path, body.clone()).await;
+    assert!(status.is_client_error());
+    let (status, result) = f.call(winner, "POST", &path, body).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["data"]["phase"], "revision_needed");
+    let (status, _) = f.claim_activity(loser, &p, review, 2, 0).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = f.call(winner, "POST", &path, json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Cannot replace decision","findings":[]})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn both_review_still_requires_two_approvals() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("both-approvals", "https://example.test/and.git")
+        .await;
+    f.review_policy(&p, "both").await;
+    let t = f.task(&p, "general", "Two approvals").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+        .await;
+    for (reviewer, kind, expected) in [
+        (&f.b, "agent_review", "waiting_review"),
+        (&f.admin, "human_review", "done"),
+    ] {
+        let review = activity(&submitted, kind);
+        let (status, claimed) = f.claim_activity(reviewer, &p, review, 2, 0).await;
+        assert_eq!(status, StatusCode::OK, "{claimed}");
+        let (status, result) = f.call(reviewer, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/review", review["id"].as_str().unwrap()), json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Reviewed","findings":[]})).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["data"]["work_status"], expected);
+    }
+}
+
+#[tokio::test]
+async fn either_review_rechecks_late_contributions_and_policy_changes() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("either-guards", "https://example.test/guards.git")
+        .await;
+    f.review_policy(&p, "either").await;
+    let t = f.task(&p, "general", "Review guards").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+        .await;
+    let review = activity(&submitted, "either_review");
+    let (status, claimed) = f.claim_activity(&f.b, &p, review, 2, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    sqlx::query("INSERT INTO task_contributors(task_id,principal_id,session_id,first_contributed_at) VALUES(?,?,?,?)").bind(t["id"].as_str().unwrap()).bind(&f.b.principal).bind(&f.b.session).bind(f.state.now()).execute(&f.state.pool).await.unwrap();
+    let path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/review",
+        review["id"].as_str().unwrap()
+    );
+    let body = json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Must reject","findings":[]});
+    let (status, rejected) = f.call(&f.b, "POST", &path, body.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "reviewer_not_independent");
+    let (status, result) = f.call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":2,"review_mode":"both","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true})).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (status, _) = f.call(&f.b, "POST", &path, body).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = f.claim_activity(&f.admin, &p, review, 3, 0).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM review_decisions")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforcement() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("migration-review", "https://example.test/migration.git")
+        .await;
+    let t = f.task(&p, "general", "Saved review").await;
+    let owner = f.claim(&f.a, &p, &t, 1).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
+        .await;
+    let review = activity(&submitted, "agent_review");
+    let (status, claimed) = f.claim_activity(&f.b, &p, review, 1, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let (status, result) = f.call(&f.b, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/review", review["id"].as_str().unwrap()), json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Preserve this decision","findings":[]})).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    sqlx::query("UPDATE projects SET rowid=99 WHERE id=?")
+        .bind(&p)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workflow_activities SET rowid=77 WHERE id=?")
+        .bind(review["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+
+    // Build the previous schema from its original, checksummed migrations and
+    // populate its unchanged columns with a real saved workflow and decision.
+    let migrations = f._dir.path().join("schema17");
+    std::fs::create_dir(&migrations).unwrap();
+    for migration in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 17)
+    {
+        std::fs::write(
+            migrations.join(format!(
+                "{:04}_{}.sql",
+                migration.version,
+                migration.description.replace(' ', "_")
+            )),
+            migration.sql.as_bytes(),
+        )
+        .unwrap();
+    }
+    let database = f._dir.path().join("upgrade.sqlite3");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&database)
+        .create_if_missing(true)
+        .foreign_keys(false);
+    let mut old = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::migrate::Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&mut old)
+        .await
+        .unwrap();
+    sqlx::query("ATTACH DATABASE ? AS original")
+        .bind(f.state.config.database_path.to_str().unwrap())
+        .execute(&mut old)
+        .await
+        .unwrap();
+    for table in [
+        "principals",
+        "credentials",
+        "agent_sessions",
+        "browser_sessions",
+        "projects",
+        "policy_revisions",
+        "tasks",
+        "task_revisions",
+        "attempts",
+        "task_contributors",
+        "submissions",
+        "workflow_subjects",
+        "workflow_activities",
+        "review_decisions",
+        "review_findings",
+        "instruction_acknowledgments",
+    ] {
+        sqlx::query(&format!(
+            "INSERT INTO main.{table} SELECT * FROM original.{table}"
+        ))
+        .execute(&mut old)
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE projects SET rowid=99")
+        .execute(&mut old)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workflow_activities SET rowid=77")
+        .execute(&mut old)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("UPDATE projects SET review_mode='either'")
+            .execute(&mut old)
+            .await
+            .is_err()
+    );
+    old.close().await.unwrap();
+    let upgraded = AppState::open(Config {
+        database_path: database,
+        ..f.state.config.clone()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT review_mode FROM projects")
+            .fetch_one(&upgraded.pool)
+            .await
+            .unwrap(),
+        "agent"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT rowid FROM projects")
+            .fetch_one(&upgraded.pool)
+            .await
+            .unwrap(),
+        99
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT rowid FROM workflow_activities")
+            .fetch_one(&upgraded.pool)
+            .await
+            .unwrap(),
+        77
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT summary FROM review_decisions")
+            .fetch_one(&upgraded.pool)
+            .await
+            .unwrap(),
+        "Preserve this decision"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pragma_foreign_key_check")
+            .fetch_one(&upgraded.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("UPDATE projects SET review_mode='either'")
+        .execute(&upgraded.pool)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("UPDATE projects SET review_mode='invalid'")
+            .execute(&upgraded.pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE workflow_activities SET subject_task_id='missing'")
+            .execute(&upgraded.pool)
+            .await
+            .is_err()
+    );
+    // All pooled request connections, including the migrated one, enforce FKs.
+    let mut connections = Vec::new();
+    for _ in 0..8 {
+        let mut connection = upgraded.pool.acquire().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap(),
+            1
+        );
+        connections.push(connection);
     }
 }
 
