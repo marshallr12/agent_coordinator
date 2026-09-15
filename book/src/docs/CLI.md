@@ -52,17 +52,28 @@ project_id = "project-id-from-the-operator"
 project_name = "Billing"
 ```
 
-On Windows this selects `%APPDATA%/Agent Coordinator/Billing/config/credentials.toml`.
-On Linux it selects `$XDG_CONFIG_HOME/agent-coordinator/Billing/config/credentials.toml`
-(or `$HOME/.config/agent-coordinator/Billing/config/credentials.toml`). On Unix an
-`AGENT_COORDINATOR_HOME` override replaces the `agent-coordinator` directory.
-The file has the same origin/token format and protection requirements as above.
+Replace `<project_name>` in these patterns with the binding's exact selector,
+such as `Billing`. Files use the origin/token format above.
+
+| Platform/configuration | With `project_name` | Without `project_name` (legacy) |
+| --- | --- | --- |
+| Windows | `%APPDATA%/Agent Coordinator/<project_name>/config/credentials.toml` | `%APPDATA%/Agent Coordinator/agent-coordinator/config/credentials.toml` |
+| Linux, absolute `XDG_CONFIG_HOME` set | `$XDG_CONFIG_HOME/agent-coordinator/<project_name>/config/credentials.toml` | `$XDG_CONFIG_HOME/agent-coordinator/credentials.toml` |
+| Linux, `XDG_CONFIG_HOME` unset, empty, or relative | `$HOME/.config/agent-coordinator/<project_name>/config/credentials.toml` | `$HOME/.config/agent-coordinator/credentials.toml` |
+| Unix, `AGENT_COORDINATOR_HOME` override | `$AGENT_COORDINATOR_HOME/<project_name>/config/credentials.toml` | `$AGENT_COORDINATOR_HOME/credentials.toml` |
+
+On Unix, a non-empty `AGENT_COORDINATOR_HOME` takes precedence over XDG/default
+lookup. Set it to an absolute private directory. This override is rejected on
+Windows. Keep Unix files at mode `0600`; on Windows restrict the ACL to the
+current user and SYSTEM. An independently configured MCP host does not
+automatically read these CLI files.
 
 `project_name` is a local selector, not a server project rename or an access
 restriction. Use a single portable directory name: no path separators, reserved
 Windows device names, or trailing dots/spaces. It is independent of the checkout
 folder and remains stable when creating or moving worktrees. Changing the server's
 display name does not move credentials.
+Names are case-sensitive on Linux.
 
 Example Windows paths for user `marsh`:
 
@@ -74,6 +85,21 @@ Example Windows paths for user `marsh`:
 | `C:/src/inventory` | `Inventory` | `C:/Users/marsh/AppData/Roaming/Agent Coordinator/Inventory/config/credentials.toml` |
 | `C:/src/agent_coordinator` | `Agent Coordinator` | `C:/Users/marsh/AppData/Roaming/Agent Coordinator/Agent Coordinator/config/credentials.toml` |
 | Any checkout with the original two-field binding | omitted | `C:/Users/marsh/AppData/Roaming/Agent Coordinator/agent-coordinator/config/credentials.toml` |
+
+Example Linux paths for user `alex`, with `XDG_CONFIG_HOME` and
+`AGENT_COORDINATOR_HOME` unset:
+
+| Checkout/worktree | Binding `project_name` | Credential file |
+| --- | --- | --- |
+| `/home/alex/src/billing` | `Billing` | `/home/alex/.config/agent-coordinator/Billing/config/credentials.toml` |
+| `/srv/worktrees/billing-review` | `Billing` | `/home/alex/.config/agent-coordinator/Billing/config/credentials.toml` |
+| `/home/alex/src/inventory` | `Inventory` | `/home/alex/.config/agent-coordinator/Inventory/config/credentials.toml` |
+| Any checkout with the original two-field binding | omitted | `/home/alex/.config/agent-coordinator/credentials.toml` |
+
+For either Billing worktree, setting `XDG_CONFIG_HOME=/srv/alex-config` selects
+`/srv/alex-config/agent-coordinator/Billing/config/credentials.toml`. Setting
+`AGENT_COORDINATOR_HOME=/srv/coordinator-private` takes precedence and selects
+`/srv/coordinator-private/Billing/config/credentials.toml`.
 
 Without `project_name`, existing shared-file lookup is unchanged. With it, a
 missing, invalid, or mismatched project file is an error; the client does not
