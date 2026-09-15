@@ -767,6 +767,8 @@ async fn create_session(
         .bind(&input.session_id)
         .fetch_optional(&mut *mutation.tx)
         .await?;
+    let subagent_identity =
+        resolve_subagent(&mut mutation, input.subagent.as_ref(), existing.is_none()).await?;
     let data = if let Some(existing) = existing {
         if existing.get::<String, _>("principal_id") != mutation.actor.id
             || Some(existing.get::<String, _>("credential_id")) != mutation.actor.credential_id
@@ -775,6 +777,9 @@ async fn create_session(
             || existing.get::<String, _>("harness") != input.harness
             || serde_json::from_str::<Vec<String>>(&existing.get::<String, _>("capabilities"))?
                 != input.capabilities
+            || existing.get::<Option<String>, _>("subagent_identity_id") != subagent_identity
+            || existing.get::<Option<String>, _>("parent_session_id")
+                != input.subagent.as_ref().map(|s| s.parent_session_id.clone())
         {
             return Err(AppError::conflict(
                 "session_conflict",
@@ -787,16 +792,16 @@ async fn create_session(
                 "This session is closed. Create a new session identity and proof.",
             ));
         }
-        session_json(&existing)?
+        session_json(&mut mutation.tx, &existing).await?
     } else {
-        sqlx::query("INSERT INTO agent_sessions(id,principal_id,credential_id,workstation_id,proof_hash,created_at,capabilities,harness) VALUES(?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO agent_sessions(id,principal_id,credential_id,workstation_id,proof_hash,created_at,capabilities,harness,subagent_identity_id,parent_session_id) VALUES(?,?,?,?,?,?,?,?,?,?)")
             .bind(&input.session_id).bind(&mutation.actor.id).bind(&mutation.actor.credential_id).bind(&input.workstation_id).bind(&proof_hash).bind(mutation.now)
-            .bind(serde_json::to_string(&input.capabilities)?).bind(&input.harness).execute(&mut *mutation.tx).await?;
+            .bind(serde_json::to_string(&input.capabilities)?).bind(&input.harness).bind(&subagent_identity).bind(input.subagent.as_ref().map(|s| &s.parent_session_id)).execute(&mut *mutation.tx).await?;
         let row = sqlx::query("SELECT * FROM agent_sessions WHERE id=?")
             .bind(&input.session_id)
             .fetch_one(&mut *mutation.tx)
             .await?;
-        session_json(&row)?
+        session_json(&mut mutation.tx, &row).await?
     };
     Ok(response(
         mutation
@@ -805,10 +810,83 @@ async fn create_session(
     ))
 }
 
-fn session_json(row: &sqlx::sqlite::SqliteRow) -> Result<Value, AppError> {
+async fn resolve_subagent(
+    m: &mut Mutation,
+    input: Option<&coordinator_core::SubagentInput>,
+    new_session: bool,
+) -> Result<Option<String>, AppError> {
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    validate_name(&input.name)?;
+    if input.name.len() > 120 || input.project_id.len() > 128 || input.parent_session_id.len() > 128
+    {
+        return Err(AppError::bad_request("Invalid subagent identity."));
+    }
+    let parent = sqlx::query("SELECT s.subagent_identity_id,s.closed_at,c.revoked_at,c.expires_at,i.project_id FROM agent_sessions s JOIN credentials c ON c.id=s.credential_id LEFT JOIN subagent_identities i ON i.id=s.subagent_identity_id WHERE s.id=? AND s.principal_id=?")
+        .bind(&input.parent_session_id).bind(&m.actor.id).fetch_optional(&mut *m.tx).await?
+        .ok_or_else(|| AppError::bad_request("The parent must be a registered session of this principal."))?;
+    if parent
+        .get::<Option<String>, _>("project_id")
+        .is_some_and(|p| p != input.project_id)
+    {
+        return Err(AppError::bad_request(
+            "The parent subagent belongs to another project.",
+        ));
+    }
+    let parent_identity: Option<String> = parent.get("subagent_identity_id");
+    let existing = sqlx::query("SELECT id,parent_identity_id FROM subagent_identities WHERE project_id=? AND principal_id=? AND name=?")
+        .bind(&input.project_id).bind(&m.actor.id).bind(&input.name).fetch_optional(&mut *m.tx).await?;
+    if let Some(existing) = existing {
+        if existing.get::<Option<String>, _>("parent_identity_id") != parent_identity {
+            return Err(AppError::conflict(
+                "subagent_identity_conflict",
+                "A subagent name retains its original parent identity; resume that identity.",
+            ));
+        }
+        return Ok(Some(existing.get("id")));
+    }
+    if !new_session
+        || parent.get::<Option<i64>, _>("closed_at").is_some()
+        || parent.get::<Option<i64>, _>("revoked_at").is_some()
+        || parent
+            .get::<Option<i64>, _>("expires_at")
+            .is_some_and(|t| t <= m.now)
+    {
+        return Err(AppError::bad_request(
+            "A new subagent identity requires an active parent session and credential.",
+        ));
+    }
+    let project_exists: i64 = sqlx::query_scalar("SELECT count(*) FROM projects WHERE id=?")
+        .bind(&input.project_id)
+        .fetch_one(&mut *m.tx)
+        .await?;
+    if project_exists == 0 {
+        return Err(AppError::not_found());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO subagent_identities(id,project_id,principal_id,name,parent_identity_id,created_by_session_id,created_at) VALUES(?,?,?,?,?,?,?)")
+        .bind(&id).bind(&input.project_id).bind(&m.actor.id).bind(&input.name).bind(&parent_identity).bind(&input.parent_session_id).bind(m.now).execute(&mut *m.tx).await?;
+    Ok(Some(id))
+}
+
+async fn session_json(
+    c: &mut SqliteConnection,
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<Value, AppError> {
+    let identity: Option<String> = row.get("subagent_identity_id");
+    let subagent = if let Some(id) = &identity {
+        let i = sqlx::query("SELECT project_id,name FROM subagent_identities WHERE id=?")
+            .bind(id)
+            .fetch_one(c)
+            .await?;
+        json!({"project_id":i.get::<String,_>("project_id"),"name":i.get::<String,_>("name"),"parent_session_id":row.get::<Option<String>,_>("parent_session_id")})
+    } else {
+        Value::Null
+    };
     Ok(
         json!({"id":row.get::<String,_>("id"),"session_id":row.get::<String,_>("id"),"principal_id":row.get::<String,_>("principal_id"),
-        "credential_id":row.get::<String,_>("credential_id"),"workstation_id":row.get::<String,_>("workstation_id"),
+        "credential_id":row.get::<String,_>("credential_id"),"workstation_id":row.get::<String,_>("workstation_id"),"subagent_identity_id":identity,"subagent":subagent,
         "harness":row.get::<String,_>("harness"),"capabilities":serde_json::from_str::<Value>(&row.get::<String,_>("capabilities"))?,
         "created_at":timestamp(row.get("created_at")),"closed_at":row.get::<Option<i64>,_>("closed_at").map(timestamp)}),
     )
@@ -837,7 +915,9 @@ async fn get_session(
     .bind(&auth.actor.id)
     .fetch_one(&state.pool)
     .await?;
-    Ok(response(session_json(&row)?))
+    Ok(response(
+        session_json(&mut *state.pool.acquire().await?, &row).await?,
+    ))
 }
 async fn close_session(
     State(state): State<AppState>,

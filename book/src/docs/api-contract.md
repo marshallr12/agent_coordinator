@@ -80,6 +80,20 @@ Browser sign-in/out and password-change endpoints operate on local human
 accounts. Admin endpoints manage principals and issue/revoke tokens. First-admin
 creation and account recovery use a host-local command, never public enrollment.
 All issued agent tokens have agent identity; an agent token cannot record a human
+review. A project may opt into `allow_subagent_reviews` through its human-managed
+policy. Omission in a policy update preserves the current setting; the default is
+false and delegated agent rule editing cannot change it. Session registration
+accepts optional `subagent: {project_id, name, parent_session_id}`. The server
+returns `subagent_identity_id` and the registration fields on session reads.
+Names map to durable identities within a project and principal; parent identity
+is immutable, and a new identity requires an active same-principal parent.
+An owning attempt can register delegated helpers using checkpoint
+`contributor_session_ids`. Contributor exclusion is enforced at review claim and
+decision, across sessions of the same subagent identity. This is a trusted harness
+policy; shared credentials cannot attest independent reasoning. See the
+[CLI examples](CLI.md#subagent-identities-and-reviews).
+
+An agent token cannot record a human
 approval even when a human operator created it.
 
 Credential issuance displays a newly generated token once. Its mutation receipt

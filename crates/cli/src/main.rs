@@ -486,6 +486,12 @@ struct RecoveryInspectArgs {
 
 #[derive(Args)]
 struct ConnectArgs {
+    /// Stable project-scoped subagent name; reuse across reconnects.
+    #[arg(long, requires = "parent_session")]
+    subagent: Option<String>,
+    /// Registered parent session ID (public identity, not its proof).
+    #[arg(long, requires = "subagent")]
+    parent_session: Option<String>,
     #[arg(long, default_value = "agent-coordinator-cli")]
     harness: String,
     #[arg(long)]
@@ -2801,7 +2807,11 @@ async fn build_context(cli: &Cli) -> std::result::Result<ContextData, Failure> {
         coordinator_client::normalize_origin(&binding.service_url, cli.allow_insecure_loopback)
             .map_err(client_failure)?;
 
-    let token = match config::token(&origin, cli.allow_insecure_loopback) {
+    let token = match config::token(
+        &origin,
+        binding.project_name.as_deref(),
+        cli.allow_insecure_loopback,
+    ) {
         Ok(token) => token,
         Err(error) => {
             let help = CoordinatorClient::unauthenticated(
@@ -2855,6 +2865,17 @@ async fn connect(
     let _session_lock = state::lock(&session_path).map_err(Failure::temporary)?;
     let existing = state::load(&session_path).map_err(Failure::invalid)?;
     let resumed = existing.is_some();
+    let requested_subagent = args
+        .subagent
+        .as_ref()
+        .map(|name| coordinator_core::SubagentInput {
+            name: name.clone(),
+            project_id: context.binding.project_id.clone(),
+            parent_session_id: args
+                .parent_session
+                .clone()
+                .expect("clap requires parent session"),
+        });
     let mut state = match existing {
         Some(state) => state,
         None => {
@@ -2875,6 +2896,15 @@ async fn connect(
             )
         }
     };
+    if resumed {
+        if requested_subagent.is_some() && state.subagent != requested_subagent {
+            return Err(Failure::invalid(
+                "This saved session has a different subagent identity. Resume its original identity or choose an unused local session name.",
+            ));
+        }
+    } else {
+        state.subagent = requested_subagent;
+    }
     validate_state(context, local_session, &state)?;
 
     if let Some(pending) = &state.pending {
@@ -2887,12 +2917,15 @@ async fn connect(
         let response = send_saved(context, &session_path, &mut state).await?;
         require_success(response)?;
     } else if !resumed {
-        let body = json!({
+        let mut body = json!({
             "session_id": state.session.id,
             "workstation_id": state.workstation_id,
             "harness": state.harness,
             "capabilities": state.capabilities,
         });
+        if let Some(subagent) = &state.subagent {
+            body["subagent"] = serde_json::to_value(subagent).map_err(Failure::invalid)?;
+        }
         let pending = PendingMutation {
             key: Uuid::new_v4().to_string(),
             method: HttpMethod::Post,

@@ -45,6 +45,8 @@ pub struct SessionState {
     pub harness: String,
     pub capabilities: Vec<String>,
     #[serde(default)]
+    pub subagent: Option<coordinator_core::SubagentInput>,
+    #[serde(default)]
     pub orientation: Option<OrientationVersion>,
     #[serde(default)]
     pub acknowledged: Option<OrientationVersion>,
@@ -73,6 +75,7 @@ impl SessionState {
             workstation_id,
             harness,
             capabilities,
+            subagent: None,
             orientation: None,
             acknowledged: None,
             pending: None,

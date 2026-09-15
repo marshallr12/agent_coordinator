@@ -112,6 +112,7 @@ struct Project {
     rules: String,
     agent_rule_editing: bool,
     automatic_integration: bool,
+    allow_subagent_reviews: bool,
     #[serde(serialize_with = "serialize_timestamp")]
     created_at: i64,
 }
@@ -247,7 +248,10 @@ async fn update_policy(
     if m.actor.kind == "agent"
         && (!current.agent_rule_editing
             || current.agent_rule_editing != input.agent_rule_editing
-            || current.automatic_integration != input.automatic_integration)
+            || current.automatic_integration != input.automatic_integration
+            || input
+                .allow_subagent_reviews
+                .is_some_and(|value| value != current.allow_subagent_reviews))
     {
         return Err(AppError::forbidden(
             "This project has not delegated this rule change. Agents cannot alter permission grants.",
@@ -273,8 +277,8 @@ async fn update_policy(
             "Finish or reconcile the held integration before changing its policy. Publication may already be in progress.",
         ));
     }
-    sqlx::query("UPDATE projects SET policy_revision=policy_revision+1,review_mode=?,recovery_mode=?,lease_seconds=?,rules=?,agent_rule_editing=?,automatic_integration=? WHERE id=?")
-        .bind(&input.review_mode).bind(&input.recovery_mode).bind(input.lease_seconds).bind(&input.rules).bind(input.agent_rule_editing).bind(input.automatic_integration).bind(&id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE projects SET policy_revision=policy_revision+1,review_mode=?,recovery_mode=?,lease_seconds=?,rules=?,agent_rule_editing=?,automatic_integration=?,allow_subagent_reviews=? WHERE id=?")
+        .bind(&input.review_mode).bind(&input.recovery_mode).bind(input.lease_seconds).bind(&input.rules).bind(input.agent_rule_editing).bind(input.automatic_integration).bind(input.allow_subagent_reviews.unwrap_or(current.allow_subagent_reviews)).bind(&id).execute(&mut *m.tx).await?;
     let value = serde_json::to_value(project(&mut m.tx, &id).await?)?;
     sqlx::query("INSERT INTO policy_revisions(project_id,revision,data_json,actor_id,created_at,provenance) VALUES(?,?,?,?,?,?)")
         .bind(&id).bind(current.policy_revision+1).bind(value.to_string()).bind(&m.actor.id).bind(m.now).bind(&input.provenance).execute(&mut *m.tx).await?;
@@ -778,6 +782,10 @@ async fn task_detail(
     let rows=sqlx::query("SELECT cp.* FROM checkpoints cp JOIN attempts a ON a.id=cp.attempt_id WHERE a.project_id=? AND a.task_id=? ORDER BY cp.created_at DESC,cp.id DESC LIMIT 100").bind(&p).bind(&id).fetch_all(&mut *c).await?;
     value["attempts"] = json!(attempts.iter().map(Attempt::value).collect::<Vec<_>>());
     value["checkpoints"] = json!(rows.iter().map(checkpoint_value).collect::<Vec<_>>());
+    let contributors = sqlx::query("SELECT tc.*,s.subagent_identity_id,i.name AS subagent_name FROM task_contributors tc LEFT JOIN agent_sessions s ON s.id=tc.session_id LEFT JOIN subagent_identities i ON i.id=s.subagent_identity_id WHERE tc.task_id=? ORDER BY tc.first_contributed_at,tc.principal_id,tc.session_id LIMIT 201")
+        .bind(&id).fetch_all(&mut *c).await?;
+    value["contributors_truncated"] = json!(contributors.len() > 200);
+    value["contributors"] = json!(contributors.iter().take(200).map(|r| json!({"principal_id":r.get::<String,_>("principal_id"),"session_id":r.get::<String,_>("session_id"),"subagent_identity_id":r.get::<Option<String>,_>("subagent_identity_id"),"subagent_name":r.get::<Option<String>,_>("subagent_name"),"first_contributed_at":timestamp(r.get("first_contributed_at"))})).collect::<Vec<_>>());
     value["depends_on"] = json!(
         sqlx::query_scalar::<_, String>(
             "SELECT prerequisite_id FROM task_dependencies WHERE task_id=? ORDER BY prerequisite_id"
@@ -1109,6 +1117,30 @@ async fn add_checkpoint(
     id: &str,
     input: &CheckpointInput,
 ) -> Result<Value, AppError> {
+    if input.contributor_session_ids.len() > 50 {
+        return Err(AppError::bad_request(
+            "Use at most 50 contributor sessions.",
+        ));
+    }
+    let owner = attempt(&mut m.tx, p, id).await?;
+    for contributor in &input.contributor_session_ids {
+        bounded(contributor, "contributor session ID", 128, true)?;
+        let valid: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_sessions s JOIN subagent_identities i ON i.id=s.subagent_identity_id WHERE s.id=? AND s.principal_id=? AND i.project_id=?")
+            .bind(contributor).bind(&m.actor.id).bind(p).fetch_one(&mut *m.tx).await?;
+        if valid == 0 {
+            return Err(AppError::bad_request(
+                "Contributors must be registered subagent sessions of this principal and project.",
+            ));
+        }
+        crate::workflow::record_contributor(
+            &mut m.tx,
+            &owner.task_id,
+            &m.actor.id,
+            contributor,
+            m.now,
+        )
+        .await?;
+    }
     let checkpoint_id = Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO checkpoints(id,project_id,attempt_id,summary,current_action,next_step,blockers_json,created_at) VALUES(?,?,?,?,?,?,?,?)")
         .bind(&checkpoint_id).bind(p).bind(id).bind(&input.summary).bind(&input.current_action).bind(&input.next_step).bind(serde_json::to_string(&input.blockers)?).bind(m.now).execute(&mut *m.tx).await?;
@@ -1118,7 +1150,7 @@ async fn add_checkpoint(
         .execute(&mut *m.tx)
         .await?;
     Ok(
-        json!({"id":checkpoint_id,"attempt_id":id,"summary":input.summary,"current_action":input.current_action,"next_step":input.next_step,"blockers":input.blockers,"created_at":timestamp(m.now)}),
+        json!({"id":checkpoint_id,"attempt_id":id,"summary":input.summary,"current_action":input.current_action,"next_step":input.next_step,"blockers":input.blockers,"contributor_session_ids":input.contributor_session_ids,"created_at":timestamp(m.now)}),
     )
 }
 async fn checkpoint(
@@ -1194,6 +1226,7 @@ async fn release(
         &CheckpointInput {
             generation: input.generation,
             summary: input.summary.clone(),
+            contributor_session_ids: vec![],
             current_action: String::new(),
             next_step: String::new(),
             blockers: if input.blocked {
@@ -1275,6 +1308,7 @@ async fn recovery_resolution(
             generation: input.generation,
             summary: input.summary.clone(),
             current_action: format!("Recovery disposition: {}", input.disposition),
+            contributor_session_ids: vec![],
             next_step: "Prepare an isolated checkout before continuing.".into(),
             blockers: vec![],
         },

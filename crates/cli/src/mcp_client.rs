@@ -46,8 +46,12 @@ pub async fn launch(cli: &Cli, context: &ContextData, args: &LaunchArgs) -> Resu
             "This harness session is closed or no longer matches. Connect a fresh --session first.",
         ));
     }
-    let token =
-        config::token(&context.origin, cli.allow_insecure_loopback).map_err(Failure::invalid)?;
+    let token = config::token(
+        &context.origin,
+        context.binding.project_name.as_deref(),
+        cli.allow_insecure_loopback,
+    )
+    .map_err(Failure::invalid)?;
     if hex::encode(Sha256::digest(token.as_bytes())) != saved.credential_digest {
         return Err(Failure::invalid(
             "The credential changed during launch. Reconnect using a fresh harness session.",

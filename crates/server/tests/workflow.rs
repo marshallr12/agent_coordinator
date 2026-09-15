@@ -347,6 +347,190 @@ async fn general_submission_requires_an_independent_reviewer_and_then_completes(
 
 const BASE: &str = "1111111111111111111111111111111111111111";
 
+async fn register_child(f: &Fixture, parent: &Caller, p: &str, name: &str) -> (Caller, Value) {
+    let child = Caller {
+        session: Uuid::new_v4().to_string(),
+        proof: secret(),
+        ..parent.clone()
+    };
+    let body = json!({"session_id":child.session,"workstation_id":"child-workstation","harness":"test-child","capabilities":["code"],"subagent":{"project_id":p,"name":name,"parent_session_id":parent.session}});
+    let (status, response) = register_session(f, &child, body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    (child, response["data"].clone())
+}
+
+async fn register_session(f: &Fixture, c: &Caller, body: Value) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/sessions")
+        .header("content-type", "application/json")
+        .header("idempotency-key", Uuid::new_v4().to_string())
+        .header("authorization", format!("Bearer {}", c.token))
+        .header("x-coordinator-session-proof", &c.proof)
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = f.app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn subagent_review_opt_in_preserves_identity_contributions_and_default_guards() {
+    for enabled in [false, true] {
+        let f = Fixture::new().await;
+        let p = f
+            .project("subagent-review", "https://example.test/children.git")
+            .await;
+        let (status, policy) = f.call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"allow_subagent_reviews":enabled})).await;
+        assert_eq!(status, StatusCode::OK, "{policy}");
+        let (status, _) = f.call(&f.a, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":2,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"allow_subagent_reviews":!enabled})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (helper, original) = register_child(&f, &f.a, &p, "implementation-helper").await;
+        let (reviewer, _) = register_child(&f, &f.a, &p, "reviewer").await;
+        let t = f.task(&p, "general", "Child reviewer").await;
+        let owner = f.claim(&f.a, &p, &t, 2).await;
+        let checkpoint_path = format!(
+            "/api/v1/projects/{p}/attempts/{}/checkpoints",
+            owner["id"].as_str().unwrap()
+        );
+        let checkpoint = json!({"generation":owner["generation"],"summary":"Register helper before delegation","contributor_session_ids":[helper.session]});
+        let mut invalid_checkpoint = checkpoint.clone();
+        invalid_checkpoint["contributor_session_ids"] = json!([helper.session, "missing-session"]);
+        let (status, _) = f
+            .call(&f.a, "POST", &checkpoint_path, invalid_checkpoint)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let helpers: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM task_contributors WHERE session_id=?")
+                .bind(&helper.session)
+                .fetch_one(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            helpers, 0,
+            "invalid checkpoint must roll back every contribution"
+        );
+        let (status, saved) = f.call(&f.a, "POST", &checkpoint_path, checkpoint).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let (helper_resumed, resumed) = register_child(&f, &f.a, &p, "implementation-helper").await;
+        assert_eq!(
+            original["subagent_identity_id"],
+            resumed["subagent_identity_id"]
+        );
+        let ordinary = Caller {
+            session: Uuid::new_v4().to_string(),
+            proof: secret(),
+            ..f.a.clone()
+        };
+        let (status, registered) = register_session(&f, &ordinary, json!({"session_id":ordinary.session,"workstation_id":"ordinary","harness":"ordinary","capabilities":[]})).await;
+        assert_eq!(status, StatusCode::OK, "{registered}");
+        let other_project = f
+            .project("other-project", "https://example.test/other.git")
+            .await;
+        let (other_child, _) = register_child(&f, &f.a, &other_project, "reviewer").await;
+        let submitted = f
+            .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+            .await;
+        let review = activity(&submitted, "agent_review");
+        for contributor in [&f.a, &helper, &helper_resumed, &ordinary, &other_child] {
+            let (status, rejected) = f.claim_activity(contributor, &p, review, 2, 0).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+            assert_eq!(rejected["error"]["code"], "reviewer_not_independent");
+        }
+        let (status, claimed) = f.claim_activity(&reviewer, &p, review, 2, 0).await;
+        if enabled {
+            assert_eq!(status, StatusCode::OK, "{claimed}");
+            let attempt = &claimed["data"]["attempt"];
+            let (status, done) = f.call(&reviewer, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/review", review["id"].as_str().unwrap()), json!({"generation":attempt["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Independent child inspected evidence","findings":[]})).await;
+            assert_eq!(status, StatusCode::OK, "{done}");
+            assert_eq!(done["data"]["work_status"], "done");
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{claimed}");
+            assert_eq!(claimed["error"]["code"], "reviewer_not_independent");
+        }
+    }
+}
+
+#[tokio::test]
+async fn omitted_subagent_policy_preserves_existing_permission() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("policy-compat", "https://example.test/policy.git")
+        .await;
+    let mut body = json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"allow_subagent_reviews":true});
+    let (status, _) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &format!("/api/v1/projects/{p}/policy"),
+            body.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    body["expected_revision"] = json!(2);
+    body.as_object_mut()
+        .unwrap()
+        .remove("allow_subagent_reviews");
+    let (status, policy) = f
+        .call(&f.a, "PATCH", &format!("/api/v1/projects/{p}/policy"), body)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    assert_eq!(policy["data"]["allow_subagent_reviews"], true);
+}
+
+#[tokio::test]
+async fn subagent_registration_rejects_reparenting_and_foreign_parent() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("child-identity", "https://example.test/identity.git")
+        .await;
+    let (child, identity) = register_child(&f, &f.a, &p, "child").await;
+    let (sibling, _) = register_child(&f, &f.a, &p, "sibling").await;
+    let body = json!({"session_id":child.session,"workstation_id":"child-workstation","harness":"test-child","capabilities":["code"],"subagent":{"project_id":p,"name":"child","parent_session_id":sibling.session}});
+    let (status, _) = register_session(&f, &child, body.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let mut foreign = body;
+    foreign["subagent"]["parent_session_id"] = json!(f.b.session);
+    let (status, _) = register_session(&f, &child, foreign).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, got) = f
+        .call(
+            &child,
+            "GET",
+            &format!("/api/v1/sessions/{}", child.session),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        got["data"]["subagent_identity_id"],
+        identity["subagent_identity_id"]
+    );
+    assert_eq!(got["data"]["subagent"]["parent_session_id"], f.a.session);
+}
+
+#[tokio::test]
+async fn review_decision_rechecks_contribution_after_claim() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("late-contributor", "https://example.test/late.git")
+        .await;
+    let t = f.task(&p, "general", "Late contribution").await;
+    let owner = f.claim(&f.a, &p, &t, 1).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
+        .await;
+    let review = activity(&submitted, "agent_review");
+    let (status, claimed) = f.claim_activity(&f.b, &p, review, 1, 0).await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("INSERT INTO task_contributors(task_id,principal_id,session_id,first_contributed_at) VALUES(?,?,?,?)")
+        .bind(t["id"].as_str().unwrap()).bind(&f.b.principal).bind(&f.b.session).bind(f.state.now()).execute(&f.state.pool).await.unwrap();
+    let (status, rejected) = f.call(&f.b, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/review", review["id"].as_str().unwrap()), json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Must reject contributor","findings":[]})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "reviewer_not_independent");
+}
+
 #[tokio::test]
 async fn submission_lessons_and_artifact_references_commit_together_or_not_at_all() {
     let f = Fixture::new().await;

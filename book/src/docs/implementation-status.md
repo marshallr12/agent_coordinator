@@ -9,6 +9,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
 
+- Optional `project_name` in repository bindings selects a protected project
+  credential directory independently of worktree location. Legacy bindings keep
+  shared lookup; explicit selection fails closed and environment precedence remains.
+- Human-controlled `allow_subagent_reviews` permits registered non-contributing
+  project subagents to review parent work. Durable identity survives new sessions;
+  helper contribution checkpoints preserve exclusion. Default principal independence
+  and human reviews remain enforced. This is trusted harness identity, not proof
+  of independent reasoning. See [configuration and examples](CLI.md).
+
 - Anonymous `/api/v1/info` serves the versioned, OS-independent
   [agent startup guide](agent-startup.md), including MCP-first connection selection, credential discovery, native
   fallback, automatic task claiming, recovery, and review requirements.

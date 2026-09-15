@@ -11,6 +11,8 @@ use serde::Deserialize;
 pub struct RepositoryBinding {
     pub service_url: String,
     pub project_id: String,
+    /// Stable local credential directory name; independent of checkout location.
+    pub project_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +43,9 @@ pub fn binding(explicit: Option<&Path>) -> Result<(PathBuf, RepositoryBinding)> 
     if binding.service_url.trim().is_empty() || binding.project_id.trim().is_empty() {
         bail!("repository binding requires non-empty service_url and project_id");
     }
+    if let Some(name) = &binding.project_name {
+        validate_project_name(name)?;
+    }
     Ok((path, binding))
 }
 
@@ -68,7 +73,56 @@ pub fn coordinator_home() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("could not determine the local configuration directory"))
 }
 
-pub fn token(origin: &str, allow_insecure_loopback: bool) -> Result<String> {
+fn validate_project_name(name: &str) -> Result<()> {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if name.is_empty()
+        || name.len() > 120
+        || name.trim() != name
+        || name.ends_with('.')
+        || name
+            .chars()
+            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+        || matches!(stem.as_str(), "" | "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+    {
+        bail!(
+            "project_name must be a portable directory name without separators, reserved names, or trailing dots/spaces"
+        );
+    }
+    Ok(())
+}
+
+fn credential_path(project_name: Option<&str>) -> Result<PathBuf> {
+    let Some(name) = project_name else {
+        return Ok(coordinator_home()?.join("credentials.toml"));
+    };
+    validate_project_name(name)?;
+    // Validate the existing Windows override restriction for both lookup modes.
+    let home = coordinator_home()?;
+    #[cfg(windows)]
+    let directory = {
+        let _ = home;
+        ProjectDirs::from("dev", "Agent Coordinator", name)
+            .ok_or_else(|| anyhow!("could not determine the project configuration directory"))?
+            .config_dir()
+            .to_path_buf()
+    };
+    #[cfg(not(windows))]
+    let directory = home.join(name).join("config");
+    Ok(directory.join("credentials.toml"))
+}
+
+pub fn token(
+    origin: &str,
+    project_name: Option<&str>,
+    allow_insecure_loopback: bool,
+) -> Result<String> {
     if let Ok(token) = env::var("AGENT_COORDINATOR_TOKEN") {
         if token.is_empty() {
             bail!("AGENT_COORDINATOR_TOKEN is empty");
@@ -93,9 +147,13 @@ pub fn token(origin: &str, allow_insecure_loopback: bool) -> Result<String> {
         return Ok(token);
     }
 
-    let path = coordinator_home()?.join("credentials.toml");
-    check_protected_file(&path)?;
-    let input = fs::read_to_string(&path).with_context(|| {
+    let path = credential_path(project_name)?;
+    token_from_file(&path, origin, allow_insecure_loopback)
+}
+
+fn token_from_file(path: &Path, origin: &str, allow_insecure_loopback: bool) -> Result<String> {
+    check_protected_file(path)?;
+    let input = fs::read_to_string(path).with_context(|| {
         format!(
             "no AGENT_COORDINATOR_TOKEN is set and {} could not be read",
             path.display()
@@ -172,6 +230,72 @@ fn check_protected_file(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn project_names_are_portable_single_directories() {
+        for name in ["Agent Coordinator", "billing", "project-one", "équipe"] {
+            assert!(validate_project_name(name).is_ok(), "{name}");
+        }
+        for name in [
+            "",
+            ".",
+            "..",
+            "../other",
+            "a/b",
+            "a\\b",
+            "C:\\secret",
+            "a:secret",
+            "CON",
+            "nul.txt",
+            "LPT1",
+            "COM9.txt",
+            "foo.",
+            " foo",
+            "foo ",
+            "a\nb",
+            "a?b",
+        ] {
+            assert!(validate_project_name(name).is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn explicit_project_path_does_not_depend_on_checkout() {
+        let path = credential_path(Some("Billing")).unwrap();
+        assert!(path.ends_with(Path::new("Billing").join("config").join("credentials.toml")));
+        assert_ne!(path, credential_path(None).unwrap());
+        let binding: RepositoryBinding = toml::from_str(
+            "service_url='https://example.test'\nproject_id='p'\nproject_name='Billing'",
+        )
+        .unwrap();
+        assert_eq!(binding.project_name.as_deref(), Some("Billing"));
+    }
+
+    #[test]
+    fn selected_credential_store_is_origin_bound_and_fails_closed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+        fs::write(&path, "[[credentials]]\norigin='https://one.test'\ntoken='fixture-one'\n[[credentials]]\norigin='https://two.test'\ntoken='fixture-two'").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(
+            token_from_file(&path, "https://one.test", false).unwrap(),
+            "fixture-one"
+        );
+        assert_eq!(
+            token_from_file(&path, "https://two.test", false).unwrap(),
+            "fixture-two"
+        );
+        assert!(token_from_file(&path, "https://missing.test", false).is_err());
+        assert!(
+            token_from_file(&dir.path().join("missing.toml"), "https://one.test", false).is_err()
+        );
+        fs::write(&path, "[[credentials]]\norigin='https://one.test'\ntoken='one'\n[[credentials]]\norigin='https://one.test/'\ntoken='two'").unwrap();
+        assert!(token_from_file(&path, "https://one.test", false).is_err());
+    }
 
     #[test]
     fn repository_binding_is_non_secret_and_exact() {

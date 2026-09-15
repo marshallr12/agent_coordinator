@@ -105,6 +105,7 @@ fn verify_existing(
         || existing.workstation_id != incoming.workstation_id
         || existing.harness != incoming.harness
         || existing.capabilities != incoming.capabilities
+        || existing.subagent != incoming.subagent
     {
         return Err(Failure::invalid(
             "This local session name already belongs to a different identity; choose an unused name.",
@@ -182,6 +183,8 @@ pub async fn run(
         harness,
         capabilities,
     );
+    incoming.subagent = serde_json::from_value(remote["data"]["subagent"].clone())
+        .map_err(|_| Failure::invalid("The remote subagent identity is invalid."))?;
     incoming.orientation = Some(parse_orientation(&orientation).ok_or_else(|| {
         Failure::invalid(
             "The service returned invalid project orientation; no session state was saved.",
@@ -245,6 +248,7 @@ mod tests {
             binding: config::RepositoryBinding {
                 service_url: "https://example.test".into(),
                 project_id: "project".into(),
+                project_name: None,
             },
             origin: "https://example.test".into(),
             client: CoordinatorClient::new("https://example.test", "fixture-token", false).unwrap(),

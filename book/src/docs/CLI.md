@@ -13,8 +13,8 @@ service_url = "https://coordinator.example.com"
 project_id = "project-id-from-the-operator"
 ```
 
-The file accepts only those two fields. In particular, a token in this file is
-rejected. Set the token in the process environment:
+The file also accepts an optional non-secret `project_name` credential directory
+selector. Tokens and unknown fields are rejected. Set the token in the process environment:
 
 ```sh
 export AGENT_COORDINATOR_TOKEN='token-issued-by-the-operator'
@@ -41,6 +41,88 @@ set mode `0600`. On Windows, keep the file within the current user's protected
 profile and restrict its ACL to that user. The configured origin is matched
 exactly after normalization, so changing a repository binding cannot redirect
 an existing credential to another service.
+
+### Project credential directories and worktrees
+
+To select a project-specific credential file, add a stable local directory name:
+
+```toml
+service_url = "https://coordinator.example.com"
+project_id = "project-id-from-the-operator"
+project_name = "Billing"
+```
+
+On Windows this selects `%APPDATA%/Agent Coordinator/Billing/config/credentials.toml`.
+On Linux it selects `$XDG_CONFIG_HOME/agent-coordinator/Billing/config/credentials.toml`
+(or `$HOME/.config/agent-coordinator/Billing/config/credentials.toml`). On Unix an
+`AGENT_COORDINATOR_HOME` override replaces the `agent-coordinator` directory.
+The file has the same origin/token format and protection requirements as above.
+
+`project_name` is a local selector, not a server project rename or an access
+restriction. Use a single portable directory name: no path separators, reserved
+Windows device names, or trailing dots/spaces. It is independent of the checkout
+folder and remains stable when creating or moving worktrees. Changing the server's
+display name does not move credentials.
+
+Example Windows paths for user `marsh`:
+
+| Checkout/worktree | Binding `project_name` | Credential file |
+| --- | --- | --- |
+| `C:/src/billing` | `Billing` | `C:/Users/marsh/AppData/Roaming/Agent Coordinator/Billing/config/credentials.toml` |
+| `C:/src/billing-review` | `Billing` | `C:/Users/marsh/AppData/Roaming/Agent Coordinator/Billing/config/credentials.toml` |
+| `D:/worktrees/billing-fix` | `Billing` | `C:/Users/marsh/AppData/Roaming/Agent Coordinator/Billing/config/credentials.toml` |
+| `C:/src/inventory` | `Inventory` | `C:/Users/marsh/AppData/Roaming/Agent Coordinator/Inventory/config/credentials.toml` |
+| `C:/src/agent_coordinator` | `Agent Coordinator` | `C:/Users/marsh/AppData/Roaming/Agent Coordinator/Agent Coordinator/config/credentials.toml` |
+| Any checkout with the original two-field binding | omitted | `C:/Users/marsh/AppData/Roaming/Agent Coordinator/agent-coordinator/config/credentials.toml` |
+
+Without `project_name`, existing shared-file lookup is unchanged. With it, a
+missing, invalid, or mismatched project file is an error; the client does not
+silently use the shared file and a different agent identity. Explicit environment
+credentials still take precedence: `AGENT_COORDINATOR_TOKEN`, then the protected
+MCP token configuration, then the selected file. Every credential is origin-bound.
+Independent worktrees still need distinct session names even when sharing a file.
+
+### Subagent identities and reviews
+
+A human can enable **Who may perform agent review? → Also allow a registered,
+non-contributing subagent** in the project's review settings or policy. The API
+field is `allow_subagent_reviews`; it defaults to false, and agents cannot change
+this permission. Policy changes invalidate existing candidates through the usual
+revision guards. Human review requirements remain unchanged.
+
+Connect the parent normally, then use its public session ID from `connect`:
+
+```text
+agent-coordinator --session billing-parent connect --harness codex --json
+agent-coordinator --session billing-review-1 connect --harness codex --subagent reviewer --parent-session PARENT_SESSION_ID --json
+```
+
+The server assigns a durable subagent identity keyed by project, credential
+principal, and subagent name. Reuse the same `--subagent` name across that agent's
+new sessions; its recorded contributions remain attached. Each new session has
+its own proof. A saved session resumes without repeating these options. Parent
+identity is immutable; ordinary parent sessions remain the same principal identity.
+Session adoption and the native MCP launcher preserve the registered identity.
+
+Before a helper contributes under the parent's task claim, the owning session
+must checkpoint with `contributor_session_ids` containing the helper's registered
+session ID. For example, pass this body with the normal checkpoint command:
+
+```json
+{"summary":"Register implementation helper before delegation","contributor_session_ids":["HELPER_SESSION_ID"]}
+```
+
+Claims, checkouts, and submissions also record their contributing sessions.
+The service rejects a contributing subagent across all sessions of its identity,
+both when claiming and deciding review. Ordinary sessions sharing the contributor
+principal remain ineligible. A review-only subagent must inspect the immutable
+candidate and evidence before deciding through the existing review workflow.
+
+This option trusts the harness to keep distinct agent contexts and record every
+helper before it works. Shared credentials cannot prove independent reasoning or
+detect undeclared local edits. Use the default separate-principal policy when
+separate credentials are required. A new name is for a genuinely separate agent,
+never a way to erase contribution history.
 
 Every independent harness must use a distinct, stable session name. Pass it on
 every ownership command or configure it in that harness's environment:

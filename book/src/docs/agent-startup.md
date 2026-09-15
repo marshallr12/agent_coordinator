@@ -10,7 +10,8 @@ discovery never includes their private contents.
 ## Discover and authenticate
 
 Read `.agent-coordinator.toml` at the repository root using a TOML parser. It has
-exactly two non-secret fields: `service_url` and `project_id`. Require a trusted
+two required non-secret fields, `service_url` and `project_id`, and an optional
+`project_name` local credential directory selector. Require a trusted
 HTTPS origin. Fetch `/api/v1/info` without credentials and with redirects disabled,
 then resolve its `authentication_help` path against that origin. Reject a help
 link with a different scheme, host, or port. Responses use a `data` envelope.
@@ -71,6 +72,14 @@ Default credential locations:
 | Linux | `$XDG_CONFIG_HOME/agent-coordinator/credentials.toml`, or `$HOME/.config/agent-coordinator/credentials.toml` when XDG_CONFIG_HOME is unset |
 | Windows | `%APPDATA%/Agent Coordinator/agent-coordinator/config/credentials.toml` |
 
+When the binding sets `project_name = "Billing"`, the CLI instead selects
+`%APPDATA%/Agent Coordinator/Billing/config/credentials.toml` on Windows, or
+`$XDG_CONFIG_HOME/agent-coordinator/Billing/config/credentials.toml` on Linux
+(using `$HOME/.config` when XDG_CONFIG_HOME is unset). All worktrees with that
+binding use the same file. A selected project file never silently falls back to
+the shared file. Explicit environment credentials retain precedence. See the
+[CLI guide](CLI.md#project-credential-directories-and-worktrees) for examples.
+
 On Unix, restrict the file to mode `0600`; on Windows restrict its ACL to the
 current user and SYSTEM. `AGENT_COORDINATOR_HOME` can override the Unix directory
 but is rejected on Windows. Alternatively, supply `AGENT_COORDINATOR_TOKEN` and
@@ -114,7 +123,13 @@ any work you already own; do not abandon an active attempt to take a review.
    empty candidate list does not mean there is no review work.
 2. Select the highest-priority eligible `agent_review`, using its subject task's
    priority. You must not be a recorded contributor to that task. A new session
-   with the same agent identity does not make you independent. Skip human reviews,
+   with the same agent identity does not make you independent. If the human has
+   enabled `allow_subagent_reviews`, a separately registered project subagent
+   with no task contributions may review its parent's work using its own session
+   and proof. Reuse its stable subagent name across reconnects. Record delegated
+   helpers in the owner's checkpoint `contributor_session_ids` before they work;
+   never rename a contributor to obtain review eligibility. See
+   [subagent identity setup](CLI.md#subagent-identities-and-reviews). Skip human reviews,
    completed reviews, reviews owned by another active worker, and submissions
    blocked by stale policy or other unmet requirements. Use the existing recovery
    or human reconciliation procedure where required; never change policy or

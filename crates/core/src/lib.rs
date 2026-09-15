@@ -93,6 +93,9 @@ pub struct CheckpointInput {
     pub next_step: String,
     #[serde(default)]
     pub blockers: Vec<String>,
+    /// Register delegated helpers before they contribute to this task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributor_session_ids: Vec<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -142,6 +145,9 @@ pub struct PolicyInput {
     pub provenance: String,
     pub agent_rule_editing: bool,
     pub automatic_integration: bool,
+    /// Omission preserves the current policy for older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_subagent_reviews: Option<bool>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -172,6 +178,18 @@ pub struct SessionInput {
     pub workstation_id: String,
     pub harness: String,
     pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<SubagentInput>,
+}
+
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentInput {
+    pub project_id: String,
+    /// Stable name reused across this subagent's sessions.
+    pub name: String,
+    pub parent_session_id: String,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

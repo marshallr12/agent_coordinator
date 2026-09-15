@@ -1273,14 +1273,14 @@ async fn claim_activity(
                     "An agent session must own an independent agent review.",
                 ));
             }
-            let contributed:i64=sqlx::query_scalar("SELECT count(*) FROM task_contributors WHERE task_id=? AND (principal_id=? OR session_id=?)")
-                .bind(&ctx.subject_task).bind(&m.actor.id).bind(&owner_session).fetch_one(&mut *m.tx).await?;
-            if contributed > 0 {
-                return Err(AppError::conflict(
-                    "reviewer_not_independent",
-                    "A contributor principal or session cannot review this task's submissions.",
-                ));
-            }
+            ensure_independent_reviewer(
+                &mut m.tx,
+                &project,
+                &ctx.subject_task,
+                &m.actor.id,
+                &owner_session,
+            )
+            .await?;
         }
         "human_review" => human(&m.actor)?,
         "integration" => {
@@ -1559,6 +1559,31 @@ async fn ensure_workflow_quiescent(
     Ok(())
 }
 
+async fn ensure_independent_reviewer(
+    c: &mut SqliteConnection,
+    project: &str,
+    task: &str,
+    principal: &str,
+    session: &str,
+) -> Result<(), AppError> {
+    let identity: Option<String> = sqlx::query_scalar("SELECT i.id FROM agent_sessions s JOIN subagent_identities i ON i.id=s.subagent_identity_id JOIN projects p ON p.id=i.project_id WHERE s.id=? AND s.principal_id=? AND i.project_id=? AND p.allow_subagent_reviews=1")
+        .bind(session).bind(principal).bind(project).fetch_optional(&mut *c).await?;
+    let contributed: i64 = if let Some(identity) = identity {
+        sqlx::query_scalar("SELECT count(*) FROM task_contributors tc LEFT JOIN agent_sessions s ON s.id=tc.session_id WHERE tc.task_id=? AND (s.subagent_identity_id=? OR tc.session_id=?)")
+            .bind(task).bind(identity).bind(session).fetch_one(&mut *c).await?
+    } else {
+        sqlx::query_scalar("SELECT count(*) FROM task_contributors WHERE task_id=? AND (principal_id=? OR session_id=?)")
+            .bind(task).bind(principal).bind(session).fetch_one(&mut *c).await?
+    };
+    if contributed > 0 {
+        return Err(AppError::conflict(
+            "reviewer_not_independent",
+            "A recorded contributor cannot review this task. Shared-credential subagents require explicit project policy and a separate non-contributing identity.",
+        ));
+    }
+    Ok(())
+}
+
 async fn review(
     State(state): State<AppState>,
     auth: Auth,
@@ -1617,6 +1642,17 @@ async fn review(
         return Err(AppError::forbidden(
             "The authenticated actor type does not match this review slot.",
         ));
+    }
+    if ctx.kind == "agent_review" {
+        let reviewer_session = session(&m.actor)?.to_owned();
+        ensure_independent_reviewer(
+            &mut m.tx,
+            &project,
+            &ctx.subject_task,
+            &m.actor.id,
+            &reviewer_session,
+        )
+        .await?;
     }
     crate::jobs::ensure_attempt_quiescent(&mut m.tx, &project, &ctx.activity_task).await?;
     let attempt_id: String = sqlx::query_scalar("SELECT current_attempt_id FROM tasks WHERE id=?")
