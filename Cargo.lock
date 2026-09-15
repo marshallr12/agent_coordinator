@@ -400,6 +400,7 @@ dependencies = [
  "anyhow",
  "clap",
  "coordinator-client",
+ "coordinator-core",
  "coordinator-local",
  "directories",
  "getrandom 0.3.4",

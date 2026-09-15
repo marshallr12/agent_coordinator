@@ -8,6 +8,7 @@ license.workspace = true
 name = "agent-coordinator"
 path = "src/main.rs"
 [dependencies]
+coordinator-core = { path = "../core" }
 coordinator-client = { path = "../client" }
 coordinator-local = { path = "../local" }
 anyhow.workspace = true
