@@ -519,7 +519,7 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
                 migration.version,
                 migration.description.replace(' ', "_")
             )),
-            migration.sql.as_bytes(),
+            migration.sql.as_str().as_bytes(),
         )
         .unwrap();
     }
@@ -560,9 +560,10 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
         "review_findings",
         "instruction_acknowledgments",
     ] {
-        sqlx::query(&format!(
+        // Identifiers come only from the fixed table list above.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO main.{table} SELECT * FROM original.{table}"
-        ))
+        )))
         .execute(&mut old)
         .await
         .unwrap();
