@@ -196,12 +196,22 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
         "release",
         "Human",
         "CONTRIBUTING.md",
+        "keep claiming eligible tasks in the",
+        "same session after completing or submitting each task",
+        "user's request narrows the scope",
+        "service does not launch or wake agents",
     ] {
         assert!(
             guide.to_lowercase().contains(&required.to_lowercase()),
             "missing bootstrap step: {required}"
         );
     }
+    assert!(
+        data["agent_startup"]["mcp"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(coordinator_server::discovery::CONTINUATION_INSTRUCTIONS)
+    );
     for private in [
         token.as_str(),
         credential_id.as_str(),

@@ -1,5 +1,11 @@
 use serde_json::{Value, json};
 
+pub const CONTINUATION_INSTRUCTIONS: &str = "Unless the user's request narrows the scope, keep claiming eligible tasks in the same session after completing or submitting each task. Finish current-attempt cleanup, refresh project instructions, decisions and the eligible queue, then claim the next task with a fresh attempt and separate worktree. Pending review is not completion, but does not prevent taking other eligible work. Never approve your own human review, abandon ownership, or release live or uncertain resource holds to move on. Stop when no eligible work remains or required input, access or capability prevents further authorized progress; report that state without inventing work. The service does not launch or wake agents; this loop is performed by the running agent.";
+
+pub fn mcp_instructions() -> String {
+    format!("{MCP_INSTRUCTIONS}\n\n{CONTINUATION_INSTRUCTIONS}")
+}
+
 pub const MCP_INSTRUCTIONS: &str = "This configured MCP connection supports coordination without the native CLI. Inspect coordinator_session_get; register a newly provisioned session only with its protected configured identity. Read coordinator_orientation, current workflow policy, decisions and tasks; acknowledge complete current instructions; then claim eligible work. Persist each mutation's idempotency_key and exact arguments before sending, and reuse both after uncertainty. Keep bearer tokens and session proofs in protected HTTP headers, never tool arguments or output. Persist attempt/generation, renew before expiry, checkpoint and release when paused. Missing CLI is not a blocker for MCP listing, claiming, renewal, checkpointing or release. Native worktree preparation, managed jobs, binary transfer and guarded Git operations still need the native client. Before those operations securely adopt the same quiescent MCP session with session adopt-mcp, or checkpoint/release and freshly claim using a separate CLI session. Never borrow ownership across sessions or abandon a lease when a local capability is missing. MCP metadata, reads and receipt replay do not renew ownership. Human review must come from a human. Read the trusted service's /api/v1/info data.agent_startup.guide for the complete portable bootstrap and transition workflow.";
 
 /// Public, deployment-independent bootstrap material. Project state stays behind auth.
@@ -13,7 +19,7 @@ pub fn agent_startup() -> Value {
             "requires_native_cli": false,
             "session_probe": "coordinator_session_get",
             "session_registration": "coordinator_session_register",
-            "instructions": MCP_INSTRUCTIONS,
+            "instructions": mcp_instructions(),
             "coordination_tools": ["coordinator_orientation", "coordinator_workflow_policy", "coordinator_decisions_list", "coordinator_tasks_list", "coordinator_task_get", "coordinator_instructions_ack", "coordinator_claim", "coordinator_attempt_get", "coordinator_attempt_renew", "coordinator_checkpoint", "coordinator_attempt_release"],
             "authentication": "Protected bearer token, session ID and session proof supplied by the MCP host; no public OAuth enrollment."
         },

@@ -97,8 +97,38 @@ Do not stop after listing tasks or ask the user to choose one. Explicit user
 requests can narrow the session to a question, review, or read-only operation.
 A bounded test that stops before source edits still permits and requires a claim
 unless service mutations are explicitly prohibited; checkpoint and release that
-test claim before ending. No eligible task or a concrete access/policy failure is
-a reason to report a blocker, not to fabricate work.
+test claim before ending. If no eligible work remains, report that the queue has
+no work you can claim. Report concrete access or policy failures as blockers;
+do not fabricate work.
+
+### Continue after each task
+
+Unless the user's request narrows the scope, keep claiming eligible tasks in the
+same session after completing or submitting each task. Do not end the run merely
+because one task was submitted for review. A new session is not required for the
+next task.
+
+1. Finish current-attempt cleanup. Save evidence and handoff, observe owned jobs
+   to termination, and release reservations only when their resource use has
+   ended. Submit the candidate, or checkpoint and release if pausing that task.
+   Never abandon ownership or release live or uncertain holds to move on.
+2. Refresh project instructions, policy, decisions, and the eligible queue,
+   following pagination. Select the next task within the user's authorized scope
+   by live priority, dependencies, and your capabilities. Claim it with a fresh
+   attempt and prepare a separate worktree for code changes; reuse the same
+   authenticated session while it remains valid.
+3. Repeat until no eligible work remains or required input, access, or capability
+   prevents further authorized progress. Report that state and any pending review
+   or integration. Do not invent tasks, start repeated polling, or schedule future
+   runs unless the user requested that behavior.
+
+Pending review is not completion, but does not prevent taking other eligible
+work. Leave required human review to a human and use the separate review and
+integration workflows for submitted candidates. An explicit single-task,
+read-only, review-only, or stop request takes precedence over this loop.
+
+The service does not launch or wake agents. This instruction tells the running
+agent to continue; it cannot restart an agent after its host ends the run.
 
 ### MCP startup
 

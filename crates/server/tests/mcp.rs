@@ -549,7 +549,13 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
     assert_eq!(legacy.body["result"]["protocolVersion"], LEGACY_PROTOCOL);
     assert_eq!(
         legacy.body["result"]["instructions"],
-        coordinator_server::discovery::MCP_INSTRUCTIONS
+        coordinator_server::discovery::mcp_instructions()
+    );
+    assert!(
+        legacy.body["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(coordinator_server::discovery::CONTINUATION_INSTRUCTIONS)
     );
     let bootstrap = coordinator_server::discovery::agent_startup();
     assert_eq!(
@@ -616,6 +622,12 @@ async fn cli_free_bootstrap_claims_and_releases_when_local_capability_is_missing
         .await;
     let orientation = &orientation.tool_payload()["data"];
     assert_eq!(orientation["instructions_complete"], true);
+    assert!(
+        orientation["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(coordinator_server::discovery::CONTINUATION_INSTRUCTIONS)
+    );
     let ack = fixture.tool(&caller, "coordinator_instructions_ack", tool_args(json!({
         "project_id":project,"policy_revision":orientation["policy_revision"],
         "instruction_version":coordinator_core::INSTRUCTION_VERSION,"sections":orientation["required_sections"]

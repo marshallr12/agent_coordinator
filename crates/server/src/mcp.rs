@@ -151,7 +151,7 @@ impl ServerHandler for CoordinatorMcp {
                         "Authenticated coordination tools with durable ownership and replay safety.",
                     ),
             )
-            .with_instructions(crate::discovery::MCP_INSTRUCTIONS)
+            .with_instructions(crate::discovery::mcp_instructions())
     }
 }
 
