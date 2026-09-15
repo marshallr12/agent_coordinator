@@ -216,10 +216,12 @@ the service never deletes workstation files or bypasses completion requirements.
 After successful worktree removal, delete only that completed task's local and
 remote branches using the same linked procedure. Verify exact ownership and refs,
 full merge into the intended target, and no remaining worktree use. Preserve
-main, parent, default, configured target, shared, and unrelated branches. Local
+main, parent, default, configured target, host-protected, shared, and unrelated branches. Local
 deletion uses `git branch -d`; remote deletion requires an explicit expected-ref
 lease against the freshly observed remote commit. A refusal or uncertain result
 requires inspection and truthful retention reporting, never forced or bulk cleanup.
+Conclusive absence means a ref is already removed; report it without recreating
+it and apply the guards to remaining refs. Lookup failure does not prove absence.
 Inspect existing completed tasks in the authorized project with these same gates;
 record each removed or retained worktree and branch separately.
 

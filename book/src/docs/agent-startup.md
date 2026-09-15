@@ -392,7 +392,7 @@ handoff. Cleanup is local agent work; the service does not delete worktrees.
 
 After successful worktree removal, delete its exact local and remote task branches
 when the following checks pass. Record their full refs and commit IDs before
-removing the tree. Preserve main, parent, default, and configured target branches,
+removing the tree. Preserve main, parent, default, configured target, and host-protected branches,
 branches used by any remaining worktree, and unrelated or shared branches. Verify
 the branches belong only to this completed task from its registered checkout and
 saved publication evidence; names alone do not establish ownership.
@@ -415,6 +415,10 @@ unguarded force, implicit lease, wildcard, mirror, or prune operation. Verify bo
 deletions and report each removed or retained ref. On failure or uncertainty,
 inspect and report the blocker; do not guess a new expected commit or retry a
 destructive effect blindly.
+
+A ref conclusively verified absent in the intended repository is already removed;
+report it and apply all remaining guards independently to refs that still exist.
+Never recreate an absent ref. A failed or uncertain lookup is not proof of absence.
 
 Also page through existing completed tasks in the authorized project and inspect
 their registered worktrees on this workstation for the same cleanup. Apply every
