@@ -127,7 +127,9 @@ pub async fn run(
     let local_session = required_session(cli)?;
     let import = read_import(context, |name| std::env::var(name).ok())?;
     let workstation = args.workstation.clone().unwrap_or_else(default_workstation);
-    if workstation.trim().is_empty() || workstation == "unknown-workstation" {
+    if workstation.trim().is_empty()
+        || (args.workstation.is_none() && workstation == "unknown-workstation")
+    {
         return Err(Failure::invalid(
             "Supply --workstation with the existing MCP session's workstation identity.",
         ));

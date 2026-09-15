@@ -37,7 +37,9 @@ def exercise_mcp_adoption(temporary, api, project, token, binary, owner, attempt
         assert token not in output and proof not in output, "Adoption disclosed a secret."
         for name in ("AGENT_COORDINATOR_MCP_TOKEN", "AGENT_COORDINATOR_MCP_SESSION_PROOF"):
             assert selected[name] not in output, "Rejected adoption disclosed a supplied secret."
-        assert (result.returncode == 0) == success, "Unexpected adoption exit status."
+        if (result.returncode == 0) != success:
+            failure = json.loads(result.stdout).get("error", {}) if result.stdout else {}
+            raise AssertionError(f"Unexpected adoption status: {result.returncode}, {failure.get('code')}: {failure.get('message')}")
         return json.loads(result.stdout) if result.stdout else None
 
     # Verify the MCP host holds the same authenticated identity before handoff.
