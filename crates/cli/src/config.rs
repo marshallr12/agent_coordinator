@@ -80,6 +80,19 @@ pub fn token(origin: &str, allow_insecure_loopback: bool) -> Result<String> {
         return Ok(token);
     }
 
+    if env::var_os("AGENT_COORDINATOR_MCP_TOKEN").is_some() {
+        let token = env::var("AGENT_COORDINATOR_MCP_TOKEN")
+            .map_err(|_| anyhow!("AGENT_COORDINATOR_MCP_TOKEN must contain valid Unicode"))?;
+        if token.is_empty() {
+            bail!("AGENT_COORDINATOR_MCP_TOKEN is empty");
+        }
+        validate_mcp_url(
+            &env::var("AGENT_COORDINATOR_MCP_URL").unwrap_or_default(),
+            origin,
+        )?;
+        return Ok(token);
+    }
+
     let path = coordinator_home()?.join("credentials.toml");
     check_protected_file(&path)?;
     let input = fs::read_to_string(&path).with_context(|| {
@@ -108,6 +121,15 @@ pub fn token(origin: &str, allow_insecure_loopback: bool) -> Result<String> {
         bail!("the configured credential for {origin} is empty");
     }
     Ok(token)
+}
+
+pub fn validate_mcp_url(configured: &str, origin: &str) -> Result<()> {
+    if configured != format!("{origin}/mcp") {
+        bail!(
+            "AGENT_COORDINATOR_MCP_URL must equal the repository service origin followed by /mcp"
+        );
+    }
+    Ok(())
 }
 
 fn validate_environment_origin(

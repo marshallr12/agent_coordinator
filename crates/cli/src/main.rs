@@ -3,6 +3,7 @@ mod config;
 mod job_state;
 mod mcp_client;
 mod operator;
+mod session_adoption;
 mod shared;
 mod state;
 mod worktree;
@@ -49,6 +50,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Adopt an existing MCP session without registering or renewing ownership.
+    Session {
+        #[command(subcommand)]
+        command: session_adoption::SessionCommand,
+    },
     /// Launch a trusted MCP client with this connected harness's credentials in its environment.
     McpClient(mcp_client::LaunchArgs),
     /// Group child tasks under a general objective with its own completion evidence.
@@ -886,6 +892,7 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
     }
     let context = build_context(cli).await?;
     match &cli.command {
+        Command::Session { command } => session_adoption::run(cli, &context, command).await,
         Command::McpClient(args) => mcp_client::launch(cli, &context, args).await,
         Command::Objectives { command } => operator::objectives(cli, &context, command).await,
         Command::Policy { command } => operator::policy(cli, &context, command).await,
