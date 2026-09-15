@@ -234,6 +234,10 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
         "fresh task read confirms the subject task is done",
         "Always preserve the main parent checkout",
         "without --force or recursive filesystem deletion",
+        "After successful worktree removal, delete its exact local and remote task branches",
+        "Preserve main, parent, default, and configured target branches",
+        "--force-with-lease=refs/heads/TASK_BRANCH:EXPECTED_OID",
+        "page through existing completed tasks in the authorized project",
     ] {
         assert!(guide.contains(required), "missing cleanup gate: {required}");
     }

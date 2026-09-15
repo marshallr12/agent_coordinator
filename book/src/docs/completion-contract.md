@@ -213,6 +213,16 @@ verify exact resolved paths and registered Git identities, then use
 removed paths or retained paths and blockers honestly. This is local guidance;
 the service never deletes workstation files or bypasses completion requirements.
 
+After successful worktree removal, delete only that completed task's local and
+remote branches using the same linked procedure. Verify exact ownership and refs,
+full merge into the intended target, and no remaining worktree use. Preserve
+main, parent, default, configured target, shared, and unrelated branches. Local
+deletion uses `git branch -d`; remote deletion requires an explicit expected-ref
+lease against the freshly observed remote commit. A refusal or uncertain result
+requires inspection and truthful retention reporting, never forced or bulk cleanup.
+Inspect existing completed tasks in the authorized project with these same gates;
+record each removed or retained worktree and branch separately.
+
 ## Coordination hooks
 
 The coordination module must call these workflow hooks while holding its existing
