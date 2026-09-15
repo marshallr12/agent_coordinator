@@ -33,10 +33,34 @@ CREATE TABLE workflow_activities_new (
 );
 INSERT INTO workflow_activities_new(rowid,id,project_id,subject_task_id,submission_id,activity_task_id,kind,slot,state,created_at,completed_at,canceled_at)
     SELECT rowid,id,project_id,subject_task_id,submission_id,activity_task_id,kind,slot,state,created_at,completed_at,canceled_at FROM workflow_activities;
+-- This trigger belongs to integration_holds but references the rebuilt table.
+DROP TRIGGER restore_capture_inserted_integration_hold;
 DROP TABLE workflow_activities;
 ALTER TABLE workflow_activities_new RENAME TO workflow_activities;
 CREATE INDEX workflow_activities_subject ON workflow_activities(subject_task_id,created_at,id);
 CREATE INDEX workflow_activities_project_subject_history ON workflow_activities(project_id,subject_task_id,created_at,id);
+
+CREATE TRIGGER restore_capture_inserted_integration_hold
+AFTER INSERT ON integration_holds
+WHEN NEW.state='held'
+ AND (SELECT coordination_state FROM service_state WHERE singleton=1)='restore_reconciliation'
+BEGIN
+    INSERT INTO restore_requirements(
+        restore_id,kind,target_id,project_id,state_at_restore,detail_json
+    )
+    SELECT ss.restore_id,'integration_hold',NEW.id,a.project_id,'held',
+           json_object(
+               'hold_id',NEW.id,
+               'activity_id',NEW.activity_id,
+               'subject_task_id',a.subject_task_id,
+               'activity_task_id',a.activity_task_id,
+               'canonical_repository_key',NEW.canonical_repository_key,
+               'target_branch',NEW.target_branch
+           )
+    FROM service_state ss
+    JOIN workflow_activities a ON a.id=NEW.activity_id
+    WHERE ss.singleton=1;
+END;
 
 -- Fail and roll back both the schema change and its migration receipt if any
 -- relationship was lost. Request connections always enforce foreign keys.
