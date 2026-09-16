@@ -382,9 +382,26 @@
 
   function openTask(id) { state.selectedTaskId = text(id); showView('task-detail'); loadTaskDetail(); }
 
+  function selectTaskDetailText(id) {
+    const source = $(id); const selection = window.getSelection();
+    if (!source || !selection) return;
+    const range = document.createRange(); range.selectNodeContents(source); selection.removeAllRanges(); selection.addRange(range);
+  }
+  function setTaskDetailCopyFeedback(message, kind) {
+    const target = $('detail-copy-feedback'); target.className = `task-detail-copy-feedback ${kind || ''}`; setText(target, message); show(target, Boolean(message));
+  }
+  async function copyTaskDetailValue(button, label, sourceId) {
+    const value = button.dataset.copyValue;
+    if (!value) return;
+    try { await navigator.clipboard.writeText(value); setTaskDetailCopyFeedback(`${label} copied to clipboard.`, 'success'); }
+    catch (_) { selectTaskDetailText(sourceId); setTaskDetailCopyFeedback(`Clipboard access was unavailable. ${label} is selected; copy it with your browser.`, 'fallback'); }
+  }
+
   function renderTaskDetail() {
     const data = state.detail || {}; const task = data.task || data; const project = state.projects.find((item) => text(item.id) === state.projectId);
-    setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), task.title || 'Untitled task'); setText($('detail-task-id'), `Task ${task.id || state.selectedTaskId} · Revision ${task.revision || 1}`); setText($('detail-description'), task.description || 'No description provided.');
+    const title = task.title || 'Untitled task'; const taskId = text(task.id || state.selectedTaskId);
+    setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), title); setText($('detail-task-id-value'), taskId); setText($('detail-task-revision'), task.revision || 1); setText($('detail-description'), task.description || 'No description provided.');
+    $('copy-task-name').dataset.copyValue = title; $('copy-task-id').dataset.copyValue = taskId; setTaskDetailCopyFeedback('', '');
     const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); badge.className = `status-badge ${status}`; setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
     const criteria = $('acceptance-list'); clear(criteria); const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
     if (!items.length) add(criteria, el('li', 'muted', 'No acceptance criteria recorded.')); else items.forEach((item) => add(criteria, el('li', '', item)));
@@ -466,7 +483,7 @@
   document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); loadClock(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
-  $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); }); });
+  $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); }); });
   function showToken(token) { setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
   function setIssueFeedback(message, kind) { const target = $('issue-feedback'); target.className = `inline-alert ${kind}`; setText(target, message); show(target, true); }
   $('clear-token').addEventListener('click', () => { setText($('issued-token'), ''); show($('token-reveal'), false); }); $('copy-token').addEventListener('click', async () => { const token = $('issued-token').textContent; if (!token) return; try { await navigator.clipboard.writeText(token); setIssueFeedback('Token copied to clipboard.', 'success'); } catch (_) { setIssueFeedback('Copy was unavailable. Select the token and copy it manually.', 'error'); } });
