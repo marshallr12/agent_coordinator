@@ -108,7 +108,9 @@ pub struct SessionLock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateAccessStage {
     StateDirectoryCreate,
+    StateDirectoryInspect,
     StateDirectoryProtection,
+    StateFileRead,
     LockFileOpen,
     LockFileProtection,
     LockAcquisition,
@@ -118,7 +120,9 @@ impl StateAccessStage {
     pub fn code(self) -> &'static str {
         match self {
             Self::StateDirectoryCreate => "state_directory_create",
+            Self::StateDirectoryInspect => "state_directory_inspect",
             Self::StateDirectoryProtection => "state_directory_protection",
+            Self::StateFileRead => "state_file_read",
             Self::LockFileOpen => "lock_file_open",
             Self::LockFileProtection => "lock_file_protection",
             Self::LockAcquisition => "lock_acquisition",
@@ -128,7 +132,9 @@ impl StateAccessStage {
     fn description(self) -> &'static str {
         match self {
             Self::StateDirectoryCreate => "create session state directory",
+            Self::StateDirectoryInspect => "inspect session state directory",
             Self::StateDirectoryProtection => "protect session state directory",
+            Self::StateFileRead => "read session state file",
             Self::LockFileOpen => "open or create session lock file",
             Self::LockFileProtection => "protect session lock file",
             Self::LockAcquisition => "acquire exclusive session lock",
@@ -243,23 +249,11 @@ pub fn diagnose(state_path: &Path) -> Value {
     let mut checks = Vec::new();
     let mut healthy = true;
 
-    match fs::create_dir_all(directory).map_err(|error| {
-        StateAccessError::new(StateAccessStage::StateDirectoryCreate, directory, error)
-    }) {
-        Ok(()) => match protect_directory(directory).map_err(|error| {
-            StateAccessError::new(StateAccessStage::StateDirectoryProtection, directory, error)
-        }) {
-            Ok(()) => checks.push(json_check("state_directory", "ok", directory, None)),
-            Err(error) => {
-                healthy = false;
-                checks.push(json_check(
-                    "state_directory",
-                    "failed",
-                    directory,
-                    Some(&error),
-                ));
-            }
-        },
+    let directory_ready = match prepare_diagnostic_directory(directory) {
+        Ok(()) => {
+            checks.push(json_check("state_directory", "ok", directory, None));
+            true
+        }
         Err(error) => {
             healthy = false;
             checks.push(json_check(
@@ -268,54 +262,88 @@ pub fn diagnose(state_path: &Path) -> Value {
                 directory,
                 Some(&error),
             ));
+            false
         }
-    }
+    };
 
-    match load(state_path) {
-        Ok(Some(_)) => checks.push(json_check("session_state", "readable", state_path, None)),
-        Ok(None) => checks.push(json_check("session_state", "missing", state_path, None)),
-        Err(error) => {
-            healthy = false;
-            checks.push(serde_json::json!({
-                "name": "session_state",
-                "status": "failed",
-                "path": state_path,
-                "message": format!("{error:#}")
-            }));
-        }
-    }
-
-    match open_lock_file(state_path) {
-        Ok(file) => {
-            checks.push(json_check("lock_file", "open", &lock_path, None));
-            match fs2::FileExt::try_lock_exclusive(&file) {
-                Ok(()) => checks.push(json_check("exclusive_lock", "acquired", &lock_path, None)),
-                Err(source) => {
+    if directory_ready {
+        match fs::read(state_path) {
+            Ok(bytes) => match serde_json::from_slice::<SessionState>(&bytes) {
+                Ok(_) => checks.push(json_check("session_state", "readable", state_path, None)),
+                Err(error) => {
                     healthy = false;
-                    let error = StateAccessError::new(
-                        StateAccessStage::LockAcquisition,
-                        &lock_path,
-                        source,
-                    );
-                    checks.push(json_check(
-                        "exclusive_lock",
-                        "busy_or_unavailable",
-                        &lock_path,
-                        Some(&error),
-                    ));
+                    checks.push(serde_json::json!({
+                        "name": "session_state",
+                        "status": "invalid",
+                        "path": state_path,
+                        "message": format!("parse local session state {}: {error}", state_path.display())
+                    }));
                 }
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                checks.push(json_check("session_state", "missing", state_path, None));
+            }
+            Err(source) => {
+                healthy = false;
+                let error =
+                    StateAccessError::new(StateAccessStage::StateFileRead, state_path, source);
+                checks.push(json_check(
+                    "session_state",
+                    "failed",
+                    state_path,
+                    Some(&error),
+                ));
             }
         }
-        Err(error) => {
-            healthy = false;
-            checks.push(json_check("lock_file", "failed", &lock_path, Some(&error)));
-            checks.push(json_check(
-                "exclusive_lock",
-                "not_attempted",
-                &lock_path,
-                None,
-            ));
+
+        match open_lock_file(state_path) {
+            Ok(file) => {
+                checks.push(json_check("lock_file", "open", &lock_path, None));
+                match fs2::FileExt::try_lock_exclusive(&file) {
+                    Ok(()) => {
+                        checks.push(json_check("exclusive_lock", "acquired", &lock_path, None));
+                    }
+                    Err(source) => {
+                        healthy = false;
+                        let error = StateAccessError::new(
+                            StateAccessStage::LockAcquisition,
+                            &lock_path,
+                            source,
+                        );
+                        checks.push(json_check(
+                            "exclusive_lock",
+                            "busy_or_unavailable",
+                            &lock_path,
+                            Some(&error),
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                healthy = false;
+                checks.push(json_check("lock_file", "failed", &lock_path, Some(&error)));
+                checks.push(json_check(
+                    "exclusive_lock",
+                    "not_attempted",
+                    &lock_path,
+                    None,
+                ));
+            }
         }
+    } else {
+        checks.push(json_check(
+            "session_state",
+            "not_attempted",
+            state_path,
+            None,
+        ));
+        checks.push(json_check("lock_file", "not_attempted", &lock_path, None));
+        checks.push(json_check(
+            "exclusive_lock",
+            "not_attempted",
+            &lock_path,
+            None,
+        ));
     }
 
     serde_json::json!({
@@ -326,6 +354,56 @@ pub fn diagnose(state_path: &Path) -> Value {
         "checks": checks,
         "note": "A lock filename may remain after a process exits; only failure to acquire the exclusive lock demonstrates current contention."
     })
+}
+
+fn prepare_diagnostic_directory(directory: &Path) -> std::result::Result<(), StateAccessError> {
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(StateAccessError::new(
+                StateAccessStage::StateDirectoryInspect,
+                directory,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "session state directory is not a real directory",
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(directory).map_err(|error| {
+                StateAccessError::new(StateAccessStage::StateDirectoryCreate, directory, error)
+            })?;
+        }
+        Err(error) => {
+            return Err(StateAccessError::new(
+                StateAccessStage::StateDirectoryInspect,
+                directory,
+                error,
+            ));
+        }
+    }
+    inspect_directory(directory).map_err(|error| {
+        StateAccessError::new(StateAccessStage::StateDirectoryInspect, directory, error)
+    })?;
+    protect_directory(directory).map_err(|error| {
+        StateAccessError::new(StateAccessStage::StateDirectoryProtection, directory, error)
+    })
+}
+
+fn inspect_directory(directory: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let extension = path.extension().and_then(|value| value.to_str());
+        if !file_type.is_file() || !matches!(extension, Some("json" | "lock")) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected entry {}", path.display()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn json_check(name: &str, status: &str, path: &Path, error: Option<&StateAccessError>) -> Value {
@@ -373,6 +451,33 @@ pub fn path_for(
     )
 }
 
+/// Resolve a diagnostic target without inspecting the target directory first.
+///
+/// Diagnostics must be able to report an inaccessible existing directory. The
+/// normal state path resolver deliberately enumerates an existing directory to
+/// enforce that it is dedicated, which would otherwise fail before the
+/// per-check diagnostic report can be produced.
+pub fn path_for_diagnosis(
+    explicit_state_dir: Option<&Path>,
+    origin: &str,
+    project_id: &str,
+    local_session: &str,
+) -> Result<PathBuf> {
+    let directory = match explicit_state_dir {
+        Some(path) => {
+            validate_state_directory_location(path)?;
+            path.to_path_buf()
+        }
+        None => coordinator_home()?.join("sessions"),
+    };
+    Ok(session_state_path(
+        &directory,
+        origin,
+        project_id,
+        local_session,
+    ))
+}
+
 pub fn path_for_directory(
     directory: &Path,
     origin: &str,
@@ -380,6 +485,20 @@ pub fn path_for_directory(
     local_session: &str,
 ) -> Result<PathBuf> {
     validate_explicit_state_directory(directory)?;
+    Ok(session_state_path(
+        directory,
+        origin,
+        project_id,
+        local_session,
+    ))
+}
+
+fn session_state_path(
+    directory: &Path,
+    origin: &str,
+    project_id: &str,
+    local_session: &str,
+) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(origin.as_bytes());
     digest.update([0]);
@@ -387,24 +506,11 @@ pub fn path_for_directory(
     digest.update([0]);
     digest.update(local_session.as_bytes());
     let name = hex::encode(digest.finalize());
-    Ok(directory.join(format!("{name}.json")))
+    directory.join(format!("{name}.json"))
 }
 
 fn validate_explicit_state_directory(path: &Path) -> Result<()> {
-    use std::path::Component;
-
-    if !path.is_absolute() {
-        bail!("session state directory must be an absolute path");
-    }
-    if path.file_name().is_none()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-    {
-        bail!(
-            "session state directory must be a dedicated absolute directory, not a filesystem root or a path containing . or .."
-        );
-    }
+    validate_state_directory_location(path)?;
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -439,6 +545,24 @@ fn validate_explicit_state_directory(path: &Path) -> Result<()> {
                 entry_path.display()
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_state_directory_location(path: &Path) -> Result<()> {
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        bail!("session state directory must be an absolute path");
+    }
+    if path.file_name().is_none()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        bail!(
+            "session state directory must be a dedicated absolute directory, not a filesystem root or a path containing . or .."
+        );
     }
     Ok(())
 }
@@ -519,6 +643,20 @@ fn protect_file(path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn set_private_windows_acl(path: &Path, directory: bool) -> io::Result<()> {
+    // Owner Rights means the actual owner of this newly created/current-user
+    // state directory, without embedding a localized account name. SYSTEM is
+    // retained for machine recovery. The protected DACL prevents broad inherited
+    // entries from exposing session proofs or pending mutation journals.
+    let sddl = if directory {
+        "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"
+    } else {
+        "D:P(A;;FA;;;OW)(A;;FA;;;SY)"
+    };
+    set_windows_acl(path, sddl)
+}
+
+#[cfg(windows)]
+fn set_windows_acl(path: &Path, sddl: &str) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::LocalFree;
@@ -531,15 +669,6 @@ fn set_private_windows_acl(path: &Path, directory: bool) -> io::Result<()> {
         PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
     };
 
-    // Owner Rights means the actual owner of this newly created/current-user
-    // state directory, without embedding a localized account name. SYSTEM is
-    // retained for machine recovery. The protected DACL prevents broad inherited
-    // entries from exposing session proofs or pending mutation journals.
-    let sddl = if directory {
-        "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"
-    } else {
-        "D:P(A;;FA;;;OW)(A;;FA;;;SY)"
-    };
     let descriptor_text: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
     let converted = unsafe {
@@ -647,6 +776,48 @@ mod tests {
         assert!(state_directory(Some(directory.path())).is_err());
     }
 
+    #[test]
+    fn diagnostic_path_does_not_enumerate_the_target_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("unrelated.txt"),
+            b"not coordinator state",
+        )
+        .unwrap();
+        assert!(
+            path_for(
+                Some(directory.path()),
+                "https://example.test",
+                "project",
+                "runner"
+            )
+            .is_err()
+        );
+        let path = path_for_diagnosis(
+            Some(directory.path()),
+            "https://example.test",
+            "project",
+            "runner",
+        )
+        .unwrap();
+        let report = diagnose(&path);
+        assert_eq!(report["healthy"], false);
+        let checks = report["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 4);
+        assert!(checks.iter().any(|check| {
+            check["name"] == "state_directory"
+                && check["status"] == "failed"
+                && check["operation"] == "state_directory_inspect"
+        }));
+        assert!(
+            checks
+                .iter()
+                .skip(1)
+                .all(|check| check["status"] == "not_attempted")
+        );
+        assert!(!path.with_extension("lock").exists());
+    }
+
     fn path_for_with_home(home: &Path, origin: &str, project: &str, session: &str) -> PathBuf {
         let mut digest = Sha256::new();
         digest.update(origin.as_bytes());
@@ -750,6 +921,40 @@ mod tests {
         assert!(!rendered.contains("credential-digest"));
         assert!(!rendered.contains("secret"));
         assert!(rendered.contains("lock filename may remain"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn diagnostics_report_windows_acl_denial_instead_of_failing_preflight() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("denied");
+        fs::create_dir(&directory).unwrap();
+        // Deny directory enumeration while retaining the owner's ability to
+        // restore the DACL after the diagnostic. This reproduces the access
+        // failure that the ordinary path resolver used to encounter first.
+        set_windows_acl(&directory, "D:P(D;OICI;0x00000001;;;WD)(A;;RCWD;;;OW)").unwrap();
+
+        let path = path_for_diagnosis(
+            Some(&directory),
+            "https://example.test",
+            "project",
+            "runner",
+        )
+        .unwrap();
+        let report = diagnose(&path);
+
+        // Restore access before asserting so the temporary directory remains
+        // removable even when the report shape regresses.
+        set_private_windows_acl(&directory, true).unwrap();
+
+        assert_eq!(report["healthy"], false);
+        let checks = report["checks"].as_array().unwrap();
+        let denied = checks
+            .iter()
+            .find(|check| check["status"] == "failed" && !check["os_error_code"].is_null())
+            .expect("an ACL denial must retain its native Windows error details");
+        assert_eq!(denied["io_error_kind"], "PermissionDenied");
+        assert_eq!(denied["os_error_code"], 5);
     }
 
     #[cfg(windows)]

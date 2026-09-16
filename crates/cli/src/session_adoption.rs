@@ -148,7 +148,7 @@ pub fn diagnose_local(cli: &Cli) -> Result<Value, Failure> {
     let origin =
         coordinator_client::normalize_origin(&binding.service_url, cli.allow_insecure_loopback)
             .map_err(crate::client_failure)?;
-    let path = state::path_for(
+    let path = state::path_for_diagnosis(
         cli.state_dir.as_deref(),
         &origin,
         &binding.project_id,
