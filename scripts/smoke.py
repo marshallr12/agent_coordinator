@@ -28,8 +28,9 @@ from mcp_adoption_smoke import exercise_mcp_adoption
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "debug"
-SERVER = BUILD / "agent-coordinator-server"
-CLI = BUILD / "agent-coordinator"
+BINARY_SUFFIX = ".exe" if os.name == "nt" else ""
+SERVER = BUILD / f"agent-coordinator-server{BINARY_SUFFIX}"
+CLI = BUILD / f"agent-coordinator{BINARY_SUFFIX}"
 
 
 def run():
@@ -88,8 +89,13 @@ def run():
 
             def cli(index, *args, body=None, expected=0, project_id=None):
                 env = {k: v for k, v in os.environ.items() if not k.startswith("AGENT_COORDINATOR_")}
-                env.update(AGENT_COORDINATOR_HOME=str(temporary / f"agent-{index}"),
-                           AGENT_COORDINATOR_TOKEN=credentials[index]["token"],
+                runner_home = temporary / f"agent-{index}"
+                session_directory = runner_home / "sessions"
+                if os.name == "nt":
+                    env["AGENT_COORDINATOR_STATE_DIR"] = str(session_directory)
+                else:
+                    env["AGENT_COORDINATOR_HOME"] = str(runner_home)
+                env.update(AGENT_COORDINATOR_TOKEN=credentials[index]["token"],
                            AGENT_COORDINATOR_ORIGIN=origin)
                 selected_binding = binding
                 if project_id is not None:
@@ -100,9 +106,10 @@ def run():
                 if body is not None:
                     command += ["--input", "-"]
                 result = subprocess.run(command, input=None if body is None else json.dumps(body),
-                                        text=True, capture_output=True, env=env, timeout=15)
+                                        text=True, capture_output=True, env=env,
+                                        timeout=45 if os.name == "nt" else 15)
                 assert credentials[index]["token"] not in result.stdout + result.stderr, "Token leaked into CLI output."
-                for saved_path in (Path(env["AGENT_COORDINATOR_HOME"]) / "sessions").glob("*.json"):
+                for saved_path in session_directory.glob("*.json"):
                     saved = json.loads(saved_path.read_text())
                     proof = saved.get("session", {}).get("proof")
                     assert not proof or proof not in result.stdout + result.stderr, "Session proof leaked into CLI output."

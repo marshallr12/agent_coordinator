@@ -1,4 +1,6 @@
-//! Protected, read-only authentication of a session created by an MCP harness.
+//! Protected local session diagnostics, migration, and MCP adoption.
+use std::path::PathBuf;
+
 use clap::{Args, Subcommand};
 use coordinator_client::SessionAuth;
 use serde_json::{Value, json};
@@ -11,9 +13,23 @@ use crate::{
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
+    /// Check local state paths, readability, lock-file access, and exclusive locking.
+    Diagnose,
+    /// Copy one quiescent session into the selected protected state directory.
+    Migrate(MigrateArgs),
     /// Import the exact MCP session from protected environment variables. Makes no remote writes.
     /// Stop MCP writes and resolve their pending retries before adoption; serialize both transports afterward.
     AdoptMcp(AdoptArgs),
+}
+
+#[derive(Args)]
+pub struct MigrateArgs {
+    /// Existing protected state directory containing the session to copy.
+    #[arg(long)]
+    from_state_dir: PathBuf,
+    /// Confirm all processes using the source session have stopped writing.
+    #[arg(long, required = true)]
+    session_writes_quiescent: bool,
 }
 
 #[derive(Args)]
@@ -119,7 +135,93 @@ pub async fn run(
     context: &ContextData,
     command: &SessionCommand,
 ) -> Result<Value, Failure> {
-    let SessionCommand::AdoptMcp(args) = command;
+    match command {
+        SessionCommand::Diagnose => diagnose_local(cli),
+        SessionCommand::Migrate(args) => migrate(cli, context, args),
+        SessionCommand::AdoptMcp(args) => adopt_mcp(cli, context, args).await,
+    }
+}
+
+pub fn diagnose_local(cli: &Cli) -> Result<Value, Failure> {
+    let local_session = required_session(cli)?;
+    let (_, binding) = config::binding(cli.repo_config.as_deref()).map_err(Failure::invalid)?;
+    let origin =
+        coordinator_client::normalize_origin(&binding.service_url, cli.allow_insecure_loopback)
+            .map_err(crate::client_failure)?;
+    let path = state::path_for(
+        cli.state_dir.as_deref(),
+        &origin,
+        &binding.project_id,
+        local_session,
+    )
+    .map_err(Failure::invalid)?;
+    Ok(json!({"data": state::diagnose(&path)}))
+}
+
+fn migrate(cli: &Cli, context: &ContextData, args: &MigrateArgs) -> Result<Value, Failure> {
+    if !args.session_writes_quiescent {
+        return Err(Failure::invalid(
+            "Confirm that all source-session writes are quiescent before migration.",
+        ));
+    }
+    let local_session = required_session(cli)?;
+    let source_path = state::path_for_directory(
+        &args.from_state_dir,
+        &context.origin,
+        &context.binding.project_id,
+        local_session,
+    )
+    .map_err(Failure::invalid)?;
+    let destination_path = state::path_for(
+        cli.state_dir.as_deref(),
+        &context.origin,
+        &context.binding.project_id,
+        local_session,
+    )
+    .map_err(Failure::invalid)?;
+    if source_path == destination_path {
+        return Err(Failure::invalid(
+            "source and destination session state paths are the same",
+        ));
+    }
+
+    let _source_lock = state::lock(&source_path).map_err(Failure::state_access)?;
+    let source = state::load(&source_path)
+        .map_err(Failure::invalid)?
+        .ok_or_else(|| Failure::invalid("the source session state does not exist"))?;
+    validate_state(context, local_session, &source)?;
+    if source.pending.is_some() {
+        return Err(Failure::invalid(
+            "Resolve the source session's pending mutation with retry before migration.",
+        ));
+    }
+
+    let _destination_lock = state::lock(&destination_path).map_err(Failure::state_access)?;
+    if state::load(&destination_path)
+        .map_err(Failure::invalid)?
+        .is_some()
+    {
+        return Err(Failure::invalid(
+            "destination session state already exists; no file was overwritten",
+        ));
+    }
+    state::save(&destination_path, &source).map_err(Failure::invalid)?;
+    Ok(json!({
+        "data": {
+            "migrated": true,
+            "local_session": local_session,
+            "source_state_path": source_path,
+            "destination_state_path": destination_path,
+            "source_preserved": true,
+            "destination_overwritten": false,
+            "authority_renewed": false,
+            "remote_writes": false,
+            "next_action": "Use the destination --state-dir consistently and run `session diagnose` before resuming writes."
+        }
+    }))
+}
+
+async fn adopt_mcp(cli: &Cli, context: &ContextData, args: &AdoptArgs) -> Result<Value, Failure> {
     if !args.mcp_writes_quiescent {
         return Err(Failure::invalid(
             "Confirm that MCP writes are quiescent before adopting their session.",
@@ -135,9 +237,14 @@ pub async fn run(
             "Supply --workstation with the existing MCP session's workstation identity.",
         ));
     }
-    let path = state::path_for(&context.origin, &context.binding.project_id, local_session)
-        .map_err(Failure::invalid)?;
-    let _lock = state::lock(&path).map_err(Failure::temporary)?;
+    let path = state::path_for(
+        cli.state_dir.as_deref(),
+        &context.origin,
+        &context.binding.project_id,
+        local_session,
+    )
+    .map_err(Failure::invalid)?;
+    let _lock = state::lock(&path).map_err(Failure::state_access)?;
     let existing = state::load(&path).map_err(Failure::invalid)?;
     if let Some(saved) = &existing {
         validate_state(context, local_session, saved)?;
@@ -242,6 +349,32 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn diagnostic_and_migration_commands_require_explicit_session_state() {
+        assert!(
+            Cli::try_parse_from([
+                "agent-coordinator",
+                "--session",
+                "local",
+                "session",
+                "diagnose"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "agent-coordinator",
+                "--session",
+                "local",
+                "session",
+                "migrate",
+                "--from-state-dir",
+                "/private/source"
+            ])
+            .is_err()
+        );
+    }
     fn context() -> ContextData {
         ContextData {
             binding_path: "binding.toml".into(),
@@ -324,5 +457,67 @@ mod tests {
             include_session_id: true,
         });
         assert!(verify_existing(&existing, &incoming).is_err());
+    }
+
+    #[test]
+    fn migration_copies_quiescent_state_without_removing_or_overwriting() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let context = context();
+        let source_path = state::path_for_directory(
+            source.path(),
+            &context.origin,
+            &context.binding.project_id,
+            "local",
+        )
+        .unwrap();
+        let saved = state::SessionState::new(
+            context.origin.clone(),
+            context.binding.project_id.clone(),
+            "local".into(),
+            context.credential_digest.clone(),
+            SessionAuth {
+                id: "session-id".into(),
+                proof: "fixture-proof".into(),
+            },
+            "machine".into(),
+            "harness".into(),
+            vec!["code".into()],
+        );
+        state::save(&source_path, &saved).unwrap();
+
+        let cli = Cli::try_parse_from([
+            "agent-coordinator",
+            "--session",
+            "local",
+            "--state-dir",
+            destination.path().to_str().unwrap(),
+            "session",
+            "migrate",
+            "--from-state-dir",
+            source.path().to_str().unwrap(),
+            "--session-writes-quiescent",
+        ])
+        .unwrap();
+        let crate::Command::Session {
+            command: SessionCommand::Migrate(args),
+        } = &cli.command
+        else {
+            panic!("migration command was not parsed")
+        };
+        let result = migrate(&cli, &context, args).unwrap();
+        let destination_path = state::path_for(
+            cli.state_dir.as_deref(),
+            &context.origin,
+            &context.binding.project_id,
+            "local",
+        )
+        .unwrap();
+        assert!(source_path.is_file());
+        assert!(destination_path.is_file());
+        assert_eq!(result["data"]["source_preserved"], true);
+        assert!(migrate(&cli, &context, args).is_err());
+        assert!(source_path.is_file());
+        assert!(destination_path.is_file());
     }
 }

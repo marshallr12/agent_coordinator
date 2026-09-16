@@ -170,6 +170,63 @@ matches the repository service origin. The session proof and pending request sta
 the platform configuration directory. Separate session names always select
 separate files and therefore cannot silently share attempt ownership.
 
+### Session state locations and diagnostics
+
+By default, session JSON and lock files use the `sessions` child of the platform
+configuration directory: `%APPDATA%/Agent Coordinator/agent-coordinator/config/sessions`
+on Windows and `$XDG_CONFIG_HOME/agent-coordinator/sessions` (or the documented
+`$HOME/.config` fallback) on Linux. This state contains the random session proof
+and the exact pending mutation key and body, so it is private operational state,
+not a cache. Never place it in a repository or discard it to work around a lock
+or uncertain request.
+
+A sandboxed or otherwise isolated runner can select its own protected, durable
+directory with global `--state-dir ABSOLUTE_PATH` or
+`AGENT_COORDINATOR_STATE_DIR`. The command-line value takes precedence. Keep the
+same location and `--session` name for that runner across restarts. The directory
+must be dedicated to Coordinator session `.json` and `.lock` files, must not be a
+link, and must not be a filesystem root. The CLI refuses a non-dedicated existing
+directory before changing its permissions. It applies mode `0700` to the directory
+and `0600` to files on Unix. On Windows it installs a protected DACL granting full
+control only to the directory owner and SYSTEM. This override affects session
+proofs and mutation journals only; credential lookup remains as documented above.
+
+Diagnose local access without contacting or mutating the service:
+
+```text
+agent-coordinator --session RUNNER_NAME session diagnose --json
+agent-coordinator --session RUNNER_NAME --state-dir ABSOLUTE_PATH session diagnose --json
+```
+
+The report checks the resolved directory, session JSON readability, lock-file
+open/create and protection, and exclusive lock acquisition separately. It never
+prints the credential, session proof, or pending request body. State-access
+failures preserve `operation`, `io_error_kind`, and the native `os_error_code`
+when the operating system provides one, in JSON and human-readable output.
+`lock_file_open` and `lock_file_protection` mean the runner cannot safely use that
+location. `lock_acquisition` means another process currently owns the advisory
+lock, or the environment denied locking. A `.lock` filename normally remains on
+disk after a clean exit; its presence alone is not an active lock and deleting it
+does not safely resolve contention.
+
+To move a session between two permitted locations, first stop every MCP/native
+writer for that exact session and reconcile any uncertain mutation with `retry`.
+Then copy it through the guarded migration command:
+
+```text
+agent-coordinator --session RUNNER_NAME --state-dir NEW_ABSOLUTE_PATH session migrate --from-state-dir OLD_ABSOLUTE_PATH --session-writes-quiescent --json
+```
+
+Migration locks both locations, verifies the source belongs to the current
+origin, project, credential, and session name, rejects a source with a pending
+mutation, and writes the destination atomically. It makes no service request,
+does not renew authority, never overwrites destination session JSON, and leaves
+the source state in place for deliberate operator cleanup after verification.
+Run `session diagnose` against the destination before resuming writes, then use
+that one state location consistently. If the source has an uncertain mutation,
+resume the source location and run `retry`; never copy it manually or create a
+fresh session to bypass the journal.
+
 For local development only, `--allow-insecure-loopback` permits `http://localhost`
 or a loopback IP address. Other HTTP origins are rejected. Redirects are never
 followed, and the CLI accepts only `/api/v1` and `/healthz` request paths.

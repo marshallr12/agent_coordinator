@@ -17,8 +17,13 @@ def exercise_mcp_adoption(temporary, api, project, token, binary, owner, attempt
     proof = identity["session"]["proof"]
     session = identity["session"]["id"]
     home = temporary / "mcp-adopted"
+    session_directory = home / "sessions"
     env = {k: v for k, v in os.environ.items() if not k.startswith("AGENT_COORDINATOR_")}
-    env.update(AGENT_COORDINATOR_HOME=str(home), AGENT_COORDINATOR_MCP_TOKEN=token,
+    if os.name == "nt":
+        env["AGENT_COORDINATOR_STATE_DIR"] = str(session_directory)
+    else:
+        env["AGENT_COORDINATOR_HOME"] = str(home)
+    env.update(AGENT_COORDINATOR_MCP_TOKEN=token,
                AGENT_COORDINATOR_MCP_SESSION_ID=session,
                AGENT_COORDINATOR_MCP_SESSION_PROOF=proof,
                AGENT_COORDINATOR_MCP_URL=origin + "/mcp",
@@ -68,13 +73,13 @@ def exercise_mcp_adoption(temporary, api, project, token, binary, owner, attempt
         {"AGENT_COORDINATOR_TOKEN": "different-token", "AGENT_COORDINATOR_ORIGIN": origin},
     ]:
         native(overrides=overrides, success=False)
-        assert not list((home / "sessions").glob("*.json")), "Failed adoption saved state."
+        assert not list(session_directory.glob("*.json")), "Failed adoption saved state."
     native(command[:-1] + ["wrong-workstation"], success=False)
     adopted = native()["data"]
     assert adopted["adopted"] and not adopted["already_adopted"]
     assert adopted["session_id"] == session and not adopted["authority_renewed"]
     assert not adopted["remote_writes"]
-    saved_path = next((home / "sessions").glob("*.json"))
+    saved_path = next(session_directory.glob("*.json"))
     original = saved_path.read_bytes()
     saved = json.loads(original)
     assert saved["session"] == identity["session"]

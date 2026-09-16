@@ -403,6 +403,7 @@ dependencies = [
  "coordinator-core",
  "coordinator-local",
  "directories",
+ "fs2",
  "getrandom 0.3.4",
  "hex",
  "serde",
@@ -412,6 +413,7 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

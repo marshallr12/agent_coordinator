@@ -36,6 +36,10 @@ struct Cli {
     #[arg(long, global = true, env = "AGENT_COORDINATOR_SESSION")]
     session: Option<String>,
 
+    /// Protected directory containing this runner's session state and mutation journals.
+    #[arg(long, global = true, env = "AGENT_COORDINATOR_STATE_DIR")]
+    state_dir: Option<PathBuf>,
+
     /// Permit plain HTTP only when the service is on a loopback address.
     #[arg(long, global = true, env = "AGENT_COORDINATOR_ALLOW_INSECURE_LOOPBACK")]
     allow_insecure_loopback: bool,
@@ -50,7 +54,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Adopt an existing MCP session without registering or renewing ownership.
+    /// Diagnose, migrate, or adopt protected session state without renewing ownership.
     Session {
         #[command(subcommand)]
         command: session_adoption::SessionCommand,
@@ -612,6 +616,7 @@ struct ContextData {
     credential_digest: String,
 }
 
+#[derive(Debug)]
 struct Failure {
     exit: u8,
     output: Value,
@@ -639,6 +644,30 @@ impl Failure {
 
     fn temporary(error: impl std::fmt::Display) -> Self {
         Self::local(7, "transport_failure", error.to_string(), true)
+    }
+
+    fn state_access(error: state::StateAccessError) -> Self {
+        let operation = error.stage().code();
+        let path = error.path().display().to_string();
+        let io_error_kind = format!("{:?}", error.io_kind());
+        let os_error_code = error.raw_os_error();
+        Self {
+            exit: 7,
+            output: json!({
+                "error": {
+                    "code": "session_state_access_failure",
+                    "message": error.to_string(),
+                    "details": {
+                        "operation": operation,
+                        "path": path,
+                        "io_error_kind": io_error_kind,
+                        "os_error_code": os_error_code
+                    },
+                    "next_actions": [{"action": "run_session_diagnose"}],
+                    "retryable": true
+                }
+            }),
+        }
     }
 }
 
@@ -694,6 +723,21 @@ fn print_human(command: &Command, value: &Value) {
         if let Some(help) = error.pointer("/details/service_help/data") {
             println!("Setup:");
             print_json(help, false);
+        }
+        if let Some(operation) = error.pointer("/details/operation").and_then(Value::as_str) {
+            println!("Operation: {operation}");
+        }
+        if let Some(kind) = error
+            .pointer("/details/io_error_kind")
+            .and_then(Value::as_str)
+        {
+            println!("I/O kind: {kind}");
+        }
+        if let Some(code) = error
+            .pointer("/details/os_error_code")
+            .and_then(Value::as_i64)
+        {
+            println!("OS code: {code}");
         }
         if let Some(actions) = error.get("next_actions").and_then(Value::as_array) {
             for action in actions {
@@ -895,6 +939,14 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
             .await
             .map_err(Failure::temporary)?;
         return serde_json::to_value(outcome).map_err(Failure::invalid);
+    }
+    if matches!(
+        &cli.command,
+        Command::Session {
+            command: session_adoption::SessionCommand::Diagnose
+        }
+    ) {
+        return session_adoption::diagnose_local(cli);
     }
     let context = build_context(cli).await?;
     match &cli.command {
@@ -2866,9 +2918,14 @@ async fn connect(
     if args.harness.trim().is_empty() {
         return Err(Failure::invalid("--harness must not be empty"));
     }
-    let session_path = state::path_for(&context.origin, &context.binding.project_id, local_session)
-        .map_err(Failure::invalid)?;
-    let _session_lock = state::lock(&session_path).map_err(Failure::temporary)?;
+    let session_path = state::path_for(
+        cli.state_dir.as_deref(),
+        &context.origin,
+        &context.binding.project_id,
+        local_session,
+    )
+    .map_err(Failure::invalid)?;
+    let _session_lock = state::lock(&session_path).map_err(Failure::state_access)?;
     let existing = state::load(&session_path).map_err(Failure::invalid)?;
     let resumed = existing.is_some();
     let requested_subagent = args
@@ -3277,9 +3334,14 @@ fn load_required_state(
     context: &ContextData,
 ) -> std::result::Result<(state::SessionLock, PathBuf, SessionState), Failure> {
     let local_session = required_session(cli)?;
-    let path = state::path_for(&context.origin, &context.binding.project_id, local_session)
-        .map_err(Failure::invalid)?;
-    let lock = state::lock(&path).map_err(Failure::temporary)?;
+    let path = state::path_for(
+        cli.state_dir.as_deref(),
+        &context.origin,
+        &context.binding.project_id,
+        local_session,
+    )
+    .map_err(Failure::invalid)?;
+    let lock = state::lock(&path).map_err(Failure::state_access)?;
     let state = state::load(&path)
         .map_err(Failure::invalid)?
         .ok_or_else(|| {
@@ -3527,6 +3589,37 @@ mod tests {
         assert_eq!(exit_for_status(409), 5);
         assert_eq!(exit_for_status(422), 6);
         assert_eq!(exit_for_status(503), 7);
+    }
+
+    #[test]
+    fn session_lock_failures_keep_structured_windows_diagnostics() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions/state.json");
+        let _owner = state::lock(&path).unwrap();
+        let failure = Failure::state_access(state::lock(&path).err().unwrap());
+        assert_eq!(
+            failure.output["error"]["code"],
+            "session_state_access_failure"
+        );
+        assert_eq!(
+            failure.output["error"]["details"]["operation"],
+            "lock_acquisition"
+        );
+        assert_ne!(
+            failure.output["error"]["details"]["io_error_kind"],
+            Value::Null
+        );
+        #[cfg(windows)]
+        assert_ne!(
+            failure.output["error"]["details"]["os_error_code"],
+            Value::Null
+        );
+        assert!(
+            failure.output["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("OS code")
+        );
     }
 
     #[test]
