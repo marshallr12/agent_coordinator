@@ -205,3 +205,5 @@ textarea { min-height: 108px; resize: vertical; }
   .credential-row { flex-wrap: wrap; }
   .credential-row > :first-child { flex-basis: 100%; }
 }
+
+.repository-summary { overflow-wrap: anywhere; }

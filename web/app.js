@@ -752,8 +752,8 @@
       const view = workflowDialog('Required checks', 'The repository identity is derived from the project URL and existing bindings are preserved. Check identities, versions, and environments must match the producer registration exactly. Saving a new roster makes existing candidates require reconciliation.');
       const rules = el('button', 'button subtle', `Review: ${displayStatus(project.review_mode)} · ${project.automatic_integration ? 'Automatic integration allowed' : 'Human integration authorization required'}`);
       rules.type = 'button'; rules.addEventListener('click', () => { view.dialog.close(); openReviewSettings(project); }); add(view.form, rules);
-      add(view.form, el('p', 'repo', `Repository: ${project.repository_url}`));
-      add(view.form, el('p', 'muted', policy.canonical_repository_key ? `Saved identity: ${policy.canonical_repository_key}` : 'Identity will be assigned automatically when you save the roster.'));
+      add(view.form, el('p', 'repo repository-summary', `Repository: ${project.repository_url}`));
+      add(view.form, el('p', 'muted repository-summary', policy.canonical_repository_key ? `Saved identity: ${policy.canonical_repository_key}` : 'Identity will be assigned automatically when you save the roster.'));
       if (state.actor?.role === 'admin' && policy.revision) {
         const aliases = el('button', 'button subtle', 'Advanced repository aliases'); aliases.type = 'button';
         aliases.addEventListener('click', () => { view.dialog.close(); openRepositoryAliases(projectId, project, policy); }); add(view.form, aliases);
@@ -779,7 +779,7 @@
   }
   function openRepositoryAliases(projectId, project, policy) {
     const view = workflowDialog('Advanced repository aliases', 'Administrator setup for clone URLs that cannot be inferred, such as a custom SSH host. Copy the saved identity from a project using the same repository. Confirm both URLs refer to that repository before saving. Changes are refused when they would split a shared binding or alter existing workflow evidence.');
-    add(view.form, el('p', 'repo', `Repository: ${project.repository_url}`));
+    add(view.form, el('p', 'repo repository-summary', `Repository: ${project.repository_url}`));
     const key = view.field('canonical_repository_key', 'Repository identity to share', policy.canonical_repository_key, 'input'); key.maxLength = 255;
     view.finish('Save repository alias', (_, dialog) => {
       dialog.close(); startMutation(`${projectPath(projectId)}/workflow-policy`, {expected_revision:policy.revision, canonical_repository_key:key.value.trim(), required_checks:policy.required_checks}, 'repository alias', async () => { await loadProjects(); setGlobalAlert('Repository alias saved. Agents must read the updated workflow policy.', 'success'); }, 'PUT', null, {projectId});
