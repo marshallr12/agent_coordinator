@@ -62,6 +62,15 @@ pub async fn upload(
 ) -> Result<ApiResponse> {
     validate_artifact_id(artifact_id)?;
     let paths = upload_paths(context, artifact_id)?;
+    upload_at(context, artifact_id, source, paths).await
+}
+
+async fn upload_at(
+    context: &TransferContext<'_>,
+    artifact_id: &str,
+    source: &Path,
+    paths: UploadPaths,
+) -> Result<ApiResponse> {
     fs::create_dir_all(&paths.directory)
         .with_context(|| format!("create artifact journal {}", paths.directory.display()))?;
     protect_directory(&paths.directory)?;
@@ -166,18 +175,27 @@ struct PublicationIntent {
     artifact_id: Option<String>,
 }
 
-/// The caller holds the native session lock. The publication lives beside that
-/// session, including when --state-dir overrides the default location.
+/// The caller holds the native session lock. Publication journals live in the
+/// protected native artifact directory, outside validated session storage.
 /// Save exact bytes and reservation intent before dispatch. A lost reservation
 /// response reuses its key; a lost upload response uses the existing transfer.
 pub async fn publish(
     context: &TransferContext<'_>,
-    session_path: &Path,
     publication_id: &str,
     source: &Path,
     request: serde_json::Value,
 ) -> Result<ApiResponse> {
     validate_artifact_id(publication_id)?;
+    let paths = upload_paths(context, &format!("publication:{publication_id}"))?;
+    publish_at(context, source, request, &paths.directory).await
+}
+
+async fn publish_at(
+    context: &TransferContext<'_>,
+    source: &Path,
+    request: serde_json::Value,
+    directory: &Path,
+) -> Result<ApiResponse> {
     let input: coordinator_core::ArtifactUploadInput =
         serde_json::from_value(request.clone()).context("parse publication metadata")?;
     let task = input
@@ -191,21 +209,14 @@ pub async fn publish(
     validate_artifact_id(task)?;
     validate_artifact_id(job)?;
     let source = source_reference(source)?;
-    let session_stem = session_path
-        .file_stem()
-        .ok_or_else(|| anyhow!("session filename missing"))?;
-    let directory = session_path
-        .with_file_name(session_stem)
-        .with_extension("publications")
-        .join(publication_id);
-    fs::create_dir_all(&directory).context("create publication directory")?;
-    crate::state::protect_directory(&directory)?;
+    create_private_directory(directory)?;
+    protect_directory(directory)?;
     let state_path = directory.join("publication.json");
     let payload = directory.join("report.bin");
     let mut intent: PublicationIntent = match fs::read(&state_path) {
         Ok(bytes) => serde_json::from_slice(&bytes).context("read publication intent")?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let (size, digest) = snapshot(&source, &payload, &directory)?;
+            let (size, digest) = snapshot(&source, &payload, directory)?;
             if input.size_bytes < 0 || size != input.size_bytes as u64 || digest != input.sha256 {
                 bail!("publication source does not match reservation size and SHA-256");
             }
@@ -219,7 +230,7 @@ pub async fn publish(
                 reservation_key: Uuid::new_v4().to_string(),
                 artifact_id: None,
             };
-            save(&state_path, &intent, &directory)?;
+            save(&state_path, &intent, directory)?;
             intent
         }
         Err(error) => return Err(error).context("read publication intent"),
@@ -263,10 +274,22 @@ pub async fn publish(
         validate_artifact_id(id)?;
         validate_same_upload(&response, size, &digest)?;
         intent.artifact_id = Some(id.into());
-        save(&state_path, &intent, &directory)?;
+        save(&state_path, &intent, directory)?;
     }
     let id = intent.artifact_id.as_deref().expect("saved reservation");
-    let response = upload(context, id, &payload).await?;
+    let transfer_directory = directory.join("upload");
+    let response = upload_at(
+        context,
+        id,
+        &payload,
+        UploadPaths {
+            state: transfer_directory.join("intent.json"),
+            payload: transfer_directory.join("payload.bin"),
+            lock: transfer_directory.join("intent.lock"),
+            directory: transfer_directory,
+        },
+    )
+    .await?;
     if !response.is_success() {
         return Ok(response);
     }
@@ -287,6 +310,27 @@ pub async fn publish(
         bail!("published artifact has different task or producer job provenance");
     }
     Ok(current)
+}
+
+fn create_private_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                bail!("publication storage must be a directory, not a link");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow!("publication directory has no parent"))?;
+            create_private_directory(parent)?;
+            fs::create_dir(path).context("create publication directory")?;
+            protect_directory(path)?;
+            sync_directory(parent)?;
+        }
+        Err(error) => return Err(error).context("inspect publication directory"),
+    }
+    Ok(())
 }
 
 fn source_reference(source: &Path) -> Result<PathBuf> {
@@ -660,6 +704,155 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+
+    #[tokio::test]
+    async fn publication_replays_lost_reservation_and_retains_exact_report() {
+        use std::sync::atomic::AtomicUsize;
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("report.json");
+        fs::write(&source, b"synthetic report").unwrap();
+        let journal_dir = directory.path().join("journals").join("publication");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let puts = Arc::new(AtomicUsize::new(0));
+        let available = Arc::new(AtomicBool::new(true));
+        let artifact = Uuid::new_v4().to_string();
+        let task = Uuid::new_v4().to_string();
+        let job = Uuid::new_v4().to_string();
+        let digest = hex::encode(Sha256::digest(b"synthetic report"));
+        let request = serde_json::json!({"filename":"report.json","media_type":"application/json",
+            "task_id":task,"job_id":job,"size_bytes":16,"sha256":digest});
+        let server_posts = posts.clone();
+        let server_puts = puts.clone();
+        let server_available = available.clone();
+        let server_request = request.clone();
+        let server_artifact = artifact.clone();
+        let server = tokio::spawn(async move {
+            let mut reservation_key = None;
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut buffer = [0; 4096];
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert_ne!(n, 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if let Some(index) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < header_end + length {
+                    let mut buffer = [0; 4096];
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert_ne!(n, 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                }
+                if headers.starts_with("POST ") {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&bytes[header_end..]).unwrap();
+                    assert_eq!(body, server_request);
+                    let key = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("idempotency-key")
+                                .then(|| value.trim().to_owned())
+                        })
+                        .unwrap();
+                    if let Some(saved) = &reservation_key {
+                        assert_eq!(&key, saved);
+                    } else {
+                        reservation_key = Some(key);
+                    }
+                    if server_posts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        // Commit happened, but the response disappeared.
+                        drop(stream);
+                        continue;
+                    }
+                } else if headers.starts_with("PUT ") {
+                    assert_eq!(&bytes[header_end..], b"synthetic report");
+                    server_puts.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    assert!(headers.starts_with("GET "));
+                }
+                let finalized = server_puts.load(Ordering::SeqCst) > 0;
+                let body = serde_json::json!({"data":{"artifact":{
+                    "id":server_artifact,"kind":"upload","task_id":task,"job_id":job,
+                    "size_bytes":16,"sha256":digest,
+                    "state":if finalized { "finalized" } else { "reserved" },
+                    "availability":if !server_available.load(Ordering::SeqCst) { "deleted" }
+                        else if finalized { "available" } else { "pending" }
+                }}})
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client =
+            CoordinatorClient::new(&format!("http://{address}"), "synthetic", true).unwrap();
+        let session = SessionAuth {
+            id: "session".into(),
+            proof: "synthetic".into(),
+        };
+        let context = TransferContext {
+            client: &client,
+            service_origin: client.origin(),
+            project_id: "project",
+            local_session: "local",
+            session: &session,
+        };
+        assert!(
+            publish_at(&context, &source, request.clone(), &journal_dir)
+                .await
+                .is_err()
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        fs::write(&source, b"changed source").unwrap();
+        let response = publish_at(&context, &source, request.clone(), &journal_dir)
+            .await
+            .unwrap();
+        assert_eq!(artifact_metadata(&response).unwrap()["id"], artifact);
+        assert_eq!(posts.load(Ordering::SeqCst), 2);
+        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fs::read(journal_dir.join("report.bin")).unwrap(),
+            b"synthetic report"
+        );
+        publish_at(&context, &source, request.clone(), &journal_dir)
+            .await
+            .unwrap();
+        assert_eq!(posts.load(Ordering::SeqCst), 2);
+        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        let mut changed = request.clone();
+        changed["filename"] = "other.json".into();
+        assert!(
+            publish_at(&context, &source, changed, &journal_dir)
+                .await
+                .is_err()
+        );
+        available.store(false, Ordering::SeqCst);
+        assert!(
+            publish_at(&context, &source, request, &journal_dir)
+                .await
+                .is_err()
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), 2);
+        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
 
     #[test]
     fn snapshot_is_bounded_and_digest_bound() {

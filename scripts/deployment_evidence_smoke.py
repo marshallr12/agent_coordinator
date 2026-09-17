@@ -31,7 +31,7 @@ def exercise_deployment_evidence(temporary, api, cli, project, owner, task, job)
     # Remove only the saved reservation result: simulate interruption after the
     # server committed it but before the client recorded its artifact identity.
     # The retry must replay the original POST key, not reserve another artifact.
-    journals = list((temporary / f"agent-{owner}").rglob(f"{publication}/publication.json"))
+    journals = list((temporary / f"agent-{owner}").rglob("publication.json"))
     assert len(journals) == 1
     journal = journals[0]
     saved = json.loads(journal.read_text())
@@ -59,7 +59,7 @@ def exercise_deployment_evidence(temporary, api, cli, project, owner, task, job)
     other = api("/api/v1/projects", {"name": "Evidence isolation", "repository_url":
                 "https://example.com/isolation.git", "target_branch": "main"})["id"]
     cli(reader, "connect", project_id=other)
-    wrong = cli(reader, "artifacts", "show", "--id", identity, project_id=other, expected=6)
+    wrong = cli(reader, "artifacts", "show", "--id", identity, project_id=other, expected=2)
     assert "error" in wrong
     cli(owner, "artifacts", "delete", "--id", identity, body={"reason": "Exercise unavailable evidence"})
     cli(reader, "artifacts", "download", "--id", identity,

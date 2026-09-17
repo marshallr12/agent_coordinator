@@ -1069,10 +1069,11 @@ ordinary pending mutation before starting publication.
 Success includes `data.artifact`, freshly authenticated as a finalized, available
 upload with matching task/job, size and SHA-256. A reservation alone is not success.
 Record `data.artifact.id` in a checkpoint/handoff and in submission `artifact_ids`.
-The publication snapshot remains beside native session state under its
-`.publications/PUBLICATION_UUID` directory; the existing upload journal uses the
-normal native artifact directory. Keep both locations across retry and do not
-migrate session storage during an unresolved publication. This command does not
+The publication snapshot and transfer journal remain under the normal native
+configuration directory in `artifact-uploads`, isolated by a hash of origin,
+project, session and publication UUID. `--state-dir` does not redirect artifact
+journals. Keep native configuration and session storage across retry; do not
+migrate either during an unresolved publication. This command does not
 renew task ownership, submit work, or release resources. It does not automatically
 delete retained publication snapshots. After independent retrieval and the agreed
 retention period, inspect the exact publication before removing local evidence.

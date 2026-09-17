@@ -285,7 +285,7 @@ pub(crate) async fn artifacts(
             require_success(response)
         }
         ArtifactsCommand::Publish(args) => {
-            let (_lock, session_path, session) = load_required_state(cli, context)?;
+            let (_lock, _, session) = load_required_state(cli, context)?;
             if session.pending.is_some() {
                 return Err(Failure::invalid(
                     "resolve the pending session mutation with retry before publishing evidence",
