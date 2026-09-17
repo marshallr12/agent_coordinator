@@ -28,7 +28,7 @@ def verified_git_clean(directory):
 
 
 def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_directory=None):
-    credential = api('/api/v1/admin/agents', {'name': 'standalone-adapter-smoke'})
+    credential = api('/api/v1/admin/agents', {'name': 'standalone-adapter-eval' if evaluation_directory else 'standalone-adapter-smoke'})
     token, session, proof = credential['token'], str(uuid.uuid4()), secrets.token_hex(32)
     state = temporary / 'standalone-journal'
     dropped = threading.Event()
