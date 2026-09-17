@@ -299,10 +299,9 @@ pub(crate) async fn artifacts(
                 local_session: &session.local_session,
                 session: &session.session,
             };
-            let response =
-                artifact_transfer::publish(&transfer, &session_path, &args.id, &args.file, body)
-                    .await
-                    .map_err(transfer_failure)?;
+            let response = artifact_transfer::publish(&transfer, &args.id, &args.file, body)
+                .await
+                .map_err(transfer_failure)?;
             require_success(response)
         }
         ArtifactsCommand::Download(args) => {
