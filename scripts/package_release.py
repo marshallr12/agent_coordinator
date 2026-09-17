@@ -24,6 +24,7 @@ VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}\Z")
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))")
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 256
+MAX_BOOTSTRAP_BYTES = 2 * 1024
 
 
 def sha256(path: Path) -> str:
@@ -96,6 +97,27 @@ def source_entries(platform: str, server: Path | None, cli: Path, mcp_adapter: P
         name = "bin/agent-coordinator-mcp" if platform == "linux-x86_64" else "agent-coordinator-mcp.exe"
         entries[name] = (checked_file(mcp_adapter, "MCP adapter binary"), 0o755)
     return entries
+
+
+def validate_bootstrap_sources(entries: dict[str, tuple[Path, int]]) -> None:
+    if any(PurePosixPath(name).name == "BACKLOG.md" for name in entries):
+        raise SystemExit("release packages must not ship BACKLOG.md as a current work queue")
+    bootstrap = entries["CLAUDE.md"][0].read_text(encoding="utf-8")
+    if len(bootstrap.encode("utf-8")) > MAX_BOOTSTRAP_BYTES:
+        raise SystemExit("CLAUDE.md must remain a concise service-discovery bootstrap")
+    normalized = bootstrap.casefold()
+    for required in [
+        ".agent-coordinator.toml",
+        "/api/v1/info",
+        "without redirects",
+        "data.agent_startup.guide",
+        "same-origin",
+        "automatically select and claim eligible work",
+        "CONTRIBUTING.md",
+        "never expose them",
+    ]:
+        if required.casefold() not in normalized:
+            raise SystemExit(f"CLAUDE.md is missing bootstrap guidance: {required}")
 
 
 def validate_local_markdown_links(entries: dict[str, tuple[Path, int]]) -> None:
@@ -226,6 +248,7 @@ def main() -> None:
         raise SystemExit("--source-date-epoch is outside the supported range")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     entries = source_entries(args.platform, args.server, args.cli, args.mcp_adapter)
+    validate_bootstrap_sources(entries)
     validate_local_markdown_links(entries)
     manifest = checksum_manifest(entries)
     validate_archive_bounds(args.platform, entries, manifest)
