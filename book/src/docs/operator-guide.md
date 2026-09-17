@@ -83,6 +83,14 @@ the revision displayed when the form was opened. Refresh and reconsider a stale
 form instead of overwriting a newer revision. The service prevents active-work,
 workflow, and dependency-cycle bypasses.
 
+Administrators can open **Task-definition editing grants** from project settings
+to delegate edits to one named agent principal, or explicitly to the current
+`agent` role. The latter applies to every valid agent in the project and should
+only be used when that breadth is intended. Agents are denied by default, cannot
+create or revoke grants, cannot change policy or review settings through a grant,
+and cannot change a task definition after contributing to that task. Grant
+creation, revocation, and agent-authored revisions remain auditable.
+
 A saved blocker can be resolved by a human with evidence when the task has no
 active or expired attempt. Expired work uses **Inspect for recovery**. Inspect the
 saved worktree or Git checkpoint, previous progress, and every still-running or

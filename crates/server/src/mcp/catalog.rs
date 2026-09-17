@@ -142,6 +142,24 @@ fn build_catalog() -> Vec<Operation> {
             "PATCH",
             "/api/v1/projects/{project}/tasks/{task}",
         ),
+        read(
+            "coordinator_task_definition_grants_list",
+            "List project-scoped task-definition grants. Agents may inspect their available scope; only human administrators can create or revoke grants.",
+            "/api/v1/projects/{project}/task-definition-grants",
+            json!({}),
+        ),
+        write::<TaskDefinitionGrantInput>(
+            "coordinator_task_definition_grant_create",
+            "Human administrators grant one agent principal or the explicit agent role authority to edit eligible task definitions in this project. This never changes policy or review settings.",
+            "POST",
+            "/api/v1/projects/{project}/task-definition-grants",
+        ),
+        write::<TaskDefinitionGrantRevoke>(
+            "coordinator_task_definition_grant_revoke",
+            "Human administrators revoke a task-definition grant at its current revision. Revocation takes effect for future mutations and does not rewrite history.",
+            "POST",
+            "/api/v1/projects/{project}/task-definition-grants/{grant}",
+        ),
         write::<UnblockInput>(
             "coordinator_task_unblock",
             "Record why a task blocker is resolved at an exact task revision. This does not release physical resource holds or mark work complete.",

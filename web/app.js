@@ -841,6 +841,8 @@
       if (state.actor?.role === 'admin' && policy.revision) {
         const aliases = el('button', 'button subtle', 'Advanced repository aliases'); aliases.type = 'button';
         aliases.addEventListener('click', () => { view.dialog.close(); openRepositoryAliases(projectId, project, policy); }); add(view.form, aliases);
+        const grants = el('button', 'button subtle', 'Task-definition editing grants'); grants.type = 'button';
+        grants.addEventListener('click', () => { view.dialog.close(); openTaskDefinitionGrants(projectId); }); add(view.form, grants);
       }
       const rows = el('div'); add(view.form, rows); let serial = 0;
       const addRow = (check = {}) => {
@@ -869,6 +871,28 @@
     view.finish('Save repository alias', (_, dialog) => {
       dialog.close(); startMutation(`${projectPath(projectId)}/workflow-policy`, {expected_revision:policy.revision, canonical_repository_key:key.value.trim(), required_checks:policy.required_checks}, 'repository alias', async () => { await loadProjects(); setGlobalAlert('Repository alias saved. Agents must read the updated workflow policy.', 'success'); }, 'PUT', null, {projectId});
     });
+  }
+  async function openTaskDefinitionGrants(projectId) {
+    try {
+      const currentActor = actorId(), reply = await request(`${projectPath(projectId)}/task-definition-grants`);
+      if (projectId !== state.projectId || currentActor !== actorId()) return;
+      const view = workflowDialog('Task-definition editing grants', 'Only administrators can grant or revoke this authority. A principal grant names one agent. The current agent-role grant applies to every valid project agent, so use it only when that wider scope is intended. Grants never permit policy, review, or self-contributed task-definition changes.');
+      const grants = reply.data.items || [];
+      if (grants.length) {
+        const list = el('div', 'record-list');
+        grants.forEach(grant => {
+          const row = el('div', 'card'); const target = grant.target_kind === 'role' ? `Role: ${grant.agent_role}` : `Agent: ${grant.agent_principal_id}`;
+          add(row, el('p', '', `${target} · ${grant.revoked_at ? 'Revoked' : 'Active'}`)); add(row, el('p', 'muted', `Grant ${grant.id} · revision ${grant.revision}`));
+          if (!grant.revoked_at) { const revoke = el('button', 'button subtle', 'Revoke'); revoke.type = 'button'; revoke.addEventListener('click', () => { view.dialog.close(); startMutation(`${projectPath(projectId)}/task-definition-grants/${encodeURIComponent(grant.id)}`, {expected_revision:grant.revision}, 'task-definition grant revocation', () => openTaskDefinitionGrants(projectId), 'POST', null, {projectId}); }); add(row, revoke); }
+          add(list, row);
+        }); add(view.form, list);
+      } else add(view.form, el('p', 'muted', 'No task-definition editing grants are recorded. Agents are denied by default.'));
+      const kind = view.field('target_kind', 'Grant target', 'principal', 'select');
+      for (const [value,label] of [['principal','One agent principal'],['role','All valid agents (agent role)']]) { const option = el('option', '', label); option.value = value; add(kind, option); }
+      const principal = view.field('agent_principal_id', 'Agent principal ID', '', 'input'); principal.maxLength = 128;
+      kind.addEventListener('change', () => { principal.disabled = kind.value === 'role'; principal.required = kind.value === 'principal'; }); principal.required = true;
+      view.finish('Create grant', (values, dialog) => { const body = values.get('target_kind') === 'role' ? {target_kind:'role',agent_role:'agent'} : {target_kind:'principal',agent_principal_id:values.get('agent_principal_id').trim()}; dialog.close(); startMutation(`${projectPath(projectId)}/task-definition-grants`, body, 'task-definition grant', () => openTaskDefinitionGrants(projectId), 'POST', null, {projectId}); });
+    } catch (error) { setGlobalAlert(errorMessage(error), 'error'); }
   }
   function openReviewSettings(project) {
     const projectId = state.projectId;
