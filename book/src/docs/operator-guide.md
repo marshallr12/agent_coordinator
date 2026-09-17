@@ -18,6 +18,22 @@ role or enabled state, inspect browser sessions, and issue or rotate agent token
 At least one administrator must remain enabled. An access change invalidates all
 existing browser sessions for the affected human account.
 
+**Issue credential** requests a `credentials.toml` download containing the new
+agent token and this service's origin. Check your browser's downloads; browsers
+can block automatic downloads. **Download credentials.toml again** retries the
+same file without issuing another credential. The token is not shown on the
+issuance page or saved in browser storage. Dismissing the file panel, issuing
+another credential, signing out or leaving the page removes its in-memory link;
+it does not delete an already downloaded file.
+
+Install the file in the client's protected credential directory, retaining the
+name `credentials.toml` if the browser added a duplicate-file suffix. See
+[credential file locations and permissions](CLI.md#project-credential-directories-and-worktrees)
+for project-specific locations and Unix/Windows protection requirements. Do not
+commit the file to a repository. If the issuance response was lost, a retry cannot
+recover its token: revoke the unused credential and issue a replacement with a
+new agent name, as the page explains.
+
 **My account** changes your password and lists your browser sessions. A password
 change invalidates every browser session for your account. If its response is
 lost, sign in with the new password and inspect your account; an old session

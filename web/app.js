@@ -5,7 +5,7 @@
   const $ = (id) => document.getElementById(id);
   const state = {
     actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0,
-    projectId: '', selectedTaskId: '', currentView: 'overview', detail: null,
+    projectId: '', selectedTaskId: '', currentView: 'overview', detail: null, credentialDownloadUrl: null,
     taskCursor: null, hasExtraTaskPages: false, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, pollTimer: null, lastSync: null
   };
@@ -195,6 +195,7 @@
     $('context-search').reset();
     state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
+    clearCredentialDownload();
     setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('restore-status')); clear($('clock-status')); clear($('restore-requirements')); clear($('task-operator-actions')); show($('credentials-list'), false);
     if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null;
     show($('dashboard-view'), false); show($('loading-view'), false); show($('login-view'), true);
@@ -218,8 +219,8 @@
   function issuedCredentialFeedback(data) {
     const credentialId = data?.credential_id || data?.id || 'the issued credential';
     if (data?.secret_unavailable) return `This issuance was replayed, but its token cannot be recovered. Revoke ${credentialId}, then issue a replacement with a fresh agent name.`;
-    if (!data?.token) return `The token was not returned. Revoke ${credentialId}, then issue a replacement with a fresh agent name.`;
-    return 'Credential issued. Copy the token now; it will not be shown again.';
+    if (typeof data?.token !== 'string' || !data.token) return `The token was not returned. Revoke ${credentialId}, then issue a replacement with a fresh agent name.`;
+    return 'Credential issued. Download requested; check your browser’s downloads. If needed, use Download credentials.toml again below.';
   }
 
   function restoredMutationCallbacks(operation, context = {}) {
@@ -237,7 +238,7 @@
     if (operation === 'resolve_resource') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; showView('task-detail'); await loadTaskDetail(); setGlobalAlert('Resolution recorded. Review the updated job and hold evidence.', 'success'); };
     if (operation === 'create_project') return async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); };
     if (operation === 'create_task') return async () => { state.projectId = context.projectId || state.projectId; await loadTasks(); setGlobalAlert('Task created.', 'success'); };
-    if (operation === 'issue_credential') return async (data) => { showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); };
+    if (operation === 'issue_credential') return async (data) => { downloadIssuedCredential(data); await loadCredentials(); };
     if (operation === 'revoke_credential') return async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); };
     if (operation === 'logout') return async () => signOutLocal();
     return null;
@@ -515,8 +516,33 @@
   document.querySelectorAll('button.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); loadClock(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
-  $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; showToken(data?.token); await loadCredentials(); setIssueFeedback(issuedCredentialFeedback(data), data?.token ? 'success' : 'error'); }); });
-  function showToken(token) { setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
+  $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
+  function showToken(token) { clearCredentialDownload(); setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
+  function clearCredentialDownload() {
+    if (state.credentialDownloadUrl) URL.revokeObjectURL(state.credentialDownloadUrl);
+    state.credentialDownloadUrl = null;
+    $('download-credential').removeAttribute('href');
+    setText($('credential-download-name'), ''); show($('credential-download'), false);
+  }
+  function downloadIssuedCredential(data) {
+    clearCredentialDownload(); setText($('issued-token'), ''); show($('token-reveal'), false);
+    if (data?.secret_unavailable || typeof data?.token !== 'string' || !data.token) {
+      setIssueFeedback(issuedCredentialFeedback(data), 'error'); return;
+    }
+    try {
+      const contents = `[[credentials]]\norigin = ${JSON.stringify(window.location.origin)}\ntoken = ${JSON.stringify(data.token)}\n`;
+      state.credentialDownloadUrl = URL.createObjectURL(new Blob([contents], {type:'application/toml;charset=utf-8'}));
+      const link = $('download-credential'); link.href = state.credentialDownloadUrl;
+      setText($('credential-download-name'), `Credential file for ${data.name || data.principal_id || 'this agent'}`);
+      show($('credential-download'), true); link.click();
+      setIssueFeedback(issuedCredentialFeedback(data), 'success');
+    } catch (_) {
+      if (state.credentialDownloadUrl) setIssueFeedback('The credential was issued, but automatic download could not start. Use Download credentials.toml again below.', 'error');
+      else setIssueFeedback(`The credential was issued, but its file could not be prepared. Revoke ${data.credential_id || data.id || 'this credential'} and issue a replacement.`, 'error');
+    }
+  }
+  $('clear-credential-download').addEventListener('click', clearCredentialDownload);
+  window.addEventListener('pagehide', clearCredentialDownload);
   function setIssueFeedback(message, kind) { const target = $('issue-feedback'); target.className = `inline-alert ${kind}`; setText(target, message); show(target, true); }
   $('clear-token').addEventListener('click', () => { setText($('issued-token'), ''); show($('token-reveal'), false); }); $('copy-token').addEventListener('click', async () => { const token = $('issued-token').textContent; if (!token) return; try { await navigator.clipboard.writeText(token); setIssueFeedback('Token copied to clipboard.', 'success'); } catch (_) { setIssueFeedback('Copy was unavailable. Select the token and copy it manually.', 'error'); } });
 
