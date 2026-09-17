@@ -14,6 +14,8 @@ pub struct RequiredCheck {
 #[serde(deny_unknown_fields)]
 pub struct WorkflowPolicyInput {
     pub expected_revision: i64,
+    /// Omit for normal URL-derived setup; explicit values are administrator alias configuration.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub canonical_repository_key: String,
     pub required_checks: Vec<RequiredCheck>,
 }

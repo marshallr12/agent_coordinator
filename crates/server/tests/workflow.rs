@@ -1393,3 +1393,127 @@ async fn next_selection_skips_decision_blocked_work() {
     assert_eq!(status, StatusCode::OK, "{claimed}");
     assert_eq!(claimed["data"]["claim"]["attempt"]["task_id"], ready["id"]);
 }
+
+fn derived_roster(revision: i64) -> Value {
+    json!({"expected_revision":revision,"required_checks":[{"identity":"workspace-tests","version":"v1","environment":"linux-ci"}]})
+}
+
+#[tokio::test]
+async fn repository_url_aliases_derive_and_reuse_legacy_bindings() {
+    let f = Fixture::new().await;
+    let legacy = f
+        .project("legacy", "https://github.com/Example/Repo.git")
+        .await;
+    f.workflow_policy(&legacy, "saved-before-url-derivation")
+        .await;
+    for (index, url) in [
+        "git@github.com:example/repo",
+        "ssh://git@github.com/EXAMPLE/REPO.git/",
+        "https://github.com/example/repo/",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let p = f.project(&format!("alias-{index}"), url).await;
+        let (status, result) = f
+            .call(
+                &f.admin,
+                "PUT",
+                &format!("/api/v1/projects/{p}/workflow-policy"),
+                derived_roster(0),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(
+            result["data"]["canonical_repository_key"],
+            "saved-before-url-derivation"
+        );
+    }
+    let p = f
+        .project("new repository", "https://github.com/example/other.git/")
+        .await;
+    let (_, result) = f
+        .call(
+            &f.admin,
+            "PUT",
+            &format!("/api/v1/projects/{p}/workflow-policy"),
+            derived_roster(0),
+        )
+        .await;
+    assert_eq!(
+        result["data"]["canonical_repository_key"],
+        "github.com/example/other"
+    );
+    let other = f
+        .project("other host", "https://elsewhere.example/example/other.git")
+        .await;
+    let (_, different) = f
+        .call(
+            &f.admin,
+            "PUT",
+            &format!("/api/v1/projects/{other}/workflow-policy"),
+            derived_roster(0),
+        )
+        .await;
+    assert_ne!(
+        different["data"]["canonical_repository_key"],
+        result["data"]["canonical_repository_key"]
+    );
+    let (status, changed) = f.call(&f.admin, "PUT", &format!("/api/v1/projects/{legacy}/workflow-policy"), json!({"canonical_repository_key":"split", "expected_revision":1, "required_checks":derived_roster(0)["required_checks"]})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{changed}");
+}
+
+#[tokio::test]
+async fn repository_aliases_require_admin_and_preserve_existing_evidence() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("custom ssh", "git@work-github:example/repo.git")
+        .await;
+    sqlx::query("UPDATE principals SET role='operator' WHERE id=?")
+        .bind(&f.admin.principal)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/projects/{p}/workflow-policy");
+    let (status, initial) = f.call(&f.admin, "PUT", &path, derived_roster(0)).await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    assert!(
+        initial["data"]["canonical_repository_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("url-sha256:")
+    );
+    let alias = json!({"canonical_repository_key":"github.com/example/repo", "expected_revision":1, "required_checks":derived_roster(0)["required_checks"]});
+    let (status, denied) = f.call(&f.admin, "PUT", &path, alias.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    sqlx::query("UPDATE principals SET role='admin' WHERE id=?")
+        .bind(&f.admin.principal)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, saved) = f.call(&f.admin, "PUT", &path, alias).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let task = f.task(&p, "general", "historical evidence").await;
+    let attempt = f.claim(&f.a, &p, &task, 1).await;
+    f.submit(
+        &f.a, &p, &task, &attempt, "general", 1, None, None, None, None,
+    )
+    .await;
+    let (status, rejected) = f.call(&f.admin, "PUT", &path, json!({"canonical_repository_key":"another-identity", "expected_revision":2, "required_checks":derived_roster(0)["required_checks"]})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "canonical_binding_frozen");
+    // Even an external URL edit cannot silently replace this saved identity.
+    sqlx::query(
+        "UPDATE projects SET repository_url='https://github.com/different/repository' WHERE id=?",
+    )
+    .bind(&p)
+    .execute(&f.state.pool)
+    .await
+    .unwrap();
+    let (status, preserved) = f.call(&f.admin, "PUT", &path, derived_roster(2)).await;
+    assert_eq!(status, StatusCode::OK, "{preserved}");
+    assert_eq!(
+        preserved["data"]["canonical_repository_key"],
+        "github.com/example/repo"
+    );
+}

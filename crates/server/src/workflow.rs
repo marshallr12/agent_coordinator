@@ -151,6 +151,111 @@ fn validate_checks(checks: &[RequiredCheck]) -> Result<(), AppError> {
     Ok(())
 }
 
+// Infer only the documented public GitHub clone forms. Other URLs remain exact
+// identities: custom SSH host aliases require an administrator's explicit binding.
+fn repository_identity(repository: &str) -> String {
+    let github_path = if let Some(path) = repository.strip_prefix("git@github.com:") {
+        Some(path)
+    } else if let Ok(url) = url::Url::parse(repository) {
+        let supported = url.host_str() == Some("github.com")
+            && url.port().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.password().is_none()
+            && ((url.scheme() == "https" && url.username().is_empty())
+                || (url.scheme() == "ssh" && url.username() == "git"));
+        if supported {
+            return github_identity_path(url.path())
+                .unwrap_or_else(|| exact_repository_identity(repository));
+        }
+        None
+    } else {
+        None
+    };
+    github_path
+        .and_then(github_identity_path)
+        .unwrap_or_else(|| exact_repository_identity(repository))
+}
+
+fn github_identity_path(path: &str) -> Option<String> {
+    let path = path
+        .trim_end_matches('/')
+        .strip_prefix('/')
+        .unwrap_or(path.trim_end_matches('/'));
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let parts: Vec<_> = path.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || *part == "."
+                || *part == ".."
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+    {
+        return None;
+    }
+    Some(format!("github.com/{}", path.to_ascii_lowercase()))
+}
+
+fn exact_repository_identity(repository: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "url-sha256:{}",
+        hex::encode(Sha256::digest(repository.as_bytes()))
+    )
+}
+
+async fn resolve_repository_key(
+    c: &mut SqliteConnection,
+    project: &str,
+    repository: &str,
+    current_key: Option<&str>,
+    requested_key: &str,
+) -> Result<String, AppError> {
+    let inferred = repository_identity(repository);
+    let rows = sqlx::query("SELECT p.repository_url,wp.canonical_repository_key FROM projects p JOIN workflow_policies wp ON wp.project_id=p.id WHERE p.id!=?")
+        .bind(project).fetch_all(&mut *c).await?;
+    let mut existing = BTreeSet::new();
+    for row in rows {
+        if repository_identity(&row.get::<String, _>("repository_url")) == inferred {
+            existing.insert(row.get::<String, _>("canonical_repository_key"));
+        }
+    }
+    if let Some(key) = current_key {
+        existing.insert(key.to_owned());
+    }
+    if existing.len() > 1 {
+        return Err(AppError::conflict(
+            "canonical_repository_conflict",
+            "Equivalent repository URLs already have conflicting saved bindings. Preserve their history and reconcile the existing bindings before new work.",
+        ));
+    }
+    let saved = existing.into_iter().next();
+    if !requested_key.is_empty() {
+        // A sibling's established identity cannot be split by configuring an alias.
+        if saved.as_deref().is_some_and(|key| key != requested_key) && current_key.is_none() {
+            return Err(AppError::conflict(
+                "canonical_repository_conflict",
+                "Equivalent repository URLs must reuse their existing saved identity.",
+            ));
+        }
+        if current_key.is_some_and(|key| key != requested_key) {
+            let shared: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow_policies WHERE canonical_repository_key=? AND project_id!=?")
+                .bind(current_key).bind(project).fetch_one(&mut *c).await?;
+            if shared > 0 {
+                return Err(AppError::conflict(
+                    "canonical_binding_frozen",
+                    "A shared repository binding cannot be split. Preserve the identity used by the other projects.",
+                ));
+            }
+        }
+        return Ok(requested_key.to_owned());
+    }
+    Ok(saved.unwrap_or(inferred))
+}
+
 async fn workflow_policy_value(c: &mut SqliteConnection, project: &str) -> Result<Value, AppError> {
     let row = sqlx::query("SELECT * FROM workflow_policies WHERE project_id=?")
         .bind(project)
@@ -159,7 +264,7 @@ async fn workflow_policy_value(c: &mut SqliteConnection, project: &str) -> Resul
         .ok_or_else(|| {
             AppError::conflict(
                 "workflow_policy_required",
-                "A human must configure the canonical repository key and explicit required-check roster.",
+                "A human must configure an explicit required-check roster; the repository identity is derived from its URL.",
             )
         })?;
     Ok(json!({
@@ -193,7 +298,7 @@ async fn put_workflow_policy(
         &input.canonical_repository_key,
         "canonical_repository_key",
         255,
-        true,
+        false,
     )?;
     validate_checks(&input.required_checks)?;
     let mut mutation = Mutation::begin(
@@ -236,9 +341,34 @@ async fn put_workflow_policy(
             "Read the current workflow policy before replacing it.",
         ));
     }
-    if current.as_ref().is_some_and(|row| {
-        row.get::<String, _>("canonical_repository_key") != input.canonical_repository_key
-    }) {
+    let repository_url: String =
+        sqlx::query_scalar("SELECT repository_url FROM projects WHERE id=?")
+            .bind(&project)
+            .fetch_one(&mut *mutation.tx)
+            .await?;
+    let current_key = current
+        .as_ref()
+        .map(|row| row.get::<String, _>("canonical_repository_key"));
+    if !input.canonical_repository_key.is_empty()
+        && current_key.as_deref() != Some(input.canonical_repository_key.as_str())
+        && mutation.actor.role != "admin"
+    {
+        return Err(AppError::forbidden(
+            "A human administrator must configure repository aliases. Omit canonical_repository_key for normal roster setup.",
+        ));
+    }
+    let canonical_key = resolve_repository_key(
+        &mut mutation.tx,
+        &project,
+        &repository_url,
+        current_key.as_deref(),
+        &input.canonical_repository_key,
+    )
+    .await?;
+    if current
+        .as_ref()
+        .is_some_and(|row| row.get::<String, _>("canonical_repository_key") != canonical_key)
+    {
         let used: i64 = sqlx::query_scalar("SELECT count(*) FROM submissions WHERE project_id=?")
             .bind(&project)
             .fetch_one(&mut *mutation.tx)
@@ -250,16 +380,6 @@ async fn put_workflow_policy(
             ));
         }
     }
-    let repository_url: String =
-        sqlx::query_scalar("SELECT repository_url FROM projects WHERE id=?")
-            .bind(&project)
-            .fetch_one(&mut *mutation.tx)
-            .await?;
-    if let Some(other)=sqlx::query_scalar::<_,String>("SELECT wp.canonical_repository_key FROM workflow_policies wp JOIN projects p ON p.id=wp.project_id WHERE p.repository_url=? AND p.id!=? LIMIT 1")
-        .bind(&repository_url).bind(&project).fetch_optional(&mut *mutation.tx).await?
-        && other!=input.canonical_repository_key {
-        return Err(AppError::conflict("canonical_repository_conflict","Projects with the exact same repository URL must use the same canonical repository key."));
-    }
     let next = current_revision + 1;
     let encoded = serde_json::to_string(&input.required_checks)?;
     sqlx::query(
@@ -270,14 +390,14 @@ async fn put_workflow_policy(
     )
     .bind(&project)
     .bind(next)
-    .bind(&input.canonical_repository_key)
+    .bind(&canonical_key)
     .bind(&encoded)
     .bind(&mutation.actor.id)
     .bind(mutation.now)
     .execute(&mut *mutation.tx)
     .await?;
     sqlx::query("INSERT INTO workflow_policy_revisions(project_id,revision,canonical_repository_key,required_checks_json,actor_id,created_at) VALUES(?,?,?,?,?,?)")
-        .bind(&project).bind(next).bind(&input.canonical_repository_key).bind(&encoded)
+        .bind(&project).bind(next).bind(&canonical_key).bind(&encoded)
         .bind(&mutation.actor.id).bind(mutation.now).execute(&mut *mutation.tx).await?;
     let value = workflow_policy_value(&mut mutation.tx, &project).await?;
     Ok(response(

@@ -97,7 +97,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   existing project policy selections are unchanged. Contributor principals and sessions
   cannot perform an independent agent review. Findings and decisions stay bound to
   the exact submission; requested changes require a new candidate and fresh reviews.
-- An explicit human-managed required-check roster and canonical repository key.
+- An explicit human-managed required-check roster with repository identity derived
+  from supported GitHub clone URLs, preservation of saved bindings, and an
+  administrator alias flow for custom hosts.
   Integration holds serialize every project sharing that repository/target pair.
   Projects can permit automatic integration or require a human authorization.
 - Native integration prepares a candidate-containing result in an isolated worktree,
@@ -168,7 +170,7 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 ## Deliberate limits of this milestone
 
 Completion is enforced through workflow activities; there is no unrestricted
-status edit. Configure a canonical repository key and at least one required check
+status edit. Configure at least one required check; repository identity is derived or reused
 before submitting code. Check identity, version, and environment are registered
 metadata, and all workstation evidence remains a client attestation. A malicious
 credential can lie about source or a producer; this service is not remote attestation.

@@ -39,8 +39,12 @@ password-recovery or public enrollment endpoint.
 Open a project's task queue and select **Project policy** to edit review mode,
 recovery mode, integration authorization, agent permission to change binding
 rules, lease duration, and binding rules. Record the reason and source for the
-change. **Review & check settings** defines the shared repository identity and
-required check roster. New policy versions require agents to reread and
+change. **Required checks** defines the required check roster and shows a read-only
+repository summary. The service derives the identity from the repository URL and
+reuses existing bindings. Administrators can open **Advanced repository aliases**
+after saving a roster to bind a custom SSH URL to an existing repository identity.
+Verify both URLs identify the same repository; shared or historically used bindings
+cannot be changed. New policy versions require agents to reread and
 acknowledge instructions; existing candidates may require reconciliation.
 
 Open an unowned task to edit its brief, criteria, priority, prerequisites, and

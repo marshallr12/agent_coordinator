@@ -13,12 +13,25 @@ field in the saved response.
 `{identity, version, environment}`; all three strings are stable exact-match
 identities. A human changes the roster with
 `PUT /api/v1/projects/{project}/workflow-policy` and
-`{expected_revision, canonical_repository_key, required_checks}`. The canonical
-repository key is an operator-managed global identity shared by projects that use
-different URL aliases for the same repository. The service cannot infer aliases;
-operators must use one key consistently. The target branch remains the project's
-validated Git ref. The roster must contain 1–100 unique, nonempty checks. A
-canonical binding cannot change after submissions or while a hold exists. The
+`{expected_revision, required_checks}`. Normal setup derives the shared repository
+identity from the project's URL and reuses an existing saved identity. Public
+GitHub HTTPS, `git@github.com:owner/repo` and `ssh://git@github.com/owner/repo`
+forms share an identity, including optional `.git` suffixes and trailing slashes.
+GitHub owner/repository case is ignored. Other URLs have distinct exact-URL
+identities; custom SSH hosts are not guessed to be equivalent.
+
+The optional `canonical_repository_key` is an advanced administrator alias
+configuration. Existing clients may resend an unchanged saved key. An
+administrator can assign the same key to a custom alias before it has workflow
+evidence, after verifying both URLs refer to the same repository. An existing
+binding cannot change after submissions, while its project has an integration
+hold, or when changing it would split a binding shared by other projects.
+Equivalent URLs with conflicting historical bindings fail closed and require
+explicit reconciliation; saved submissions and holds are never rewritten.
+Omitting the key on an existing project preserves its binding even if its URL
+has changed. The current project API does not expose a repository-URL edit.
+The target branch remains the project's validated Git ref. The roster must
+contain 1–100 unique, nonempty checks. The
 workflow-policy revision is independent of the existing
 project policy revision. A code submission pins both. There is no implicit empty
 roster and an agent cannot create, weaken, or replace it.
