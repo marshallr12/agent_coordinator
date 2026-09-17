@@ -128,6 +128,12 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
         duplicate = subprocess.run(command, input='', text=True, capture_output=True, env=env, timeout=10)
         assert duplicate.returncode != 0, 'Concurrent adapter acquired the same journal.'
         if evaluation_directory is not None:
+            # Provision the configured host session through the adapter itself,
+            # without the native CLI. The evaluator tests coordination/recovery
+            # with a working authenticated connection, not operator enrollment.
+            mutation("coordinator_session_register", {"session_id": session,
+                     "workstation_id": "disposable-evaluation", "harness": "standalone-evaluation",
+                     "capabilities": ["code"]})
             directory = Path(evaluation_directory)
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             task = api(f'/api/v1/projects/{project}/tasks', {'title': 'Bounded startup evaluation',
@@ -186,7 +192,7 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
                 assert git_check.returncode != 0, 'Evaluation fixture unexpectedly became a Git repository.'
                 assert model_report.get('workspace_clean') is None and model_report.get('git_exit_code') == git_check.returncode, 'Unsupported workspace-cleanliness claim.'
                 assert replay_verified, 'Receipt replay authority was not independently inspected.'
-                report = {'git_exit_code': git_check.returncode, 'cleanliness_unverified': True, 'receipt_did_not_renew': True, 'forced_interruption': True, 'exact_replay': True, 'attempt_count': 1,
+                report = {'host_registered_session_before_model': True, 'git_exit_code': git_check.returncode, 'cleanliness_unverified': True, 'receipt_did_not_renew': True, 'forced_interruption': True, 'exact_replay': True, 'attempt_count': 1,
                           'released': True, 'journal_verified': True, 'transcript': transcript,
                           'task': observed, 'model_report': model_report}
                 (directory / 'verified.json').write_text(json.dumps(report, indent=2))
