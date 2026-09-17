@@ -395,6 +395,9 @@
     tasks.forEach((task) => {
       const row = el('button', 'task-row'); row.type = 'button'; row.addEventListener('click', () => openTask(task.id));
       const copy = el('span'); add(copy, el('span', 'task-title', task.title || 'Untitled task')); add(copy, el('span', 'task-description', task.description || 'No description')); const meta = el('span', 'task-meta');
+      const created = el('time', 'task-created project-meta', `Created ${formatDate(task.created_at)}`);
+      if (task.created_at && !Number.isNaN(new Date(task.created_at).getTime())) created.dateTime = task.created_at;
+      add(copy, created);
       const badge = el('span', `status-badge ${taskStatus(task)}`, displayStatus(taskStatus(task))); add(meta, badge); add(meta, el('span', 'project-meta', `Rev. ${text(task.revision || 1)}`)); add(row, copy); add(row, meta); add(target, row);
     });
   }
