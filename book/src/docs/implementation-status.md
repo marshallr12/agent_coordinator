@@ -402,6 +402,14 @@ remain native operations; the service does not execute workstation commands.
 
 ### Documentation review evidence
 
+The server embeds its pinned mdBook output and serves it at `/documentation/`.
+The dashboard's main navigation links to this public book; no runtime filesystem
+directory or external documentation site is required. Inline initialization scripts
+are emitted as local assets at build time, preserving the console's strict script
+policy. Documentation permits inline styles and local fonts for the mdBook theme;
+the dashboard's security policy remains unchanged. This describes the source
+implementation, not confirmation that a production rollout has occurred.
+
 The 35-chapter mdBook consolidates the canonical guides and preserved design
 records. Root live records are included at build time; prior document paths retain
 compatibility links. Pinned mdBook 0.5.4 checks verify exact chapter coverage,

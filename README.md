@@ -6,6 +6,10 @@ shared lessons across projects.
 
 The maintained documentation is an offline-capable mdBook:
 
+The dashboard's **Documentation** link opens the book hosted by the application
+at `/documentation/`. Server builds embed it automatically using pinned mdBook
+0.5.4; no separate runtime installation is needed.
+
 - [Start with the book](book/src/README.md)
 - [Current implementation and limits](book/src/docs/implementation-status.md)
 - [CLI guide](book/src/docs/CLI.md)

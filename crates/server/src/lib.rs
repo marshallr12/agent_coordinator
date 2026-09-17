@@ -3,6 +3,7 @@ pub mod auth;
 pub mod backup;
 pub mod coordination;
 pub mod discovery;
+mod documentation;
 pub mod error;
 pub mod history;
 pub mod imports;
@@ -58,6 +59,9 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         )
         .route("/api/v1/info", get(info))
         .route("/api/v1/help/authentication", get(authentication_help))
+        .route("/documentation", get(documentation::redirect))
+        .route("/documentation/", get(documentation::index))
+        .route("/documentation/{*path}", get(documentation::file))
         .route(
             "/",
             get(|| async {
@@ -95,15 +99,18 @@ pub(crate) fn rest_router(state: AppState) -> Router {
 
 async fn protect(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let (mut parts, body) = request.into_parts();
+    let documentation_read = matches!(parts.method, Method::GET | Method::HEAD)
+        && documentation::is_path(parts.uri.path());
     let public_read = matches!(parts.method, Method::GET | Method::HEAD)
-        && matches!(
-            parts.uri.path(),
-            "/" | "/app.js"
-                | "/style.css"
-                | "/healthz"
-                | "/api/v1/info"
-                | "/api/v1/help/authentication"
-        );
+        && (documentation_read
+            || matches!(
+                parts.uri.path(),
+                "/" | "/app.js"
+                    | "/style.css"
+                    | "/healthz"
+                    | "/api/v1/info"
+                    | "/api/v1/help/authentication"
+            ));
     let login = parts.method == Method::POST && parts.uri.path() == "/api/v1/auth/login";
     let mut result = if parts.uri.path().starts_with("/api/v1/reporters/") {
         match jobs::ReporterAuth::authenticate(&parts, &state).await {
@@ -163,6 +170,12 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
     headers.insert("content-security-policy", HeaderValue::from_static("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'"));
+    if documentation_read {
+        headers.insert(
+            "content-security-policy",
+            HeaderValue::from_static(documentation::CSP),
+        );
+    }
     if state.config.secure_cookie() {
         headers.insert(
             "strict-transport-security",

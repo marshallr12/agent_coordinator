@@ -9,8 +9,15 @@ mdbook build
 
 Open `target/book/index.html` in a browser. Navigation, search, styles, and fonts
 are bundled with the generated book. External source and reference links still
-need network access. The source repository is public, but no public documentation
-site is deployed by this build.
+need network access. The dashboard's **Documentation** link opens the same book
+at `/documentation/` on the service. These maintained public guides are readable
+without signing in; private project records remain behind the authenticated API.
+
+Building the server uses the pinned mdBook 0.5.4 library and embeds the generated
+HTML, search index, styles, scripts and fonts in the binary. No separate mdBook
+installation or documentation directory is needed at runtime. Rebuild and deploy
+the server to publish updated chapters. The standalone command above still
+produces an offline book for local reading and documentation validation.
 
 ## Edit the maintained source
 
@@ -61,6 +68,7 @@ systemd, HTTPS, or sustained-capacity acceptance exercises.
 
 Release archives contain the Markdown sources, `book.toml`, the root records,
 and deployment examples, allowing readers to build the book from the extracted
-package. Generated HTML is not committed or included in binary packages. Build
+package. Generated HTML is not committed or shipped as a separate directory;
+Linux server binaries include their built documentation. Build
 and test scripts are maintained in the source checkout. Do not place credentials,
 application state, build trees, or unrelated files in `book/src`.

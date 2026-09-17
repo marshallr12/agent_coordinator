@@ -4,6 +4,12 @@ The dashboard uses the same authenticated, revision-checked service operations a
 the native client. It does not bypass leases, reviews, completion checks, or
 uncertain physical resource holds.
 
+Choose **Documentation** in the main navigation to read the maintained mdBook
+hosted by this service. Chapter navigation and book search work on the same
+origin. Use your browser's Back button to return to the dashboard. The book
+contains public guides, not private tasks or credentials, and is also readable
+without signing in at `/documentation/`.
+
 ## Accounts and credentials
 
 Sign in with a local human account. Every account can access every project.

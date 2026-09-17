@@ -7,6 +7,10 @@ license.workspace = true
 [[bin]]
 name = "agent-coordinator-server"
 path = "src/main.rs"
+[build-dependencies]
+mdbook-driver = { version = "=0.5.4", features = ["search"] }
+sha2.workspace = true
+hex.workspace = true
 [dependencies]
 coordinator-core = { path = "../core", features = ["json-schema"] }
 anyhow.workspace = true

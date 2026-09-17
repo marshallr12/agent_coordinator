@@ -80,6 +80,7 @@ textarea { min-height: 108px; resize: vertical; }
 .nav-item span { width: 19px; color: inherit; font-size: 18px; text-align: center; }
 .nav-item:hover { background: #eaf1f2; color: var(--navy); }
 .nav-item.active { background: #dff1ef; color: var(--teal); }
+a.nav-item { text-decoration: none; }
 .sidebar-note { display: flex; gap: 9px; padding: 14px 12px; border-top: 1px solid var(--line); color: var(--navy); font-size: 11px; }
 .sidebar-note strong, .sidebar-note small { display: block; }
 .sidebar-note small { margin-top: 2px; color: var(--muted); }
