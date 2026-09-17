@@ -63,6 +63,8 @@ pub(crate) enum ArtifactsCommand {
     Link(InputArgs),
     Reserve(InputArgs),
     Upload(UploadArgs),
+    /// Reserve and upload evidence with one durable publication identity.
+    Publish(PublishArgs),
     Download(DownloadArgs),
     Retention(RecordInput),
     Delete(RecordInput),
@@ -74,6 +76,18 @@ pub(crate) struct UploadArgs {
     id: String,
     #[arg(long)]
     file: PathBuf,
+}
+
+#[derive(Args)]
+pub(crate) struct PublishArgs {
+    /// Stable UUID for this publication; reuse it for every retry.
+    #[arg(long)]
+    id: String,
+    #[arg(long)]
+    file: PathBuf,
+    /// Artifact reservation JSON, including task/job, exact size and SHA-256.
+    #[arg(long)]
+    input: PathBuf,
 }
 
 #[derive(Args)]
@@ -268,6 +282,27 @@ pub(crate) async fn artifacts(
             let response = artifact_transfer::upload(&transfer, &args.id, &args.file)
                 .await
                 .map_err(transfer_failure)?;
+            require_success(response)
+        }
+        ArtifactsCommand::Publish(args) => {
+            let (_lock, session_path, session) = load_required_state(cli, context)?;
+            if session.pending.is_some() {
+                return Err(Failure::invalid(
+                    "resolve the pending session mutation with retry before publishing evidence",
+                ));
+            }
+            let body = read_json(&args.input).map_err(Failure::invalid)?;
+            let transfer = artifact_transfer::TransferContext {
+                client: &context.client,
+                service_origin: &context.origin,
+                project_id: &context.binding.project_id,
+                local_session: &session.local_session,
+                session: &session.session,
+            };
+            let response =
+                artifact_transfer::publish(&transfer, &session_path, &args.id, &args.file, body)
+                    .await
+                    .map_err(transfer_failure)?;
             require_success(response)
         }
         ArtifactsCommand::Download(args) => {

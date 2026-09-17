@@ -154,6 +154,141 @@ pub async fn upload(
     Ok(response)
 }
 
+#[derive(Deserialize, Serialize)]
+struct PublicationIntent {
+    version: u8,
+    service_origin: String,
+    project_id: String,
+    local_session: String,
+    source: PathBuf,
+    request: serde_json::Value,
+    reservation_key: String,
+    artifact_id: Option<String>,
+}
+
+/// The caller holds the native session lock. The publication lives beside that
+/// session, including when --state-dir overrides the default location.
+/// Save exact bytes and reservation intent before dispatch. A lost reservation
+/// response reuses its key; a lost upload response uses the existing transfer.
+pub async fn publish(
+    context: &TransferContext<'_>,
+    session_path: &Path,
+    publication_id: &str,
+    source: &Path,
+    request: serde_json::Value,
+) -> Result<ApiResponse> {
+    validate_artifact_id(publication_id)?;
+    let input: coordinator_core::ArtifactUploadInput =
+        serde_json::from_value(request.clone()).context("parse publication metadata")?;
+    let task = input
+        .task_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("publication requires task_id"))?;
+    let job = input
+        .job_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("publication requires producer job_id"))?;
+    validate_artifact_id(task)?;
+    validate_artifact_id(job)?;
+    let source = source_reference(source)?;
+    let session_stem = session_path
+        .file_stem()
+        .ok_or_else(|| anyhow!("session filename missing"))?;
+    let directory = session_path
+        .with_file_name(session_stem)
+        .with_extension("publications")
+        .join(publication_id);
+    fs::create_dir_all(&directory).context("create publication directory")?;
+    crate::state::protect_directory(&directory)?;
+    let state_path = directory.join("publication.json");
+    let payload = directory.join("report.bin");
+    let mut intent: PublicationIntent = match fs::read(&state_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("read publication intent")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let (size, digest) = snapshot(&source, &payload, &directory)?;
+            if input.size_bytes < 0 || size != input.size_bytes as u64 || digest != input.sha256 {
+                bail!("publication source does not match reservation size and SHA-256");
+            }
+            let intent = PublicationIntent {
+                version: 1,
+                service_origin: context.service_origin.into(),
+                project_id: context.project_id.into(),
+                local_session: context.local_session.into(),
+                source: source.clone(),
+                request: request.clone(),
+                reservation_key: Uuid::new_v4().to_string(),
+                artifact_id: None,
+            };
+            save(&state_path, &intent, &directory)?;
+            intent
+        }
+        Err(error) => return Err(error).context("read publication intent"),
+    };
+    if intent.version != 1
+        || intent.service_origin != context.service_origin
+        || intent.project_id != context.project_id
+        || intent.local_session != context.local_session
+        || intent.source != source
+        || intent.request != request
+    {
+        bail!(
+            "publication identity already belongs to a different request; reuse the original arguments"
+        );
+    }
+    // Retain the independent publication snapshot even after successful transfer:
+    // the operator decides its retention after verifying service-hosted evidence.
+    let (size, digest) = hash_file(&payload)?;
+    if input.size_bytes < 0 || size != input.size_bytes as u64 || digest != input.sha256 {
+        bail!("saved publication bytes do not match their reservation");
+    }
+    if intent.artifact_id.is_none() {
+        let path = format!("/api/v1/projects/{}/artifacts/uploads", context.project_id);
+        let response = context
+            .client
+            .mutate(
+                &path,
+                &intent.request,
+                &intent.reservation_key,
+                Some(context.session),
+            )
+            .await
+            .context("reserve publication artifact")?;
+        if !response.is_success() {
+            return Ok(response);
+        }
+        let id = artifact_metadata(&response)?
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("reservation omitted artifact ID"))?;
+        validate_artifact_id(id)?;
+        validate_same_upload(&response, size, &digest)?;
+        intent.artifact_id = Some(id.into());
+        save(&state_path, &intent, &directory)?;
+    }
+    let id = intent.artifact_id.as_deref().expect("saved reservation");
+    let response = upload(context, id, &payload).await?;
+    if !response.is_success() {
+        return Ok(response);
+    }
+    // A receipt is not evidence of present availability. Authenticate a fresh
+    // metadata read, and never return publication success for pending/tombstoned bytes.
+    let current = authenticated_detail(context, id).await?;
+    if !current.is_success() {
+        return Ok(current);
+    }
+    let (current_size, current_digest) = download_expectation(&current)?;
+    if current_size != size || current_digest != digest {
+        bail!("published artifact differs from retained report");
+    }
+    let artifact = artifact_metadata(&current)?;
+    if artifact.get("task_id").and_then(serde_json::Value::as_str) != Some(task)
+        || artifact.get("job_id").and_then(serde_json::Value::as_str) != Some(job)
+    {
+        bail!("published artifact has different task or producer job provenance");
+    }
+    Ok(current)
+}
+
 fn source_reference(source: &Path) -> Result<PathBuf> {
     if let Ok(canonical) = fs::canonicalize(source) {
         return Ok(canonical);
@@ -473,7 +608,7 @@ fn load(path: &Path) -> Result<Option<UploadIntent>> {
     }
 }
 
-fn save(path: &Path, intent: &UploadIntent, directory: &Path) -> Result<()> {
+fn save(path: &Path, intent: &impl Serialize, directory: &Path) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(intent).context("serialize artifact upload intent")?;
     let mut temporary = NamedTempFile::new_in(directory)
         .with_context(|| format!("create temporary upload intent in {}", directory.display()))?;
@@ -493,28 +628,12 @@ fn save(path: &Path, intent: &UploadIntent, directory: &Path) -> Result<()> {
     sync_directory(directory)
 }
 
-#[cfg(unix)]
 fn protect_directory(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("protect artifact journal {}", path.display()))
+    crate::state::protect_directory(path).context("protect artifact directory")
 }
 
-#[cfg(not(unix))]
-fn protect_directory(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
 fn protect_file(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("protect artifact journal file {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn protect_file(_path: &Path) -> Result<()> {
-    Ok(())
+    crate::state::protect_file(path).context("protect artifact file")
 }
 
 #[cfg(unix)]

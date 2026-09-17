@@ -180,3 +180,49 @@ version, and `SOURCE_DATE_EPOCH`. CI performs two clean release builds into
 separate target directories, packages each result, and requires byte-identical
 archives and checksum files. This checks the complete native release output on
 the named runner image; keep the run identity with release evidence.
+
+## Publish deployment evidence
+
+A successful producer exit does not establish which backups, binaries, or timers
+were checked. Every deployment producer must save a sanitized report in durable
+storage outside its task worktree, including on failure. Record the project,
+deployment task and registered producer job IDs; exact source commit/tree,
+release-run identity and package/binary SHA-256 values; start/end timestamps;
+observed health and UI checks; preserved rollback identity; pre/post-upgrade
+backup verification and off-server verification where applicable; and restored
+timer states. Distinguish `verified`, `failed`, `not_exercised`, and `unavailable`
+observations. Never convert an omitted check into success. Keep original logs
+privately; publish only reviewed excerpts needed to substantiate these observations.
+Do not include credentials, proofs, authentication headers, password hashes,
+raw databases/backups, or unrelated host data. Publication does not sanitize files.
+
+After the producer terminates, publish the report through the existing artifact
+store with **both** `task_id` and `job_id`. The native
+[`artifacts publish` workflow](CLI.md#publish-and-retrieve-deployment-reports)
+retains exact bytes and a reservation key before sending, then reuses the existing
+upload protocol. Preserve its stable publication UUID, input metadata, native
+session state and original report. A failed upload is a publication failure,
+not permission to repeat the deployment. Retry publication independently. Do not
+claim evidence is shared until the returned artifact is an available finalized
+upload. Include its artifact ID and checksum in the task checkpoint/handoff and
+submission's `artifact_ids`; supporting excerpts each need their own artifact.
+External links and workstation paths are retrieval leads, not stored report bytes.
+
+A reviewer on another workstation retrieves the report from task artifact history,
+inspects its current metadata and downloads it with the native checksum verifier.
+Compare report identities with the task and registered producer; a valid checksum
+proves byte integrity, not the truth of the reported checks. Keep the local report
+until this retrieval has been verified and required retention is agreed. Uploaded
+artifacts expire (90 days by default), may be deleted, and consume storage quota.
+Use explicit retention/pinning where evidence must survive longer, and inspect
+current availability even when an old submission links the artifact.
+
+For historical backfill, a worker with source-host access inventories each named
+deployment task, its jobs and available original reports. Publish reviewed reports
+against their original task/job, record artifact IDs and checksum, and state the
+original observation date separately from upload time. When originals cannot be
+retrieved, record `unavailable on this workstation` with the retrieval lead. Use
+`not deployed` only when supported by task/job evidence. Missing reports, narrative
+handoffs and newer public assets cannot establish old backup or rollout checks.
+Do not redeploy an obsolete revision to reconstruct evidence, manufacture a report,
+or mark historical acceptance complete merely because a file was uploaded.

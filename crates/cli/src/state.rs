@@ -620,24 +620,24 @@ fn sync_directory(_path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn protect_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn protect_directory(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
 #[cfg(windows)]
-fn protect_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn protect_directory(path: &Path) -> io::Result<()> {
     set_private_windows_acl(path, true)
 }
 
 #[cfg(unix)]
-fn protect_file(path: &Path) -> io::Result<()> {
+pub(crate) fn protect_file(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(windows)]
-fn protect_file(path: &Path) -> io::Result<()> {
+pub(crate) fn protect_file(path: &Path) -> io::Result<()> {
     set_private_windows_acl(path, false)
 }
 

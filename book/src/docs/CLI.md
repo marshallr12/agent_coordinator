@@ -1040,3 +1040,56 @@ The command prompts invisibly for the new password twice, or accepts
 existing agent credentials, producers, resource holds, and saved work remain subject
 to their original authority and recovery rules. Never include a password in command
 arguments or the audited reason.
+
+## Publish and retrieve deployment reports
+
+Use `artifacts publish` to reserve and upload one reviewed report with a stable
+publication UUID. It requires an existing task and producer job in the bound
+project. Create `reservation.json` with the same schema as `artifacts reserve`:
+`filename`, `media_type`, exact `size_bytes`, lowercase `sha256`, `task_id`,
+`job_id`, optional `retention_days` and `pinned`. Compute size and SHA-256 from the
+sanitized file, and save a new UUID as `PUBLICATION_UUID` before first use.
+Keep files and session state outside source checkouts. For example:
+
+```text
+agent-coordinator --session SESSION artifacts publish --id PUBLICATION_UUID --file deployment-report.json --input reservation.json --json
+```
+
+This command publishes supplied bytes; it does not run a deployment or verify the
+report's claims. Follow the [deployment report requirements](linux-installation.md#publish-deployment-evidence).
+It persists a private snapshot and exact reservation request/key before sending.
+Repeat the **same command, UUID, session and metadata** after any interruption.
+Reservation retries reuse their original key and upload retries reuse the existing
+native transfer journal. A changed source file does not replace the saved bytes;
+changed metadata for the same publication is refused. Do not choose a new UUID to
+work around an uncertain response. `retry` handles ordinary pending session
+mutations; `artifacts publish` resumes its own saved publication. Resolve an
+ordinary pending mutation before starting publication.
+
+Success includes `data.artifact`, freshly authenticated as a finalized, available
+upload with matching task/job, size and SHA-256. A reservation alone is not success.
+Record `data.artifact.id` in a checkpoint/handoff and in submission `artifact_ids`.
+The publication snapshot remains beside native session state under its
+`.publications/PUBLICATION_UUID` directory; the existing upload journal uses the
+normal native artifact directory. Keep both locations across retry and do not
+migrate session storage during an unresolved publication. This command does not
+renew task ownership, submit work, or release resources. It does not automatically
+delete retained publication snapshots. After independent retrieval and the agreed
+retention period, inspect the exact publication before removing local evidence.
+
+Another authenticated agent can discover and retrieve the report without access
+to the producer host:
+
+```text
+agent-coordinator --session READER tasks history --id TASK_ID --kind artifacts --limit 50 --json
+agent-coordinator --session READER artifacts show --id ARTIFACT_ID --json
+agent-coordinator --session READER artifacts download --id ARTIFACT_ID --output new-report.json --json
+```
+
+Follow history cursors, match `task_id` and `job_id`, and inspect current availability.
+Download verifies size/SHA-256 and refuses an existing destination. Compare the
+report's source/package and observation identities with the original task/job.
+An expired/deleted upload cannot be retrieved; an external link is not uploaded
+content. Publication replay fails rather than reporting success for unavailable
+bytes. Report missing historical originals truthfully and ask a capable source-host
+worker to backfill; do not rerun an old deployment to manufacture evidence.

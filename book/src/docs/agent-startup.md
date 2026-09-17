@@ -410,6 +410,15 @@ to a shared repository/target. An uncertain push must be reconciled, not repeate
 as a new side effect. A commit or push alone is not task completion; only the
 guarded service finalization records done and releases dependencies.
 
+For deployment work, publish sanitized reports and supporting evidence through
+coordinator artifacts with the original task and producer job IDs. Keep local
+evidence until upload and independent retrieval are verified; record artifact IDs
+in the handoff and submission. Retry an uncertain publication without repeating
+the rollout. Reviewers retrieve current report bytes through task artifact history
+and verify their checksum and source/package identities. See
+[deployment evidence](linux-installation.md#publish-deployment-evidence) for
+publication, retention and historical backfill requirements.
+
 ### Remove completed task worktrees
 
 After a fresh task read confirms the subject task is `done`, the completing agent

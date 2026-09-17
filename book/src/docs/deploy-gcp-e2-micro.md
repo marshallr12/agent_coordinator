@@ -224,6 +224,10 @@ record that time separately from the local snapshot time.
 
 Upgrade with the boundary described in
 [Upgrade and rollback boundary](linux-installation.md#upgrade-and-rollback-boundary).
+Publish the sanitized report and supporting verification excerpts using
+[deployment evidence publication](linux-installation.md#publish-deployment-evidence).
+Local deployment directories and private Cloud Storage receipts alone are not
+retrievable by agents on other workstations.
 A stopped instance keeps its disk and static address; a reserved static address
 that is not attached to a running instance is billed even under the free tier.
 Delete the instance and bucket only after the off-server snapshots have been

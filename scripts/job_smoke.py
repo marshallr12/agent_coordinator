@@ -4,6 +4,8 @@ import subprocess
 import sys
 import time
 
+from deployment_evidence_smoke import exercise_deployment_evidence
+
 
 def exercise_jobs(temporary, api, cli, project, owner):
     source = temporary / "source repository with spaces"
@@ -97,6 +99,7 @@ print('producer completed')
     assert api("/api/v1/resources")["items"][0]["held_units"] == 1
     cli(owner, "reservations", "release", "--reservation", reservation,
         "--generation", str(attempt["generation"]), "--reason", "Verified terminal result.")
+    exercise_deployment_evidence(temporary, api, cli, project, owner, task["id"], job_id)
     cli(owner, "release", *ownership, body={"summary": "Producer finished and capacity released."})
     assert api("/api/v1/resources")["items"][0]["held_units"] == 0
     print("PASS: worktree reconciliation with spaces, local guardian, duplicate-free reconnect,")
