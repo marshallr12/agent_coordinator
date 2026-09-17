@@ -534,6 +534,7 @@
       setIssueFeedback(issuedCredentialFeedback(data), 'error'); return;
     }
     try {
+      showToken(data.token);
       const contents = `[[credentials]]\norigin = ${JSON.stringify(window.location.origin)}\ntoken = ${JSON.stringify(data.token)}\n`;
       state.credentialDownloadUrl = URL.createObjectURL(new Blob([contents], {type:'application/toml;charset=utf-8'}));
       const link = $('download-credential'); link.href = state.credentialDownloadUrl;
@@ -548,7 +549,23 @@
   $('clear-credential-download').addEventListener('click', clearCredentialDownload);
   window.addEventListener('pagehide', clearCredentialDownload);
   function setIssueFeedback(message, kind) { const target = $('issue-feedback'); target.className = `inline-alert ${kind}`; setText(target, message); show(target, true); }
-  $('clear-token').addEventListener('click', () => { setText($('issued-token'), ''); show($('token-reveal'), false); }); $('copy-token').addEventListener('click', async () => { const token = $('issued-token').textContent; if (!token) return; try { await navigator.clipboard.writeText(token); setIssueFeedback('Token copied to clipboard.', 'success'); } catch (_) { setIssueFeedback('Copy was unavailable. Select the token and copy it manually.', 'error'); } });
+  function selectIssuedToken() {
+    const token = $('issued-token'), selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange(); range.selectNodeContents(token); selection.removeAllRanges(); selection.addRange(range);
+  }
+  $('clear-token').addEventListener('click', () => { setText($('issued-token'), ''); show($('token-reveal'), false); });
+  $('copy-token').addEventListener('click', async () => {
+    const token = $('issued-token').textContent;
+    if (!token) return;
+    try {
+      await navigator.clipboard.writeText(token);
+      setIssueFeedback('Token copied to clipboard.', 'success');
+    } catch (_) {
+      selectIssuedToken();
+      setIssueFeedback('Clipboard access was unavailable. The token is selected; copy it with your browser.', 'error');
+    }
+  });
 
 
   async function loadResources(silent = false, append = false) {

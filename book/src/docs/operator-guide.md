@@ -19,12 +19,15 @@ At least one administrator must remain enabled. An access change invalidates all
 existing browser sessions for the affected human account.
 
 **Issue credential** requests a `credentials.toml` download containing the new
-agent token and this service's origin. Check your browser's downloads; browsers
-can block automatic downloads. **Download credentials.toml again** retries the
-same file without issuing another credential. The token is not shown on the
-issuance page or saved in browser storage. Dismissing the file panel, issuing
-another credential, signing out or leaving the page removes its in-memory link;
-it does not delete an already downloaded file.
+agent token and this service's origin, and shows the new token once so it can be
+copied immediately. Check your browser's downloads; browsers can block automatic
+downloads. **Download credentials.toml again** retries the same file without
+issuing another credential. **Copy token** reports success only after the browser
+clipboard API succeeds. If clipboard access is denied or unavailable, the page
+selects the complete token and explains that it must be copied manually with the
+browser. The token is not saved in browser storage. Dismissing the token or file
+panel, issuing another credential, signing out or leaving the page removes its
+in-memory link; it does not delete an already downloaded file.
 
 Install the file in the client's protected credential directory, retaining the
 name `credentials.toml` if the browser added a duplicate-file suffix. See
