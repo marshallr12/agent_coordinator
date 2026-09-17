@@ -1167,39 +1167,42 @@ fn create_new_file(path: &Path) -> anyhow::Result<File> {
 }
 
 fn create_private_directory(path: &Path) -> anyhow::Result<()> {
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
+        let mut builder = fs::DirBuilder::new();
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
-    }
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     builder.create(path)?;
     make_private_directory(path)
 }
 
-fn make_private_directory(path: &Path) -> anyhow::Result<()> {
+fn make_private_directory(_path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(_path, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
 
-fn make_private_file(path: &Path) -> anyhow::Result<()> {
+fn make_private_file(_path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(_path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
 
-fn make_private_open_file(file: &File) -> anyhow::Result<()> {
+fn make_private_open_file(_file: &File) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        _file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
@@ -1217,9 +1220,13 @@ fn validate_regular_file(path: &Path, description: &str) -> anyhow::Result<fs::M
 }
 
 fn validate_directory(path: &Path, description: &str) -> anyhow::Result<()> {
-    let metadata = validate_directory_without_mode(path, description)?;
     #[cfg(unix)]
-    ensure_private_mode(&metadata, true, description)?;
+    {
+        let metadata = validate_directory_without_mode(path, description)?;
+        ensure_private_mode(&metadata, true, description)?;
+    }
+    #[cfg(not(unix))]
+    validate_directory_without_mode(path, description)?;
     Ok(())
 }
 
@@ -1262,9 +1269,9 @@ fn sync_file(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sync_directory(path: &Path) -> anyhow::Result<()> {
+fn sync_directory(_path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
-    File::open(path)?.sync_all()?;
+    File::open(_path)?.sync_all()?;
     Ok(())
 }
 
