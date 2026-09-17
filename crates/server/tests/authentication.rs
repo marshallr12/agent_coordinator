@@ -198,10 +198,14 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
         "CONTRIBUTING.md",
         "keep claiming eligible tasks in the",
         "same session after completing or submitting each task",
-        "user's request narrows the scope",
+        "review request alone does not narrow the scope",
+        "subagent returned its review result",
+        "child final message as an intermediate event",
+        "automatically re-prompt it",
         "service does not launch or wake agents",
         "Review before new implementation",
         "highest-priority eligible `agent_review`",
+        "automatically create or reuse that stable review identity",
         "If no agent review is eligible",
         "coordinator_activity_claim",
     ] {
@@ -227,6 +231,20 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
             .as_str()
             .unwrap()
             .contains(coordinator_server::discovery::WORKTREE_CLEANUP_INSTRUCTIONS)
+    );
+    assert_eq!(
+        data["agent_startup"]["automatic_continuation"]["implicit_review_scope"],
+        false
+    );
+    assert_eq!(
+        data["agent_startup"]["automatic_continuation"]["subagent_result_is_terminal"],
+        false
+    );
+    assert!(
+        data["agent_startup"]["automatic_continuation"]["host_requirement"]
+            .as_str()
+            .unwrap()
+            .contains("automatically re-prompt")
     );
     let guide = guide.replace('`', "");
     let guide = guide.split_whitespace().collect::<Vec<_>>().join(" ");

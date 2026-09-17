@@ -144,6 +144,21 @@ both when claiming and deciding review. Ordinary sessions sharing the contributo
 principal remain ineligible. A review-only subagent must inspect the immutable
 candidate and evidence before deciding through the existing review workflow.
 
+When automatic work is authorized and this policy option is enabled, a still-running
+parent that cannot independently review its own or a contributor's submission should
+create or reuse its stable review-only subagent and spawn it without waiting for a
+second user prompt. A request to perform or spawn a review does not implicitly make
+the session review-only; only an explicit single-task, review-only, read-only, stop,
+or equivalent boundary does. After the child reports, its final message is an
+intermediate workflow event. The parent refreshes live state, advances any eligible
+integration or other required workflow step, and continues task selection. Review
+approval alone does not complete code work.
+
+The service cannot wake a parent after its host turn ends. A harness that requires
+deterministic continuation must keep the parent turn active or automatically
+re-prompt it until there is no eligible work or a concrete required-input, access,
+policy, or capability blocker.
+
 This option trusts the harness to keep distinct agent contexts and record every
 helper before it works. Shared credentials cannot prove independent reasoning or
 detect undeclared local edits. Use the default separate-principal policy when

@@ -196,10 +196,11 @@ again using its returned identity. Account-creation retries retain their origina
 key and require the original password, which the dashboard never persists; the
 same administrator can authenticate again to reconcile that request safely.
 
-Instruction version 7 adds clock reconciliation and receipt-retention guidance
-to the existing restore, operator, worktree/job, completion, and shared-record
-instructions.
-Existing sessions must fetch and acknowledge the new instructions before new claims.
+Instruction version 7 added clock reconciliation and receipt-retention guidance.
+Instruction version 8 clarifies automatic non-contributing subagent review,
+explicit-only scope narrowing, and mandatory parent continuation after child review
+results. Existing sessions must fetch and acknowledge the new instructions before
+new claims.
 
 JSON requests default to 1 MiB and can be configured lower; artifact bytes use a
 separate 16 MiB hard limit. Task details return the latest 50 attempts,

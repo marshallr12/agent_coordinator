@@ -13,8 +13,8 @@ pub use artifacts::*;
 pub mod workflow;
 pub use workflow::*;
 
-pub const INSTRUCTION_VERSION: &str = "7";
-pub const REQUIRED_SECTION: &str = "coordination-v7";
+pub const INSTRUCTION_VERSION: &str = "8";
+pub const REQUIRED_SECTION: &str = "coordination-v8";
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]

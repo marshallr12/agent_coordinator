@@ -131,7 +131,9 @@ login for every agent session. Report setup errors without inventing credentials
 When repository instructions authorize automatic work, startup means discovering,
 connecting, inspecting, and claiming eligible work, then beginning implementation.
 Do not stop after listing tasks or ask the user to choose one. Explicit user
-requests can narrow the session to a question, review, or read-only operation.
+requests can narrow the session to a single-task, review-only, read-only, or stop
+operation. Merely asking to perform or spawn a review does not narrow an otherwise
+automatic work session; the user must state the boundary explicitly.
 A bounded test that stops before source edits still permits and requires a claim
 unless service mutations are explicitly prohibited; checkpoint and release that
 test claim before ending. If no eligible work remains, report that the queue has
@@ -154,7 +156,9 @@ any work you already own; do not abandon an active attempt to take a review.
    with the same agent identity does not make you independent. If the human has
    enabled `allow_subagent_reviews`, a separately registered project subagent
    with no task contributions may review its parent's work using its own session
-   and proof. Reuse its stable subagent name across reconnects. Record delegated
+   and proof. When the still-running parent cannot review its own or a contributor's
+   submission, automatically create or reuse that stable review identity and spawn
+   the eligible subagent. Reuse its stable subagent name across reconnects. Record delegated
    helpers in the owner's checkpoint `contributor_session_ids` before they work;
    never rename a contributor to obtain review eligibility. See
    [subagent identity setup](CLI.md#subagent-identities-and-reviews). Skip human reviews,
@@ -167,9 +171,12 @@ any work you already own; do not abandon an active attempt to take a review.
    A listing grants no ownership. On a claim conflict, refresh and reconsider
    eligibility rather than repeatedly attempting the same ineligible review.
 4. Inspect the saved candidate and evidence, record an independent decision, and
-   repeat selection. If no agent review is eligible, select a ready implementation
-   task by priority, dependencies, and your capabilities. Do not wait on an
-   ineligible review when other authorized work is available.
+   return the result to the still-running parent. The child result is intermediate,
+   not the parent's final-response trigger. The parent refreshes live workflow
+   state, advances eligible integration or other required work, and repeats
+   selection without another user prompt. If no agent review is eligible, select a
+   ready implementation task by priority, dependencies, and your capabilities. Do
+   not wait on an ineligible review when other authorized work is available.
 
 With MCP, use `coordinator_tasks_list`, `coordinator_task_workflow` and
 `coordinator_activity_get` to discover reviews, `coordinator_activity_claim` to
@@ -180,10 +187,12 @@ a project-wide review-list endpoint or a task status filter that is not exposed.
 
 ### Continue after each task
 
-Unless the user's request narrows the scope, keep claiming eligible tasks in the
-same session after completing or submitting each task. Do not end the run merely
-because one task was submitted for review. A new session is not required for the
-next task.
+Keep claiming eligible tasks in the same session after completing or submitting
+each task. A review request alone does not narrow the scope. Only an explicit
+single-task, review-only, read-only, stop, or equivalent user boundary overrides
+this loop. Do not end the run merely because one task was submitted for review or
+a subagent returned its review result. A new parent session is not required for
+the next task.
 
 1. Finish current-attempt cleanup. Save evidence and handoff, observe owned jobs
    to termination, and release reservations only when their resource use has
@@ -191,11 +200,14 @@ next task.
    Never abandon ownership or release live or uncertain holds to move on.
    Retain worktrees while review or integration is pending. After service-confirmed
    completion, remove eligible task worktrees as described below before continuing.
-2. Refresh project instructions, policy, decisions, and the eligible queue,
-   following pagination. Apply review-first selection above before taking new
-   implementation work. Claim the selected task or review with a fresh attempt
-   through its appropriate workflow and prepare a separate worktree for code
-   changes; reuse the same authenticated session while it remains valid.
+2. After every task or subagent result, refresh project instructions, policy,
+   decisions, workflow state, and the eligible queue, following pagination. Treat
+   a child final message as an intermediate event. Advance eligible review,
+   integration, publication, or finalization work through its guarded workflow,
+   then apply review-first selection before taking new implementation work. Claim
+   the selected task or review with a fresh attempt and prepare a separate
+   worktree for code changes; reuse the same authenticated session while it
+   remains valid. Review approval alone does not complete code work.
 3. Repeat until no eligible work remains or required input, access, or capability
    prevents further authorized progress. Report that state and any pending review
    or integration. Do not invent tasks, start repeated polling, or schedule future
@@ -206,8 +218,11 @@ work. Leave required human review to a human and use the separate review and
 integration workflows for submitted candidates. An explicit single-task,
 read-only, review-only, or stop request takes precedence over this loop.
 
-The service does not launch or wake agents. This instruction tells the running
-agent to continue; it cannot restart an agent after its host ends the run.
+The service does not launch or wake agents. This instruction tells the still-running
+parent agent to continue; it cannot restart an agent after its host ends the run.
+A harness that requires deterministic continuation must keep the parent turn active
+or automatically re-prompt it until the queue is empty or a concrete required-input,
+access, policy, or capability blocker is observed.
 
 ### MCP startup
 

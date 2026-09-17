@@ -876,6 +876,11 @@ async fn subagent_review_opt_in_preserves_identity_contributions_and_default_gua
             let (status, done) = f.call(&reviewer, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/review", review["id"].as_str().unwrap()), json!({"generation":attempt["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Independent child inspected evidence","findings":[]})).await;
             assert_eq!(status, StatusCode::OK, "{done}");
             assert_eq!(done["data"]["work_status"], "done");
+            let next = f
+                .task(&p, "general", "Parent continues after child review")
+                .await;
+            let continued = f.claim(&f.a, &p, &next, 2).await;
+            assert_eq!(continued["task_id"], next["id"]);
         } else {
             assert_eq!(status, StatusCode::CONFLICT, "{claimed}");
             assert_eq!(claimed["error"]["code"], "reviewer_not_independent");

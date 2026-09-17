@@ -575,6 +575,27 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
         "configured_authenticated_mcp"
     );
     assert_eq!(bootstrap["mcp"]["requires_native_cli"], false);
+    assert_eq!(
+        bootstrap["automatic_continuation"]["implicit_review_scope"],
+        false
+    );
+    assert_eq!(
+        bootstrap["automatic_continuation"]["subagent_result_is_terminal"],
+        false
+    );
+    for required in [
+        "automatically create or reuse a stable project subagent identity",
+        "child review result is intermediate",
+        "continues selection without waiting for another user prompt",
+    ] {
+        assert!(
+            legacy.body["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(required),
+            "missing automatic review continuation guidance: {required}"
+        );
+    }
     for advertised in bootstrap["mcp"]["coordination_tools"].as_array().unwrap() {
         assert!(
             names.contains(&advertised.as_str().unwrap()),
