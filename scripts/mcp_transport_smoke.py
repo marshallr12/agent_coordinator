@@ -160,6 +160,7 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
             helper = directory / 'mcp_call.py'
             helper.write_text('import json,sys,urllib.request\n'
                 + 'value={"method":sys.argv[1],"params":json.loads(sys.argv[2]) if len(sys.argv)>2 else {}}\n'
+                + 'if value["method"].startswith("coordinator_"): value={"method":"tools/call","params":{"name":value["method"],"arguments":value["params"]}}\n'
                 + f'request=urllib.request.Request("http://127.0.0.1:{gateway.server_port}/", data=json.dumps(value).encode(), headers={{"Content-Type":"application/json"}})\n'
                 + 'with urllib.request.urlopen(request, timeout=40) as response: print(response.read().decode())\n')
             (directory / 'ready.json').write_text(json.dumps({'project': project, 'task': task['id'],
@@ -171,6 +172,8 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
                 assert (directory / 'finished.json').exists(), 'Evaluator did not finish before deadline.'
                 observed = api(f"/api/v1/projects/{project}/tasks/{task['id']}")
                 saved = json.loads((state / 'journal.json').read_text())
+                assert token not in json.dumps(transcript) and proof not in json.dumps(transcript)
+                (directory / 'transcript.json').write_text(json.dumps(transcript, indent=2))
                 claims = [call for call in sent if call['name'] == 'coordinator_claim']
                 assert dropped.is_set() and len(claims) == 2 and claims[0] == claims[1]
                 assert len(observed['attempts']) == 1 and observed['current_attempt_id'] is None
