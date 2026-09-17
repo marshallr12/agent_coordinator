@@ -781,6 +781,49 @@ async fn task_definition_grants_are_scoped_revocable_and_preserve_contributor_sa
     );
     assert_eq!(f.call(&f.b, "PATCH", &other_path, "revoked-deny", json!({"expected_revision":1,"title":"nope","description":"Test task","acceptance_criteria":["verified"],"priority":2,"depends_on":[],"planned":false})).await.0, StatusCode::FORBIDDEN);
 
+    let (status, role_grant) = f
+        .call(
+            &f.admin,
+            "POST",
+            &grants,
+            "grant-agent-role",
+            json!({"target_kind":"role","agent_role":"agent"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{role_grant}");
+    let role_task = f.task(&p, "editable by delegated role", vec![]).await;
+    let role_path = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        role_task["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        f.call(
+            &f.b,
+            "PATCH",
+            &role_path,
+            "role-edit",
+            json!({"expected_revision":1,"title":"role revised","description":"Test task","acceptance_criteria":["verified"],"priority":2,"depends_on":[],"planned":false}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let isolated = f.project("definition grant isolation").await;
+    let isolated_task = f.task(&isolated, "not delegated here", vec![]).await;
+    assert_eq!(
+        f.call(
+            &f.b,
+            "PATCH",
+            &format!("/api/v1/projects/{isolated}/tasks/{}", isolated_task["id"]),
+            "cross-project-deny",
+            json!({"expected_revision":1,"title":"nope","description":"Test task","acceptance_criteria":["verified"],"priority":2,"depends_on":[],"planned":false}),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+
     f.ack(&f.b, &p).await;
     let (status, claim) = f.claim(&f.b, &p, &other, "contributor-claim", "work").await;
     assert_eq!(status, StatusCode::OK);
