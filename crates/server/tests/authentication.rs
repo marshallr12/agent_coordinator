@@ -188,6 +188,7 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
         guide,
         include_str!("../../../book/src/docs/agent-startup.md")
     );
+    let normalized_guide = guide.split_whitespace().collect::<Vec<_>>().join(" ");
     for required in [
         "credentials.toml",
         "SESSION_NAME",
@@ -210,7 +211,9 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
         "coordinator_activity_claim",
     ] {
         assert!(
-            guide.to_lowercase().contains(&required.to_lowercase()),
+            normalized_guide
+                .to_lowercase()
+                .contains(&required.to_lowercase()),
             "missing bootstrap step: {required}"
         );
     }
