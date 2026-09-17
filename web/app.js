@@ -463,7 +463,7 @@
   }
 
   function openDialog(kind) {
-    const dialog = document.createElement('dialog'); dialog.className = 'form-dialog'; const form = el('form'); form.method = 'dialog';
+    const dialog = document.createElement('dialog'); dialog.className = 'form-dialog'; setupHelpDismissal(dialog); const form = el('form'); form.method = 'dialog';
     const title = kind === 'project' ? 'Create project' : 'Create task'; add(form, el('div', 'dialog-header', ''));
     const header = form.firstChild; add(header, el('h2', '', title)); const close = el('button', 'icon-button', '×'); close.type = 'button'; close.setAttribute('aria-label', 'Close'); close.addEventListener('click', () => dialog.close()); add(header, close);
     const fields = [];
@@ -579,7 +579,7 @@
 
   function openResourceResolution(reservation) {
     const projectId = state.projectId; const taskId = state.selectedTaskId;
-    const dialog = el('dialog', 'form-dialog'); const form = el('form');
+    const dialog = el('dialog', 'form-dialog'); setupHelpDismissal(dialog); const form = el('form');
     add(form, el('h2', '', 'Resolve a physical resource hold'));
     add(form, el('p', 'muted', 'Record how you verified the old producer stopped or was isolated. This permits conflicting work to use the resource. An unreachable workstation is not evidence that it stopped.'));
     for (const [id, label] of [['resolution-reason', 'Reason'], ['resolution-evidence', 'Evidence of termination or isolation']]) {
@@ -627,11 +627,26 @@
     rules: 'Instructions every agent working on this project must follow, such as required validation and repository conventions. Saving a change creates a new policy revision that agents must read and acknowledge.',
     provenance: 'Explain why the policy is changing and cite the request, decision or other supporting source so later workers can understand it. Use your actual reason and source.'
   };
+  const helpDismissals = new WeakMap();
+  function setupHelpDismissal(dialog) {
+    const dismissVisible = () => {
+      let dismissed = false;
+      for (const panel of dialog.querySelectorAll('[role="tooltip"]')) {
+        const dismiss = helpDismissals.get(panel);
+        if (!panel.hidden && dismiss) { dismiss(); dismissed = true; }
+      }
+      return dismissed;
+    };
+    dialog.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && dismissVisible()) { event.preventDefault(); event.stopPropagation(); }
+    }, true);
+    dialog.addEventListener('cancel', event => { if (dismissVisible()) event.preventDefault(); });
+  }
   function contextualHelp(target, control, label, description, panelTarget = null) {
     const wrapper = el('div', 'contextual-help');
     const button = el('button', 'button text-button', panelTarget ? 'Help' : `Help: ${label}`); button.type = 'button'; button.setAttribute('aria-label', `Help: ${label}`);
     const help = el('p', 'help-text', description); help.id = `context-help-${++helpSerial}`; help.hidden = true; help.setAttribute('role', 'tooltip');
-    button.setAttribute('aria-controls', help.id); button.setAttribute('aria-expanded', 'false');
+    button.setAttribute('aria-controls', help.id); button.setAttribute('aria-expanded', 'false'); button.setAttribute('aria-describedby', help.id);
     control.setAttribute('aria-describedby', [control.getAttribute('aria-describedby'), help.id].filter(Boolean).join(' '));
     let pinned = false, controlFocused = false, buttonFocused = false, hideTimer;
     const hovered = new Set();
@@ -645,8 +660,7 @@
     button.addEventListener('focus', () => { buttonFocused = true; update(); });
     button.addEventListener('blur', () => { buttonFocused = false; update(); });
     button.addEventListener('click', () => { pinned = !pinned; hovered.clear(); controlFocused = buttonFocused = false; update(); });
-    const dismiss = event => { if (event.key === 'Escape' && !help.hidden) { event.preventDefault(); event.stopPropagation(); clearTimeout(hideTimer); pinned = controlFocused = buttonFocused = false; hovered.clear(); update(); } };
-    wrapper.addEventListener('keydown', dismiss); control.addEventListener('keydown', dismiss);
+    helpDismissals.set(help, () => { clearTimeout(hideTimer); pinned = controlFocused = buttonFocused = false; hovered.clear(); update(); });
     add(wrapper, button);
     if (panelTarget) { help.classList.add('check-help-panel'); add(panelTarget, help); }
     else add(wrapper, help);
@@ -660,7 +674,7 @@
     }
   }
   function workflowDialog(title, description) {
-    const dialog = el('dialog', 'form-dialog'); const form = el('form');
+    const dialog = el('dialog', 'form-dialog'); setupHelpDismissal(dialog); const form = el('form');
     add(form, el('h2', '', title)); if (description) add(form, el('p', 'muted', description));
     const field = (name, label, value = '', kind = 'textarea') => {
       const id = `workflow-${name}`; const caption = el('label', '', label); caption.htmlFor = id;
