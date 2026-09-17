@@ -60,7 +60,7 @@ jobs:
       # This is a native Windows run, not a Linux cross-compilation check.
       # Windows validation remains pending until this job actually passes.
       - name: Run client, CLI, and local runner tests
-        run: cargo test -p coordinator-client -p coordinator-cli -p coordinator-local --locked --no-fail-fast
+        run: cargo test -p coordinator-client -p coordinator-cli -p coordinator-local -p coordinator-mcp-transport --locked --no-fail-fast
 
   audit:
     name: Audit locked dependencies
