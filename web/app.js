@@ -393,8 +393,19 @@
     if (!tasks.length) { show(target, false); setState($('tasks-state'), state.tasks.length ? 'No tasks match this status filter. Load more to search the rest of the queue.' : 'No tasks in this project yet. Create the first task.', false); return; }
     show($('tasks-state'), false); show(target, true);
     tasks.forEach((task) => {
-      const row = el('button', 'task-row'); row.type = 'button'; row.addEventListener('click', () => openTask(task.id));
+      const row = el('article', 'task-row');
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('button, a')) return;
+        const selection = window.getSelection();
+        if (selection && !selection.isCollapsed && (row.contains(selection.anchorNode) || row.contains(selection.focusNode))) return;
+        openTask(task.id);
+      });
       const copy = el('span'); add(copy, el('span', 'task-title', task.title || 'Untitled task')); add(copy, el('span', 'task-description', task.description || 'No description')); const meta = el('span', 'task-meta');
+      const identity = el('span', 'task-queue-id'); add(identity, el('span', '', 'Task ID · ')); add(identity, el('span', 'task-id-value', task.id)); add(copy, identity);
+      const open = el('button', 'button subtle task-open', 'Open task'); open.type = 'button';
+      open.setAttribute('aria-label', `Open task ${task.title || task.id}`);
+      open.addEventListener('click', () => openTask(task.id));
+      add(meta, open);
       const badge = el('span', `status-badge ${taskStatus(task)}`, displayStatus(taskStatus(task))); add(meta, badge); add(meta, el('span', 'project-meta', `Rev. ${text(task.revision || 1)}`)); add(row, copy); add(row, meta); add(target, row);
     });
   }

@@ -197,7 +197,26 @@ async function main() {
     await send('Emulation.clearDeviceMetricsOverride');
     await evaluate("window.__copiedTaskDetailValue = null; document.querySelector('.project-open').click()");
     await waitPage("document.querySelector('.task-row')", 'task queue');
-    await evaluate("document.querySelector('.task-row').click()");
+    assert(await evaluate("document.querySelector('.task-id-value').textContent") === task.id, 'Queue task ID differs.');
+    for (const selector of ['.task-title', '.task-id-value']) {
+      const selected = await evaluate(`(() => {
+        const node = document.querySelector('${selector}');
+        const range = document.createRange(); range.selectNodeContents(node);
+        window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+        node.click();
+        return { value: window.getSelection().toString(), queueVisible: !document.querySelector('#tasks-view').hidden, selectable: getComputedStyle(node).userSelect };
+      })()`);
+      assert(selected.value === (selector === '.task-title' ? task.title : task.id), 'Queue selection differs from task identity.');
+      assert(selected.queueVisible && selected.selectable === 'text', 'Selecting queue identity navigated away or is disabled.');
+    }
+    await evaluate("window.getSelection().removeAllRanges()");
+    for (const width of [1280, 390, 320]) {
+      await send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: true });
+      assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), `Task queue overflows at ${width}px.`);
+    }
+    await evaluate("document.querySelector('.task-open').focus()");
+    await press('Enter', 'Enter', 13);
+
     await waitPage("document.querySelector('#task-detail-content') && !document.querySelector('#task-detail-content').hidden", 'task detail');
 
     assert(await evaluate("document.querySelector('#task-detail-heading').textContent") === task.title, 'Task name was not rendered exactly.');
@@ -210,7 +229,7 @@ async function main() {
     await waitPage("document.querySelector('#detail-copy-feedback').textContent.includes('Clipboard access was unavailable')", 'manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === task.id, 'Clipboard fallback did not select the exact task ID.');
     assert(await evaluate("document.querySelector('#detail-copy-feedback').classList.contains('fallback')"), 'Clipboard fallback was not identified to assistive technology and styling.');
-    console.log('PASS: headless Chrome verified project navigation, keyboard focus, selection, binding copy, phone layout, and task-detail copy/fallback.');
+    console.log('PASS: headless Chrome verified project navigation, keyboard focus, selection, binding copy, phone layout, queue identity selection and keyboard opening, and task-detail copy/fallback.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
@@ -222,7 +241,7 @@ async function main() {
       const exited = once(chrome, 'exit'); chrome.kill('SIGTERM'); await exited;
     }
     await new Promise((resolveClose) => server.close(resolveClose));
-    await rm(profile, { recursive: true, force: true });
+    await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     if (launchError) throw launchError;
   }
 }
