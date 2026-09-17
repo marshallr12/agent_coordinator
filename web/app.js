@@ -660,7 +660,12 @@
     button.addEventListener('focus', () => { buttonFocused = true; update(); });
     button.addEventListener('blur', () => { buttonFocused = false; update(); });
     button.addEventListener('click', () => { pinned = !pinned; hovered.clear(); controlFocused = buttonFocused = false; update(); });
-    helpDismissals.set(help, () => { clearTimeout(hideTimer); pinned = controlFocused = buttonFocused = false; hovered.clear(); update(); });
+    const dismiss = () => { clearTimeout(hideTimer); pinned = controlFocused = buttonFocused = false; hovered.clear(); update(); };
+    helpDismissals.set(help, dismiss);
+    const dismissHere = event => {
+      if (event.key === 'Escape' && !help.hidden) { event.preventDefault(); event.stopPropagation(); dismiss(); }
+    };
+    wrapper.addEventListener('keydown', dismissHere); control.addEventListener('keydown', dismissHere);
     add(wrapper, button);
     if (panelTarget) { help.classList.add('check-help-panel'); add(panelTarget, help); }
     else add(wrapper, help);
