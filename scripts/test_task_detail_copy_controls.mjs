@@ -49,7 +49,7 @@ async function fixtureServer() {
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://fixture.invalid');
-    if (url.pathname === '/api/v1/me') return json(response, { actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'operator' }, csrf_token: 'fixture-csrf' });
+    if (url.pathname === '/api/v1/me') return json(response, { actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'operator', kind: 'human', session_id: 'fixture-browser' }, csrf_token: 'fixture-csrf' });
     if (url.pathname === '/api/v1/projects') return json(response, { items: [{ id: 'fixture-project', name: 'Fixture project', target_branch: 'main' }] });
     if (url.pathname === '/api/v1/projects/fixture-project/tasks') return json(response, { items: [task] });
     if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}`) return json(response, task);
@@ -210,7 +210,63 @@ async function main() {
     await waitPage("document.querySelector('#detail-copy-feedback').textContent.includes('Clipboard access was unavailable')", 'manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === task.id, 'Clipboard fallback did not select the exact task ID.');
     assert(await evaluate("document.querySelector('#detail-copy-feedback').classList.contains('fallback')"), 'Clipboard fallback was not identified to assistive technology and styling.');
-    console.log('PASS: headless Chrome verified project navigation, keyboard focus, selection, binding copy, phone layout, and task-detail copy/fallback.');
+    const openFixtureTask = async () => {
+      await send('Page.navigate', { url: `http://127.0.0.1:${serverPort}/` });
+      await waitPage("document.querySelector('.project-open')", 'fixture project');
+      await evaluate("document.querySelector('.project-open').click()");
+      await waitPage("document.querySelector('.task-row')", 'fixture queue');
+      await evaluate("document.querySelector('.task-row').click()");
+      await waitPage("!document.querySelector('#task-detail-content').hidden", 'fixture detail');
+    };
+    const submission = { id: 'fixture-submission', task_id: task.id, kind: 'code', summary: 'Saved candidate', candidate_revision: 'fixture-source', acceptance_evidence: [] };
+    task.blocked_reason = 'Saved blocker\nRepository access must be restored.';
+    for (const phase of ['review', 'integration', 'done']) {
+      task.lifecycle = phase === 'done' ? 'done' : 'open';
+      task.work_status = phase === 'done' ? 'done' : `waiting_${phase}`;
+      task.workflow = { phase, submission, activities: phase === 'review' ? [{ id: 'fixture-review', kind: 'human_review', status: 'queued' }] : [] };
+      await openFixtureTask();
+      assert(await evaluate("!document.querySelector('#task-operator-actions').textContent.includes('Resolve blocker')"), `Ordinary blocker resolution offered during ${phase}.`);
+      if (phase === 'review') {
+        assert(await evaluate("document.querySelector('#workflow-content').textContent.includes('Claim human review')"), 'Human review claim action missing.');
+        assert(await evaluate("document.querySelector('#workflow-content').textContent.includes('Claiming reserves the review for you; it does not approve the work.')"), 'Review claim/decision distinction missing.');
+      }
+    }
+    task.lifecycle = 'open'; task.work_status = 'waiting_review';
+    task.workflow = { phase: 'review', submission, activities: [{ id: 'fixture-review', kind: 'human_review', status: 'active', current_attempt: { id: 'fixture-attempt', generation: 1, owner_id: 'fixture-operator', session_id: 'fixture-browser', state: 'active', valid_by_time: true, owner_authorized: true } }] };
+    await openFixtureTask();
+    await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Record human review').click()");
+    await waitPage("document.querySelector('dialog[open] #workflow-decision')", 'human review dialog');
+    assert(await evaluate("document.querySelector('dialog[open]').textContent.includes('fixture-submission')"), 'Review does not identify the saved submission.');
+    await evaluate("document.querySelector('#workflow-decision').value = 'approved'; document.querySelector('#workflow-summary').value = 'Synthetic review'; document.querySelector('#workflow-findings').value = 'Still needs a fix'; document.querySelector('dialog[open] form').requestSubmit()");
+    assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && !document.querySelector('#workflow-findings').validity.valid"), 'Required remedies allowed approval.');
+    await evaluate("document.querySelector('dialog[open]').close()");
+
+    task.work_status = 'blocked'; task.workflow = { activities: [] };
+    await openFixtureTask();
+    await evaluate("Array.from(document.querySelectorAll('#task-operator-actions button')).find(button => button.textContent === 'Resolve blocker').click()");
+    await waitPage("document.querySelector('dialog[open] .saved-blocker')", 'saved blocker dialog');
+    assert(await evaluate("document.querySelector('.saved-blocker').textContent") === task.blocked_reason, 'Saved blocker reason was lost.');
+    assert(await evaluate("document.querySelector('#workflow-reason').maxLength") === 4096, 'Resolution evidence bound changed.');
+    assert(await evaluate("document.querySelector('dialog[open]').textContent.includes('Record what changed and how you checked it.')"), 'Resolution instructions missing.');
+    const helpSelector = 'dialog[open] [aria-label="Help: Resolution evidence"]';
+    const helpVisible = "!document.querySelector('dialog[open] [role=tooltip]').hidden";
+    await evaluate(`document.querySelector('${helpSelector}').focus()`);
+    await waitPage(helpVisible, 'keyboard help');
+    await press('Escape', 'Escape', 27);
+    assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && document.querySelector('dialog[open] [role=tooltip]').hidden"), 'Escape closed dialog or failed to dismiss help.');
+    const helpPoint = await evaluate(`(() => { const node = document.querySelector('${helpSelector}'); node.scrollIntoView(); const rect = node.getBoundingClientRect(); return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }; })()`);
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...helpPoint });
+    await waitPage(helpVisible, 'pointer hover help');
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 0, y: 0 });
+    await waitPage("document.querySelector('dialog[open] [role=tooltip]').hidden", 'hover dismissal');
+    await send('Emulation.setTouchEmulationEnabled', { enabled: true });
+    await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...helpPoint, radiusX: 1, radiusY: 1 }] });
+    await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await waitPage(helpVisible, 'emulated touch help');
+    await send('Emulation.setDeviceMetricsOverride', { width: 375, height: 844, deviceScaleFactor: 1, mobile: true });
+    assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), 'Blocker dialog overflows on phone.');
+    await evaluate("document.querySelector('dialog[open]').close()");
+    console.log('PASS: headless Chrome verified project navigation, keyboard focus, selection, binding copy, phone layout, task-detail copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
@@ -222,7 +278,7 @@ async function main() {
       const exited = once(chrome, 'exit'); chrome.kill('SIGTERM'); await exited;
     }
     await new Promise((resolveClose) => server.close(resolveClose));
-    await rm(profile, { recursive: true, force: true });
+    await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     if (launchError) throw launchError;
   }
 }
