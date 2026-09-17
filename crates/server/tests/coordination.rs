@@ -821,7 +821,7 @@ async fn task_definition_grants_are_scoped_revocable_and_preserve_contributor_sa
         )
         .await
         .0,
-        StatusCode::FORBIDDEN
+        StatusCode::NOT_FOUND
     );
 
     f.ack(&f.b, &p).await;
