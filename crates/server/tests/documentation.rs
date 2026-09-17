@@ -85,7 +85,7 @@ async fn embedded_book_is_public_bounded_and_keeps_console_security_policy() {
             .to_vec(),
     )
     .unwrap();
-    assert!(chapter.contains("Project settings"));
+    assert!(chapter.contains("Operating projects and accounts"));
     for path in [
         "/documentation/missing.html",
         "/documentation/%2e%2e/Cargo.toml",

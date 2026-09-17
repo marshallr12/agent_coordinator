@@ -38,8 +38,13 @@ fn main() {
     if destination.exists() {
         fs::remove_dir_all(&destination).expect("Clear generated documentation");
     }
-    let mut book = mdbook_driver::MDBook::load(&root).expect("Load maintained mdBook");
-    book.config.build.build_dir = destination.clone();
+    // Embedded public content comes only from the checked-in configuration;
+    // ambient MDBOOK_* overrides must not select a different source directory.
+    let mut config = mdbook_driver::config::Config::from_disk(root.join("book.toml"))
+        .expect("Read checked-in book configuration");
+    config.build.build_dir = destination.clone();
+    let book = mdbook_driver::MDBook::load_with_config(&root, config)
+        .expect("Load maintained mdBook without environment overrides");
     book.build()
         .expect("Build embedded mdBook with pinned renderer");
 
