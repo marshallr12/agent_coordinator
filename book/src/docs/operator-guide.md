@@ -36,7 +36,7 @@ password-recovery or public enrollment endpoint.
 
 ## Project policy and tasks
 
-Open a project's task queue and select **Project policy** to edit review mode,
+Open a project's settings with its gear button and select **Project policy** to edit review mode,
 recovery mode, integration authorization, agent permission to change binding
 rules, lease duration, and binding rules. Record the reason and source for the
 change. **Required checks** defines the required check roster and shows a read-only
@@ -46,6 +46,14 @@ after saving a roster to bind a custom SSH URL to an existing repository identit
 Verify both URLs identify the same repository; shared or historically used bindings
 cannot be changed. New policy versions require agents to reread and
 acknowledge instructions; existing candidates may require reconciliation.
+
+Setup fields offer **Help** on hover, field or help-button focus, and tap. Press
+Escape to dismiss the current explanation without closing the form. Help is
+associated with its field for assistive technology. Examples explain values;
+they do not configure checks. Copy the exact `check_identity`, `check_version`
+and `check_environment` from your registered producer configuration. The version
+identifies the check definition, not the application release. Saving a roster
+neither creates nor runs a producer, and at least one check is required.
 
 Open an unowned task to edit its brief, criteria, priority, prerequisites, and
 admission. Planned tasks remain unavailable until admitted. An edit always names

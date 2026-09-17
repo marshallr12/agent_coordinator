@@ -207,3 +207,7 @@ textarea { min-height: 108px; resize: vertical; }
 }
 
 .repository-summary { overflow-wrap: anywhere; }
+
+.check-help-panel { grid-column: 1 / -1; margin: 0; }
+.check-row > div { min-width: 0; }
+.contextual-help button { min-height: 32px; }

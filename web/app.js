@@ -468,7 +468,7 @@
     const header = form.firstChild; add(header, el('h2', '', title)); const close = el('button', 'icon-button', '×'); close.type = 'button'; close.setAttribute('aria-label', 'Close'); close.addEventListener('click', () => dialog.close()); add(header, close);
     const fields = [];
     const field = (label, id, type = 'input', placeholder = '') => { const wrap = el('div', 'dialog-field'); const labelNode = el('label', '', label); labelNode.htmlFor = id; const input = document.createElement(type); input.id = id; input.name = id; input.placeholder = placeholder; add(wrap, labelNode); add(wrap, input); add(form, wrap); fields.push(input); return input; };
-    if (kind === 'project') { field('Project name', 'project-name', 'input', 'e.g. Atlas API'); field('Repository URL', 'repository-url', 'input', 'https://…'); field('Target branch', 'target-branch', 'input', 'main'); }
+    if (kind === 'project') { field('Project name', 'project-name', 'input', 'e.g. Atlas API'); field('Repository URL', 'repository-url', 'input', 'https://…'); field('Target branch', 'target-branch', 'input', 'main'); setupFieldHelp(form); }
     else { const titleInput = field('Task title', 'task-title', 'input', 'What needs to happen?'); titleInput.required = true; field('Description', 'task-description', 'textarea', 'Give the agent enough context to start.'); field('Acceptance criteria', 'task-criteria', 'textarea', 'One criterion per line'); const kindInput = field('Kind', 'task-kind', 'select'); ['code', 'general'].forEach((value) => { const option = el('option', '', value === 'code' ? 'Code' : 'General'); option.value = value; add(kindInput, option); }); }
     const actions = el('div', 'dialog-actions'); const cancel = el('button', 'button subtle', 'Cancel'); cancel.type = 'button'; cancel.addEventListener('click', () => dialog.close()); const submit = el('button', 'button primary', kind === 'project' ? 'Create project' : 'Create task'); submit.type = 'submit'; add(actions, cancel); add(actions, submit); add(form, actions); dialog.appendChild(form); document.body.appendChild(dialog);
     form.addEventListener('submit', (event) => { event.preventDefault(); if (!form.reportValidity()) return; const value = Object.fromEntries(new FormData(form).entries()); dialog.close(); if (kind === 'project') createProject(value); else createTask(value); });
@@ -609,21 +609,55 @@
 
   const projectPath = (projectId = state.projectId) => `/api/v1/projects/${encodeURIComponent(projectId)}`;
   let helpSerial = 0;
-  function contextualHelp(target, control, label, description) {
+  const SETUP_HELP = {
+    'project-name': 'A readable name for this project in the dashboard. It does not rename the Git repository. Example only: Atlas API.',
+    'repository-url': 'Use the Git clone URL for this project. Supported GitHub HTTPS and SSH aliases share a repository identity automatically. Custom SSH host aliases can be linked by an administrator in Advanced repository aliases after the check roster is saved.',
+    'target-branch': 'The Git branch where reviewed code will be integrated. Example only: main. Use the actual branch in your repository; creating a project does not create the branch.',
+    repository_identity: 'The repository identity groups URL aliases of the same Git repository so projects coordinate integration to the same target. Normal setup derives it from the URL and preserves saved bindings. Administrators can link custom aliases after verifying they refer to the same repository.',
+    canonical_repository_key: 'Copy the saved identity from a project using the same repository. This advanced administrator setting links aliases that cannot be inferred, such as custom SSH hosts. Existing workflow evidence and shared bindings prevent unsafe changes.',
+    identity: 'Copy check_identity exactly from the producer configuration used with jobs run. Example only: workspace-tests. A producer must be configured, registered and run on a workstation or CI runner; saving this roster does not create or run it.',
+    version: 'Copy check_version exactly from the registered producer. This identifies the check definition, such as its commands and configuration, not the application version. Example only: v1. A different definition version needs a matching roster entry.',
+    environment: 'Copy check_environment exactly from the registered producer. This label identifies its validation environment; the service does not choose or start a runner from this value. Example only: linux-ci. Use the actual configured label, including its case.',
+    review_mode: 'Independent agent requires a reviewer who did not contribute. Human requires a person. Both requires both reviews; Either accepts one independent agent or human review. None removes the review requirement. Required code checks still apply.',
+    automatic_integration: 'When allowed, agents may integrate a candidate after required reviews and checks pass. Otherwise a human must authorize each candidate before integration. This setting does not create or run checks.',
+    allow_subagent_reviews: 'When enabled, a separately registered project subagent may review its parent’s work only if it did not contribute. Otherwise the reviewer must be an independently enrolled agent. Human reviews always require a person.',
+    recovery_mode: 'Choose who may inspect and recover expired work. Expiry does not prove a workstation job stopped. The selected agent or human must inspect saved work and any remaining jobs or resource holds before continuing.',
+    agent_rule_editing: 'Allow agents to change the binding rules text for this project. Humans still control review, integration, recovery and lease settings. Leave this off when rule changes need an operator.',
+    lease_seconds: 'How long task ownership lasts without renewal, from 30 to 3600 seconds. Example only: 600 means ten minutes. Agents must renew before expiry; reading a task or saving a checkpoint does not renew ownership.',
+    rules: 'Instructions every agent working on this project must follow, such as required validation and repository conventions. Saving a change creates a new policy revision that agents must read and acknowledge.',
+    provenance: 'Explain why the policy is changing and cite the request, decision or other supporting source so later workers can understand it. Use your actual reason and source.'
+  };
+  function contextualHelp(target, control, label, description, panelTarget = null) {
     const wrapper = el('div', 'contextual-help');
-    const button = el('button', 'button text-button', `Help: ${label}`); button.type = 'button';
-    const help = el('p', 'help-text', description); help.id = `context-help-${++helpSerial}`; help.hidden = true;
+    const button = el('button', 'button text-button', panelTarget ? 'Help' : `Help: ${label}`); button.type = 'button'; button.setAttribute('aria-label', `Help: ${label}`);
+    const help = el('p', 'help-text', description); help.id = `context-help-${++helpSerial}`; help.hidden = true; help.setAttribute('role', 'tooltip');
     button.setAttribute('aria-controls', help.id); button.setAttribute('aria-expanded', 'false');
     control.setAttribute('aria-describedby', [control.getAttribute('aria-describedby'), help.id].filter(Boolean).join(' '));
-    let pinned = false, hovered = false, focused = false;
-    const update = () => { const visible = pinned || hovered || focused; show(help, visible); button.setAttribute('aria-expanded', String(visible)); };
-    wrapper.addEventListener('mouseenter', () => { hovered = true; update(); });
-    wrapper.addEventListener('mouseleave', () => { hovered = false; update(); });
-    button.addEventListener('focus', () => { focused = true; update(); });
-    button.addEventListener('blur', () => { focused = false; update(); });
-    button.addEventListener('click', () => { pinned = !pinned; hovered = false; focused = false; update(); });
-    wrapper.addEventListener('keydown', event => { if (event.key === 'Escape' && !help.hidden) { event.preventDefault(); event.stopPropagation(); pinned = hovered = focused = false; update(); } });
-    add(wrapper, button); add(wrapper, help); add(target, wrapper);
+    let pinned = false, controlFocused = false, buttonFocused = false, hideTimer;
+    const hovered = new Set();
+    const update = () => { const visible = pinned || hovered.size > 0 || controlFocused || buttonFocused; show(help, visible); button.setAttribute('aria-expanded', String(visible)); };
+    for (const element of [control, wrapper, help]) {
+      element.addEventListener('mouseenter', () => { clearTimeout(hideTimer); hovered.add(element); update(); });
+      element.addEventListener('mouseleave', () => { hovered.delete(element); clearTimeout(hideTimer); hideTimer = setTimeout(update, 150); });
+    }
+    control.addEventListener('focus', () => { controlFocused = true; update(); });
+    control.addEventListener('blur', () => { controlFocused = false; update(); });
+    button.addEventListener('focus', () => { buttonFocused = true; update(); });
+    button.addEventListener('blur', () => { buttonFocused = false; update(); });
+    button.addEventListener('click', () => { pinned = !pinned; hovered.clear(); controlFocused = buttonFocused = false; update(); });
+    const dismiss = event => { if (event.key === 'Escape' && !help.hidden) { event.preventDefault(); event.stopPropagation(); clearTimeout(hideTimer); pinned = controlFocused = buttonFocused = false; hovered.clear(); update(); } };
+    wrapper.addEventListener('keydown', dismiss); control.addEventListener('keydown', dismiss);
+    add(wrapper, button);
+    if (panelTarget) { help.classList.add('check-help-panel'); add(panelTarget, help); }
+    else add(wrapper, help);
+    add(target, wrapper); return wrapper;
+  }
+  function setupFieldHelp(form) {
+    for (const control of form.querySelectorAll('input[name], select[name], textarea[name]')) {
+      const description = SETUP_HELP[control.name]; if (!description) continue;
+      const label = form.querySelector(`label[for="${control.id}"]`)?.textContent || control.name;
+      const wrapper = contextualHelp(control.parentElement, control, label, description); control.after(wrapper);
+    }
   }
   function workflowDialog(title, description) {
     const dialog = el('dialog', 'form-dialog'); const form = el('form');
@@ -749,24 +783,25 @@
       ]);
       if (projectId !== state.projectId || currentActor !== actorId()) return;
       const policy = policyReply.data, project = orientationReply.data.project;
-      const view = workflowDialog('Required checks', 'The repository identity is derived from the project URL and existing bindings are preserved. Check identities, versions, and environments must match the producer registration exactly. Saving a new roster makes existing candidates require reconciliation.');
+      const view = workflowDialog('Required checks', 'Configure at least one required check. Saving this roster does not create or run checks. Changing it makes existing candidates require reconciliation. The examples in Help are explanations, not configured checks.');
       const rules = el('button', 'button subtle', `Review: ${displayStatus(project.review_mode)} · ${project.automatic_integration ? 'Automatic integration allowed' : 'Human integration authorization required'}`);
       rules.type = 'button'; rules.addEventListener('click', () => { view.dialog.close(); openReviewSettings(project); }); add(view.form, rules);
       add(view.form, el('p', 'repo repository-summary', `Repository: ${project.repository_url}`));
-      add(view.form, el('p', 'muted repository-summary', policy.canonical_repository_key ? `Saved identity: ${policy.canonical_repository_key}` : 'Identity will be assigned automatically when you save the roster.'));
+      const repositorySummary = add(view.form, el('p', 'muted repository-summary', policy.canonical_repository_key ? `Saved identity: ${policy.canonical_repository_key}` : 'Identity will be assigned automatically when you save the roster.'));
+      contextualHelp(view.form, repositorySummary, 'Repository identity', SETUP_HELP.repository_identity);
       if (state.actor?.role === 'admin' && policy.revision) {
         const aliases = el('button', 'button subtle', 'Advanced repository aliases'); aliases.type = 'button';
         aliases.addEventListener('click', () => { view.dialog.close(); openRepositoryAliases(projectId, project, policy); }); add(view.form, aliases);
       }
       const rows = el('div'); add(view.form, rows); let serial = 0;
       const addRow = (check = {}) => {
-        const row = el('div', 'check-row'); row.dataset.row = String(serial++);
+        const row = el('div', 'check-row'); row.dataset.row = String(serial++); const helpPanels = document.createDocumentFragment();
         for (const [name,label] of [['identity','Check'],['version','Definition version'],['environment','Environment']]) {
           const wrap = el('div'), id = `check-${row.dataset.row}-${name}`, caption = el('label', '', label), input = el('input');
           caption.htmlFor = id; input.id = id; input.name = name; input.value = check[name] || ''; input.required = true; input.maxLength = 255;
-          add(wrap, caption); add(wrap, input); add(row, wrap);
+          add(wrap, caption); add(wrap, input); contextualHelp(wrap, input, label, SETUP_HELP[name], helpPanels); add(row, wrap);
         }
-        const remove = el('button', 'button subtle', 'Remove'); remove.type = 'button'; remove.addEventListener('click', () => row.remove()); add(row, remove); add(rows, row);
+        const remove = el('button', 'button subtle', 'Remove'); remove.type = 'button'; remove.addEventListener('click', () => row.remove()); add(row, remove); add(row, helpPanels); add(rows, row);
       };
       const checks = policy.required_checks || []; (checks.length ? checks : [{}]).forEach(addRow);
       const more = el('button', 'button subtle', 'Add required check'); more.type = 'button'; more.addEventListener('click', () => { if (rows.children.length < 100) addRow(); }); add(view.form, more);
@@ -781,6 +816,7 @@
     const view = workflowDialog('Advanced repository aliases', 'Administrator setup for clone URLs that cannot be inferred, such as a custom SSH host. Copy the saved identity from a project using the same repository. Confirm both URLs refer to that repository before saving. Changes are refused when they would split a shared binding or alter existing workflow evidence.');
     add(view.form, el('p', 'repo repository-summary', `Repository: ${project.repository_url}`));
     const key = view.field('canonical_repository_key', 'Repository identity to share', policy.canonical_repository_key, 'input'); key.maxLength = 255;
+    setupFieldHelp(view.form);
     view.finish('Save repository alias', (_, dialog) => {
       dialog.close(); startMutation(`${projectPath(projectId)}/workflow-policy`, {expected_revision:policy.revision, canonical_repository_key:key.value.trim(), required_checks:policy.required_checks}, 'repository alias', async () => { await loadProjects(); setGlobalAlert('Repository alias saved. Agents must read the updated workflow policy.', 'success'); }, 'PUT', null, {projectId});
     });
@@ -793,6 +829,7 @@
     const integration = view.field('automatic_integration', 'Integration authorization', '', 'select');
     selectField(view, 'allow_subagent_reviews', 'Who may perform agent review?', project.allow_subagent_reviews || false, [['false','A separate credential principal'],['true','Also allow a registered, non-contributing subagent']]);
     for (const [value,label] of [['false','A human must authorize each candidate'],['true','Agents may integrate after required review']]) { const option = el('option', '', label); option.value = value; add(integration, option); } integration.value = String(project.automatic_integration);
+    setupFieldHelp(view.form);
     view.finish('Save review rules', (values, dialog) => {
       dialog.close(); startMutation(`${projectPath(projectId)}/policy`, {expected_revision:project.policy_revision, review_mode:values.get('review_mode'), recovery_mode:project.recovery_mode, lease_seconds:project.lease_seconds, rules:project.rules, agent_rule_editing:project.agent_rule_editing, automatic_integration:values.get('automatic_integration') === 'true', allow_subagent_reviews:values.get('allow_subagent_reviews') === 'true'}, 'review rules', async () => { await loadProjects(); setGlobalAlert('Review rules saved. Agents must read and acknowledge the updated policy.', 'success'); }, 'PATCH', null, {projectId});
     });
@@ -1007,6 +1044,7 @@
       const lease = view.field('lease_seconds','Ownership lease (seconds)',project.lease_seconds,'input'); lease.type = 'number'; lease.min = '30'; lease.max = '3600';
       const rules = view.field('rules','Binding rules',project.rules); rules.maxLength = 32768; rules.required = false;
       view.field('provenance','Reason and supporting source').maxLength = 4096;
+      setupFieldHelp(view.form);
       view.finish('Save policy', (values, dialog) => {
         const body = {expected_revision:project.policy_revision, review_mode:values.get('review_mode'), recovery_mode:values.get('recovery_mode'), automatic_integration:values.get('automatic_integration') === 'true', agent_rule_editing:values.get('agent_rule_editing') === 'true', allow_subagent_reviews:values.get('allow_subagent_reviews') === 'true', lease_seconds:Number(values.get('lease_seconds')), rules:values.get('rules'), provenance:values.get('provenance')};
         dialog.close(); startMutation(`${projectPath(projectId)}/policy`, body, 'project policy', async () => { await loadProjects(); setGlobalAlert('Project policy saved.', 'success'); }, 'PATCH', null, {projectId});
