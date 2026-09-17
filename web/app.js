@@ -523,6 +523,7 @@
     state.credentialDownloadUrl = null;
     $('download-credential').removeAttribute('href');
     setText($('credential-download-name'), ''); show($('credential-download'), false);
+    setText($('issue-feedback'), ''); show($('issue-feedback'), false);
   }
   function downloadIssuedCredential(data) {
     clearCredentialDownload(); setText($('issued-token'), ''); show($('token-reveal'), false);
