@@ -208,8 +208,14 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
                  'workstation_id': 'disposable-adapter', 'harness': 'standalone-smoke',
                  'capabilities': ['code']})
         orientation = tool('coordinator_orientation', {'project': project})['data']
-        mutation('coordinator_instructions_ack', {'instruction_version': orientation['instruction_version'],
-                 'sections': orientation['required_sections'], 'policy_revision': orientation['policy_revision'], 'project_id': project})
+        ack = {'project': project, 'idempotency_key': str(uuid.uuid4()), 'body': {
+               'instruction_version': orientation['instruction_version'], 'sections': orientation['required_sections'],
+               'policy_revision': orientation['policy_revision'], 'project_id': project}}
+        count = len(sent)
+        tool('coordinator_instructions_ack', ack, failure=True)
+        assert len(sent) == count and not tool('coordinator_transport_status')['pending']
+        del ack['project']
+        tool('coordinator_instructions_ack', ack)  # Corrected call retains its undispatched key.
         task = api(f'/api/v1/projects/{project}/tasks', {'title': 'Adapter interrupted claim',
                    'description': 'Disposable transport test', 'kind': 'code',
                    'acceptance_criteria': ['One claim only'], 'priority': 1})

@@ -64,6 +64,7 @@ journal; their digests bind it to the provisioned identity. Do not erase a
 journal or change identities to bypass a recovery error.
 
 Supply the advertised `idempotency_key` with each mutation. The adapter atomically
+checks required and permitted outer argument fields before journaling, then
 saves the complete tool parameters and key before network dispatch, serializes
 writes, and rejects reuse of a key with different parameters. A transport error,
 invalid response or uncertain tool error retains the pending request. Reads and

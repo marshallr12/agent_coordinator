@@ -255,6 +255,16 @@ impl Adapter {
                     .tools
                     .get(name)
                     .context("tool not in trusted catalog")?;
+                if !argument_envelope_valid(
+                    &tool["inputSchema"],
+                    params.get("arguments").unwrap_or(&json!({})),
+                ) {
+                    let mut result = structured(
+                        json!({"error":{"code":"invalid_tool_arguments","message":"Correct the tool arguments using the advertised inputSchema. This request was rejected before dispatch.","allowed_arguments":tool["inputSchema"]["properties"].as_object().map(|p|p.keys().collect::<Vec<_>>()),"required_arguments":tool["inputSchema"]["required"]},"dispatched":false,"journal_pending":self.journal.pending().is_some()}),
+                    );
+                    result["isError"] = json!(true);
+                    return Ok(result);
+                }
                 if tool["annotations"]["readOnlyHint"] == true {
                     let value = self.remote(method, params).await?;
                     ensure!(value.get("error").is_none(), "upstream read failed");
@@ -273,6 +283,27 @@ impl Adapter {
             _ => bail!("unsupported MCP method"),
         }
     }
+}
+
+// Check the closed outer tool argument envelope before journaling. The service
+// remains authoritative for typed body validation and current policy/authority.
+fn argument_envelope_valid(schema: &Value, arguments: &Value) -> bool {
+    let Some(args) = arguments.as_object() else {
+        return false;
+    };
+    let Some(properties) = schema["properties"].as_object() else {
+        return false;
+    };
+    if schema["additionalProperties"] == false
+        && args.keys().any(|key| !properties.contains_key(key))
+    {
+        return false;
+    }
+    schema["required"].as_array().is_none_or(|required| {
+        required
+            .iter()
+            .all(|key| key.as_str().is_some_and(|key| args.contains_key(key)))
+    })
 }
 
 // These claim rejections occur after receipt lookup and before any claim write.
@@ -350,6 +381,15 @@ async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn argument_errors_are_detected_before_journaling() {
+        let schema = json!({"properties":{"body":{},"idempotency_key":{},"session":{}},"required":["body","idempotency_key"],"additionalProperties":false});
+        let mut args = json!({"project":"wrong-level","body":{"project_id":"p"},"idempotency_key":"unique-key-123456"});
+        assert!(!argument_envelope_valid(&schema, &args));
+        args.as_object_mut().unwrap().remove("project");
+        assert!(argument_envelope_valid(&schema, &args));
+        assert!(!argument_envelope_valid(&schema, &json!({})));
+    }
     #[test]
     fn endpoint_never_accepts_remote_plaintext_or_credential_url() {
         for value in [
