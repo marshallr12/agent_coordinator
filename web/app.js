@@ -1019,7 +1019,7 @@
       if (projectId !== state.projectId || currentActor !== actorId()) return;
       const project = orientation.data.project;
       const view = workflowDialog('Binding project rules', 'These instructions govern work on this project. Changing them creates a new policy revision; agents must read and acknowledge it before claiming work.');
-      const rules = view.field('rules', 'Rules', project.rules); rules.maxLength = 32768;
+      const rules = view.field('rules', 'Rules', project.rules); rules.maxLength = 32768; rules.required = false;
       bindingRulesGuidance(rules);
       view.field('provenance', 'Reason and supporting source').maxLength = 4096;
       recordDetails(view.form, 'Policy history — first 50 revisions', history.data);
