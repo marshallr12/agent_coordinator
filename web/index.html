@@ -108,7 +108,15 @@
               </div>
               <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
               <div id="tasks-list" class="tasks-list" hidden></div>
-              <div class="tasks-footer"><button id="load-more-tasks" class="button subtle" type="button" hidden>Load more tasks</button><span id="tasks-page-status" class="muted" aria-live="polite"></span></div>
+              <div id="task-pagination" class="tasks-footer" aria-label="Task pagination" hidden>
+                <button id="tasks-first-page" class="button subtle pagination-icon" type="button" aria-label="First page">⏮</button>
+                <button id="tasks-previous-page" class="button subtle pagination-icon" type="button" aria-label="Previous page">◀</button>
+                <span id="tasks-page-numbers" class="pagination-numbers" aria-label="Page numbers"></span>
+                <button id="tasks-next-page" class="button subtle pagination-icon" type="button" aria-label="Next page">▶</button>
+                <button id="tasks-last-page" class="button subtle pagination-icon" type="button" aria-label="Last page">⏭</button>
+                <label class="select-label pagination-size" for="tasks-page-size">Items per page<select id="tasks-page-size"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select></label>
+                <span id="tasks-page-status" class="muted" aria-live="polite"></span>
+              </div>
             </section>
 
             <section id="task-detail-view" class="page-view" aria-labelledby="task-detail-heading" hidden>

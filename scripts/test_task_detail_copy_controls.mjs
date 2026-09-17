@@ -21,6 +21,11 @@ const task = {
   workflow: { activities: [] },
   job_evidence: { jobs: [], reservations: [] },
 };
+const tasks = Array.from({ length: 30 }, (_, index) => ({
+  ...task,
+  id: index ? `task-copy-id-${index}` : task.id,
+  title: index ? `Fixture task ${index + 1}` : task.title,
+}));
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -51,7 +56,13 @@ async function fixtureServer() {
     const url = new URL(request.url, 'http://fixture.invalid');
     if (url.pathname === '/api/v1/me') return json(response, { actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'operator' }, csrf_token: 'fixture-csrf' });
     if (url.pathname === '/api/v1/projects') return json(response, { items: [{ id: 'fixture-project', name: 'Fixture project', target_branch: 'main' }] });
-    if (url.pathname === '/api/v1/projects/fixture-project/tasks') return json(response, { items: [task] });
+    if (url.pathname === '/api/v1/projects/fixture-project/tasks') {
+      const limit = Number(url.searchParams.get('limit') || 50);
+      const start = Number(url.searchParams.get('cursor') || 0);
+      const items = tasks.slice(start, start + limit);
+      const nextCursor = start + items.length < tasks.length ? String(start + items.length) : null;
+      return json(response, { items, next_cursor: nextCursor });
+    }
     if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}`) return json(response, task);
     const file = files[url.pathname];
     if (!file) { response.writeHead(404); response.end(); return; }
@@ -80,6 +91,16 @@ async function waitFor(fetchUrl, predicate, description) {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }
   throw new Error(`Timed out waiting for ${description}`);
+}
+
+async function removeProfile(profile) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try { await rm(profile, { recursive: true, force: true }); return; }
+    catch (error) {
+      if (attempt === 2 || error.code !== 'ENOTEMPTY') throw error;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    }
+  }
 }
 
 async function main() {
@@ -197,6 +218,23 @@ async function main() {
     await send('Emulation.clearDeviceMetricsOverride');
     await evaluate("window.__copiedTaskDetailValue = null; document.querySelector('.project-open').click()");
     await waitPage("document.querySelector('.task-row')", 'task queue');
+    assert(await evaluate("document.querySelectorAll('.task-row').length") === 25, 'The first task page did not use the default page size.');
+    await evaluate("document.querySelector('#tasks-next-page').click()");
+    await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 2')", 'next task page');
+    assert(await evaluate("document.querySelectorAll('.task-row').length") === 5, 'Next page did not show the remaining tasks.');
+    assert(await evaluate("document.querySelectorAll('#tasks-page-numbers button').length") === 2, 'The second page was not represented by a numbered control.');
+    await evaluate("document.querySelector('#tasks-previous-page').click()");
+    await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'previous task page');
+    await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '10'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await waitPage("document.querySelectorAll('.task-row').length === 10", 'page size update');
+    await evaluate("document.querySelector('#tasks-last-page').click()");
+    await waitPage("document.querySelector('#tasks-page-status').textContent === 'Page 3 of 3'", 'last task page');
+    await evaluate("document.querySelector('#tasks-first-page').click()");
+    await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'first task page');
+    await evaluate("[...document.querySelectorAll('#tasks-page-numbers button')].find((button) => button.textContent === '2').click()");
+    await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 2')", 'numbered task page');
+    await evaluate("document.querySelector('#tasks-first-page').click()");
+    await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'first task page before detail');
     await evaluate("document.querySelector('.task-row').click()");
     await waitPage("document.querySelector('#task-detail-content') && !document.querySelector('#task-detail-content').hidden", 'task detail');
 
@@ -210,7 +248,7 @@ async function main() {
     await waitPage("document.querySelector('#detail-copy-feedback').textContent.includes('Clipboard access was unavailable')", 'manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === task.id, 'Clipboard fallback did not select the exact task ID.');
     assert(await evaluate("document.querySelector('#detail-copy-feedback').classList.contains('fallback')"), 'Clipboard fallback was not identified to assistive technology and styling.');
-    console.log('PASS: headless Chrome verified project navigation, keyboard focus, selection, binding copy, phone layout, and task-detail copy/fallback.');
+    console.log('PASS: headless Chrome verified project navigation, keyboard focus, pagination controls, selection, binding copy, phone layout, and task-detail copy/fallback.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
@@ -222,7 +260,7 @@ async function main() {
       const exited = once(chrome, 'exit'); chrome.kill('SIGTERM'); await exited;
     }
     await new Promise((resolveClose) => server.close(resolveClose));
-    await rm(profile, { recursive: true, force: true });
+    await removeProfile(profile);
     if (launchError) throw launchError;
   }
 }

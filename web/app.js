@@ -6,7 +6,7 @@
   const state = {
     actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0,
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null, credentialDownloadUrl: null,
-    taskCursor: null, hasExtraTaskPages: false, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
+    taskCursor: null, taskPages: [], taskPageIndex: 0, taskPageSize: 25, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, pollTimer: null, lastSync: null
   };
 
@@ -193,7 +193,7 @@
     state.mutation = null; state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
     ++state.sharedSeq; state.sharedCursor = null; clear($('shared-list')); setText($('shared-freshness'), '');
     $('context-search').reset();
-    state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); state.taskCursor = null; state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
+    state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
     clearCredentialDownload();
     setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('restore-status')); clear($('clock-status')); clear($('restore-requirements')); clear($('task-operator-actions')); show($('credentials-list'), false);
@@ -324,13 +324,13 @@
   }
 
   function openProject(id) {
-    state.projectId = text(id); state.selectedTaskId = ''; state.taskCursor = null; state.tasks = [];
+    state.projectId = text(id); state.selectedTaskId = ''; resetTaskPages();
     showView('tasks'); loadTasks();
   }
   function openProjectSettings(id) {
     const project = state.projects.find(item => text(item.id) === text(id));
     if (!project) { showView('overview'); return; }
-    if (state.projectId !== text(id)) { state.taskCursor = null; state.tasks = []; }
+    if (state.projectId !== text(id)) resetTaskPages();
     state.projectId = text(id); state.selectedTaskId = '';
     setText($('project-heading'), `${project.name || 'Unnamed project'} settings`);
     setText($('project-repository'), `${project.repository_url || 'Repository not configured'} · ${project.target_branch || 'Branch not set'}`);
@@ -356,40 +356,57 @@
     } catch (error) { setGlobalAlert(errorMessage(error), 'error'); }
   });
 
-  async function loadTasks(silent = false, append = false) {
-    // Keep later pages readable until the operator explicitly refreshes them.
-    if (silent && state.hasExtraTaskPages) return;
+  function resetTaskPages() {
+    state.taskCursor = null; state.taskPages = []; state.taskPageIndex = 0; state.tasks = [];
+  }
+
+  function showTaskPage(index) {
+    state.taskPageIndex = index; const page = state.taskPages[index];
+    state.tasks = page?.items || []; state.taskCursor = page?.nextCursor || null;
+    renderTasks(); renderSummary();
+  }
+
+  async function loadTasks(silent = false, next = false) {
     const requestedProjectId = state.projectId;
     if (!requestedProjectId || (state.inflight.tasks?.projectId === requestedProjectId)) return;
-    if (append && !state.taskCursor) return;
+    if (next && !state.taskCursor) return;
     const requestId = ++state.requestSeq.tasks;
     const cursorBefore = state.taskCursor;
     state.inflight.tasks = { projectId: requestedProjectId, requestId };
     const project = state.projects.find((item) => text(item.id) === requestedProjectId);
     setText($('tasks-subtitle'), project?.name ? `${project.name} · current work queue` : 'Current work queue');
-    if (!silent && !append) { state.taskCursor = null; state.tasks = []; show($('tasks-list'), false); setState($('tasks-state'), 'Loading tasks…', true); }
-    if (append) { $('load-more-tasks').disabled = true; setText($('tasks-page-status'), 'Loading more tasks…'); }
-    const query = append && cursorBefore ? `?cursor=${encodeURIComponent(cursorBefore)}` : '';
+    if (!silent && !next) { resetTaskPages(); show($('tasks-list'), false); setState($('tasks-state'), 'Loading tasks…', true); }
+    if (next) setText($('tasks-page-status'), 'Loading next page…');
+    const params = new URLSearchParams({ limit: String(state.taskPageSize) });
+    if (next && cursorBefore) params.set('cursor', cursorBefore);
     try {
-      const page = (await request(`/api/v1/projects/${encodeURIComponent(requestedProjectId)}/tasks${query}`)).data;
+      const page = (await request(`/api/v1/projects/${encodeURIComponent(requestedProjectId)}/tasks?${params}`)).data;
       if (requestedProjectId !== state.projectId || state.requestSeq.tasks !== requestId) return;
-      const items = listData(page);
-      if (append) { const byId = new Map(state.tasks.map((item) => [text(item.id), item])); items.forEach((item) => byId.set(text(item.id), item)); state.tasks = Array.from(byId.values()); }
-      // A refresh re-reads page one and drops appended pages so stale snapshots
-      // never contribute to the live summary or get mixed into a later cursor.
-      else state.tasks = items;
-      state.hasExtraTaskPages = append;
-      state.taskCursor = page?.next_cursor || null;
-      renderTasks(); renderSummary();
+      const entry = { items: listData(page), nextCursor: page?.next_cursor || null };
+      if (next) { state.taskPages.push(entry); showTaskPage(state.taskPages.length - 1); }
+      else { state.taskPages = [entry]; showTaskPage(0); }
     }
     catch (error) { if (requestedProjectId === state.projectId && state.requestSeq.tasks === requestId && !silent) setState($('tasks-state'), errorMessage(error), false, true); }
-    finally { if (state.inflight.tasks?.requestId === requestId) state.inflight.tasks = null; if (state.projectId === requestedProjectId) $('load-more-tasks').disabled = false; }
+    finally { if (state.inflight.tasks?.requestId === requestId) state.inflight.tasks = null; renderTaskPagination(); }
+  }
+
+  async function showLastTaskPage() {
+    while (state.taskCursor && !state.inflight.tasks) await loadTasks(false, true);
+  }
+
+  function renderTaskPagination() {
+    const pager = $('task-pagination'), count = state.taskPages.length, current = state.taskPageIndex;
+    show(pager, Boolean(count)); $('tasks-first-page').disabled = !current; $('tasks-previous-page').disabled = !current;
+    $('tasks-next-page').disabled = Boolean(state.inflight.tasks) || !state.taskCursor;
+    $('tasks-last-page').disabled = Boolean(state.inflight.tasks) || !state.taskCursor;
+    const numbers = $('tasks-page-numbers'); clear(numbers);
+    state.taskPages.forEach((_, index) => { const page = actionButton(String(index + 1), () => showTaskPage(index), false); page.classList.add('pagination-page'); page.setAttribute('aria-current', index === current ? 'page' : 'false'); page.disabled = index === current; add(numbers, page); });
   }
 
   function renderTasks() {
     const target = $('tasks-list'); clear(target); const filter = $('status-filter').value;
     const tasks = filter === 'all' ? state.tasks : state.tasks.filter((task) => taskStatus(task) === filter);
-    const loadMore = $('load-more-tasks'); show(loadMore, Boolean(state.taskCursor)); loadMore.disabled = Boolean(state.inflight.tasks); setText($('tasks-page-status'), state.hasExtraTaskPages ? `Showing ${state.tasks.length} loaded tasks. Automatic refresh paused; use Refresh for current status.` : state.taskCursor ? `Showing ${state.tasks.length} loaded tasks` : state.tasks.length ? `${state.tasks.length} task${state.tasks.length === 1 ? '' : 's'}` : '');
+    renderTaskPagination(); setText($('tasks-page-status'), state.taskPages.length ? `Page ${state.taskPageIndex + 1}${state.taskCursor ? ' of more pages' : ` of ${state.taskPages.length}`}` : '');
     if (!tasks.length) { show(target, false); setState($('tasks-state'), state.tasks.length ? 'No tasks match this status filter. Load more to search the rest of the queue.' : 'No tasks in this project yet. Create the first task.', false); return; }
     show($('tasks-state'), false); show(target, true);
     tasks.forEach((task) => {
@@ -515,7 +532,7 @@
   $('logout-button').addEventListener('click', () => startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()));
   document.querySelectorAll('button.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); loadClock(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
-  $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
+  $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('tasks-first-page').addEventListener('click', () => showTaskPage(0)); $('tasks-previous-page').addEventListener('click', () => showTaskPage(Math.max(0, state.taskPageIndex - 1))); $('tasks-next-page').addEventListener('click', () => loadTasks(false, true)); $('tasks-last-page').addEventListener('click', showLastTaskPage); $('tasks-page-size').addEventListener('change', (event) => { state.taskPageSize = Number(event.target.value); loadTasks(); }); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; resetTaskPages(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
   $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
   function showToken(token) { clearCredentialDownload(); setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
   function clearCredentialDownload() {
@@ -1053,7 +1070,7 @@
       setGlobalAlert('Snapshot downloaded with provenance and generated-file markers.', 'success');
     } catch (error) { setGlobalAlert(errorMessage(error)); }
   }
-  $('shared-project').addEventListener('change', event => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; state.selectedTaskId = ''; loadShared(); });
+  $('shared-project').addEventListener('change', event => { state.projectId = event.target.value; resetTaskPages(); state.selectedTaskId = ''; loadShared(); });
   $('shared-kind').addEventListener('change', () => loadShared());
   $('refresh-shared').addEventListener('click', () => loadShared());
   $('load-more-shared').addEventListener('click', () => loadShared(true));
