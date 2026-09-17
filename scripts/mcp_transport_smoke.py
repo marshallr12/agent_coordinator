@@ -117,7 +117,10 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
         value = rpc('initialize', {'protocolVersion': '2025-11-25', 'capabilities': {},
                                  'clientInfo': {'name': 'standalone-smoke', 'version': '1'}})
         assert 'error' not in value
-        assert tool('coordinator_transport_status')['durable_mutation_journal']
+        status = tool('coordinator_transport_status')
+        assert status['durable_mutation_journal']
+        assert status['configured_identity']['session_id'] == session
+        assert status['configured_identity']['project_id'] == project
 
     try:
         process = start()

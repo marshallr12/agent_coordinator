@@ -39,6 +39,7 @@ struct Adapter {
     journal: Journal,
     tools: BTreeMap<String, Value>,
     protocol: String,
+    public_identity: Value,
 }
 
 fn env(name: &str) -> Result<String> {
@@ -83,6 +84,7 @@ impl Adapter {
             &args.state_dir,
             journal::binding(&[url.as_str(), &session, &token, &proof, &project]),
         )?;
+        let public_identity = json!({"session_id":session,"project_id":project,"service_url":url.origin().ascii_serialization()});
         let mut headers = HeaderMap::new();
         for (name, value) in [
             ("authorization", format!("Bearer {token}")),
@@ -109,6 +111,7 @@ impl Adapter {
             journal,
             tools: BTreeMap::new(),
             protocol: "2025-11-25".into(),
+            public_identity,
         })
     }
 
@@ -214,7 +217,7 @@ impl Adapter {
                     .to_owned();
                 let instructions = result["instructions"].as_str().unwrap_or("").to_owned();
                 result["instructions"] = json!(format!(
-                    "{instructions}\n\nThis connection uses agent-coordinator-mcp with a private durable journal. Call coordinator_transport_status before mutations. Supply a unique idempotency_key; the adapter saves the exact arguments before sending. After uncertainty use coordinator_transport_retry, never a new key. Reads remain available. A replayed receipt is not proof of current ownership. Do not share this configured session with another host or transport writer."
+                    "{instructions}\n\nThis connection uses agent-coordinator-mcp with a private durable journal. Call coordinator_transport_status before mutations; its configured_identity supplies the non-secret session_id and project_id for registration. If session_get reports an unregistered session, use that configured session_id with coordinator_session_register; never invent a different ID. Supply a unique idempotency_key; the adapter saves the exact arguments before sending. After uncertainty use coordinator_transport_retry, never a new key. Reads remain available. A replayed receipt is not proof of current ownership. Do not share this configured session with another host or transport writer."
                 ));
                 Ok(result)
             }
@@ -234,7 +237,9 @@ impl Adapter {
                         "local tools take no arguments"
                     );
                     if name == STATUS {
-                        return Ok(structured(self.journal.status()));
+                        let mut status = self.journal.status();
+                        status["configured_identity"] = self.public_identity.clone();
+                        return Ok(structured(status));
                     }
                     let mut pending = self
                         .journal

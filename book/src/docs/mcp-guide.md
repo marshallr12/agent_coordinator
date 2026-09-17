@@ -54,7 +54,9 @@ credential's existing service permissions to one project.
 
 Before mutations, call `coordinator_transport_status`. A running adapter reports
 `durable_mutation_journal: true` only after acquiring the exclusive journal lock
-and successfully saving protected state. Startup fails if storage, permissions,
+and successfully saving protected state. Its `configured_identity` supplies the
+non-secret session ID, project ID and service origin. Use that session ID for
+registration if the configured session is new; never invent a replacement. Startup fails if storage, permissions,
 identity binding or locking cannot be established. Unix state uses modes 0700
 and 0600; Windows uses a protected owner/SYSTEM DACL. Links, unexpected files and
 corrupt journals are rejected. Credentials and proofs are not stored in the

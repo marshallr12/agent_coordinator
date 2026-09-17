@@ -27,13 +27,13 @@ installation evidence; that run is the acceptance claim for the archive.
 
 ## Option B: build on a workstation
 
-Install the pinned toolchain and build only the two packaged crates with locked
+Install the pinned toolchain and build the three packaged crates with locked
 dependencies:
 
 ```sh
 rustup toolchain install 1.98.1 --profile minimal
 rustup default 1.98.1
-cargo build --release --locked -p coordinator-server -p coordinator-cli
+cargo build --release --locked -p coordinator-server -p coordinator-cli -p coordinator-mcp-transport
 ```
 
 Package the binaries with the repository's Markdown guidance and systemd files:

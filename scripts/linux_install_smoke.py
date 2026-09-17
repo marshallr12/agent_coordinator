@@ -125,7 +125,7 @@ def extract_checked(package: Path, destination: Path) -> Path:
         )
         or (name.startswith("docs/") and name.endswith(".md") and name.count("/") == 1)
         or (name.startswith("deploy/") and name.count("/") == 1)
-        or name in {"bin/agent-coordinator", "bin/agent-coordinator-server"}
+        or name in {"bin/agent-coordinator", "bin/agent-coordinator-server", "bin/agent-coordinator-mcp"}
         for name in files
     ), "The package contains an unexpected path."
     return destination / root
