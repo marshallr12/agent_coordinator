@@ -154,10 +154,15 @@ fn validate_checks(checks: &[RequiredCheck]) -> Result<(), AppError> {
 // Infer only the documented public GitHub clone forms. Other URLs remain exact
 // identities: custom SSH host aliases require an administrator's explicit binding.
 fn repository_identity(repository: &str) -> String {
-    let github_path = if let Some(path) = repository.strip_prefix("git@github.com:") {
-        Some(path)
+    let github_path = if let Some((host, path)) = repository
+        .strip_prefix("git@")
+        .and_then(|value| value.split_once(':'))
+    {
+        host.eq_ignore_ascii_case("github.com").then_some(path)
     } else if let Ok(url) = url::Url::parse(repository) {
-        let supported = url.host_str() == Some("github.com")
+        let supported = url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
             && url.port().is_none()
             && url.query().is_none()
             && url.fragment().is_none()
@@ -178,13 +183,16 @@ fn repository_identity(repository: &str) -> String {
 }
 
 fn github_identity_path(path: &str) -> Option<String> {
+    let normalized = path.to_ascii_lowercase();
+    let path = normalized.as_str();
     let path = path
         .trim_end_matches('/')
         .strip_prefix('/')
         .unwrap_or(path.trim_end_matches('/'));
     let path = path.strip_suffix(".git").unwrap_or(path);
     let parts: Vec<_> = path.split('/').collect();
-    if parts.len() != 2
+    if path.len() + "github.com/".len() > 255
+        || parts.len() != 2
         || parts.iter().any(|part| {
             part.is_empty()
                 || *part == "."
@@ -298,7 +306,7 @@ async fn put_workflow_policy(
         &input.canonical_repository_key,
         "canonical_repository_key",
         255,
-        false,
+        !input.canonical_repository_key.is_empty(),
     )?;
     validate_checks(&input.required_checks)?;
     let mut mutation = Mutation::begin(

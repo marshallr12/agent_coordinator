@@ -1408,6 +1408,8 @@ async fn repository_url_aliases_derive_and_reuse_legacy_bindings() {
         .await;
     for (index, url) in [
         "git@github.com:example/repo",
+        "git@GitHub.COM:Example/Repo.GIT",
+        "ssh://git@GitHub.COM/Example/Repo.GIT/",
         "ssh://git@github.com/EXAMPLE/REPO.git/",
         "https://github.com/example/repo/",
     ]
@@ -1516,4 +1518,72 @@ async fn repository_aliases_require_admin_and_preserve_existing_evidence() {
         preserved["data"]["canonical_repository_key"],
         "github.com/example/repo"
     );
+}
+
+#[tokio::test]
+async fn repository_derivation_bounds_and_conflicting_legacy_bindings() {
+    let f = Fixture::new().await;
+    let long_url = format!("https://github.com/owner/{}", "x".repeat(300));
+    let p = f.project("long URL", &long_url).await;
+    let (status, saved) = f
+        .call(
+            &f.admin,
+            "PUT",
+            &format!("/api/v1/projects/{p}/workflow-policy"),
+            derived_roster(0),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let key = saved["data"]["canonical_repository_key"].as_str().unwrap();
+    assert!(key.starts_with("url-sha256:") && key.len() <= 255);
+    sqlx::query("UPDATE principals SET role='operator' WHERE id=?")
+        .bind(&f.admin.principal)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, unchanged) = f.call(&f.admin, "PUT", &format!("/api/v1/projects/{p}/workflow-policy"), json!({"expected_revision":1,"canonical_repository_key":key,"required_checks":derived_roster(0)["required_checks"]})).await;
+    assert_eq!(status, StatusCode::OK, "{unchanged}");
+    sqlx::query("UPDATE principals SET role='admin' WHERE id=?")
+        .bind(&f.admin.principal)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let first = f
+        .project("legacy first", "https://github.com/legacy/repo")
+        .await;
+    let second = f
+        .project("legacy second", "git@unresolved:legacy/repo")
+        .await;
+    f.workflow_policy(&first, "legacy-first").await;
+    f.workflow_policy(&second, "legacy-second").await;
+    // Represent two pre-upgrade identities that the old exact-URL check allowed.
+    sqlx::query("UPDATE projects SET repository_url='git@github.com:legacy/repo.git' WHERE id=?")
+        .bind(&second)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let third = f
+        .project("new alias", "ssh://git@github.com/legacy/repo")
+        .await;
+    let (status, conflict) = f
+        .call(
+            &f.admin,
+            "PUT",
+            &format!("/api/v1/projects/{third}/workflow-policy"),
+            derived_roster(0),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["error"]["code"], "canonical_repository_conflict");
+    for (project, key) in [(&first, "legacy-first"), (&second, "legacy-second")] {
+        let (_, value) = f
+            .call(
+                &f.admin,
+                "GET",
+                &format!("/api/v1/projects/{project}/workflow-policy"),
+                Value::Null,
+            )
+            .await;
+        assert_eq!(value["data"]["canonical_repository_key"], key);
+    }
 }
