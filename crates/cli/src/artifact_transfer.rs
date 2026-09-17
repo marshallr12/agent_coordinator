@@ -792,7 +792,7 @@ mod tests {
                     "state":if finalized { "finalized" } else { "reserved" },
                     "availability":if !server_available.load(Ordering::SeqCst) { "deleted" }
                         else if finalized { "available" } else { "pending" }
-                }}})
+                }}, "request_id":"synthetic-request", "server_time":"2026-09-17T00:00:00Z"})
                 .to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
