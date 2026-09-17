@@ -44,11 +44,11 @@ jobs:
           set -euo pipefail
           version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
           epoch="$(git show -s --format=%ct HEAD)"
-          CARGO_TARGET_DIR=target/repro-first cargo build --release --locked -p coordinator-server -p coordinator-cli
+          CARGO_TARGET_DIR=target/repro-first cargo build --release --locked -p coordinator-server -p coordinator-cli -p coordinator-mcp-transport
           python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
             --server target/repro-first/release/agent-coordinator-server --cli target/repro-first/release/agent-coordinator --mcp-adapter target/repro-first/release/agent-coordinator-mcp \
             --source-date-epoch "$epoch" --output-dir dist/first
-          CARGO_TARGET_DIR=target/repro-second cargo build --release --locked -p coordinator-server -p coordinator-cli
+          CARGO_TARGET_DIR=target/repro-second cargo build --release --locked -p coordinator-server -p coordinator-cli -p coordinator-mcp-transport
           python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
             --server target/repro-second/release/agent-coordinator-server --cli target/repro-second/release/agent-coordinator --mcp-adapter target/repro-second/release/agent-coordinator-mcp \
             --source-date-epoch "$epoch" --output-dir dist/second

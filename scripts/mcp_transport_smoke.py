@@ -13,10 +13,13 @@ import urllib.request
 import urllib.error
 import uuid
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 
 def verified_git_clean(directory):
+    root = subprocess.run(['git', '-C', str(directory), 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
+    if root.returncode != 0 or Path(root.stdout.strip()).resolve() != Path(directory).resolve():
+        raise AssertionError('Workspace is not a verified repository root; cleanliness is unverified.')
     result = subprocess.run(['git', '-C', str(directory), 'status', '--porcelain=v1',
                              '--untracked-files=all'], capture_output=True, text=True)
     if result.returncode != 0:
@@ -30,6 +33,8 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
     state = temporary / 'standalone-journal'
     dropped = threading.Event()
     sent = []
+    first_claim = []
+    replay_verified = []
 
     class Proxy(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -55,9 +60,15 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
                 payload, status = response.read(), response.code
             if params.get('name') == 'coordinator_claim' and not dropped.is_set():
                 assert status == 200 and json.loads(payload)['result'].get('isError') is not True
+                receipt = json.loads(payload)['result']['structuredContent']['data']
+                first_claim.append(receipt['claim']['attempt'])
                 dropped.set()
                 self.close_connection = True
                 return
+            if params.get('name') == 'coordinator_claim' and first_claim:
+                current = api(f"/api/v1/projects/{project}/attempts/{first_claim[0]['id']}")['attempt']
+                assert current['session_id'] == session and current['expires_at'] == first_claim[0]['expires_at']
+                replay_verified.append(True)
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(payload)))
@@ -140,7 +151,7 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
                     self.send_header('Content-Length', str(len(payload)))
                     self.end_headers()
                     self.wfile.write(payload)
-            gateway = ThreadingHTTPServer(('127.0.0.1', 0), Gateway)
+            gateway = HTTPServer(('127.0.0.1', 0), Gateway)
             gateway_thread = threading.Thread(target=gateway.serve_forever, daemon=True)
             gateway_thread.start()
             helper = directory / 'mcp_call.py'
@@ -164,9 +175,14 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
                 assert observed['checkpoints'] and saved['pending'] is None
                 assert all(call['arguments']['idempotency_key'] in saved['requests'] for call in sent)
                 assert token not in json.dumps(transcript) and proof not in json.dumps(transcript)
-                report = {'forced_interruption': True, 'exact_replay': True, 'attempt_count': 1,
+                model_report = json.loads((directory / 'finished.json').read_text())
+                git_check = subprocess.run(['git', '-C', str(directory), 'status', '--porcelain=v1'], capture_output=True, text=True)
+                assert git_check.returncode != 0, 'Evaluation fixture unexpectedly became a Git repository.'
+                assert model_report.get('workspace_clean') is None and model_report.get('git_exit_code') == git_check.returncode, 'Unsupported workspace-cleanliness claim.'
+                assert replay_verified, 'Receipt replay authority was not independently inspected.'
+                report = {'git_exit_code': git_check.returncode, 'cleanliness_unverified': True, 'receipt_did_not_renew': True, 'forced_interruption': True, 'exact_replay': True, 'attempt_count': 1,
                           'released': True, 'journal_verified': True, 'transcript': transcript,
-                          'task': observed, 'model_report': json.loads((directory / 'finished.json').read_text())}
+                          'task': observed, 'model_report': model_report}
                 (directory / 'verified.json').write_text(json.dumps(report, indent=2))
                 print('PASS: isolated evaluator actual journal, exact interrupted replay, single attempt, checkpoint and release independently verified.')
             finally:
