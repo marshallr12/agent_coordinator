@@ -87,11 +87,14 @@ async function main() {
   const serverPort = server.address().port;
   const debugPort = await unusedPort();
   const profile = await mkdtemp(join(tmpdir(), 'agent-coordinator-copy-test-'));
-  const chrome = spawn('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', [
+  const executable = process.env.CHROME_BIN || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : 'chromium');
+  const chrome = spawn(executable, [
     '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
   ], { stdio: 'ignore', windowsHide: true });
   let socket;
+  let launchError;
+  chrome.on('error', (error) => { launchError = error; });
   try {
     const version = await waitFor(`http://127.0.0.1:${debugPort}/json/version`, (value) => Boolean(value.webSocketDebuggerUrl), 'headless Chrome');
     const connect = async (url) => {
@@ -120,7 +123,11 @@ async function main() {
     connection = await connect(pageSocket);
     socket = connection.connection;
     const { send } = connection;
-    const evaluate = async (expression) => (await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })).result.value;
+    const evaluate = async (expression) => {
+      const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+      return result.result.value;
+    };
 
     await send('Page.enable');
     await send('Page.addScriptToEvaluateOnNewDocument', { source: `
@@ -144,7 +151,51 @@ async function main() {
       throw new Error(`Timed out waiting for ${label}`);
     };
     await waitPage("document.querySelector('.project-open')", 'project list');
-    await evaluate("document.querySelector('.project-open').click()");
+    const press = async (key, code, virtualKey) => {
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: virtualKey });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: virtualKey });
+    };
+    const back = async () => {
+      await evaluate("document.querySelector('#back-to-project').click()");
+      await waitPage("!document.querySelector('#overview-view').hidden", 'return to projects');
+    };
+    await evaluate(`(() => {
+      const title = document.querySelector('.project-card h3');
+      const range = document.createRange(); range.selectNodeContents(title);
+      window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+      title.click();
+    })()`);
+    assert(await evaluate("!document.querySelector('#overview-view').hidden && window.getSelection().toString() === 'Fixture project'"), 'Selecting project text navigated away.');
+    await evaluate("window.getSelection().removeAllRanges(); document.querySelector('.project-card h3').click()");
+    await waitPage("!document.querySelector('#tasks-view').hidden && document.querySelector('.task-row')", 'card title navigation');
+    assert(await evaluate("document.querySelector('#project-select').value") === 'fixture-project', 'Card opened the wrong project.');
+    await back();
+    await evaluate("document.querySelector('.project-card').click()");
+    await waitPage("!document.querySelector('#tasks-view').hidden", 'blank card navigation');
+    await back();
+    await evaluate("document.querySelector('.project-settings-button').focus()");
+    await press('Tab', 'Tab', 9);
+    assert(await evaluate("document.activeElement.classList.contains('project-open')"), 'Open tasks is not reachable by Tab.');
+    assert(await evaluate("getComputedStyle(document.activeElement).outlineStyle !== 'none' && parseFloat(getComputedStyle(document.activeElement).outlineWidth) > 0"), 'Open tasks has no visible keyboard focus.');
+    await press('Enter', 'Enter', 13);
+    await waitPage("!document.querySelector('#tasks-view').hidden", 'keyboard task navigation');
+    await back();
+    await evaluate("document.querySelector('.project-settings-button').focus()");
+    await press('Enter', 'Enter', 13);
+    await waitPage("!document.querySelector('#project-view').hidden", 'keyboard settings navigation');
+    assert(await evaluate("document.activeElement.id") === 'project-heading', 'Settings heading did not receive focus.');
+    assert(await evaluate("document.querySelector('#tasks-view').hidden"), 'Settings gear also opened tasks.');
+    await evaluate("document.querySelector('#project-binding-content button').click()");
+    await waitPage("window.__copiedTaskDetailValue !== null", 'binding clipboard write');
+    assert(await evaluate("window.__copiedTaskDetailValue.includes('project_id = \"fixture-project\"')"), 'Binding copied the wrong project.');
+    assert(await evaluate("!document.querySelector('#project-view').hidden"), 'Copy binding navigated away.');
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), 'Settings page overflows at phone width.');
+    await evaluate("document.querySelector('#back-to-projects').click()");
+    await waitPage("!document.querySelector('#overview-view').hidden", 'settings return navigation');
+    assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), 'Project cards overflow at phone width.');
+    await send('Emulation.clearDeviceMetricsOverride');
+    await evaluate("window.__copiedTaskDetailValue = null; document.querySelector('.project-open').click()");
     await waitPage("document.querySelector('.task-row')", 'task queue');
     await evaluate("document.querySelector('.task-row').click()");
     await waitPage("document.querySelector('#task-detail-content') && !document.querySelector('#task-detail-content').hidden", 'task detail');
@@ -159,16 +210,20 @@ async function main() {
     await waitPage("document.querySelector('#detail-copy-feedback').textContent.includes('Clipboard access was unavailable')", 'manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === task.id, 'Clipboard fallback did not select the exact task ID.');
     assert(await evaluate("document.querySelector('#detail-copy-feedback').classList.contains('fallback')"), 'Clipboard fallback was not identified to assistive technology and styling.');
-    console.log('PASS: headless Chrome verified task-detail copy controls and the manual-copy fallback.');
+    console.log('PASS: headless Chrome verified project navigation, keyboard focus, selection, binding copy, phone layout, and task-detail copy/fallback.');
   } finally {
     socket?.close();
-    if (chrome.exitCode === null) {
+    if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
       const taskkill = spawn('taskkill', ['/PID', String(chrome.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
       await once(taskkill, 'exit');
       await once(chrome, 'exit');
     }
+    if (chrome.pid && chrome.exitCode === null) {
+      const exited = once(chrome, 'exit'); chrome.kill('SIGTERM'); await exited;
+    }
     await new Promise((resolveClose) => server.close(resolveClose));
     await rm(profile, { recursive: true, force: true });
+    if (launchError) throw launchError;
   }
 }
 
