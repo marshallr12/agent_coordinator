@@ -43,6 +43,7 @@ version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'
 python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
   --server target/release/agent-coordinator-server \
   --cli target/release/agent-coordinator \
+  --mcp-adapter target/release/agent-coordinator-mcp \
   --source-date-epoch "$(git show -s --format=%ct HEAD)" \
   --output-dir dist
 ```

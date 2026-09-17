@@ -9,6 +9,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
 
+- Standalone `agent-coordinator-mcp` stdio adapter with protected, locked, atomic
+  mutation journals and exact retry through the service. Native CLI installation
+  is not required for coordination. Direct HTTP hosts still need their own
+  verified persistence; see [adapter requirements](mcp-guide.md#standalone-durable-adapter).
+
 - Optional `project_name` in repository bindings selects a protected project
   credential directory independently of worktree location. Legacy bindings keep
   shared lookup; explicit selection fails closed and environment precedence remains.

@@ -24,6 +24,7 @@ from shared_smoke import exercise_shared
 from operator_smoke import exercise_operator
 from mcp_launcher_smoke import exercise_mcp_launcher
 from mcp_adoption_smoke import exercise_mcp_adoption
+from mcp_transport_smoke import exercise_mcp_transport
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,6 +148,16 @@ def run():
             exercise_shared(temporary, api, cli, project, owner)
 
             exercise_operator(api, cli, owner, options)
+
+            adapter_project = api("/api/v1/projects", {"name": "Adapter smoke", "repository_url": "https://example.com/adapter.git", "target_branch": "main"})["id"]
+            adapter = BUILD / f"agent-coordinator-mcp{BINARY_SUFFIX}"
+            exercise_mcp_transport(temporary, api, adapter_project, origin, adapter)
+            if os.environ.get("MCP_EVALUATION_DIR"):
+                evaluation_project = api("/api/v1/projects", {"name": "Isolated adapter evaluation", "repository_url": "https://example.com/evaluation.git", "target_branch": "main"})["id"]
+                evaluation_temp = temporary / "evaluation-fixture"
+                evaluation_temp.mkdir()
+                exercise_mcp_transport(evaluation_temp, api, evaluation_project, origin, adapter,
+                                       os.environ["MCP_EVALUATION_DIR"])
 
             # Credential revocation must be visible to the actual CLI on its next call.
             api(f"/api/v1/admin/credentials/{credentials[owner]['credential_id']}/revoke", {})

@@ -235,8 +235,21 @@ JSON text. Follow this sequence without using a native launcher:
    for subsequent ownership. A bounded startup test
    still claims, checkpoints and releases even when the CLI is absent.
 
-For every MCP mutation, save a new idempotency_key and the exact tool arguments
-before calling it; retry an uncertain result with that same key and arguments.
+Before any MCP mutation, verify host/transport-managed durable journaling.
+The standalone `agent-coordinator-mcp` adapter exposes
+`coordinator_transport_status`; require `durable_mutation_journal: true`. A direct
+HTTP host must provide independently verified equivalent persistence. Header
+authentication, model-written notes, and a promise to save requests are not a
+capability check. If this capability is missing, report it and stop before
+mutations; read-only discovery remains available. The native CLI is not required
+when the standalone adapter is configured. See the
+[adapter setup and recovery requirements](mcp-guide.md#standalone-durable-adapter).
+
+For every MCP mutation, supply a new idempotency_key; the host/transport saves
+the exact tool arguments and key atomically before dispatch. Retry uncertainty
+with the saved key and arguments. With the standalone adapter use
+`coordinator_transport_retry`; never generate a replacement key to escape an
+uncertain result. Inspect current ownership separately from replayed receipts.
 Do not put the bearer token or session proof into these records. Run writes for
 one harness sequentially. MCP initialization, session reads, and tool discovery
 do not grant ownership or renew leases.

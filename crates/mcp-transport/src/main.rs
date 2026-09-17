@@ -177,15 +177,17 @@ impl Adapter {
         let mut result = value["result"].clone();
         let tools = result["tools"].as_array_mut().unwrap();
         tools.push(local_tool(STATUS,"Inspect durable adapter capability and whether a mutation is pending. Does not grant or renew ownership.",true));
-        tools.push(local_tool(RETRY,"Replay the exact saved pending mutation and key after uncertainty. Inspect current ownership separately; receipt replay does not renew a lease.",false));
+        tools.push(local_tool(RETRY,"Replay the exact pending mutation, or the most recently completed request if no mutation is pending, after uncertainty. Inspect current ownership separately; receipt replay does not renew a lease.",false));
         Ok(result)
     }
 
     async fn dispatch(&mut self, params: Value) -> Result<Value> {
-        let value = self.remote("tools/call", params).await?;
+        let value = self.remote("tools/call", params.clone()).await?;
         // JSON-RPC and tool errors may follow a committed effect. Conservatively
         // preserve intent; reads and exact retries remain available.
-        if value.get("error").is_none() && value["result"]["isError"] != true {
+        if value.get("error").is_none()
+            && (value["result"]["isError"] != true || rejected_claim(&params, &value["result"]))
+        {
             ensure!(value["result"]["content"].is_array(), "invalid tool result");
             self.journal.complete()?;
         }
@@ -234,10 +236,11 @@ impl Adapter {
                     if name == STATUS {
                         return Ok(structured(self.journal.status()));
                     }
-                    let pending = self
+                    let mut pending = self
                         .journal
-                        .pending()
-                        .context("no pending mutation to retry")?;
+                        .retry_request()
+                        .context("no saved mutation to retry")?;
+                    self.journal.prepare(&mut pending)?;
                     return self.dispatch(pending).await;
                 }
                 if self.tools.is_empty() {
@@ -265,6 +268,20 @@ impl Adapter {
             _ => bail!("unsupported MCP method"),
         }
     }
+}
+
+// These claim rejections occur after receipt lookup and before any claim write.
+// Never generalize this to isError, retryable=false, or an HTTP status class.
+fn rejected_claim(params: &Value, result: &Value) -> bool {
+    params["name"] == "coordinator_claim"
+        && result["isError"] == true
+        && result["structuredContent"]["request_id"].is_string()
+        && matches!(
+            result["structuredContent"]["error"]["code"].as_str(),
+            Some(
+                "claim_conflict" | "revision_conflict" | "policy_changed" | "instructions_required"
+            )
+        )
 }
 
 fn local_tool(name: &str, description: &str, read_only: bool) -> Value {

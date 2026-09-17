@@ -54,7 +54,7 @@ def checked_file(path: Path, label: str) -> Path:
     return path
 
 
-def source_entries(platform: str, server: Path | None, cli: Path) -> dict[str, tuple[Path, int]]:
+def source_entries(platform: str, server: Path | None, cli: Path, mcp_adapter: Path | None = None) -> dict[str, tuple[Path, int]]:
     docs = ROOT / "docs"
     deploy = ROOT / "deploy"
     book_source = ROOT / "book/src"
@@ -92,6 +92,9 @@ def source_entries(platform: str, server: Path | None, cli: Path) -> dict[str, t
         if server is not None:
             raise SystemExit("--server is not accepted for the Windows CLI package")
         entries["agent-coordinator.exe"] = (checked_file(cli, "Windows CLI binary"), 0o755)
+    if mcp_adapter is not None:
+        name = "bin/agent-coordinator-mcp" if platform == "linux-x86_64" else "agent-coordinator-mcp.exe"
+        entries[name] = (checked_file(mcp_adapter, "MCP adapter binary"), 0o755)
     return entries
 
 
@@ -213,6 +216,7 @@ def main() -> None:
     parser.add_argument("--version", required=True)
     parser.add_argument("--server", type=Path)
     parser.add_argument("--cli", type=Path, required=True)
+    parser.add_argument("--mcp-adapter", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-date-epoch", type=int, default=int(os.environ.get("SOURCE_DATE_EPOCH", "0")))
     args = parser.parse_args()
@@ -221,7 +225,7 @@ def main() -> None:
     if args.source_date_epoch < 0 or args.source_date_epoch > 4_354_819_199:
         raise SystemExit("--source-date-epoch is outside the supported range")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    entries = source_entries(args.platform, args.server, args.cli)
+    entries = source_entries(args.platform, args.server, args.cli, args.mcp_adapter)
     validate_local_markdown_links(entries)
     manifest = checksum_manifest(entries)
     validate_archive_bounds(args.platform, entries, manifest)

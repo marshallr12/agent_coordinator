@@ -46,11 +46,11 @@ jobs:
           epoch="$(git show -s --format=%ct HEAD)"
           CARGO_TARGET_DIR=target/repro-first cargo build --release --locked -p coordinator-server -p coordinator-cli
           python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
-            --server target/repro-first/release/agent-coordinator-server --cli target/repro-first/release/agent-coordinator \
+            --server target/repro-first/release/agent-coordinator-server --cli target/repro-first/release/agent-coordinator --mcp-adapter target/repro-first/release/agent-coordinator-mcp \
             --source-date-epoch "$epoch" --output-dir dist/first
           CARGO_TARGET_DIR=target/repro-second cargo build --release --locked -p coordinator-server -p coordinator-cli
           python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
-            --server target/repro-second/release/agent-coordinator-server --cli target/repro-second/release/agent-coordinator \
+            --server target/repro-second/release/agent-coordinator-server --cli target/repro-second/release/agent-coordinator --mcp-adapter target/repro-second/release/agent-coordinator-mcp \
             --source-date-epoch "$epoch" --output-dir dist/second
           cmp "dist/first/agent-coordinator-$version-linux-x86_64.tar.gz" \
               "dist/second/agent-coordinator-$version-linux-x86_64.tar.gz"
@@ -102,7 +102,7 @@ jobs:
           rustup default $env:RUST_TOOLCHAIN
       - name: Run native Windows client tests
         run: |
-          cargo test -p coordinator-client -p coordinator-cli -p coordinator-local --locked --no-fail-fast
+          cargo test -p coordinator-client -p coordinator-cli -p coordinator-local -p coordinator-mcp-transport --locked --no-fail-fast
       - name: Rebuild and package the Windows CLI twice
         shell: pwsh
         run: |
@@ -112,14 +112,14 @@ jobs:
           $env:RUSTFLAGS = "-C link-arg=/Brepro"
           $env:ARFLAGS_x86_64_pc_windows_msvc = "/Brepro"
           $env:CARGO_TARGET_DIR = "target/repro-first"
-          cargo build --release --locked -p coordinator-cli
+          cargo build --release --locked -p coordinator-cli -p coordinator-mcp-transport
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/package_release.py --platform windows-x86_64 --version $version --cli target/repro-first/release/agent-coordinator.exe --source-date-epoch $epoch --output-dir dist/first
+          python scripts/package_release.py --platform windows-x86_64 --version $version --cli target/repro-first/release/agent-coordinator.exe --mcp-adapter target/repro-first/release/agent-coordinator-mcp.exe --source-date-epoch $epoch --output-dir dist/first
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:CARGO_TARGET_DIR = "target/repro-second"
-          cargo build --release --locked -p coordinator-cli
+          cargo build --release --locked -p coordinator-cli -p coordinator-mcp-transport
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/package_release.py --platform windows-x86_64 --version $version --cli target/repro-second/release/agent-coordinator.exe --source-date-epoch $epoch --output-dir dist/second
+          python scripts/package_release.py --platform windows-x86_64 --version $version --cli target/repro-second/release/agent-coordinator.exe --mcp-adapter target/repro-second/release/agent-coordinator-mcp.exe --source-date-epoch $epoch --output-dir dist/second
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $package = "agent-coordinator-$version-windows-x86_64.zip"
           python scripts/compare_release.py "dist/first/$package" "dist/second/$package"

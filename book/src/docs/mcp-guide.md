@@ -14,6 +14,91 @@ Coordinator harness session and is unrelated to `Mcp-Session-Id`. Disconnecting
 or reconnecting an MCP client does not renew a lease, close a coordinator
 session, or restore expired authority.
 
+## Standalone durable adapter
+
+`agent-coordinator-mcp` is a separate executable: an MCP host launches it as a
+stdio server, and it forwards supported requests to the coordinator's stateless
+HTTP endpoint. Listing, claiming, checkpointing and releasing do not require the
+native `agent-coordinator` CLI. Build it with
+`cargo build --release --locked -p coordinator-mcp-transport`; use the resulting
+`agent-coordinator-mcp` executable (`agent-coordinator-mcp.exe` on Windows).
+
+Configure the host's stdio command as that executable's absolute path, with
+arguments `--state-dir` and an absolute, dedicated directory outside every
+checkout. Its parent must already exist. Use one directory and one session for
+this harness across restarts. The directory must be on persistent local storage
+that supports exclusive file locks and atomic file replacement; do not use a
+RAM disk or an ephemeral sandbox directory for interruption recovery. Never
+launch another transport writer with the same session or copy its journal to
+another host. The lock excludes processes using this directory, not writers
+on other machines.
+
+Map the following values from the host's protected environment or secret store;
+this table specifies variable names, not shell assignment syntax:
+
+| Environment variable | Value |
+| --- | --- |
+| `AGENT_COORDINATOR_MCP_URL` | Trusted HTTPS origin followed by `/mcp` |
+| `AGENT_COORDINATOR_MCP_TOKEN` | Issued agent token |
+| `AGENT_COORDINATOR_MCP_SESSION_ID` | Unique, stable harness session UUID |
+| `AGENT_COORDINATOR_MCP_SESSION_PROOF` | Persisted random 32-byte session proof |
+| `AGENT_COORDINATOR_MCP_PROJECT_ID` | Bound project UUID |
+| `AGENT_COORDINATOR_MCP_STATE_DIR` | Alternative to the `--state-dir` argument |
+
+No secret belongs in command arguments, a model-visible configuration, or the
+repository. The adapter does not enroll agents, invent sessions, read native CLI
+credentials, or perform OAuth. Provision the session ID and proof once; register
+that configured identity through `coordinator_session_register` if it is new.
+The project mapping binds the journal's identity; it does not restrict the
+credential's existing service permissions to one project.
+
+Before mutations, call `coordinator_transport_status`. A running adapter reports
+`durable_mutation_journal: true` only after acquiring the exclusive journal lock
+and successfully saving protected state. Startup fails if storage, permissions,
+identity binding or locking cannot be established. Unix state uses modes 0700
+and 0600; Windows uses a protected owner/SYSTEM DACL. Links, unexpected files and
+corrupt journals are rejected. Credentials and proofs are not stored in the
+journal; their digests bind it to the provisioned identity. Do not erase a
+journal or change identities to bypass a recovery error.
+
+Supply the advertised `idempotency_key` with each mutation. The adapter atomically
+saves the complete tool parameters and key before network dispatch, serializes
+writes, and rejects reuse of a key with different parameters. A transport error,
+invalid response or uncertain tool error retains the pending request. Reads and
+status calls remain available, but a different mutation is refused. Call
+`coordinator_transport_retry` to resend the exact saved request through the
+service's current authentication and receipt checks. If no request is pending,
+this tool replays the most recently completed request, covering a disconnect
+before the host received its response. It does not replay every historical call
+or create a new key. Inspect current ownership before further task work: a
+receipt never grants renewed authority.
+
+Only narrowly checked claim rejections (`claim_conflict`, `revision_conflict`,
+`policy_changed`, `instructions_required`) release the pending slot without a
+successful result. Other error results remain pending for exact retry and
+inspection; some require operator reconciliation. This conservative behavior
+can stop writes rather than guess whether an effect committed. Request history
+is retained, with a 64 MiB journal limit; resolve pending work and provision a
+new independent session before capacity is exhausted. Do not prune uncertain
+requests or silently switch credentials.
+
+The adapter supports bounded newline-delimited JSON-RPC stdio, initialization,
+ping, tool discovery and tool calls against this service's JSON HTTP transport.
+It is not a general proxy for arbitrary MCP servers, SSE streaming, remote
+execution, or paginated tool catalogs. Hosts must support launching a local
+stdio server and protected environment mappings. Direct HTTP header configuration
+below provides authentication alone; it does **not** prove durable journaling.
+A direct host needs its own verified pre-dispatch persistence capability before
+mutations are safe. Model instructions or claims that a journal was written are
+not verification.
+
+The disposable service smoke test cuts a claim response after commit, kills and
+restarts the adapter, then independently checks the journal and service records
+for exact replay, one attempt, unchanged session and unchanged expiry. It also
+rejects concurrent adapters and failed Git-status checks. A failed Git command
+means cleanliness is unverified, regardless of empty stdout. These checks do not
+claim compatibility with every desktop host or simulate physical disk failure.
+
 ## Configure authentication
 
 Configure the MCP server in machine- or user-level client settings, outside the
@@ -38,7 +123,7 @@ claim MCP OAuth discovery or dynamic client registration support. A client that
 requires OAuth and cannot supply a bearer token plus the two coordinator headers
 cannot connect directly in this release.
 
-For example, Codex supports bearer tokens and HTTP headers sourced from
+For direct transport authentication only, Codex supports bearer tokens and HTTP headers sourced from
 environment variables. Put this in the user-level `config.toml`, not a
 repository `.codex/config.toml`:
 

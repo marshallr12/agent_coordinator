@@ -11,11 +11,13 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct State {
     version: u32,
     binding: String,
     pending: Option<String>,
+    #[serde(default)]
+    last_completed: Option<String>,
     requests: BTreeMap<String, Value>,
 }
 
@@ -86,6 +88,8 @@ impl Journal {
             }
         }
         ordinary(directory, true)?;
+        #[cfg(unix)]
+        File::open(parent)?.sync_all()?;
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -138,6 +142,7 @@ impl Journal {
                 version: 1,
                 binding: identity,
                 pending: None,
+                last_completed: None,
                 requests: BTreeMap::new(),
             }
         };
@@ -172,7 +177,7 @@ impl Journal {
     }
 
     pub fn status(&self) -> Value {
-        json!({"durable_mutation_journal":true,"version":1,"pending":self.state.pending.is_some(),"pending_tool":self.pending().and_then(|p|p["name"].as_str().map(str::to_owned)),"authority_renewed":false})
+        json!({"durable_mutation_journal":true,"version":1,"pending":self.state.pending.is_some(),"last_request_replayable":self.retry_request().is_some(),"pending_tool":self.pending().and_then(|p|p["name"].as_str().map(str::to_owned)),"authority_renewed":false})
     }
 
     pub fn pending(&self) -> Option<Value> {
@@ -188,8 +193,9 @@ impl Journal {
             .get_mut("arguments")
             .and_then(Value::as_object_mut)
             .context("tool arguments must be an object")?;
-        let key = arguments["idempotency_key"]
-            .as_str()
+        let key = arguments
+            .get("idempotency_key")
+            .and_then(Value::as_str)
             .context("invalid mutation key")?
             .to_owned();
         ensure!(
@@ -205,6 +211,7 @@ impl Journal {
                 "pending mutation must be reconciled using coordinator_transport_retry before another write"
             );
         }
+        let previous = self.state.clone();
         if let Some(saved) = self.state.requests.get(&key) {
             ensure!(
                 saved == params,
@@ -214,21 +221,35 @@ impl Journal {
             self.state.requests.insert(key.clone(), params.clone());
         }
         self.state.pending = Some(key);
-        self.save()
+        if let Err(error) = self.save() {
+            self.state = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn retry_request(&self) -> Option<Value> {
+        self.pending().or_else(|| {
+            self.state
+                .last_completed
+                .as_ref()
+                .and_then(|key| self.state.requests.get(key))
+                .cloned()
+        })
     }
 
     pub fn complete(&mut self) -> Result<()> {
+        let previous = self.state.clone();
         let pending = self.state.pending.take();
         if pending.is_none() {
             bail!("no pending mutation");
         }
-        match self.save() {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                self.state.pending = pending;
-                Err(error)
-            }
+        self.state.last_completed = pending;
+        if let Err(error) = self.save() {
+            self.state = previous;
+            return Err(error);
         }
+        Ok(())
     }
 }
 
@@ -256,6 +277,41 @@ mod tests {
         assert!(j.prepare(&mut call).is_err());
         drop(j);
         assert!(Journal::open(&path, "another identity".into()).is_err());
+    }
+    #[test]
+    fn failed_persistence_cannot_leave_an_unsaved_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let mut j = Journal::open(&path, "a".into()).unwrap();
+        assert!(
+            j.prepare(&mut json!({"name":"claim","arguments":{}}))
+                .is_err()
+        );
+        fs::remove_file(path.join("journal.json")).unwrap();
+        fs::create_dir(path.join("journal.json")).unwrap();
+        assert!(
+            j.prepare(
+                &mut json!({"name":"claim","arguments":{"idempotency_key":"test-key-123456789"}})
+            )
+            .is_err()
+        );
+        assert!(j.pending().is_none());
+        assert!(j.retry_request().is_none());
+    }
+    #[test]
+    fn completed_request_remains_replayable_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let mut j = Journal::open(&path, "a".into()).unwrap();
+        let mut call = json!({"name":"claim","arguments":{"idempotency_key":"test-key-123456789"}});
+        j.prepare(&mut call).unwrap();
+        j.complete().unwrap();
+        drop(j);
+        let mut j = Journal::open(&path, "a".into()).unwrap();
+        assert!(j.pending().is_none());
+        assert_eq!(j.retry_request(), Some(call.clone()));
+        j.prepare(&mut call).unwrap();
+        assert_eq!(j.pending(), Some(call));
     }
     #[test]
     fn rejects_unrelated_directory_and_corrupt_state() {
