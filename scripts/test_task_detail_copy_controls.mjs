@@ -152,7 +152,7 @@ async function main() {
     };
     await waitPage("document.querySelector('.project-open')", 'project list');
     const press = async (key, code, virtualKey) => {
-      await send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: virtualKey });
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: virtualKey, text: key === 'Enter' ? '\r' : '' });
       await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: virtualKey });
     };
     const back = async () => {
