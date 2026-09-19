@@ -25,6 +25,7 @@ import uuid
 
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_FILES = 256
+MAX_BOOTSTRAP_BYTES = 2 * 1024
 REQUIRED = {
     "AGENTS.md",
     "CLAUDE.md",
@@ -114,6 +115,9 @@ def extract_checked(package: Path, destination: Path) -> Path:
                 shutil.copyfileobj(source, output, 1024 * 1024)
             target.chmod(member.mode & 0o777)
     assert root is not None and REQUIRED <= files, f"Required package files are missing: {sorted(REQUIRED - files)}"
+    assert all(PurePosixPath(name).name != "BACKLOG.md" for name in files), (
+        "The release package must not ship BACKLOG.md as a current work queue."
+    )
     assert all(
         (name.endswith(".md") and "/" not in name)
         or name == "SHA256SUMS"
@@ -150,6 +154,22 @@ def verify_internal(root: Path) -> None:
         assert sha256(root.joinpath(*PurePosixPath(name).parts)) == digest, f"Checksum mismatch for {name}."
     assert os.access(root / "bin/agent-coordinator", os.X_OK)
     assert os.access(root / "bin/agent-coordinator-server", os.X_OK)
+    bootstrap = (root / "CLAUDE.md").read_text(encoding="utf-8")
+    assert len(bootstrap.encode("utf-8")) <= MAX_BOOTSTRAP_BYTES, (
+        "CLAUDE.md must remain a concise service-discovery bootstrap."
+    )
+    normalized = bootstrap.casefold()
+    for required in [
+        ".agent-coordinator.toml",
+        "/api/v1/info",
+        "without redirects",
+        "data.agent_startup.guide",
+        "same-origin",
+        "automatically select and claim eligible work",
+        "CONTRIBUTING.md",
+        "never expose them",
+    ]:
+        assert required.casefold() in normalized, f"CLAUDE.md is missing bootstrap guidance: {required}"
     assert (root / "deploy/service.env.example").stat().st_mode & 0o777 == 0o600
     service = (root / "deploy/agent-coordinator.service").read_text()
     backup = (root / "deploy/agent-coordinator-backup.service").read_text()
