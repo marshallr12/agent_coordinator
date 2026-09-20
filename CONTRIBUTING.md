@@ -29,4 +29,9 @@ browser. For documentation changes, build with the pinned mdBook version and run
 the documentation link/package checks documented in the book. Edit canonical
 chapters in book/src. Keep historical records consistent with verified behavior;
 record current task progress, blockers, and completion in the service.
-Native Windows claims require actual Windows CI evidence.
+
+Linux validation is the default release-blocking verification for coordinator
+integrations. Native Windows client coverage remains valuable and is retained in
+CI, but it is not a default release-blocking required check. A project may opt
+into a native Windows check when its change or release specifically needs that
+assurance; its live required-check roster is authoritative for the integration.

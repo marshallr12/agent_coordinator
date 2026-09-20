@@ -69,6 +69,21 @@ Verify both URLs identify the same repository; shared or historically used bindi
 cannot be changed. New policy versions require agents to reread and
 acknowledge instructions; existing candidates may require reconciliation.
 
+### Choosing required checks
+
+The required-check roster is a release gate for that project, not a catalogue of
+every platform the repository can build on. The default coordinator roster uses
+Linux validation, documentation, and dependency-audit producers. Native Windows
+client coverage is retained in CI but is not a default release-blocking roster
+entry. Add a native Windows check when a task changes Windows-specific behavior,
+when releasing a Windows package, or when an operator needs that extra assurance.
+
+Finish or reconcile submitted candidates before changing the roster. A ready task
+without a submission will use the new roster when it is submitted. A candidate in
+review or integration is pinned to its original roster revision, and an active
+integration hold must be finished or reconciled before the service permits a
+roster change.
+
 Setup fields offer **Help** on hover, field or help-button focus, and tap. Press
 Escape to dismiss the current explanation without closing the form. Help is
 associated with its field for assistive technology. Examples explain values;
