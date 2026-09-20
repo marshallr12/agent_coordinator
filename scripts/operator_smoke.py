@@ -11,7 +11,10 @@ def exercise_operator(api, cli, owner, server_options):
     task = cli(owner, 'tasks', 'create', project_id=project, body={
         'title': 'Draft child', 'description': 'Needs admission', 'kind': 'general',
         'acceptance_criteria': ['Preserve the intended scope'], 'planned': True})['data']
-    updated = cli(owner, 'tasks', 'edit', '--id', task['id'], project_id=project, body={
+    editor = 1 - owner
+    api(f'/api/v1/projects/{project}/task-definition-grants', {
+        'target_kind': 'role', 'agent_role': 'agent'})
+    updated = cli(editor, 'tasks', 'edit', '--id', task['id'], project_id=project, body={
         'expected_revision': task['revision'], 'title': 'Admitted child',
         'description': task['description'], 'acceptance_criteria': task['acceptance_criteria'],
         'priority': 2, 'depends_on': [], 'planned': False})['data']
