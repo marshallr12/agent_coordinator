@@ -175,14 +175,14 @@
   function renderMutationState() {
     const busy = Boolean(state.mutation);
     document.querySelectorAll('form button[type="submit"], [data-mutation="true"]').forEach((button) => { button.disabled = busy && !(state.mutation?.awaitingSecret && button.closest('form')?.dataset.resumeSecret === 'true'); });
-    if ($('logout-button')) $('logout-button').disabled = busy;
+    if ($('account-button')) $('account-button').disabled = busy;
   }
 
   function applySession(data) {
     state.actor = data?.actor || data?.principal || null;
     state.csrfToken = data?.csrf_token || data?.csrfToken || state.csrfToken;
     const actorName = state.actor?.name || state.actor?.id || 'Operator';
-    setText($('actor-chip'), `${actorName} · ${displayStatus(state.actor?.role || 'operator')}`);
+    setText($('account-button'), actorName);
     const admin = state.actor?.role === 'admin';
     show($('admin-nav'), admin);
     show($('loading-view'), false); show($('login-view'), false); show($('dashboard-view'), true);
@@ -519,7 +519,6 @@
   function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = setInterval(() => { if (!state.actor || state.mutation) return; if (state.currentView === 'overview') loadProjects(true); else if (state.currentView === 'tasks') loadTasks(true); else if (state.currentView === 'task-detail') loadTaskDetail(true); else if (state.currentView === 'admin') loadCredentials(true); else if (state.currentView === 'resources' && !state.resourcePagesExtended) loadResources(true); }, 5000); }
 
   $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
-  $('logout-button').addEventListener('click', () => startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()));
   document.querySelectorAll('button.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); loadClock(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks()); $('load-more-tasks').addEventListener('click', () => loadTasks(false, true)); $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; state.taskCursor = null; state.tasks = []; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
@@ -1303,6 +1302,7 @@
       if (actorId() !== currentActor) return;
       const view = workflowDialog('My account', `${operator.name} · ${displayStatus(operator.role)}. Changing your password signs out every browser session for this account.`);
       add(view.form,actionButton('View my browser sessions', () => { view.dialog.close(); browserSessions(operator.id,operator.name); },false));
+      add(view.form,actionButton('Sign out', () => { view.dialog.close(); startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()); }));
       const current = view.field('current_password','Current password','','input'); current.type = 'password'; current.autocomplete = 'current-password'; current.maxLength = 1024;
       const next = view.field('new_password','New password (at least 12 characters)','','input'); next.type = 'password'; next.autocomplete = 'new-password'; next.maxLength = 1024; next.minLength = 12;
       const confirmation = view.field('confirmation','Confirm new password','','input'); confirmation.type = 'password'; confirmation.autocomplete = 'new-password';

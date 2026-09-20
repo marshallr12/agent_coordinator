@@ -1,4 +1,7 @@
-use std::{fs, io, path::Path};
+use std::{io, path::Path};
+
+#[cfg(unix)]
+use std::fs;
 
 #[cfg(unix)]
 pub(crate) fn protect_directory(path: &Path) -> io::Result<()> {
