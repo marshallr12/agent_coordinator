@@ -31,7 +31,7 @@ Open `target/book/index.html` locally. The original `docs/*.md`, `PLAN.md`, and
 under `book/src`.
 
 Current work is coordinated through the live service, discovered using the short
-[CLAUDE.md](CLAUDE.md) bootstrap. See [engineering requirements](CONTRIBUTING.md),
+[AGENTS.md](AGENTS.md) bootstrap. See [engineering requirements](CONTRIBUTING.md),
 [automatic agent startup](book/src/docs/agent-startup.md), and
 [implementation history](book/src/docs/implementation-history.md). Historical
 [handoff](HANDOFF.md) and [lessons](DURABLE-RECORD.md) remain reference records.
