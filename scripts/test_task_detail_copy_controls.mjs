@@ -54,7 +54,7 @@ async function fixtureServer() {
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://fixture.invalid');
-    if (url.pathname === '/api/v1/me') return json(response, { actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'operator' }, csrf_token: 'fixture-csrf' });
+    if (url.pathname === '/api/v1/me') return json(response, { actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'admin' }, csrf_token: 'fixture-csrf' });
     if (url.pathname === '/api/v1/projects') return json(response, { items: [{ id: 'fixture-project', name: 'Fixture project', target_branch: 'main' }] });
     if (url.pathname === '/api/v1/projects/fixture-project/tasks') {
       const limit = Number(url.searchParams.get('limit') || 50);
@@ -64,6 +64,8 @@ async function fixtureServer() {
       return json(response, { items, next_cursor: nextCursor });
     }
     if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}`) return json(response, task);
+    if (url.pathname === '/api/v1/admin/credentials') return json(response, { items: [] });
+    if (url.pathname === '/api/v1/admin/agents' && request.method === 'POST') return json(response, { token: 'synthetic-token-for-clipboard-test', name: 'Synthetic agent' });
     const file = files[url.pathname];
     if (!file) { response.writeHead(404); response.end(); return; }
     try {
@@ -154,6 +156,7 @@ async function main() {
     await send('Page.addScriptToEvaluateOnNewDocument', { source: `
       window.__copiedTaskDetailValue = null;
       window.__rejectTaskDetailClipboard = false;
+      window.__credentialDownloadRequested = false;
       Object.defineProperty(Navigator.prototype, 'clipboard', { configurable: true, value: {
         writeText(value) {
           if (window.__rejectTaskDetailClipboard) return Promise.reject(new DOMException('Denied', 'NotAllowedError'));
@@ -161,6 +164,11 @@ async function main() {
           return Promise.resolve();
         }
       }});
+      const anchorClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function () {
+        if (this.id === 'download-credential') { window.__credentialDownloadRequested = true; return; }
+        return anchorClick.call(this);
+      };
     ` });
     await send('Page.navigate', { url: `http://127.0.0.1:${serverPort}/` });
     const waitPage = async (expression, label) => {
@@ -248,7 +256,21 @@ async function main() {
     await waitPage("document.querySelector('#detail-copy-feedback').textContent.includes('Clipboard access was unavailable')", 'manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === task.id, 'Clipboard fallback did not select the exact task ID.');
     assert(await evaluate("document.querySelector('#detail-copy-feedback').classList.contains('fallback')"), 'Clipboard fallback was not identified to assistive technology and styling.');
-    console.log('PASS: headless Chrome verified project navigation, keyboard focus, pagination controls, selection, binding copy, phone layout, and task-detail copy/fallback.');
+
+    await evaluate("document.querySelector('button.nav-item[data-view=\"admin\"]').click()");
+    await waitPage("!document.querySelector('#admin-view').hidden", 'admin view');
+    await evaluate("document.querySelector('#agent-name').value = 'Synthetic agent'; document.querySelector('#issue-form').requestSubmit()");
+    await waitPage("!document.querySelector('#token-reveal').hidden", 'issued token reveal');
+    assert(await evaluate("document.querySelector('#issued-token').textContent") === 'synthetic-token-for-clipboard-test', 'Issued token was not revealed exactly.');
+    assert(await evaluate('window.__credentialDownloadRequested'), 'Credential download was not prepared.');
+    await evaluate("window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = false; document.querySelector('#copy-token').focus()");
+    await press('Enter', 'Enter', 13);
+    await waitPage("window.__copiedTaskDetailValue === 'synthetic-token-for-clipboard-test'", 'keyboard token clipboard write');
+    assert(await evaluate("document.querySelector('#issue-feedback').textContent") === 'Token copied to clipboard.', 'Token success feedback was not truthful.');
+    await evaluate("window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = true; document.querySelector('#copy-token').click()");
+    await waitPage("document.querySelector('#issue-feedback').textContent.includes('Clipboard access was unavailable')", 'token manual-copy fallback');
+    assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
+    console.log('PASS: headless Chrome verified project navigation, keyboard focus, pagination controls, selection, binding copy, phone layout, task-detail copy/fallback, and synthetic issued-token copy/fallback.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
