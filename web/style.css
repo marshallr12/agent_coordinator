@@ -136,6 +136,9 @@ a.nav-item { text-decoration: none; }
 .task-description { display: block; max-width: 700px; margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .task-meta { display: flex; align-items: center; gap: 10px; }
 .task-created { display: block; margin-top: 8px; }
+.task-row .task-title, .task-queue-id { cursor: text; user-select: text; }
+.task-queue-id { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.task-row .task-meta { flex-wrap: wrap; }
 .status-badge, .meta-pill { display: inline-flex; align-items: center; min-height: 25px; padding: 4px 9px; border-radius: 999px; color: var(--navy); background: #edf1f3; font-size: 11px; font-weight: 800; white-space: nowrap; }
 .status-badge.ready { color: #176762; background: var(--teal-soft); }.status-badge.claimed, .status-badge.in_progress, .status-badge.recovery_required { color: #795218; background: var(--amber-soft); }.status-badge.blocked, .status-badge.canceled, .status-badge.superseded { color: #963d4b; background: var(--red-soft); }
 .detail-back-row { margin-bottom: 17px; }

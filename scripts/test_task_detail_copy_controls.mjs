@@ -215,9 +215,9 @@ async function main() {
     assert(await evaluate("document.activeElement.id") === 'project-heading', 'Settings heading did not receive focus.');
     assert(await evaluate("document.querySelector('#tasks-view').hidden"), 'Settings gear also opened tasks.');
     await evaluate("document.querySelector('#project-binding-content button').click()");
-    await waitPage("window.__copiedTaskDetailValue !== null", 'binding clipboard write');
-    assert(await evaluate("window.__copiedTaskDetailValue.includes('project_id = \"fixture-project\"')"), 'Binding copied the wrong project.');
-    assert(await evaluate("!document.querySelector('#project-view').hidden"), 'Copy binding navigated away.');
+    await waitPage("document.querySelector('#project-binding-content button').textContent === 'Downloaded'", 'binding download');
+    assert(await evaluate("document.querySelector('#project-binding-content code').textContent.includes('project_id = \"fixture-project\"')"), 'Binding omitted the current project.');
+    assert(await evaluate("!document.querySelector('#project-view').hidden"), 'Binding download navigated away.');
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), 'Settings page overflows at phone width.');
     await evaluate("document.querySelector('#back-to-projects').click()");
@@ -227,6 +227,24 @@ async function main() {
     await evaluate("window.__copiedTaskDetailValue = null; document.querySelector('.project-open').click()");
     await waitPage("document.querySelector('.task-row')", 'task queue');
     assert(await evaluate("document.querySelectorAll('.task-row').length") === 25, 'The first task page did not use the default page size.');
+    assert(await evaluate("document.querySelector('.task-id-value').textContent") === task.id, 'Queue task ID differs.');
+    for (const selector of ['.task-title', '.task-id-value']) {
+      const selected = await evaluate(`(() => {
+        const node = document.querySelector('${selector}');
+        const range = document.createRange(); range.selectNodeContents(node);
+        window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+        node.click();
+        return { value: window.getSelection().toString(), queueVisible: !document.querySelector('#tasks-view').hidden, selectable: getComputedStyle(node).userSelect };
+      })()`);
+      assert(selected.value === (selector === '.task-title' ? task.title : task.id), 'Queue selection differs from task identity.');
+      assert(selected.queueVisible && selected.selectable === 'text', 'Selecting queue identity navigated away or is disabled.');
+    }
+    await evaluate("window.getSelection().removeAllRanges()");
+    for (const width of [1280, 390, 320]) {
+      await send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: true });
+      assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), `Task queue overflows at ${width}px.`);
+    }
+    await send('Emulation.clearDeviceMetricsOverride');
     await evaluate("document.querySelector('#tasks-next-page').click()");
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 2')", 'next task page');
     assert(await evaluate("document.querySelectorAll('.task-row').length") === 5, 'Next page did not show the remaining tasks.');
@@ -243,7 +261,8 @@ async function main() {
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 2')", 'numbered task page');
     await evaluate("document.querySelector('#tasks-first-page').click()");
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'first task page before detail');
-    await evaluate("document.querySelector('.task-row').click()");
+    await evaluate("document.querySelector('.task-open').focus()");
+    await press('Enter', 'Enter', 13);
     await waitPage("document.querySelector('#task-detail-content') && !document.querySelector('#task-detail-content').hidden", 'task detail');
 
     assert(await evaluate("document.querySelector('#task-detail-heading').textContent") === task.title, 'Task name was not rendered exactly.');
