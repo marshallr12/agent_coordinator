@@ -98,9 +98,13 @@
                 <div><p class="eyebrow">Execution</p><h1 id="tasks-heading">Task queue</h1><p id="tasks-subtitle" class="muted">Choose a project to inspect its work.</p></div>
                 <button id="new-task-button" class="button primary" data-mutation="true" type="button" disabled><span aria-hidden="true">＋</span> New task</button>
               </div>
+              <div class="task-view-tabs" role="group" aria-label="Task views">
+                <button id="task-queue-tab" class="button subtle task-view-tab" type="button" aria-pressed="true">Task queue</button>
+                <button id="completed-tasks-tab" class="button subtle task-view-tab" type="button" aria-pressed="false">Completed tasks</button>
+              </div>
               <div class="toolbar">
                 <label class="select-label" for="project-select">Project<select id="project-select"><option value="">Choose a project</option></select></label>
-                <label class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
+                <label id="status-filter-label" class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
                 <button id="refresh-tasks" class="button subtle" type="button" disabled>Refresh</button>
                 <button id="objective-list-button" class="button subtle" type="button">Objectives</button>
               </div>

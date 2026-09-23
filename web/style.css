@@ -87,6 +87,8 @@ a.nav-item { text-decoration: none; }
 .content-column { min-width: 0; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 25px; margin-bottom: 30px; }
 .page-heading .muted { margin-bottom: 0; font-size: 14px; }
+.task-view-tabs { display: flex; gap: 8px; margin: -12px 0 14px; }
+.task-view-tab[aria-pressed="true"] { color: var(--teal); border-color: #a8d4d0; background: #dff1ef; }
 .summary-grid { margin-bottom: 42px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
 .summary-card { padding: 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
 .summary-card .summary-number { display: block; margin-bottom: 2px; color: var(--navy); font-size: 26px; font-weight: 800; line-height: 1.2; }
