@@ -550,7 +550,6 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
         "browser_sessions",
         "projects",
         "policy_revisions",
-        "tasks",
         "task_revisions",
         "attempts",
         "task_contributors",
@@ -569,6 +568,8 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
         .await
         .unwrap();
     }
+    sqlx::query("INSERT INTO main.tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,revision,generation,current_attempt_id,blocked_reason,created_at,ready_since) SELECT id,project_id,title,description,acceptance_json,kind,priority,lifecycle,revision,generation,current_attempt_id,blocked_reason,created_at,ready_since FROM original.tasks")
+        .execute(&mut old).await.unwrap();
     sqlx::query("UPDATE projects SET rowid=99")
         .execute(&mut old)
         .await

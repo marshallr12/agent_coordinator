@@ -21,6 +21,14 @@ Persist a task lifecycle of `planned`, `open`, `done`, `canceled`, or `supersede
 Expose a derived work status alongside it, so agents do not have to infer
 readiness from raw records:
 
+Human operators may cancel unowned `planned` or `open` tasks, archive tasks for
+separate browsing, and restore archived tasks to the ordinary task listing.
+Archiving preserves lifecycle and history. The default task endpoint excludes
+archived and soft-deleted tasks before pagination; `/tasks/archived` is a
+separate project-scoped listing. Deletion is soft and limited to canceled or
+planned tasks with no attempt, dependency, objective, or workflow history.
+Active attempts and review/integration workflows block lifecycle changes.
+
 | Work status | Meaning and next action |
 | --- | --- |
 | `planned` | Outcome is recorded but not admitted to the work queue |

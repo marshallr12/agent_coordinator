@@ -56,7 +56,7 @@
   const mutationOperation = (path, method) => {
     if (['POST', 'PUT', 'PATCH'].includes(method) && /\/projects\/[^/]+\/(workflow-policy|policy|workflow-activities\/[^/]+\/[^/]+|tasks\/[^/]+\/workflow\/reopen)$/.test(path)) return 'workflow_change';
     if (['POST','PATCH'].includes(method) && /\/projects\/[^/]+\/(knowledge|decisions|artifacts|imports)(\/|$)/.test(path)) return 'shared_change';
-    if (['POST','PATCH'].includes(method) && /\/projects\/[^/]+\/(objectives|claims|attempts|tasks)(\/|$)/.test(path)) return 'operator_work';
+    if (['POST','PATCH','DELETE'].includes(method) && /\/projects\/[^/]+\/(objectives|claims|attempts|tasks)(\/|$)/.test(path)) return 'operator_work';
     if (method === 'POST' && /\/admin\/operators\/[^/]+\/access$/.test(path)) return 'operator_access';
     if (method === 'POST' && /\/browser-sessions\/[^/]+\/revoke$/.test(path)) return 'browser_revoke';
     if (method === 'POST' && /\/admin\/credentials\/[^/]+\/rotate$/.test(path)) return 'rotate_credential';
@@ -211,7 +211,7 @@
 
   function showView(view) {
     state.currentView = view;
-    ['overview', 'project', 'tasks', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
+    ['overview', 'project', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
     document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (view === 'project' && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
     if (view === 'tasks') { fillProjectSelect(); $('back-to-project').disabled = !state.projectId; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
   }
@@ -321,6 +321,7 @@
     add(select, el('option', '', 'Choose a project')).value = '';
     state.projects.forEach((project) => { const option = el('option', '', project.name || project.id); option.value = text(project.id); add(select, option); });
     select.value = state.projects.some((project) => text(project.id) === current) ? current : '';
+    const archive = $('archive-project-select'); if (archive) { const prior=archive.value; clear(archive); add(archive,el('option','','Choose a project')).value=''; state.projects.forEach(project=>{const option=el('option','',project.name||project.id);option.value=text(project.id);add(archive,option);}); archive.value=state.projects.some(project=>text(project.id)===prior)?prior:(state.projects.some(project=>text(project.id)===current)?current:''); }
     fillSharedProject();
   }
 
@@ -508,7 +509,22 @@
     finally { if (state.inflight.detail?.requestId === requestId) state.inflight.detail = null; }
   }
 
-  function openTask(id) { state.selectedTaskId = text(id); showView('task-detail'); loadTaskDetail(); }
+  function openTask(id, origin = 'tasks') { state.selectedTaskId = text(id); state.detailOrigin = origin; showView('task-detail'); loadTaskDetail(); }
+  async function loadArchivedTasks() {
+    const projectId = $('archive-project-select').value || state.projectId;
+    if (!projectId) { setText($('archived-state'), 'Choose a project to load archived tasks.'); show($('archived-state'), true); show($('archived-list'), false); return; }
+    $('archive-project-select').value = projectId;
+    setText($('archived-state'), 'Loading archived tasks…'); show($('archived-state'), true); show($('archived-list'), false);
+    try {
+      const tasks = []; let cursor = null;
+      do { const params=new URLSearchParams({limit:'200'}); if(cursor) params.set('cursor',cursor); const page=(await request(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/archived?${params}`)).data; tasks.push(...listData(page)); cursor=page?.next_cursor||null; } while(cursor && projectId === ($('archive-project-select').value || state.projectId));
+      if (projectId !== ($('archive-project-select').value || state.projectId)) return;
+      const target = $('archived-list'); clear(target);
+      if (!tasks.length) { setText($('archived-state'), 'No archived tasks in this project.'); return; }
+      tasks.forEach(task => { const row=el('article','task-row'); const copy=el('span'); add(copy,el('span','task-title',task.title)); add(copy,el('span','task-description',task.description||'No description')); add(copy,el('span','task-meta',`Archived · ${displayStatus(task.lifecycle)} · Rev. ${task.revision}`)); const button=actionButton('Open archived task',()=>{state.projectId=projectId;openTask(task.id,'archived');},false); add(row,copy);add(row,button);add(target,row); });
+      show($('archived-state'), false); show(target,true);
+    } catch(error) { setText($('archived-state'),errorMessage(error)); show($('archived-state'),true); }
+  }
 
   function selectTaskDetailText(id) {
     const source = $(id); const selection = window.getSelection();
@@ -618,7 +634,8 @@
   $('tasks-last-page').addEventListener('click', showLastTaskPage);
   $('tasks-page-size').addEventListener('change', (event) => { state.taskPageSize = Number(event.target.value); if (state.taskView === 'completed') showTaskPage(state.completedPageIndex); else loadTasks(); });
   $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; resetTaskPages(); state.taskView = 'queue'; updateTaskViewTabs(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
-  $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
+  $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else showView('tasks'); }); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
+  $('open-archive-button').addEventListener('click',()=>{ $('archive-project-select').value=state.projectId; showView('archived'); loadArchivedTasks(); }); $('back-from-archive').addEventListener('click',()=>showView('tasks')); $('refresh-archive').addEventListener('click',loadArchivedTasks); $('archive-project-select').addEventListener('change',loadArchivedTasks);
   function showToken(token) { clearCredentialDownload(); setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
   function clearCredentialDownload() {
     if (state.credentialDownloadUrl) URL.revokeObjectURL(state.credentialDownloadUrl);
@@ -1250,6 +1267,14 @@
   function renderTaskActions(data, task) {
     const target = $('task-operator-actions'); clear(target);
     const completionPending = data.workflow?.submission && data.workflow.phase !== 'revision_needed';
+    if (state.actor?.kind === 'human' && !task.activity_kind && !task.current_attempt_id) {
+      if (task.archived_at) add(target, actionButton('Restore archived task', () => taskLifecycle(task,'restore','Restore this task to the main task queue? Its lifecycle state and history will be preserved.')));
+      else {
+        if (['open','planned','canceled'].includes(task.lifecycle)) add(target, actionButton('Archive task', () => taskLifecycle(task,'archive','Archive this task? It will leave the main task queue and remain available in Archived tasks.')));
+        if (['open','planned'].includes(task.lifecycle)) add(target, actionButton('Cancel task', () => taskLifecycle(task,'cancel','Cancel this task? It will remain in the task queue with canceled status.')));
+        if (['planned','canceled'].includes(task.lifecycle)) add(target, actionButton('Delete task', () => taskLifecycle(task,'delete','Remove this task from task views? This is a soft delete that retains task and audit history. The service refuses if attempts, workflow, objective, or dependency history exist.')));
+      }
+    }
     if (!completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, actionButton('Edit task', () => editTask(task, data)));
     if (!completionPending && !task.activity_kind && task.lifecycle === 'open' && !task.current_attempt_id && task.blocked_reason) add(target, actionButton('Resolve blocker', () => {
       const projectId = state.projectId, taskId = task.id;
@@ -1271,6 +1296,16 @@
     if (task.objective_id) add(target, actionButton('View objective children', () => showObjective(task.objective_id), false));
     if (task.parent_objective_id) add(target, actionButton('View parent objective', () => showObjective(task.parent_objective_id), false));
     renderMutationState();
+  }
+  function taskLifecycle(task, action, confirmation) {
+    const projectId=state.projectId, taskId=task.id;
+    const view=workflowDialog(({archive:'Archive task',restore:'Restore task',cancel:'Cancel task',delete:'Delete task'})[action],confirmation);
+    view.field('reason','Reason for this action');
+    view.finish(({archive:'Archive task',restore:'Restore task',cancel:'Cancel task',delete:'Delete task'})[action],(values,dialog)=>{
+      dialog.close(); const path=`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}`;
+      const callback=async()=>{if(action==='delete'){showView('tasks');await loadTasks();}else await loadTaskDetail();};
+      startMutation(action==='delete'?path:`${path}/${action}`,{expected_revision:task.revision,reason:values.get('reason')},`task ${action}`,callback,action==='delete'?'DELETE':'POST',null,{projectId,taskId});
+    });
   }
   function editTask(task, data) {
     const projectId = state.projectId, taskId = task.id;

@@ -74,8 +74,24 @@ pub fn routes() -> Router<AppState> {
             get(tasks).post(create_task),
         )
         .route(
+            "/api/v1/projects/{project}/tasks/archived",
+            get(archived_tasks),
+        )
+        .route(
             "/api/v1/projects/{project}/tasks/{task}",
-            get(task_detail).patch(edit_task),
+            get(task_detail).patch(edit_task).delete(delete_task),
+        )
+        .route(
+            "/api/v1/projects/{project}/tasks/{task}/archive",
+            post(archive_task),
+        )
+        .route(
+            "/api/v1/projects/{project}/tasks/{task}/restore",
+            post(restore_task),
+        )
+        .route(
+            "/api/v1/projects/{project}/tasks/{task}/cancel",
+            post(cancel_task),
         )
         .route(
             "/api/v1/projects/{project}/preconditions/{target}",
@@ -329,6 +345,7 @@ struct Task {
     blocked_reason: Option<String>,
     created_at: i64,
     ready_since: i64,
+    archived_at: Option<i64>,
     attempt_state: Option<String>,
     attempt_expires: Option<i64>,
     owner_authorized: bool,
@@ -354,7 +371,7 @@ macro_rules! task_sql {($suffix:literal)=>{concat!(
     "NOT EXISTS(SELECT 1 FROM decisions d JOIN decision_cycles dc ON dc.decision_id=d.id AND dc.generation=d.current_generation JOIN projects dp ON dp.id=d.project_id LEFT JOIN decision_answers da ON da.decision_id=d.id AND da.generation=d.current_generation WHERE d.project_id=t.project_id AND EXISTS(SELECT 1 FROM decision_affected_tasks target WHERE target.decision_id=d.id AND target.generation=d.current_generation AND (target.task_id=t.id OR target.task_id=(SELECT subject_task_id FROM workflow_activities WHERE activity_task_id=t.id))) AND (dc.policy_revision!=dp.policy_revision OR EXISTS(SELECT 1 FROM decision_affected_tasks scoped JOIN tasks current ON current.project_id=scoped.project_id AND current.id=scoped.task_id WHERE scoped.decision_id=d.id AND scoped.generation=d.current_generation AND scoped.task_revision!=current.revision) OR da.decision_id IS NULL OR da.disposition!='allow' OR da.conditions_confirmed=0 OR (dc.expires_at IS NOT NULL AND dc.expires_at<=?))) AS decisions_ready, ",
     "NOT EXISTS(SELECT 1 FROM objective_children oc JOIN tasks child ON child.project_id=oc.project_id AND child.id=oc.child_task_id WHERE oc.objective_task_id=t.id AND oc.required=1 AND child.lifecycle!='done') AS objective_children_ready, ",
     "NOT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks prerequisite ON prerequisite.id=d.prerequisite_id WHERE d.task_id=t.id AND prerequisite.lifecycle!='done') AS dependencies_ready ",
-    "FROM tasks t LEFT JOIN attempts a ON a.id=t.current_attempt_id LEFT JOIN principals p ON p.id=a.owner_id LEFT JOIN credentials c ON c.id=a.credential_id LEFT JOIN agent_sessions ag ON ag.id=a.session_id AND ag.credential_id=a.credential_id LEFT JOIN browser_sessions b ON b.id=a.session_id WHERE t.project_id=?) ",$suffix
+    "FROM tasks t LEFT JOIN attempts a ON a.id=t.current_attempt_id LEFT JOIN principals p ON p.id=a.owner_id LEFT JOIN credentials c ON c.id=a.credential_id LEFT JOIN agent_sessions ag ON ag.id=a.session_id AND ag.credential_id=a.credential_id LEFT JOIN browser_sessions b ON b.id=a.session_id WHERE t.project_id=? AND t.deleted_at IS NULL) ",$suffix
 )}}
 impl Task {
     fn status(&self, now: i64) -> &str {
@@ -438,7 +455,7 @@ impl Task {
         "work_status":self.status(now),"blocked_reason":self.blocked_reason,"dependencies_ready":self.dependencies_ready,
         "objective_children_ready":self.objective_children_ready,"decisions_ready":self.decisions_ready,
         "objective_id":self.objective_id,"parent_objective_id":self.parent_objective_id,"parent_objective_required":self.parent_objective_required,
-        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"preconditions":preconditions});
+        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions});
         if self.workflow_phase.as_deref() == Some("integration") {
             value["precondition_hints"] = json!([{
                 "code":"candidate_stale_merge_conflict_requires_preflight",
@@ -558,15 +575,17 @@ async fn task_list(
     p: &str,
     page: &Page,
     now: i64,
+    archived: bool,
 ) -> Result<Value, AppError> {
     let limit = page.limit()?;
     let mut items: Vec<Task> = sqlx::query_as(task_sql!(
-        "SELECT * FROM visible WHERE workflow_activity_kind IS NULL AND (? IS NULL OR id>?) ORDER BY id LIMIT ?"
+        "SELECT * FROM visible WHERE (archived_at IS NOT NULL)=? AND workflow_activity_kind IS NULL AND (? IS NULL OR id>?) ORDER BY id LIMIT ?"
     ))
     .bind(now)
     .bind(now)
     .bind(now)
     .bind(p)
+    .bind(archived)
     .bind(&page.cursor)
     .bind(&page.cursor)
     .bind(limit + 1)
@@ -592,7 +611,166 @@ async fn tasks(
 ) -> Reply {
     let mut c = s.pool.acquire().await?;
     project(&mut c, &p).await?;
-    Ok(response(task_list(&mut c, &p, &page, s.now()).await?))
+    Ok(response(
+        task_list(&mut c, &p, &page, s.now(), false).await?,
+    ))
+}
+async fn archived_tasks(
+    State(s): State<AppState>,
+    _auth: Auth,
+    Path(p): Path<String>,
+    Query(page): Query<Page>,
+) -> Reply {
+    let mut c = s.pool.acquire().await?;
+    project(&mut c, &p).await?;
+    Ok(response(task_list(&mut c, &p, &page, s.now(), true).await?))
+}
+
+#[derive(Deserialize, Serialize)]
+struct TaskLifecycleInput {
+    expected_revision: i64,
+    reason: String,
+}
+
+async fn lifecycle_change(
+    s: AppState,
+    auth: Auth,
+    headers: HeaderMap,
+    p: String,
+    id: String,
+    input: TaskLifecycleInput,
+    action: &'static str,
+) -> Reply {
+    bounded(&input.reason, "reason", 4096, true)?;
+    let operation = format!("POST /api/v1/projects/{p}/tasks/{id}/{action}");
+    let mut m = Mutation::begin(&s, &auth, &headers, &operation, &input).await?;
+    admin_or_operator(&m.actor)?;
+    if let Some(v) = m.replay {
+        return Ok(response(v));
+    }
+    let row = sqlx::query("SELECT lifecycle,revision,current_attempt_id,archived_at,deleted_at FROM tasks WHERE project_id=? AND id=?")
+        .bind(&p).bind(&id).fetch_optional(&mut *m.tx).await?.ok_or_else(AppError::not_found)?;
+    let lifecycle: String = row.get("lifecycle");
+    let revision: i64 = row.get("revision");
+    let attempt: Option<String> = row.get("current_attempt_id");
+    let archived: Option<i64> = row.get("archived_at");
+    let deleted: Option<i64> = row.get("deleted_at");
+    if deleted.is_some() {
+        return Err(AppError::not_found());
+    }
+    if archived.is_some() && action != "restore" {
+        return Err(AppError::conflict(
+            "task_archived",
+            "Restore this task before changing its lifecycle.",
+        ));
+    }
+    if revision != input.expected_revision {
+        return Err(AppError::conflict(
+            "task_revision_changed",
+            "The task changed. Reload it before applying this lifecycle action.",
+        ));
+    }
+    if m.actor.kind != "human" {
+        return Err(AppError::forbidden(
+            "Only a human operator may change task lifecycle.",
+        ));
+    }
+    if attempt.is_some() {
+        return Err(AppError::conflict(
+            "task_attempt_protected",
+            "Release or resolve the current attempt before changing task lifecycle.",
+        ));
+    }
+    let protected: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM workflow_activities wa WHERE wa.subject_task_id=? AND wa.state IN ('queued','active','recovery_required')) + (SELECT count(*) FROM workflow_subjects ws WHERE ws.task_id=? AND ws.phase IN ('review','integration')) + (SELECT count(*) FROM workflow_activities wa WHERE wa.activity_task_id=?)")
+        .bind(&id).bind(&id).bind(&id).fetch_one(&mut *m.tx).await?;
+    if protected > 0 {
+        return Err(AppError::conflict(
+            "task_workflow_protected",
+            "Resolve active review or integration work before changing task lifecycle.",
+        ));
+    }
+    let (sql, event) = match action {
+        "archive" if archived.is_none() => (
+            "UPDATE tasks SET archived_at=?,revision=revision+1 WHERE id=?",
+            "task.archived",
+        ),
+        "restore" if archived.is_some() => (
+            "UPDATE tasks SET archived_at=NULL,revision=revision+1 WHERE id=?",
+            "task.restored",
+        ),
+        "cancel" if lifecycle == "open" || lifecycle == "planned" => (
+            "UPDATE tasks SET lifecycle='canceled',revision=revision+1 WHERE id=?",
+            "task.canceled",
+        ),
+        "delete" if lifecycle == "planned" || lifecycle == "canceled" => {
+            let linked: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM attempts WHERE task_id=?)+(SELECT count(*) FROM task_dependencies WHERE task_id=? OR prerequisite_id=?)+(SELECT count(*) FROM objective_children WHERE child_task_id=? OR objective_task_id=?)+(SELECT count(*) FROM workflow_subjects WHERE task_id=?)")
+                .bind(&id).bind(&id).bind(&id).bind(&id).bind(&id).bind(&id).fetch_one(&mut *m.tx).await?;
+            if linked > 0 {
+                return Err(AppError::conflict(
+                    "task_history_protected",
+                    "This task has history or workflow links. Archive it to retain its records.",
+                ));
+            }
+            (
+                "UPDATE tasks SET deleted_at=?,revision=revision+1 WHERE id=?",
+                "task.deleted",
+            )
+        }
+        "archive" | "restore" | "cancel" => {
+            return Err(AppError::conflict(
+                "task_lifecycle_invalid",
+                "This task is not in a lifecycle state that permits this action.",
+            ));
+        }
+        _ => return Err(AppError::bad_request("Unknown task lifecycle action.")),
+    };
+    if action == "restore" || action == "cancel" {
+        sqlx::query(sql).bind(&id).execute(&mut *m.tx).await?;
+    } else {
+        sqlx::query(sql)
+            .bind(m.now)
+            .bind(&id)
+            .execute(&mut *m.tx)
+            .await?;
+    }
+    let result = json!({"id":id,"lifecycle":if action == "cancel" {"canceled"} else {lifecycle.as_str()},"archived":action == "archive","deleted":action == "delete","reason":input.reason});
+    Ok(response(m.finish(result, Some(&p), event, &id).await?))
+}
+async fn archive_task(
+    State(s): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Path((p, id)): Path<(String, String)>,
+    input: Result<Json<TaskLifecycleInput>, JsonRejection>,
+) -> Reply {
+    lifecycle_change(s, auth, headers, p, id, payload(input)?, "archive").await
+}
+async fn restore_task(
+    State(s): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Path((p, id)): Path<(String, String)>,
+    input: Result<Json<TaskLifecycleInput>, JsonRejection>,
+) -> Reply {
+    lifecycle_change(s, auth, headers, p, id, payload(input)?, "restore").await
+}
+async fn cancel_task(
+    State(s): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Path((p, id)): Path<(String, String)>,
+    input: Result<Json<TaskLifecycleInput>, JsonRejection>,
+) -> Reply {
+    lifecycle_change(s, auth, headers, p, id, payload(input)?, "cancel").await
+}
+async fn delete_task(
+    State(s): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Path((p, id)): Path<(String, String)>,
+    input: Result<Json<TaskLifecycleInput>, JsonRejection>,
+) -> Reply {
+    lifecycle_change(s, auth, headers, p, id, payload(input)?, "delete").await
 }
 async fn set_dependencies(
     c: &mut SqliteConnection,
