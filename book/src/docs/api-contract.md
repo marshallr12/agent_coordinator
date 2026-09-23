@@ -155,7 +155,9 @@ does not hold a transaction, reserve resources, or renew ownership. Expected
 detection latency is at most about 500 ms plus request/database scheduling.
 Tokens from task and activity details include caller-visible eligibility and
 unmet-precondition state, so an instruction acknowledgment can wake a task wait
-without changing `work_status`.
+without changing `work_status`. Job tokens use persisted job state and exclude
+derived observation age and freshness, so those display values do not wake a
+wait by themselves.
 
 `POST /api/v1/projects/{project_id}/claims` accepts exactly one task ID or a
 next-eligible selector. For an explicit task, include its expected revision.

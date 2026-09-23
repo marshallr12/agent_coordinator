@@ -792,6 +792,16 @@ async fn state_wait_observes_an_individual_job_transition() {
             0,
         )
         .await;
+    let (status, observation) = fixture
+        .reporter(
+            &registration.token(),
+            "POST",
+            &format!("/api/v1/reporters/{}/observations", registration.reporter),
+            "observe-job-running-before-wait",
+            json!({"sequence":1,"producer_id":registration.producer,"state":"running","pid":4123,"summary":"still running"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{observation}");
     let (_, detail) = fixture
         .call(
             &fixture.a,
@@ -802,6 +812,19 @@ async fn state_wait_observes_an_individual_job_transition() {
         )
         .await;
     let token = detail["data"]["state_token"].as_str().unwrap().to_owned();
+    // Advancing the service clock changes the displayed observation age but
+    // must not make an unchanged job appear to have transitioned.
+    fixture.clock.0.fetch_add(1, Ordering::SeqCst);
+    let timeout_path = format!(
+        "/api/v1/projects/{project}/state-wait?target_kind=job&target_id={}&after_state_token={token}&timeout_seconds=1",
+        registration.job
+    );
+    let (status, unchanged) = fixture
+        .call(&fixture.a, "GET", &timeout_path, "", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{unchanged}");
+    assert_eq!(unchanged["data"]["changed"], false);
+    assert_eq!(unchanged["data"]["timed_out"], true);
     let app = fixture.app.clone();
     let caller = fixture.a.clone();
     let path = format!(
@@ -816,7 +839,7 @@ async fn state_wait_observes_an_individual_job_transition() {
             "POST",
             &format!("/api/v1/reporters/{}/observations", registration.reporter),
             "complete-job-for-wait",
-            json!({"sequence":1,"producer_id":registration.producer,"state":"succeeded","exit_code":0,"inputs_unchanged":true,"summary":"passed"}),
+            json!({"sequence":2,"producer_id":registration.producer,"state":"succeeded","exit_code":0,"inputs_unchanged":true,"summary":"passed"}),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{result}");

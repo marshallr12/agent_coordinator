@@ -113,6 +113,11 @@ pub(crate) fn state_token(value: &Value) -> Result<String, AppError> {
     let mut stable = value.clone();
     if let Some(object) = stable.as_object_mut() {
         object.remove("state_token");
+        // Job snapshots include these derived observation fields for display,
+        // but their values move with the clock even when the job is unchanged.
+        // Keep waits tied to durable job state and observation timestamps.
+        object.remove("observation_age_ms");
+        object.remove("observation_freshness");
     }
     let bytes = serde_json::to_vec(&stable)?;
     Ok(hex::encode(Sha256::digest(bytes)))
