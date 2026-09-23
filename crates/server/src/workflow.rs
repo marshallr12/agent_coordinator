@@ -804,9 +804,10 @@ pub(crate) async fn activity_wait_snapshot(
     c: &mut SqliteConnection,
     project: &str,
     id: &str,
+    actor: &crate::auth::Actor,
     now: i64,
 ) -> Result<Value, AppError> {
-    activity_value(c, project, id, now).await
+    activity_preconditions(c, project, id, actor, now).await
 }
 
 pub(crate) async fn activity_preconditions(
@@ -822,12 +823,13 @@ pub(crate) async fn activity_preconditions(
     let mut add = |code: &str, message: &str| {
         unmet.push(json!({"code":code,"message":message}));
     };
-    let policy_current = ctx.submission == ctx.current_submission
-        && ctx.superseded_at.is_none()
-        && ctx.project_policy_revision == ctx.project_current_policy
-        && (ctx.workflow_policy_revision == 0
-            || ctx.workflow_current_policy == Some(ctx.workflow_policy_revision));
-    if !policy_current {
+    let policy_stale = ctx.phase != "revision_needed"
+        && (ctx.submission != ctx.current_submission
+            || ctx.superseded_at.is_some()
+            || ctx.project_policy_revision != ctx.project_current_policy
+            || (ctx.workflow_policy_revision != 0
+                && ctx.workflow_current_policy != Some(ctx.workflow_policy_revision)));
+    if policy_stale {
         add(
             "operator_reopen_required",
             "This immutable candidate or a pinned policy is stale. An authenticated operator must reopen it before new workflow authority can be claimed.",
@@ -851,11 +853,35 @@ pub(crate) async fn activity_preconditions(
                 "A live authorized attempt currently owns this activity.",
             );
         } else {
-            add(
-                "recovery_inspection_required",
-                "Inspect the expired or unauthorized activity attempt and its jobs before resuming.",
-            );
+            if ctx.recovery_mode == "manual" && actor.kind != "human" {
+                add(
+                    "human_recovery_required",
+                    "This project requires a human to inspect expired or revoked workflow activity authority.",
+                );
+            }
+            let held: i64 = sqlx::query_scalar("SELECT count(*) FROM reservations r JOIN attempts a ON a.id=r.attempt_id WHERE a.project_id=? AND a.task_id=? AND r.state='held'")
+                .bind(project).bind(&ctx.activity_task).fetch_one(&mut *c).await?;
+            let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE project_id=? AND task_id=? AND state NOT IN ('succeeded','failed','not_started') AND reconciled_at IS NULL")
+                .bind(project).bind(&ctx.activity_task).fetch_one(&mut *c).await?;
+            if held > 0 || jobs > 0 {
+                add(
+                    "attempt_evidence_unresolved",
+                    &format!(
+                        "Inspect prior work before reclaiming this activity: {held} held reservation(s) and {jobs} nonterminal producer job(s) remain."
+                    ),
+                );
+            }
         }
+    }
+    let blocked_reason: Option<String> =
+        sqlx::query_scalar("SELECT blocked_reason FROM tasks WHERE project_id=? AND id=?")
+            .bind(project)
+            .bind(&ctx.activity_task)
+            .fetch_optional(&mut *c)
+            .await?
+            .flatten();
+    if let Some(reason) = blocked_reason {
+        add("activity_blocked", &reason);
     }
     if actor.kind == "agent" {
         let session_id = actor.session_id.as_deref().unwrap_or("");
@@ -936,15 +962,17 @@ pub(crate) async fn activity_preconditions(
             }
         }
     }
-    Ok(json!({
+    let mut result = json!({
         "target_kind":"activity",
         "target_id":id,
         "activity_kind":ctx.kind,
         "eligible_to_claim":unmet.is_empty(),
         "unmet_preconditions":unmet,
-        "state_token":crate::state_wait::state_token(&snapshot)?,
-        "precondition_hints":if ctx.kind == "integration" { json!([{"code":"candidate_stale_merge_conflict_requires_preflight","state":"requires_local_observation","message":"The service cannot inspect the Git target or detect merge conflicts. Fetch the pinned target and run local integration preflight before publication; a stale/conflicting immutable candidate requires operator reopen."}]) } else { json!([]) }
-    }))
+        "precondition_hints":if ctx.kind == "integration" { json!([{"code":"candidate_stale_merge_conflict_requires_preflight","state":"requires_local_observation","message":"The service cannot inspect the Git target or detect merge conflicts. Fetch the pinned target and run local integration preflight before publication; a stale/conflicting immutable candidate requires operator reopen."}]) } else { json!([]) },
+        "state":snapshot
+    });
+    result["state_token"] = json!(crate::state_wait::state_token(&result)?);
+    Ok(result)
 }
 
 pub async fn workflow_snapshot(
@@ -1392,7 +1420,7 @@ async fn activity_detail(
     let mut c = state.pool.begin().await?;
     let now = state.now();
     let mut value = activity_value(&mut c, &project, &id, now).await?;
-    let token = crate::state_wait::state_token(&value)?;
+    let preconditions = activity_preconditions(&mut c, &project, &id, &auth.actor, now).await?;
     let ctx = activity_context(&mut c, &project, &id).await?;
     let current = value["current_attempt"].clone();
     let owned = current["owner_id"] == auth.actor.id
@@ -1433,7 +1461,10 @@ async fn activity_detail(
     };
     value["publication_allowed"] = json!(publication_allowed);
     value["qualifying_check_job_ids"] = json!(check_job_ids);
-    value["state_token"] = json!(token);
+    value["eligible_to_claim"] = preconditions["eligible_to_claim"].clone();
+    value["unmet_preconditions"] = preconditions["unmet_preconditions"].clone();
+    value["precondition_hints"] = preconditions["precondition_hints"].clone();
+    value["state_token"] = preconditions["state_token"].clone();
     Ok(response(value))
 }
 

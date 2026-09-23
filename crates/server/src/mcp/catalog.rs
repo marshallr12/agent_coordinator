@@ -138,10 +138,10 @@ fn build_catalog() -> Vec<Operation> {
         ),
         read(
             "coordinator_state_wait",
-            "Wait up to 30 seconds for a task work_status or workflow activity state token to change. Polling holds no database transaction and grants no ownership.",
+            "Wait up to 30 seconds for a task work_status, workflow activity, or individual job state token to change. Polling holds no database transaction and grants no ownership.",
             "/api/v1/projects/{project}/state-wait",
             json!({
-                "target_kind":{"type":"string","enum":["task","activity"]},
+                "target_kind":{"type":"string","enum":["task","activity","job"]},
                 "target_id":{"type":"string","minLength":1,"maxLength":128},
                 "after_state_token":{"type":"string","minLength":1,"maxLength":64},
                 "timeout_seconds":{"type":"integer","minimum":1,"maximum":30}

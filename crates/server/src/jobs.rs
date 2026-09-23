@@ -1062,7 +1062,7 @@ async fn job_detail(
     ))
 }
 
-async fn job(
+pub(crate) async fn job(
     connection: &mut SqliteConnection,
     project: &str,
     id: &str,
@@ -1077,7 +1077,9 @@ async fn job(
     .fetch_optional(connection)
     .await?
     .ok_or_else(AppError::not_found)?;
-    Ok(job_value(&row, now))
+    let mut value = job_value(&row, now);
+    value["state_token"] = json!(crate::state_wait::state_token(&value)?);
+    Ok(value)
 }
 
 fn job_value(row: &sqlx::sqlite::SqliteRow, now: i64) -> Value {

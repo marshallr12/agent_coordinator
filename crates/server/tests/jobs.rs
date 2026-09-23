@@ -15,6 +15,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicI64, Ordering},
 };
+use std::time::Duration;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -761,6 +762,68 @@ async fn terminal_observation_allows_release_and_never_releases_automatically() 
         .await;
     assert_eq!(status, StatusCode::OK, "{released}");
     assert_eq!(released["data"]["state"], "released");
+}
+
+#[tokio::test]
+async fn state_wait_observes_an_individual_job_transition() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("job-state-wait").await;
+    let (_, attempt, generation) = fixture.claimed(&fixture.a, &project, "wait for job").await;
+    fixture
+        .checkout(&fixture.a, &project, &attempt, generation)
+        .await;
+    let resource = fixture.resource("job/wait", 1).await;
+    let (_, reservation) = fixture
+        .reserve(
+            &fixture.a,
+            &project,
+            &attempt,
+            generation,
+            json!([{"resource_id":resource,"units":1}]),
+        )
+        .await;
+    let registration = fixture
+        .job(
+            &fixture.a,
+            &project,
+            &attempt,
+            generation,
+            reservation["data"]["id"].as_str().unwrap(),
+            0,
+        )
+        .await;
+    let (_, detail) = fixture
+        .call(
+            &fixture.a,
+            "GET",
+            &format!("/api/v1/projects/{project}/jobs/{}", registration.job),
+            "",
+            json!({}),
+        )
+        .await;
+    let token = detail["data"]["state_token"].as_str().unwrap().to_owned();
+    let app = fixture.app.clone();
+    let caller = fixture.a.clone();
+    let path = format!(
+        "/api/v1/projects/{project}/state-wait?target_kind=job&target_id={}&after_state_token={token}&timeout_seconds=3",
+        registration.job
+    );
+    let wait = tokio::spawn(async move { call(app, &caller, "GET", &path, "", json!({})).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (status, result) = fixture
+        .reporter(
+            &registration.token(),
+            "POST",
+            &format!("/api/v1/reporters/{}/observations", registration.reporter),
+            "complete-job-for-wait",
+            json!({"sequence":1,"producer_id":registration.producer,"state":"succeeded","exit_code":0,"inputs_unchanged":true,"summary":"passed"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (status, changed) = wait.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(changed["data"]["changed"], true);
+    assert_eq!(changed["data"]["state"]["state"], "succeeded");
 }
 
 #[tokio::test]

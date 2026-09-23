@@ -1,4 +1,4 @@
-//! Bounded long-poll reads for task and workflow-activity state changes.
+//! Bounded long-poll reads for task, workflow-activity, and job state changes.
 use crate::{auth::Auth, coordination, error::AppError, response, state::AppState, workflow};
 use axum::{
     Json, Router,
@@ -33,13 +33,13 @@ struct WaitQuery {
 
 async fn wait_for_change(
     State(state): State<AppState>,
-    _auth: Auth,
+    auth: Auth,
     Path(project): Path<String>,
     Query(query): Query<WaitQuery>,
 ) -> Reply {
-    if !matches!(query.target_kind.as_str(), "task" | "activity") {
+    if !matches!(query.target_kind.as_str(), "task" | "activity" | "job") {
         return Err(AppError::bad_request(
-            "target_kind must be task or activity.",
+            "target_kind must be task, activity, or job.",
         ));
     }
     if query.target_id.is_empty() || query.target_id.len() > 128 {
@@ -65,6 +65,7 @@ async fn wait_for_change(
             &project,
             &query.target_kind,
             &query.target_id,
+            &auth.actor,
             state.now(),
         )
         .await?;
@@ -93,13 +94,17 @@ async fn target_snapshot(
     project: &str,
     kind: &str,
     id: &str,
+    actor: &crate::auth::Actor,
     now: i64,
 ) -> Result<Value, AppError> {
     match kind {
-        "task" => coordination::task_record_value(connection, project, id, now).await,
-        "activity" => workflow::activity_wait_snapshot(connection, project, id, now).await,
+        "task" => {
+            coordination::task_preconditions_snapshot(connection, project, id, actor, now).await
+        }
+        "activity" => workflow::activity_wait_snapshot(connection, project, id, actor, now).await,
+        "job" => crate::jobs::job(connection, project, id, now).await,
         _ => Err(AppError::bad_request(
-            "target_kind must be task or activity.",
+            "target_kind must be task, activity, or job.",
         )),
     }
 }

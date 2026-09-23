@@ -144,15 +144,18 @@ a local merge-preflight hint: the service cannot inspect workstation Git or
 determine whether an immutable candidate conflicts with the current remote target.
 An operator must reopen a candidate when its pinned submission or policy is stale.
 
-`GET /api/v1/projects/{project_id}/state-wait` accepts `target_kind=task|activity`,
-`target_id`, an `after_state_token` returned by task detail/precondition inspection
-or activity detail/precondition inspection, and optional `timeout_seconds` from
+`GET /api/v1/projects/{project_id}/state-wait` accepts `target_kind=task|activity|job`,
+`target_id`, an `after_state_token` returned by task detail/precondition inspection,
+activity detail/precondition inspection, or individual job detail, and optional `timeout_seconds` from
 1 through 30 (default 15). It polls at 500 ms intervals, releases its database
 connection between reads, and returns immediately when the state token changes.
 On timeout it returns the latest snapshot with `timed_out: true`. This is an
-opt-in long poll for one task `work_status` or one workflow activity state; it
+opt-in long poll for one task `work_status`, workflow activity, or job state; it
 does not hold a transaction, reserve resources, or renew ownership. Expected
 detection latency is at most about 500 ms plus request/database scheduling.
+Tokens from task and activity details include caller-visible eligibility and
+unmet-precondition state, so an instruction acknowledgment can wake a task wait
+without changing `work_status`.
 
 `POST /api/v1/projects/{project_id}/claims` accepts exactly one task ID or a
 next-eligible selector. For an explicit task, include its expected revision.

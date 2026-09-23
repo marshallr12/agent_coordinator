@@ -231,6 +231,33 @@ async fn preconditions_report_service_gates_and_state_wait_detects_task_changes(
         "Task is intentionally held."
     );
 
+    let (status, before_ack) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/preconditions/{dependent_id}"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{before_ack}");
+    let before_token = before_ack["data"]["state_token"].as_str().unwrap();
+    let before_status = before_ack["data"]["work_status"].clone();
+    f.ack(&f.a, &p).await;
+    let (status, after_ack) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/state-wait?target_kind=task&target_id={dependent_id}&after_state_token={before_token}&timeout_seconds=3"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{after_ack}");
+    assert_eq!(after_ack["data"]["changed"], true);
+    assert_eq!(after_ack["data"]["state"]["work_status"], before_status);
+    assert_ne!(after_ack["data"]["state_token"], before_token);
+
     let (status, bad_timeout) = f
         .call(
             &f.a,

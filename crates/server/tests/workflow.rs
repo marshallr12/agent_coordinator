@@ -1448,11 +1448,114 @@ async fn manual_recovery_rejects_agent_takeover_and_human_reopens_expired_review
     let (status, claimed) = f.claim_activity(&f.b, &p, &review, 2, 0).await;
     assert_eq!(status, StatusCode::OK, "{claimed}");
     f.clock.0.fetch_add(600_000, Ordering::SeqCst);
+    let (status, preconditions) = f
+        .call(
+            &f.b,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/preconditions/{}",
+                review["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preconditions}");
+    assert!(
+        preconditions["data"]["unmet_preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["code"] == "human_recovery_required")
+    );
     let (status, _) = f.claim_activity(&f.c, &p, &review, 2, 0).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status,reopened)=f.call(&f.admin,"POST",&format!("/api/v1/projects/{p}/tasks/{}/workflow/reopen",t["id"].as_str().unwrap()),json!({"submission_id":review["submission_id"],"reason":"expired reviewer inspected; no jobs or holds remain"})).await;
     assert_eq!(status, StatusCode::OK, "{reopened}");
     assert_eq!(reopened["data"]["work_status"], "ready");
+}
+
+#[tokio::test]
+async fn agent_mode_quiescent_expired_activity_is_claimable() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("agent recovery", "https://example.test/agent-recovery.git")
+        .await;
+    f.review_policy(&p, "agent").await;
+    let task = f
+        .task(&p, "general", "Expired review can be reclaimed")
+        .await;
+    let owner = f.claim(&f.a, &p, &task, 2).await;
+    let submitted = f
+        .submit(
+            &f.a, &p, &task, &owner, "general", 2, None, None, None, None,
+        )
+        .await;
+    let review = activity(&submitted, "agent_review").clone();
+    let (status, first) = f.claim_activity(&f.b, &p, &review, 2, 0).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    f.clock.0.fetch_add(600_000, Ordering::SeqCst);
+    let attempt = &first["data"]["attempt"];
+    let reservation_id = Uuid::new_v4().to_string();
+    let job_id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO reservations(id,project_id,attempt_id,generation,state,created_by,created_at) VALUES(?,?,?,?,'held',?,?)")
+        .bind(&reservation_id).bind(&p).bind(attempt["id"].as_str().unwrap()).bind(attempt["generation"].as_i64().unwrap()).bind(&f.b.principal).bind(f.state.now()).execute(&f.state.pool).await.unwrap();
+    sqlx::query("INSERT INTO jobs(id,producer_id,project_id,task_id,attempt_id,generation,runner_instance_id,workstation_id,label,source_revision,source_tree,reservation_id,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'registered',?)")
+        .bind(&job_id).bind(Uuid::new_v4().to_string()).bind(&p).bind(review["activity_task_id"].as_str().unwrap()).bind(attempt["id"].as_str().unwrap()).bind(attempt["generation"].as_i64().unwrap()).bind(Uuid::new_v4().to_string()).bind("review-host").bind("unresolved review producer").bind("candidate").bind("tree").bind(&reservation_id).bind(f.state.now()).execute(&f.state.pool).await.unwrap();
+    let (status, preconditions) = f
+        .call(
+            &f.b,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/preconditions/{}",
+                review["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preconditions}");
+    assert_eq!(preconditions["data"]["eligible_to_claim"], false);
+    assert!(
+        !preconditions["data"]["unmet_preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["code"] == "recovery_inspection_required")
+    );
+    assert!(
+        preconditions["data"]["unmet_preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["code"] == "attempt_evidence_unresolved")
+    );
+    let (status, blocked_claim) = f.claim_activity(&f.b, &p, &review, 2, 0).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked_claim}");
+    assert_eq!(
+        blocked_claim["error"]["code"],
+        "attempt_evidence_unresolved"
+    );
+    sqlx::query("UPDATE jobs SET state='succeeded',exit_code=0,inputs_unchanged=1 WHERE id=?")
+        .bind(&job_id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE reservations SET state='released',released_at=?,released_by=?,release_reason='test terminal producer' WHERE id=?")
+        .bind(f.state.now()).bind(&f.b.principal).bind(&reservation_id).execute(&f.state.pool).await.unwrap();
+    let (status, preconditions) = f
+        .call(
+            &f.b,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/preconditions/{}",
+                review["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preconditions}");
+    assert_eq!(preconditions["data"]["eligible_to_claim"], true);
+    let (status, reclaimed) = f.claim_activity(&f.b, &p, &review, 2, 0).await;
+    assert_eq!(status, StatusCode::OK, "{reclaimed}");
 }
 
 #[tokio::test]
@@ -1538,6 +1641,57 @@ async fn preconditions_surface_operator_reopen_and_reviewer_independence() {
             .unwrap()
             .iter()
             .any(|blocker| blocker["code"] == "reviewer_not_independent")
+    );
+
+    let (status, reopened) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("/api/v1/projects/{p}/tasks/{}/workflow/reopen", task["id"].as_str().unwrap()),
+            json!({"submission_id":review["submission_id"],"reason":"Policy changed and the obsolete candidate was intentionally reopened."}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    let (status, old_activity) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/preconditions/{}",
+                review["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{old_activity}");
+    assert!(
+        !old_activity["data"]["unmet_preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "operator_reopen_required")
+    );
+    f.ack(&f.a, &p, 3).await;
+    let (status, revision_ready) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/tasks/{}",
+                task["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{revision_ready}");
+    assert_eq!(revision_ready["data"]["work_status"], "ready");
+    assert_eq!(revision_ready["data"]["eligible_to_claim"], true);
+    assert!(
+        !revision_ready["data"]["preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "operator_reopen_required")
     );
 }
 

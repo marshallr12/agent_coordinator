@@ -1061,11 +1061,15 @@ service cannot inspect Git remotes or determine merge conflicts itself.
 
 To wait without a polling loop, call the authenticated REST endpoint
 `GET /api/v1/projects/PROJECT_ID/state-wait` or MCP tool
-`coordinator_state_wait`. Provide `target_kind` (`task` or `activity`),
+`coordinator_state_wait`. Provide `target_kind` (`task`, `activity`, or `job`),
 `target_id`, and the `after_state_token` returned by task detail,
-activity detail, or precondition inspection. `timeout_seconds` is optional and
+activity detail, individual job detail, or precondition inspection. Use the
+individual job detail endpoint rather than the paged job list. `timeout_seconds` is optional and
 bounded to 1–30 seconds (default 15). The service checks every 500 ms, holds no
 database transaction while sleeping, and returns the latest state on timeout.
+Tokens include the caller-visible precondition list and claim eligibility, so
+an acknowledgment or policy gate change can wake the wait even when the task's
+`work_status` stays the same.
 Expected detection latency is up to roughly 500 ms plus scheduling and query
 time. Waiting does not renew ownership; renew through the normal owner session.
 
