@@ -262,6 +262,18 @@ async function main() {
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 2')", 'numbered task page');
     await evaluate("document.querySelector('#tasks-first-page').click()");
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'first task page before detail');
+    tasks.push({ ...task, id: 'task-copy-id-done', title: 'Completed fixture task', lifecycle: 'done', work_status: 'done' });
+    await evaluate("document.querySelector('#refresh-tasks').click()");
+    await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'refreshed task queue');
+    assert(await evaluate("![...document.querySelector('#status-filter').options].some((option) => option.value === 'done')"), 'Task queue still offers a Done status filter.');
+    assert(await evaluate("![...document.querySelectorAll('.task-row .task-title')].some((node) => node.textContent === 'Completed fixture task')"), 'A completed task appeared in the task queue.');
+    await evaluate("document.querySelector('#completed-tasks-tab').click()");
+    await waitPage("[...document.querySelectorAll('.task-row .task-title')].some((node) => node.textContent === 'Completed fixture task')", 'completed task view');
+    assert(await evaluate("document.querySelector('#tasks-heading').textContent === 'Completed tasks'"), 'Completed task view has the wrong heading.');
+    assert(await evaluate("document.querySelectorAll('.task-row').length === 1"), 'Completed view included non-completed tasks.');
+    await evaluate("document.querySelector('#task-queue-tab').click()");
+    await waitPage("document.querySelector('#tasks-heading').textContent === 'Task queue'", 'return to task queue');
+    assert(await evaluate("![...document.querySelectorAll('.task-row .task-title')].some((node) => node.textContent === 'Completed fixture task')"), 'A completed task appeared after returning to the task queue.');
     await evaluate("document.querySelector('.task-open').focus()");
     await press('Enter', 'Enter', 13);
     await waitPage("document.querySelector('#task-detail-content') && !document.querySelector('#task-detail-content').hidden", 'task detail');
@@ -345,7 +357,7 @@ async function main() {
     await evaluate("window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = true; document.querySelector('#copy-token').click()");
     await waitPage("document.querySelector('#issue-feedback').textContent.includes('Clipboard access was unavailable')", 'token manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
-    console.log('PASS: headless Chrome verified project navigation, keyboard focus, pagination, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified project navigation, keyboard focus, queue/completed-task separation, pagination, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
