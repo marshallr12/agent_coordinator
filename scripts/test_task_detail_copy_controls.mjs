@@ -262,10 +262,17 @@ async function main() {
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 2')", 'numbered task page');
     await evaluate("document.querySelector('#tasks-first-page').click()");
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'first task page before detail');
-    tasks.push({ ...task, id: 'task-copy-id-done', title: 'Completed fixture task', lifecycle: 'done', work_status: 'done' });
+    await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '50'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await waitPage("document.querySelectorAll('.task-row').length === 30", 'all fixture queue tasks');
+    const doneFixtureTask = { ...task, id: 'task-copy-id-done', title: 'Completed fixture task' };
+    tasks.push(doneFixtureTask);
     await evaluate("document.querySelector('#refresh-tasks').click()");
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'refreshed task queue');
     assert(await evaluate("![...document.querySelector('#status-filter').options].some((option) => option.value === 'done')"), 'Task queue still offers a Done status filter.');
+    await waitPage("[...document.querySelectorAll('.task-row .task-title')].some((node) => node.textContent === 'Completed fixture task')", 'new example task in queue');
+    doneFixtureTask.lifecycle = 'done'; doneFixtureTask.work_status = 'done';
+    await evaluate("document.querySelector('#refresh-tasks').click()");
+    await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'queue after completing example task');
     assert(await evaluate("![...document.querySelectorAll('.task-row .task-title')].some((node) => node.textContent === 'Completed fixture task')"), 'A completed task appeared in the task queue.');
     await evaluate("document.querySelector('#completed-tasks-tab').click()");
     await waitPage("[...document.querySelectorAll('.task-row .task-title')].some((node) => node.textContent === 'Completed fixture task')", 'completed task view');
