@@ -107,6 +107,7 @@
                 <label id="status-filter-label" class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
                 <button id="refresh-tasks" class="button subtle" type="button" disabled>Refresh</button>
                 <button id="objective-list-button" class="button subtle" type="button">Objectives</button>
+                <button id="open-archive-button" class="button subtle" type="button">Archived tasks</button>
               </div>
               <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
               <div id="tasks-list" class="tasks-list" hidden></div>
@@ -119,6 +120,13 @@
                 <label class="select-label pagination-size" for="tasks-page-size">Items per page<select id="tasks-page-size"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select></label>
                 <span id="tasks-page-status" class="muted" aria-live="polite"></span>
               </div>
+            </section>
+
+            <section id="archived-view" class="page-view" aria-labelledby="archived-heading" hidden>
+              <div class="detail-back-row"><button id="back-from-archive" class="button text-button" type="button">← Back to tasks</button></div>
+              <div class="page-heading"><div><p class="eyebrow">Task history</p><h1 id="archived-heading">Archived tasks</h1><p id="archived-subtitle" class="muted">Archived work is kept separately from the task queue.</p></div></div>
+              <div class="toolbar"><label class="select-label" for="archive-project-select">Project<select id="archive-project-select"><option value="">Choose a project</option></select></label><button id="refresh-archive" class="button subtle" type="button">Refresh</button></div>
+              <div id="archived-state" class="state-panel" role="status">Choose a project to load archived tasks.</div><div id="archived-list" class="tasks-list" hidden></div>
             </section>
 
             <section id="task-detail-view" class="page-view" aria-labelledby="task-detail-heading" hidden>

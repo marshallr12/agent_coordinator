@@ -27,6 +27,137 @@ impl Clock for TestClock {
         false
     }
 }
+
+#[tokio::test]
+async fn task_archive_restore_cancel_and_delete_are_separate_from_queue() {
+    let f = Fixture::new().await;
+    let p = f.project("task-archive").await;
+    let task = f.task(&p, "Keep me", vec![]).await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        task["id"].as_str().unwrap()
+    );
+    let archive = format!("{path}/archive");
+    let restore = format!("{path}/restore");
+    let input = |revision| json!({"expected_revision":revision,"reason":"Operator confirmed this work is obsolete."});
+    assert_eq!(
+        f.call(&f.a, "POST", &archive, "agent-cannot-archive", input(1))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        f.call(&f.admin, "POST", &archive, "archive-task", input(1))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (_, main) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks"),
+            "",
+            json!({}),
+        )
+        .await;
+    let (_, archived) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/archived"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert!(main["data"]["items"].as_array().unwrap().is_empty());
+    assert_eq!(archived["data"]["items"].as_array().unwrap().len(), 1);
+    assert!(
+        f.call(&f.admin, "POST", &restore, "restore-task", input(2))
+            .await
+            .0
+            == StatusCode::OK
+    );
+    let (_, main) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(main["data"]["items"].as_array().unwrap().len(), 1);
+    let owned = f.task(&p, "Owned work", vec![]).await;
+    f.ack(&f.a, &p).await;
+    let (claim_status, _) = f
+        .claim(&f.a, &p, &owned, "archive-guard-claim", "work")
+        .await;
+    assert_eq!(claim_status, StatusCode::OK);
+    let owned_archive = format!(
+        "/api/v1/projects/{p}/tasks/{}/archive",
+        owned["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        f.call(&f.admin, "POST", &owned_archive, "archive-owned", input(1))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let task_path = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        task["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        f.call(
+            &f.admin,
+            "POST",
+            &format!("{task_path}/cancel"),
+            "cancel-task",
+            input(3)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let actual_revision: i64 = sqlx::query_scalar("SELECT revision FROM tasks WHERE id=?")
+        .bind(task["id"].as_str().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let actual_lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM tasks WHERE id=?")
+        .bind(task["id"].as_str().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(actual_lifecycle, "canceled");
+    let (delete_status, delete_response) = f
+        .call(
+            &f.admin,
+            "DELETE",
+            &task_path,
+            "delete-task",
+            input(actual_revision),
+        )
+        .await;
+    assert_eq!(delete_status, StatusCode::OK, "{delete_response}");
+    let (_, main) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert!(
+        !main["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == task["id"])
+    );
+}
 #[derive(Clone)]
 struct Caller {
     token: String,
