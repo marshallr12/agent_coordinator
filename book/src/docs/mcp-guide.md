@@ -267,6 +267,15 @@ local journals:
   `integrations reconcile`, and `integrations finish` observe exact Git objects,
   preserve publication intent, and enforce guarded compare-and-swap publication.
 
+For interrupted publication, `coordinator_agent_publication_reconcile` records
+only a fresh observation that exactly matches the immutable saved base or intended
+result. The caller must verify the durable local intent journal and confirm the old
+publisher stopped, current policy and decisions still match, and no live or
+uncertain jobs or held reservations remain.
+A changed target, missing intent/evidence, or uncertainty stays human-gated. The
+service records client evidence but does not inspect a remote Git repository or
+independently verify process termination.
+
 MCP can inspect the resulting jobs, artifacts, workflow, and history. Recording
 a checkout, publication intent, or integration result through MCP does not prove
 that the corresponding local Git or process operation occurred.

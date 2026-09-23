@@ -425,6 +425,18 @@ to a shared repository/target. An uncertain push must be reconciled, not repeate
 as a new side effect. A commit or push alone is not task completion; only the
 guarded service finalization records done and releases dependencies.
 
+After an interrupted publication, keep the target hold. The native CLI's
+`integrations reconcile-agent` path is limited to a fresh observation exactly
+matching the saved pre-publication target or intended result, with the immutable
+local journal available and locked, the previous publisher stopped, its service
+owner expired or revoked, current policy/decisions, and no live or uncertain job
+or held reservation. A moved target, missing/mismatched journal, live producer,
+or ambiguous result remains for a human operator. The service stores this as a
+workstation attestation and does not independently verify Git or process state.
+MCP callers may use `coordinator_agent_publication_reconcile` only when they can
+provide the same fresh exact evidence. It never publishes or supplies check
+receipts.
+
 For deployment work, publish sanitized reports and supporting evidence through
 coordinator artifacts with the original task and producer job IDs. Keep local
 evidence until upload and independent retrieval are verified; record artifact IDs

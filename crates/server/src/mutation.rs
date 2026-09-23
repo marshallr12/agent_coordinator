@@ -237,7 +237,8 @@ fn allowed_during_restore(operation: &str) -> bool {
         || (operation.starts_with("POST /api/v1/projects/")
             && ((operation.contains("/reservations/") && operation.ends_with("/resolve"))
                 || (operation.contains("/workflow-activities/")
-                    && operation.ends_with("/publication-reconciliation"))))
+                    && (operation.ends_with("/publication-reconciliation")
+                        || operation.ends_with("/agent-publication-reconciliation")))))
 }
 
 fn allowed_during_clock_reconciliation(operation: &str) -> bool {
@@ -252,7 +253,8 @@ fn allowed_during_clock_reconciliation(operation: &str) -> bool {
                 || (operation.contains("/workflow-activities/")
                     && (operation.ends_with("/release")
                         || operation.ends_with("/integration-result")
-                        || operation.ends_with("/publication-reconciliation")))
+                        || operation.ends_with("/publication-reconciliation")
+                        || operation.ends_with("/agent-publication-reconciliation")))
                 || (operation.contains("/reservations/")
                     && (operation.ends_with("/release") || operation.ends_with("/resolve")))))
         || (operation.starts_with("POST /api/v1/reporters/")

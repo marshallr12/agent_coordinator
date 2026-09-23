@@ -289,6 +289,8 @@ enum IntegrationsCommand {
     Publish(IntegrationOperationArgs),
     /// Observe the remote target after an interrupted or uncertain publication.
     Reconcile(IntegrationOperationArgs),
+    /// Submit fresh, exact remote observation evidence for guarded agent reconciliation.
+    ReconcileAgent(IntegrationAgentReconcileArgs),
     /// Register exact publication and check-job receipts and finish integration.
     Finish(IntegrationFinishArgs),
 }
@@ -408,6 +410,22 @@ struct IntegrationOperationArgs {
     attempt: String,
     #[arg(long)]
     generation: u64,
+}
+
+#[derive(Args)]
+struct IntegrationAgentReconcileArgs {
+    #[arg(long)]
+    activity: String,
+    #[arg(long)]
+    attempt: String,
+    #[arg(long)]
+    generation: u64,
+    /// Confirm the old local publication command has exited and released its durable journal lock.
+    #[arg(long, default_value_t = false)]
+    publisher_stopped: bool,
+    /// Describe how termination/isolation was confirmed; this is recorded as workstation evidence.
+    #[arg(long)]
+    evidence: String,
 }
 
 #[derive(Args)]
@@ -1321,6 +1339,9 @@ async fn integrations_command(
         IntegrationsCommand::Prepare(args) => prepare_integration(cli, context, args).await,
         IntegrationsCommand::Publish(args) => publish_integration(cli, context, args).await,
         IntegrationsCommand::Reconcile(args) => reconcile_integration(cli, context, args).await,
+        IntegrationsCommand::ReconcileAgent(args) => {
+            reconcile_agent_integration(cli, context, args).await
+        }
         IntegrationsCommand::Finish(args) => finish_integration(cli, context, args).await,
     }
 }
@@ -1554,6 +1575,140 @@ async fn reconcile_integration(
     let outcome = coordinator_local::git_workflow::reconcile_publication(&state_file, repository)
         .map_err(Failure::temporary)?;
     Ok(json!({"data":{"publication":outcome}}))
+}
+
+async fn reconcile_agent_integration(
+    cli: &Cli,
+    context: &ContextData,
+    args: &IntegrationAgentReconcileArgs,
+) -> std::result::Result<Value, Failure> {
+    let (_session_lock, session_path, mut session) = load_required_state(cli, context)?;
+    if session.pending.is_some() {
+        return Err(Failure::invalid(
+            "an earlier mutation is unresolved; run `agent-coordinator retry` before reconciliation",
+        ));
+    }
+    if !args.publisher_stopped || args.evidence.trim().is_empty() {
+        return Err(Failure::invalid(
+            "agent reconciliation requires --publisher-stopped and concrete --evidence",
+        ));
+    }
+    let detail = remote_integration_context(context, &session.session, &args.activity).await?;
+    let activity = activity_record(&detail);
+    let submission = detail
+        .pointer("/data/submission")
+        .ok_or_else(|| Failure::temporary("workflow response omitted submission"))?;
+    let intent = coordinator_local::git_workflow::load_integration_intent(
+        &integration_state_file(context, &args.activity, &args.attempt)
+            .map_err(Failure::invalid)?,
+    )
+    .map_err(Failure::invalid)?;
+    let remote = submission
+        .get("repository")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::temporary("submission omitted repository"))?;
+    if submission.get("id").and_then(Value::as_str)
+        != activity.get("submission_id").and_then(Value::as_str)
+        || activity
+            .pointer("/intent/result_revision")
+            .and_then(Value::as_str)
+            != intent.result.as_deref()
+        || activity
+            .pointer("/intent/result_tree")
+            .and_then(Value::as_str)
+            != intent.result_tree.as_deref()
+        || activity
+            .pointer("/intent/observed_target_revision")
+            .and_then(Value::as_str)
+            != Some(intent.expected_target.as_str())
+        || activity
+            .pointer("/intent/observed_target_tree")
+            .and_then(Value::as_str)
+            != Some(intent.expected_target_tree.as_str())
+    {
+        return Err(Failure::local(
+            5,
+            "publication_intent_mismatch",
+            "local journal does not match the current immutable service intent",
+            false,
+        ));
+    }
+    let project = bound_project(context, Some(&session.session)).await?;
+    let target_branch = project
+        .get("target_branch")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::temporary("project omitted target_branch"))?;
+    if intent.target_branch != target_branch {
+        return Err(Failure::local(
+            5,
+            "publication_target_mismatch",
+            "local journal target differs from the current project target",
+            false,
+        ));
+    }
+    let publication =
+        coordinator_local::git_workflow::reconcile_publication(&intent.state_file, remote)
+            .map_err(Failure::temporary)?;
+    let (disposition, revision, tree) = match publication {
+        coordinator_local::git_workflow::PublicationOutcome::Published { revision } => (
+            "published",
+            revision,
+            intent
+                .result_tree
+                .clone()
+                .ok_or_else(|| Failure::temporary("local journal omitted result tree"))?,
+        ),
+        coordinator_local::git_workflow::PublicationOutcome::NotPublished {
+            observed: Some(revision),
+        } => (
+            "not_published",
+            revision,
+            intent.expected_target_tree.clone(),
+        ),
+        coordinator_local::git_workflow::PublicationOutcome::TargetMoved { .. } => {
+            return Err(Failure::local(
+                5,
+                "publication_target_moved",
+                "the target moved; retain the hold and use human reconciliation",
+                false,
+            ));
+        }
+        coordinator_local::git_workflow::PublicationOutcome::Uncertain { .. }
+        | coordinator_local::git_workflow::PublicationOutcome::NotPublished { observed: None } => {
+            return Err(Failure::local(
+                5,
+                "publication_uncertain",
+                "the exact outcome is not established; retain the hold and use human reconciliation",
+                false,
+            ));
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Failure::temporary("local clock is before Unix epoch"))?
+        .as_millis();
+    let observed_at =
+        i64::try_from(now).map_err(|_| Failure::temporary("local clock value is out of range"))?;
+    let body = json!({
+        "attempt_id": args.attempt, "generation": args.generation,
+        "submission_id": submission["id"], "disposition": disposition,
+        "canonical_repository_key": submission["canonical_repository_key"], "target_branch": target_branch,
+        "observed_target_revision": revision, "observed_target_tree": tree, "observed_at": observed_at,
+        "local_journal_verified": true, "publisher_stopped": true, "evidence": args.evidence
+    });
+    let path =
+        activity_operation_path(context, &args.activity, "agent-publication-reconciliation")?;
+    let response = persist_and_send(
+        context,
+        &session_path,
+        &mut session,
+        HttpMethod::Post,
+        &path,
+        body,
+        true,
+    )
+    .await?;
+    Ok(data(&require_success(response)?))
 }
 
 async fn finish_integration(

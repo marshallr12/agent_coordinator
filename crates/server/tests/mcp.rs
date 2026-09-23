@@ -496,7 +496,7 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
         .await;
     assert_eq!(modern.status, StatusCode::OK);
     let tools = modern.body["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 59);
+    assert_eq!(tools.len(), 60);
     let names: Vec<_> = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
@@ -508,6 +508,7 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
         "coordinator_submit",
         "coordinator_activity_claim",
         "coordinator_review",
+        "coordinator_agent_publication_reconcile",
         "coordinator_context",
         "coordinator_task_history",
     ] {

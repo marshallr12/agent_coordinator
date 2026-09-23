@@ -148,6 +148,24 @@ pub struct PublicationReconciliationInput {
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct AgentPublicationReconciliationInput {
+    pub attempt_id: String,
+    pub generation: i64,
+    pub submission_id: String,
+    pub disposition: String,
+    pub canonical_repository_key: String,
+    pub target_branch: String,
+    pub observed_target_revision: String,
+    pub observed_target_tree: String,
+    pub observed_at: i64,
+    pub local_journal_verified: bool,
+    pub publisher_stopped: bool,
+    pub evidence: String,
+}
+
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FinalizeIntegrationInput {
     pub generation: i64,
     pub submission_id: String,

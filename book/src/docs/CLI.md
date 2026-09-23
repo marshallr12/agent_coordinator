@@ -790,8 +790,32 @@ agent-coordinator integrations reconcile \
 ```
 
 This local reconciliation can confirm the exact prepared result, report that the
-target moved, or preserve an uncertain outcome. Only an authenticated human can
-record the service-side disposition of an uncertain or known nonpublication.
+target moved, or preserve an uncertain outcome. It observes the configured remote
+and uses the exact immutable local intent; it never publishes.
+
+When the saved intent and local journal are available, the prior publisher is
+confirmed stopped, its integration ownership is expired or revoked, current
+policy and decisions still match, and no live/uncertain jobs or held reservations
+remain, an agent can record only an exact observation of the saved base or exact
+intended result:
+
+```sh
+agent-coordinator integrations reconcile-agent \
+  --activity integration-activity-id \
+  --attempt integration-attempt-id \
+  --generation 1 \
+  --publisher-stopped \
+  --evidence 'Previous publisher exited and released its journal lock'
+```
+
+The command obtains the local journal lock, compares its intent with the current
+service submission, and freshly observes the configured remote before saving
+the exact request and idempotency key. A moved target, unavailable or mismatched
+journal, active publisher, live job, held reservation, or uncertain outcome
+retains the integration hold for human reconciliation. The service records this
+workstation evidence as an attestation; it does not inspect Git or prove process
+termination independently.
+
 If the remote moved to an object the trusted checkout does not contain, fetch
 that exact remote target ref into the checkout and reconcile again so its tree
 can be observed before a human records evidence. If the target ref was deleted,

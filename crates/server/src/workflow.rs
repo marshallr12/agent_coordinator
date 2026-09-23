@@ -7,10 +7,11 @@ use axum::{
     routing::{get, post},
 };
 use coordinator_core::{
-    ActivityClaimInput, ActivityReleaseInput, FinalizeIntegrationInput, INSTRUCTION_VERSION,
-    IntegrationAuthorizationInput, IntegrationResultInput, PublicationIntentInput,
-    PublicationReconciliationInput, ReopenSubmissionInput, RequiredCheck, ReviewInput,
-    SubmissionInput, WorkflowPolicyInput, timestamp,
+    ActivityClaimInput, ActivityReleaseInput, AgentPublicationReconciliationInput,
+    FinalizeIntegrationInput, INSTRUCTION_VERSION, IntegrationAuthorizationInput,
+    IntegrationResultInput, PublicationIntentInput, PublicationReconciliationInput,
+    ReopenSubmissionInput, RequiredCheck, ReviewInput, SubmissionInput, WorkflowPolicyInput,
+    timestamp,
 };
 use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection};
@@ -68,6 +69,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/projects/{project}/workflow-activities/{activity}/publication-reconciliation",
             post(reconcile_publication),
+        )
+        .route(
+            "/api/v1/projects/{project}/workflow-activities/{activity}/agent-publication-reconciliation",
+            post(agent_reconcile_publication),
         )
         .route(
             "/api/v1/projects/{project}/workflow-activities/{activity}/finalize",
@@ -2363,6 +2368,229 @@ async fn reconcile_publication(
         .bind(Uuid::new_v4().to_string()).bind(&replacement)
         .bind(ctx.canonical_repository_key.as_deref().ok_or_else(||AppError::conflict("workflow_policy_required","Replacement integration requires the pinned canonical repository key."))?)
         .bind(ctx.target_branch.as_deref().ok_or_else(||AppError::conflict("target_required","Replacement integration requires the pinned target branch."))?)
+        .bind(&m.actor.id).bind(m.now).execute(&mut *m.tx).await?;
+    let value = workflow_snapshot(&mut m.tx, &project, &ctx.subject_task, m.now).await?;
+    Ok(response(
+        m.finish(
+            value,
+            Some(&project),
+            "integration.publication_reconciled",
+            &ctx.id,
+        )
+        .await?,
+    ))
+}
+
+async fn agent_reconcile_publication(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path((project, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<AgentPublicationReconciliationInput>, JsonRejection>,
+) -> Reply {
+    let input = payload(body)?;
+    if !["published", "not_published"].contains(&input.disposition.as_str()) {
+        return Err(AppError::bad_request(
+            "Agent reconciliation accepts only published or not_published; target movement and uncertainty require a human operator.",
+        ));
+    }
+    revision(&input.observed_target_revision, "observed_target_revision")?;
+    revision(&input.observed_target_tree, "observed_target_tree")?;
+    bounded(
+        &input.canonical_repository_key,
+        "canonical_repository_key",
+        255,
+        true,
+    )?;
+    bounded(&input.target_branch, "target_branch", 255, true)?;
+    bounded(&input.evidence, "evidence", 16384, true)?;
+    if !input.local_journal_verified || !input.publisher_stopped {
+        return Err(AppError::conflict(
+            "publication_evidence_incomplete",
+            "Agent reconciliation requires a verified durable local intent journal and confirmation that the original publication process stopped; otherwise a human must reconcile.",
+        ));
+    }
+    let mut m = Mutation::begin(
+        &state,
+        &auth,
+        &headers,
+        &format!(
+            "POST /api/v1/projects/{project}/workflow-activities/{id}/agent-publication-reconciliation"
+        ),
+        &input,
+    )
+    .await?;
+    if m.actor.kind != "agent" {
+        return Err(AppError::forbidden(
+            "This endpoint is reserved for an authenticated agent session.",
+        ));
+    }
+    session(&m.actor)?;
+    let ctx = activity_context(&mut m.tx, &project, &id).await?;
+    if let Some(v) = m.replay {
+        return Ok(response(v));
+    }
+    if input.submission_id != ctx.submission || ctx.submission != ctx.current_submission {
+        return Err(AppError::conflict(
+            "integration_candidate_mismatch",
+            "Reconciliation must name the exact current submission.",
+        ));
+    }
+    if ctx.project_policy_revision != ctx.project_current_policy
+        || (ctx.workflow_policy_revision > 0
+            && ctx.workflow_current_policy != Some(ctx.workflow_policy_revision))
+    {
+        return Err(AppError::conflict(
+            "workflow_policy_changed",
+            "The candidate policy changed; only a human can reconcile this publication.",
+        ));
+    }
+    if ctx.recovery_mode != "agent" {
+        return Err(AppError::conflict(
+            "agent_reconciliation_policy_disabled",
+            "The project recovery policy reserves publication reconciliation to a human operator.",
+        ));
+    }
+    ensure_activity_decisions(&mut m, &project, &ctx).await?;
+    if ctx.kind != "integration" || !matches!(ctx.state.as_str(), "active" | "recovery_required") {
+        return Err(AppError::conflict(
+            "activity_not_eligible",
+            "Only an unresolved integration activity can use agent reconciliation.",
+        ));
+    }
+    if input.canonical_repository_key != ctx.canonical_repository_key.as_deref().unwrap_or_default()
+        || input.target_branch != ctx.target_branch.as_deref().unwrap_or_default()
+    {
+        return Err(AppError::conflict(
+            "publication_target_mismatch",
+            "The observation must identify the exact repository and branch pinned to this integration.",
+        ));
+    }
+    const OBSERVATION_MAX_AGE_MS: i64 = 120_000;
+    if input.observed_at > m.now || m.now.saturating_sub(input.observed_at) > OBSERVATION_MAX_AGE_MS
+    {
+        return Err(AppError::conflict(
+            "publication_observation_stale",
+            "Agent reconciliation requires a fresh target observation from the last two minutes.",
+        ));
+    }
+    let intent = sqlx::query("SELECT attempt_id,observed_target_revision,observed_target_tree,result_revision,result_tree FROM publication_intents WHERE activity_id=? AND submission_id=?")
+        .bind(&ctx.id).bind(&ctx.submission).fetch_optional(&mut *m.tx).await?
+        .ok_or_else(|| AppError::conflict("publication_intent_required", "There is no immutable publication intent to reconcile."))?;
+    let attempt_id: String = intent.get("attempt_id");
+    let intent_generation: Option<i64> =
+        sqlx::query_scalar("SELECT generation FROM attempts WHERE id=? AND project_id=?")
+            .bind(&attempt_id)
+            .bind(&project)
+            .fetch_optional(&mut *m.tx)
+            .await?;
+    if input.attempt_id != attempt_id || intent_generation != Some(input.generation) {
+        return Err(AppError::conflict(
+            "publication_attempt_mismatch",
+            "Agent reconciliation must name the exact attempt generation pinned by the immutable publication intent.",
+        ));
+    }
+    let owner_live: i64 = sqlx::query_scalar("SELECT count(*) FROM attempts a LEFT JOIN credentials c ON c.id=a.credential_id LEFT JOIN agent_sessions s ON s.id=a.session_id AND s.credential_id=a.credential_id LEFT JOIN browser_sessions bs ON bs.id=a.session_id WHERE a.id=? AND a.state='active' AND a.expires_at>? AND ((a.credential_id IS NOT NULL AND c.id IS NOT NULL AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>?) AND s.id IS NOT NULL AND s.closed_at IS NULL) OR (a.credential_id IS NULL AND bs.id IS NOT NULL AND bs.revoked_at IS NULL AND bs.expires_at>?))")
+        .bind(&attempt_id).bind(m.now).bind(m.now).bind(m.now).fetch_one(&mut *m.tx).await?;
+    let uncertain_jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE attempt_id=? AND state IN ('registered','running','unknown')")
+        .bind(&attempt_id).fetch_one(&mut *m.tx).await?;
+    let held_reservations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM reservations WHERE attempt_id=? AND state='held'")
+            .bind(&attempt_id)
+            .fetch_one(&mut *m.tx)
+            .await?;
+    if owner_live != 0 || uncertain_jobs != 0 || held_reservations != 0 {
+        return Err(AppError::conflict(
+            "publication_producer_uncertain",
+            "An active integration owner, live or uncertain producer, or held reservation remains; retain the global hold and use human reconciliation.",
+        ));
+    }
+    let result_state: Option<String> =
+        sqlx::query_scalar("SELECT publication_state FROM integration_results WHERE activity_id=?")
+            .bind(&ctx.id)
+            .fetch_optional(&mut *m.tx)
+            .await?;
+    if matches!(result_state.as_deref(), Some("published" | "not_published")) {
+        return Err(AppError::conflict(
+            "publication_already_known",
+            "A known integration result does not need agent reconciliation.",
+        ));
+    }
+    let (expected_revision, expected_tree) = if input.disposition == "published" {
+        (
+            intent.get::<String, _>("result_revision"),
+            intent.get::<String, _>("result_tree"),
+        )
+    } else {
+        (
+            intent.get::<String, _>("observed_target_revision"),
+            intent.get::<String, _>("observed_target_tree"),
+        )
+    };
+    if input.observed_target_revision != expected_revision
+        || input.observed_target_tree != expected_tree
+    {
+        return Err(AppError::conflict(
+            "publication_observation_ambiguous",
+            "The observed target is neither the exact intended result nor the exact saved pre-publication target; a human must inspect the changed target.",
+        ));
+    }
+    if sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM integration_holds WHERE activity_id=? AND state='held'",
+    )
+    .bind(&ctx.id)
+    .fetch_one(&mut *m.tx)
+    .await?
+        == 0
+    {
+        return Err(AppError::conflict(
+            "integration_hold_required",
+            "The original integration hold is not held; agent reconciliation cannot recreate or bypass it.",
+        ));
+    }
+
+    sqlx::query("INSERT INTO publication_reconciliations(activity_id,submission_id,disposition,observed_target_revision,observed_target_tree,evidence,actor_id,created_at) VALUES(?,?,?,?,?,?,?,?)")
+        .bind(&ctx.id).bind(&ctx.submission).bind(&input.disposition).bind(&input.observed_target_revision).bind(&input.observed_target_tree)
+        .bind(format!("agent observation; repository={}; branch={}; observed_at={}; local_journal_verified=true; publisher_stopped=true; {}", input.canonical_repository_key, input.target_branch, input.observed_at, input.evidence))
+        .bind(&m.actor.id).bind(m.now).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE attempts SET state='canceled',ended_at=?,outcome='Publication reconciled by an agent from exact durable intent and fresh remote evidence; replacement integration required.' WHERE id=? AND state='active'")
+        .bind(m.now).bind(&attempt_id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE integration_holds SET state='released',released_by=?,released_at=?,release_reason=? WHERE activity_id=? AND state='held'")
+        .bind(&m.actor.id).bind(m.now).bind(format!("Agent reconciliation: {}", input.disposition)).bind(&ctx.id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE id=?")
+        .bind(m.now)
+        .bind(&ctx.id)
+        .execute(&mut *m.tx)
+        .await?;
+    sqlx::query("UPDATE tasks SET lifecycle='canceled',current_attempt_id=NULL,blocked_reason=NULL WHERE id=?")
+        .bind(&ctx.activity_task).execute(&mut *m.tx).await?;
+    let slot: i64 = sqlx::query_scalar("SELECT COALESCE(max(slot),0)+1 FROM workflow_activities WHERE submission_id=? AND kind='integration'")
+        .bind(&ctx.submission).fetch_one(&mut *m.tx).await?;
+    let s = sqlx::query("SELECT t.id,t.kind,t.title,t.acceptance_json,t.revision,p.policy_revision,p.review_mode FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?")
+        .bind(&ctx.subject_task).fetch_one(&mut *m.tx).await?;
+    let subject = OwnedSubject {
+        task_id: s.get("id"),
+        kind: s.get("kind"),
+        title: s.get("title"),
+        acceptance_json: s.get("acceptance_json"),
+        task_revision: s.get("revision"),
+        project_policy_revision: s.get("policy_revision"),
+        review_mode: s.get("review_mode"),
+    };
+    let replacement = create_activity(
+        &mut m.tx,
+        &project,
+        &subject,
+        &ctx.submission,
+        "integration",
+        slot,
+        m.now,
+    )
+    .await?;
+    sqlx::query("INSERT INTO integration_holds(id,activity_id,canonical_repository_key,target_branch,state,acquired_by,acquired_at) VALUES(?,?,?,?,'held',?,?)")
+        .bind(Uuid::new_v4().to_string()).bind(&replacement)
+        .bind(ctx.canonical_repository_key.as_deref().ok_or_else(|| AppError::conflict("workflow_policy_required", "Replacement integration requires the pinned canonical repository key."))?)
+        .bind(ctx.target_branch.as_deref().ok_or_else(|| AppError::conflict("target_required", "Replacement integration requires the pinned target branch."))?)
         .bind(&m.actor.id).bind(m.now).execute(&mut *m.tx).await?;
     let value = workflow_snapshot(&mut m.tx, &project, &ctx.subject_task, m.now).await?;
     Ok(response(

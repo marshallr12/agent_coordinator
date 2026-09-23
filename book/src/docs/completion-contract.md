@@ -106,6 +106,19 @@ new submission and new reviews. Live current owners must release first, and
 unresolved jobs/resources always block reopening. After publication intent, use
 publication reconciliation. Completed workflows cannot be reopened.
 
+An authenticated agent may reconcile only when the exact current candidate and
+policy are unchanged, current scoped decisions are resolved, a fresh observation
+of the pinned repository branch exactly matches the immutable pre-publication
+base or intended result, the old publisher is confirmed stopped, the integration
+owner is no longer live, and no registered job is live or uncertain and no
+reservation remains held. Agent reconciliation cannot publish or create check
+receipts. A moved target, missing durable intent or local journal, conflicting
+result, or any ambiguous producer remains human-gated with the target hold
+preserved. The native CLI serializes its local journal and records its evidence;
+the service stores this as a client attestation and does not verify remote Git or
+process state itself. Both human and agent reconciliation retain the original
+record and create a fresh integration activity under the same target hold.
+
 Activity attempts renew through the existing
 `POST /api/v1/projects/{project}/attempts/{attempt}/renew` endpoint and use existing
 checkout, reservation, and job endpoints. They release through
@@ -201,6 +214,23 @@ activity requires fresh authorization and checks against its new result. Reconci
 cannot invent check success. Confirmed publication must match the intent's exact
 result revision/tree. Confirmed nonpublication permits an explicit new integration
 attempt after the old hold is closed in the same transaction.
+
+Agents use the separate
+`POST /api/v1/projects/{project}/workflow-activities/{activity}/agent-publication-reconciliation`
+operation with `{attempt_id, generation, submission_id, disposition, canonical_repository_key,
+target_branch, observed_target_revision, observed_target_tree, observed_at,
+local_journal_verified, publisher_stopped, evidence}`. `observed_at` is Unix
+milliseconds and must be no more than two minutes old. Both boolean fields must
+be true. The disposition can only be `published` when both
+identities equal the immutable intended result, or `not_published` when both
+equal the saved pre-publication target. The endpoint also requires an expired or
+revoked integration owner, no registered live/uncertain job, no held reservation,
+current candidate/policy/decisions, and the still-held original target. Moved or
+missing targets, an unavailable local journal, a running publisher, or any other
+uncertainty stay human-gated. The service cannot independently inspect Git or
+prove that a workstation process stopped; agent evidence remains a client
+attestation. The native CLI obtains its protected journal lock and remote
+observation before it sends this mutation.
 
 For a known published result, call
 `POST /api/v1/projects/{project}/workflow-activities/{activity}/finalize` with

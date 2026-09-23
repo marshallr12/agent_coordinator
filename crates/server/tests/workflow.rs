@@ -10,7 +10,7 @@ use coordinator_server::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sqlx::Connection;
+use sqlx::{Connection, Row};
 use std::sync::{
     Arc,
     atomic::{AtomicI64, Ordering},
@@ -1230,6 +1230,158 @@ async fn intent_only_crash_retains_hold_until_human_reconciliation_creates_repla
     let (status,done)=f.call(&f.c,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/finalize",replacement["id"].as_str().unwrap()),json!({"generation":fresh["generation"],"submission_id":replacement["submission_id"],"observed_target_revision":RESULT,"observed_target_tree":RESULT_TREE})).await;
     assert_eq!(status, StatusCode::OK, "{done}");
     assert_eq!(done["data"]["work_status"], "done");
+}
+
+#[tokio::test]
+async fn agent_reconciliation_requires_stopped_publisher_and_exact_fresh_remote_evidence() {
+    let f = Fixture::new().await;
+    let (p, _t, submitted) = code_integration(&f, "agent-reconcile", "agent-reconcile").await;
+    let integration = activity(&submitted, "integration").clone();
+    let (_, claimed) = f.claim_activity(&f.c, &p, &integration, 2, 1).await;
+    let attempt = claimed["data"]["attempt"].clone();
+    f.checkout(&f.c, &p, &attempt, CANDIDATE).await;
+    let path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/publication-intent",
+        integration["id"].as_str().unwrap()
+    );
+    let (status, intent) = f.call(&f.c, "POST", &path, json!({"generation":attempt["generation"],"submission_id":integration["submission_id"],"observed_target_revision":BASE,"observed_target_tree":BASE_TREE,"result_revision":RESULT,"result_tree":RESULT_TREE})).await;
+    assert_eq!(status, StatusCode::OK, "{intent}");
+
+    let reconcile_path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/agent-publication-reconciliation",
+        integration["id"].as_str().unwrap()
+    );
+    let evidence = json!({
+        "attempt_id": attempt["id"],
+        "generation": attempt["generation"],
+        "submission_id": integration["submission_id"],
+        "disposition": "published",
+        "canonical_repository_key": "agent-reconcile",
+        "target_branch": "main",
+        "observed_target_revision": RESULT,
+        "observed_target_tree": RESULT_TREE,
+        "observed_at": f.clock.now_ms(),
+        "local_journal_verified": true,
+        "publisher_stopped": true,
+        "evidence": "publisher process exited; fresh ls-remote observation resolved to the intended commit and tree"
+    });
+    let mut no_journal = evidence.clone();
+    no_journal["local_journal_verified"] = json!(false);
+    let (status, journal_rejected) = f.call(&f.c, "POST", &reconcile_path, no_journal).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{journal_rejected}");
+    assert_eq!(
+        journal_rejected["error"]["code"],
+        "publication_evidence_incomplete"
+    );
+    let (status, live_rejected) = f
+        .call(&f.c, "POST", &reconcile_path, evidence.clone())
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{live_rejected}");
+    assert_eq!(
+        live_rejected["error"]["code"],
+        "publication_producer_uncertain"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM integration_holds WHERE activity_id=?")
+            .bind(integration["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap(),
+        "held"
+    );
+
+    f.clock.0.fetch_add(600_001, Ordering::SeqCst);
+    let mut fresh_evidence = evidence.clone();
+    fresh_evidence["observed_at"] = json!(f.clock.now_ms());
+    let reconciliation_key = "agent-publication-reconciliation-retry";
+    let (status, reconciled) = call(
+        f.app.clone(),
+        &f.c,
+        "POST",
+        &reconcile_path,
+        reconciliation_key,
+        fresh_evidence.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reconciled}");
+    let (replay_status, replayed) = call(
+        f.app.clone(),
+        &f.c,
+        "POST",
+        &reconcile_path,
+        reconciliation_key,
+        fresh_evidence,
+    )
+    .await;
+    assert_eq!(replay_status, StatusCode::OK, "{replayed}");
+    assert_eq!(
+        replayed["data"]["activities"],
+        reconciled["data"]["activities"]
+    );
+    assert_eq!(
+        reconciled["data"]["activities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["kind"] == "integration")
+            .count(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM integration_holds WHERE activity_id=?")
+            .bind(integration["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap(),
+        "released"
+    );
+    let row = sqlx::query(
+        "SELECT disposition,evidence,actor_id FROM publication_reconciliations WHERE activity_id=?",
+    )
+    .bind(integration["id"].as_str().unwrap())
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("disposition"), "published");
+    assert!(
+        row.get::<String, _>("evidence")
+            .contains("local_journal_verified=true; publisher_stopped=true")
+    );
+    assert_eq!(row.get::<String, _>("actor_id"), f.c.principal);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM publication_reconciliations WHERE activity_id=?"
+        )
+        .bind(integration["id"].as_str().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn agent_reconciliation_keeps_changed_target_human_gated() {
+    let f = Fixture::new().await;
+    let (p, _t, submitted) =
+        code_integration(&f, "agent-reconcile-moved", "agent-reconcile-moved").await;
+    let integration = activity(&submitted, "integration").clone();
+    let (_, claimed) = f.claim_activity(&f.c, &p, &integration, 2, 1).await;
+    let attempt = claimed["data"]["attempt"].clone();
+    f.checkout(&f.c, &p, &attempt, CANDIDATE).await;
+    let (status, intent) = f.call(&f.c, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/publication-intent", integration["id"].as_str().unwrap()), json!({"generation":attempt["generation"],"submission_id":integration["submission_id"],"observed_target_revision":BASE,"observed_target_tree":BASE_TREE,"result_revision":RESULT,"result_tree":RESULT_TREE})).await;
+    assert_eq!(status, StatusCode::OK, "{intent}");
+    f.clock.0.fetch_add(600_001, Ordering::SeqCst);
+    let (status, rejected) = f.call(&f.c, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/agent-publication-reconciliation", integration["id"].as_str().unwrap()), json!({"attempt_id":attempt["id"],"generation":attempt["generation"],"submission_id":integration["submission_id"],"disposition":"target_moved","canonical_repository_key":"agent-reconcile-moved","target_branch":"main","observed_target_revision":RESULT,"observed_target_tree":RESULT_TREE,"observed_at":f.clock.now_ms(),"local_journal_verified":true,"publisher_stopped":true,"evidence":"target changed during uncertain publication"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM integration_holds WHERE activity_id=?")
+            .bind(integration["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap(),
+        "held"
+    );
 }
 
 #[tokio::test]

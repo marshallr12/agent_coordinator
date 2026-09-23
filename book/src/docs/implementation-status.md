@@ -39,7 +39,7 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   package identities, free-tier limits, and capacity/recovery scope. No repository
   is automatically bound and no agent is automatically enrolled.
 
-- Authenticated stateless Streamable HTTP at `/mcp` with 56 typed tools routed
+- Authenticated stateless Streamable HTTP at `/mcp` with 57 typed tools routed
   through the existing REST authorization and mutation checks. A protected native
   launcher shares the exact saved harness identity with a trusted foreground MCP
   client and its native CLI children. See the [MCP guide](mcp-guide.md).

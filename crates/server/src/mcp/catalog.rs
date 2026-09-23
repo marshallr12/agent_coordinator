@@ -286,6 +286,12 @@ fn build_catalog() -> Vec<Operation> {
             "POST",
             "/api/v1/projects/{project}/workflow-activities/{activity}/publication-reconciliation",
         ),
+        write::<AgentPublicationReconciliationInput>(
+            "coordinator_agent_publication_reconcile",
+            "Resolve only an expired or revoked publisher with fresh exact target observation, durable intent, confirmed stopped publisher, no live jobs or held reservations, and unchanged current policy. Changed targets and uncertainty remain human-gated. The caller must independently observe the configured Git remote; the service records workstation attestation but does not inspect Git.",
+            "POST",
+            "/api/v1/projects/{project}/workflow-activities/{activity}/agent-publication-reconciliation",
+        ),
         write::<FinalizeIntegrationInput>(
             "coordinator_integration_finalize",
             "Complete an integration only after required review, exact target identities, and recorded integrated checks pass. Dependencies unblock only when the service accepts completion.",
