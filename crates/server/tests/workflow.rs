@@ -10,6 +10,7 @@ use coordinator_server::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{Connection, Row};
 use std::sync::{
     Arc,
@@ -1452,6 +1453,161 @@ async fn manual_recovery_rejects_agent_takeover_and_human_reopens_expired_review
     let (status,reopened)=f.call(&f.admin,"POST",&format!("/api/v1/projects/{p}/tasks/{}/workflow/reopen",t["id"].as_str().unwrap()),json!({"submission_id":review["submission_id"],"reason":"expired reviewer inspected; no jobs or holds remain"})).await;
     assert_eq!(status, StatusCode::OK, "{reopened}");
     assert_eq!(reopened["data"]["work_status"], "ready");
+}
+
+#[tokio::test]
+async fn preconditions_surface_operator_reopen_and_reviewer_independence() {
+    let f = Fixture::new().await;
+    let p = f
+        .project(
+            "precondition review",
+            "https://example.test/preconditions.git",
+        )
+        .await;
+    let (status, policy) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &format!("/api/v1/projects/{p}/policy"),
+            json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let task = f.task(&p, "general", "Stale review candidate").await;
+    f.ack(&f.a, &p, 2).await;
+    let owner = f.claim(&f.a, &p, &task, 2).await;
+    let submitted = f
+        .submit(
+            &f.a, &p, &task, &owner, "general", 2, None, None, None, None,
+        )
+        .await;
+    let review = activity(&submitted, "agent_review").clone();
+
+    let (status, updated_policy) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &format!("/api/v1/projects/{p}/policy"),
+            json!({"expected_revision":2,"review_mode":"none","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated_policy}");
+
+    let (status, task_detail) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/tasks/{}",
+                task["id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{task_detail}");
+    assert!(
+        task_detail["data"]["preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "operator_reopen_required")
+    );
+
+    let (status, inspected) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/preconditions/{}",
+                review["id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{inspected}");
+    assert!(
+        inspected["data"]["unmet_preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "operator_reopen_required")
+    );
+    assert!(
+        inspected["data"]["unmet_preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "reviewer_not_independent")
+    );
+}
+
+#[tokio::test]
+async fn orientation_and_inspection_flag_merge_state_for_local_preflight() {
+    let f = Fixture::new().await;
+    let repo = "https://example.test/preflight.git";
+    let canonical = format!(
+        "url-sha256:{}",
+        hex::encode(Sha256::digest(repo.as_bytes()))
+    );
+    let (p, task, submitted) = code_integration(&f, "preflight", &canonical).await;
+    let integration = activity(&submitted, "integration").clone();
+
+    let (status, detail) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/tasks/{}",
+                task["id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["data"]["precondition_hints"][0]["code"],
+        "candidate_stale_merge_conflict_requires_preflight"
+    );
+    assert_eq!(
+        detail["data"]["precondition_hints"][0]["state"],
+        "requires_local_observation"
+    );
+
+    let (status, inspected) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/preconditions/{}",
+                integration["id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{inspected}");
+    assert_eq!(
+        inspected["data"]["precondition_hints"][0]["code"],
+        "candidate_stale_merge_conflict_requires_preflight"
+    );
+
+    let (status, orientation) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/orientation"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{orientation}");
+    assert!(
+        orientation["data"]["workflow_subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|subject| subject["task"]["id"] == task["id"]
+                && subject["task"]["precondition_hints"][0]["code"]
+                    == "candidate_stale_merge_conflict_requires_preflight")
+    );
 }
 
 #[tokio::test]

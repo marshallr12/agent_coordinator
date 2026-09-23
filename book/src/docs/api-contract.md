@@ -128,10 +128,31 @@ underlying HTTP workflow remains fully documented for clients without the CLI.
 instruction versions, session work, recovery candidates, blockers/decisions,
 relevant lessons, candidate tasks, and next actions. Required rules may require
 pagination; `instructions_complete: false` prevents new work until acknowledged.
+Workflow subjects include service-known precondition blockers and hints for
+candidate merge preflight and operator reopen.
 `POST /api/v1/sessions/{id}/instruction-acknowledgments` records the project,
 policy/instruction revisions, and required section IDs the client has received
 and read. Claims require the current complete acknowledgment. This establishes
 protocol acknowledgment, not proof that a model understood the prose.
+
+`GET /api/v1/projects/{project_id}/preconditions/{task_or_activity_id}` is a
+read-only inspection of current unmet claim/review/integration preconditions.
+Task detail and orientation workflow subjects surface the same service-known
+blockers. Results are observations and can become stale immediately; guarded
+claim and mutation endpoints remain authoritative. Code integration also returns
+a local merge-preflight hint: the service cannot inspect workstation Git or
+determine whether an immutable candidate conflicts with the current remote target.
+An operator must reopen a candidate when its pinned submission or policy is stale.
+
+`GET /api/v1/projects/{project_id}/state-wait` accepts `target_kind=task|activity`,
+`target_id`, an `after_state_token` returned by task detail/precondition inspection
+or activity detail/precondition inspection, and optional `timeout_seconds` from
+1 through 30 (default 15). It polls at 500 ms intervals, releases its database
+connection between reads, and returns immediately when the state token changes.
+On timeout it returns the latest snapshot with `timed_out: true`. This is an
+opt-in long poll for one task `work_status` or one workflow activity state; it
+does not hold a transaction, reserve resources, or renew ownership. Expected
+detection latency is at most about 500 ms plus request/database scheduling.
 
 `POST /api/v1/projects/{project_id}/claims` accepts exactly one task ID or a
 next-eligible selector. For an explicit task, include its expected revision.

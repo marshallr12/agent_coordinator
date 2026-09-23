@@ -496,7 +496,7 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
         .await;
     assert_eq!(modern.status, StatusCode::OK);
     let tools = modern.body["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 60);
+    assert_eq!(tools.len(), 62);
     let names: Vec<_> = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
@@ -511,6 +511,8 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
         "coordinator_agent_publication_reconcile",
         "coordinator_context",
         "coordinator_task_history",
+        "coordinator_preconditions_get",
+        "coordinator_state_wait",
     ] {
         assert!(names.contains(&required));
     }
@@ -873,6 +875,50 @@ async fn catalog_rejects_path_query_and_wrapper_injection_before_dispatch() {
         .await
         .unwrap();
     assert_eq!(attempts, 0);
+}
+
+#[tokio::test]
+async fn mcp_preconditions_and_state_wait_use_the_same_read_only_rest_contract() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("mcp-inspection").await;
+    let task = fixture.task(&project, "Inspect before claim").await;
+    let inspected_result = fixture
+        .tool(
+            &fixture.a,
+            "coordinator_preconditions_get",
+            json!({"project":project,"target":task["id"]}),
+        )
+        .await;
+    let inspected = inspected_result.tool_payload().clone();
+    assert_eq!(inspected["data"]["target_kind"], "task");
+    assert!(inspected["data"]["state_token"].as_str().is_some());
+    assert_eq!(inspected["data"]["eligible_to_claim"], false);
+    assert!(
+        inspected["data"]["unmet_preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "instructions_required")
+    );
+
+    let waited_result = fixture
+        .tool(
+            &fixture.a,
+            "coordinator_state_wait",
+            json!({
+                "project":project,
+                "query":{
+                    "target_kind":"task",
+                    "target_id":task["id"],
+                    "after_state_token":inspected["data"]["state_token"],
+                    "timeout_seconds":1
+                }
+            }),
+        )
+        .await;
+    let waited = waited_result.tool_payload().clone();
+    assert_eq!(waited["data"]["changed"], false);
+    assert_eq!(waited["data"]["timed_out"], true);
 }
 
 #[tokio::test]

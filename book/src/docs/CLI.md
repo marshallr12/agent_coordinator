@@ -1049,6 +1049,35 @@ agent-coordinator objectives show --id OBJECTIVE_ID
 agent-coordinator objectives children --id OBJECTIVE_ID --input membership.json
 ```
 
+### Inspect blockers and wait for a state change
+
+Task detail exposes service-known preconditions. For an exact task or workflow
+activity, use `GET /api/v1/projects/PROJECT_ID/preconditions/TARGET_ID` or the
+MCP tool `coordinator_preconditions_get` before claiming. The result names each
+known unmet gate, including reviewer independence and operator reopen where
+applicable. These reads do not reserve ownership; the guarded claim remains
+authoritative. Code integrations include a merge-preflight hint because the
+service cannot inspect Git remotes or determine merge conflicts itself.
+
+To wait without a polling loop, call the authenticated REST endpoint
+`GET /api/v1/projects/PROJECT_ID/state-wait` or MCP tool
+`coordinator_state_wait`. Provide `target_kind` (`task` or `activity`),
+`target_id`, and the `after_state_token` returned by task detail,
+activity detail, or precondition inspection. `timeout_seconds` is optional and
+bounded to 1–30 seconds (default 15). The service checks every 500 ms, holds no
+database transaction while sleeping, and returns the latest state on timeout.
+Expected detection latency is up to roughly 500 ms plus scheduling and query
+time. Waiting does not renew ownership; renew through the normal owner session.
+
+Cross-session delivery receipts for a separate Claude-to-Claude messaging
+channel are outside this service's scope: that transport is external and the
+coordinator cannot observe whether another client received its message. This is
+already filed with the correct owner in the open
+[Claude Code issue #86014](https://github.com/anthropics/claude-code/issues/86014),
+which asks for delivery or an error/pending result instead of unconditional
+success; do not create a duplicate coordinator endpoint or imply its event log
+confirms external receipt.
+
 Use `--cursor` from a returned page for task history, task lists, objective lists,
 and policy history. History kinds include attempts, checkpoints, checkouts, jobs,
 job_observations, resources, artifacts, submissions, reviews, integrations,

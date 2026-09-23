@@ -183,13 +183,15 @@ async fn official_client_discovers_registers_claims_and_reconnects_without_renew
         ProtocolVersion::V_2026_07_28
     );
     let tools = client.list_tools(None).await.unwrap();
-    assert_eq!(tools.tools.len(), 60);
+    assert_eq!(tools.tools.len(), 62);
     for required in [
         "coordinator_session_register",
         "coordinator_orientation",
         "coordinator_claim",
         "coordinator_attempt_get",
         "coordinator_agent_publication_reconcile",
+        "coordinator_preconditions_get",
+        "coordinator_state_wait",
     ] {
         assert!(tools.tools.iter().any(|tool| tool.name == required));
     }

@@ -14,6 +14,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicI64, Ordering},
 };
+use std::time::Duration;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -156,6 +157,90 @@ async fn seed(state: &AppState, human: bool, name: &str) -> Caller {
             .bind(&c.session).bind(&c.principal).bind(&c.credential).bind(name).bind(digest(&c.proof)).bind(state.now()).execute(&state.pool).await.unwrap();
     }
     c
+}
+
+#[tokio::test]
+async fn preconditions_report_service_gates_and_state_wait_detects_task_changes() {
+    let f = Fixture::new().await;
+    let p = f.project("preconditions and state wait").await;
+    let prerequisite = f.task(&p, "Prerequisite", vec![]).await;
+    let dependent = f
+        .task(
+            &p,
+            "Dependent",
+            vec![prerequisite["id"].as_str().unwrap().to_owned()],
+        )
+        .await;
+    let dependent_id = dependent["id"].as_str().unwrap();
+    let path = format!("/api/v1/projects/{p}/preconditions/{dependent_id}");
+    let (status, inspected) = f.call(&f.a, "GET", &path, "", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{inspected}");
+    assert_eq!(inspected["data"]["eligible_to_claim"], false);
+    assert!(
+        inspected["data"]["unmet_preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "dependencies_incomplete")
+    );
+    let (status, task_detail) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{dependent_id}"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{task_detail}");
+    assert_eq!(
+        task_detail["data"]["state_token"],
+        inspected["data"]["state_token"]
+    );
+    assert!(
+        task_detail["data"]["preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "dependencies_incomplete")
+    );
+    let token = inspected["data"]["state_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let app = f.app.clone();
+    let caller = f.a.clone();
+    let wait_path = format!(
+        "/api/v1/projects/{p}/state-wait?target_kind=task&target_id={}&after_state_token={token}&timeout_seconds=3",
+        dependent_id
+    );
+    let wait =
+        tokio::spawn(async move { call(app, &caller, "GET", &wait_path, "", json!({})).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sqlx::query("UPDATE tasks SET blocked_reason='Task is intentionally held.' WHERE id=?")
+        .bind(dependent["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, changed) = wait.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(changed["data"]["changed"], true);
+    assert_eq!(
+        changed["data"]["state"]["blocked_reason"],
+        "Task is intentionally held."
+    );
+
+    let (status, bad_timeout) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/state-wait?target_kind=task&target_id={dependent_id}&after_state_token={token}&timeout_seconds=31"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad_timeout}");
 }
 async fn call(
     app: Router,

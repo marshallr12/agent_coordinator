@@ -130,6 +130,23 @@ fn build_catalog() -> Vec<Operation> {
             "/api/v1/projects/{project}/tasks/{task}",
             json!({}),
         ),
+        read(
+            "coordinator_preconditions_get",
+            "Inspect currently unmet claim/review/integration preconditions for a task or workflow activity without attempting the guarded mutation. Results are observations and may change immediately.",
+            "/api/v1/projects/{project}/preconditions/{target}",
+            json!({}),
+        ),
+        read(
+            "coordinator_state_wait",
+            "Wait up to 30 seconds for a task work_status or workflow activity state token to change. Polling holds no database transaction and grants no ownership.",
+            "/api/v1/projects/{project}/state-wait",
+            json!({
+                "target_kind":{"type":"string","enum":["task","activity"]},
+                "target_id":{"type":"string","minLength":1,"maxLength":128},
+                "after_state_token":{"type":"string","minLength":1,"maxLength":64},
+                "timeout_seconds":{"type":"integer","minimum":1,"maximum":30}
+            }),
+        ),
         write::<TaskInput>(
             "coordinator_task_create",
             "Create a task with acceptance criteria, priority, and same-project dependencies. This does not claim it.",
@@ -479,6 +496,7 @@ fn definition(op: &Operation) -> Tool {
         let required_query = match op.name {
             "coordinator_context" => vec!["q"],
             "coordinator_task_history" => vec!["kind"],
+            "coordinator_state_wait" => vec!["target_kind", "target_id", "after_state_token"],
             _ => vec![],
         };
         properties.insert("query".into(), json!({"type":"object","additionalProperties":false,"properties":op.query,"required":required_query}));

@@ -39,7 +39,7 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   package identities, free-tier limits, and capacity/recovery scope. No repository
   is automatically bound and no agent is automatically enrolled.
 
-- Authenticated stateless Streamable HTTP at `/mcp` with 57 typed tools routed
+- Authenticated stateless Streamable HTTP at `/mcp` with 62 typed tools routed
   through the existing REST authorization and mutation checks. A protected native
   launcher shares the exact saved harness identity with a trusted foreground MCP
   client and its native CLI children. See the [MCP guide](mcp-guide.md).
@@ -55,6 +55,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 - Tasks with acceptance criteria, priorities, immutable definition revisions,
   planned/open lifecycle, same-project prerequisites and cycle rejection.
   Listings are observations. A transactional claim is the only ownership grant.
+- Read-only precondition inspection for task, review, and integration claims.
+  Task and orientation workflow subjects surface known blockers, including
+  reviewer independence, stale pinned policy/operator reopen, and a local Git
+  merge-preflight hint. An authenticated bounded long poll waits up to 30 seconds
+  for one task status or workflow activity state token, checking at 500 ms
+  intervals without holding a database transaction or renewing work. The service
+  cannot inspect remote Git state or determine merge conflicts.
 - Separate harness sessions with random persisted proofs bound to the issuing
   credential. One current attempt per task, monotonic ownership generations,
   renewable deadlines, separate heartbeat/progress timestamps, and revocation

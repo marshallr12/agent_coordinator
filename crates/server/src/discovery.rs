@@ -4,9 +4,11 @@ pub const CONTINUATION_INSTRUCTIONS: &str = "Keep claiming eligible tasks in the
 
 pub fn mcp_instructions() -> String {
     format!(
-        "{MCP_INSTRUCTIONS}\n\n{REVIEW_SELECTION_INSTRUCTIONS}\n\n{CONTINUATION_INSTRUCTIONS}\n\n{WORKTREE_CLEANUP_INSTRUCTIONS}"
+        "{MCP_INSTRUCTIONS}\n\n{INSPECTION_INSTRUCTIONS}\n\n{REVIEW_SELECTION_INSTRUCTIONS}\n\n{CONTINUATION_INSTRUCTIONS}\n\n{WORKTREE_CLEANUP_INSTRUCTIONS}"
     )
 }
+
+pub const INSPECTION_INSTRUCTIONS: &str = "Use coordinator_preconditions_get with a task or activity ID to inspect current claim/review/integration blockers before attempting guarded work. Task/orientation and activity reads include current state_token values. coordinator_state_wait can wait up to 30 seconds for one task work_status or workflow activity state change; it polls every 500 ms without holding a database transaction or renewing ownership. These observations can become stale immediately. For code integration, Git merge-conflict status requires a local target preflight; the service does not inspect workstation repositories.";
 
 pub const WORKTREE_CLEANUP_INSTRUCTIONS: &str = "After a fresh task read confirms the subject task is done, the completing agent removes its task-specific implementation and integration worktrees. Submission, review approval, or publication alone does not authorize removal; retain worktrees while review or integration is pending. Always preserve the main parent checkout and any main target checkout, plus unrelated worktrees and branches unless separately authorized. Save commits, handoff, and required logs/artifacts outside the worktrees first. Match each exact resolved path and Git worktree identity against the task's registered checkout and git worktree list --porcelain. Confirm no agent or live/uncertain job still uses the tree; inspect tracked changes, untracked files, and meaningful ignored files. Retain the tree if work or evidence is unsaved, ownership is unclear, or inspection fails. From outside the worktree, run git worktree remove with its verified absolute path, without --force or recursive filesystem deletion. Verify removal and report the removed path, or the retained path and concrete blocker, in the final handoff. Cleanup is local agent work; the service does not delete worktrees. After successful worktree removal, delete its exact local and remote task branches only after verifying exclusive task ownership, full refs and commit IDs, and that both local and remote task tips are fully merged into the intended target. Record refs before removing the tree. Preserve main, parent, default, configured target, and host-protected branches, branches used by any remaining worktree, and unrelated or shared branches. Fetch the exact task and target refs from the verified project remote and recheck identities and worktree use before deletion. Use git branch -d -- TASK_BRANCH locally; never override refusal with -D. Delete only the exact remote task ref using git push --force-with-lease=refs/heads/TASK_BRANCH:EXPECTED_OID REMOTE :refs/heads/TASK_BRANCH with freshly verified values. The explicit expected-ref lease rejects a changed remote branch; never use an unguarded force, implicit lease, wildcard, mirror, or prune. Verify and report each removed or retained ref; inspect failed or uncertain results without guessing a new expected commit or blindly retrying deletion. A ref conclusively verified absent in the intended repository is already removed; report it and apply all remaining guards independently to refs that still exist. Never recreate an absent ref. A failed or uncertain lookup is not proof of absence. Also page through existing completed tasks in the authorized project and inspect their registered worktrees on this workstation, applying the same gates to each task individually: fresh done confirmation, saved evidence, safe worktree removal before branch deletion, and no dirty, unmerged, shared, live, or uncertain work. Report per-task paths, refs, and retention reasons; never bulk-delete worktrees or branches.";
 
@@ -27,7 +29,7 @@ pub fn agent_startup() -> Value {
             "session_probe": "coordinator_session_get",
             "session_registration": "coordinator_session_register",
             "instructions": mcp_instructions(),
-            "coordination_tools": ["coordinator_orientation", "coordinator_workflow_policy", "coordinator_decisions_list", "coordinator_tasks_list", "coordinator_task_get", "coordinator_task_workflow", "coordinator_activity_get", "coordinator_activity_claim", "coordinator_activity_release", "coordinator_review", "coordinator_instructions_ack", "coordinator_claim", "coordinator_attempt_get", "coordinator_attempt_renew", "coordinator_checkpoint", "coordinator_attempt_release"],
+            "coordination_tools": ["coordinator_orientation", "coordinator_workflow_policy", "coordinator_decisions_list", "coordinator_tasks_list", "coordinator_task_get", "coordinator_preconditions_get", "coordinator_state_wait", "coordinator_task_workflow", "coordinator_activity_get", "coordinator_activity_claim", "coordinator_activity_release", "coordinator_review", "coordinator_instructions_ack", "coordinator_claim", "coordinator_attempt_get", "coordinator_attempt_renew", "coordinator_checkpoint", "coordinator_attempt_release"],
             "authentication": "Protected bearer token, session ID and session proof supplied by the MCP host; no public OAuth enrollment."
         },
         "local_operations": {
@@ -55,6 +57,8 @@ pub fn agent_startup() -> Value {
             "session_registration": "/api/v1/sessions",
             "project_orientation": "/api/v1/projects/{project_id}/orientation",
             "tasks": "/api/v1/projects/{project_id}/tasks",
+            "preconditions": "/api/v1/projects/{project_id}/preconditions/{task_or_activity_id}",
+            "state_wait": "/api/v1/projects/{project_id}/state-wait",
             "required_checks": "/api/v1/projects/{project_id}/workflow-policy",
             "mcp": "/mcp"
         },

@@ -16,6 +16,7 @@ pub mod objectives;
 pub mod operator_access;
 pub mod restore;
 pub mod state;
+pub mod state_wait;
 pub mod workflow;
 
 use axum::{
@@ -50,6 +51,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(imports::routes())
         .merge(knowledge::routes())
         .merge(history::routes())
+        .merge(state_wait::routes())
         .merge(objectives::routes())
         .merge(operator_access::routes())
         .merge(restore::routes())
@@ -197,7 +199,7 @@ async fn info() -> Json<Value> {
         json!({"product":"Agent Coordinator","version":env!("CARGO_PKG_VERSION"),"api_version":"v1","instruction_version":coordinator_core::INSTRUCTION_VERSION,
         "implementation_stage":"mcp","authentication_help":"/api/v1/help/authentication",
         "mcp":{"path":"/mcp","transport":"Streamable HTTP","stateless":true},
-        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events","submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","operator_accounts","password_change","browser_session_revocation","agent_token_rotation","objectives","task_history","backup_restore","restore_reconciliation","clock_reconciliation","storage_maintenance","mcp"],
+        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","precondition_inspection","state_change_long_poll","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events","submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","operator_accounts","password_change","browser_session_revocation","agent_token_rotation","objectives","task_history","backup_restore","restore_reconciliation","clock_reconciliation","storage_maintenance","mcp"],
         "unavailable_features":[],
         "agent_startup":discovery::agent_startup()}),
     )

@@ -800,6 +800,153 @@ async fn activity_value(
     )
 }
 
+pub(crate) async fn activity_wait_snapshot(
+    c: &mut SqliteConnection,
+    project: &str,
+    id: &str,
+    now: i64,
+) -> Result<Value, AppError> {
+    activity_value(c, project, id, now).await
+}
+
+pub(crate) async fn activity_preconditions(
+    c: &mut SqliteConnection,
+    project: &str,
+    id: &str,
+    actor: &crate::auth::Actor,
+    now: i64,
+) -> Result<Value, AppError> {
+    let ctx = activity_context(c, project, id).await?;
+    let snapshot = activity_value(c, project, id, now).await?;
+    let mut unmet = Vec::new();
+    let mut add = |code: &str, message: &str| {
+        unmet.push(json!({"code":code,"message":message}));
+    };
+    let policy_current = ctx.submission == ctx.current_submission
+        && ctx.superseded_at.is_none()
+        && ctx.project_policy_revision == ctx.project_current_policy
+        && (ctx.workflow_policy_revision == 0
+            || ctx.workflow_current_policy == Some(ctx.workflow_policy_revision));
+    if !policy_current {
+        add(
+            "operator_reopen_required",
+            "This immutable candidate or a pinned policy is stale. An authenticated operator must reopen it before new workflow authority can be claimed.",
+        );
+    }
+    if matches!(
+        ctx.state.as_str(),
+        "completed" | "canceled" | "recovery_required"
+    ) {
+        add(
+            "activity_not_eligible",
+            "This activity is completed, canceled, or requires explicit recovery before it can grant new work authority.",
+        );
+    }
+    if let Some(attempt) = snapshot.get("current_attempt").filter(|v| !v.is_null()) {
+        let valid_by_time = attempt["valid_by_time"].as_bool().unwrap_or(false);
+        let owner_authorized = attempt["owner_authorized"].as_bool().unwrap_or(false);
+        if valid_by_time && owner_authorized {
+            add(
+                "active_owner",
+                "A live authorized attempt currently owns this activity.",
+            );
+        } else {
+            add(
+                "recovery_inspection_required",
+                "Inspect the expired or unauthorized activity attempt and its jobs before resuming.",
+            );
+        }
+    }
+    if actor.kind == "agent" {
+        let session_id = actor.session_id.as_deref().unwrap_or("");
+        let ack: i64 = sqlx::query_scalar("SELECT count(*) FROM instruction_acknowledgments WHERE session_id=? AND project_id=? AND policy_revision=? AND instruction_version=?")
+            .bind(session_id).bind(project).bind(ctx.project_current_policy).bind(INSTRUCTION_VERSION)
+            .fetch_one(&mut *c).await?;
+        if ack == 0 {
+            add(
+                "instructions_required",
+                "Read and acknowledge current coordination instructions before claiming workflow work.",
+            );
+        }
+        if matches!(ctx.kind.as_str(), "agent_review" | "either_review")
+            && let Err(error) =
+                ensure_independent_reviewer(c, project, &ctx.subject_task, &actor.id, session_id)
+                    .await
+        {
+            add(&error.code, &error.message);
+        }
+        if ctx.kind == "human_review" {
+            add(
+                "human_reviewer_required",
+                "An authenticated human operator must claim this review activity.",
+            );
+        }
+    } else if matches!(ctx.kind.as_str(), "agent_review") {
+        add(
+            "agent_reviewer_required",
+            "An independent agent session must claim this review activity.",
+        );
+    }
+    let pending_subject =
+        crate::knowledge::pending_decision_ids(c, project, Some(&ctx.subject_task), now, 1).await?;
+    let pending_activity =
+        crate::knowledge::pending_decision_ids(c, project, Some(&ctx.activity_task), now, 1)
+            .await?;
+    if !pending_subject.is_empty() || !pending_activity.is_empty() {
+        add(
+            "scoped_decisions_pending",
+            "Resolve current scoped decisions for the subject and activity before claiming.",
+        );
+    }
+    if ctx.kind == "integration" {
+        if !approvals_satisfied(c, &ctx.submission).await? {
+            add(
+                "reviews_pending",
+                "Every required review must approve this exact submission before integration work can proceed.",
+            );
+        }
+        if !ctx.automatic_integration {
+            let authorized: i64 = sqlx::query_scalar("SELECT count(*) FROM integration_authorizations WHERE activity_id=? AND submission_id=? AND project_policy_revision=? AND workflow_policy_revision=? AND invalidated_at IS NULL")
+                .bind(id).bind(&ctx.submission).bind(ctx.project_policy_revision).bind(ctx.workflow_policy_revision)
+                .fetch_one(&mut *c).await?;
+            if authorized == 0 {
+                add(
+                    "integration_authorization_required",
+                    "A human operator must authorize integration for this exact candidate and policy revision.",
+                );
+            }
+        }
+        if ctx.canonical_repository_key.is_none() || ctx.target_branch.is_none() {
+            add(
+                "integration_target_identity_missing",
+                "The immutable candidate does not contain a pinned canonical repository key and target branch.",
+            );
+        } else {
+            let conflict: i64 = sqlx::query_scalar("SELECT count(*) FROM integration_holds h JOIN workflow_activities owner ON owner.id=h.activity_id WHERE h.state='held' AND h.activity_id!=? AND h.canonical_repository_key=? AND h.target_branch=?")
+                .bind(id)
+                .bind(ctx.canonical_repository_key.as_deref().unwrap_or_default())
+                .bind(ctx.target_branch.as_deref().unwrap_or_default())
+                .fetch_one(&mut *c)
+                .await?;
+            if conflict > 0 {
+                add(
+                    "integration_target_held",
+                    "Another activity currently holds this canonical repository target. Wait for it to release or reconcile its hold before claiming integration.",
+                );
+            }
+        }
+    }
+    Ok(json!({
+        "target_kind":"activity",
+        "target_id":id,
+        "activity_kind":ctx.kind,
+        "eligible_to_claim":unmet.is_empty(),
+        "unmet_preconditions":unmet,
+        "state_token":crate::state_wait::state_token(&snapshot)?,
+        "precondition_hints":if ctx.kind == "integration" { json!([{"code":"candidate_stale_merge_conflict_requires_preflight","state":"requires_local_observation","message":"The service cannot inspect the Git target or detect merge conflicts. Fetch the pinned target and run local integration preflight before publication; a stale/conflicting immutable candidate requires operator reopen."}]) } else { json!([]) }
+    }))
+}
+
 pub async fn workflow_snapshot(
     c: &mut SqliteConnection,
     project: &str,
@@ -1245,6 +1392,7 @@ async fn activity_detail(
     let mut c = state.pool.begin().await?;
     let now = state.now();
     let mut value = activity_value(&mut c, &project, &id, now).await?;
+    let token = crate::state_wait::state_token(&value)?;
     let ctx = activity_context(&mut c, &project, &id).await?;
     let current = value["current_attempt"].clone();
     let owned = current["owner_id"] == auth.actor.id
@@ -1285,6 +1433,7 @@ async fn activity_detail(
     };
     value["publication_allowed"] = json!(publication_allowed);
     value["qualifying_check_job_ids"] = json!(check_job_ids);
+    value["state_token"] = json!(token);
     Ok(response(value))
 }
 
