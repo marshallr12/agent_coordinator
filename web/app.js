@@ -379,10 +379,10 @@
     renderTasks(); renderSummary();
   }
 
-  async function loadTasks(silent = false, next = false) {
+  async function loadTasks(silent = false, next = false, replaceInFlight = false) {
     if (state.taskView === 'completed') { await loadCompletedTasks(silent); return; }
     const requestedProjectId = state.projectId;
-    if (!requestedProjectId || (state.inflight.tasks?.projectId === requestedProjectId)) return;
+    if (!requestedProjectId || (!replaceInFlight && state.inflight.tasks?.projectId === requestedProjectId)) return;
     if (next && !state.taskCursor) return;
     const requestId = ++state.requestSeq.tasks;
     const cursorBefore = state.taskCursor;
@@ -616,7 +616,7 @@
   $('tasks-previous-page').addEventListener('click', () => showTaskPage(Math.max(0, (state.taskView === 'completed' ? state.completedPageIndex : state.taskPageIndex) - 1)));
   $('tasks-next-page').addEventListener('click', () => state.taskView === 'completed' ? showTaskPage(state.completedPageIndex + 1) : loadTasks(false, true));
   $('tasks-last-page').addEventListener('click', showLastTaskPage);
-  $('tasks-page-size').addEventListener('change', (event) => { state.taskPageSize = Number(event.target.value); if (state.taskView === 'completed') showTaskPage(state.completedPageIndex); else loadTasks(); });
+  $('tasks-page-size').addEventListener('change', (event) => { state.taskPageSize = Number(event.target.value); if (state.taskView === 'completed') showTaskPage(state.completedPageIndex); else loadTasks(false, false, true); });
   $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; resetTaskPages(); state.taskView = 'queue'; updateTaskViewTabs(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); }); $('status-filter').addEventListener('change', renderTasks);
   $('back-to-tasks').addEventListener('click', () => showView('tasks')); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation('/api/v1/admin/agents', { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
   function showToken(token) { clearCredentialDownload(); setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
