@@ -447,8 +447,7 @@ async function main() {
     await evaluate("window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = true; document.querySelector('#copy-token').click()");
     await waitPage("document.querySelector('#issue-feedback').textContent.includes('Clipboard access was unavailable')", 'token manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
-    console.log('PASS: headless Chrome verified project navigation, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
-    console.log('PASS: headless Chrome verified project navigation, dedicated archived-task view and queue exclusion, keyboard focus, queue/completed-task separation, pagination, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified project navigation, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
