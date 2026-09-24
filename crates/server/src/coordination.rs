@@ -420,6 +420,11 @@ impl Task {
         if self.lifecycle != "open" {
             preconditions.push(json!({"code":"task_not_open","message":format!("Task lifecycle is {}.", self.lifecycle)}));
         }
+        if self.archived_at.is_some() {
+            preconditions.push(
+                json!({"code":"task_archived","message":"Restore this task before claiming work."}),
+            );
+        }
         if let Some(reason) = &self.blocked_reason {
             preconditions.push(json!({"code":"task_blocked","message":reason}));
         }
@@ -1342,13 +1347,13 @@ async fn orientation(State(s): State<AppState>, auth: Auth, Path(p): Path<String
     let mut c = s.pool.acquire().await?;
     let proj = project(&mut c, &p).await?;
     let now = s.now();
-    let candidates:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND objective_children_ready AND decisions_ready AND current_attempt_id IS NULL ORDER BY priority,ready_since,id LIMIT 20"))
+    let candidates:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE archived_at IS NULL AND lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND objective_children_ready AND decisions_ready AND current_attempt_id IS NULL ORDER BY priority,ready_since,id LIMIT 20"))
         .bind(now).bind(now).bind(now).bind(&p).fetch_all(&mut *c).await?;
     let active:Vec<Attempt>=sqlx::query_as("SELECT * FROM attempts WHERE project_id=? AND owner_id=? AND session_id=? AND state='active' ORDER BY created_at LIMIT 50")
         .bind(&p).bind(&auth.actor.id).bind(&auth.actor.session_id).fetch_all(&mut *c).await?;
-    let recovery:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized) ORDER BY priority,ready_since,id LIMIT 20"))
+    let recovery:Vec<Task>=sqlx::query_as(task_sql!("SELECT * FROM visible WHERE archived_at IS NULL AND lifecycle='open' AND workflow_activity_kind IS NULL AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized) ORDER BY priority,ready_since,id LIMIT 20"))
         .bind(now).bind(now).bind(now).bind(&p).bind(now).fetch_all(&mut *c).await?;
-    let mut workflow_tasks: Vec<Task> = sqlx::query_as(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_phase IN ('review','integration','revision_needed') ORDER BY priority,ready_since,id LIMIT 20"))
+    let mut workflow_tasks: Vec<Task> = sqlx::query_as(task_sql!("SELECT * FROM visible WHERE archived_at IS NULL AND lifecycle='open' AND workflow_phase IN ('review','integration','revision_needed') ORDER BY priority,ready_since,id LIMIT 20"))
         .bind(now).bind(now).bind(now).bind(&p).fetch_all(&mut *c).await?;
     let mut workflow_subjects = Vec::with_capacity(workflow_tasks.len());
     for task in &mut workflow_tasks {
@@ -1531,12 +1536,18 @@ async fn claim(
     let chosen = if let Some(id) = &input.task_id {
         Some(task(&mut m.tx, &p, id, m.now).await?)
     } else {
-        sqlx::query_as::<_,Task>(task_sql!("SELECT * FROM visible WHERE lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND ((?='work' AND objective_children_ready AND decisions_ready AND current_attempt_id IS NULL) OR (?='recovery' AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized))) ORDER BY priority,ready_since,id LIMIT 1"))
+        sqlx::query_as::<_,Task>(task_sql!("SELECT * FROM visible WHERE archived_at IS NULL AND lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND ((?='work' AND objective_children_ready AND decisions_ready AND current_attempt_id IS NULL) OR (?='recovery' AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized))) ORDER BY priority,ready_since,id LIMIT 1"))
             .bind(m.now).bind(m.now).bind(m.now).bind(&p).bind(&input.mode).bind(&input.mode).bind(m.now).fetch_optional(&mut *m.tx).await?
     };
     let Some(t) = chosen else {
         return Ok(response(m.finish(json!({"claim":null,"reasons":["No eligible task in this project and mode. Inspect task blockers, active owners, or recovery candidates."],"retry_after_seconds":30}),Some(&p),"claim.empty",&p).await?));
     };
+    if t.archived_at.is_some() {
+        return Err(AppError::conflict(
+            "task_archived",
+            "Restore this task before claiming work.",
+        ));
+    }
     crate::workflow::guard_normal_claim(&mut m.tx, &p, &t.id).await?;
     if input.mode == "work" {
         crate::knowledge::ensure_decisions_resolved(&mut m.tx, &p, &t.id, m.now).await?;

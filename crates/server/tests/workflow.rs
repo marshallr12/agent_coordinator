@@ -838,6 +838,24 @@ async fn general_submission_requires_an_independent_reviewer_and_then_completes(
         .submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
         .await;
     let review = activity(&submitted, "agent_review");
+    let lifecycle_revision: i64 = sqlx::query_scalar("SELECT revision FROM tasks WHERE id=?")
+        .bind(t["id"].as_str().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, protected) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!(
+                "/api/v1/projects/{p}/tasks/{}/archive",
+                t["id"].as_str().unwrap()
+            ),
+            json!({"expected_revision":lifecycle_revision,"reason":"Must wait for review."}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{protected}");
+    assert_eq!(protected["error"]["code"], "task_workflow_protected");
     let (status, _) = f.claim_activity(&f.a, &p, review, 1, 0).await;
     assert_eq!(status, StatusCode::CONFLICT);
     let (status, claimed) = f.claim_activity(&f.b, &p, review, 1, 0).await;
