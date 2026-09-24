@@ -102,9 +102,9 @@ def source_entries(platform: str, server: Path | None, cli: Path, mcp_adapter: P
 def validate_bootstrap_sources(entries: dict[str, tuple[Path, int]]) -> None:
     if any(PurePosixPath(name).name == "BACKLOG.md" for name in entries):
         raise SystemExit("release packages must not ship BACKLOG.md as a current work queue")
-    bootstrap = entries["CLAUDE.md"][0].read_text(encoding="utf-8")
+    bootstrap = entries["AGENTS.md"][0].read_text(encoding="utf-8")
     if len(bootstrap.encode("utf-8")) > MAX_BOOTSTRAP_BYTES:
-        raise SystemExit("CLAUDE.md must remain a concise service-discovery bootstrap")
+        raise SystemExit("AGENTS.md must remain a concise service-discovery bootstrap")
     normalized = bootstrap.casefold()
     for required in [
         ".agent-coordinator.toml",
@@ -117,7 +117,7 @@ def validate_bootstrap_sources(entries: dict[str, tuple[Path, int]]) -> None:
         "never expose them",
     ]:
         if required.casefold() not in normalized:
-            raise SystemExit(f"CLAUDE.md is missing bootstrap guidance: {required}")
+            raise SystemExit(f"AGENTS.md is missing bootstrap guidance: {required}")
 
 
 def validate_local_markdown_links(entries: dict[str, tuple[Path, int]]) -> None:

@@ -149,7 +149,7 @@ jobs:
               }
               actual = {name.removeprefix(root) for name in names if name != manifest_name}
               required = {
-                  "agent-coordinator.exe", "book.toml", "book/src/SUMMARY.md",
+                  "agent-coordinator.exe", "AGENTS.md", "book.toml", "book/src/SUMMARY.md",
                   "book/src/README.md", "book/src/PLAN.md", "book/src/AGENTS.md",
                   "book/src/docs/agent-startup.md", "book/src/docs/implementation-history.md", "book/src/DURABLE-RECORD.md", "book/src/HANDOFF.md",
               }

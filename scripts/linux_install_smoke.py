@@ -28,7 +28,6 @@ MAX_FILES = 256
 MAX_BOOTSTRAP_BYTES = 2 * 1024
 REQUIRED = {
     "AGENTS.md",
-    "CLAUDE.md",
     "CONTRIBUTING.md",
     "DURABLE-RECORD.md",
     "HANDOFF.md",
@@ -154,9 +153,9 @@ def verify_internal(root: Path) -> None:
         assert sha256(root.joinpath(*PurePosixPath(name).parts)) == digest, f"Checksum mismatch for {name}."
     assert os.access(root / "bin/agent-coordinator", os.X_OK)
     assert os.access(root / "bin/agent-coordinator-server", os.X_OK)
-    bootstrap = (root / "CLAUDE.md").read_text(encoding="utf-8")
+    bootstrap = (root / "AGENTS.md").read_text(encoding="utf-8")
     assert len(bootstrap.encode("utf-8")) <= MAX_BOOTSTRAP_BYTES, (
-        "CLAUDE.md must remain a concise service-discovery bootstrap."
+        "AGENTS.md must remain a concise service-discovery bootstrap."
     )
     normalized = bootstrap.casefold()
     for required in [
@@ -169,7 +168,7 @@ def verify_internal(root: Path) -> None:
         "CONTRIBUTING.md",
         "never expose them",
     ]:
-        assert required.casefold() in normalized, f"CLAUDE.md is missing bootstrap guidance: {required}"
+        assert required.casefold() in normalized, f"AGENTS.md is missing bootstrap guidance: {required}"
     assert (root / "deploy/service.env.example").stat().st_mode & 0o777 == 0o600
     service = (root / "deploy/agent-coordinator.service").read_text()
     backup = (root / "deploy/agent-coordinator-backup.service").read_text()
