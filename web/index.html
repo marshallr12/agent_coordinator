@@ -46,11 +46,6 @@
           </div>
         </header>
 
-        <div class="design-banner" role="note">
-          <span class="banner-icon" aria-hidden="true">✦</span>
-          <span><strong>Development release.</strong> Coordinate work through checks, review, and integration. Publishing a change does not by itself complete the task.</span>
-        </div>
-
         <div id="global-alert" class="global-alert" role="status" aria-live="polite" hidden></div>
         <main id="main-content" class="main-layout">
           <aside class="sidebar" aria-label="Primary navigation">
@@ -105,7 +100,6 @@
               <div class="toolbar">
                 <label class="select-label" for="project-select">Project<select id="project-select"><option value="">Choose a project</option></select></label>
                 <label id="status-filter-label" class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
-                <button id="refresh-tasks" class="button subtle" type="button" disabled>Refresh</button>
                 <button id="objective-list-button" class="button subtle" type="button">Objectives</button>
                 <button id="open-archive-button" class="button subtle" type="button">Archived tasks</button>
               </div>
@@ -117,8 +111,10 @@
                 <span id="tasks-page-numbers" class="pagination-numbers" aria-label="Page numbers"></span>
                 <button id="tasks-next-page" class="button subtle pagination-icon" type="button" aria-label="Next page">▶</button>
                 <button id="tasks-last-page" class="button subtle pagination-icon" type="button" aria-label="Last page">⏭</button>
-                <label class="select-label pagination-size" for="tasks-page-size">Items per page<select id="tasks-page-size"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select></label>
+                <select id="tasks-page-size" class="pagination-size" aria-label="Items per page"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select>
+                <span class="pagination-size-label">Items per page</span>
                 <span id="tasks-page-status" class="muted" aria-live="polite"></span>
+                <button id="refresh-tasks" class="button subtle refresh-icon-button" type="button" disabled aria-label="Refresh tasks" title="Refresh tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg></button>
               </div>
             </section>
 

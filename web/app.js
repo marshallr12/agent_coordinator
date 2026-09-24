@@ -16,6 +16,13 @@
   const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
   const MAX_ATTACHMENT_BATCH_BYTES = 64 * 1024 * 1024;
   const MAX_ATTACHMENT_FILES = 10;
+  const THEME_KEY = 'agent-coordinator.theme';
+  function applyTheme(theme) {
+    const selected = ['light', 'dark', 'system'].includes(theme) ? theme : 'system';
+    document.documentElement.dataset.theme = selected;
+    try { localStorage.setItem(THEME_KEY, selected); } catch { /* Theme still applies for this page. */ }
+  }
+  try { applyTheme(localStorage.getItem(THEME_KEY) || 'system'); } catch { applyTheme('system'); }
 
   class ApiError extends Error {
     constructor(message, status, code, details, uncertain = false) {
@@ -516,7 +523,8 @@
     const tasks = state.taskView === 'completed' ? state.tasks : state.tasks.filter((task) => taskStatus(task) !== 'done' && (filter === 'all' || taskStatus(task) === filter));
     const pageCount = state.taskView === 'completed' ? Math.ceil(state.completedTasks.length / state.taskPageSize) : state.taskPages.length;
     const pageIndex = state.taskView === 'completed' ? state.completedPageIndex : state.taskPageIndex;
-    renderTaskPagination(); setText($('tasks-page-status'), pageCount ? `Page ${pageIndex + 1}${state.taskView === 'queue' && state.taskCursor ? ' of more pages' : ` of ${pageCount}`}` : '');
+    const taskTotal = state.taskView === 'completed' ? state.completedTasks.length : state.taskPages.reduce((total, page) => total + page.items.length, 0);
+    renderTaskPagination(); setText($('tasks-page-status'), pageCount ? `Page ${pageIndex + 1} of ${taskTotal} tasks` : '');
     if (!tasks.length) {
       show(target, false);
       const empty = state.taskView === 'completed' ? (state.inflightCompleted ? 'Loading completed tasks…' : 'No completed tasks in this project yet.') : state.tasks.length ? (filter === 'all' ? 'No unfinished tasks on this page. Continue to another page to find more work.' : 'No tasks match this status filter. Load more to search the rest of the queue.') : 'No tasks in this project yet. Create the first task.';
@@ -1449,6 +1457,18 @@
     if (mutation) button.dataset.mutation = 'true';
     button.addEventListener('click', action); return button;
   }
+  function taskIconButton(label, icon, action) {
+    const button = actionButton('', action);
+    const paths = {
+      archive: '<rect x="4" y="5" width="16" height="4" rx="1"/><path d="M6 9v10h12V9m-8 4h4"/>',
+      cancel: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
+      edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z"/>',
+      resolve: '<path d="m5 12 4 4L19 6"/><circle cx="12" cy="12" r="9"/>'
+    };
+    button.classList.add('task-action-icon'); button.title = label; button.setAttribute('aria-label', label);
+    button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[icon]}</svg>`;
+    return button;
+  }
   function selectField(view, name, label, value, choices) {
     const select = view.field(name, label, '', 'select');
     choices.forEach(([key, caption]) => { const option = el('option', '', caption); option.value = key; add(select, option); });
@@ -1489,13 +1509,13 @@
     if (state.actor?.kind === 'human' && !task.activity_kind && !task.current_attempt_id) {
       if (task.archived_at) add(target, actionButton('Restore archived task', () => taskLifecycle(task,'restore','Restore this task to the main task queue? Its lifecycle state and history will be preserved.')));
       else {
-        if (['open','planned','canceled'].includes(task.lifecycle)) add(target, actionButton('Archive task', () => taskLifecycle(task,'archive','Archive this task? It will leave the main task queue and remain available in Archived tasks.')));
-        if (['open','planned'].includes(task.lifecycle)) add(target, actionButton('Cancel task', () => taskLifecycle(task,'cancel','Cancel this task? It will remain in the task queue with canceled status.')));
+        if (['open','planned','canceled'].includes(task.lifecycle)) add(target, taskIconButton('Archive task', 'archive', () => taskLifecycle(task,'archive','Archive this task? It will leave the main task queue and remain available in Archived tasks.')));
+        if (['open','planned'].includes(task.lifecycle)) add(target, taskIconButton('Cancel task', 'cancel', () => taskLifecycle(task,'cancel','Cancel this task? It will remain in the task queue with canceled status.')));
         if (['planned','canceled'].includes(task.lifecycle)) add(target, actionButton('Delete task', () => taskLifecycle(task,'delete','Remove this task from task views? This is a soft delete that retains task and audit history. The service refuses if attempts, workflow, objective, or dependency history exist.')));
       }
     }
-    if (!completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, actionButton('Edit task', () => editTask(task, data)));
-    if (!completionPending && !task.activity_kind && task.lifecycle === 'open' && !task.current_attempt_id && task.blocked_reason) add(target, actionButton('Resolve blocker', () => {
+    if (!completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, taskIconButton('Edit task', 'edit', () => editTask(task, data)));
+    if (!completionPending && !task.activity_kind && task.lifecycle === 'open' && !task.current_attempt_id && task.blocked_reason) add(target, taskIconButton('Resolve blocker', 'resolve', () => {
       const projectId = state.projectId, taskId = task.id;
       const view = workflowDialog('Resolve saved blocker', 'Use this after the problem that stopped work has been fixed. Record what changed and how you checked it. This clears the saved blocker so an agent can claim the task when its other requirements are met.');
       add(view.form, el('h3', '', 'What stopped work'));
@@ -1694,6 +1714,13 @@
       const operator = (await request('/api/v1/auth/account')).data.operator;
       if (actorId() !== currentActor) return;
       const view = workflowDialog('My account', `${operator.name} · ${displayStatus(operator.role)}. Changing your password signs out every browser session for this account.`);
+      const themeGroup = el('fieldset', 'theme-selector'); add(themeGroup, el('legend', '', 'Website theme'));
+      const savedTheme = (() => { try { return localStorage.getItem(THEME_KEY) || 'system'; } catch { return 'system'; } })();
+      [['light','Light'],['dark','Dark'],['system','System']].forEach(([value,label]) => {
+        const choice = el('label', 'theme-choice'); const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'site-theme'; radio.value = value; radio.checked = savedTheme === value;
+        radio.addEventListener('change', () => applyTheme(value)); add(choice, radio); add(choice, el('span', '', label)); add(themeGroup, choice);
+      });
+      add(view.form, themeGroup);
       add(view.form,actionButton('View my browser sessions', () => { view.dialog.close(); browserSessions(operator.id,operator.name); },false));
       add(view.form,actionButton('Sign out', () => { view.dialog.close(); startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()); }));
       const current = view.field('current_password','Current password','','input'); current.type = 'password'; current.autocomplete = 'current-password'; current.maxLength = 1024;
