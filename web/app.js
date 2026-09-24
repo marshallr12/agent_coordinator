@@ -7,10 +7,15 @@
     actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0,
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null, credentialDownloadUrl: null,
     taskCursor: null, taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', completedTasks: [], completedPageIndex: 0, inflightCompleted: false, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
-    requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, pollTimer: null, lastSync: null
+    requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
   };
 
   const PENDING_MUTATION_KEY = 'agent-coordinator.pending-mutation';
+  const ATTACHMENT_DB_NAME = 'agent-coordinator-attachment-journal';
+  const ATTACHMENT_STORE_NAME = 'batches';
+  const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
+  const MAX_ATTACHMENT_BATCH_BYTES = 64 * 1024 * 1024;
+  const MAX_ATTACHMENT_FILES = 10;
 
   class ApiError extends Error {
     constructor(message, status, code, details, uncertain = false) {
@@ -51,6 +56,50 @@
     if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
     return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   };
+
+  function openAttachmentDatabase() {
+    if (!globalThis.indexedDB) return Promise.reject(new Error('This browser cannot save upload bytes for a safe retry.'));
+    return new Promise((resolve, reject) => {
+      const open = indexedDB.open(ATTACHMENT_DB_NAME, 1);
+      open.onupgradeneeded = () => open.result.createObjectStore(ATTACHMENT_STORE_NAME, { keyPath: 'id' });
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(new Error('Could not open the protected browser upload journal.'));
+    });
+  }
+
+  async function storeAttachmentBatch(batch) {
+    const db = await openAttachmentDatabase();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(ATTACHMENT_STORE_NAME, 'readwrite');
+      transaction.objectStore(ATTACHMENT_STORE_NAME).put(batch);
+      transaction.oncomplete = () => { db.close(); resolve(); };
+      transaction.onerror = () => { db.close(); reject(new Error('Could not save upload bytes and retry keys.')); };
+      transaction.onabort = () => { db.close(); reject(new Error('Could not save upload bytes and retry keys.')); };
+    });
+  }
+
+  async function readAttachmentBatches() {
+    const db = await openAttachmentDatabase();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(ATTACHMENT_STORE_NAME, 'readonly');
+      const request = transaction.objectStore(ATTACHMENT_STORE_NAME).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(new Error('Could not read pending attachment uploads.'));
+      transaction.oncomplete = () => db.close();
+      transaction.onerror = () => { db.close(); reject(new Error('Could not read pending attachment uploads.')); };
+    });
+  }
+
+  async function deleteAttachmentBatch(id) {
+    const db = await openAttachmentDatabase();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(ATTACHMENT_STORE_NAME, 'readwrite');
+      transaction.objectStore(ATTACHMENT_STORE_NAME).delete(id);
+      transaction.oncomplete = () => { db.close(); resolve(); };
+      transaction.onerror = () => { db.close(); reject(new Error('Could not clear the completed upload journal.')); };
+      transaction.onabort = () => { db.close(); reject(new Error('Could not clear the completed upload journal.')); };
+    });
+  }
 
   const actorId = () => text(state.actor?.id || state.actor?.principal_id);
   const mutationOperation = (path, method) => {
@@ -535,6 +584,7 @@
     if (!items.length) add(criteria, el('li', 'muted', 'No acceptance criteria recorded.')); else items.forEach((item) => add(criteria, el('li', '', item)));
     renderTaskActions(data, task); renderLease(data, task); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
     show($('task-detail-state'), false); show($('task-detail-content'), true);
+    loadTaskAttachments(state.projectId, taskId);
   }
 
   function renderLease(data, task) {
@@ -549,6 +599,174 @@
   }
 
   function formatLease(expires) { const remaining = new Date(expires).getTime() - Date.now(); return `${Math.max(0, Math.round(remaining / 60000))} min remaining`; }
+
+  function attachmentStatus(message, error = false) {
+    const target = $('task-attachments-state'); setText(target, message); target.className = error ? 'inline-alert error' : 'muted';
+  }
+
+  function renderTaskAttachments(records, pending, hasMore = false) {
+    const list = $('task-attachments-list'); clear(list);
+    if (!records.length) add(list, el('p', 'muted', 'No files are attached to this task yet.'));
+    records.forEach((record) => {
+      const entry = el('div', 'task-attachment-entry');
+      add(entry, el('strong', '', record.display_name || 'Attachment'));
+      add(entry, el('p', 'muted', `${record.media_type || 'Unknown type'} · ${record.size_bytes ?? 'Unknown'} bytes · ${displayStatus(record.availability || record.state || 'unknown')}`));
+      if (record.availability === 'available' && record.kind === 'upload') {
+        const link = el('a', 'button subtle', 'Download attachment');
+        link.href = `${projectPath(state.projectId)}/artifacts/${encodeURIComponent(record.id)}/content`;
+        link.download = record.display_name || 'attachment';
+        add(entry, link);
+      } else if (record.external_url) {
+        try {
+          const url = new URL(record.external_url);
+          if (url.protocol === 'https:' && !url.username && !url.password) {
+            const link = el('a', 'button subtle', 'Open attachment link'); link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; add(entry, link);
+          }
+        } catch (_) { /* Keep invalid links as metadata only. */ }
+      }
+      add(list, entry);
+    });
+    if (hasMore) add(list, el('p', 'muted', 'More records are available through Browse history.'));
+    const retry = $('retry-task-attachments');
+    retry.hidden = !pending.length;
+    retry.disabled = state.attachmentBusy || Boolean(state.mutation);
+    retry.textContent = pending.length === 1 ? 'Retry pending upload' : `Retry ${pending.length} pending uploads`;
+  }
+
+  async function loadTaskAttachments(projectId, taskId, force = false) {
+    const key = `${projectId}/${taskId}`, requestedActor = actorId();
+    if (!force && state.attachmentTaskKey === key && state.attachmentsLoaded) return;
+    state.attachmentTaskKey = key; state.attachmentsLoaded = false;
+    const requestId = ++state.attachmentRequestSeq;
+    attachmentStatus('Loading task attachments…');
+    try {
+      const [history, batches] = await Promise.all([
+        request(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/history?kind=artifacts&limit=50`),
+        readAttachmentBatches()
+      ]);
+      if (requestId !== state.attachmentRequestSeq || projectId !== state.projectId || taskId !== state.selectedTaskId || requestedActor !== actorId()) return;
+      const records = (history.data.items || []).map((item) => item.record).filter(Boolean);
+      const pending = batches.filter((batch) => batch.project_id === projectId && batch.task_id === taskId && batch.actor_id === requestedActor);
+      renderTaskAttachments(records, pending, Boolean(history.data.next_cursor));
+      attachmentStatus(records.length ? `${records.length} attachment${records.length === 1 ? '' : 's'} available in task history.` : 'No files are attached to this task yet.');
+      if (pending.length) attachmentStatus('A saved upload is waiting to finish. Retry uses the saved bytes and request keys.', true);
+      state.attachmentsLoaded = true;
+    } catch (error) {
+      if (requestId !== state.attachmentRequestSeq || projectId !== state.projectId || taskId !== state.selectedTaskId || requestedActor !== actorId()) return;
+      state.attachmentsLoaded = false;
+      attachmentStatus(`Could not load task attachments: ${errorMessage(error)}`, true);
+    }
+  }
+
+  function safeAttachmentName(value) {
+    let name = text(value).replace(/[\\/\u0000-\u001f\u007f]/g, '_') || 'attachment';
+    const encoder = new TextEncoder();
+    while (encoder.encode(name).length > 255) name = Array.from(name).slice(0, -1).join('');
+    return name || 'attachment';
+  }
+
+  async function attachmentDigest(file) {
+    if (!globalThis.crypto?.subtle) throw new Error('This browser cannot calculate a secure file digest. Open the coordinator over HTTPS and try again.');
+    const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function makeAttachmentBatch(projectId, taskId, files) {
+    let totalBytes = 0;
+    if (files.length > MAX_ATTACHMENT_FILES) throw new Error(`Choose no more than ${MAX_ATTACHMENT_FILES} files at once.`);
+    const records = [];
+    for (const file of files) {
+      if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name} exceeds the 16 MiB per-file limit.`);
+      totalBytes += file.size;
+      if (totalBytes > MAX_ATTACHMENT_BATCH_BYTES) throw new Error('The combined selection exceeds the 64 MiB upload limit.');
+      const mediaType = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(file.type) ? file.type : 'application/octet-stream';
+      const filename = safeAttachmentName(file.name);
+      const sha256 = await attachmentDigest(file);
+      const reservationBody = { filename, media_type: mediaType, size_bytes: file.size, sha256, task_id: taskId, job_id: null, retention_days: 90, pinned: false };
+      records.push({ filename, media_type: mediaType, size_bytes: file.size, sha256, blob: file.slice(0, file.size, mediaType), reservation_body: reservationBody, reservation_key: newKey(), upload_key: newKey(), artifact_id: null, upload_path: null, uploaded: false });
+    }
+    return { id: newKey(), project_id: projectId, task_id: taskId, actor_id: actorId(), files: records, created_at: new Date().toISOString() };
+  }
+
+  async function putAttachmentBytes(path, record) {
+    if (!path.startsWith('/api/v1/') || path.startsWith('//') || path.includes('\\') || path.includes('://')) throw new Error('The upload path is not a safe same-origin API path.');
+    const headers = new Headers({ Accept: 'application/json', 'Content-Type': record.media_type, 'Idempotency-Key': record.upload_key });
+    if (state.csrfToken) headers.set('X-CSRF-Token', state.csrfToken);
+    let response;
+    try { response = await fetch(path, { method: 'PUT', headers, body: record.blob, credentials: 'same-origin', redirect: 'error' }); }
+    catch (_) { throw new ApiError('The file upload may still be processing. Retry it with the saved bytes and key.', 0, 'network_error', null, true); }
+    let payload = null;
+    try { payload = await response.json(); } catch (_) { /* handled below */ }
+    const uncertain = response.status === 429 || response.status >= 500;
+    if (!response.ok) {
+      const apiError = payload?.error || {};
+      throw new ApiError(apiError.message || `Upload failed (${response.status}).`, response.status, apiError.code || 'upload_failed', apiError.details, uncertain);
+    }
+    if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'data')) throw new ApiError('The coordinator returned an invalid upload response.', response.status, 'invalid_response', null, true);
+    return payload.data;
+  }
+
+  async function processTaskAttachmentBatch(batchId) {
+    const batch = (await readAttachmentBatches()).find((item) => item.id === batchId);
+    if (!batch) return;
+    if (batch.project_id !== state.projectId || batch.task_id !== state.selectedTaskId || batch.actor_id !== actorId()) throw new Error('Open the same task with the same account to resume this upload.');
+    for (const record of batch.files) {
+      if (record.uploaded) continue;
+      attachmentStatus(`Uploading ${record.filename}…`);
+      if (!record.artifact_id) {
+        const reserved = (await request(`${projectPath(batch.project_id)}/artifacts/uploads`, { method: 'POST', body: record.reservation_body, idempotencyKey: record.reservation_key })).data;
+        record.artifact_id = reserved.artifact?.id;
+        record.upload_path = reserved.upload_path;
+        if (!record.artifact_id || !record.upload_path) throw new Error('The upload reservation response was incomplete. The saved request is ready to retry.');
+        await storeAttachmentBatch(batch);
+      }
+      await putAttachmentBytes(record.upload_path, record);
+      record.uploaded = true;
+      await storeAttachmentBatch(batch);
+    }
+    await deleteAttachmentBatch(batch.id);
+  }
+
+  async function runTaskAttachmentBatches(batches) {
+    if (state.attachmentBusy || state.mutation) return;
+    state.attachmentBusy = true;
+    $('upload-task-attachments').disabled = true; $('retry-task-attachments').disabled = true; $('task-attachment-files').disabled = true;
+    try {
+      for (const batch of batches) await processTaskAttachmentBatch(batch.id);
+      await loadTaskAttachments(state.projectId, state.selectedTaskId, true);
+      attachmentStatus('Attachments uploaded and saved with this task. Agents can inspect them in task history and download the original files.');
+      setGlobalAlert('', 'success');
+    } catch (error) {
+      attachmentStatus(`Upload paused. The saved bytes and request keys are retained for retry: ${errorMessage(error)}`, true);
+      await loadTaskAttachments(state.projectId, state.selectedTaskId, true);
+      setGlobalAlert('The attachment upload did not finish. Retry the saved upload to resume safely.', 'error');
+    } finally {
+      state.attachmentBusy = false; $('upload-task-attachments').disabled = Boolean(state.mutation); $('task-attachment-files').disabled = Boolean(state.mutation);
+      $('retry-task-attachments').disabled = Boolean(state.mutation);
+    }
+  }
+
+  async function uploadTaskAttachments() {
+    if (state.attachmentBusy || state.mutation || !state.selectedTaskId) return;
+    const files = Array.from($('task-attachment-files').files || []);
+    if (!files.length) { attachmentStatus('Choose one or more files first.', true); return; }
+    attachmentStatus('Saving upload bytes and request keys…');
+    try {
+      const batch = await makeAttachmentBatch(state.projectId, state.selectedTaskId, files);
+      await storeAttachmentBatch(batch);
+      $('task-attachment-files').value = '';
+      await runTaskAttachmentBatches([batch]);
+    } catch (error) { attachmentStatus(errorMessage(error), true); }
+  }
+
+  async function retryTaskAttachments() {
+    if (state.attachmentBusy || state.mutation) return;
+    try {
+      const batches = (await readAttachmentBatches()).filter((batch) => batch.project_id === state.projectId && batch.task_id === state.selectedTaskId && batch.actor_id === actorId());
+      if (!batches.length) { attachmentStatus('No pending uploads need a retry.'); return; }
+      await runTaskAttachmentBatches(batches);
+    } catch (error) { attachmentStatus(errorMessage(error), true); }
+  }
 
   function renderCheckpoints(data) {
     const target = $('checkpoints-content'); clear(target); let checkpoints = Array.isArray(data.checkpoints) ? data.checkpoints : [];
@@ -1396,6 +1614,8 @@
   }
   $('project-policy-button').addEventListener('click',openProjectPolicy);
   $('task-history-button').addEventListener('click',taskHistory);
+  $('upload-task-attachments').addEventListener('click', uploadTaskAttachments);
+  $('retry-task-attachments').addEventListener('click', retryTaskAttachments);
   $('objective-list-button').addEventListener('click',objectives);
 
   async function loadOperators(append = false, cursor = null) {

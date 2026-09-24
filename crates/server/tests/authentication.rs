@@ -233,6 +233,12 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
         data["agent_startup"]["mcp"]["instructions"]
             .as_str()
             .unwrap()
+            .contains(coordinator_server::discovery::TASK_ATTACHMENT_INSTRUCTIONS)
+    );
+    assert!(
+        data["agent_startup"]["mcp"]["instructions"]
+            .as_str()
+            .unwrap()
             .contains(coordinator_server::discovery::WORKTREE_CLEANUP_INSTRUCTIONS)
     );
     assert_eq!(

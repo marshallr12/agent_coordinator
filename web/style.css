@@ -159,6 +159,14 @@ a.nav-item { text-decoration: none; }
 #resources-list { margin-top: 20px; }
 #load-more-resources { margin-top: 20px; }
 .job-evidence-card { margin-top: 15px; }
+.task-attachments-card { margin-top: 15px; }
+.task-attachment-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+.task-attachment-controls .select-label { flex: 1; min-width: min(100%, 280px); }
+.task-attachment-controls input { display: block; max-width: 100%; margin-top: 5px; font-size: 12px; }
+.task-attachment-entry { padding: 12px 0; border-bottom: 1px solid #edf1f2; }
+.task-attachment-entry:last-child { border-bottom: 0; }
+.task-attachment-entry p { margin: 4px 0; overflow-wrap: anywhere; }
+.task-attachment-entry .button { margin-top: 6px; }
 .evidence-entry { padding: 14px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .evidence-entry:last-child { border-bottom: 0; }
 .evidence-entry h3 { margin: 0 0 8px; }

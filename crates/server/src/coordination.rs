@@ -1181,7 +1181,7 @@ async fn orientation(State(s): State<AppState>, auth: Auth, Path(p): Path<String
         workflow_subjects.push(json!({"task":task_value,"workflow":workflow}));
     }
     Ok(response(
-        json!({"project":proj,"policy_revision":proj.policy_revision,"instruction_version":INSTRUCTION_VERSION,"required_sections":[REQUIRED_SECTION],"instructions":format!("{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}",crate::discovery::REVIEW_SELECTION_INSTRUCTIONS,crate::discovery::CONTINUATION_INSTRUCTIONS,crate::discovery::WORKTREE_CLEANUP_INSTRUCTIONS),"instructions_complete":true,
+        json!({"project":proj,"policy_revision":proj.policy_revision,"instruction_version":INSTRUCTION_VERSION,"required_sections":[REQUIRED_SECTION],"instructions":format!("{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}",crate::discovery::REVIEW_SELECTION_INSTRUCTIONS,crate::discovery::TASK_ATTACHMENT_INSTRUCTIONS,crate::discovery::CONTINUATION_INSTRUCTIONS,crate::discovery::WORKTREE_CLEANUP_INSTRUCTIONS),"instructions_complete":true,
         "candidates":candidates.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"active_attempts":active.iter().map(Attempt::value).collect::<Vec<_>>(),"recovery_candidates":recovery.iter().map(|t|t.value(now)).collect::<Vec<_>>(),"workflow_subjects":workflow_subjects,"implemented_stage":"backup_restore", "operator_tools": {
             "bootstrap":"Run agent-coordinator --session UNIQUE_HARNESS_NAME connect with a unique stable harness name; retain that session name on every command. Connection reserves no work.",
             "objectives_path":format!("/api/v1/projects/{p}/objectives"),
