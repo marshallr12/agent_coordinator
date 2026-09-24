@@ -120,7 +120,7 @@ def extract_checked(package: Path, destination: Path) -> Path:
     )
     assert all(
         (name.endswith(".md") and "/" not in name)
-        or name == "SHA256SUMS"
+        or name in {"SHA256SUMS", "BUILD-IDENTITY.json"}
         or name == "book.toml"
         or (
             name.startswith("book/src/")
