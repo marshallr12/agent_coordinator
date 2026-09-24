@@ -33,6 +33,8 @@ const attachmentBytes = new Map();
 let failFirstAttachmentPut = true;
 const attachmentUploadKeys = [];
 const archivedTask = { ...task, id: 'archived-fixture-task', title: 'Archived fixture task', lifecycle: 'canceled', archived_at: '2026-09-23T00:00:00Z' };
+let delayNext25TaskResponse = false;
+let delayed25TaskResponseStarted = false;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -61,10 +63,23 @@ async function fixtureServer() {
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://fixture.invalid');
+    if (url.pathname === '/__fixture/delay-next-25') {
+      delayNext25TaskResponse = true;
+      response.writeHead(204); response.end(); return;
+    }
+    if (url.pathname === '/__fixture/status') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ delayed25TaskResponseStarted })); return;
+    }
     if (url.pathname === '/api/v1/me') return json(response, { actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'admin', kind: 'human', session_id: 'fixture-browser' }, csrf_token: 'fixture-csrf' });
     if (url.pathname === '/api/v1/projects') return json(response, { items: [{ id: 'fixture-project', name: 'Fixture project', target_branch: 'main' }] });
     if (url.pathname === '/api/v1/projects/fixture-project/tasks') {
       const limit = Number(url.searchParams.get('limit') || 50);
+      if (limit === 25 && delayNext25TaskResponse) {
+        delayNext25TaskResponse = false;
+        delayed25TaskResponseStarted = true;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+      }
       const start = Number(url.searchParams.get('cursor') || 0);
       const items = tasks.slice(start, start + limit);
       const nextCursor = start + items.length < tasks.length ? String(start + items.length) : null;
@@ -343,6 +358,13 @@ async function main() {
     await evaluate("document.querySelector('#task-queue-tab').click()");
     await waitPage("document.querySelector('#tasks-heading').textContent === 'Task queue'", 'return to task queue');
     assert(await evaluate("![...document.querySelectorAll('#tasks-list .task-row .task-title')].some((node) => node.textContent === 'Completed fixture task')"), 'A completed task appeared after returning to the task queue.');
+    await fetch(`http://127.0.0.1:${serverPort}/__fixture/delay-next-25`);
+    await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '25'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await waitFor(`http://127.0.0.1:${serverPort}/__fixture/status`, (value) => value.delayed25TaskResponseStarted, 'delayed 25-item queue response');
+    await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '50'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 30 && document.querySelector('#tasks-page-status').textContent === 'Page 1 of 1'", 'latest 50-item selection');
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
+    assert(await evaluate("document.querySelectorAll('#tasks-list .task-row').length === 30 && document.querySelector('#tasks-page-size').value === '50' && document.querySelector('#tasks-page-status').textContent === 'Page 1 of 1'"), 'A stale delayed response replaced the latest 50-item selection.');
     await evaluate("document.querySelector('.task-open').focus()");
     await press('Enter', 'Enter', 13);
     await waitPage("document.querySelector('#task-detail-content') && !document.querySelector('#task-detail-content').hidden", 'task detail');
