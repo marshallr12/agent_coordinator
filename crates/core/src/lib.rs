@@ -16,6 +16,51 @@ pub use workflow::*;
 pub const INSTRUCTION_VERSION: &str = "8";
 pub const REQUIRED_SECTION: &str = "coordination-v8";
 
+/// Immutable source and target identity embedded in every workspace binary.
+pub const BUILD_SOURCE_COMMIT: &str = env!("COORDINATOR_SOURCE_COMMIT");
+pub const BUILD_SOURCE_REPOSITORY: &str = env!("COORDINATOR_SOURCE_REPOSITORY");
+pub const BUILD_TARGET_OS: &str = env!("COORDINATOR_TARGET_OS");
+pub const BUILD_TARGET_ARCH: &str = env!("COORDINATOR_TARGET_ARCH");
+pub const BUILD_DIRTY: &str = env!("COORDINATOR_BUILD_DIRTY");
+pub const CLIENT_PROTOCOL_VERSIONS: &[&str] = &["v1"];
+pub const CLIENT_CAPABILITIES: &[&str] = &["durable_candidate_submission_fields"];
+pub const CLIENT_SUPPORTED_TARGETS: &[&str] = &["linux-x86_64", "linux-aarch64", "windows-x86_64"];
+
+pub fn build_identity() -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "source_commit": BUILD_SOURCE_COMMIT,
+        "source_repository": BUILD_SOURCE_REPOSITORY,
+        "target_os": BUILD_TARGET_OS,
+        "target_arch": BUILD_TARGET_ARCH,
+        "dirty": BUILD_DIRTY == "true",
+    })
+}
+
+pub fn client_compatibility() -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "supported_protocol_versions": CLIENT_PROTOCOL_VERSIONS,
+        "capabilities": CLIENT_CAPABILITIES,
+        "build": build_identity(),
+    })
+}
+
+pub fn service_client_compatibility() -> serde_json::Value {
+    serde_json::json!({
+        "required_protocol_versions": CLIENT_PROTOCOL_VERSIONS,
+        "required_capabilities": CLIENT_CAPABILITIES,
+        "compatible_client": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "source_commit": BUILD_SOURCE_COMMIT,
+            "source_repository": BUILD_SOURCE_REPOSITORY,
+            "supported_targets": CLIENT_SUPPORTED_TARGETS,
+            "verified_packages": [],
+            "provenance": "Build the exact named source commit. No checksummed package is registered for this deployment."
+        }
+    })
+}
+
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

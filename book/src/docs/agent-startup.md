@@ -18,6 +18,18 @@ link with a different scheme, host, or port. Responses use a `data` envelope.
 Do not guess an OAuth endpoint: this service uses administrator-issued opaque
 agent tokens and does not provide public enrollment or an OAuth server.
 
+Before connecting or claiming new work, inspect `data.client_compatibility` from
+the anonymous info response. It names required protocol versions and client
+capabilities, an exact compatible client source repository, commit and semantic
+version, and supported package targets. `verified_packages` lists only packages
+with registered provenance and checksums; an empty list means use the exact
+source fallback. The source commit distinguishes builds that share the same
+`0.1.0` version. Run `agent-coordinator client-info --json` to inspect
+the local build and `agent-coordinator compatibility --json` to compare it with
+the service. A missing contract, source mismatch, unsupported target, dirty
+build, or missing capability requires a verified client upgrade before new work.
+The compatibility commands need no credential; neither follows redirects.
+
 ## Choose a connection
 
 Prefer an already configured MCP connection to this exact service origin when its
@@ -279,6 +291,42 @@ one harness sequentially. MCP initialization, session reads, and tool discovery
 do not grant ownership or renew leases.
 
 ### CLI fallback startup
+
+Run the compatibility preflight before `connect`. A compatible server/client
+pair uses the exact repository and source commit named by service discovery.
+Prefer a checksummed release package for the matching OS and architecture when
+`verified_packages` lists one. Verify both the release archive checksum and its
+internal `SHA256SUMS`, then extract the CLI binary. When no package is listed,
+clone the named repository, check out the full `source_commit`, and keep that
+checkout clean. Save service discovery without following redirects, then clone
+the repository and select the exact commit:
+
+```sh
+curl --proto '=https' --max-redirs 0 --silent --show-error --fail \
+  --output /tmp/service-info.json "$SERVICE_URL/api/v1/info"
+source_repository="$(jq -er '.data.client_compatibility.compatible_client.source_repository' /tmp/service-info.json)"
+source_commit="$(jq -er '.data.client_compatibility.compatible_client.source_commit' /tmp/service-info.json)"
+git clone "$source_repository" /tmp/agent-coordinator-compatible-source
+git -C /tmp/agent-coordinator-compatible-source checkout --detach "$source_commit"
+python3 scripts/upgrade_client.py \
+  --binary "$(command -v agent-coordinator)" \
+  --service-info /tmp/service-info.json \
+  --source-root /tmp/agent-coordinator-compatible-source
+```
+
+For an extracted binary, pass `--candidate /path/to/agent-coordinator
+--sha256 EXPECTED_BINARY_SHA256` instead. The script verifies the trusted source
+repository, full commit, platform, capabilities, and clean build identity
+before replacement. It keeps the current executable as `agent-coordinator.rollback`,
+atomically installs and verifies the new binary, and preserves the original
+rollback on repeated successful runs. Do not replace a running Windows
+executable. Credentials, origin binding, protected session state, ownership,
+and pending request journals stay in their existing locations. If replacement
+or verification fails, restore the rollback executable and keep handling any
+existing attempt with the client that owns it. Never replay an uncertain
+mutation with a new key. If trusted package provenance, build tools, privileges,
+or a supported target are unavailable, continue safe operations for existing
+ownership and report the concrete workstation blocker.
 
 Choose a unique stable `SESSION_NAME` for this harness. Use it on every command
 and resume the same name after interruption; independent harnesses must not

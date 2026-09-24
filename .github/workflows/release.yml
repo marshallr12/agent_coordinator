@@ -44,12 +44,15 @@ jobs:
           set -euo pipefail
           version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
           epoch="$(git show -s --format=%ct HEAD)"
-          CARGO_TARGET_DIR=target/repro-first cargo build --release --locked -p coordinator-server -p coordinator-cli -p coordinator-mcp-transport
+          build_commit="$(git rev-parse HEAD)"
+          COORDINATOR_BUILD_COMMIT="$build_commit" COORDINATOR_SOURCE_REPOSITORY=https://github.com/marshallr12/agent_coordinator CARGO_TARGET_DIR=target/repro-first cargo build --release --locked -p coordinator-server -p coordinator-cli -p coordinator-mcp-transport
           python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
+            --source-commit "$build_commit" \
             --server target/repro-first/release/agent-coordinator-server --cli target/repro-first/release/agent-coordinator --mcp-adapter target/repro-first/release/agent-coordinator-mcp \
             --source-date-epoch "$epoch" --output-dir dist/first
-          CARGO_TARGET_DIR=target/repro-second cargo build --release --locked -p coordinator-server -p coordinator-cli -p coordinator-mcp-transport
+          COORDINATOR_BUILD_COMMIT="$build_commit" COORDINATOR_SOURCE_REPOSITORY=https://github.com/marshallr12/agent_coordinator CARGO_TARGET_DIR=target/repro-second cargo build --release --locked -p coordinator-server -p coordinator-cli -p coordinator-mcp-transport
           python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
+            --source-commit "$build_commit" \
             --server target/repro-second/release/agent-coordinator-server --cli target/repro-second/release/agent-coordinator --mcp-adapter target/repro-second/release/agent-coordinator-mcp \
             --source-date-epoch "$epoch" --output-dir dist/second
           cmp "dist/first/agent-coordinator-$version-linux-x86_64.tar.gz" \
@@ -109,17 +112,20 @@ jobs:
           $version = python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $epoch = git show -s --format=%ct HEAD
+          $buildCommit = git rev-parse HEAD
+          $env:COORDINATOR_BUILD_COMMIT = $buildCommit
+          $env:COORDINATOR_SOURCE_REPOSITORY = "https://github.com/marshallr12/agent_coordinator"
           $env:RUSTFLAGS = "-C link-arg=/Brepro"
           $env:ARFLAGS_x86_64_pc_windows_msvc = "/Brepro"
           $env:CARGO_TARGET_DIR = "target/repro-first"
           cargo build --release --locked -p coordinator-cli -p coordinator-mcp-transport
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/package_release.py --platform windows-x86_64 --version $version --cli target/repro-first/release/agent-coordinator.exe --mcp-adapter target/repro-first/release/agent-coordinator-mcp.exe --source-date-epoch $epoch --output-dir dist/first
+          python scripts/package_release.py --platform windows-x86_64 --version $version --source-commit $buildCommit --cli target/repro-first/release/agent-coordinator.exe --mcp-adapter target/repro-first/release/agent-coordinator-mcp.exe --source-date-epoch $epoch --output-dir dist/first
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:CARGO_TARGET_DIR = "target/repro-second"
           cargo build --release --locked -p coordinator-cli -p coordinator-mcp-transport
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/package_release.py --platform windows-x86_64 --version $version --cli target/repro-second/release/agent-coordinator.exe --mcp-adapter target/repro-second/release/agent-coordinator-mcp.exe --source-date-epoch $epoch --output-dir dist/second
+          python scripts/package_release.py --platform windows-x86_64 --version $version --source-commit $buildCommit --cli target/repro-second/release/agent-coordinator.exe --mcp-adapter target/repro-second/release/agent-coordinator-mcp.exe --source-date-epoch $epoch --output-dir dist/second
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $package = "agent-coordinator-$version-windows-x86_64.zip"
           python scripts/compare_release.py "dist/first/$package" "dist/second/$package"

@@ -28,6 +28,7 @@ MAX_FILES = 256
 MAX_BOOTSTRAP_BYTES = 2 * 1024
 REQUIRED = {
     "AGENTS.md",
+    "BUILD-IDENTITY.json",
     "CONTRIBUTING.md",
     "DURABLE-RECORD.md",
     "HANDOFF.md",
@@ -178,6 +179,13 @@ def verify_internal(root: Path) -> None:
     assert "PrivateNetwork=true" in backup and "Persistent=true" in timer and "OnCalendar=" in timer
     run([str(root / "bin/agent-coordinator"), "--version"])
     run([str(root / "bin/agent-coordinator-server"), "--version"])
+    identity = json.loads((root / "BUILD-IDENTITY.json").read_text(encoding="utf-8"))
+    cli_identity = json.loads(run([str(root / "bin/agent-coordinator"), "client-info", "--json"]).stdout)
+    server_identity = json.loads(run([str(root / "bin/agent-coordinator-server"), "build-info"]).stdout)
+    assert identity["cli"] == cli_identity, "Package manifest CLI identity differs from the packaged executable."
+    assert identity["server"] == server_identity, "Package manifest server identity differs from the packaged executable."
+    assert cli_identity["build"]["source_commit"] == server_identity["build"]["source_commit"]
+    assert cli_identity["version"] == server_identity["version"]
 
 
 def verify_markdown_links(root: Path) -> None:

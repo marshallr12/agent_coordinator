@@ -427,6 +427,7 @@ name = "coordinator-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "coordinator-core",
  "reqwest",
  "serde",
  "serde_json",

@@ -4,6 +4,28 @@ The native `agent-coordinator` command connects an existing harness to one
 Agent Coordinator project. It stores no secret in the repository and never
 claims work as a side effect of `connect`.
 
+## Client compatibility and verified updates
+
+`client-info --json` reports the CLI semantic version, exact source commit and
+repository, build cleanliness, OS/architecture target, supported protocol
+versions, and capabilities. `compatibility --json` anonymously reads the
+service's `/api/v1/info` contract without credentials or redirects. It compares
+the exact source identity, target, protocol versions, and capabilities. The
+preflight runs before `connect`, task claims, and code submissions. A missing
+contract or mismatch returns `client_upgrade_required`; read-only diagnosis and
+safe handling of existing attempts remain available.
+
+Use the full source commit and repository from
+`client_compatibility.compatible_client`. Prefer an artifact in
+`verified_packages`, which lists target, release identity, trusted download, and
+checksums. This deployment registers no prebuilt package, so the documented
+fallback is a clean locked build from the exact source commit. The restartable
+upgrade command verifies provenance, target, capabilities, and clean build
+identity, saves the previous binary as a rollback, and verifies the replacement.
+It does not move protected credentials, local sessions, or retry journals. See
+[startup and client upgrade](agent-startup.md#cli-fallback-startup) for complete
+commands and recovery steps.
+
 ## Repository and credential configuration
 
 Commit a non-secret `.agent-coordinator.toml` at the repository root:

@@ -48,6 +48,8 @@ struct Options {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Print exact source and target build identity without opening service state.
+    BuildInfo,
     /// Start the service on its private loopback listener.
     Serve,
     /// Publish and verify a consistent database/artifact snapshot, then apply retention.
@@ -113,6 +115,17 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::new("info,rmcp=off"))
         .init();
     let options = Options::parse();
+    if matches!(&options.command, Command::BuildInfo) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "build": coordinator_core::build_identity(),
+                "client_compatibility": coordinator_core::service_client_compatibility(),
+            }))?
+        );
+        return Ok(());
+    }
     // Verification and restore must not create, migrate, or otherwise touch the
     // configured live database. Restore prepares an isolated destination itself.
     match &options.command {
@@ -154,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
         AppState::open(config).await?
     };
     match options.command {
+        Command::BuildInfo => unreachable!("handled before opening service state"),
         Command::RecoverClock { reason } => {
             let report =
                 coordinator_server::operator_access::recover_clock(&state, &reason).await?;

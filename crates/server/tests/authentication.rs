@@ -182,6 +182,38 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
     assert_eq!(discovery.headers["cache-control"], "no-store");
     let data = &discovery.body["data"];
     assert_eq!(data["api_version"], "v1");
+    assert_eq!(data["build"]["source_commit"].as_str().unwrap().len(), 40);
+    assert_eq!(data["build"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        data["client_compatibility"]["required_protocol_versions"][0],
+        "v1"
+    );
+    assert_eq!(
+        data["client_compatibility"]["required_capabilities"][0],
+        "durable_candidate_submission_fields"
+    );
+    assert_eq!(
+        data["client_compatibility"]["compatible_client"]["source_commit"],
+        data["build"]["source_commit"]
+    );
+    assert!(
+        data["client_compatibility"]["compatible_client"]["source_repository"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://")
+    );
+    assert!(
+        data["client_compatibility"]["compatible_client"]["verified_packages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        data["client_compatibility"]["compatible_client"]["supported_targets"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("linux-aarch64"))
+    );
     assert_eq!(data["agent_startup"]["schema_version"], 2);
     let guide = data["agent_startup"]["guide"].as_str().unwrap();
     assert_eq!(

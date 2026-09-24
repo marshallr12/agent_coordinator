@@ -5,13 +5,16 @@ Run `cargo build --workspace --locked` first. Python's standard library is enoug
 No existing credentials, repositories, or service state are used.
 """
 import concurrent.futures
+import hashlib
 import http.cookiejar
 import json
 import os
 from pathlib import Path
+import platform
 import secrets
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -35,7 +38,9 @@ CLI = BUILD / f"agent-coordinator{BINARY_SUFFIX}"
 
 
 def run():
+    global CLI
     assert SERVER.is_file() and CLI.is_file(), "Build the workspace first."
+    subprocess.run([sys.executable, str(ROOT / "scripts/upgrade_client_test.py")], check=True, timeout=30)
     with tempfile.TemporaryDirectory(prefix="coordinator-smoke-") as directory:
         temporary = Path(directory)
         with socket.socket() as listener:
@@ -119,10 +124,42 @@ def run():
                 assert result.returncode == expected, f"CLI {args[0]} returned {result.returncode}, expected {expected}: {failure.get('code')} {failure.get('message')}"
                 return payload
 
+            if os.name != "nt":
+                # Upgrade a same-semver legacy build to the exact client named by live discovery.
+                upgrade_dir = temporary / "upgrade"
+                upgrade_dir.mkdir()
+                installed_cli = upgrade_dir / "agent-coordinator"
+                legacy_commit = "8bf489f72cf5b82dac1fa7ebd6ec6d53bd7f13c3"
+                installed_cli.write_text(
+                    "#!/usr/bin/env python3\nimport json\n"
+                    "print(json.dumps({'version':'0.1.0','build':"
+                    "{'source_commit':'" + legacy_commit + "','source_repository':'https://github.com/marshallr12/agent_coordinator',"
+                    "'target_os':'linux','target_arch':'" + platform.machine().lower() + "','dirty':False},'capabilities':[]}))\n"
+                )
+                installed_cli.chmod(0o755)
+                protected_state = upgrade_dir / "session-state.json"
+                protected_state.write_text('{"origin":"local-smoke","pending_key":"preserved"}')
+                original_state = protected_state.read_bytes()
+                with urllib.request.urlopen(origin + "/api/v1/info", timeout=5) as response:
+                    service_info = upgrade_dir / "service-info.json"
+                    service_info.write_bytes(response.read())
+                digest = hashlib.sha256(CLI.read_bytes()).hexdigest()
+                upgraded = subprocess.run([
+                    sys.executable, str(ROOT / "scripts/upgrade_client.py"),
+                    "--binary", str(installed_cli), "--service-info", str(service_info),
+                    "--candidate", str(CLI), "--sha256", digest,
+                ], text=True, capture_output=True, timeout=30)
+                assert upgraded.returncode == 0, f"Verified client upgrade failed: {upgraded.stderr}"
+                assert Path(str(installed_cli) + ".rollback").is_file(), "Upgrade did not retain its rollback executable."
+                assert protected_state.read_bytes() == original_state, "Upgrade changed protected session state."
+                CLI = installed_cli
+
             for index in range(2):
                 connected = cli(index, "connect")
                 assert connected["data"]["orientation"]["instructions_complete"]
                 assert len(cli(index, "projects", "list")["data"]["items"]) == 2
+            compatibility = cli(0, "compatibility")
+            assert compatibility["compatible"] is True
             task = cli(0, "tasks", "create", body={"title": "One shared task",
                 "description": "Two native CLI processes compete for one task.",
                 "acceptance_criteria": ["Exactly one owner"]})["data"]

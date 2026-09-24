@@ -33,6 +33,9 @@ dependencies:
 ```sh
 rustup toolchain install 1.98.1 --profile minimal
 rustup default 1.98.1
+build_commit="$(git rev-parse HEAD)"
+COORDINATOR_BUILD_COMMIT="$build_commit" \
+COORDINATOR_SOURCE_REPOSITORY=https://github.com/marshallr12/agent_coordinator \
 cargo build --release --locked -p coordinator-server -p coordinator-cli -p coordinator-mcp-transport
 ```
 
@@ -41,6 +44,7 @@ Package the binaries with the repository's Markdown guidance and systemd files:
 ```sh
 version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
 python3 scripts/package_release.py --platform linux-x86_64 --version "$version" \
+  --source-commit "$build_commit" \
   --server target/release/agent-coordinator-server \
   --cli target/release/agent-coordinator \
   --mcp-adapter target/release/agent-coordinator-mcp \
@@ -48,8 +52,13 @@ python3 scripts/package_release.py --platform linux-x86_64 --version "$version" 
   --output-dir dist
 ```
 
-The script prints the archive path, checksum file, and SHA-256. A workstation
-build has not passed the release workflow's systemd/HTTPS exercise. Treat it as
+Pass `--source-commit` to assert that the embedded CLI and server metadata match
+the exact clean revision. The package contains `BUILD-IDENTITY.json` and its
+internal `SHA256SUMS` includes every artifact. The CLI and server also expose
+their build identities directly (`agent-coordinator client-info --json` and
+`agent-coordinator-server build-info`). The script prints the archive path,
+checksum file, and SHA-256. A workstation build has not passed the release
+workflow's systemd/HTTPS exercise. Treat it as
 suitable for a staging instance, or run that workflow on the same commit before
 calling the instance production.
 

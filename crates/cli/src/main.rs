@@ -100,6 +100,10 @@ enum Command {
     },
     /// Export a service-authoritative Markdown snapshot.
     Export(ListArgs),
+    /// Compare this executable with the service's anonymous compatibility contract.
+    Compatibility,
+    /// Show local version, source commit, target, protocols, and capabilities as JSON.
+    ClientInfo,
     /// Create or resume this harness session and return project orientation. Never claims work.
     Connect(ConnectArgs),
     /// List or create projects.
@@ -978,6 +982,12 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
     ) {
         return session_adoption::diagnose_local(cli);
     }
+    if matches!(&cli.command, Command::ClientInfo) {
+        return Ok(coordinator_core::client_compatibility());
+    }
+    if matches!(&cli.command, Command::Compatibility) {
+        return compatibility_report(cli).await;
+    }
     let context = build_context(cli).await?;
     match &cli.command {
         Command::Session { command } => session_adoption::run(cli, &context, command).await,
@@ -987,7 +997,12 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
         Command::TaskDefinitionGrants { command } => {
             operator::task_definition_grants(cli, &context, command).await
         }
-        Command::Connect(args) => connect(cli, &context, args).await,
+        Command::Connect(args) => {
+            ensure_compatible(&context).await?;
+            connect(cli, &context, args).await
+        }
+        Command::Compatibility => unreachable!("handled before authenticated context"),
+        Command::ClientInfo => unreachable!("handled before authenticated context"),
         Command::Projects { command } => match command {
             ProjectsCommand::List(args) => finish(
                 context
@@ -1020,7 +1035,10 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
                 }
             }
         }
-        Command::Claim(args) => claim(cli, &context, args).await,
+        Command::Claim(args) => {
+            ensure_compatible(&context).await?;
+            claim(cli, &context, args).await
+        }
         Command::Renew(args) => {
             let path = attempt_path(&context, &args.attempt, "renew").map_err(Failure::invalid)?;
             mutate(
@@ -1157,7 +1175,10 @@ async fn submissions_command(
     command: &SubmissionsCommand,
 ) -> std::result::Result<Value, Failure> {
     match command {
-        SubmissionsCommand::Code(args) => submit_code(cli, context, args).await,
+        SubmissionsCommand::Code(args) => {
+            ensure_compatible(context).await?;
+            submit_code(cli, context, args).await
+        }
         SubmissionsCommand::General(args) => {
             validate_segment("attempt", &args.attempt).map_err(Failure::invalid)?;
             let mut body = submission_evidence(&args.input).map_err(Failure::invalid)?;
@@ -3310,6 +3331,125 @@ async fn build_context(cli: &Cli) -> std::result::Result<ContextData, Failure> {
     })
 }
 
+async fn compatibility_report(cli: &Cli) -> std::result::Result<Value, Failure> {
+    let (_, binding) = config::binding(cli.repo_config.as_deref()).map_err(Failure::invalid)?;
+    let service =
+        CoordinatorClient::unauthenticated(&binding.service_url, cli.allow_insecure_loopback)
+            .map_err(client_failure)?;
+    let response = service
+        .get("/api/v1/info", None)
+        .await
+        .map_err(client_failure)?;
+    compatibility_value(&require_success(response)?)
+}
+
+async fn check_compatibility(context: &ContextData) -> std::result::Result<Value, Failure> {
+    let response = context
+        .client
+        .get("/api/v1/info", None)
+        .await
+        .map_err(client_failure)?;
+    compatibility_value(&require_success(response)?)
+}
+
+fn compatibility_value(info: &Value) -> std::result::Result<Value, Failure> {
+    let data = info.get("data").unwrap_or(info);
+    let Some(contract) = data.get("client_compatibility") else {
+        return Err(upgrade_required(
+            json!({"reason":"service_compatibility_contract_missing","service_version":data.get("version")}),
+        ));
+    };
+    let client = coordinator_core::client_compatibility();
+    let required_protocols = contract
+        .get("required_protocol_versions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let required_capabilities = contract
+        .get("required_capabilities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let compatible_client = contract.get("compatible_client").unwrap_or(&Value::Null);
+    let expected_commit = compatible_client
+        .get("source_commit")
+        .and_then(Value::as_str);
+    let expected_repository = compatible_client
+        .get("source_repository")
+        .and_then(Value::as_str);
+    let expected_version = compatible_client.get("version").and_then(Value::as_str);
+    let source_commit = client
+        .pointer("/build/source_commit")
+        .and_then(Value::as_str);
+    let source_repository = client
+        .pointer("/build/source_repository")
+        .and_then(Value::as_str);
+    let target = format!(
+        "{}-{}",
+        coordinator_core::BUILD_TARGET_OS,
+        coordinator_core::BUILD_TARGET_ARCH
+    );
+    let supported_targets = compatible_client
+        .get("supported_targets")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let contract_well_formed = expected_commit.is_some_and(|value| {
+        value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) && expected_repository.is_some_and(|value| {
+        value.starts_with("https://") && !value.contains('@') && !value.contains('?')
+    }) && expected_version.is_some_and(|value| !value.is_empty())
+        && !required_protocols.is_empty()
+        && !required_capabilities.is_empty()
+        && !supported_targets.is_empty();
+    let supported_protocols = client
+        .get("supported_protocol_versions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let capabilities = client
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let checks = json!({
+        "contract_well_formed": contract_well_formed,
+        "version_matches": expected_version == client.get("version").and_then(Value::as_str),
+        "source_commit_matches": expected_commit.is_some() && expected_commit == source_commit,
+        "source_repository_matches": expected_repository.is_some() && expected_repository == source_repository,
+        "supported_target": supported_targets.iter().any(|item| item.as_str() == Some(&target)),
+        "protocols": required_protocols.iter().all(|required| supported_protocols.contains(required)),
+        "capabilities": required_capabilities.iter().all(|required| capabilities.contains(required)),
+        "clean_build": client.pointer("/build/dirty").and_then(Value::as_bool) == Some(false),
+    });
+    let compatible = checks
+        .as_object()
+        .is_some_and(|values| values.values().all(|value| value.as_bool() == Some(true)));
+    let report = json!({
+        "compatible": compatible,
+        "client": client,
+        "service": {"version":data.get("version"),"build":data.get("build"),"requirements":contract},
+        "checks": checks,
+        "next_actions": if compatible { json!([]) } else { json!(["Install or build the exact compatible client identified by service.client_compatibility.compatible_client.","Verify with agent-coordinator compatibility --json before connecting or claiming new work.","If no trusted artifact or build tool is available, continue only safe operations for existing ownership and report the workstation blocker."]) }
+    });
+    if compatible {
+        Ok(report)
+    } else {
+        Err(upgrade_required(report))
+    }
+}
+
+async fn ensure_compatible(context: &ContextData) -> std::result::Result<(), Failure> {
+    check_compatibility(context).await.map(|_| ())
+}
+
+fn upgrade_required(details: Value) -> Failure {
+    Failure {
+        exit: 6,
+        output: json!({"error":{"code":"client_upgrade_required","message":"This CLI is not an exact compatible client for the running service.","details":details,"next_actions":[{"action":"run_compatibility_diagnostic","command":"agent-coordinator compatibility --json"},{"action":"install_verified_compatible_client"}],"retryable":false}}),
+    }
+}
+
 async fn connect(
     cli: &Cli,
     context: &ContextData,
@@ -4035,5 +4175,75 @@ mod tests {
             Ok(Some(_))
         ));
         assert!(registered_checkout(&json!({"data":{"checkout":"invalid"}})).is_err());
+    }
+
+    #[test]
+    fn compatibility_rejects_equal_semver_with_a_different_source_build() {
+        let client = coordinator_core::client_compatibility();
+        let local_commit = client
+            .pointer("/build/source_commit")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        let info = json!({
+            "data": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "client_compatibility": {
+                    "required_protocol_versions": ["v1"],
+                    "required_capabilities": ["durable_candidate_submission_fields"],
+                    "compatible_client": {
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "source_commit": "ffffffffffffffffffffffffffffffffffffffff",
+                        "source_repository": coordinator_core::BUILD_SOURCE_REPOSITORY,
+                        "supported_targets": [format!("{}-{}", coordinator_core::BUILD_TARGET_OS, coordinator_core::BUILD_TARGET_ARCH)]
+                    }
+                }
+            }
+        });
+        assert_ne!(local_commit, "ffffffffffffffffffffffffffffffffffffffff");
+        let failure = compatibility_value(&info).unwrap_err();
+        assert_eq!(failure.output["error"]["code"], "client_upgrade_required");
+        assert_eq!(
+            failure.output["error"]["details"]["service"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            failure.output["error"]["details"]["checks"]["version_matches"],
+            true
+        );
+        assert_eq!(
+            failure.output["error"]["details"]["checks"]["source_commit_matches"],
+            false
+        );
+    }
+
+    #[test]
+    fn compatibility_reports_legacy_and_missing_capability_contracts_actionably() {
+        let legacy = compatibility_value(&json!({"data":{"version":"0.1.0"}})).unwrap_err();
+        assert_eq!(legacy.output["error"]["code"], "client_upgrade_required");
+        assert_eq!(
+            legacy.output["error"]["details"]["reason"],
+            "service_compatibility_contract_missing"
+        );
+
+        let mut contract = coordinator_core::service_client_compatibility();
+        contract["required_capabilities"] = json!(["capability_not_supported"]);
+        let info = json!({
+            "data": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "client_compatibility": contract
+            }
+        });
+        let failure = compatibility_value(&info).unwrap_err();
+        assert_eq!(failure.output["error"]["code"], "client_upgrade_required");
+        assert_eq!(
+            failure.output["error"]["details"]["checks"]["capabilities"],
+            false
+        );
+        assert!(
+            failure.output["error"]["details"]["next_actions"]
+                .as_array()
+                .is_some_and(|actions| !actions.is_empty())
+        );
     }
 }

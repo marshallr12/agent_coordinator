@@ -12,6 +12,7 @@ import posixpath
 import re
 import shutil
 import stat
+import subprocess
 import tarfile
 import tempfile
 import urllib.parse
@@ -97,6 +98,52 @@ def source_entries(platform: str, server: Path | None, cli: Path, mcp_adapter: P
         name = "bin/agent-coordinator-mcp" if platform == "linux-x86_64" else "agent-coordinator-mcp.exe"
         entries[name] = (checked_file(mcp_adapter, "MCP adapter binary"), 0o755)
     return entries
+
+
+def verify_build_identity(platform: str, version: str, source_commit: str, server: Path | None, cli: Path) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise SystemExit("--source-commit must be the exact 40-character source revision")
+    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+    tracked_changes = subprocess.run(["git", "-C", str(ROOT), "diff-index", "--quiet", "HEAD", "--"],
+                                     check=False).returncode
+    if head != source_commit or tracked_changes != 0:
+        raise SystemExit("release source must be clean and checked out at --source-commit")
+    try:
+        client = json.loads(subprocess.run([str(cli), "client-info", "--json"], check=True,
+                                           capture_output=True, text=True).stdout)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+        raise SystemExit(f"CLI does not expose valid machine-readable build identity: {error}")
+    cli_build = client.get("build", {})
+    target_os, target_arch = ("linux", "x86_64") if platform == "linux-x86_64" else ("windows", "x86_64")
+    if (client.get("version") != version or cli_build.get("source_commit") != source_commit
+            or cli_build.get("dirty") is not False or cli_build.get("target_os") != target_os
+            or cli_build.get("target_arch") != target_arch):
+        raise SystemExit("CLI build identity does not match the release version, source commit, clean state, and package target")
+    identity = {"cli": client, "server": None}
+    if server is not None:
+        try:
+            service = json.loads(subprocess.run([str(server), "build-info"], check=True,
+                                                capture_output=True, text=True).stdout)
+        except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+            raise SystemExit(f"server does not expose valid machine-readable build identity: {error}")
+        service_build = service.get("build", {})
+        compatibility = service.get("client_compatibility", {})
+        compatible_client = compatibility.get("compatible_client", {})
+        target_name = f"{target_os}-{target_arch}"
+        if (service.get("version") != version or service_build.get("source_commit") != source_commit
+                or service_build.get("dirty") is not False or service_build.get("target_os") != "linux"
+                or service_build.get("target_arch") != "x86_64"
+                or service_build.get("source_repository") != cli_build.get("source_repository")
+                or compatible_client.get("version") != cli_build.get("version")
+                or compatible_client.get("source_commit") != cli_build.get("source_commit")
+                or compatible_client.get("source_repository") != cli_build.get("source_repository")
+                or target_name not in compatible_client.get("supported_targets", [])
+                or not set(compatibility.get("required_protocol_versions", [])).issubset(set(client.get("supported_protocol_versions", [])))
+                or not set(compatibility.get("required_capabilities", [])).issubset(set(client.get("capabilities", [])))):
+            raise SystemExit("server and CLI build identities do not match the clean release source and target")
+        identity["server"] = service
+    return identity
 
 
 def validate_bootstrap_sources(entries: dict[str, tuple[Path, int]]) -> None:
@@ -236,6 +283,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=PLATFORMS, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--source-commit", required=True, help="exact clean source commit embedded in the binaries")
     parser.add_argument("--server", type=Path)
     parser.add_argument("--cli", type=Path, required=True)
     parser.add_argument("--mcp-adapter", type=Path)
@@ -247,18 +295,23 @@ def main() -> None:
     if args.source_date_epoch < 0 or args.source_date_epoch > 4_354_819_199:
         raise SystemExit("--source-date-epoch is outside the supported range")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    entries = source_entries(args.platform, args.server, args.cli, args.mcp_adapter)
-    validate_bootstrap_sources(entries)
-    validate_local_markdown_links(entries)
-    manifest = checksum_manifest(entries)
-    validate_archive_bounds(args.platform, entries, manifest)
-    root_name = f"agent-coordinator-{args.version}-{args.platform}"
-    suffix = ".tar.gz" if args.platform == "linux-x86_64" else ".zip"
-    archive = args.output_dir / f"{root_name}{suffix}"
-    if args.platform == "linux-x86_64":
-        write_linux(archive, root_name, entries, manifest, args.source_date_epoch)
-    else:
-        write_windows(archive, root_name, entries, manifest, args.source_date_epoch)
+    identity = verify_build_identity(args.platform, args.version, args.source_commit, args.server, args.cli)
+    with tempfile.TemporaryDirectory(prefix="agent-coordinator-build-identity-") as temporary:
+        identity_path = Path(temporary) / "BUILD-IDENTITY.json"
+        identity_path.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        entries = source_entries(args.platform, args.server, args.cli, args.mcp_adapter)
+        entries["BUILD-IDENTITY.json"] = (identity_path, 0o644)
+        validate_bootstrap_sources(entries)
+        validate_local_markdown_links(entries)
+        manifest = checksum_manifest(entries)
+        validate_archive_bounds(args.platform, entries, manifest)
+        root_name = f"agent-coordinator-{args.version}-{args.platform}"
+        suffix = ".tar.gz" if args.platform == "linux-x86_64" else ".zip"
+        archive = args.output_dir / f"{root_name}{suffix}"
+        if args.platform == "linux-x86_64":
+            write_linux(archive, root_name, entries, manifest, args.source_date_epoch)
+        else:
+            write_windows(archive, root_name, entries, manifest, args.source_date_epoch)
     digest = sha256(archive)
     checksum = archive.with_name(archive.name + ".sha256")
     atomic_bytes(checksum, f"{digest}  {archive.name}\n".encode("ascii"))
