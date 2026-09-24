@@ -317,6 +317,16 @@ async function main() {
       await evaluate("document.querySelector('#tasks-list .task-row').click()");
       await waitPage("!document.querySelector('#task-detail-content').hidden", 'fixture detail');
     };
+    task.lifecycle = 'canceled';
+    task.work_status = 'canceled';
+    await openFixtureTask();
+    assert(await evaluate("document.querySelector('#task-operator-actions').textContent.includes('Delete task')"), 'Canceled task did not expose the labeled delete control.');
+    await evaluate("[...document.querySelectorAll('#task-operator-actions button')].find(button => button.textContent === 'Delete task').click()");
+    await waitPage("document.querySelector('dialog[open] h2')?.textContent === 'Delete task'", 'delete confirmation');
+    assert(await evaluate("document.querySelector('dialog[open]').textContent.includes('soft delete that retains task and audit history')"), 'Delete confirmation did not explain retained task and audit history.');
+    await evaluate("document.querySelector('dialog[open] button[type=button]').click()");
+    task.lifecycle = 'open';
+    task.work_status = 'ready';
     const submission = { id: 'fixture-submission', task_id: task.id, kind: 'code', summary: 'Saved candidate', candidate_revision: 'fixture-source', acceptance_evidence: [] };
     task.blocked_reason = 'Saved blocker\nRepository access must be restored.';
     for (const phase of ['review', 'integration', 'done']) {
