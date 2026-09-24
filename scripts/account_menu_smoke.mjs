@@ -21,7 +21,7 @@ async function unusedPort() {
   return port;
 }
 
-async function fixtureServer() {
+async function fixtureServer({ authenticated = true } = {}) {
   let signedOut = false;
   const files = {
     '/': ['web/index.html', 'text/html; charset=utf-8'],
@@ -32,7 +32,10 @@ async function fixtureServer() {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://fixture.invalid');
     const json = data => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ data })); };
-    if (url.pathname === '/api/v1/me') return json({ actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'operator' }, csrf_token: 'fixture-csrf' });
+    if (url.pathname === '/api/v1/me') {
+      if (!authenticated) { response.writeHead(401, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ error: { code: 'authentication_required', message: 'Sign in to continue.' } })); return; }
+      return json({ actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'operator' }, csrf_token: 'fixture-csrf' });
+    }
     if (url.pathname === '/api/v1/projects') return json({ items: [] });
     if (url.pathname === '/api/v1/auth/account') return json({ operator: { id: 'fixture-operator', name: 'Fixture operator', role: 'operator', revision: 1 } });
     if (url.pathname === '/api/v1/auth/logout' && request.method === 'POST') { signedOut = true; return json({}); }
@@ -62,10 +65,11 @@ async function waitFor(fetchUrl, predicate, description) {
 }
 
 async function main() {
-  const fixture = await fixtureServer();
+  const fixture = await fixtureServer({ authenticated: false });
+  let authenticatedFixture;
   const serverPort = fixture.server.address().port;
   const debugPort = await unusedPort();
-  const profile = await mkdtemp(join(tmpdir(), 'agent-coordinator-account-menu-'));
+  const profile = await mkdtemp(join(tmpdir(), 'agent-coordinator-fresh-browser-'));
   const executable = process.env.CHROME_BIN || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : 'chromium');
   const chrome = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`], { stdio: 'ignore', windowsHide: true });
   let socket;
@@ -113,6 +117,18 @@ async function main() {
       throw new Error(`Timed out waiting for ${label}`);
     };
 
+    await waitPage("!document.querySelector('#login-view').hidden && document.querySelector('#dashboard-view').hidden", 'bounded unauthenticated sign-in view');
+    assert(await evaluate("location.pathname === '/'"), 'Unauthenticated startup navigated away from the root page.');
+    assert(await evaluate("document.querySelector('#login-error').hidden"), 'A normal missing session was shown as a sign-in error.');
+    await evaluate("document.querySelector('#username').focus()");
+    assert(await evaluate("document.activeElement.id") === 'username', 'The fresh browser did not focus the sign-in form.');
+    console.log('PASS: fresh-profile Chrome reached the sign-in view without a navigation redirect.');
+
+    // Repeat with a fresh authenticated fixture and profile to retain account-menu coverage.
+    await new Promise(resolveClose => fixture.server.close(resolveClose));
+    authenticatedFixture = await fixtureServer();
+    const authenticatedPort = authenticatedFixture.server.address().port;
+    await connection.send('Page.navigate', { url: `http://127.0.0.1:${authenticatedPort}/` });
     await waitPage("!document.querySelector('#dashboard-view').hidden", 'authenticated dashboard');
     assert(await evaluate("document.querySelectorAll('.topbar-actions button').length") === 1, 'Expected one account action in the header.');
     assert(await evaluate("document.querySelector('#account-button').textContent") === 'Fixture operator', 'The account action did not use the signed-in username.');
@@ -122,7 +138,7 @@ async function main() {
     assert(await evaluate("[...document.querySelectorAll('dialog[open] button')].some(button => button.textContent === 'Sign out')"), 'The My account dialog has no Sign out button.');
     await evaluate("[...document.querySelectorAll('dialog[open] button')].find(button => button.textContent === 'Sign out').click()");
     await waitPage("!document.querySelector('#login-view').hidden && document.querySelector('#dashboard-view').hidden", 'local sign-out');
-    assert(fixture.signedOut(), 'The Sign out button did not call the logout endpoint.');
+    assert(authenticatedFixture.signedOut(), 'The Sign out button did not call the logout endpoint.');
     console.log('PASS: headless Chrome verified the username account action, My account dialog, and sign out.');
   } finally {
     socket?.close();
@@ -132,8 +148,10 @@ async function main() {
       await once(chrome, 'exit');
     }
     if (chrome.pid && chrome.exitCode === null) { const exited = once(chrome, 'exit'); chrome.kill('SIGTERM'); await exited; }
-    await new Promise(resolveClose => fixture.server.close(resolveClose));
-    await rm(profile, { recursive: true, force: true });
+    for (const server of [fixture.server, authenticatedFixture?.server]) {
+      if (server?.listening) await new Promise(resolveClose => server.close(resolveClose));
+    }
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     if (launchError) throw launchError;
   }
 }
