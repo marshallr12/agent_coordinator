@@ -7,6 +7,10 @@ import { once } from 'node:events';
 import net from 'node:net';
 
 const root = resolve(import.meta.dirname, '..');
+// Model a mobile Chromium WebView user agent used by embedded browser surfaces.
+// This is a compatibility fixture, not a claim that it exactly matches every
+// Codex in-app browser version.
+const IN_APP_BROWSER_USER_AGENT = 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UQ1A.240205.004; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/122.0.0.0 Mobile Safari/537.36';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -107,6 +111,7 @@ async function main() {
       return result.result.value;
     };
     await connection.send('Page.enable');
+    await connection.send('Emulation.setUserAgentOverride', { userAgent: IN_APP_BROWSER_USER_AGENT });
     await connection.send('Page.navigate', { url: `http://127.0.0.1:${serverPort}/` });
     const waitPage = async (expression, label) => {
       const deadline = Date.now() + 10000;
@@ -119,10 +124,11 @@ async function main() {
 
     await waitPage("!document.querySelector('#login-view').hidden && document.querySelector('#dashboard-view').hidden", 'bounded unauthenticated sign-in view');
     assert(await evaluate("location.pathname === '/'"), 'Unauthenticated startup navigated away from the root page.');
+    assert(await evaluate('navigator.userAgent') === IN_APP_BROWSER_USER_AGENT, 'The fresh browser did not use the embedded Chromium user-agent fixture.');
     assert(await evaluate("document.querySelector('#login-error').hidden"), 'A normal missing session was shown as a sign-in error.');
     await evaluate("document.querySelector('#username').focus()");
     assert(await evaluate("document.activeElement.id") === 'username', 'The fresh browser did not focus the sign-in form.');
-    console.log('PASS: fresh-profile Chrome reached the sign-in view without a navigation redirect.');
+    console.log('PASS: fresh-profile embedded-Chromium fixture reached sign-in without a navigation redirect.');
 
     // Repeat with a fresh authenticated fixture and profile to retain account-menu coverage.
     await new Promise(resolveClose => fixture.server.close(resolveClose));
