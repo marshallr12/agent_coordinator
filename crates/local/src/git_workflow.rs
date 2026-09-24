@@ -31,6 +31,14 @@ pub struct CleanSnapshot {
     pub tree: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateCheckpoint {
+    pub remote: CanonicalRemoteIdentity,
+    pub reference: String,
+    pub revision: String,
+    pub tree: String,
+}
+
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CanonicalRemoteIdentity(String);
@@ -238,6 +246,209 @@ pub fn verify_clean_snapshot(
 ) -> Result<()> {
     let actual = capture_clean_snapshot(checkout, configured_remote)?;
     ensure!(actual == *expected, "the clean checkout snapshot changed");
+    Ok(())
+}
+
+/// Publishes a clean candidate to a create-only durable ref, fetches that exact
+/// ref into a private verification namespace, and checks the fetched commit and
+/// tree against the original local snapshot. Existing refs are accepted only
+/// when they already name the exact candidate.
+pub fn checkpoint_candidate(
+    checkout: &Path,
+    configured_remote: &str,
+    reference: &str,
+) -> Result<CandidateCheckpoint> {
+    let snapshot = capture_clean_snapshot(checkout, configured_remote)?;
+    validate_candidate_reference(&snapshot.checkout, reference)?;
+    let remote = git_remote_argument(&snapshot.checkout, configured_remote)?;
+    match observe_remote_reference(&snapshot.checkout, remote.clone(), reference)? {
+        Some(revision) => ensure!(
+            revision == snapshot.revision,
+            "candidate checkpoint ref already names a different commit"
+        ),
+        None => {
+            let lease = format!("--force-with-lease={reference}:");
+            let source = format!("{}:{reference}", snapshot.revision);
+            let pushed = git_raw(
+                &snapshot.checkout,
+                [
+                    OsString::from("push"),
+                    OsString::from("--no-follow-tags"),
+                    OsString::from(lease),
+                    remote.clone(),
+                    OsString::from(source),
+                ],
+                None,
+                &[],
+            )?;
+            if !pushed.status.success()
+                && observe_remote_reference(&snapshot.checkout, remote.clone(), reference)?
+                    != Some(snapshot.revision.clone())
+            {
+                bail!("Git could not create the candidate checkpoint ref")
+            }
+        }
+    }
+
+    let verification_ref = format!("refs/agent-coordinator/verify/{}", Uuid::new_v4());
+    let refspec = format!("+{reference}:{verification_ref}");
+    let fetch = git_raw(
+        &snapshot.checkout,
+        [
+            OsString::from("fetch"),
+            OsString::from("--no-tags"),
+            OsString::from("--no-write-fetch-head"),
+            remote.clone(),
+            OsString::from(refspec),
+        ],
+        None,
+        &[],
+    )?;
+    ensure!(
+        fetch.status.success(),
+        "Git could not fetch the candidate checkpoint ref"
+    );
+    let fetched_revision = git_text(
+        &snapshot.checkout,
+        ["rev-parse", &format!("{verification_ref}^{{commit}}")],
+    )?;
+    let fetched_tree = git_text(
+        &snapshot.checkout,
+        ["rev-parse", &format!("{verification_ref}^{{tree}}")],
+    )?;
+    let remote_revision = observe_remote_reference(&snapshot.checkout, remote, reference)?;
+    git_ok(
+        &snapshot.checkout,
+        ["update-ref", "-d", verification_ref.as_str()],
+    )?;
+    ensure!(
+        fetched_revision == snapshot.revision
+            && fetched_tree == snapshot.tree
+            && remote_revision.as_deref() == Some(snapshot.revision.as_str()),
+        "fetched candidate checkpoint does not match the clean local commit and tree"
+    );
+    verify_clean_snapshot(&snapshot.checkout, configured_remote, &snapshot)?;
+    Ok(CandidateCheckpoint {
+        remote: snapshot.remote,
+        reference: reference.to_owned(),
+        revision: snapshot.revision,
+        tree: snapshot.tree,
+    })
+}
+
+/// Fetches an immutable candidate ref into an isolated namespace and verifies
+/// both full object identities before returning the local commit ID.
+pub fn fetch_candidate_checkpoint(
+    checkout: &Path,
+    configured_remote: &str,
+    reference: &str,
+    expected_revision: &str,
+    expected_tree: &str,
+) -> Result<String> {
+    let snapshot = capture_clean_snapshot(checkout, configured_remote)?;
+    validate_candidate_reference(&snapshot.checkout, reference)?;
+    validate_full_oid(expected_revision)?;
+    validate_full_oid(expected_tree)?;
+    let remote = git_remote_argument(&snapshot.checkout, configured_remote)?;
+    let verification_ref = format!("refs/agent-coordinator/verify/{}", Uuid::new_v4());
+    let refspec = format!("+{reference}:{verification_ref}");
+    let fetched = git_raw(
+        &snapshot.checkout,
+        [
+            OsString::from("fetch"),
+            OsString::from("--no-tags"),
+            OsString::from("--no-write-fetch-head"),
+            remote.clone(),
+            OsString::from(refspec),
+        ],
+        None,
+        &[],
+    )?;
+    let result = (|| {
+        ensure!(
+            fetched.status.success(),
+            "Git could not fetch the candidate checkpoint ref"
+        );
+        let revision = git_text(
+            &snapshot.checkout,
+            ["rev-parse", &format!("{verification_ref}^{{commit}}")],
+        )?;
+        let tree = git_text(
+            &snapshot.checkout,
+            ["rev-parse", &format!("{verification_ref}^{{tree}}")],
+        )?;
+        let advertised = observe_remote_reference(&snapshot.checkout, remote, reference)?;
+        ensure!(
+            revision == expected_revision.to_ascii_lowercase()
+                && tree == expected_tree.to_ascii_lowercase()
+                && advertised.as_deref() == Some(expected_revision.to_ascii_lowercase().as_str()),
+            "candidate checkpoint ref is missing or differs from the immutable submission"
+        );
+        Ok(revision)
+    })();
+    let cleanup = git_ok(
+        &snapshot.checkout,
+        ["update-ref", "-d", verification_ref.as_str()],
+    );
+    let revision = result?;
+    cleanup?;
+    Ok(revision)
+}
+
+/// Verifies a candidate ref using a temporary independent Git object store.
+/// This lets native reviewers check remote availability before claiming the
+/// activity or preparing any review or integration worktree.
+pub fn verify_remote_candidate_checkpoint(
+    checkout: &Path,
+    configured_remote: &str,
+    reference: &str,
+    expected_revision: &str,
+    expected_tree: &str,
+) -> Result<()> {
+    let checkout = canonical_git_root(checkout)?;
+    validate_candidate_reference(&checkout, reference)?;
+    validate_full_oid(expected_revision)?;
+    validate_full_oid(expected_tree)?;
+    ensure_remote_matches(&checkout, configured_remote)?;
+    let remote = git_remote_argument(&checkout, configured_remote)?;
+    let directory = tempfile::Builder::new()
+        .prefix("agent-coordinator-candidate-verify-")
+        .tempdir()
+        .context("create temporary candidate verification store")?;
+    git_ok(directory.path(), ["init", "--bare"])?;
+    let verification_ref = format!("refs/agent-coordinator/verify/{}", Uuid::new_v4());
+    let refspec = format!("+{reference}:{verification_ref}");
+    let fetched = git_raw(
+        directory.path(),
+        [
+            OsString::from("fetch"),
+            OsString::from("--no-tags"),
+            OsString::from("--no-write-fetch-head"),
+            remote.clone(),
+            OsString::from(refspec),
+        ],
+        None,
+        &[],
+    )?;
+    ensure!(
+        fetched.status.success(),
+        "Git could not fetch the candidate checkpoint ref"
+    );
+    let revision = git_text(
+        directory.path(),
+        ["rev-parse", &format!("{verification_ref}^{{commit}}")],
+    )?;
+    let tree = git_text(
+        directory.path(),
+        ["rev-parse", &format!("{verification_ref}^{{tree}}")],
+    )?;
+    let advertised = observe_remote_reference(directory.path(), remote, reference)?;
+    ensure!(
+        revision == expected_revision.to_ascii_lowercase()
+            && tree == expected_tree.to_ascii_lowercase()
+            && advertised.as_deref() == Some(expected_revision.to_ascii_lowercase().as_str()),
+        "candidate checkpoint ref is missing or differs from the immutable submission"
+    );
     Ok(())
 }
 
@@ -1020,6 +1231,67 @@ fn validate_full_oid(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_candidate_reference(checkout: &Path, reference: &str) -> Result<()> {
+    ensure!(
+        reference.starts_with("refs/agent-coordinator/candidates/"),
+        "candidate refs must use refs/agent-coordinator/candidates/"
+    );
+    ensure!(
+        reference.len() <= 240
+            && reference
+                .as_bytes()
+                .last()
+                .is_some_and(|byte| !byte.is_ascii_whitespace()),
+        "candidate ref is empty, too long, or has trailing whitespace"
+    );
+    git_ok(checkout, ["check-ref-format", reference])
+        .context("candidate ref is not a valid full Git ref")
+}
+
+fn observe_remote_reference(
+    checkout: &Path,
+    remote: OsString,
+    reference: &str,
+) -> Result<Option<String>> {
+    let output = git_raw(
+        checkout,
+        [
+            OsString::from("ls-remote"),
+            OsString::from("--exit-code"),
+            OsString::from("--refs"),
+            remote,
+            OsString::from(reference),
+        ],
+        None,
+        &[],
+    )?;
+    match output.status.code() {
+        Some(0) => {
+            let text = String::from_utf8(output.stdout)
+                .context("Git returned non-UTF-8 candidate ref evidence")?;
+            let mut lines = text.lines();
+            let line = lines
+                .next()
+                .context("Git returned empty candidate ref evidence")?;
+            ensure!(
+                lines.next().is_none(),
+                "Git returned ambiguous candidate ref evidence"
+            );
+            let (revision, actual_ref) = line
+                .split_once(char::is_whitespace)
+                .context("Git returned malformed candidate ref evidence")?;
+            ensure!(
+                actual_ref.trim() == reference,
+                "Git returned evidence for an unexpected candidate ref"
+            );
+            validate_full_oid(revision)?;
+            Ok(Some(revision.to_ascii_lowercase()))
+        }
+        Some(2) => Ok(None),
+        _ => bail!("Git could not observe the candidate checkpoint ref"),
+    }
+}
+
 fn ensure_clean(checkout: &Path) -> Result<()> {
     let output = git(
         checkout,
@@ -1626,6 +1898,81 @@ mod tests {
             clean_snapshot_matches_commit(&repository.source, remote, &snapshot, &repository.base)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn candidate_checkpoint_is_create_only_and_verifies_in_an_independent_clone() {
+        let repository = repository();
+        let candidate_revision = candidate(&repository, "candidate", "candidate\n");
+        let tree = git_text(
+            &repository.source,
+            ["rev-parse", &format!("{candidate_revision}^{{tree}}")],
+        )
+        .unwrap();
+        let reference = "refs/agent-coordinator/candidates/attempt-1";
+        let checkpoint = checkpoint_candidate(
+            &repository.source,
+            repository.remote.to_str().unwrap(),
+            reference,
+        )
+        .unwrap();
+        assert_eq!(checkpoint.revision, candidate_revision);
+        assert_eq!(checkpoint.tree, tree);
+        assert_eq!(checkpoint.reference, reference);
+
+        let independent = repository._directory.path().join("independent clone");
+        git_ok(
+            repository._directory.path(),
+            [
+                "clone",
+                "--branch",
+                "main",
+                repository.remote.to_str().unwrap(),
+                independent.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        fetch_candidate_checkpoint(
+            &independent,
+            repository.remote.to_str().unwrap(),
+            reference,
+            &candidate_revision,
+            &tree,
+        )
+        .unwrap();
+        verify_remote_candidate_checkpoint(
+            &independent,
+            repository.remote.to_str().unwrap(),
+            reference,
+            &candidate_revision,
+            &tree,
+        )
+        .unwrap();
+        assert!(
+            verify_remote_candidate_checkpoint(
+                &independent,
+                repository.remote.to_str().unwrap(),
+                reference,
+                &candidate_revision,
+                &git_text(
+                    &repository.source,
+                    ["rev-parse", &format!("{}^{{tree}}", repository.base)],
+                )
+                .unwrap(),
+            )
+            .is_err()
+        );
+
+        let other_candidate = candidate(&repository, "other-candidate", "other\n");
+        assert!(
+            checkpoint_candidate(
+                &repository.source,
+                repository.remote.to_str().unwrap(),
+                reference,
+            )
+            .is_err()
+        );
+        assert_ne!(other_candidate, candidate_revision);
     }
 
     #[test]

@@ -72,14 +72,23 @@ def exercise_completion(temporary, api, cli, owner):
     def activity(kind):
         return next(item for item in activities if item['kind'] == kind)
 
-    def claim_args(item):
+    def clone_workstation(name):
+        checkout = root / name
+        git('clone', '--branch', 'main', str(remote), str(checkout), cwd=root)
+        return checkout
+
+    def claim_args(item, candidate_checkout):
         return ['--activity',item['id'],'--submission',submission['id'],
                 '--project-policy-revision',str(policy['policy_revision']),
-                '--workflow-policy-revision',str(roster['revision'])]
+                '--workflow-policy-revision',str(roster['revision']),
+                '--candidate-checkout',str(candidate_checkout)]
 
     agent_review = activity('agent_review')
-    review_claim = client(reviewer,'reviews','claim',*claim_args(agent_review))
+    reviewer_checkout = clone_workstation('reviewer clone with spaces')
+    review_claim = client(reviewer,'reviews','claim',*claim_args(agent_review, reviewer_checkout))
     review_attempt = review_claim['attempt']
+    git('cat-file','-e',f'{candidate}^{{commit}}',cwd=reviewer_checkout)
+    assert git('rev-parse',f'{candidate}^{{tree}}',cwd=reviewer_checkout) == submission['candidate_tree']
     client(reviewer,'reviews','decide','--activity',agent_review['id'],
            '--attempt',review_attempt['id'],'--generation',str(review_attempt['generation']),
            '--submission',submission['id'], body={'decision':'approved',
@@ -96,12 +105,15 @@ def exercise_completion(temporary, api, cli, owner):
     api(f'/api/v1/projects/{p}/workflow-activities/{integration["id"]}/authorization',{
         'submission_id':submission['id'],'expected_project_policy_revision':policy['policy_revision'],
         'expected_workflow_policy_revision':roster['revision'],'summary':'Authorize this exact integration.'})
-    integration_claim = client(owner,'integrations','claim',*claim_args(integration))
+    integration_checkout_source = clone_workstation('integrator clone with spaces')
+    integration_claim = client(owner,'integrations','claim',*claim_args(integration, integration_checkout_source))
     integrate_attempt = integration_claim['attempt']
+    git('cat-file','-e',f'{candidate}^{{commit}}',cwd=integration_checkout_source)
+    assert git('rev-parse',f'{candidate}^{{tree}}',cwd=integration_checkout_source) == submission['candidate_tree']
     integration_own = ['--attempt',integrate_attempt['id'],'--generation',str(integrate_attempt['generation'])]
     integration_args = ['--activity',integration['id'],*integration_own]
     checkout = root / 'integration worktree'
-    client(owner,'worktree','prepare',*integration_own,'--source',str(source),'--path',str(checkout),
+    client(owner,'worktree','prepare',*integration_own,'--source',str(integration_checkout_source),'--path',str(checkout),
            '--branch','task/integration','--base',base)
     preparation = ['integrations','prepare',*integration_args,'--submission',submission['id'],
                    '--checkout',str(checkout),'--expected-target',base,'--candidate',candidate]
@@ -145,5 +157,5 @@ def exercise_completion(temporary, api, cli, owner):
     assert api(f'/api/v1/projects/{p}/tasks/{task["id"]}')['lifecycle'] == 'done'
     assert api(f'/api/v1/projects/{p}/tasks/{dependent["id"]}')['work_status'] == 'ready'
     assert git('ls-remote','origin','refs/heads/main').split()[0] == result_revision
-    print('PASS: immutable submission, independent agent and human review, authorization,')
-    print('      real Git integration, exact producer checks, publication, and dependency release.')
+    print('PASS: immutable checkpointed submission, independent-clone candidate fetch/review/integration,')
+    print('      authorization, real Git publication, exact producer checks, and dependency release.')

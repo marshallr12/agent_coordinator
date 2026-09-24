@@ -209,7 +209,20 @@ impl Fixture {
         candidate: Option<&str>,
         tree: Option<&str>,
     ) -> Value {
-        let (s,v)=self.call(c,"POST",&format!("/api/v1/projects/{p}/attempts/{}/submissions",a["id"].as_str().unwrap()),json!({"generation":a["generation"],"task_revision":t["revision"],"project_policy_revision":policy,"workflow_policy_revision":if kind=="code"{1}else{0},"kind":kind,"summary":"candidate ready","acceptance_evidence":[{"criterion":"required behavior verified","evidence":"verified in workflow test"}],"handoff":"review exact evidence","repository":repo,"base_revision":base,"candidate_revision":candidate,"candidate_tree":tree})).await;
+        let candidate_remote: Option<String> = if kind == "code" {
+            sqlx::query_scalar(
+                "SELECT canonical_repository_key FROM workflow_policies WHERE project_id=?",
+            )
+            .bind(p)
+            .fetch_one(&self.state.pool)
+            .await
+            .unwrap()
+        } else {
+            None
+        };
+        let candidate_ref = (kind == "code")
+            .then(|| format!("refs/agent-coordinator/candidates/{}", Uuid::new_v4()));
+        let (s,v)=self.call(c,"POST",&format!("/api/v1/projects/{p}/attempts/{}/submissions",a["id"].as_str().unwrap()),json!({"generation":a["generation"],"task_revision":t["revision"],"project_policy_revision":policy,"workflow_policy_revision":if kind=="code"{1}else{0},"kind":kind,"summary":"candidate ready","acceptance_evidence":[{"criterion":"required behavior verified","evidence":"verified in workflow test"}],"handoff":"review exact evidence","repository":repo,"base_revision":base,"candidate_revision":candidate,"candidate_tree":tree,"candidate_remote":candidate_remote,"candidate_ref":candidate_ref})).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         v["data"].clone()
     }
@@ -232,6 +245,55 @@ impl Fixture {
         assert_eq!(status, StatusCode::OK, "{result}");
         assert_eq!(result["data"]["review_mode"], mode);
     }
+}
+
+#[tokio::test]
+async fn code_submission_requires_a_candidate_remote_and_durable_ref() {
+    let f = Fixture::new().await;
+    let repository = "https://example.test/checkpoint-required.git";
+    let project = f.project("checkpoint-required", repository).await;
+    f.policy_none(&project).await;
+    f.workflow_policy(&project, "checkpoint-required").await;
+    let task = f.task(&project, "code", "Require checkpoint").await;
+    let attempt = f.claim(&f.a, &project, &task, 2).await;
+    f.checkout(
+        &f.a,
+        &project,
+        &attempt,
+        "1111111111111111111111111111111111111111",
+    )
+    .await;
+    let (status, rejected) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!(
+                "/api/v1/projects/{project}/attempts/{}/submissions",
+                attempt["id"].as_str().unwrap()
+            ),
+            json!({
+                "generation":attempt["generation"],"task_revision":task["revision"],
+                "project_policy_revision":2,"workflow_policy_revision":1,"kind":"code",
+                "summary":"Uncheckpointed candidate","acceptance_evidence":[{"criterion":"required behavior verified","evidence":"local only"}],
+                "handoff":"Must remain unsubmitted","repository":repository,
+                "base_revision":"1111111111111111111111111111111111111111",
+                "candidate_revision":"2222222222222222222222222222222222222222",
+                "candidate_tree":"3333333333333333333333333333333333333333"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "candidate_remote_mismatch");
+    let (status, workflow) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{project}/tasks/{}/workflow", task["id"]),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(workflow["data"]["submission"].is_null());
 }
 
 #[tokio::test]
@@ -562,12 +624,26 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
         "instruction_acknowledgments",
     ] {
         // Identifiers come only from the fixed table list above.
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "INSERT INTO main.{table} SELECT * FROM original.{table}"
-        )))
-        .execute(&mut old)
-        .await
-        .unwrap();
+        let statement = if table == "submissions" {
+            "INSERT INTO main.submissions (
+                id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,
+                workflow_policy_revision,summary,acceptance_evidence_json,handoff,
+                canonical_repository_key,repository_url,target_branch,base_revision,
+                candidate_revision,candidate_tree,created_by,contributor_session_id,created_at,
+                superseded_at
+            ) SELECT id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,
+                workflow_policy_revision,summary,acceptance_evidence_json,handoff,
+                canonical_repository_key,repository_url,target_branch,base_revision,
+                candidate_revision,candidate_tree,created_by,contributor_session_id,created_at,
+                superseded_at FROM original.submissions"
+                .to_owned()
+        } else {
+            format!("INSERT INTO main.{table} SELECT * FROM original.{table}")
+        };
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&mut old)
+            .await
+            .unwrap();
     }
     sqlx::query("UPDATE projects SET rowid=99")
         .execute(&mut old)

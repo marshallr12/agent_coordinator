@@ -862,7 +862,8 @@
     const candidate = el('div', 'workflow-entry'); add(candidate, el('h3', '', workflow.phase === 'revision_needed' ? 'Previous candidate' : 'Current candidate'));
     add(candidate, el('p', '', submission.summary));
     const details = el('dl');
-    [['Submission', submission.id], ['Source revision', submission.candidate_revision], ['Source tree', submission.candidate_tree], ['Task revision', submission.task_revision], ['Policy revision', submission.project_policy_revision]].filter(([,value]) => value !== null && value !== undefined).forEach(([label,value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+    [['Submission', submission.id], ['Source revision', submission.candidate_revision], ['Source tree', submission.candidate_tree], ['Candidate remote identity', submission.candidate_remote], ['Candidate checkpoint ref', submission.candidate_ref], ['Task revision', submission.task_revision], ['Policy revision', submission.project_policy_revision]].filter(([,value]) => value !== null && value !== undefined).forEach(([label,value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+    if (submission.kind === 'code' && !submission.candidate_ref) add(candidate, el('p', 'inline-alert warning', 'Legacy submission has no durable candidate checkpoint. Ask an operator to reopen it before another workstation reviews or integrates its code.'));
     add(candidate, details); if (submission.handoff) add(candidate, el('p', '', submission.handoff));
     (submission.acceptance_evidence || []).forEach(item => add(candidate, el('p', '', `${item.criterion}: ${item.evidence}`)));
     if (submission.lessons?.length) recordDetails(candidate, 'Lessons saved with this submission — original revisions', submission.lessons);

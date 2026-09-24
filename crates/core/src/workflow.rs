@@ -48,6 +48,10 @@ pub struct SubmissionInput {
     pub base_revision: Option<String>,
     pub candidate_revision: Option<String>,
     pub candidate_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_ref: Option<String>,
 }
 
 #[cfg(test)]

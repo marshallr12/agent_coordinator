@@ -61,6 +61,7 @@ textarea { min-height: 108px; resize: vertical; }
 .inline-alert, .global-alert { padding: 11px 13px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
 .inline-alert.error, .global-alert.error { color: #8f3643; background: var(--red-soft); border-color: #f1ccd1; }
 .inline-alert.success, .global-alert.success { color: #176762; background: var(--teal-soft); border-color: #b8e3de; }
+.inline-alert.warning { color: #79510b; background: #fff5d9; border-color: #efd493; }
 
 .topbar { height: 68px; background: var(--surface); border-bottom: 1px solid var(--line); }
 .topbar-inner { max-width: 1420px; height: 100%; margin: auto; padding: 0 32px; display: flex; align-items: center; justify-content: space-between; }

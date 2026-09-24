@@ -29,8 +29,10 @@ temporary tunnel, is closed.
 Operational duties remain with the workstations and the operator:
 
 - Source never moves through the service. Every workstation needs push and fetch
-  access to the shared Git remote, and candidate commits must be pushed before
-  another workstation can review or integrate them.
+  access to the shared Git remote. `submissions code` creates a durable candidate
+  ref and verifies its exact commit and tree before submission; native review and
+  integration claims fetch and verify that recorded ref before taking ownership.
+  Keep it until the workflow finishes, then clean up only the exact unchanged ref.
 - Hosts should keep synchronized time. A material clock rollback pauses new
   authority until reconciliation. See [clock safety](clock-safety-contract.md).
 - Workstation facts are client attestations. The service does not inspect a

@@ -52,9 +52,40 @@ following common fields:
   "repository": "canonical configured repository URL",
   "base_revision": "full source revision",
   "candidate_revision": "full candidate revision",
-  "candidate_tree": "full candidate tree"
+  "candidate_tree": "full candidate tree",
+  "candidate_remote": "credential-free canonical configured repository identity",
+  "candidate_ref": "refs/agent-coordinator/candidates/attempt-id"
 }
 ```
+
+The native CLI derives `candidate_remote` from the saved credential-free
+`canonical_repository_key`. It creates the candidate ref, unless the caller
+selects one under `refs/agent-coordinator/candidates/`, by pushing the exact
+clean worktree commit to the configured remote. Before the submission POST, it
+fetches that ref into an isolated verification namespace and compares both the
+fetched commit and tree. The ref is create-only: a prior different commit is
+never overwritten. A failed push or verification leaves the attempt active and
+unsubmitted; a remote candidate ref may remain if the push succeeded before a
+later verification failed, but no workflow activity or publication hold is
+created. That ref can be reused on retry only when it still names the same
+exact commit.
+
+Native review and integration claims fetch and verify the recorded candidate
+ref from the configured remote before claiming work. Integration preparation
+fetches and verifies it again before making the integration result or durable
+publication intent. These client checks provide source availability across
+workstations; the service records the credential-free remote identity and ref
+but never runs Git or claims to have independently verified the remote. MCP
+coordination can inspect records but native Git capability is required for
+code submission, review, and integration.
+
+Rows created before candidate refs were required retain `candidate_ref = null`.
+They remain visible as historical records, but are not treated as remotely
+available. Their review and integration activities are blocked with an explicit
+`candidate_checkpoint_missing` condition. An operator may reopen an eligible
+pre-publication submission for a new revision; the next code submission must
+create and verify a durable checkpoint. Never infer or synthesize a ref for a
+legacy commit.
 
 For `kind: "general"`, omit repository/base/candidate fields and send a workflow
 policy revision of `0`; project policy and task revision are still pinned. Every

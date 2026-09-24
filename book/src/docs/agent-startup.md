@@ -168,8 +168,12 @@ any work you already own; do not abandon an active attempt to take a review.
    fabricate approval to make a review eligible.
 3. Claim the review activity with its exact current submission and policy
    revisions through the review workflow, not the ordinary task claim endpoint.
-   A listing grants no ownership. On a claim conflict, refresh and reconsider
-   eligibility rather than repeatedly attempting the same ineligible review.
+   For code submissions, use the native CLI: it fetches and verifies the saved
+   candidate checkpoint ref from the configured repository before claiming.
+   A missing or changed ref blocks the claim; legacy submissions with no ref
+   need operator reopening. A listing grants no ownership. On a claim conflict,
+   refresh and reconsider eligibility rather than repeatedly attempting the
+   same ineligible review.
 4. Inspect the saved candidate and evidence, record an independent decision, and
    return the result to the still-running parent. The child result is intermediate,
    not the parent's final-response trigger. The parent refreshes live workflow
@@ -184,6 +188,11 @@ claim, and `coordinator_review` to record the decision. With the native CLI, use
 `tasks list`, `reviews list --task TASK_ID`, `reviews status`, `reviews claim`,
 and `reviews decide`. Follow their advertised schemas or `--help`; do not invent
 a project-wide review-list endpoint or a task status filter that is not exposed.
+The native `submissions code` command creates and verifies a durable remote
+candidate ref before it records a submission. Integration claims verify the
+same exact ref before acquiring the target hold, and integration preparation
+fetches it again before making the result. Keep the ref available through
+workflow completion.
 
 ### Continue after each task
 

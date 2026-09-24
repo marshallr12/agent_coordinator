@@ -491,6 +491,22 @@ async fn submit(
                 "The submission repository must exactly match the configured project repository.",
             ));
         }
+        let configured_candidate_remote = policy["canonical_repository_key"]
+            .as_str()
+            .filter(|key| !key.is_empty())
+            .ok_or_else(AppError::internal)?;
+        if input.candidate_remote.as_deref() != Some(configured_candidate_remote) {
+            return Err(AppError::conflict(
+                "candidate_remote_mismatch",
+                "The candidate checkpoint remote must match the pinned configured repository identity.",
+            ));
+        }
+        validate_candidate_ref(
+            input
+                .candidate_ref
+                .as_deref()
+                .ok_or_else(|| AppError::bad_request("candidate_ref is required."))?,
+        )?;
         for (value, name) in [
             (input.base_revision.as_deref(), "base_revision"),
             (input.candidate_revision.as_deref(), "candidate_revision"),
@@ -527,6 +543,8 @@ async fn submit(
         || input.base_revision.is_some()
         || input.candidate_revision.is_some()
         || input.candidate_tree.is_some()
+        || input.candidate_remote.is_some()
+        || input.candidate_ref.is_some()
     {
         return Err(AppError::bad_request(
             "General submissions use workflow_policy_revision 0 and omit Git fields.",
@@ -561,13 +579,13 @@ async fn submit(
         mutation.now,
     )
     .await?;
-    sqlx::query("INSERT INTO submissions(id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,workflow_policy_revision,summary,acceptance_evidence_json,handoff,canonical_repository_key,repository_url,target_branch,base_revision,candidate_revision,candidate_tree,created_by,contributor_session_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO submissions(id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,workflow_policy_revision,summary,acceptance_evidence_json,handoff,canonical_repository_key,repository_url,target_branch,base_revision,candidate_revision,candidate_tree,candidate_ref,created_by,contributor_session_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&submission).bind(&project).bind(&subject.task_id).bind(&attempt).bind(&input.kind)
         .bind(input.task_revision).bind(input.project_policy_revision).bind(input.workflow_policy_revision)
         .bind(&input.summary).bind(serde_json::to_string(&input.acceptance_evidence)?).bind(&input.handoff)
         .bind(&canonical).bind(if input.kind=="code" {Some(repository.as_str())} else {None})
         .bind(if input.kind=="code" {Some(target.as_str())} else {None})
-        .bind(&input.base_revision).bind(&input.candidate_revision).bind(&input.candidate_tree)
+        .bind(&input.base_revision).bind(&input.candidate_revision).bind(&input.candidate_tree).bind(&input.candidate_ref)
         .bind(&mutation.actor.id).bind(&owner_session).bind(mutation.now).execute(&mut *mutation.tx).await?;
     let lessons = crate::knowledge::insert_submission_lessons(
         &mut mutation.tx,
@@ -722,6 +740,8 @@ async fn submission_value(c: &mut SqliteConnection, id: &str) -> Result<Value, A
         "handoff":row.get::<String,_>("handoff"),
         "lesson_ids":lesson_ids,"lessons":lessons,"artifact_ids":artifact_ids,
         "canonical_repository_key":row.get::<Option<String>,_>("canonical_repository_key"),
+        "candidate_remote":row.get::<Option<String>,_>("canonical_repository_key"),
+        "candidate_ref":row.get::<Option<String>,_>("candidate_ref"),
         "repository":row.get::<Option<String>,_>("repository_url"),
         "target_branch":row.get::<Option<String>,_>("target_branch"),
         "base_revision":row.get::<Option<String>,_>("base_revision"),
@@ -922,6 +942,13 @@ pub(crate) async fn activity_preconditions(
         add(
             "scoped_decisions_pending",
             "Resolve current scoped decisions for the subject and activity before claiming.",
+        );
+    }
+    if ctx.workflow_policy_revision > 0 && !candidate_checkpoint_present(c, &ctx.submission).await?
+    {
+        add(
+            "candidate_checkpoint_missing",
+            "This historical code submission has no durable candidate ref. Reopen it through an operator before review or integration.",
         );
     }
     if ctx.kind == "integration" {
@@ -1358,6 +1385,19 @@ struct ActivityContext {
     target_branch: Option<String>,
 }
 
+async fn candidate_checkpoint_present(
+    c: &mut SqliteConnection,
+    submission: &str,
+) -> Result<bool, AppError> {
+    let reference = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT candidate_ref FROM submissions WHERE id=? AND kind='code'",
+    )
+    .bind(submission)
+    .fetch_optional(&mut *c)
+    .await?;
+    Ok(reference.flatten().is_some_and(|value| !value.is_empty()))
+}
+
 async fn activity_context(
     c: &mut SqliteConnection,
     project: &str,
@@ -1541,6 +1581,8 @@ async fn claim_activity(
     let ctx = activity_context(&mut m.tx, &project, &id).await?;
     ensure_activity_decisions(&mut m, &project, &ctx).await?;
     if let Some(mut value) = m.replay {
+        let checkpoint_ready = ctx.workflow_policy_revision == 0
+            || candidate_checkpoint_present(&mut m.tx, &ctx.submission).await?;
         let projected = activity_value(&mut m.tx, &project, &ctx.id, m.now).await?;
         let current = &projected["current_attempt"];
         let saved = value.pointer("/attempt/id").and_then(Value::as_str);
@@ -1557,6 +1599,7 @@ async fn claim_activity(
             && ctx.phase != "revision_needed"
             && ctx.submission == ctx.current_submission
             && ctx.project_policy_revision == ctx.project_current_policy
+            && checkpoint_ready
             && (ctx.workflow_policy_revision == 0
                 || ctx.workflow_current_policy == Some(ctx.workflow_policy_revision));
         let remaining = if valid {
@@ -1579,6 +1622,14 @@ async fn claim_activity(
         return Err(AppError::conflict(
             "workflow_revision_conflict",
             "Read the current activity and retry with its exact candidate and policy revisions.",
+        ));
+    }
+    if ctx.workflow_policy_revision > 0
+        && !candidate_checkpoint_present(&mut m.tx, &ctx.submission).await?
+    {
+        return Err(AppError::conflict(
+            "candidate_checkpoint_missing",
+            "This historical code submission has no durable candidate ref. Ask an operator to reopen it for a checkpointed submission.",
         ));
     }
     if m.actor.kind == "agent" {
@@ -2985,6 +3036,33 @@ fn validate_acceptance(input: &SubmissionInput, acceptance_json: &str) -> Result
                 "Acceptance evidence must name each current criterion exactly once.",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_candidate_ref(value: &str) -> Result<(), AppError> {
+    let invalid = value.len() > 240
+        || !value.starts_with("refs/agent-coordinator/candidates/")
+        || value.is_empty()
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.ends_with('.')
+        || value.contains("..")
+        || value.contains("//")
+        || value.contains("@{")
+        || value.split('/').any(|part| {
+            part.is_empty()
+                || part.starts_with('.')
+                || part.ends_with(".lock")
+                || part.ends_with('.')
+        })
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || b" ~^:?*[\\".contains(&byte));
+    if invalid {
+        return Err(AppError::bad_request(
+            "candidate_ref must be a valid full ref under refs/agent-coordinator/candidates/.",
+        ));
     }
     Ok(())
 }

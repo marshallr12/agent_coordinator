@@ -87,6 +87,25 @@ review or integration is pinned to its original roster revision, and an active
 integration hold must be finished or reconciled before the service permits a
 roster change.
 
+### Durable candidate checkpoints
+
+Before `submissions code` records a candidate, the native client pushes its
+exact clean commit to a create-only ref under
+`refs/agent-coordinator/candidates/`, fetches that ref into a separate
+verification namespace, and checks the commit and tree. The submission records
+the saved credential-free repository identity and exact ref. Review and
+integration claims fetch and verify that ref before claiming; integration
+preparation checks it again before preparing or acquiring a publication intent.
+Keep the ref available until the workflow is complete. Remove only the exact
+unchanged ref after confirming no review, integration, or recovery work still
+needs it.
+
+Legacy code submissions without a ref remain visible as history but are blocked
+from review and integration claims. An operator can reopen an eligible
+pre-publication candidate for a new revision; the next code submission must
+create a verified checkpoint. Do not infer a ref from a commit ID or move an
+existing checkpoint ref.
+
 Setup fields offer **Help** on hover, field or help-button focus, and tap. Press
 Escape to dismiss the current explanation without closing the form. Help is
 associated with its field for assistive technology. Examples explain values;

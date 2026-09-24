@@ -263,9 +263,13 @@ local journals:
   producers and retain reporter state safely across interruptions.
 - `artifacts upload` and `artifacts download` journal and verify bounded binary
   transfers.
-- `submissions code`, `integrations prepare`, `integrations publish`,
-  `integrations reconcile`, and `integrations finish` observe exact Git objects,
-  preserve publication intent, and enforce guarded compare-and-swap publication.
+- `submissions code`, `reviews claim`, `integrations claim`,
+  `integrations prepare`, `integrations publish`, `integrations reconcile`, and
+  `integrations finish` need the native CLI's local Git capability. It creates a
+  durable candidate ref before submission and fetches/verifies that exact ref
+  before review or integration claims. Preparation fetches and checks it again.
+  These commands also preserve publication intent and enforce guarded
+  compare-and-swap publication.
 
 For interrupted publication, `coordinator_agent_publication_reconcile` records
 only a fresh observation that exactly matches the immutable saved base or intended

@@ -310,6 +310,10 @@ struct CodeSubmissionArgs {
     /// Prepared worktree registered for this attempt.
     #[arg(long)]
     checkout: PathBuf,
+    /// Caller-selected ref under refs/agent-coordinator/candidates/.
+    /// Defaults to a stable ref derived from this attempt ID.
+    #[arg(long)]
+    candidate_ref: Option<String>,
     /// JSON evidence without kind or Git identity fields.
     #[arg(long)]
     input: PathBuf,
@@ -353,6 +357,9 @@ struct ActivityClaimArgs {
     project_policy_revision: u64,
     #[arg(long)]
     workflow_policy_revision: u64,
+    /// Clean local repository or worktree into which the candidate ref is fetched before claiming code review or integration work.
+    #[arg(long)]
+    candidate_checkout: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -1226,6 +1233,14 @@ async fn submit_code(
             false,
         ));
     }
+    if session.pending.is_some() {
+        return Err(Failure::local(
+            5,
+            "pending_mutation",
+            "an earlier mutation is unresolved; run `agent-coordinator retry` before pushing a candidate ref",
+            false,
+        ));
+    }
     let (candidate_revision, candidate_tree) =
         worktree::current_snapshot(&prepared).map_err(Failure::invalid)?;
     let project = bound_project(context, Some(&session.session)).await?;
@@ -1238,6 +1253,50 @@ async fn submit_code(
             5,
             "repository_binding_changed",
             "the prepared worktree no longer matches the configured repository",
+            false,
+        ));
+    }
+    let workflow_path = format!(
+        "/api/v1/projects/{}/workflow-policy",
+        context.binding.project_id
+    );
+    let workflow_policy = finish(
+        context
+            .client
+            .get(&workflow_path, Some(&session.session))
+            .await,
+    )?;
+    let policy_data = workflow_policy.get("data").unwrap_or(&workflow_policy);
+    if policy_data.get("revision").and_then(Value::as_u64) != Some(args.workflow_policy_revision) {
+        return Err(Failure::local(
+            5,
+            "workflow_policy_changed",
+            "the required-check policy changed; refresh it before pushing or submitting the candidate",
+            false,
+        ));
+    }
+    let candidate_remote = policy_data
+        .get("canonical_repository_key")
+        .and_then(Value::as_str)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| {
+            Failure::temporary("workflow policy omitted canonical repository identity")
+        })?;
+    let candidate_ref = args
+        .candidate_ref
+        .clone()
+        .unwrap_or_else(|| format!("refs/agent-coordinator/candidates/{}", args.attempt));
+    let checkpoint = coordinator_local::git_workflow::checkpoint_candidate(
+        &prepared.destination,
+        repository,
+        &candidate_ref,
+    )
+    .map_err(Failure::invalid)?;
+    if checkpoint.revision != candidate_revision || checkpoint.tree != candidate_tree {
+        return Err(Failure::local(
+            5,
+            "candidate_changed",
+            "the verified remote checkpoint does not match the clean submitted worktree",
             false,
         ));
     }
@@ -1260,6 +1319,8 @@ async fn submit_code(
             ("base_revision", json!(prepared.base_revision)),
             ("candidate_revision", json!(candidate_revision)),
             ("candidate_tree", json!(candidate_tree)),
+            ("candidate_remote", json!(candidate_remote)),
+            ("candidate_ref", json!(candidate_ref)),
         ],
     )
     .map_err(Failure::invalid)?;
@@ -1291,6 +1352,8 @@ fn submission_evidence(path: &Path) -> Result<Value> {
             "base_revision",
             "candidate_revision",
             "candidate_tree",
+            "candidate_remote",
+            "candidate_ref",
         ],
     )?;
     Ok(body)
@@ -1422,6 +1485,32 @@ async fn prepare_integration(
         return Err(Failure::invalid(
             "--checkout does not match the saved worktree for this integration attempt",
         ));
+    }
+    if submission.get("kind").and_then(Value::as_str) == Some("code") {
+        let candidate_ref = submission
+            .get("candidate_ref")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Failure::local(
+                    5,
+                    "candidate_checkpoint_missing",
+                    "this legacy code submission has no durable candidate ref; an operator must reopen it for a checkpointed submission",
+                    false,
+                )
+            })?;
+        let candidate_tree = submission
+            .get("candidate_tree")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Failure::temporary("submission omitted candidate tree"))?;
+        coordinator_local::git_workflow::fetch_candidate_checkpoint(
+            &checkout,
+            repository,
+            candidate_ref,
+            &args.candidate,
+            candidate_tree,
+        )
+        .map_err(Failure::invalid)?;
     }
     let state_file =
         integration_state_file(context, &args.authority.activity, &args.authority.attempt)
@@ -1946,6 +2035,25 @@ async fn activity_claim(
     let (_session_lock, session_path, mut state) = load_required_state(cli, context)?;
     acknowledge_current_orientation(context, &session_path, &mut state).await?;
     let path = activity_operation_path(context, &args.activity, "claim")?;
+    if let Some(pending) = &state.pending {
+        if pending.path != path {
+            return Err(Failure::local(
+                5,
+                "pending_mutation",
+                "an earlier mutation is unresolved; run `agent-coordinator retry` before claiming workflow work",
+                false,
+            ));
+        }
+    } else {
+        verify_candidate_before_claim(
+            context,
+            &state.session,
+            &args.activity,
+            &args.submission,
+            args.candidate_checkout.as_deref(),
+        )
+        .await?;
+    }
     let response = persist_and_send(
         context,
         &session_path,
@@ -1961,6 +2069,136 @@ async fn activity_claim(
     )
     .await?;
     require_success(response)
+}
+
+async fn verify_candidate_before_claim(
+    context: &ContextData,
+    session: &SessionAuth,
+    activity_id: &str,
+    expected_submission_id: &str,
+    candidate_checkout: Option<&Path>,
+) -> std::result::Result<(), Failure> {
+    let activity_path = format!(
+        "/api/v1/projects/{}/workflow-activities/{activity_id}",
+        context.binding.project_id
+    );
+    let activity_response = context
+        .client
+        .get(&activity_path, Some(session))
+        .await
+        .map_err(client_failure)?;
+    let activity_body = require_success(activity_response)?;
+    let activity = activity_record(&activity_body);
+    if activity.get("submission_id").and_then(Value::as_str) != Some(expected_submission_id) {
+        return Err(Failure::local(
+            5,
+            "submission_mismatch",
+            "the workflow activity no longer points to the requested submission",
+            false,
+        ));
+    }
+    let subject = activity
+        .get("subject_task_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::temporary("workflow activity omitted its subject task"))?;
+    let workflow_path = format!(
+        "/api/v1/projects/{}/tasks/{subject}/workflow",
+        context.binding.project_id
+    );
+    let workflow_response = context
+        .client
+        .get(&workflow_path, Some(session))
+        .await
+        .map_err(client_failure)?;
+    let workflow_body = require_success(workflow_response)?;
+    let submission = workflow_body
+        .pointer("/data/submission")
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| Failure::temporary("subject workflow omitted its immutable submission"))?;
+    if submission.get("id").and_then(Value::as_str) != Some(expected_submission_id) {
+        return Err(Failure::local(
+            5,
+            "submission_superseded",
+            "the subject now has a different immutable submission",
+            false,
+        ));
+    }
+    if submission.get("kind").and_then(Value::as_str) != Some("code") {
+        return Ok(());
+    }
+    let candidate_ref = submission
+        .get("candidate_ref")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            Failure::local(
+                5,
+                "candidate_checkpoint_missing",
+                "this legacy code submission has no durable candidate ref; have an operator reopen it for a new checkpointed submission",
+                false,
+            )
+        })?;
+    let candidate_remote = submission
+        .get("candidate_remote")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::temporary("code submission omitted candidate remote identity"))?;
+    let revision = submission
+        .get("candidate_revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::temporary("code submission omitted candidate revision"))?;
+    let tree = submission
+        .get("candidate_tree")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::temporary("code submission omitted candidate tree"))?;
+    let project = bound_project(context, Some(session)).await?;
+    let repository = project
+        .get("repository_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::temporary("project response omitted repository URL"))?;
+    let policy_path = format!(
+        "/api/v1/projects/{}/workflow-policy",
+        context.binding.project_id
+    );
+    let policy_response = context
+        .client
+        .get(&policy_path, Some(session))
+        .await
+        .map_err(client_failure)?;
+    let policy_body = require_success(policy_response)?;
+    let policy = policy_body.get("data").unwrap_or(&policy_body);
+    if policy
+        .get("canonical_repository_key")
+        .and_then(Value::as_str)
+        != Some(candidate_remote)
+        || submission
+            .get("workflow_policy_revision")
+            .and_then(Value::as_u64)
+            != policy.get("revision").and_then(Value::as_u64)
+    {
+        return Err(Failure::local(
+            5,
+            "candidate_remote_stale",
+            "the candidate checkpoint identity no longer matches the pinned project policy",
+            false,
+        ));
+    }
+    let checkout = candidate_checkout.ok_or_else(|| {
+        Failure::local(
+            5,
+            "candidate_checkout_required",
+            "pass --candidate-checkout with a clean clone of the configured repository so the client can fetch the candidate before claiming",
+            false,
+        )
+    })?;
+    coordinator_local::git_workflow::fetch_candidate_checkpoint(
+        checkout,
+        repository,
+        candidate_ref,
+        revision,
+        tree,
+    )
+    .map_err(Failure::invalid)?;
+    Ok(())
 }
 
 async fn activity_renew(

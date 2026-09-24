@@ -582,6 +582,7 @@ agent-coordinator submissions code \
   --task-revision 4 --project-policy-revision 3 \
   --workflow-policy-revision 2 \
   --checkout "/srv/worktrees/task 42" \
+  --candidate-ref refs/agent-coordinator/candidates/submission-id \
   --input submission.json
 ```
 
@@ -591,6 +592,7 @@ agent-coordinator.exe submissions code `
   --task-revision 4 --project-policy-revision 3 `
   --workflow-policy-revision 2 `
   --checkout 'C:\agent worktrees\task 42' `
+  --candidate-ref refs/agent-coordinator/candidates/submission-id `
   --input .\submission.json
 ```
 
@@ -600,34 +602,32 @@ Submission ends the implementation attempt and creates the review and
 integration activities required by the pinned policies. It does not itself mark
 a code task complete.
 
-A submission records commit and tree identities; it does not upload Git objects.
-Before submitting work that another workstation must review or integrate, push
-the candidate commit to a durable remote checkpoint ref that the other
-workstation can fetch. For example:
+A code submission checkpoints the candidate before sending the submission
+mutation. The CLI pushes the exact clean commit to a create-only ref on the
+configured project remote, fetches that exact ref into an isolated verification
+namespace, and compares both the fetched commit and tree with the registered
+worktree. If verification fails, no submission or review activity is created.
+If `--candidate-ref` is omitted, the CLI creates the stable ref
+`refs/agent-coordinator/candidates/ATTEMPT_ID`. Caller-selected refs must use
+the `refs/agent-coordinator/candidates/` namespace. An existing ref is accepted
+only when it already names the exact same commit; the CLI never moves a prior
+candidate ref.
 
-```sh
-git -C "/srv/worktrees/task 42" push origin \
-  HEAD:refs/agent-coordinator/candidates/submission-id
-```
+The immutable submission records the credential-free canonical project remote
+identity and exact candidate ref in addition to commit and tree IDs. The remote
+URL itself comes from project configuration; credentials are never stored in
+the candidate identity. Keep the ref available through review and integration.
+Native `reviews claim` and `integrations claim` fetch and verify the recorded ref
+from the configured remote before claiming code work. Integration preparation
+fetches and checks the ref again before creating its result or publication
+intent. A missing, moved, or mismatched ref fails safely with an actionable
+error; restore the exact ref or ask an operator to reopen a legacy submission.
 
-```powershell
-git -C 'C:\agent worktrees\task 42' push origin `
-  'HEAD:refs/agent-coordinator/candidates/submission-id'
-```
-
-On another workstation, fetch that exact ref before claiming review or
-integration work:
-
-```sh
-git -C /srv/src/project fetch origin \
-  refs/agent-coordinator/candidates/submission-id
-```
-
-The checkpoint ref name is an operator convention and is not created by the
-coordinator CLI. Keep it available until review and integration finish. The
-service stores identities and evidence only; sharing a local object database
-between worktrees is sufficient on one machine but does not transfer source to
-another machine.
+Use an independent clone to confirm the checkpoint is available on another
+workstation before review. After workflow completion, remove only the exact
+candidate ref after checking its observed commit and confirming no review,
+integration, or recovery operation still needs it. Use an expected-value
+`--force-with-lease` for cleanup; never delete a moved ref.
 
 General work uses the same evidence JSON without any Git fields:
 

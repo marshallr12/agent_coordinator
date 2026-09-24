@@ -455,7 +455,8 @@ async fn expired_subject_decision_removes_integration_publication_authority() {
                 "project_policy_revision":2,"workflow_policy_revision":1,"kind":"code",
                 "summary":"Candidate ready","acceptance_evidence":[{"criterion":"required behavior verified","evidence":"Observed directly"}],
                 "handoff":"Integrate the exact candidate","repository":repository,"base_revision":BASE,
-                "candidate_revision":CANDIDATE,"candidate_tree":CANDIDATE_TREE}),
+                "candidate_revision":CANDIDATE,"candidate_tree":CANDIDATE_TREE,
+                "candidate_remote":"decision-authority","candidate_ref":"refs/agent-coordinator/candidates/decision-authority"}),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{submitted}");
