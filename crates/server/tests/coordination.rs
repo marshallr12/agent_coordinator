@@ -52,6 +52,16 @@ async fn task_archive_restore_cancel_and_delete_are_separate_from_queue() {
             .0,
         StatusCode::OK
     );
+    f.ack(&f.a, &p).await;
+    let (archived_claim_status, archived_claim) = f
+        .claim(&f.a, &p, &task, "archived-task-claim", "work")
+        .await;
+    assert_eq!(
+        archived_claim_status,
+        StatusCode::CONFLICT,
+        "{archived_claim}"
+    );
+    assert_eq!(archived_claim["error"]["code"], "task_archived");
     let (_, main) = f
         .call(
             &f.admin,
