@@ -1,5 +1,6 @@
 [package]
 name = "coordinator-core"
+build = "build.rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

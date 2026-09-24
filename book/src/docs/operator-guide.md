@@ -1,5 +1,25 @@
 # Operating projects and accounts
 
+## Client and service release compatibility
+
+Every service binary exposes its semantic version and embedded source commit,
+repository, target, and build cleanliness through `GET /api/v1/info` and the
+local `agent-coordinator-server build-info` command. Discovery identifies the
+exact compatible CLI source commit, required protocol versions and capabilities,
+and supported workstation targets. The full commit, not `0.1.0` alone, separates
+different builds that share a semantic version. Release packages include a
+`BUILD-IDENTITY.json` manifest and checksums for the CLI and server builds.
+
+Register only packages whose checksum and embedded build identity have been
+verified. If no matching package is registered, provide the exact trusted source
+repository and commit for a `--locked` build; do not assume `main` matches a
+running service. The release workflow rejects dirty or mismatched service/client
+identities. Publish client artifacts before deploying a service contract that
+requires new capabilities. Agents must rerun the compatibility preflight after
+installing an update. The [restartable upgrade instructions](agent-startup.md#cli-fallback-startup)
+preserve the old executable for rollback and keep protected credentials and
+pending mutation journals in place.
+
 The dashboard uses the same authenticated, revision-checked service operations as
 the native client. It does not bypass leases, reviews, completion checks, or
 uncertain physical resource holds.
