@@ -37,7 +37,7 @@ def client_info(executable: Path) -> dict:
     return value.get("data", value)
 
 
-def service_contract(path: Path) -> tuple[str, str, set[str], set[str]]:
+def service_contract(path: Path) -> tuple[str, str, set[str], set[str], set[str]]:
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
         data = body.get("data", body)
@@ -46,6 +46,7 @@ def service_contract(path: Path) -> tuple[str, str, set[str], set[str]]:
         commit = compatible["source_commit"]
         repository = compatible["source_repository"]
         targets = set(compatible["supported_targets"])
+        protocols = set(contract["required_protocol_versions"])
         capabilities = set(contract["required_capabilities"])
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
         fail("service info file has no valid client_compatibility contract")
@@ -53,10 +54,15 @@ def service_contract(path: Path) -> tuple[str, str, set[str], set[str]]:
         fail("service compatibility contract has no exact source commit")
     if not isinstance(repository, str) or not repository.startswith("https://") or "@" in repository:
         fail("service compatibility contract has no trusted HTTPS source repository")
-    return commit.lower(), repository.rstrip("/").removesuffix(".git"), targets, capabilities
+    if not protocols or not all(isinstance(value, str) and value for value in protocols):
+        fail("service compatibility contract has no valid required protocol versions")
+    if not capabilities or not all(isinstance(value, str) and value for value in capabilities):
+        fail("service compatibility contract has no valid required capabilities")
+    return commit.lower(), repository.rstrip("/").removesuffix(".git"), targets, protocols, capabilities
 
 
-def verify_candidate(executable: Path, commit: str, repository: str, target: str, capabilities: set[str]) -> None:
+def verify_candidate(executable: Path, commit: str, repository: str, target: str,
+                     protocols: set[str], capabilities: set[str]) -> None:
     if executable.is_symlink() or not executable.is_file():
         fail(f"candidate must be a regular executable file: {executable}")
     info = client_info(executable)
@@ -71,6 +77,9 @@ def verify_candidate(executable: Path, commit: str, repository: str, target: str
         fail(f"candidate target {observed_target} does not match workstation target {target}")
     if build.get("dirty") is not False:
         fail("candidate build is dirty or lacks build provenance")
+    advertised_protocols = set(info.get("supported_protocol_versions", []))
+    if not protocols.issubset(advertised_protocols):
+        fail("candidate does not advertise every service-required protocol version")
     advertised = set(info.get("capabilities", []))
     if not capabilities.issubset(advertised):
         fail("candidate does not advertise every service-required client capability")
@@ -131,7 +140,9 @@ def install(active: Path, candidate: Path, rollback: Path, commit: str) -> None:
     installed_build = installed.get("build", {})
     candidate_info = client_info(candidate)
     candidate_build = candidate_info.get("build", {})
-    if installed_build == candidate_build and installed.get("capabilities") == candidate_info.get("capabilities"):
+    if (installed_build == candidate_build
+            and installed.get("capabilities") == candidate_info.get("capabilities")
+            and installed.get("supported_protocol_versions") == candidate_info.get("supported_protocol_versions")):
         print(f"The compatible client is already installed; rollback remains at {rollback}.")
         return
     if rollback.is_symlink() or (rollback.exists() and not rollback.is_file()):
@@ -148,7 +159,9 @@ def install(active: Path, candidate: Path, rollback: Path, commit: str) -> None:
         os.replace(temporary, active)
         try:
             verified = client_info(active)
-            valid = verified.get("build") == candidate_build and verified.get("capabilities") == candidate_info.get("capabilities")
+            valid = (verified.get("build") == candidate_build
+                     and verified.get("capabilities") == candidate_info.get("capabilities")
+                     and verified.get("supported_protocol_versions") == candidate_info.get("supported_protocol_versions"))
         except SystemExit:
             valid = False
         if not valid:
@@ -178,7 +191,7 @@ def main() -> None:
     args = parser.parse_args()
 
     target = target_name()
-    commit, repository, targets, capabilities = service_contract(args.service_info)
+    commit, repository, targets, protocols, capabilities = service_contract(args.service_info)
     if target not in targets:
         fail(f"service has no verified compatible client for {target}; do not install another architecture")
     candidate = args.candidate
@@ -193,7 +206,7 @@ def main() -> None:
     try:
         if args.binary.is_symlink():
             fail("installed client path must not be a symbolic link")
-        verify_candidate(candidate, commit, repository, target, capabilities)
+        verify_candidate(candidate, commit, repository, target, protocols, capabilities)
         active = args.binary.resolve()
         rollback = active.with_name(active.name + ".rollback")
         install(active, candidate, rollback, commit)

@@ -316,12 +316,13 @@ python3 scripts/upgrade_client.py \
 
 For an extracted binary, pass `--candidate /path/to/agent-coordinator
 --sha256 EXPECTED_BINARY_SHA256` instead. The script verifies the trusted source
-repository, full commit, platform, capabilities, and clean build identity
-before replacement. It keeps the current executable as `agent-coordinator.rollback`,
-atomically installs and verifies the new binary, and preserves the original
-rollback on repeated successful runs. Do not replace a running Windows
-executable. Credentials, origin binding, protected session state, ownership,
-and pending request journals stay in their existing locations. If replacement
+repository, full commit, platform, required protocol versions and capabilities,
+and clean build identity before replacement. It keeps the current executable as
+`agent-coordinator.rollback`, atomically installs and verifies the new binary,
+and preserves the original rollback on repeated successful runs. Do not replace
+a running Windows executable. Credentials, origin binding, protected session
+state, ownership, and pending request journals stay in their existing locations.
+If replacement
 or verification fails, restore the rollback executable and keep handling any
 existing attempt with the client that owns it. Never replay an uncertain
 mutation with a new key. If trusted package provenance, build tools, privileges,

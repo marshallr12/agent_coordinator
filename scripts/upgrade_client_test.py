@@ -28,6 +28,7 @@ class UpgradeClientTests(unittest.TestCase):
         self.info = {
             "build": {"source_commit": self.commit, "source_repository": self.repository,
                       "target_os": "linux", "target_arch": "x86_64", "dirty": False},
+            "supported_protocol_versions": ["v1"],
             "capabilities": ["durable_candidate_submission_fields"],
         }
 
@@ -42,13 +43,14 @@ class UpgradeClientTests(unittest.TestCase):
         candidate = self.executable(self.root / "candidate", candidate_info)
         with self.assertRaises(SystemExit):
             UPDATER.verify_candidate(candidate, self.commit, self.repository,
-                                     "linux-x86_64", {"durable_candidate_submission_fields"})
+                                     "linux-x86_64", {"v1"}, {"durable_candidate_submission_fields"})
 
     def test_bad_download_checksum_leaves_installed_client_unchanged(self):
         active = self.executable(self.root / "agent-coordinator", {"legacy": True})
         candidate = self.executable(self.root / "download", self.info)
         service_info = self.root / "service-info.json"
         service_info.write_text(json.dumps({"data": {"client_compatibility": {
+            "required_protocol_versions": ["v1"],
             "required_capabilities": ["durable_candidate_submission_fields"],
             "compatible_client": {"source_commit": self.commit,
                                    "source_repository": self.repository,
@@ -62,6 +64,32 @@ class UpgradeClientTests(unittest.TestCase):
         ], text=True, capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("SHA-256 mismatch", result.stderr)
+        self.assertEqual(active.read_bytes(), original)
+        self.assertFalse((self.root / "agent-coordinator.rollback").exists())
+
+    def test_missing_required_protocol_is_rejected_before_replacement(self):
+        active = self.executable(self.root / "agent-coordinator", {"legacy": True})
+        original = active.read_bytes()
+        candidate_info = json.loads(json.dumps(self.info))
+        candidate_info["supported_protocol_versions"] = []
+        candidate = self.executable(self.root / "candidate", candidate_info)
+        service_info = self.root / "service-info.json"
+        service_info.write_text(json.dumps({"data": {"client_compatibility": {
+            "required_protocol_versions": ["v1"],
+            "required_capabilities": ["durable_candidate_submission_fields"],
+            "compatible_client": {
+                "source_commit": self.commit,
+                "source_repository": self.repository,
+                "supported_targets": [UPDATER.target_name()],
+            },
+        }}}))
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "--binary", str(active),
+            "--service-info", str(service_info), "--candidate", str(candidate),
+            "--sha256", UPDATER.sha256(candidate),
+        ], text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("service-required protocol version", result.stderr)
         self.assertEqual(active.read_bytes(), original)
         self.assertFalse((self.root / "agent-coordinator.rollback").exists())
 
@@ -94,10 +122,10 @@ class UpgradeClientTests(unittest.TestCase):
         candidate = self.executable(self.root / "candidate", self.info)
         with self.assertRaisesRegex(SystemExit, "source commit"):
             UPDATER.verify_candidate(candidate, "b" * 40, self.repository,
-                                     "linux-x86_64", {"durable_candidate_submission_fields"})
+                                     "linux-x86_64", {"v1"}, {"durable_candidate_submission_fields"})
         with self.assertRaisesRegex(SystemExit, "source repository"):
             UPDATER.verify_candidate(candidate, self.commit, "https://github.com/other/repo",
-                                     "linux-x86_64", {"durable_candidate_submission_fields"})
+                                     "linux-x86_64", {"v1"}, {"durable_candidate_submission_fields"})
 
     def test_locked_source_build_fallback_uses_exact_clean_origin(self):
         source = self.root / "source"
