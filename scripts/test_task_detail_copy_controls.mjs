@@ -26,6 +26,7 @@ const tasks = Array.from({ length: 30 }, (_, index) => ({
   id: index ? `task-copy-id-${index}` : task.id,
   title: index ? `Fixture task ${index + 1}` : task.title,
 }));
+let nextTaskListDelayMs = 0;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -61,6 +62,9 @@ async function fixtureServer() {
       const start = Number(url.searchParams.get('cursor') || 0);
       const items = tasks.slice(start, start + limit);
       const nextCursor = start + items.length < tasks.length ? String(start + items.length) : null;
+      const delay = nextTaskListDelayMs;
+      nextTaskListDelayMs = 0;
+      if (delay) await new Promise((resolveDelay) => setTimeout(resolveDelay, delay));
       return json(response, { items, next_cursor: nextCursor });
     }
     if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}`) return json(response, task);
@@ -254,6 +258,12 @@ async function main() {
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'previous task page');
     await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '10'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
     await waitPage("document.querySelectorAll('.task-row').length === 10", 'page size update');
+    assert(await evaluate("document.querySelector('#tasks-page-size').value") === '10', 'The dropdown did not retain the selected 10-item page size.');
+    nextTaskListDelayMs = 300;
+    await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '25'; size.dispatchEvent(new Event('change', { bubbles: true })); size.value = '50'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await waitPage("document.querySelector('#tasks-page-size').value === '50' && document.querySelectorAll('.task-row').length === 30 && document.querySelector('#tasks-page-status').textContent === 'Page 1 of 1'", 'latest page size after a rapid selection change');
+    await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '10'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await waitPage("document.querySelectorAll('.task-row').length === 10", 'page size restored to 10 items');
     await evaluate("document.querySelector('#tasks-last-page').click()");
     await waitPage("document.querySelector('#tasks-page-status').textContent === 'Page 3 of 3'", 'last task page');
     await evaluate("document.querySelector('#tasks-first-page').click()");
