@@ -940,6 +940,42 @@ async fn reusing_mutation_key_with_changed_input_is_a_conflict() {
 }
 
 #[tokio::test]
+async fn task_listing_can_exclude_done_tasks_before_pagination() {
+    let f = Fixture::new().await;
+    let p = f.project("queue pagination").await;
+    let ready = f.task(&p, "unfinished", vec![]).await;
+    let done = f.task(&p, "completed", vec![]).await;
+    sqlx::query("UPDATE tasks SET lifecycle='done' WHERE id=?")
+        .bind(done["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+
+    let (_, all_tasks) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks?limit=1"),
+            "",
+            json!({}),
+        )
+        .await;
+    let (_, queue_tasks) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks?limit=1&exclude_done=true"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert!(all_tasks["data"]["next_cursor"].is_string());
+    assert_eq!(queue_tasks["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(queue_tasks["data"]["items"][0]["id"], ready["id"]);
+    assert!(queue_tasks["data"]["next_cursor"].is_null());
+}
+
+#[tokio::test]
 async fn acceptance_changes_after_work_require_a_human_or_explicit_delegation() {
     let f = Fixture::new().await;
     let p = f.project("protected acceptance").await;

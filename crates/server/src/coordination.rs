@@ -175,6 +175,7 @@ async fn project(c: &mut SqliteConnection, id: &str) -> Result<Project, AppError
 struct Page {
     cursor: Option<String>,
     limit: Option<i64>,
+    exclude_done: Option<bool>,
 }
 impl Page {
     fn limit(&self) -> Result<i64, AppError> {
@@ -583,14 +584,16 @@ async fn task_list(
     archived: bool,
 ) -> Result<Value, AppError> {
     let limit = page.limit()?;
+    let exclude_done = page.exclude_done.unwrap_or(false);
     let mut items: Vec<Task> = sqlx::query_as(task_sql!(
-        "SELECT * FROM visible WHERE (archived_at IS NOT NULL)=? AND workflow_activity_kind IS NULL AND (? IS NULL OR id>?) ORDER BY id LIMIT ?"
+        "SELECT * FROM visible WHERE (archived_at IS NOT NULL)=? AND workflow_activity_kind IS NULL AND (?=0 OR lifecycle!='done') AND (? IS NULL OR id>?) ORDER BY id LIMIT ?"
     ))
     .bind(now)
     .bind(now)
     .bind(now)
     .bind(p)
     .bind(archived)
+    .bind(exclude_done)
     .bind(&page.cursor)
     .bind(&page.cursor)
     .bind(limit + 1)

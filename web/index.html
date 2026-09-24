@@ -36,10 +36,13 @@
       <div id="dashboard-view" hidden>
         <header class="topbar">
           <div class="topbar-inner">
-            <button id="brand-button" class="brand-button" type="button" aria-label="Go to overview">
-              <span class="brand-mark small" aria-hidden="true">AC</span>
-              <span><strong>Agent Coordinator</strong><small>Operations console</small></span>
-            </button>
+            <div class="topbar-brand-group">
+              <button id="brand-button" class="brand-button" type="button" aria-label="Go to overview">
+                <span class="brand-mark small" aria-hidden="true">AC</span>
+                <span><strong>Agent Coordinator</strong><small>Operations console</small></span>
+              </button>
+              <div class="service-indicator" role="status"><span class="status-dot" aria-hidden="true"></span><span><strong>Service connected</strong><small id="last-sync">Syncing…</small></span></div>
+            </div>
             <div class="topbar-actions">
               <button id="account-button" class="button ghost" type="button">My account</button>
             </div>
@@ -50,17 +53,13 @@
         <main id="main-content" class="main-layout">
           <aside class="sidebar" aria-label="Primary navigation">
             <nav>
-              <button class="nav-item active" data-view="overview" type="button"><span aria-hidden="true">⌂</span> Overview</button>
-              <button class="nav-item" data-view="tasks" type="button"><span aria-hidden="true">☷</span> Tasks</button>
-              <button class="nav-item" data-view="shared" type="button"><span aria-hidden="true">▤</span> Knowledge & evidence</button>
-              <button class="nav-item" data-view="resources" type="button"><span aria-hidden="true">◇</span> Resources</button>
-              <a class="nav-item" href="/documentation/"><span aria-hidden="true">▣</span> Documentation</a>
-              <button class="nav-item" data-view="admin" id="admin-nav" type="button"><span aria-hidden="true">⚿</span> Access</button>
+              <button class="nav-item active" data-view="overview" type="button" aria-label="Overview" title="Overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-6v-7h-4v7H4a1 1 0 0 1-1-1z"/></svg></button>
+              <button class="nav-item" data-view="tasks" type="button" aria-label="Tasks" title="Tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg></button>
+              <button class="nav-item" data-view="shared" type="button" aria-label="Knowledge and evidence" title="Knowledge & evidence"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 1 4 17.5zM4 5.5v12M8 7h8M8 11h8"/></svg></button>
+              <button class="nav-item" data-view="resources" type="button" aria-label="Resources" title="Resources"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7zM3.3 7 12 12l8.7-5M12 12v10M7.5 4.5 16 9.4"/></svg></button>
+              <a class="nav-item" href="/documentation/" aria-label="Documentation" title="Documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 1 4 17.5zM4 5.5v12M8 7h8M8 11h8M8 15h5"/></svg></a>
+              <button class="nav-item" data-view="admin" id="admin-nav" type="button" aria-label="Access" title="Access"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11zM9 12l2 2 4-4"/></svg></button>
             </nav>
-            <div class="sidebar-note">
-              <span class="status-dot" aria-hidden="true"></span>
-              <span><strong>Service connected</strong><small id="last-sync">Syncing…</small></span>
-            </div>
           </aside>
 
           <div class="content-column">
@@ -87,21 +86,24 @@
               <article class="card project-binding-card"><h2>Repository binding</h2><p class="muted">Download this non-secret file, then place <code>.agent-coordinator.toml</code> in the root of your repository so agents connect to this project.</p><div id="project-binding-content" class="binding-content"></div></article>
             </section>
 
-            <section id="tasks-view" class="page-view" aria-labelledby="tasks-heading" hidden>
+            <nav id="task-view-tabs" class="task-view-tabs" role="tablist" aria-label="Task views" hidden>
+              <button id="task-queue-tab" class="task-view-tab" type="button" role="tab" aria-controls="tasks-view" aria-selected="true" tabindex="0" title="Task queue"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg><span>Task queue</span></button>
+              <button id="completed-tasks-tab" class="task-view-tab" type="button" role="tab" aria-controls="tasks-view" aria-selected="false" tabindex="-1" title="Completed tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></svg><span>Completed tasks</span></button>
+              <button id="archived-tasks-tab" class="task-view-tab" type="button" role="tab" aria-controls="archived-view" aria-selected="false" tabindex="-1" title="Archived tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"/></svg><span>Archived tasks</span></button>
+            </nav>
+
+            <section id="tasks-view" class="page-view" role="tabpanel" aria-labelledby="task-queue-tab" tabindex="0" hidden>
               <div class="detail-back-row"><button id="back-to-project" class="button text-button" type="button">← All projects</button></div>
               <div class="page-heading">
                 <div><p class="eyebrow">Execution</p><h1 id="tasks-heading">Task queue</h1><p id="tasks-subtitle" class="muted">Choose a project to inspect its work.</p></div>
-                <button id="new-task-button" class="button primary" data-mutation="true" type="button" disabled><span aria-hidden="true">＋</span> New task</button>
-              </div>
-              <div class="task-view-tabs" role="group" aria-label="Task views">
-                <button id="task-queue-tab" class="button subtle task-view-tab" type="button" aria-pressed="true">Task queue</button>
-                <button id="completed-tasks-tab" class="button subtle task-view-tab" type="button" aria-pressed="false">Completed tasks</button>
+                <div class="task-heading-actions">
+                  <button id="new-task-button" class="button primary icon-action-button" data-mutation="true" type="button" disabled aria-label="New task" title="New task"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+                  <button id="objective-list-button" class="button subtle icon-action-button" type="button" aria-label="Objectives" title="Objectives"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1"/></svg></button>
+                </div>
               </div>
               <div class="toolbar">
                 <label class="select-label" for="project-select">Project<select id="project-select"><option value="">Choose a project</option></select></label>
                 <label id="status-filter-label" class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
-                <button id="objective-list-button" class="button subtle" type="button">Objectives</button>
-                <button id="open-archive-button" class="button subtle" type="button">Archived tasks</button>
               </div>
               <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
               <div id="tasks-list" class="tasks-list" hidden></div>
@@ -114,12 +116,12 @@
                 <select id="tasks-page-size" class="pagination-size" aria-label="Items per page"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select>
                 <span class="pagination-size-label">Items per page</span>
                 <span id="tasks-page-status" class="muted" aria-live="polite"></span>
+                <label class="auto-refresh-option" for="tasks-auto-refresh" title="Refresh this view automatically every 5 seconds"><input id="tasks-auto-refresh" type="checkbox"><span>Auto-refresh</span></label>
                 <button id="refresh-tasks" class="button subtle refresh-icon-button" type="button" disabled aria-label="Refresh tasks" title="Refresh tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg></button>
               </div>
             </section>
 
-            <section id="archived-view" class="page-view" aria-labelledby="archived-heading" hidden>
-              <div class="detail-back-row"><button id="back-from-archive" class="button text-button" type="button">← Back to tasks</button></div>
+            <section id="archived-view" class="page-view" role="tabpanel" aria-labelledby="archived-tasks-tab" tabindex="0" hidden>
               <div class="page-heading"><div><p class="eyebrow">Task history</p><h1 id="archived-heading">Archived tasks</h1><p id="archived-subtitle" class="muted">Archived work is kept separately from the task queue.</p></div></div>
               <div class="toolbar"><label class="select-label" for="archive-project-select">Project<select id="archive-project-select"><option value="">Choose a project</option></select></label><button id="refresh-archive" class="button subtle" type="button">Refresh</button></div>
               <div id="archived-state" class="state-panel" role="status">Choose a project to load archived tasks.</div><div id="archived-list" class="tasks-list" hidden></div>
