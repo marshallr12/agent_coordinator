@@ -376,6 +376,16 @@ async function main() {
     const downloadedAttachment = await evaluate("(async () => { const link = document.querySelector('#task-attachments-list a'); const response = await fetch(link.href); return { ok: response.ok, filename: link.download, body: await response.text() }; })()");
     assert(downloadedAttachment.ok && downloadedAttachment.filename === 'palette.svg' && downloadedAttachment.body === palette, 'The attachment download did not preserve the uploaded image context.');
     assert(attachmentUploadKeys.length === 2 && attachmentUploadKeys[0] === attachmentUploadKeys[1], 'Retry did not reuse the exact binary upload idempotency key.');
+    task.lifecycle = 'canceled';
+    task.work_status = 'canceled';
+    await openFixtureTask();
+    assert(await evaluate("document.querySelector('#task-operator-actions').textContent.includes('Delete task')"), 'Canceled task did not expose the labeled delete control.');
+    await evaluate("[...document.querySelectorAll('#task-operator-actions button')].find(button => button.textContent === 'Delete task').click()");
+    await waitPage("document.querySelector('dialog[open] h2')?.textContent === 'Delete task'", 'delete confirmation');
+    assert(await evaluate("document.querySelector('dialog[open]').textContent.includes('soft delete that retains task and audit history')"), 'Delete confirmation did not explain retained task and audit history.');
+    await evaluate("document.querySelector('dialog[open] button[type=button]').click()");
+    task.lifecycle = 'open';
+    task.work_status = 'ready';
     const submission = { id: 'fixture-submission', task_id: task.id, kind: 'code', summary: 'Saved candidate', candidate_revision: 'fixture-source', acceptance_evidence: [] };
     task.blocked_reason = 'Saved blocker\nRepository access must be restored.';
     for (const phase of ['review', 'integration', 'done']) {
