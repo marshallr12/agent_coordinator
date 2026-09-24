@@ -370,6 +370,33 @@ async fn public_setup_assets_and_private_route_authentication_order() {
 }
 
 #[tokio::test]
+async fn fresh_browser_navigation_enters_sign_in_without_redirecting() {
+    let fixture = Fixture::new().await;
+
+    // A new in-app-browser-equivalent client has no cookies. Loading the SPA
+    // must return the sign-in shell directly; session restoration is an API
+    // request and must fail closed without redirecting the client elsewhere.
+    let page = fixture.call("GET", "/", &[], None).await;
+    page.ok();
+    assert!(!page.headers.contains_key("location"));
+    assert!(page.text.contains("id=\"login-view\""));
+    assert!(page.text.contains("Sign in"));
+
+    let restore = fixture.call("GET", "/api/v1/me", &[], None).await;
+    restore.error(StatusCode::UNAUTHORIZED, "authentication_required");
+    assert!(!restore.headers.contains_key("location"));
+
+    // A separately issued valid session still restores through the protected
+    // API, preserving the normal authenticated-browser path.
+    let browser = fixture.login().await;
+    let authenticated = fixture
+        .call("GET", "/api/v1/me", &[("cookie", &browser.cookie)], None)
+        .await;
+    authenticated.ok();
+    assert_eq!(authenticated.body["data"]["actor"]["kind"], "human");
+}
+
+#[tokio::test]
 async fn browser_writes_require_origin_csrf_and_live_session() {
     let fixture = Fixture::new().await;
     let browser = fixture.login().await;
