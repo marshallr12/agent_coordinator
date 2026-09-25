@@ -235,7 +235,10 @@
 
   function renderMutationState() {
     const busy = Boolean(state.mutation);
-    document.querySelectorAll('form button[type="submit"], [data-mutation="true"]').forEach((button) => { button.disabled = busy && !(state.mutation?.awaitingSecret && button.closest('form')?.dataset.resumeSecret === 'true'); });
+    document.querySelectorAll('form button[type="submit"], [data-mutation="true"]').forEach((button) => {
+      const readOnlyAttachment = button.id === 'upload-task-attachments' && taskDetailReadOnly();
+      button.disabled = readOnlyAttachment || (busy && !(state.mutation?.awaitingSecret && button.closest('form')?.dataset.resumeSecret === 'true'));
+    });
     if ($('account-button')) $('account-button').disabled = busy;
   }
 
