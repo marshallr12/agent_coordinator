@@ -401,7 +401,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "coordinator-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "coordinator-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "coordinator-core",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "coordinator-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "schemars",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "coordinator-local"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "coordinator-mcp-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "coordinator-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "argon2",

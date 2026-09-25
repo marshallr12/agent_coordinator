@@ -114,6 +114,7 @@
 
   const actorId = () => text(state.actor?.id || state.actor?.principal_id);
   const mutationOperation = (path, method) => {
+    if (method === 'POST' && /\/projects\/[^/]+\/tasks\/[^/]+\/archive$/.test(path)) return 'archive_completed_task';
     if (['POST', 'PUT', 'PATCH'].includes(method) && /\/projects\/[^/]+\/(workflow-policy|policy|workflow-activities\/[^/]+\/[^/]+|tasks\/[^/]+\/workflow\/reopen)$/.test(path)) return 'workflow_change';
     if (['POST','PATCH'].includes(method) && /\/projects\/[^/]+\/(knowledge|decisions|artifacts|imports)(\/|$)/.test(path)) return 'shared_change';
     if (['POST','PATCH','DELETE'].includes(method) && /\/projects\/[^/]+\/(objectives|claims|attempts|tasks)(\/|$)/.test(path)) return 'operator_work';
@@ -275,7 +276,7 @@
     show($('task-view-tabs'), view === 'tasks' || view === 'archived');
     updateTaskViewTabs();
     document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (view === 'project' && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
-    if (view === 'tasks') { fillProjectSelect(); $('back-to-project').disabled = !state.projectId; $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
+    if (view === 'tasks') { fillProjectSelect(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
   }
 
   function issuedCredentialFeedback(data) {
@@ -300,6 +301,7 @@
     if (operation === 'resolve_resource') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; showView('task-detail'); await loadTaskDetail(); setGlobalAlert('Resolution recorded. Review the updated job and hold evidence.', 'success'); };
     if (operation === 'create_project') return async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); };
     if (operation === 'create_task') return async () => { state.projectId = context.projectId || state.projectId; await loadTasks(); setGlobalAlert('Task created.', 'success'); };
+    if (operation === 'archive_completed_task') return async () => { removeCompletedTask(context.projectId, context.taskId); };
     if (operation === 'issue_credential') return async (data) => { downloadIssuedCredential(data); await loadCredentials(); };
     if (operation === 'revoke_credential') return async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); };
     if (operation === 'logout') return async () => signOutLocal();
@@ -415,7 +417,6 @@
     showView('project'); $('project-heading').focus();
   }
   $('back-to-projects').addEventListener('click', () => showView('overview'));
-  $('back-to-project').addEventListener('click', () => showView('overview'));
   $('project-review-button').addEventListener('click', async () => {
     const projectId = state.projectId;
     try {
@@ -573,8 +574,9 @@
     show($('tasks-state'), false); show(target, true);
     tasks.forEach((task) => {
       const status = taskStatus(task);
-      const row = el('article', `task-row ${status}`);
-      row.setAttribute('role', 'button'); row.setAttribute('tabindex', '0');
+      const completed = state.taskView === 'completed';
+      const row = el('article', `task-row${completed ? ' completed-task-row' : ''} ${status}`);
+      row.setAttribute('role', completed ? 'group' : 'button'); row.setAttribute('tabindex', '0');
       row.setAttribute('aria-label', `Open task ${task.title || task.id}`);
       const open = () => openTask(task.id);
       row.addEventListener('click', (event) => {
@@ -583,8 +585,16 @@
         open();
       });
       row.addEventListener('keydown', (event) => {
+        if (event.target.closest('button')) return;
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
       });
+      if (completed) {
+        const archive = taskIconButton('Archive completed task and move it to Archived Tasks', 'archive', (event) => {
+          event.stopPropagation(); archiveCompletedTask(task);
+        });
+        archive.addEventListener('keydown', event => event.stopPropagation());
+        add(row, archive);
+      }
       const title = el('span', 'task-main'); add(title, el('span', 'task-title', task.title || 'Untitled task'));
       const identity = el('span', 'task-queue-id'); add(identity, el('span', '', 'Task ID · ')); add(identity, el('span', 'task-id-value', task.id));
       const created = el('time', 'task-created project-meta', `Created ${formatDate(task.created_at)}`);
@@ -594,6 +604,25 @@
       const description = el('span', 'task-description', task.description || 'No description');
       add(row, title); add(row, identity); add(row, created); add(row, meta); add(row, description); add(target, row);
     });
+  }
+
+  function removeCompletedTask(projectId, taskId) {
+    if (projectId !== state.projectId) return;
+    state.completedTasks = state.completedTasks.filter(task => text(task.id) !== text(taskId));
+    state.completedLoaded = true;
+    state.completedPageIndex = Math.min(state.completedPageIndex, Math.max(0, Math.ceil(state.completedTasks.length / state.taskPageSize) - 1));
+    if (state.taskView === 'completed') showTaskPage(state.completedPageIndex);
+    setGlobalAlert('Task archived and moved to Archived Tasks.', 'success');
+  }
+
+  function archiveCompletedTask(task) {
+    if (state.mutation || !task?.id || !state.projectId) return;
+    const projectId = state.projectId;
+    const taskId = text(task.id);
+    startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/archive`, {
+      expected_revision: task.revision,
+      reason: 'Archived from the Completed Tasks view.'
+    }, 'archive completed task', () => removeCompletedTask(projectId, taskId), 'POST', null, {projectId, taskId});
   }
 
   async function loadTaskDetail(silent = false) {
