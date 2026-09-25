@@ -71,6 +71,8 @@ textarea { min-height: 108px; resize: vertical; }
 .brand-button strong { font-size: 14px; letter-spacing: -.01em; }
 .brand-button small { margin-top: 1px; color: var(--muted); font-size: 11px; }
 .topbar-actions { display: flex; align-items: center; gap: 13px; }
+.topbar-link { color: var(--teal); font-size: 13px; font-weight: 750; text-decoration: none; }
+.topbar-link:hover { text-decoration: underline; }
 .service-indicator { display: flex; align-items: center; gap: 9px; color: var(--navy); font-size: 11px; }
 .service-indicator strong, .service-indicator small { display: block; }
 .service-indicator small { margin-top: 2px; color: var(--muted); font-size: 10px; }
@@ -178,12 +180,17 @@ a.nav-item { text-decoration: none; }
 .task-detail-copy-feedback.fallback { color: #795218; }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(270px, .7fr); gap: 15px; margin-bottom: 15px; }
 .card { padding: 22px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: 0 3px 8px rgba(29, 50, 63, .025); }
-.resource-form { display: grid; grid-template-columns: minmax(0, 1.2fr) 110px minmax(0, 1.5fr) auto; gap: 12px; align-items: end; margin: 18px 0; }
-.resource-form label { margin-top: 0; }
+.resource-form { display: grid; grid-template-columns: minmax(0, 1.2fr) 110px minmax(0, 1.5fr) auto; gap: 12px; align-items: start; margin: 18px 0; }
+.resource-form > div { display: grid; grid-template-rows: 20px 40px 1fr; gap: 4px; min-width: 0; }
+.resource-form label { margin: 0; }
+.resource-form input { min-width: 0; }
+.resource-form > div > p { margin: 4px 0 0; font-size: 12px; }
+.resource-form > button { margin-top: 24px; white-space: nowrap; }
 #resources-list { margin-top: 20px; }
 #load-more-resources { margin-top: 20px; }
 .job-evidence-card { margin-top: 15px; }
 .task-attachments-card { margin-top: 15px; }
+.task-attachments-readonly .task-attachment-controls { opacity: .55; }
 .task-attachment-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
 .task-attachment-controls .select-label { flex: 1; min-width: min(100%, 280px); }
 .task-attachment-controls input { display: block; max-width: 100%; margin-top: 5px; font-size: 12px; }
@@ -196,10 +203,10 @@ a.nav-item { text-decoration: none; }
 .evidence-entry h3 { margin: 0 0 8px; }
 .evidence-entry p { margin: 5px 0; font-size: 13px; }
 .evidence-entry code { font-size: 11px; }
-@media (max-width: 900px) { .resource-form { grid-template-columns: 1fr; } .sidebar nav { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 900px) { .resource-form { grid-template-columns: 1fr; } .resource-form > div { grid-template-rows: auto auto auto; } .resource-form > button { margin-top: 0; } .sidebar nav { grid-template-columns: repeat(2, 1fr); } }
 .detail-card .card-header, .lease-card .card-header { margin-bottom: 17px; }
-.detail-description { min-height: 24px; color: #3d4e5a; font-size: 14px; white-space: pre-wrap; }
-.criteria-list { margin: 0; padding-left: 21px; color: #3d4e5a; font-size: 13px; }
+.detail-description { min-height: 24px; color: var(--ink); font-size: 14px; white-space: pre-wrap; }
+.criteria-list { margin: 0; padding-left: 21px; color: var(--ink); font-size: 13px; }
 .criteria-list li { padding: 5px 0; }
 .live-label { display: flex; align-items: center; gap: 7px; color: var(--teal); font-size: 11px; font-weight: 800; }
 .lease-line { display: flex; justify-content: space-between; gap: 14px; padding: 10px 0; border-bottom: 1px solid #edf1f2; font-size: 12px; }.lease-line:last-child { border-bottom: 0; }.lease-line dt { color: var(--muted); }.lease-line dd { margin: 0; color: var(--navy); font-weight: 750; text-align: right; }

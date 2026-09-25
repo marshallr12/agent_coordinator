@@ -714,6 +714,11 @@
     setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), title); setText($('detail-task-id-value'), taskId); setText($('detail-task-revision'), task.revision || 1); setText($('detail-description'), task.description || 'No description provided.');
     $('copy-task-name').dataset.copyValue = title; $('copy-task-id').dataset.copyValue = taskId; setTaskDetailCopyFeedback('', '');
     const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); badge.className = `status-badge ${status}`; setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
+    const readOnly = Boolean(task.archived_at || ['done', 'completed'].includes(status));
+    $('task-attachment-files').disabled = readOnly || Boolean(state.mutation || state.attachmentBusy);
+    $('upload-task-attachments').disabled = readOnly || Boolean(state.mutation || state.attachmentBusy);
+    $('retry-task-attachments').disabled = readOnly || Boolean(state.mutation || state.attachmentBusy);
+    $('task-attachments-card').classList.toggle('task-attachments-readonly', readOnly);
     const criteria = $('acceptance-list'); clear(criteria); const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
     if (!items.length) add(criteria, el('li', 'muted', 'No acceptance criteria recorded.')); else items.forEach((item) => add(criteria, el('li', '', item)));
     renderTaskActions(data, task); renderLease(data, task); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
@@ -763,7 +768,8 @@
     if (hasMore) add(list, el('p', 'muted', 'More records are available through Browse history.'));
     const retry = $('retry-task-attachments');
     retry.hidden = !pending.length;
-    retry.disabled = state.attachmentBusy || Boolean(state.mutation);
+    const task = state.detail?.task || state.detail || {};
+    retry.disabled = Boolean(state.attachmentBusy || state.mutation || task.archived_at || ['done', 'completed'].includes(taskStatus(task)));
     retry.textContent = pending.length === 1 ? 'Retry pending upload' : `Retry ${pending.length} pending uploads`;
   }
 
@@ -875,13 +881,13 @@
       await loadTaskAttachments(state.projectId, state.selectedTaskId, true);
       setGlobalAlert('The attachment upload did not finish. Retry the saved upload to resume safely.', 'error');
     } finally {
-      state.attachmentBusy = false; $('upload-task-attachments').disabled = Boolean(state.mutation); $('task-attachment-files').disabled = Boolean(state.mutation);
-      $('retry-task-attachments').disabled = Boolean(state.mutation);
+      state.attachmentBusy = false; $('upload-task-attachments').disabled = Boolean(state.mutation || taskDetailReadOnly()); $('task-attachment-files').disabled = Boolean(state.mutation || taskDetailReadOnly());
+      $('retry-task-attachments').disabled = Boolean(state.mutation || taskDetailReadOnly());
     }
   }
 
   async function uploadTaskAttachments() {
-    if (state.attachmentBusy || state.mutation || !state.selectedTaskId) return;
+    if (state.attachmentBusy || state.mutation || !state.selectedTaskId || taskDetailReadOnly()) return;
     const files = Array.from($('task-attachment-files').files || []);
     if (!files.length) { attachmentStatus('Choose one or more files first.', true); return; }
     attachmentStatus('Saving upload bytes and request keys…');
@@ -894,12 +900,17 @@
   }
 
   async function retryTaskAttachments() {
-    if (state.attachmentBusy || state.mutation) return;
+    if (state.attachmentBusy || state.mutation || taskDetailReadOnly()) return;
     try {
       const batches = (await readAttachmentBatches()).filter((batch) => batch.project_id === state.projectId && batch.task_id === state.selectedTaskId && batch.actor_id === actorId());
       if (!batches.length) { attachmentStatus('No pending uploads need a retry.'); return; }
       await runTaskAttachmentBatches(batches);
     } catch (error) { attachmentStatus(errorMessage(error), true); }
+  }
+
+  function taskDetailReadOnly() {
+    const task = state.detail?.task || state.detail || {};
+    return Boolean(task.archived_at || ['done', 'completed'].includes(taskStatus(task)));
   }
 
   function renderCheckpoints(data) {
@@ -1644,7 +1655,7 @@
         if (['planned','canceled'].includes(task.lifecycle)) add(target, actionButton('Delete task', () => taskLifecycle(task,'delete','Remove this task from task views? This is a soft delete that retains task and audit history. The service refuses if attempts, workflow, objective, or dependency history exist.')));
       }
     }
-    if (!completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, taskIconButton('Edit task', 'edit', () => editTask(task, data)));
+    if (!task.archived_at && !['done', 'completed'].includes(taskStatus(task)) && !completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, taskIconButton('Edit task', 'edit', () => editTask(task, data)));
     if (!completionPending && !task.activity_kind && task.lifecycle === 'open' && !task.current_attempt_id && task.blocked_reason) add(target, taskIconButton('Resolve blocker', 'resolve', () => {
       const projectId = state.projectId, taskId = task.id;
       const view = workflowDialog('Resolve saved blocker', 'Use this after the problem that stopped work has been fixed. Record what changed and how you checked it. This clears the saved blocker so an agent can claim the task when its other requirements are met.');
