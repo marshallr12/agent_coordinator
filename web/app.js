@@ -532,7 +532,13 @@
       showView('archived'); loadArchivedTasks();
     } else {
       showView('tasks');
-      if (view === 'completed') loadCompletedTasks(); else showTaskPage(state.taskPageIndex);
+      if (view === 'completed') {
+        // The task list is shared between views. Select the completed page
+        // immediately so an unchanged cached result cannot leave queue rows
+        // visible while (or after) the refresh completes.
+        showTaskPage(state.completedPageIndex);
+        loadCompletedTasks();
+      } else showTaskPage(state.taskPageIndex);
     }
   }
 
