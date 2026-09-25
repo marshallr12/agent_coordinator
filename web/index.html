@@ -124,6 +124,16 @@
               <div class="page-heading"><div><p class="eyebrow">Task history</p><h1 id="archived-heading">Archived tasks</h1><p id="archived-subtitle" class="muted">Archived work is kept separately from the task queue.</p></div></div>
               <div class="toolbar"><label class="select-label" for="archive-project-select">Project<select id="archive-project-select"><option value="">Choose a project</option></select></label><button id="refresh-archive" class="button subtle" type="button">Refresh</button></div>
               <div id="archived-state" class="state-panel" role="status">Choose a project to load archived tasks.</div><div id="archived-list" class="tasks-list" hidden></div>
+              <div id="archived-pagination" class="tasks-footer" aria-label="Archived task pagination" hidden>
+                <button id="archived-first-page" class="button subtle pagination-icon" type="button" aria-label="First page">⏮</button>
+                <button id="archived-previous-page" class="button subtle pagination-icon" type="button" aria-label="Previous page">◀</button>
+                <span id="archived-page-numbers" class="pagination-numbers" aria-label="Page numbers"></span>
+                <button id="archived-next-page" class="button subtle pagination-icon" type="button" aria-label="Next page">▶</button>
+                <button id="archived-last-page" class="button subtle pagination-icon" type="button" aria-label="Last page">⏭</button>
+                <select id="archived-page-size" class="pagination-size" aria-label="Archived items per page"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select>
+                <span class="pagination-size-label">Items per page</span>
+                <span id="archived-page-status" class="muted" aria-live="polite"></span>
+              </div>
             </section>
 
             <section id="task-detail-view" class="page-view" aria-labelledby="task-detail-heading" hidden>

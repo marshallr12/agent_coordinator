@@ -10,7 +10,7 @@
   const state = {
     actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0,
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null, credentialDownloadUrl: null,
-    taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
+    taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedTasks: [], archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
   };
 
@@ -552,6 +552,7 @@
     const completed = state.taskView === 'completed';
     const count = completed ? Math.ceil(state.completedTasks.length / state.taskPageSize) : state.taskPages.length;
     const current = completed ? state.completedPageIndex : state.taskPageIndex;
+    $('tasks-page-size').value = String(state.taskPageSize);
     show($('task-pagination'), Boolean(count)); $('tasks-first-page').disabled = !current; $('tasks-previous-page').disabled = !current;
     $('tasks-next-page').disabled = completed ? state.inflightCompleted || current + 1 >= count : Boolean(state.inflight.tasks) || current + 1 >= count;
     $('tasks-last-page').disabled = completed ? state.inflightCompleted || current + 1 >= count : Boolean(state.inflight.tasks) || current + 1 >= count;
@@ -642,28 +643,54 @@
   function openTask(id, origin = 'tasks') { state.selectedTaskId = text(id); state.detailOrigin = origin; showView('task-detail'); loadTaskDetail(); }
   async function loadArchivedTasks() {
     const projectId = $('archive-project-select').value || state.projectId;
-    if (!projectId) { setText($('archived-state'), 'Choose a project to load archived tasks.'); show($('archived-state'), true); show($('archived-list'), false); return; }
+    if (!projectId) { show($('archived-pagination'), false); setText($('archived-state'), 'Choose a project to load archived tasks.'); show($('archived-state'), true); show($('archived-list'), false); return; }
     $('archive-project-select').value = projectId;
+    if (state.archivedProjectId !== projectId) { state.archivedProjectId = projectId; state.archivedPageIndex = 0; state.archivedTasks = []; }
+    show($('archived-pagination'), false);
     setText($('archived-state'), 'Loading archived tasks…'); show($('archived-state'), true); show($('archived-list'), false);
     try {
       const tasks = []; let cursor = null;
       do { const params=new URLSearchParams({limit:'200'}); if(cursor) params.set('cursor',cursor); const page=(await request(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/archived?${params}`)).data; tasks.push(...listData(page)); cursor=page?.next_cursor||null; } while(cursor && projectId === ($('archive-project-select').value || state.projectId));
       if (projectId !== ($('archive-project-select').value || state.projectId)) return;
-      const target = $('archived-list'); clear(target);
-      if (!tasks.length) { setText($('archived-state'), 'No archived tasks in this project.'); return; }
-      tasks.forEach(task => {
-        const row = el('article', `task-row archived-task-row ${task.lifecycle}`);
-        row.setAttribute('role', 'button'); row.setAttribute('tabindex', '0'); row.setAttribute('aria-label', `Open archived task ${task.title || task.id}`);
-        const open = () => { state.projectId = projectId; openTask(task.id, 'archived'); };
-        row.addEventListener('click', open);
-        row.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
-        const title = el('span', 'task-title', task.title || 'Untitled task');
-        const meta = el('span', 'task-meta', `Archived · ${displayStatus(task.lifecycle)}`);
-        const description = el('span', 'task-description', task.description || 'No description');
-        add(row, title); add(row, meta); add(row, description); add(target, row);
-      });
-      show($('archived-state'), false); show(target,true);
+      state.archivedTasks = tasks;
+      renderArchivedTasks();
     } catch(error) { setText($('archived-state'),errorMessage(error)); show($('archived-state'),true); }
+  }
+
+  function renderArchivedTasks() {
+    const target = $('archived-list'); clear(target);
+    const pageCount = Math.ceil(state.archivedTasks.length / state.taskPageSize);
+    state.archivedPageIndex = Math.min(state.archivedPageIndex, Math.max(0, pageCount - 1));
+    const start = state.archivedPageIndex * state.taskPageSize;
+    const pageTasks = state.archivedTasks.slice(start, start + state.taskPageSize);
+    renderArchivedPagination();
+    setText($('archived-page-status'), pageCount ? `Page ${state.archivedPageIndex + 1} of ${state.archivedTasks.length} tasks` : '');
+    if (!pageTasks.length) { setText($('archived-state'), 'No archived tasks in this project.'); show(target, false); return; }
+    pageTasks.forEach(task => {
+      const row = el('article', `task-row archived-task-row ${task.lifecycle}`);
+      row.setAttribute('role', 'button'); row.setAttribute('tabindex', '0'); row.setAttribute('aria-label', `Open archived task ${task.title || task.id}`);
+      const open = () => { state.projectId = state.archivedProjectId; openTask(task.id, 'archived'); };
+      row.addEventListener('click', open);
+      row.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
+      const title = el('span', 'task-title', task.title || 'Untitled task');
+      const meta = el('span', 'task-meta', `Archived · ${displayStatus(task.lifecycle)}`);
+      const description = el('span', 'task-description', task.description || 'No description');
+      add(row, title); add(row, meta); add(row, description); add(target, row);
+    });
+    show($('archived-state'), false); show(target, true);
+  }
+
+  function renderArchivedPagination() {
+    const count = Math.ceil(state.archivedTasks.length / state.taskPageSize), current = state.archivedPageIndex;
+    show($('archived-pagination'), Boolean(count));
+    $('archived-first-page').disabled = !current; $('archived-previous-page').disabled = !current;
+    $('archived-next-page').disabled = current + 1 >= count; $('archived-last-page').disabled = current + 1 >= count;
+    $('archived-page-size').value = String(state.taskPageSize);
+    const numbers = $('archived-page-numbers'); clear(numbers);
+    for (let index = 0; index < count; index++) {
+      const page = actionButton(String(index + 1), () => { state.archivedPageIndex = index; renderArchivedTasks(); }, false);
+      page.classList.add('pagination-page'); page.setAttribute('aria-current', index === current ? 'page' : 'false'); page.disabled = index === current; add(numbers, page);
+    }
   }
 
   function selectTaskDetailText(id) {
@@ -955,6 +982,12 @@
   $('tasks-next-page').addEventListener('click', () => showTaskPage((state.taskView === 'completed' ? state.completedPageIndex : state.taskPageIndex) + 1));
   $('tasks-last-page').addEventListener('click', showLastTaskPage);
   $('tasks-page-size').addEventListener('change', (event) => { state.taskPageSize = Number(event.target.value); if (state.taskView === 'completed') showTaskPage(state.completedPageIndex); else { rebuildQueuePages(); showTaskPage(0); } });
+  $('archived-first-page').addEventListener('click', () => { state.archivedPageIndex = 0; renderArchivedTasks(); });
+  $('archived-previous-page').addEventListener('click', () => { state.archivedPageIndex = Math.max(0, state.archivedPageIndex - 1); renderArchivedTasks(); });
+  $('archived-next-page').addEventListener('click', () => { state.archivedPageIndex = Math.min(Math.ceil(state.archivedTasks.length / state.taskPageSize) - 1, state.archivedPageIndex + 1); renderArchivedTasks(); });
+  $('archived-last-page').addEventListener('click', () => { state.archivedPageIndex = Math.max(0, Math.ceil(state.archivedTasks.length / state.taskPageSize) - 1); renderArchivedTasks(); });
+  $('archived-page-size').addEventListener('change', (event) => { state.taskPageSize = Number(event.target.value); $('tasks-page-size').value = String(state.taskPageSize); state.archivedPageIndex = 0; renderArchivedTasks(); });
+  $('tasks-page-size').addEventListener('change', (event) => { $('archived-page-size').value = event.target.value; if (state.archivedTasks.length) renderArchivedTasks(); });
   $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; resetTaskPages(); state.taskView = 'queue'; updateTaskViewTabs(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); });
   $('status-filter').addEventListener('change', () => { state.taskPageIndex = 0; rebuildQueuePages(); showTaskPage(0); });
   $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else showView('tasks'); }); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation(`/api/v1/admin/agents`, { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
