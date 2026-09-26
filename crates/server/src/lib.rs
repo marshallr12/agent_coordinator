@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod auth;
+pub mod autonomy;
 pub mod backup;
 pub mod coordination;
 pub mod discovery;

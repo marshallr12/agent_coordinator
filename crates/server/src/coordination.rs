@@ -327,6 +327,7 @@ async fn update_policy(
     let value = serde_json::to_value(project(&mut m.tx, &id).await?)?;
     sqlx::query("INSERT INTO policy_revisions(project_id,revision,data_json,actor_id,created_at,provenance) VALUES(?,?,?,?,?,?)")
         .bind(&id).bind(current.policy_revision+1).bind(value.to_string()).bind(&m.actor.id).bind(m.now).bind(&input.provenance).execute(&mut *m.tx).await?;
+    crate::autonomy::reconcile_required_reviews(&mut m.tx, Some(&id), m.now).await?;
     Ok(response(
         m.finish(value, Some(&id), "policy.updated", &id).await?,
     ))
@@ -551,7 +552,7 @@ pub(crate) async fn task_preconditions_snapshot(
     let workflow = crate::workflow::workflow_snapshot(c, project_id, id, now).await?;
     let reopened = workflow["phase"] == "revision_needed";
     if !reopened && !workflow["blockers"].as_array().is_none_or(Vec::is_empty) {
-        unmet.push(json!({"code":"operator_reopen_required","message":"The immutable candidate is pinned to stale project or workflow policy. Ask a human operator to reopen it before creating a replacement submission."}));
+        unmet.push(json!({"code":"operator_reopen_required","message":"The task's judged fields changed after this candidate was submitted. Reopen or revise it before creating a replacement submission."}));
     }
     crate::workflow::label_human_preconditions(&mut unmet);
     value["preconditions"] = json!(unmet);

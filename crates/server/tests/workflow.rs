@@ -1653,8 +1653,10 @@ async fn agent_mode_quiescent_expired_activity_is_claimable() {
     assert_eq!(status, StatusCode::OK, "{reclaimed}");
 }
 
+// P1 autonomy (B1): a review_mode change reconciles the required reviews instead of
+// stranding the candidate behind a human reopen.
 #[tokio::test]
-async fn preconditions_surface_operator_reopen_and_reviewer_independence() {
+async fn review_mode_change_reconciles_reviews_instead_of_stranding_candidate() {
     let f = Fixture::new().await;
     let p = f
         .project(
@@ -1662,16 +1664,8 @@ async fn preconditions_surface_operator_reopen_and_reviewer_independence() {
             "https://example.test/preconditions.git",
         )
         .await;
-    let (status, policy) = f
-        .call(
-            &f.admin,
-            "PATCH",
-            &format!("/api/v1/projects/{p}/policy"),
-            json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{policy}");
-    let task = f.task(&p, "general", "Stale review candidate").await;
+    f.review_policy(&p, "agent").await;
+    let task = f.task(&p, "general", "Reconciled review candidate").await;
     f.ack(&f.a, &p, 2).await;
     let owner = f.claim(&f.a, &p, &task, 2).await;
     let submitted = f
@@ -1680,6 +1674,26 @@ async fn preconditions_surface_operator_reopen_and_reviewer_independence() {
         )
         .await;
     let review = activity(&submitted, "agent_review").clone();
+    let review_path = format!(
+        "/api/v1/projects/{p}/preconditions/{}",
+        review["id"].as_str().unwrap()
+    );
+    let (status, inspected) = f.call(&f.a, "GET", &review_path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{inspected}");
+    let codes: Vec<_> = inspected["data"]["unmet_preconditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["code"].clone())
+        .collect();
+    assert!(
+        codes.contains(&json!("reviewer_not_independent")),
+        "{inspected}"
+    );
+    assert!(
+        !codes.contains(&json!("operator_reopen_required")),
+        "{inspected}"
+    );
 
     let (status, updated_policy) = f
         .call(
@@ -1690,84 +1704,7 @@ async fn preconditions_surface_operator_reopen_and_reviewer_independence() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{updated_policy}");
-
-    let (status, task_detail) = f
-        .call(
-            &f.a,
-            "GET",
-            &format!(
-                "/api/v1/projects/{p}/tasks/{}",
-                task["id"].as_str().unwrap()
-            ),
-            json!({}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{task_detail}");
-    assert!(
-        task_detail["data"]["preconditions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker["code"] == "operator_reopen_required")
-    );
-
-    let (status, inspected) = f
-        .call(
-            &f.a,
-            "GET",
-            &format!(
-                "/api/v1/projects/{p}/preconditions/{}",
-                review["id"].as_str().unwrap()
-            ),
-            json!({}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{inspected}");
-    assert!(
-        inspected["data"]["unmet_preconditions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker["code"] == "operator_reopen_required")
-    );
-    assert!(
-        inspected["data"]["unmet_preconditions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker["code"] == "reviewer_not_independent")
-    );
-
-    let (status, reopened) = f
-        .call(
-            &f.admin,
-            "POST",
-            &format!("/api/v1/projects/{p}/tasks/{}/workflow/reopen", task["id"].as_str().unwrap()),
-            json!({"submission_id":review["submission_id"],"reason":"Policy changed and the obsolete candidate was intentionally reopened."}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{reopened}");
-    let (status, old_activity) = f
-        .call(
-            &f.a,
-            "GET",
-            &format!(
-                "/api/v1/projects/{p}/preconditions/{}",
-                review["id"].as_str().unwrap()
-            ),
-            Value::Null,
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{old_activity}");
-    assert!(
-        !old_activity["data"]["unmet_preconditions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker["code"] == "operator_reopen_required")
-    );
-    f.ack(&f.a, &p, 3).await;
-    let (status, revision_ready) = f
+    let (status, detail) = f
         .call(
             &f.a,
             "GET",
@@ -1778,16 +1715,14 @@ async fn preconditions_surface_operator_reopen_and_reviewer_independence() {
             Value::Null,
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{revision_ready}");
-    assert_eq!(revision_ready["data"]["work_status"], "ready");
-    assert_eq!(revision_ready["data"]["eligible_to_claim"], true);
-    assert!(
-        !revision_ready["data"]["preconditions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker["code"] == "operator_reopen_required")
-    );
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["data"]["lifecycle"], "done", "{detail}");
+    let state: String = sqlx::query_scalar("SELECT state FROM workflow_activities WHERE id=?")
+        .bind(review["id"].as_str().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "canceled");
 }
 
 #[tokio::test]
@@ -2194,4 +2129,72 @@ async fn human_only_refusals_and_preconditions_are_labelled() {
         .find(|item| item["code"] == "human_reviewer_required")
         .expect("human reviewer gate");
     assert_eq!(gate["required_actor"], "human");
+}
+
+// P1 autonomy (B1): a lease-only policy change between claim and submit no longer
+// strands the attempt or its candidate; the reviewer claims under the new policy.
+#[tokio::test]
+async fn lease_only_policy_change_keeps_attempt_and_candidate_current() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("lease-change", "https://example.test/lease.git")
+        .await;
+    f.review_policy(&p, "agent").await;
+    let task = f.task(&p, "general", "Lease change survivor").await;
+    let owner = f.claim(&f.a, &p, &task, 2).await;
+    let (status, changed) = f
+        .call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"),
+            json!({"expected_revision":2,"review_mode":"agent","recovery_mode":"agent","lease_seconds":3600,"rules":"","agent_rule_editing":false,"automatic_integration":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    let submitted = f
+        .submit(
+            &f.a, &p, &task, &owner, "general", 2, None, None, None, None,
+        )
+        .await;
+    let review = activity(&submitted, "agent_review").clone();
+    f.ack(&f.b, &p, 3).await;
+    let (status, claimed) = f
+        .call(&f.b, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/claim", review["id"].as_str().unwrap()),
+            json!({"expected_submission_id":review["submission_id"],"expected_project_policy_revision":2,"expected_workflow_policy_revision":0}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+}
+
+// P1 autonomy: tightening review_mode during review adds the newly required review
+// and cancels the queued one that is no longer required (never grandfathered).
+#[tokio::test]
+async fn tightened_review_mode_adds_required_review() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("tighten", "https://example.test/tighten.git")
+        .await;
+    f.review_policy(&p, "agent").await;
+    let task = f.task(&p, "general", "Tightened review").await;
+    let owner = f.claim(&f.a, &p, &task, 2).await;
+    let submitted = f
+        .submit(
+            &f.a, &p, &task, &owner, "general", 2, None, None, None, None,
+        )
+        .await;
+    let submission = activity(&submitted, "agent_review")["submission_id"].clone();
+    let (status, changed) = f
+        .call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"),
+            json!({"expected_revision":2,"review_mode":"human","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kind,state FROM workflow_activities WHERE submission_id=? ORDER BY kind",
+    )
+    .bind(submission.as_str().unwrap())
+    .fetch_all(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("agent_review".to_owned(), "canceled".to_owned()),
+            ("human_review".to_owned(), "queued".to_owned())
+        ]
+    );
 }

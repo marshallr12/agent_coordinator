@@ -462,31 +462,26 @@ async fn submit(
             "The submission must use the task and policy revisions pinned by its claim.",
         ));
     }
-    let current = sqlx::query("SELECT t.revision,p.policy_revision,p.repository_url,p.target_branch FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.project_id=? AND t.id=?")
+    let current = sqlx::query("SELECT p.repository_url,p.target_branch FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.project_id=? AND t.id=?")
         .bind(&project).bind(&subject.task_id).fetch_one(&mut *mutation.tx).await?;
-    if current.get::<i64, _>("revision") != input.task_revision
-        || current.get::<i64, _>("policy_revision") != input.project_policy_revision
-    {
-        return Err(AppError::conflict(
-            "policy_changed",
-            "Task or project policy changed after this attempt was claimed. Release and claim a current revision.",
-        ));
-    }
+    let task_digest = ensure_judged_fields_unchanged(&mut mutation.tx, &subject).await?;
     validate_acceptance(&input, &subject.acceptance_json)?;
     crate::jobs::ensure_attempt_quiescent(&mut mutation.tx, &project, &subject.task_id).await?;
     ensure_workflow_quiescent(&mut mutation.tx, &project, &subject.task_id).await?;
 
     let mut canonical: Option<String> = None;
+    let mut roster_revision = 0;
     let repository = current.get::<String, _>("repository_url");
     let target = current.get::<String, _>("target_branch");
     if input.kind == "code" {
         let policy = workflow_policy_value(&mut mutation.tx, &project).await?;
-        if policy["revision"] != input.workflow_policy_revision {
+        if input.workflow_policy_revision < 1 {
             return Err(AppError::conflict(
                 "workflow_policy_changed",
-                "Read the current required-check roster and claim a current revision.",
+                "Read the current required-check roster and submit with its revision.",
             ));
         }
+        roster_revision = policy["revision"].as_i64().ok_or_else(AppError::internal)?;
         if input.repository.as_deref() != Some(repository.as_str()) {
             return Err(AppError::conflict(
                 "repository_mismatch",
@@ -581,14 +576,14 @@ async fn submit(
         mutation.now,
     )
     .await?;
-    sqlx::query("INSERT INTO submissions(id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,workflow_policy_revision,summary,acceptance_evidence_json,handoff,canonical_repository_key,repository_url,target_branch,base_revision,candidate_revision,candidate_tree,candidate_ref,created_by,contributor_session_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO submissions(id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,workflow_policy_revision,summary,acceptance_evidence_json,handoff,canonical_repository_key,repository_url,target_branch,base_revision,candidate_revision,candidate_tree,candidate_ref,created_by,contributor_session_id,created_at,task_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&submission).bind(&project).bind(&subject.task_id).bind(&attempt).bind(&input.kind)
-        .bind(input.task_revision).bind(input.project_policy_revision).bind(input.workflow_policy_revision)
+        .bind(input.task_revision).bind(input.project_policy_revision).bind(roster_revision)
         .bind(&input.summary).bind(serde_json::to_string(&input.acceptance_evidence)?).bind(&input.handoff)
         .bind(&canonical).bind(if input.kind=="code" {Some(repository.as_str())} else {None})
         .bind(if input.kind=="code" {Some(target.as_str())} else {None})
         .bind(&input.base_revision).bind(&input.candidate_revision).bind(&input.candidate_tree).bind(&input.candidate_ref)
-        .bind(&mutation.actor.id).bind(&owner_session).bind(mutation.now).execute(&mut *mutation.tx).await?;
+        .bind(&mutation.actor.id).bind(&owner_session).bind(mutation.now).bind(&task_digest).execute(&mut *mutation.tx).await?;
     let lessons = crate::knowledge::insert_submission_lessons(
         &mut mutation.tx,
         &mutation.actor,
@@ -843,6 +838,21 @@ pub(crate) fn label_human_preconditions(unmet: &mut [Value]) {
     }
 }
 
+/// True when the task's judged fields differ from the digest the submission pinned.
+async fn judged_fields_changed(
+    c: &mut SqliteConnection,
+    submission: &str,
+    task_id: &str,
+) -> Result<bool, AppError> {
+    let pinned: Option<String> =
+        sqlx::query_scalar("SELECT task_digest FROM submissions WHERE id=?")
+            .bind(submission)
+            .fetch_one(&mut *c)
+            .await?;
+    let current = crate::autonomy::current_task_digest(c, task_id).await?;
+    Ok(pinned.is_some_and(|pinned| pinned != current))
+}
+
 pub(crate) async fn activity_wait_snapshot(
     c: &mut SqliteConnection,
     project: &str,
@@ -866,12 +876,7 @@ pub(crate) async fn activity_preconditions(
     let mut add = |code: &str, message: &str| {
         unmet.push(json!({"code":code,"message":message}));
     };
-    let policy_stale = ctx.phase != "revision_needed"
-        && (ctx.submission != ctx.current_submission
-            || ctx.superseded_at.is_some()
-            || ctx.project_policy_revision != ctx.project_current_policy
-            || (ctx.workflow_policy_revision != 0
-                && ctx.workflow_current_policy != Some(ctx.workflow_policy_revision)));
+    let policy_stale = ctx.phase != "revision_needed" && !ctx.pins_current();
     if policy_stale {
         add(
             "operator_reopen_required",
@@ -1056,22 +1061,8 @@ pub async fn workflow_snapshot(
     }
     let mut blockers = Vec::new();
     let sub = submission_value(c, &submission_id).await?;
-    let policy: Option<i64> = sqlx::query_scalar("SELECT policy_revision FROM projects WHERE id=?")
-        .bind(project)
-        .fetch_optional(&mut *c)
-        .await?;
-    if policy != sub["project_policy_revision"].as_i64() {
-        blockers.push("Project policy changed after submission.".to_string());
-    }
-    if sub["kind"] == "code" {
-        let wp: Option<i64> =
-            sqlx::query_scalar("SELECT revision FROM workflow_policies WHERE project_id=?")
-                .bind(project)
-                .fetch_optional(&mut *c)
-                .await?;
-        if wp != sub["workflow_policy_revision"].as_i64() {
-            blockers.push("Required-check policy changed after submission.".to_string());
-        }
+    if judged_fields_changed(c, &submission_id, task_id).await? {
+        blockers.push("Task requirements changed after submission.".to_string());
     }
     let integration = activities
         .iter()
@@ -1348,7 +1339,7 @@ pub async fn guard_activity_work(
     now: i64,
 ) -> Result<(), AppError> {
     crate::knowledge::ensure_decisions_resolved(c, project, activity_task_id, now).await?;
-    let row=sqlx::query("SELECT wa.subject_task_id,wa.id,wa.state,wa.submission_id,ws.current_submission_id,s.project_policy_revision,s.workflow_policy_revision,p.policy_revision,wp.revision AS current_workflow_revision,t.current_attempt_id,a.expires_at FROM workflow_activities wa JOIN workflow_subjects ws ON ws.task_id=wa.subject_task_id JOIN submissions s ON s.id=wa.submission_id JOIN projects p ON p.id=wa.project_id LEFT JOIN workflow_policies wp ON wp.project_id=wa.project_id JOIN tasks t ON t.id=wa.activity_task_id LEFT JOIN attempts a ON a.id=t.current_attempt_id WHERE wa.project_id=? AND wa.activity_task_id=?")
+    let row=sqlx::query("SELECT wa.subject_task_id,wa.id,wa.state,t.current_attempt_id,a.expires_at FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id LEFT JOIN attempts a ON a.id=t.current_attempt_id WHERE wa.project_id=? AND wa.activity_task_id=?")
         .bind(project).bind(activity_task_id).fetch_optional(&mut *c).await?;
     let Some(row) = row else { return Ok(()) };
     crate::knowledge::ensure_decisions_resolved(
@@ -1358,12 +1349,9 @@ pub async fn guard_activity_work(
         now,
     )
     .await?;
+    let ctx = activity_context(c, project, &row.get::<String, _>("id")).await?;
     if row.get::<String, _>("state") != "active"
-        || row.get::<String, _>("submission_id") != row.get::<String, _>("current_submission_id")
-        || row.get::<i64, _>("project_policy_revision") != row.get::<i64, _>("policy_revision")
-        || (row.get::<i64, _>("workflow_policy_revision") > 0
-            && row.get::<Option<i64>, _>("current_workflow_revision")
-                != Some(row.get::<i64, _>("workflow_policy_revision")))
+        || !ctx.pins_current()
         || row.get::<Option<String>, _>("current_attempt_id").is_none()
         || row
             .get::<Option<i64>, _>("expires_at")
@@ -1401,12 +1389,32 @@ struct ActivityContext {
     workflow_policy_revision: i64,
     current_submission: String,
     project_current_policy: i64,
-    workflow_current_policy: Option<i64>,
     automatic_integration: bool,
     recovery_mode: String,
     lease_seconds: i64,
     canonical_repository_key: Option<String>,
     target_branch: Option<String>,
+    /// Judged-field digest pinned by the submission (NULL only before backfill).
+    pinned_digest: Option<String>,
+    /// Current judged-field digest of the subject task.
+    current_digest: String,
+    /// Roster this activity validates checks against: the one captured on its
+    /// publication intent, else the current roster (0 for general work).
+    roster_revision: i64,
+}
+
+impl ActivityContext {
+    /// True while the activity's candidate is the subject's current submission and
+    /// the task's judged fields are unchanged. Policy and roster revisions are not
+    /// pins: review sets are reconciled and the roster is captured on the intent.
+    fn pins_current(&self) -> bool {
+        self.submission == self.current_submission
+            && self.superseded_at.is_none()
+            && self
+                .pinned_digest
+                .as_deref()
+                .is_none_or(|pinned| pinned == self.current_digest)
+    }
 }
 
 async fn candidate_checkpoint_present(
@@ -1427,7 +1435,9 @@ async fn activity_context(
     project: &str,
     id: &str,
 ) -> Result<ActivityContext, AppError> {
-    let r=sqlx::query("SELECT wa.id,wa.kind,wa.subject_task_id,wa.submission_id,wa.activity_task_id,wa.state,ws.current_submission_id,ws.phase,s.superseded_at,s.task_revision,s.project_policy_revision,s.workflow_policy_revision,s.canonical_repository_key,s.target_branch,p.policy_revision,p.review_mode,p.automatic_integration,p.recovery_mode,p.lease_seconds,wp.revision AS current_workflow_revision FROM workflow_activities wa JOIN workflow_subjects ws ON ws.task_id=wa.subject_task_id JOIN submissions s ON s.id=wa.submission_id JOIN projects p ON p.id=wa.project_id LEFT JOIN workflow_policies wp ON wp.project_id=wa.project_id WHERE wa.project_id=? AND wa.id=?")
+    let r=sqlx::query("SELECT wa.id,wa.kind,wa.subject_task_id,wa.submission_id,wa.activity_task_id,wa.state,ws.current_submission_id,ws.phase,s.superseded_at,s.task_revision,s.project_policy_revision,s.workflow_policy_revision,s.canonical_repository_key,s.target_branch,s.task_digest,p.policy_revision,p.review_mode,p.automatic_integration,p.recovery_mode,p.lease_seconds,wp.revision AS current_workflow_revision,st.title,st.description,st.acceptance_json,st.kind AS subject_kind, \
+        CASE WHEN s.kind='code' THEN COALESCE((SELECT COALESCE(pi.roster_revision,s.workflow_policy_revision) FROM publication_intents pi WHERE pi.activity_id=wa.id),wp.revision,s.workflow_policy_revision) ELSE 0 END AS roster_revision \
+        FROM workflow_activities wa JOIN workflow_subjects ws ON ws.task_id=wa.subject_task_id JOIN submissions s ON s.id=wa.submission_id JOIN projects p ON p.id=wa.project_id JOIN tasks st ON st.id=wa.subject_task_id LEFT JOIN workflow_policies wp ON wp.project_id=wa.project_id WHERE wa.project_id=? AND wa.id=?")
         .bind(project).bind(id).fetch_optional(&mut *c).await?.ok_or_else(AppError::not_found)?;
     Ok(ActivityContext {
         id: r.get("id"),
@@ -1442,26 +1452,22 @@ async fn activity_context(
         workflow_policy_revision: r.get("workflow_policy_revision"),
         current_submission: r.get("current_submission_id"),
         project_current_policy: r.get("policy_revision"),
-        workflow_current_policy: r.get("current_workflow_revision"),
         automatic_integration: r.get("automatic_integration"),
         recovery_mode: r.get("recovery_mode"),
         lease_seconds: r.get("lease_seconds"),
         canonical_repository_key: r.get("canonical_repository_key"),
         target_branch: r.get("target_branch"),
+        pinned_digest: r.get("task_digest"),
+        current_digest: crate::autonomy::row_digest(&r, "subject_kind")?,
+        roster_revision: r.get("roster_revision"),
     })
 }
 
 fn ensure_current(a: &ActivityContext) -> Result<(), AppError> {
-    if a.submission != a.current_submission
-        || a.superseded_at.is_some()
-        || a.phase == "revision_needed"
-        || a.project_policy_revision != a.project_current_policy
-        || (a.workflow_policy_revision > 0
-            && a.workflow_current_policy != Some(a.workflow_policy_revision))
-    {
+    if !a.pins_current() || a.phase == "revision_needed" {
         return Err(AppError::conflict(
             "workflow_policy_changed",
-            "The candidate or its pinned policy is no longer current.",
+            "The candidate is no longer current or its task requirements changed.",
         ));
     }
     if matches!(
@@ -1491,10 +1497,7 @@ async fn activity_detail(
         && current["session_id"].as_str() == auth.actor.session_id.as_deref()
         && current["valid_by_time"] == true
         && current["owner_authorized"] == true;
-    let policy_current = ctx.submission == ctx.current_submission
-        && ctx.project_policy_revision == ctx.project_current_policy
-        && (ctx.workflow_policy_revision == 0
-            || ctx.workflow_current_policy == Some(ctx.workflow_policy_revision));
+    let policy_current = ctx.pins_current();
     let decisions_ready =
         crate::knowledge::pending_decision_ids(&mut c, &project, Some(&ctx.subject_task), now, 1)
             .await?
@@ -1581,8 +1584,7 @@ async fn publication_readiness(
 }
 
 async fn approvals_satisfied(c: &mut SqliteConnection, submission: &str) -> Result<bool, AppError> {
-    Ok(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM workflow_activities wa LEFT JOIN review_decisions rd ON rd.activity_id=wa.id AND rd.decision='approved' WHERE wa.submission_id=? AND wa.kind IN ('agent_review','human_review','either_review') AND rd.activity_id IS NULL")
-        .bind(submission).fetch_one(&mut *c).await?==0)
+    crate::autonomy::approvals_satisfied(c, submission).await
 }
 
 async fn claim_activity(
@@ -1619,13 +1621,9 @@ async fn claim_activity(
             && current["valid_by_time"] == true
             && current["owner_authorized"] == true
             && projected["status"] == "active"
-            && ctx.superseded_at.is_none()
             && ctx.phase != "revision_needed"
-            && ctx.submission == ctx.current_submission
-            && ctx.project_policy_revision == ctx.project_current_policy
-            && checkpoint_ready
-            && (ctx.workflow_policy_revision == 0
-                || ctx.workflow_current_policy == Some(ctx.workflow_policy_revision));
+            && ctx.pins_current()
+            && checkpoint_ready;
         let remaining = if valid {
             current["expires_at"]
                 .as_str()
@@ -2112,46 +2110,101 @@ async fn review(
             .execute(&mut *m.tx)
             .await?;
     } else if approvals_satisfied(&mut m.tx, &ctx.submission).await? {
-        let kind: String = sqlx::query_scalar("SELECT kind FROM submissions WHERE id=?")
-            .bind(&ctx.submission)
-            .fetch_one(&mut *m.tx)
-            .await?;
-        if kind == "general" {
-            crate::objectives::ensure_required_children_done(
-                &mut m.tx,
-                &project,
-                &ctx.subject_task,
-            )
-            .await?;
-            crate::jobs::ensure_attempt_quiescent(&mut m.tx, &project, &ctx.subject_task).await?;
-            ensure_workflow_quiescent(&mut m.tx, &project, &ctx.subject_task).await?;
-            sqlx::query("UPDATE workflow_subjects SET phase='done',updated_at=? WHERE task_id=?")
-                .bind(m.now)
-                .bind(&ctx.subject_task)
-                .execute(&mut *m.tx)
-                .await?;
-            sqlx::query("UPDATE tasks SET lifecycle='done',blocked_reason=NULL WHERE id=?")
-                .bind(&ctx.subject_task)
-                .execute(&mut *m.tx)
-                .await?;
-            ready_dependents(&mut m.tx, &ctx.subject_task, m.now).await?;
-        } else {
-            sqlx::query(
-                "UPDATE workflow_subjects SET phase='integration',updated_at=? WHERE task_id=?",
-            )
-            .bind(m.now)
-            .bind(&ctx.subject_task)
-            .execute(&mut *m.tx)
-            .await?;
-            sqlx::query("UPDATE tasks SET blocked_reason=NULL,ready_since=? WHERE id=(SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND kind='integration' AND state='queued')")
-                .bind(m.now).bind(&ctx.submission).execute(&mut *m.tx).await?;
-        }
+        advance_approved_subject(
+            &mut m.tx,
+            &project,
+            &ctx.subject_task,
+            &ctx.submission,
+            m.now,
+        )
+        .await?;
     }
     let value = workflow_snapshot(&mut m.tx, &project, &ctx.subject_task, m.now).await?;
     Ok(response(
         m.finish(value, Some(&project), "review.decided", &ctx.id)
             .await?,
     ))
+}
+
+/// Move a subject whose required reviews are satisfied out of review: general work
+/// is done; code work proceeds to its queued integration activity.
+pub(crate) async fn advance_approved_subject(
+    c: &mut SqliteConnection,
+    project: &str,
+    subject_task: &str,
+    submission: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    let kind: String = sqlx::query_scalar("SELECT kind FROM submissions WHERE id=?")
+        .bind(submission)
+        .fetch_one(&mut *c)
+        .await?;
+    if kind == "general" {
+        complete_general_subject(c, project, subject_task, now).await
+    } else {
+        sqlx::query(
+            "UPDATE workflow_subjects SET phase='integration',updated_at=? WHERE task_id=?",
+        )
+        .bind(now)
+        .bind(subject_task)
+        .execute(&mut *c)
+        .await?;
+        sqlx::query("UPDATE tasks SET blocked_reason=NULL,ready_since=? WHERE id=(SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND kind='integration' AND state='queued')")
+            .bind(now).bind(submission).execute(&mut *c).await?;
+        Ok(())
+    }
+}
+
+/// Mark an approved general subject done and release its dependents.
+async fn complete_general_subject(
+    c: &mut SqliteConnection,
+    project: &str,
+    subject_task: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    crate::objectives::ensure_required_children_done(c, project, subject_task).await?;
+    crate::jobs::ensure_attempt_quiescent(c, project, subject_task).await?;
+    ensure_workflow_quiescent(c, project, subject_task).await?;
+    sqlx::query("UPDATE workflow_subjects SET phase='done',updated_at=? WHERE task_id=?")
+        .bind(now)
+        .bind(subject_task)
+        .execute(&mut *c)
+        .await?;
+    sqlx::query("UPDATE tasks SET lifecycle='done',blocked_reason=NULL WHERE id=?")
+        .bind(subject_task)
+        .execute(&mut *c)
+        .await?;
+    ready_dependents(c, subject_task, now).await
+}
+
+/// Queue one more review activity of `kind` for `submission`, in the next free slot
+/// (used by review reconciliation after a policy change).
+pub(crate) async fn add_review_activity(
+    c: &mut SqliteConnection,
+    project: &str,
+    task_id: &str,
+    title: &str,
+    submission: &str,
+    kind: &str,
+    now: i64,
+) -> Result<String, AppError> {
+    let slot: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(max(slot),0)+1 FROM workflow_activities WHERE submission_id=? AND kind=?",
+    )
+    .bind(submission)
+    .bind(kind)
+    .fetch_one(&mut *c)
+    .await?;
+    let subject = OwnedSubject {
+        task_id: task_id.into(),
+        kind: String::new(),
+        title: title.into(),
+        acceptance_json: String::new(),
+        task_revision: 0,
+        project_policy_revision: 0,
+        review_mode: String::new(),
+    };
+    create_activity(c, project, &subject, submission, kind, slot, now).await
 }
 
 async fn authorize_integration(
@@ -2306,8 +2359,8 @@ async fn publication_intent(
             "The canonical integration hold is no longer held.",
         ));
     }
-    sqlx::query("INSERT INTO publication_intents(activity_id,submission_id,attempt_id,observed_target_revision,observed_target_tree,result_revision,result_tree,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
-        .bind(&ctx.id).bind(&ctx.submission).bind(&attempt_id).bind(&input.observed_target_revision).bind(&input.observed_target_tree).bind(&input.result_revision).bind(&input.result_tree).bind(&m.actor.id).bind(m.now).execute(&mut *m.tx).await?;
+    sqlx::query("INSERT INTO publication_intents(activity_id,submission_id,attempt_id,observed_target_revision,observed_target_tree,result_revision,result_tree,created_by,created_at,roster_revision) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .bind(&ctx.id).bind(&ctx.submission).bind(&attempt_id).bind(&input.observed_target_revision).bind(&input.observed_target_tree).bind(&input.result_revision).bind(&input.result_tree).bind(&m.actor.id).bind(m.now).bind(ctx.roster_revision).execute(&mut *m.tx).await?;
     let value = activity_value(&mut m.tx, &project, &ctx.id, m.now).await?;
     Ok(response(
         m.finish(
@@ -2330,7 +2383,7 @@ async fn validate_check_jobs(
     job_ids: &[String],
 ) -> Result<(), AppError> {
     let roster_row:String=sqlx::query_scalar("SELECT required_checks_json FROM workflow_policy_revisions WHERE project_id=? AND revision=?")
-        .bind(project).bind(ctx.workflow_policy_revision).fetch_optional(&mut *c).await?
+        .bind(project).bind(ctx.roster_revision).fetch_optional(&mut *c).await?
         .ok_or_else(||AppError::conflict("workflow_policy_missing","The pinned required-check roster is unavailable."))?;
     let roster: Vec<RequiredCheck> = serde_json::from_str(&roster_row)?;
     validate_checks(&roster)?;
@@ -2691,13 +2744,10 @@ async fn agent_reconcile_publication(
             "Reconciliation must name the exact current submission.",
         ));
     }
-    if ctx.project_policy_revision != ctx.project_current_policy
-        || (ctx.workflow_policy_revision > 0
-            && ctx.workflow_current_policy != Some(ctx.workflow_policy_revision))
-    {
+    if !ctx.pins_current() {
         return Err(AppError::conflict(
             "workflow_policy_changed",
-            "The candidate policy changed; only a human can reconcile this publication.",
+            "The candidate's task requirements changed; only a human can reconcile this publication.",
         ));
     }
     if ctx.recovery_mode != "agent" {
@@ -3042,6 +3092,24 @@ async fn owned_subject(
         project_policy_revision: pinned_policy.unwrap(),
         review_mode: row.get("review_mode"),
     })
+}
+
+/// Refuse a submission when the task's judged fields changed since the attempt was
+/// claimed; priority edits and policy changes do not count. Returns the current digest.
+async fn ensure_judged_fields_unchanged(
+    c: &mut SqliteConnection,
+    subject: &OwnedSubject,
+) -> Result<String, AppError> {
+    let current = crate::autonomy::current_task_digest(c, &subject.task_id).await?;
+    let pinned =
+        crate::autonomy::revision_task_digest(c, &subject.task_id, subject.task_revision).await?;
+    if pinned.is_some_and(|pinned| pinned != current) {
+        return Err(AppError::conflict(
+            "policy_changed",
+            "The task's title, description, acceptance criteria or kind changed after this attempt was claimed. Release and claim the current task.",
+        ));
+    }
+    Ok(current)
 }
 
 fn validate_acceptance(input: &SubmissionInput, acceptance_json: &str) -> Result<(), AppError> {
