@@ -1321,6 +1321,7 @@ async fn submit_code(
         &prepared.destination,
         repository,
         &candidate_ref,
+        &[context.credential_digest.as_str()],
     )
     .map_err(Failure::invalid)?;
     if checkpoint.revision != candidate_revision || checkpoint.tree != candidate_tree {

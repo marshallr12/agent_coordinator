@@ -9,6 +9,7 @@
 pub mod git_workflow;
 mod persist;
 mod process;
+pub mod secret_scan;
 
 use std::collections::BTreeMap;
 use std::fmt;

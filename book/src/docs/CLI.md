@@ -635,6 +635,15 @@ the `refs/agent-coordinator/candidates/` namespace. An existing ref is accepted
 only when it already names the exact same commit; the CLI never moves a prior
 candidate ref.
 
+Before creating the ref, the CLI scans the patch of every commit it would push
+(reachable from the candidate but not from any remote-tracking ref) for likely
+secrets: common cloud, GitHub, model-provider and chat token shapes, private key
+blocks, credential files such as `credentials.toml`, `.env` or `*.pem`, and the
+caller's own coordinator token. A match refuses the push and names each rule,
+commit and path without echoing the secret; remove the secret from history
+(not only from the latest commit) and submit again. Supervised agents cannot run
+`git push` directly, so this scanned push is their only route to the remote.
+
 The immutable submission records the credential-free canonical project remote
 identity and exact candidate ref in addition to commit and tree IDs. The remote
 URL itself comes from project configuration; credentials are never stored in

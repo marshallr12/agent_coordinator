@@ -253,10 +253,13 @@ pub fn verify_clean_snapshot(
 /// ref into a private verification namespace, and checks the fetched commit and
 /// tree against the original local snapshot. Existing refs are accepted only
 /// when they already name the exact candidate.
+/// `known_digests` are SHA-256 digests of coordinator tokens that the secret
+/// scan must also refuse (normally the caller's own credential).
 pub fn checkpoint_candidate(
     checkout: &Path,
     configured_remote: &str,
     reference: &str,
+    known_digests: &[&str],
 ) -> Result<CandidateCheckpoint> {
     let snapshot = capture_clean_snapshot(checkout, configured_remote)?;
     validate_candidate_reference(&snapshot.checkout, reference)?;
@@ -267,6 +270,7 @@ pub fn checkpoint_candidate(
             "candidate checkpoint ref already names a different commit"
         ),
         None => {
+            refuse_outgoing_secrets(&snapshot.checkout, &snapshot.revision, known_digests)?;
             let lease = format!("--force-with-lease={reference}:");
             let source = format!("{}:{reference}", snapshot.revision);
             let pushed = git_raw(
@@ -1223,6 +1227,34 @@ fn locally_available_tree(checkout: &Path, revision: &str) -> Result<Option<Stri
     )?))
 }
 
+/// Scans every commit reachable from `revision` but not from any
+/// remote-tracking ref (what the push would send) and refuses likely secrets.
+fn refuse_outgoing_secrets(checkout: &Path, revision: &str, known_digests: &[&str]) -> Result<()> {
+    let patch = git_text(
+        checkout,
+        [
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "-p",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--format=commit:%H",
+            revision,
+            "--not",
+            "--remotes",
+        ],
+    )?;
+    let findings = crate::secret_scan::scan_patch(&patch, known_digests);
+    ensure!(
+        findings.is_empty(),
+        "{}",
+        crate::secret_scan::describe(&findings)
+    );
+    Ok(())
+}
+
 fn validate_full_oid(value: &str) -> Result<()> {
     ensure!(
         matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -1901,6 +1933,30 @@ mod tests {
     }
 
     #[test]
+    fn candidate_checkpoint_refuses_outgoing_secrets_before_pushing() {
+        let repository = repository();
+        // Assembled at runtime so this source file never matches the scanner.
+        let key = format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP");
+        candidate(&repository, "leak", &format!("key = {key}\n"));
+        let reference = "refs/agent-coordinator/candidates/leaky";
+        let error = checkpoint_candidate(
+            &repository.source,
+            repository.remote.to_str().unwrap(),
+            reference,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("aws_access_key"), "{error}");
+        assert!(!error.contains(&key), "{error}");
+        let remote = repository.remote.clone().into_os_string();
+        assert_eq!(
+            observe_remote_reference(&repository.source, remote, reference).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn candidate_checkpoint_is_create_only_and_verifies_in_an_independent_clone() {
         let repository = repository();
         let candidate_revision = candidate(&repository, "candidate", "candidate\n");
@@ -1914,6 +1970,7 @@ mod tests {
             &repository.source,
             repository.remote.to_str().unwrap(),
             reference,
+            &[],
         )
         .unwrap();
         assert_eq!(checkpoint.revision, candidate_revision);
@@ -1969,6 +2026,7 @@ mod tests {
                 &repository.source,
                 repository.remote.to_str().unwrap(),
                 reference,
+                &[],
             )
             .is_err()
         );
