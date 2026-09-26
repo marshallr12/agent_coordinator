@@ -15,7 +15,7 @@ use crate::{
         Auth, admin, clear_browser_cookie, digest, hash_password_bounded, secret, timestamp,
         valid_id, validate_name, verify_password,
     },
-    credential_attributes::{CredentialAccess, CredentialClass},
+    credential_attributes::{CredentialAccess, CredentialAttributes, CredentialClass},
     error::AppError,
     mutation::Mutation,
     response,
@@ -924,13 +924,45 @@ async fn rotate_agent_credential(
 #[serde(deny_unknown_fields)]
 struct IssueExistingCredentialInput {
     name: String,
-    /// Omitted means `interactive`; skipped when default so fingerprints of
-    /// pre-attribute retries are unchanged.
-    #[serde(default, skip_serializing_if = "CredentialClass::is_default")]
-    class: CredentialClass,
-    /// Omitted means `write`.
-    #[serde(default, skip_serializing_if = "CredentialAccess::is_default")]
-    access: CredentialAccess,
+    /// Omitted inherits the principal's most recent credential's class (or
+    /// `interactive` when it has none). Skipped when omitted or default so
+    /// fingerprints of earlier retries are unchanged.
+    #[serde(default, skip_serializing_if = "omitted_or_default")]
+    class: Option<CredentialClass>,
+    /// Omitted inherits the most recent credential's access (or `write`).
+    #[serde(default, skip_serializing_if = "omitted_or_default")]
+    access: Option<CredentialAccess>,
+}
+
+/// True when an optional attribute is absent or its default value; either
+/// serializes to nothing so idempotency fingerprints match the pre-inheritance
+/// request shape.
+fn omitted_or_default<T: Default + PartialEq>(value: &Option<T>) -> bool {
+    value.as_ref().is_none_or(|v| *v == T::default())
+}
+
+/// Resolves the attributes for a credential issued to an existing principal:
+/// explicit values win, then the principal's most recent credential (revoked
+/// ones included, since a restore revokes everything), then the defaults.
+async fn inherited_attributes(
+    tx: &mut sqlx::SqliteConnection,
+    principal_id: &str,
+    input: &IssueExistingCredentialInput,
+) -> Result<CredentialAttributes, AppError> {
+    let previous = sqlx::query(
+        "SELECT class,access FROM credentials WHERE principal_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(principal_id)
+    .fetch_optional(tx)
+    .await?
+    .map(|row| {
+        CredentialAttributes::from_columns(&row.get::<String, _>("class"), &row.get::<String, _>("access"))
+    })
+    .unwrap_or_default();
+    Ok(CredentialAttributes {
+        class: input.class.unwrap_or(previous.class),
+        access: input.access.unwrap_or(previous.access),
+    })
 }
 
 async fn issue_existing_agent_credential(
@@ -974,6 +1006,7 @@ async fn issue_existing_agent_credential(
             "Enable the existing agent principal before issuing a credential.",
         ));
     }
+    let attributes = inherited_attributes(&mut mutation.tx, &id, &input).await?;
     let credential_id = uuid::Uuid::new_v4().to_string();
     let token = secret();
     sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,name,issued_by,created_at,class,access) VALUES(?,?,?,?,?,?,?,?)")
@@ -983,8 +1016,8 @@ async fn issue_existing_agent_credential(
         .bind(&input.name)
         .bind(&mutation.actor.id)
         .bind(mutation.now)
-        .bind(input.class.as_str())
-        .bind(input.access.as_str())
+        .bind(attributes.class.as_str())
+        .bind(attributes.access.as_str())
         .execute(&mut *mutation.tx)
         .await?;
     let data = json!({
@@ -993,8 +1026,8 @@ async fn issue_existing_agent_credential(
         "credential":{
             "id":credential_id,
             "name":input.name,
-            "class":input.class,
-            "access":input.access,
+            "class":attributes.class,
+            "access":attributes.access,
             "created_at":timestamp(mutation.now),
             "expires_at":Value::Null,
             "revoked_at":Value::Null
@@ -1132,4 +1165,28 @@ pub async fn recover_clock(state: &AppState, reason: &str) -> Result<Value, AppE
             "recovery_kind":"host_operator",
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Omitted and explicitly default attributes serialize to the
+    /// pre-attribute shape, so idempotency fingerprints of earlier requests
+    /// are unchanged; non-default values are still fingerprinted.
+    #[test]
+    fn reissue_fingerprint_input_skips_omitted_and_default_attributes() {
+        let parse = |body: Value| -> Value {
+            let input: IssueExistingCredentialInput = serde_json::from_value(body).unwrap();
+            serde_json::to_value(&input).unwrap()
+        };
+        let bare = json!({"name":"n"});
+        assert_eq!(parse(bare.clone()), bare);
+        assert_eq!(
+            parse(json!({"name":"n","class":"interactive","access":"write"})),
+            bare
+        );
+        let read = json!({"name":"n","class":"supervised","access":"read"});
+        assert_eq!(parse(read.clone()), read);
+    }
 }

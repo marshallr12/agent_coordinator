@@ -2011,7 +2011,14 @@
   function replaceAgentCredential(credential) {
     const view = workflowDialog('New credential for an existing agent', 'This issues a fresh token while preserving the agent identity and contributor history. Existing revoked tokens remain invalid. The new secret is displayed once.');
     view.field('name','Credential name','after-recovery','input').maxLength = 100;
-    view.finish('Issue new token', (values, dialog) => { dialog.close(); startMutation(`/api/v1/admin/agents/${encodeURIComponent(credential.principal_id)}/credentials`, {name:values.get('name')}, 'credential replacement', restoredMutationCallbacks('rotate_credential')); });
+    credentialAttributeFields(view, credential);
+    view.finish('Issue new token', (values, dialog) => { dialog.close(); startMutation(`/api/v1/admin/agents/${encodeURIComponent(credential.principal_id)}/credentials`, {name:values.get('name'), class:values.get('class'), access:values.get('access')}, 'credential replacement', restoredMutationCallbacks('rotate_credential')); });
+  }
+  // Adds class and access selects matching the issue form, pre-filled from the
+  // principal's current credential so a re-issued token keeps its authority.
+  function credentialAttributeFields(view, credential) {
+    selectField(view, 'class', 'Class', credential.class || 'interactive', [['interactive', 'Interactive (a person drives the harness)'], ['supervised', 'Supervised (launched by the supervisor)']]);
+    selectField(view, 'access', 'Access', credential.access || 'write', [['write', 'Write'], ['read', 'Read-only (reviewers, shadow hosts)']]);
   }
   $('refresh-restore').addEventListener('click', () => loadRestore());
 

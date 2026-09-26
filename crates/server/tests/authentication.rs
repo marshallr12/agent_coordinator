@@ -1076,3 +1076,101 @@ async fn credentials_default_to_interactive_write() {
     assert_eq!(item["class"], "interactive");
     assert_eq!(item["access"], "write");
 }
+
+/// Issues a credential for an existing agent principal with the given body and
+/// returns the response data (token plus credential attributes).
+async fn reissue(
+    fixture: &Fixture,
+    browser: &Browser,
+    principal: &str,
+    key: &str,
+    body: Value,
+) -> Value {
+    let result = fixture
+        .call(
+            "POST",
+            &format!("/api/v1/admin/agents/{principal}/credentials"),
+            &browser.headers(key),
+            Some(body),
+        )
+        .await;
+    result.ok();
+    result.body["data"].clone()
+}
+
+/// Issues a supervised read-only reviewer, then revokes its only credential
+/// the way a restore does; returns the reviewer's principal id.
+async fn revoked_read_only_reviewer(fixture: &Fixture, browser: &Browser) -> String {
+    let (_, credential) = issue_with(fixture, browser, "reviewer", "supervised", "read").await;
+    fixture
+        .call(
+            "POST",
+            &format!("/api/v1/admin/credentials/{credential}/revoke"),
+            &browser.headers("revoke-reviewer"),
+            Some(json!({})),
+        )
+        .await
+        .ok();
+    sqlx::query_scalar("SELECT principal_id FROM credentials WHERE id=?")
+        .bind(&credential)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap()
+}
+
+/// Re-issuing for an existing principal without attributes inherits them from
+/// its most recent (here revoked) credential, so a read-only reviewer stays
+/// read-only after a restore and is refused on a write.
+#[tokio::test]
+async fn reissued_credentials_inherit_attributes_from_the_previous_credential() {
+    let fixture = Fixture::new().await;
+    let browser = fixture.login().await;
+    let principal = revoked_read_only_reviewer(&fixture, &browser).await;
+    let data = reissue(
+        &fixture,
+        &browser,
+        &principal,
+        "reissue",
+        json!({"name":"after-restore"}),
+    )
+    .await;
+    assert_eq!(data["credential"]["class"], "supervised");
+    assert_eq!(data["credential"]["access"], "read");
+    let token = data["token"].as_str().unwrap();
+    let proof = secret();
+    fixture
+        .register(token, "restored-session", &proof, "restored-key")
+        .await
+        .ok();
+    let bearer = format!("Bearer {token}");
+    let headers = [
+        ("authorization", bearer.as_str()),
+        ("x-coordinator-session", "restored-session"),
+        ("x-coordinator-session-proof", proof.as_str()),
+        ("idempotency-key", "restored-task"),
+    ];
+    fixture
+        .call("POST", "/api/v1/projects/any/tasks", &headers, Some(json!({"title":"x","description":"d","acceptance_criteria":["c"],"kind":"code","depends_on":[]})))
+        .await
+        .error(StatusCode::FORBIDDEN, "operation_not_permitted");
+}
+
+/// Explicit attributes on a re-issue override the inherited ones; an omitted
+/// attribute is still inherited.
+#[tokio::test]
+async fn reissued_credentials_accept_an_explicit_write_override() {
+    let fixture = Fixture::new().await;
+    let browser = fixture.login().await;
+    let principal = revoked_read_only_reviewer(&fixture, &browser).await;
+    let body = json!({"name":"promoted","access":"write"});
+    let data = reissue(&fixture, &browser, &principal, "promote", body).await;
+    assert_eq!(data["credential"]["class"], "supervised");
+    assert_eq!(data["credential"]["access"], "write");
+    let row = sqlx::query("SELECT class,access FROM credentials WHERE id=?")
+        .bind(data["credential"]["id"].as_str().unwrap())
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<String, _>("class"), "supervised");
+    assert_eq!(row.get::<String, _>("access"), "write");
+}

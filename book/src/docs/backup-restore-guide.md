@@ -346,6 +346,10 @@ installations cannot act on the same external work.
     {"name":"post-restore workstation credential"}
     ```
 
+    The new credential keeps the `class` and `access` of the principal's most
+    recent (revoked) credential unless the request sets them explicitly, so a
+    read-only reviewer stays read-only.
+
     Recover any additional human account from the host before enabling it; never
     treat its pre-restore password as valid authority.
 

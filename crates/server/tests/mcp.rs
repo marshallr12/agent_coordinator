@@ -1320,3 +1320,61 @@ async fn clock_reconciliation_pause_blocks_mcp_mutations_without_effect() {
         .unwrap();
     assert_eq!(tasks, 0);
 }
+
+/// Marks a seeded agent caller's credential read-only (migration 0023).
+async fn make_read_only(state: &AppState, caller: &Caller) {
+    sqlx::query("UPDATE credentials SET access='read' WHERE id=?")
+        .bind(&caller.credential)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+}
+
+/// A read-only credential may acknowledge instructions for its own session
+/// but is refused on a mutating MCP tool call and on a PATCH route, and
+/// neither refusal changes coordination state.
+#[tokio::test]
+async fn read_only_credentials_are_refused_on_mcp_tools_and_patch_routes() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("read-only-guard").await;
+    let task = fixture.task(&project, "Guarded task").await;
+    make_read_only(&fixture.state, &fixture.b).await;
+    fixture.acknowledge(&fixture.b, &project).await;
+    let claimed = fixture
+        .tool(
+            &fixture.b,
+            "coordinator_claim",
+            json!({
+                "project":project,"body":claim_body(&task),"idempotency_key":"read-only-claim-attempt"
+            }),
+        )
+        .await;
+    claimed.tool_error("operation_not_permitted");
+    assert!(claimed.text.contains("read-only"), "{}", claimed.text);
+    let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM attempts")
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 0);
+    let task_id = task["id"].as_str().unwrap();
+    let edit = json!({"expected_revision":task["revision"],"title":"changed","description":"","acceptance_criteria":["done"],"priority":2,"depends_on":[],"planned":false});
+    let path = format!("/api/v1/projects/{project}/tasks/{task_id}");
+    let patched = rest(
+        fixture.app.clone(),
+        &fixture.b,
+        "PATCH",
+        &path,
+        "read-only-edit",
+        edit,
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::FORBIDDEN, "{}", patched.text);
+    assert_eq!(patched.body["error"]["code"], "operation_not_permitted");
+    assert!(patched.text.contains("read-only"), "{}", patched.text);
+    let title: String = sqlx::query_scalar("SELECT title FROM tasks WHERE id=?")
+        .bind(task_id)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(title, "Guarded task");
+}

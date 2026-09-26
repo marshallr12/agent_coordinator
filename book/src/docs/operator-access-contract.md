@@ -121,8 +121,13 @@ and kept by rotation:
 {"name":"mxmini-reviewer","class":"supervised","access":"read"}
 ```
 
-Omitting both fields issues an interactive write credential, which is how every
-credential issued before these attributes existed behaves.
+On `POST /api/v1/admin/agents`, omitting both fields issues an interactive
+write credential, which is how every credential issued before these attributes
+existed behaves. On `POST /api/v1/admin/agents/{principal_id}/credentials`, each
+omitted field is inherited from the principal's most recent credential, revoked
+ones included, so a read-only reviewer re-issued a token after a restore stays
+read-only; only a principal with no prior credential falls back to interactive
+write. Explicit values always win.
 
 ## Agent token rotation
 
@@ -157,7 +162,8 @@ POST /api/v1/admin/agents/{principal_id}/credentials
 
 The principal must still be an enabled agent. The first response contains its
 unchanged `principal_id` and `principal_name`, the new `credential` record, and
-the one-time `token`. A replay returns the saved credential identity without the
+the one-time `token`. Omitted `class` and `access` are inherited from the
+principal's most recent credential (see above). A replay returns the saved credential identity without the
 token and sets `secret_unavailable: true`. The operation is available during
 restore reconciliation so a recovered administrator can reconnect clients, but
 the global restore pause prevents those clients from claiming or changing work
