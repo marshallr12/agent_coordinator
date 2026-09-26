@@ -2198,3 +2198,56 @@ async fn tightened_review_mode_adds_required_review() {
         ]
     );
 }
+
+// P1 autonomy: agents unblock under recovery_mode=agent and cancel (with a
+// replacement link) under agent_rule_editing; otherwise the gate stays human.
+#[tokio::test]
+async fn agents_unblock_and_cancel_only_when_delegated() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("agent-lifecycle", "https://example.test/lifecycle.git")
+        .await;
+    f.policy_none(&p).await;
+    let t = f.task(&p, "general", "Wrongly shaped work").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let (status, released) = f
+        .call(&f.a, "POST", &format!("/api/v1/projects/{p}/attempts/{}/release", owner["id"].as_str().unwrap()),
+            json!({"generation":owner["generation"],"summary":"Needs a resource that now exists.","blocked":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{released}");
+    let task_path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let revision = |v: &Value| v["data"]["revision"].as_i64().unwrap();
+    let (_, current) = f.call(&f.b, "GET", &task_path, Value::Null).await;
+    let (status, unblocked) = f
+        .call(
+            &f.b,
+            "POST",
+            &format!("{task_path}/unblock"),
+            json!({"expected_revision":revision(&current),"reason":"The resource was created."}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{unblocked}");
+
+    let (_, current) = f.call(&f.b, "GET", &task_path, Value::Null).await;
+    let cancel = json!({"expected_revision":revision(&current),"reason":"Wrong kind; replaced."});
+    let (status, refused) = f
+        .call(&f.b, "POST", &format!("{task_path}/cancel"), cancel.clone())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["error"]["details"]["gate"], "task_cancel");
+
+    let (status, policy) = f
+        .call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"),
+            json!({"expected_revision":2,"review_mode":"none","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let replacement = f.task(&p, "code", "Correctly shaped work").await;
+    let mut cancel = cancel;
+    cancel["replacement_task_id"] = replacement["id"].clone();
+    let (status, canceled) = f
+        .call(&f.b, "POST", &format!("{task_path}/cancel"), cancel)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_eq!(canceled["data"]["lifecycle"], "canceled");
+    assert_eq!(canceled["data"]["replacement_task_id"], replacement["id"]);
+}

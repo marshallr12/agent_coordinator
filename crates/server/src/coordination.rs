@@ -642,6 +642,64 @@ async fn archived_tasks(
 struct TaskLifecycleInput {
     expected_revision: i64,
     reason: String,
+    /// Task that replaces a canceled one (e.g. a wrong-kind task), recorded with the cancel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replacement_task_id: Option<String>,
+}
+
+/// Allow a lifecycle action for humans, and for agent sessions only when the project
+/// delegates it: `cancel` under `agent_rule_editing`, `unblock` under
+/// `recovery_mode=agent`. Everything else stays a labelled human gate.
+async fn ensure_lifecycle_actor(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    p: &str,
+    action: &str,
+) -> Result<(), AppError> {
+    if actor.kind == "human" {
+        return Ok(());
+    }
+    let proj = project(c, p).await?;
+    let delegated = match action {
+        "cancel" => proj.agent_rule_editing,
+        "unblock" => proj.recovery_mode == "agent",
+        _ => false,
+    };
+    if !delegated {
+        return Err(AppError::human_gate(
+            &format!("task_{action}"),
+            "This project has not delegated this task lifecycle action to agents.",
+        ));
+    }
+    session(actor).map(|_| ())
+}
+
+/// Confirm that a named replacement task exists in the same project.
+async fn ensure_replacement(
+    c: &mut SqliteConnection,
+    p: &str,
+    id: &str,
+    replacement: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(replacement) = replacement else {
+        return Ok(());
+    };
+    if replacement == id {
+        return Err(AppError::bad_request("A task cannot replace itself."));
+    }
+    let found: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tasks WHERE project_id=? AND id=? AND deleted_at IS NULL",
+    )
+    .bind(p)
+    .bind(replacement)
+    .fetch_one(&mut *c)
+    .await?;
+    if found == 0 {
+        return Err(AppError::bad_request(
+            "replacement_task_id must name a task in this project.",
+        ));
+    }
+    Ok(())
 }
 
 async fn lifecycle_change(
@@ -656,10 +714,16 @@ async fn lifecycle_change(
     bounded(&input.reason, "reason", 4096, true)?;
     let operation = format!("POST /api/v1/projects/{p}/tasks/{id}/{action}");
     let mut m = Mutation::begin(&s, &auth, &headers, &operation, &input).await?;
-    admin_or_operator(&m.actor)?;
+    ensure_lifecycle_actor(&mut m.tx, &m.actor, &p, action).await?;
     if let Some(v) = m.replay {
         return Ok(response(v));
     }
+    if action != "cancel" && input.replacement_task_id.is_some() {
+        return Err(AppError::bad_request(
+            "replacement_task_id applies only to cancel.",
+        ));
+    }
+    ensure_replacement(&mut m.tx, &p, &id, input.replacement_task_id.as_deref()).await?;
     let row = sqlx::query("SELECT lifecycle,revision,current_attempt_id,archived_at,deleted_at FROM tasks WHERE project_id=? AND id=?")
         .bind(&p).bind(&id).fetch_optional(&mut *m.tx).await?.ok_or_else(AppError::not_found)?;
     let lifecycle: String = row.get("lifecycle");
@@ -680,11 +744,6 @@ async fn lifecycle_change(
         return Err(AppError::conflict(
             "task_revision_changed",
             "The task changed. Reload it before applying this lifecycle action.",
-        ));
-    }
-    if m.actor.kind != "human" {
-        return Err(AppError::forbidden(
-            "Only a human operator may change task lifecycle.",
         ));
     }
     if attempt.is_some() {
@@ -745,7 +804,7 @@ async fn lifecycle_change(
             .execute(&mut *m.tx)
             .await?;
     }
-    let result = json!({"id":id,"lifecycle":if action == "cancel" {"canceled"} else {lifecycle.as_str()},"archived":action == "archive","deleted":action == "delete","reason":input.reason});
+    let result = json!({"id":id,"lifecycle":if action == "cancel" {"canceled"} else {lifecycle.as_str()},"archived":action == "archive","deleted":action == "delete","reason":input.reason,"replacement_task_id":input.replacement_task_id});
     Ok(response(m.finish(result, Some(&p), event, &id).await?))
 }
 async fn archive_task(
@@ -1137,7 +1196,7 @@ async fn unblock_task(
         &input,
     )
     .await?;
-    admin_or_operator(&m.actor)?;
+    ensure_lifecycle_actor(&mut m.tx, &m.actor, &p, "unblock").await?;
     if let Some(v) = m.replay {
         return Ok(response(v));
     }
