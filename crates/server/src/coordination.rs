@@ -554,6 +554,9 @@ pub(crate) async fn task_preconditions_snapshot(
     if !reopened && !workflow["blockers"].as_array().is_none_or(Vec::is_empty) {
         unmet.push(json!({"code":"operator_reopen_required","message":"The task's judged fields changed after this candidate was submitted. Reopen or revise it before creating a replacement submission."}));
     }
+    if crate::autonomy::revise_limit_reached(c, id, now).await? {
+        unmet.push(json!({"code":"revise_limit_reached","message":"Agents revised this task three times in 24 hours; a human must look at it."}));
+    }
     crate::workflow::label_human_preconditions(&mut unmet);
     value["preconditions"] = json!(unmet);
     value["unmet_preconditions"] = json!(unmet);

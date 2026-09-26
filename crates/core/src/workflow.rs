@@ -183,6 +183,13 @@ pub struct FinalizeIntegrationInput {
 pub struct ReopenSubmissionInput {
     pub submission_id: String,
     pub reason: String,
+    /// Required when an agent revises: `conflict`, `check_failed`, `candidate_missing`,
+    /// `requirements_changed` or `author_withdraw`. Humans may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    /// Evidence for the reason code, such as conflicting paths or the failing check receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

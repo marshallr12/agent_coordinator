@@ -2251,3 +2251,179 @@ async fn agents_unblock_and_cancel_only_when_delegated() {
     assert_eq!(canceled["data"]["lifecycle"], "canceled");
     assert_eq!(canceled["data"]["replacement_task_id"], replacement["id"]);
 }
+
+/// Submit an approved-by-policy (review_mode none) code candidate and return the
+/// task and its integration activity.
+async fn integrating_code_task(f: &Fixture, name: &str) -> (String, Value, Value) {
+    let repo = format!("https://example.test/{name}.git");
+    let p = f.project(name, &repo).await;
+    f.policy_none(&p).await;
+    f.workflow_policy(&p, &repo).await;
+    let t = f.task(&p, "code", "Conflicting candidate").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let base = "1111111111111111111111111111111111111111";
+    f.checkout(&f.a, &p, &owner, base).await;
+    let submitted = f
+        .submit(
+            &f.a,
+            &p,
+            &t,
+            &owner,
+            "code",
+            2,
+            Some(&repo),
+            Some(base),
+            Some("2222222222222222222222222222222222222222"),
+            Some("3333333333333333333333333333333333333333"),
+        )
+        .await;
+    let integration = activity(&submitted, "integration").clone();
+    (p, t, integration)
+}
+
+fn revise_body(submission: &Value, code: &str, evidence: Option<&str>) -> Value {
+    json!({"submission_id":submission,"reason":"Agent revise","reason_code":code,"evidence":evidence})
+}
+
+// P1 autonomy (B2): the integration owner revises a conflicting candidate with
+// evidence; other agents and reason-less agent calls are refused.
+#[tokio::test]
+async fn integration_owner_revises_conflicting_candidate() {
+    let f = Fixture::new().await;
+    let (p, t, integration) = integrating_code_task(&f, "revise-conflict").await;
+    let (status, claimed) = f.claim_activity(&f.c, &p, &integration, 2, 1).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    );
+    let submission = &integration["submission_id"];
+    let (status, missing) = f
+        .call(
+            &f.c,
+            "POST",
+            &path,
+            json!({"submission_id":submission,"reason":"conflict"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
+    f.ack(&f.b, &p, 2).await;
+    let (status, other) = f
+        .call(
+            &f.b,
+            "POST",
+            &path,
+            revise_body(submission, "conflict", Some("scripts/x.mjs")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{other}");
+    assert_eq!(other["error"]["code"], "revise_not_permitted");
+    let (status, revised) = f
+        .call(
+            &f.c,
+            "POST",
+            &path,
+            revise_body(submission, "conflict", Some("CONFLICT in scripts/x.mjs")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{revised}");
+    assert_eq!(revised["data"]["phase"], "revision_needed");
+    assert_eq!(revised["data"]["revise"]["reason_code"], "conflict");
+}
+
+// P1 autonomy (B8): a legacy code submission without a durable candidate ref is
+// revised by any agent, because the service can verify the missing ref itself.
+#[tokio::test]
+async fn legacy_null_candidate_ref_is_revised_by_any_agent() {
+    let f = Fixture::new().await;
+    let (p, t, integration) = integrating_code_task(&f, "revise-legacy").await;
+    let submission = &integration["submission_id"];
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    );
+    f.ack(&f.b, &p, 2).await;
+    let (status, refused) = f
+        .call(
+            &f.b,
+            "POST",
+            &path,
+            revise_body(submission, "candidate_missing", None),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    sqlx::query("UPDATE submissions SET candidate_ref=NULL WHERE id=?")
+        .bind(submission.as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, revised) = f
+        .call(
+            &f.b,
+            "POST",
+            &path,
+            revise_body(submission, "candidate_missing", None),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{revised}");
+    assert_eq!(revised["data"]["phase"], "revision_needed");
+}
+
+// P1 autonomy: the fourth agent revise of a subject within 24 hours parks it in
+// the human queue; manual recovery reserves revise to humans.
+#[tokio::test]
+async fn agent_revise_is_rate_limited_and_needs_agent_recovery() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("revise-limit", "https://example.test/limit.git")
+        .await;
+    f.review_policy(&p, "agent").await;
+    let t = f.task(&p, "general", "Withdrawn repeatedly").await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    );
+    for round in 0..4 {
+        let owner = f.claim(&f.a, &p, &t, 2).await;
+        let submitted = f
+            .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+            .await;
+        let submission = activity(&submitted, "agent_review")["submission_id"].clone();
+        let (status, result) = f
+            .call(
+                &f.a,
+                "POST",
+                &path,
+                revise_body(&submission, "author_withdraw", None),
+            )
+            .await;
+        if round < 3 {
+            assert_eq!(status, StatusCode::OK, "{result}");
+        } else {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
+            assert_eq!(result["error"]["code"], "revise_limit_reached");
+            assert_eq!(result["error"]["details"]["required_actor"], "human");
+        }
+    }
+    let (status, policy) = f
+        .call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"),
+            json!({"expected_revision":2,"review_mode":"agent","recovery_mode":"manual","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let submission: String =
+        sqlx::query_scalar("SELECT current_submission_id FROM workflow_subjects WHERE task_id=?")
+            .bind(t["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    let (status, manual) = f
+        .call(
+            &f.a,
+            "POST",
+            &path,
+            revise_body(&json!(submission), "author_withdraw", None),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{manual}");
+    assert_eq!(manual["error"]["details"]["gate"], "human_reopen_required");
+}

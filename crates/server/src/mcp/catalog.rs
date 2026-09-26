@@ -257,7 +257,7 @@ fn build_catalog() -> Vec<Operation> {
         ),
         write::<ReopenSubmissionInput>(
             "coordinator_submission_reopen",
-            "Reopen a submission with an explicit reason, subject to current workflow restrictions.",
+            "Reopen (revise) a submission with an explicit reason. Agents must give reason_code (conflict, check_failed, candidate_missing, requirements_changed, author_withdraw) and evidence; the project must use recovery_mode=agent.",
             "POST",
             "/api/v1/projects/{project}/tasks/{task}/workflow/reopen",
         ),

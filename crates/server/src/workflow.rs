@@ -838,21 +838,6 @@ pub(crate) fn label_human_preconditions(unmet: &mut [Value]) {
     }
 }
 
-/// True when the task's judged fields differ from the digest the submission pinned.
-async fn judged_fields_changed(
-    c: &mut SqliteConnection,
-    submission: &str,
-    task_id: &str,
-) -> Result<bool, AppError> {
-    let pinned: Option<String> =
-        sqlx::query_scalar("SELECT task_digest FROM submissions WHERE id=?")
-            .bind(submission)
-            .fetch_one(&mut *c)
-            .await?;
-    let current = crate::autonomy::current_task_digest(c, task_id).await?;
-    Ok(pinned.is_some_and(|pinned| pinned != current))
-}
-
 pub(crate) async fn activity_wait_snapshot(
     c: &mut SqliteConnection,
     project: &str,
@@ -880,7 +865,7 @@ pub(crate) async fn activity_preconditions(
     if policy_stale {
         add(
             "operator_reopen_required",
-            "This immutable candidate or a pinned policy is stale. An authenticated operator must reopen it before new workflow authority can be claimed.",
+            "This candidate is superseded or its task requirements changed. Revise it (reason_code requirements_changed) or ask an operator to reopen it before new workflow authority can be claimed.",
         );
     }
     if matches!(
@@ -1024,7 +1009,7 @@ pub(crate) async fn activity_preconditions(
         "activity_kind":ctx.kind,
         "eligible_to_claim":unmet.is_empty(),
         "unmet_preconditions":unmet,
-        "precondition_hints":if ctx.kind == "integration" { json!([{"code":"candidate_stale_merge_conflict_requires_preflight","state":"requires_local_observation","message":"The service cannot inspect the Git target or detect merge conflicts. Fetch the pinned target and run local integration preflight before publication; a stale/conflicting immutable candidate requires operator reopen."}]) } else { json!([]) },
+        "precondition_hints":if ctx.kind == "integration" { json!([{"code":"candidate_stale_merge_conflict_requires_preflight","state":"requires_local_observation","message":"The service cannot inspect the Git target or detect merge conflicts. Fetch the pinned target and run local integration preflight before publication; a stale or conflicting immutable candidate is revised by the integration owner (reason_code conflict) or reopened by an operator."}]) } else { json!([]) },
         "state":snapshot
     });
     result["state_token"] = json!(crate::state_wait::state_token(&result)?);
@@ -1061,7 +1046,7 @@ pub async fn workflow_snapshot(
     }
     let mut blockers = Vec::new();
     let sub = submission_value(c, &submission_id).await?;
-    if judged_fields_changed(c, &submission_id, task_id).await? {
+    if crate::autonomy::digest_changed(c, &submission_id, task_id).await? {
         blockers.push("Task requirements changed after submission.".to_string());
     }
     let integration = activities
@@ -1129,7 +1114,6 @@ async fn reopen(
         &input,
     )
     .await?;
-    human(&m.actor, "submission_reopen")?;
     let subject=sqlx::query("SELECT current_submission_id,phase FROM workflow_subjects WHERE project_id=? AND task_id=?").bind(&project).bind(&task).fetch_optional(&mut *m.tx).await?.ok_or_else(AppError::not_found)?;
     if let Some(v) = m.replay {
         return Ok(response(v));
@@ -1146,6 +1130,7 @@ async fn reopen(
             "A completed workflow cannot be reopened.",
         ));
     }
+    let revise = revise_record(&mut m, &project, &task, &input).await?;
     let effects:i64=sqlx::query_scalar("SELECT count(*) FROM workflow_activities wa JOIN publication_intents pi ON pi.activity_id=wa.id LEFT JOIN publication_reconciliations pr ON pr.activity_id=wa.id WHERE wa.submission_id=? AND (pr.activity_id IS NULL OR pr.disposition!='not_published')")
         .bind(&input.submission_id).fetch_one(&mut *m.tx).await?;
     if effects > 0 {
@@ -1164,6 +1149,7 @@ async fn reopen(
             let value = activity_value(&mut m.tx, &project, activity_id, m.now).await?;
             if value["current_attempt"]["valid_by_time"] == true
                 && value["current_attempt"]["owner_authorized"] == true
+                && !owned_by_caller(&value["current_attempt"], &m.actor)
             {
                 return Err(AppError::conflict(
                     "activity_owned",
@@ -1174,7 +1160,7 @@ async fn reopen(
     }
     crate::jobs::ensure_attempt_quiescent(&mut m.tx, &project, &task).await?;
     ensure_workflow_quiescent(&mut m.tx, &project, &task).await?;
-    sqlx::query("UPDATE attempts SET state='canceled',ended_at=?,outcome='Human reopened expired, revoked, or stale workflow authority.' WHERE id IN (SELECT t.current_attempt_id FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id WHERE wa.submission_id=? AND t.current_attempt_id IS NOT NULL) AND state='active'")
+    sqlx::query("UPDATE attempts SET state='canceled',ended_at=?,outcome='Workflow reopened: expired, revoked, stale, or revised authority.' WHERE id IN (SELECT t.current_attempt_id FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id WHERE wa.submission_id=? AND t.current_attempt_id IS NOT NULL) AND state='active'")
         .bind(m.now).bind(&input.submission_id).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE tasks SET current_attempt_id=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=?)")
         .bind(&input.submission_id).execute(&mut *m.tx).await?;
@@ -1200,7 +1186,8 @@ async fn reopen(
         .bind(&task)
         .execute(&mut *m.tx)
         .await?;
-    let value = workflow_snapshot(&mut m.tx, &project, &task, m.now).await?;
+    let mut value = workflow_snapshot(&mut m.tx, &project, &task, m.now).await?;
+    value["revise"] = revise;
     Ok(response(
         m.finish(
             value,
@@ -1210,6 +1197,35 @@ async fn reopen(
         )
         .await?,
     ))
+}
+
+/// Authorize the caller of a reopen. Humans reopen without a reason code; agents
+/// `revise` under the project's delegation rules. Returns the reason record (null for humans).
+async fn revise_record(
+    m: &mut Mutation,
+    project: &str,
+    task: &str,
+    input: &ReopenSubmissionInput,
+) -> Result<Value, AppError> {
+    if m.actor.kind == "human" {
+        return Ok(Value::Null);
+    }
+    session(&m.actor)?;
+    let request = crate::autonomy::ReviseRequest {
+        project,
+        task,
+        submission: &input.submission_id,
+        code: input.reason_code.as_deref(),
+        evidence: input.evidence.as_deref(),
+    };
+    crate::autonomy::authorize_revise(&mut m.tx, &m.actor, &request, m.now).await
+}
+
+/// True when the caller's own session owns this attempt (an integrator revising
+/// the candidate it holds).
+fn owned_by_caller(attempt: &Value, actor: &crate::auth::Actor) -> bool {
+    attempt["owner_id"] == actor.id.as_str()
+        && attempt["session_id"].as_str() == actor.session_id.as_deref()
 }
 
 pub async fn guard_normal_claim(

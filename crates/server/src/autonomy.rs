@@ -255,6 +255,169 @@ async fn advance_if_quiet(
     Ok(())
 }
 
+/// Agent revises allowed per subject in any 24 hours before the subject parks in
+/// the human queue.
+const REVISE_LIMIT: i64 = 3;
+const DAY_MS: i64 = 86_400_000;
+
+/// Number of agent revises (agent-called reopens) of a task's submissions in the
+/// last 24 hours.
+pub(crate) async fn agent_revise_count(
+    c: &mut SqliteConnection,
+    task: &str,
+    now: i64,
+) -> Result<i64, AppError> {
+    Ok(sqlx::query_scalar("SELECT count(*) FROM events e JOIN principals pr ON pr.id=e.actor_id JOIN submissions s ON s.id=e.record_id WHERE e.kind='submission.reopened' AND pr.kind='agent' AND s.task_id=? AND e.created_at>?")
+        .bind(task).bind(now - DAY_MS).fetch_one(&mut *c).await?)
+}
+
+/// True when agents may no longer revise this task until a human looks at it.
+pub(crate) async fn revise_limit_reached(
+    c: &mut SqliteConnection,
+    task: &str,
+    now: i64,
+) -> Result<bool, AppError> {
+    Ok(agent_revise_count(c, task, now).await? >= REVISE_LIMIT)
+}
+
+/// What an agent revise needs to be checked against.
+pub(crate) struct ReviseRequest<'a> {
+    pub project: &'a str,
+    pub task: &'a str,
+    pub submission: &'a str,
+    pub code: Option<&'a str>,
+    pub evidence: Option<&'a str>,
+}
+
+/// Authorize an agent `revise` (an agent-called reopen) and return the reason record
+/// to attach to the result. Requires `recovery_mode=agent`, a closed reason code with
+/// its allowed actor, and at most three agent revises per subject per 24 hours.
+pub(crate) async fn authorize_revise(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    r: &ReviseRequest<'_>,
+    now: i64,
+) -> Result<Value, AppError> {
+    let code = r.code.ok_or_else(|| AppError::bad_request("Agents must give reason_code: conflict, check_failed, candidate_missing, requirements_changed or author_withdraw."))?;
+    let recovery: String = sqlx::query_scalar("SELECT recovery_mode FROM projects WHERE id=?")
+        .bind(r.project)
+        .fetch_one(&mut *c)
+        .await?;
+    if recovery != "agent" {
+        return Err(AppError::human_gate(
+            "human_reopen_required",
+            "This project reserves reopening submissions to a human (recovery_mode is manual).",
+        ));
+    }
+    if revise_limit_reached(c, r.task, now).await? {
+        return Err(AppError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "revise_limit_reached",
+            "Agents revised this task three times in 24 hours; a human must look at it.",
+        )
+        .with_details(json!({"required_actor":"human","gate":"revise_limit_reached"})));
+    }
+    ensure_revise_actor(c, actor, r, code, now).await?;
+    Ok(json!({"reason_code":code,"evidence":r.evidence}))
+}
+
+/// Check the reason code's allowed actor and its service-verifiable evidence.
+async fn ensure_revise_actor(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    r: &ReviseRequest<'_>,
+    code: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    let allowed = match code {
+        "conflict" | "check_failed" => {
+            require_evidence(r.evidence)?;
+            holds_integration(c, actor, r.submission, now).await?
+        }
+        "candidate_missing" => candidate_missing(c, r.submission).await?,
+        "requirements_changed" => {
+            !is_contributor(c, r.task, &actor.id).await?
+                && digest_changed(c, r.submission, r.task).await?
+        }
+        "author_withdraw" => submission_author(c, r.submission).await? == actor.id,
+        _ => return Err(AppError::bad_request("Unknown reason_code.")),
+    };
+    if !allowed {
+        return Err(AppError::conflict(
+            "revise_not_permitted",
+            "This caller or the recorded state does not permit this revise reason.",
+        ));
+    }
+    Ok(())
+}
+
+fn require_evidence(evidence: Option<&str>) -> Result<(), AppError> {
+    if evidence.is_none_or(|value| value.trim().is_empty() || value.len() > 16384) {
+        return Err(AppError::bad_request(
+            "This reason_code needs 1–16384 bytes of evidence.",
+        ));
+    }
+    Ok(())
+}
+
+/// True when the caller's session owns the submission's live integration attempt.
+async fn holds_integration(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    submission: &str,
+    now: i64,
+) -> Result<bool, AppError> {
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id JOIN attempts a ON a.id=t.current_attempt_id WHERE wa.submission_id=? AND wa.kind='integration' AND wa.state='active' AND a.state='active' AND a.owner_id=? AND a.session_id=? AND a.expires_at>?")
+        .bind(submission).bind(&actor.id).bind(actor.session_id.as_deref().unwrap_or("")).bind(now).fetch_one(&mut *c).await?;
+    Ok(n > 0)
+}
+
+/// True for a code submission without a durable candidate ref (including legacy rows).
+async fn candidate_missing(c: &mut SqliteConnection, submission: &str) -> Result<bool, AppError> {
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM submissions WHERE id=? AND kind='code' AND (candidate_ref IS NULL OR candidate_ref='')")
+        .bind(submission).fetch_one(&mut *c).await?;
+    Ok(n > 0)
+}
+
+async fn is_contributor(
+    c: &mut SqliteConnection,
+    task: &str,
+    principal: &str,
+) -> Result<bool, AppError> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM task_contributors WHERE task_id=? AND principal_id=?",
+    )
+    .bind(task)
+    .bind(principal)
+    .fetch_one(&mut *c)
+    .await?;
+    Ok(n > 0)
+}
+
+/// True when the task's judged fields differ from the digest the submission pinned.
+pub(crate) async fn digest_changed(
+    c: &mut SqliteConnection,
+    submission: &str,
+    task: &str,
+) -> Result<bool, AppError> {
+    let pinned: Option<String> =
+        sqlx::query_scalar("SELECT task_digest FROM submissions WHERE id=?")
+            .bind(submission)
+            .fetch_one(&mut *c)
+            .await?;
+    let current = current_task_digest(c, task).await?;
+    Ok(pinned.is_some_and(|pinned| pinned != current))
+}
+
+async fn submission_author(c: &mut SqliteConnection, submission: &str) -> Result<String, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT created_by FROM submissions WHERE id=?")
+            .bind(submission)
+            .fetch_one(&mut *c)
+            .await?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::reviews_satisfied;
