@@ -53,10 +53,12 @@ def default_dir():
 
 
 def default_binary(name):
-    """A built workspace binary, preferring release over debug."""
+    """A built workspace binary from the first profile (release, then debug)
+    that has the server, so the server and CLI always come from one build and
+    pass the service's exact-client check."""
     target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
     for profile in ("release", "debug"):
-        if (target / profile / name).is_file():
+        if (target / profile / "agent-coordinator-server").is_file():
             return target / profile / name
     return target / "release" / name
 
