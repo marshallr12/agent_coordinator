@@ -2149,3 +2149,49 @@ async fn repository_derivation_bounds_and_conflicting_legacy_bindings() {
         assert_eq!(value["data"]["canonical_repository_key"], key);
     }
 }
+
+// P1 autonomy: every remaining human-only refusal is labelled, so agents can route
+// it to the human queue instead of retrying.
+#[tokio::test]
+async fn human_only_refusals_and_preconditions_are_labelled() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("labelled-gates", "https://example.test/labelled.git")
+        .await;
+    let (status, refused) = f
+        .call(&f.a, "PUT", &format!("/api/v1/projects/{p}/workflow-policy"),
+            json!({"expected_revision":0,"canonical_repository_key":"labelled","required_checks":[{"identity":"t","version":"v1","environment":"any"}]}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["error"]["code"], "operation_not_permitted");
+    assert_eq!(refused["error"]["details"]["required_actor"], "human");
+    assert_eq!(refused["error"]["details"]["gate"], "workflow_policy_edit");
+
+    f.review_policy(&p, "human").await;
+    let t = f.task(&p, "general", "Human-reviewed work").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+        .await;
+    let review = activity(&submitted, "human_review").clone();
+    f.ack(&f.b, &p, 2).await;
+    let (status, inspected) = f
+        .call(
+            &f.b,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/preconditions/{}",
+                review["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{inspected}");
+    let gate = inspected["data"]["unmet_preconditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == "human_reviewer_required")
+        .expect("human reviewer gate");
+    assert_eq!(gate["required_actor"], "human");
+}

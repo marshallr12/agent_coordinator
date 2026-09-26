@@ -38,7 +38,8 @@ fn criteria(values: &[String]) -> Result<(), AppError> {
 }
 fn admin_or_operator(actor: &crate::auth::Actor) -> Result<(), AppError> {
     if actor.kind != "human" {
-        return Err(AppError::forbidden(
+        return Err(AppError::human_gate(
+            "project_administration",
             "A human operator manages project setup and delegation.",
         ));
     }
@@ -296,7 +297,8 @@ async fn update_policy(
                 .allow_subagent_reviews
                 .is_some_and(|value| value != current.allow_subagent_reviews))
     {
-        return Err(AppError::forbidden(
+        return Err(AppError::human_gate(
+            "policy_permission_change",
             "This project has not delegated this rule change. Agents cannot alter permission grants.",
         ));
     }
@@ -551,6 +553,7 @@ pub(crate) async fn task_preconditions_snapshot(
     if !reopened && !workflow["blockers"].as_array().is_none_or(Vec::is_empty) {
         unmet.push(json!({"code":"operator_reopen_required","message":"The immutable candidate is pinned to stale project or workflow policy. Ask a human operator to reopen it before creating a replacement submission."}));
     }
+    crate::workflow::label_human_preconditions(&mut unmet);
     value["preconditions"] = json!(unmet);
     value["unmet_preconditions"] = json!(unmet);
     value["eligible_to_claim"] = json!(unmet.is_empty());
@@ -1064,7 +1067,8 @@ async fn edit_task(
         .fetch_optional(&mut *m.tx)
         .await?;
         if agent_grant.is_none() {
-            return Err(AppError::forbidden(
+            return Err(AppError::human_gate(
+                "task_definition_grant",
                 "A human administrator must grant this agent task-definition editing authority for this project.",
             ));
         }
@@ -1090,7 +1094,8 @@ async fn edit_task(
             .await?
                 > 0
         {
-            return Err(AppError::forbidden(
+            return Err(AppError::human_gate(
+                "self_related_definition_change",
                 "A human must change a task definition after this agent has contributed to it. Delegation never permits self-related requirement changes.",
             ));
         }
@@ -1532,7 +1537,8 @@ async fn claim(
         }
     }
     if input.mode == "recovery" && proj.recovery_mode == "manual" && m.actor.kind != "human" {
-        return Err(AppError::forbidden(
+        return Err(AppError::human_gate(
+            "manual_recovery",
             "This project requires a human operator to inspect and recover expired work.",
         ));
     }

@@ -32,6 +32,12 @@ impl AppError {
     pub fn forbidden(message: &str) -> Self {
         Self::new(StatusCode::FORBIDDEN, "operation_not_permitted", message)
     }
+    /// A refusal that only a human can clear. The status and top-level code stay
+    /// `operation_not_permitted` for compatibility; `details.gate` names the gate so
+    /// queues, digests and preconditions can route it to the human queue.
+    pub fn human_gate(gate: &str, message: &str) -> Self {
+        Self::forbidden(message).with_details(json!({"required_actor":"human","gate":gate}))
+    }
     pub fn not_found() -> Self {
         Self::new(
             StatusCode::NOT_FOUND,

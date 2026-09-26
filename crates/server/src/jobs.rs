@@ -265,7 +265,8 @@ async fn create_resource(
     let mut mutation =
         Mutation::begin(&state, &auth, &headers, "POST /api/v1/resources", &input).await?;
     if mutation.actor.kind != "human" {
-        return Err(AppError::forbidden(
+        return Err(AppError::human_gate(
+            "resource_create",
             "A human operator creates globally shared resources.",
         ));
     }
@@ -715,7 +716,8 @@ async fn resolve_reservation(
     )
     .await?;
     if mutation.actor.kind != "human" {
-        return Err(AppError::forbidden(
+        return Err(AppError::human_gate(
+            "reservation_resolve",
             "A human operator must resolve uncertain physical resources.",
         ));
     }

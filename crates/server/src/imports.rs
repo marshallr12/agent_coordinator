@@ -59,7 +59,8 @@ fn bounded(value: &str, name: &str, max: usize, required: bool) -> Result<(), Ap
 
 fn human(auth: &crate::auth::Actor) -> Result<(), AppError> {
     if auth.kind != "human" {
-        return Err(AppError::forbidden(
+        return Err(AppError::human_gate(
+            "import_apply",
             "A human operator must apply imported records.",
         ));
     }

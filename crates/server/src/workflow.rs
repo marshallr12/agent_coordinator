@@ -111,9 +111,11 @@ fn session(actor: &crate::auth::Actor) -> Result<&str, AppError> {
     })
 }
 
-fn human(actor: &crate::auth::Actor) -> Result<(), AppError> {
+/// Refuse non-human actors with a labelled human gate named `gate`.
+fn human(actor: &crate::auth::Actor, gate: &str) -> Result<(), AppError> {
     if actor.kind != "human" {
-        return Err(AppError::forbidden(
+        return Err(AppError::human_gate(
+            gate,
             "An authenticated human operator must perform this action.",
         ));
     }
@@ -322,7 +324,7 @@ async fn put_workflow_policy(
         &input,
     )
     .await?;
-    human(&mutation.actor)?;
+    human(&mutation.actor, "workflow_policy_edit")?;
     project_exists(&mut mutation.tx, &project).await?;
     if let Some(value) = mutation.replay {
         return Ok(response(value));
@@ -820,6 +822,27 @@ async fn activity_value(
     )
 }
 
+/// Precondition codes that only a human can clear.
+const HUMAN_PRECONDITIONS: &[&str] = &[
+    "human_recovery_required",
+    "human_reviewer_required",
+    "integration_authorization_required",
+    "revise_limit_reached",
+];
+
+/// Tag unmet preconditions that only a human can clear with
+/// `required_actor="human"`, so agents route them to the human queue instead of retrying.
+pub(crate) fn label_human_preconditions(unmet: &mut [Value]) {
+    for item in unmet {
+        if item["code"]
+            .as_str()
+            .is_some_and(|code| HUMAN_PRECONDITIONS.contains(&code))
+        {
+            item["required_actor"] = json!("human");
+        }
+    }
+}
+
 pub(crate) async fn activity_wait_snapshot(
     c: &mut SqliteConnection,
     project: &str,
@@ -989,6 +1012,7 @@ pub(crate) async fn activity_preconditions(
             }
         }
     }
+    label_human_preconditions(&mut unmet);
     let mut result = json!({
         "target_kind":"activity",
         "target_id":id,
@@ -1114,7 +1138,7 @@ async fn reopen(
         &input,
     )
     .await?;
-    human(&m.actor)?;
+    human(&m.actor, "submission_reopen")?;
     let subject=sqlx::query("SELECT current_submission_id,phase FROM workflow_subjects WHERE project_id=? AND task_id=?").bind(&project).bind(&task).fetch_optional(&mut *m.tx).await?.ok_or_else(AppError::not_found)?;
     if let Some(v) = m.replay {
         return Ok(response(v));
@@ -1654,7 +1678,7 @@ async fn claim_activity(
             )
             .await?;
         }
-        "human_review" | "either_review" => human(&m.actor)?,
+        "human_review" | "either_review" => human(&m.actor, "human_review_claim")?,
         "agent_review" => {
             return Err(AppError::forbidden(
                 "An agent session must own an independent agent review.",
@@ -2147,7 +2171,7 @@ async fn authorize_integration(
         &input,
     )
     .await?;
-    human(&m.actor)?;
+    human(&m.actor, "integration_authorization")?;
     let ctx = activity_context(&mut m.tx, &project, &id).await?;
     if let Some(v) = m.replay {
         return Ok(response(v));
@@ -2507,7 +2531,7 @@ async fn reconcile_publication(
         &input,
     )
     .await?;
-    human(&m.actor)?;
+    human(&m.actor, "publication_reconciliation")?;
     let ctx = activity_context(&mut m.tx, &project, &id).await?;
     if let Some(v) = m.replay {
         return Ok(response(v));
