@@ -23,3 +23,6 @@ Log each role's harnesses in and install its supervised coordinator credential
 as the script prints, then verify with `sudo deploy/agentc/containment-suite.sh`
 (add `--cargo-test` to also run the workspace tests under each profile).
 `sudo deploy/agentc/host-setup.sh --uninstall` removes everything it created.
+The two services are systemd units where systemd is the init system and LSB
+`/etc/init.d` scripts otherwise (for example MX Linux with sysvinit), where the
+proxy logs to `/var/log/agentc-egress.log`.

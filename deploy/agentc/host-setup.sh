@@ -133,53 +133,101 @@ table inet agentc {
   }
 }
 EOF
-  install_unit agentc-firewall.service <<EOF
-[Unit]
-Description=Egress filter for supervised agent accounts
-Before=agentc-egress.service
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/sbin/nft -f $ETC/agentc.nft
-ExecStop=/usr/sbin/nft delete table inet agentc
-[Install]
-WantedBy=multi-user.target
-EOF
+  install_service agentc-firewall \
+    "/usr/sbin/nft -f $ETC/agentc.nft" "/usr/sbin/nft delete table inet agentc"
 }
 
 # Runs the allowlisting proxy as its own unprivileged account.
 install_egress_service() {
-  install_unit agentc-egress.service <<EOF
-[Unit]
-Description=Egress allowlist proxy for supervised agents
-After=network-online.target agentc-firewall.service
-Wants=network-online.target
-[Service]
-User=agentc-egress
-ExecStart=$PREFIX/bin/agentc-supervisor egress-proxy
+  install_service agentc-egress "$PREFIX/bin/agentc-supervisor egress-proxy" ""
+}
+
+# True when systemd is the running init (MX Linux and others may use sysvinit).
+has_systemd() { [ -d /run/systemd/system ]; }
+
+# Installs, enables and (re)starts a service under whichever init is running.
+# An empty stop command means a long-running daemon; otherwise a oneshot.
+install_service() {
+  if has_systemd; then systemd_unit "$@"; else sysv_script "$@"; fi
+}
+
+# systemd: a oneshot with a stop command, or a restarting sandboxed daemon.
+systemd_unit() {
+  local name=$1 start=$2 stop=$3 body
+  if [ -n "$stop" ]; then
+    body="Type=oneshot
+RemainAfterExit=yes
+ExecStart=$start
+ExecStop=$stop"
+  else
+    body="User=agentc-egress
+ExecStart=$start
 Restart=always
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-PrivateTmp=yes
-[Install]
-WantedBy=multi-user.target
-EOF
+PrivateTmp=yes"
+  fi
+  printf '[Unit]\nDescription=%s (agentc)\nAfter=network-online.target\n[Service]\n%s\n[Install]\nWantedBy=multi-user.target\n' \
+    "$name" "$body" > "/etc/systemd/system/$name.service"
+  systemctl daemon-reload
+  systemctl enable --quiet "$name.service"
+  systemctl restart "$name.service"
 }
 
-# Writes a unit from stdin and (re)starts it.
-install_unit() {
-  cat > "/etc/systemd/system/$1"
-  systemctl daemon-reload
-  systemctl enable --quiet "$1"
-  systemctl restart "$1"
+# sysvinit: an LSB script; the daemon runs via start-stop-daemon as its own
+# account and logs to /var/log/<name>.log (no automatic restart on crash).
+sysv_script() {
+  local name=$1 start=$2 stop=$3 pid=/run/$1.pid log=/var/log/$1.log
+  rm -f "/etc/systemd/system/$name.service"
+  local run_start="$start" run_stop="$stop" status="nft list table inet agentc >/dev/null"
+  if [ -z "$stop" ]; then
+    install -o agentc-egress -g agentc-egress -m 0640 /dev/null "$log"
+    run_start="start-stop-daemon --start --background --make-pidfile --pidfile $pid --chuid agentc-egress --startas /bin/sh -- -c 'exec $start >>$log 2>&1'"
+    run_stop="start-stop-daemon --stop --pidfile $pid --retry 5; rm -f $pid"
+    status="start-stop-daemon --status --pidfile $pid"
+  fi
+  cat > "/etc/init.d/$name" <<EOF
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          $name
+# Required-Start:    \$network \$remote_fs
+# Required-Stop:     \$network \$remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: $name (supervised agent containment)
+### END INIT INFO
+case "\$1" in
+  start) $run_start ;;
+  stop) $run_stop ;;
+  restart|force-reload) "\$0" stop; "\$0" start ;;
+  status) $status ;;
+  *) echo "usage: \$0 {start|stop|restart|status}"; exit 2 ;;
+esac
+EOF
+  chmod 0755 "/etc/init.d/$name"
+  update-rc.d "$name" defaults >/dev/null
+  "/etc/init.d/$name" restart
+}
+
+# Stops and removes a service under either init.
+remove_service() {
+  local name=$1
+  if has_systemd; then
+    systemctl disable --now "$name.service" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$name.service"
+    systemctl daemon-reload
+  elif [ -x "/etc/init.d/$name" ]; then
+    "/etc/init.d/$name" stop || true
+    update-rc.d -f "$name" remove >/dev/null
+    rm -f "/etc/init.d/$name" "/var/log/$name.log"
+  fi
 }
 
 # Removes everything this script created.
 uninstall() {
-  systemctl disable --now agentc-egress.service agentc-firewall.service 2>/dev/null || true
-  rm -f /etc/systemd/system/agentc-egress.service /etc/systemd/system/agentc-firewall.service
-  systemctl daemon-reload
+  remove_service agentc-egress
+  remove_service agentc-firewall
   nft delete table inet agentc 2>/dev/null || true
   git config --system --unset-all safe.directory "^$STATE/mirror.git\$" 2>/dev/null || true
   for user in "${AGENTS[@]}" agentc-egress; do userdel "$user" 2>/dev/null || true; done
