@@ -49,6 +49,9 @@ enum Commands {
         /// Read-only local mirror to borrow objects from.
         #[arg(long)]
         mirror: Option<PathBuf>,
+        /// Canonical fetch URL for `origin` when `--url` is a local mirror.
+        #[arg(long)]
+        origin_url: Option<String>,
     },
     /// Run the egress allowlist proxy on the configured loopback address.
     EgressProxy,
@@ -117,7 +120,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
             revision,
             dest,
             mirror,
-        } => clone::create(&url, mirror.as_deref(), &revision, &dest)?,
+            origin_url,
+        } => {
+            clone::create(&url, mirror.as_deref(), &revision, &dest)?;
+            if let Some(origin) = origin_url {
+                clone::set_origin(&dest, &origin)?;
+            }
+        }
         Commands::EgressProxy => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(egress::serve(&config.egress_listen, config.egress_hosts()))?

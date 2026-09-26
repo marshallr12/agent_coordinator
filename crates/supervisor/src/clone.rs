@@ -47,6 +47,15 @@ pub fn create(url: &str, mirror: Option<&Path>, revision: &str, dest: &Path) -> 
     Ok(())
 }
 
+/// Points `origin`'s fetch URL at the canonical repository after cloning from
+/// a local mirror, so tools that read `remote.origin.url` (build provenance,
+/// the coordinator CLI) see the real remote. The dead push URL is untouched.
+pub fn set_origin(dest: &Path, url: &str) -> Result<()> {
+    ensure!(!url.starts_with('-'), "origin URL cannot begin with a dash");
+    run(Some(dest), &["remote", "set-url", "origin", url])?;
+    Ok(())
+}
+
 /// Lists the hardening settings that are missing or wrong in `clone`.
 pub fn hardening_problems(clone: &Path) -> Result<Vec<String>> {
     ensure!(clone.join(".git").is_dir(), "not a Git clone");
@@ -186,6 +195,18 @@ mod tests {
     fn make_executable(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn canonical_origin_keeps_push_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, head) = remote(dir.path());
+        let dest = dir.path().join("clone");
+        create(&url, None, &head, &dest).unwrap();
+        set_origin(&dest, "https://github.com/example/repo.git").unwrap();
+        let fetch = text(git(Some(&dest), &["remote", "get-url", "origin"]).unwrap()).unwrap();
+        assert_eq!(fetch, "https://github.com/example/repo.git");
+        assert!(hardening_problems(&dest).unwrap().is_empty());
     }
 
     #[test]

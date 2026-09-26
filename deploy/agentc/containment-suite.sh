@@ -42,7 +42,8 @@ prepare_clone() {
   rm -rf "$base/clones/suite" "$base/runs/suite"
   expect_ok "$user: hardened clone at mirror HEAD" as "$user" "$SUP" clone \
     --url "$STATE/mirror.git" --revision "$(git -C "$STATE/mirror.git" rev-parse HEAD)" \
-    --dest "$base/clones/suite"
+    --dest "$base/clones/suite" \
+    --origin-url "$(git -C "$STATE/mirror.git" config --get remote.origin.url)"
   as "$user" mkdir -p "$base/runs/suite"
   as "$user" sh -c "echo containment-suite > '$base/runs/suite/prompt.md'"
 }
