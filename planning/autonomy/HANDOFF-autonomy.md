@@ -396,6 +396,8 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
 | 2026-09-26 | P2 step 6: `deploy/agentc/host-setup.sh` + `containment-suite.sh` (user approved the file write) | `ae8ecda`, `56067d9` | `bash -n`; `codex sandbox` policy verified on owner uid; CI green on `d02c684` | Not yet run: **the user runs both with sudo** (agent never executes root scripts). System `safe.directory` = mirror path only. Release binaries built in the P2 worktree `target/release/` |
 | 2026-09-26 | P2 step 6: first host-setup run (user) | `36d68cc` fix | partial | mxmini runs **sysvinit** (MX Linux), so `systemctl` failed after users/dirs/binaries/toolchain 1.98.1/mirror/config succeeded; setup now installs LSB init scripts when systemd is absent (proxy log `/var/log/agentc-egress.log`). Re-run pending |
 | 2026-09-26 | P2 containment exit criterion (user ran setup + suite on mxmini) | `51acdc1` | **containment suite: all 40 checks PASS** incl. `cargo test --workspace` as agentc-impl under uid+firewall and inside the Codex sandbox | Fixes found by the runs: sysvinit services (`36d68cc`), suite keeps cargo logs (`5a7f926`), clones get the canonical `origin` URL via `clone --origin-url` (build provenance test needed `https://`, `51acdc1`). Harness logins and supervised credentials not yet done (needed for P3b, not P2) |
+| 2026-09-26 | P2: staging coordinator + UI verification (M2) | `a6481dd`, `ff286ec` | full CI gate green (smoke + backup smoke on a clean committed build); e2e: supervisor `prepare` → `$RUN/verification.json` → `scripts/verify_ui.mjs` signed in as `staging-verifier` and saved screenshot + DOM | `deploy/agentc/staging.py` (up/status/cli/credentials/down/destroy; env stripped of all `AGENT_COORDINATOR_*`/`COORDINATOR_*`); supervisor `[verification.<project>]` + `--project`, reviewer-only login at `/var/lib/agentc/rev/verification/<project>.json`, preflight checks login 0600 + root-owned browser; host-setup pins `node`, detects the browser, keeps entries below a KEEP marker; suite gains a reviewer browser check. Playwright replaced by the repo's existing CDP-over-Chrome pattern (no npm dependency, no registry egress). Chrome aborts if `$TMPDIR` is deeper than the Unix-socket limit (~108 bytes); `$RUN/tmp` is short enough |
+| 2026-09-26 | P2: staging running on mxmini | `ff286ec` | owner/impl/rev `connect` ok; impl creates a task; rev refused `operation_not_permitted`, can list | `127.0.0.1:18080`, state `~/.local/state/agentc-staging`, project `1dad5306-cbaf-4e6c-a7ed-20b9f369362d`, server = worktree debug build (pid in `server.pid`; `staging.py down` stops it) |
 
 ### Next session: resume P2 here
 
@@ -408,8 +410,23 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
    # per role (impl, rev): harness logins as printed; supervised credentials (impl write, rev read)
    sudo deploy/agentc/containment-suite.sh --cargo-test
    ```
-2. Remaining P2 items: staging coordinator on mxmini (loopback :18080, default config, throwaway
-   project, supervised credentials) as a script; Playwright + `verification_env` (plan §2.3 M2).
+2. DONE 2026-09-26: staging coordinator (`deploy/agentc/staging.py`) and UI verification
+   (`verification_env`, `scripts/verify_ui.mjs`). **The user** now re-runs host-setup (new supervisor
+   binary, pinned `node`, browser, `verification/` dirs), installs the staging credentials and adds the
+   verification entry, then re-runs the suite (it now includes the reviewer browser check):
+   ```
+   cd ~/src/worktrees/agent-coordinator-p2
+   # as the owner, clean tree; the server too, so staging and the installed CLI share one commit
+   COORDINATOR_BUILD_COMMIT=$(git rev-parse HEAD) cargo build --release --locked \
+     -p agentc-supervisor -p coordinator-cli -p coordinator-server
+   deploy/agentc/staging.py down && deploy/agentc/staging.py up   # now serves the release build
+   sudo SUPERVISOR=target/release/agentc-supervisor CLI=target/release/agent-coordinator deploy/agentc/host-setup.sh
+   deploy/agentc/staging.py credentials      # run the printed sudo commands
+   # append below the KEEP line of /etc/agentc/supervisor.toml:
+   #   [verification.1dad5306-cbaf-4e6c-a7ed-20b9f369362d]
+   #   url = "http://127.0.0.1:18080"
+   sudo deploy/agentc/containment-suite.sh --cargo-test
+   ```
 3. P2 exit = suite all PASS under both profiles. Then ship `autonomy/p2` (fresh-context review, the
    user's OK, preflight, `scripts/ship.py` or FF push) and deploy migration 0023 (U9: agent deploy
    after a clean preflight). P3a (shadow `next`, would-launch log) can start in parallel (no root).
