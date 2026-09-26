@@ -393,3 +393,21 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
 | 2026-09-26 | P2 step 5: egress allowlist proxy (`agentc-supervisor egress-proxy`) | `52bb1d3` | crate tests + live test (github 200 via proxy, example.com 403) | loopback CONNECT-only :443; firewall will allow agent uids only this proxy, the staging port and loopback 32768-60999 (tests), not other loopback services (Samba, CUPS, rpcbind) |
 | 2026-09-26 | P2 step 5b: toolchain/update pins, `egress_allow_extra`, `prepare` | `d02c684` | full gate green; `autonomy/p2` pushed | Codex silently accepts unknown `-c` keys ⇒ containment suite must test behaviour, not config parsing |
 | 2026-09-26 | P2 step 6 BLOCKED: `deploy/agentc/host-setup.sh` | — | — | Auto-mode classifier refused writing the root setup script ("Unauthorized Persistence": system users, systemd units, boot-time nft table). Awaiting the user's decision; design in this session's transcript: uids agentc-impl/-rev/-egress, /opt/agentc (pinned claude/codex/CLI/supervisor + rustup toolchain), /var/lib/agentc/<role> 0700, root-owned mirror.git, /etc/agentc/{supervisor.toml,agentc.nft}, units agentc-firewall + agentc-egress, `--uninstall` |
+| 2026-09-26 | P2 step 6: `deploy/agentc/host-setup.sh` + `containment-suite.sh` (user approved the file write) | `ae8ecda`, `56067d9` | `bash -n`; `codex sandbox` policy verified on owner uid; CI green on `d02c684` | Not yet run: **the user runs both with sudo** (agent never executes root scripts). System `safe.directory` = mirror path only. Release binaries built in the P2 worktree `target/release/` |
+
+### Next session: resume P2 here
+
+1. Ask the user for the output of the host setup and suite (commands below). Fix any FAIL; common
+   causes: a login/auth host missing from the egress allowlist (see `journalctl -u agentc-egress`,
+   then add it to `egress_allow_extra` in `/etc/agentc/supervisor.toml` and restart the unit).
+   ```
+   cd ~/src/worktrees/agent-coordinator-p2
+   sudo SUPERVISOR=target/release/agentc-supervisor CLI=target/release/agent-coordinator deploy/agentc/host-setup.sh
+   # per role (impl, rev): harness logins as printed; supervised credentials (impl write, rev read)
+   sudo deploy/agentc/containment-suite.sh --cargo-test
+   ```
+2. Remaining P2 items: staging coordinator on mxmini (loopback :18080, default config, throwaway
+   project, supervised credentials) as a script; Playwright + `verification_env` (plan §2.3 M2).
+3. P2 exit = suite all PASS under both profiles. Then ship `autonomy/p2` (fresh-context review, the
+   user's OK, preflight, `scripts/ship.py` or FF push) and deploy migration 0023 (U9: agent deploy
+   after a clean preflight). P3a (shadow `next`, would-launch log) can start in parallel (no root).
