@@ -64,7 +64,7 @@ check_git() {
   as "$user" git -C "$clone" -c user.name=suite -c user.email=suite@invalid commit -q --allow-empty -m hook >/dev/null 2>&1
   expect_fail "$user: planted post-commit hook did not run" test -e "$marker"
   expect_ok "$user: origin push URL is disabled" \
-    sh -c "[ \"\$(git -C $clone remote get-url --push origin)\" = '$DISABLED_PUSH' ]"
+    sh -c "[ \"\$(sudo -u $user git -C $clone remote get-url --push origin)\" = '$DISABLED_PUSH' ]"
   expect_fail "$user: raw git push refused" as "$user" git -C "$clone" push origin HEAD:refs/heads/suite-probe
 }
 

@@ -85,13 +85,18 @@ refresh_mirror() {
   fi
   chown -R root:root "$STATE/mirror.git"
   chmod -R go-w,a+rX "$STATE/mirror.git"
+  # Git refuses repositories owned by another uid; trust exactly the mirror
+  # (never '*', plan §2.3) so agent accounts can clone from it.
+  git config --system --get-all safe.directory | grep -qx "$STATE/mirror.git" ||
+    git config --system --add safe.directory "$STATE/mirror.git"
 }
 
 # Writes the host config: defaults shown commented, pins and extras set.
 write_config() {
   local claude codex
-  claude=$("$PREFIX/bin/claude" --version | awk '{print $1}')
-  codex=$("$PREFIX/bin/codex" --version | awk '{print $NF}')
+  local as_agent=(sudo -u agentc-impl env -i HOME="$STATE/impl/home")
+  claude=$("${as_agent[@]}" "$PREFIX/bin/claude" --version | awk '{print $1}')
+  codex=$("${as_agent[@]}" "$PREFIX/bin/codex" --version | awk '{print $NF}')
   cat > "$ETC/supervisor.toml" <<EOF
 # agentc-supervisor host configuration. Every entry has an in-code default;
 # commented lines show those defaults. Written by deploy/agentc/host-setup.sh.
@@ -176,6 +181,7 @@ uninstall() {
   rm -f /etc/systemd/system/agentc-egress.service /etc/systemd/system/agentc-firewall.service
   systemctl daemon-reload
   nft delete table inet agentc 2>/dev/null || true
+  git config --system --unset-all safe.directory "^$STATE/mirror.git\$" 2>/dev/null || true
   for user in "${AGENTS[@]}" agentc-egress; do userdel "$user" 2>/dev/null || true; done
   rm -rf "$PREFIX" "$STATE" "$ETC"
   echo "agentc host setup removed"
