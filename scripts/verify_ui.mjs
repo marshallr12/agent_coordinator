@@ -13,7 +13,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import net from 'node:net';
 import { parseArgs } from 'node:util';
 
 /** Parses the command line; every option has a default. */
@@ -37,71 +36,60 @@ async function environment() {
   return { url: verification.url.replace(/\/$/, ''), login, browser };
 }
 
-/** An unused loopback port for Chrome's DevTools endpoint. */
-async function unusedPort() {
-  const server = net.createServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const { port } = server.address();
-  await new Promise(done => server.close(done));
-  return port;
-}
-
-/** Polls a DevTools JSON endpoint until `accept` holds. */
-async function poll(url, accept) {
-  for (let i = 0; i < 200; i += 1) {
-    try {
-      const value = await (await fetch(url)).json();
-      if (accept(value)) return value;
-    } catch { /* not listening yet */ }
-    await new Promise(done => setTimeout(done, 50));
-  }
-  throw new Error(`timed out waiting for ${url}`);
-}
-
-/** A minimal Chrome DevTools Protocol client over one WebSocket. */
-async function devtools(url) {
-  const socket = new WebSocket(url);
-  await once(socket, 'open');
+/** A minimal Chrome DevTools Protocol client over Chrome's debugging pipe
+ * (fd 3 carries commands to Chrome, fd 4 its replies, each message
+ * NUL-terminated). A pipe, unlike --remote-debugging-port, cannot be reached
+ * by other local accounts, so no one else can drive the reviewer's browser. */
+function pipeClient(chrome) {
+  const [toChrome, fromChrome] = [chrome.stdio[3], chrome.stdio[4]];
   let nextId = 1;
+  let buffer = '';
   const pending = new Map();
-  socket.addEventListener('message', ({ data }) => {
-    const message = JSON.parse(data);
-    pending.get(message.id)?.(message);
-    pending.delete(message.id);
+  // A dying Chrome resets the pipe; earlyExit reports why, so these are quiet.
+  for (const stream of [toChrome, fromChrome]) stream.on('error', () => {});
+  fromChrome.on('data', chunk => {
+    buffer += chunk.toString('utf8');
+    let end;
+    while ((end = buffer.indexOf('\0')) >= 0) {
+      settle(pending, JSON.parse(buffer.slice(0, end)));
+      buffer = buffer.slice(end + 1);
+    }
   });
-  const send = (method, params = {}) => new Promise((resolve, reject) => {
+  const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
     const id = nextId++;
     pending.set(id, m => (m.error ? reject(new Error(`${method}: ${m.error.message}`)) : resolve(m.result)));
-    socket.send(JSON.stringify({ id, method, params }));
+    toChrome.write(JSON.stringify({ id, method, params, ...(sessionId && { sessionId }) }) + '\0');
   });
-  return { socket, send };
+  return { send };
 }
 
-/** Rejects with the tail of Chrome's stderr if it exits before listening
+/** Resolves the pending request a DevTools reply answers; events are ignored. */
+function settle(pending, message) {
+  pending.get(message.id)?.(message);
+  pending.delete(message.id);
+}
+
+/** Rejects with the tail of Chrome's stderr if it exits before answering
  * (for example "Socket path too long" when $TMPDIR is very deep). */
 function earlyExit(chrome) {
   let stderr = '';
   chrome.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
   return new Promise((_, reject) => chrome.on('exit', code =>
-    reject(new Error(`browser exited (${code}) before DevTools listened: ${stderr.trim()}`))));
+    reject(new Error(`browser exited (${code}) before DevTools answered: ${stderr.trim()}`))));
 }
 
-/** Starts headless Chrome and returns a DevTools client for a fresh page. */
+/** Starts headless Chrome and returns a DevTools client bound to a fresh page. */
 async function openPage(browser, profile) {
-  const port = await unusedPort();
   const chrome = spawn(browser, ['--headless=new', '--disable-gpu', '--no-first-run',
     '--no-default-browser-check', '--disable-background-networking',
-    `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`], { stdio: ['ignore', 'ignore', 'pipe'] });
-  const version = await Promise.race([
-    poll(`http://127.0.0.1:${port}/json/version`, value => Boolean(value.webSocketDebuggerUrl)),
-    earlyExit(chrome)]);
-  // Headless Chrome starts without a page; create one through the browser target.
-  const root = await devtools(version.webSocketDebuggerUrl);
-  const { targetId } = await root.send('Target.createTarget', { url: 'about:blank' });
-  root.socket.close();
-  const pages = await poll(`http://127.0.0.1:${port}/json/list`, items => items.some(item => item.id === targetId));
-  const page = await devtools(pages.find(item => item.id === targetId).webSocketDebuggerUrl);
+    '--remote-debugging-pipe', `--user-data-dir=${profile}`],
+  { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+  const root = pipeClient(chrome);
+  // Headless Chrome starts without a page; create one and attach a flat session.
+  const { targetId } = await Promise.race([
+    root.send('Target.createTarget', { url: 'about:blank' }), earlyExit(chrome)]);
+  const { sessionId } = await root.send('Target.attachToTarget', { targetId, flatten: true });
+  const page = { send: (method, params) => root.send(method, params, sessionId) };
   await page.send('Page.enable');
   return { chrome, page };
 }
@@ -159,7 +147,6 @@ async function main() {
     await capture(page, env.url, opts);
     console.log(JSON.stringify({ ok: true, url: env.url + opts.path, expected: opts.expect, evidence: opts.out }));
   } finally {
-    page.socket.close();
     if (chrome.exitCode === null) { const exited = once(chrome, 'exit'); chrome.kill('SIGTERM'); await exited; }
     await rm(profile, { recursive: true, force: true });
   }

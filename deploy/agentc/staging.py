@@ -320,17 +320,25 @@ def cmd_cli(st, args):
     os.execve(str(st.cli_bin), [str(st.cli_bin), *args.args], env)
 
 
+def install_command(role, source, target):
+    """A command that writes `source` to `target` as the agent account itself.
+
+    The owner's shell opens `source`; the agent creates `target` (mode 0600).
+    Root never writes inside an agent-owned directory, where a planted
+    symlink could redirect the write."""
+    return (f"sudo -u agentc-{role} sh -c 'umask 077 && cat > \"$1\"' _ "
+            f"{target} < {source}")
+
+
 def cmd_credentials(st, _args):
-    """Prints the root commands that install the supervised credentials and the
+    """Prints the commands that install the supervised credentials and the
     reviewer's verification login where supervised launches read them."""
     state = st.state() or sys.exit("staging is not bootstrapped; run `up` first")
     for role in ("impl", "rev"):
         target = AGENT_STATE / role / "coordinator" / "credentials.toml"
-        print(f"sudo install -o agentc-{role} -g agentc-{role} -m 0600 "
-              f"{st.path('home', role, 'credentials.toml')} {target}")
+        print(install_command(role, st.path("home", role, "credentials.toml"), target))
     target = AGENT_STATE / "rev" / "verification" / f"{state['project_id']}.json"
-    print(f"sudo install -o agentc-rev -g agentc-rev -m 0600 "
-          f"{st.path('secrets', 'verification.json')} {target}")
+    print(install_command("rev", st.path("secrets", "verification.json"), target))
     print("# Replaces any existing credentials.toml; merge by hand if production "
           "entries are already installed (entries are keyed by origin).")
     return 0

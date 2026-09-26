@@ -40,7 +40,7 @@ role_of() { [ "$1" = agentc-impl ] && echo implementer || echo reviewer; }
 # Creates a fresh hardened clone and run directory for a role.
 prepare_clone() {
   local user=$1 base=$STATE/${1#agentc-}
-  rm -rf "$base/clones/suite" "$base/runs/suite"
+  as "$user" rm -rf "$base/clones/suite" "$base/runs/suite"
   expect_ok "$user: hardened clone at mirror HEAD" as "$user" "$SUP" clone \
     --url "$STATE/mirror.git" --revision "$(git -C "$STATE/mirror.git" rev-parse HEAD)" \
     --dest "$base/clones/suite" \

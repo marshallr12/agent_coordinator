@@ -39,15 +39,22 @@ create_users() {
 }
 
 # Private 0700 state per role; the mirror and prefix are root-owned, readable.
+# Root creates only $STATE/<role> (its parent is root-owned); everything inside
+# is created by the agent itself, because root following a symlink the agent
+# planted there would hand the agent any directory on the host.
 create_dirs() {
   install -d -o root -g root -m 0755 "$PREFIX" "$PREFIX/bin" "$STATE" "$ETC"
   for user in "${AGENTS[@]}"; do
     local role=${user#agentc-}
+    refuse_symlink "$STATE/$role"
     install -d -o "$user" -g "$user" -m 0700 "$STATE/$role"
-    for sub in home claude-config codex-home coordinator cargo clones runs verification; do
-      install -d -o "$user" -g "$user" -m 0700 "$STATE/$role/$sub"
-    done
+    runuser -u "$user" -- sh -c 'umask 077 && cd "$1" && mkdir -p home claude-config codex-home coordinator cargo clones runs verification' _ "$STATE/$role"
   done
+}
+
+# Aborts when a path root is about to write is a symlink.
+refuse_symlink() {
+  if [ -L "$1" ]; then echo "refusing: $1 is a symlink" >&2; exit 1; fi
 }
 
 # Copies the owner's current harness binaries and our binaries, root-owned.
@@ -132,6 +139,8 @@ write_config() {
 browser = "$(detect_browser)"
 egress_listen = "127.0.0.1:$PROXY_PORT"
 egress_allow_extra = ["$EXTRA_EGRESS"]
+# egress_probe_target = "1.1.1.1:443"
+# egress_probe_blocked_host = "blocked.invalid"
 
 [pinned]
 claude = "$claude"
