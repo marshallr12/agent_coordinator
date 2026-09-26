@@ -293,13 +293,15 @@ async fn update_policy(
         && (!current.agent_rule_editing
             || current.agent_rule_editing != input.agent_rule_editing
             || current.automatic_integration != input.automatic_integration
+            || current.review_mode != input.review_mode
+            || current.recovery_mode != input.recovery_mode
             || input
                 .allow_subagent_reviews
                 .is_some_and(|value| value != current.allow_subagent_reviews))
     {
         return Err(AppError::human_gate(
             "policy_permission_change",
-            "This project has not delegated this rule change. Agents cannot alter permission grants.",
+            "This project has not delegated this rule change. Agents cannot alter permission grants, review mode or recovery mode.",
         ));
     }
     if let Some(v) = m.replay {
@@ -327,7 +329,13 @@ async fn update_policy(
     let value = serde_json::to_value(project(&mut m.tx, &id).await?)?;
     sqlx::query("INSERT INTO policy_revisions(project_id,revision,data_json,actor_id,created_at,provenance) VALUES(?,?,?,?,?,?)")
         .bind(&id).bind(current.policy_revision+1).bind(value.to_string()).bind(&m.actor.id).bind(m.now).bind(&input.provenance).execute(&mut *m.tx).await?;
-    crate::autonomy::reconcile_required_reviews(&mut m.tx, Some(&id), m.now).await?;
+    let reconcile = crate::autonomy::Reconcile {
+        project: Some(&id),
+        actor: Some(&m.actor.id),
+        advance: true,
+        now: m.now,
+    };
+    crate::autonomy::reconcile_required_reviews(&mut m.tx, &reconcile).await?;
     Ok(response(
         m.finish(value, Some(&id), "policy.updated", &id).await?,
     ))
@@ -689,7 +697,7 @@ async fn ensure_replacement(
         return Err(AppError::bad_request("A task cannot replace itself."));
     }
     let found: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM tasks WHERE project_id=? AND id=? AND deleted_at IS NULL",
+        "SELECT count(*) FROM tasks WHERE project_id=? AND id=? AND deleted_at IS NULL AND archived_at IS NULL AND lifecycle IN ('open','planned','done')",
     )
     .bind(p)
     .bind(replacement)
@@ -697,7 +705,7 @@ async fn ensure_replacement(
     .await?;
     if found == 0 {
         return Err(AppError::bad_request(
-            "replacement_task_id must name a task in this project.",
+            "replacement_task_id must name a live (open, planned or done) task in this project.",
         ));
     }
     Ok(())

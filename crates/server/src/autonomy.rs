@@ -91,9 +91,9 @@ pub(crate) async fn backfill_task_digests(c: &mut SqliteConnection) -> Result<()
 }
 
 /// Startup steps run once after migrations, before serving.
-pub async fn startup(c: &mut SqliteConnection, now: i64) -> Result<(), AppError> {
+pub async fn startup(c: &mut SqliteConnection) -> Result<(), AppError> {
     backfill_task_digests(c).await?;
-    reconcile_required_reviews(c, None, now).await
+    startup_reconcile(c).await
 }
 
 /// Review activity kinds a project review mode requires.
@@ -137,7 +137,8 @@ pub(crate) fn reviews_satisfied(required: &[String], approvers: &[String]) -> bo
 
 /// True when the submission's approvals satisfy its required reviews. Subjects still
 /// in review are judged against the current review mode; subjects past review keep
-/// the review set they were approved under.
+/// the reviews that completed before they advanced, so a leftover review that was no
+/// longer required (and later released) never gates integration.
 pub(crate) async fn approvals_satisfied(
     c: &mut SqliteConnection,
     submission: &str,
@@ -149,7 +150,7 @@ pub(crate) async fn approvals_satisfied(
     let required = if row.get::<Option<String>, _>("phase").as_deref() == Some("review") {
         required_review_kinds(&row.get::<String, _>("review_mode"))
     } else {
-        sqlx::query_scalar("SELECT kind FROM workflow_activities WHERE submission_id=? AND kind!='integration' AND state!='canceled'")
+        sqlx::query_scalar("SELECT kind FROM workflow_activities WHERE submission_id=? AND kind!='integration' AND state='completed'")
             .bind(submission)
             .fetch_all(&mut *c)
             .await?
@@ -161,48 +162,116 @@ pub(crate) async fn approvals_satisfied(
     Ok(reviews_satisfied(&required, &approvers))
 }
 
+/// Who reconciles and whether satisfied subjects may advance.
+pub(crate) struct Reconcile<'a> {
+    /// Limit to one project (policy update) or all projects (startup).
+    pub project: Option<&'a str>,
+    /// Principal recorded on audit events; None uses each project's last policy author.
+    pub actor: Option<&'a str>,
+    /// Advance subjects whose approvals already satisfy the mode (policy update only).
+    pub advance: bool,
+    pub now: i64,
+}
+
 /// Bring every subject in review up to the project's current review mode, so a
 /// policy change never grandfathers a tightened `review_mode` and never strands a
 /// candidate: add missing review activities, cancel queued ones no longer required,
-/// and advance subjects whose approvals already satisfy the mode. Subjects in
-/// integration keep the set they were approved under. Idempotent; runs inside the
-/// policy-update transaction and once at startup.
+/// and (when allowed) advance subjects whose approvals already satisfy the mode.
+/// Subjects in integration keep the set they were approved under. Each subject runs
+/// in a savepoint: a subject that cannot be reconciled is left unchanged for a human
+/// or the next review decision, never blocking startup or the policy update.
 pub(crate) async fn reconcile_required_reviews(
     c: &mut SqliteConnection,
-    project: Option<&str>,
-    now: i64,
+    r: &Reconcile<'_>,
 ) -> Result<(), AppError> {
-    let subjects = sqlx::query("SELECT ws.project_id,ws.task_id,ws.current_submission_id,t.title,p.review_mode FROM workflow_subjects ws JOIN tasks t ON t.id=ws.task_id JOIN projects p ON p.id=ws.project_id WHERE ws.phase='review' AND (?1 IS NULL OR ws.project_id=?1)")
-        .bind(project)
+    let subjects = sqlx::query("SELECT ws.project_id,ws.task_id,ws.current_submission_id,t.title,p.review_mode,s.ac_amendment_json IS NOT NULL AS amended,(SELECT actor_id FROM policy_revisions pr WHERE pr.project_id=p.id ORDER BY revision DESC LIMIT 1) AS policy_actor FROM workflow_subjects ws JOIN tasks t ON t.id=ws.task_id JOIN projects p ON p.id=ws.project_id JOIN submissions s ON s.id=ws.current_submission_id WHERE ws.phase='review' AND (?1 IS NULL OR ws.project_id=?1)")
+        .bind(r.project)
         .fetch_all(&mut *c)
         .await?;
     for s in subjects {
-        let required = required_review_kinds(&s.get::<String, _>("review_mode"));
-        let submission: String = s.get("current_submission_id");
-        cancel_unrequired_reviews(c, &submission, &required, now).await?;
-        if approvals_satisfied(c, &submission).await? {
-            advance_if_quiet(c, &s, &submission, now).await?;
-        } else {
-            add_missing_reviews(c, &s, &submission, &required, now).await?;
+        sqlx::query("SAVEPOINT reconcile_subject")
+            .execute(&mut *c)
+            .await?;
+        match reconcile_subject(c, &s, r).await {
+            Ok(()) => {}
+            Err(_) => {
+                sqlx::query("ROLLBACK TO reconcile_subject")
+                    .execute(&mut *c)
+                    .await?;
+            }
         }
+        sqlx::query("RELEASE reconcile_subject")
+            .execute(&mut *c)
+            .await?;
     }
     Ok(())
 }
 
+/// Reconcile one subject in review and record what changed.
+async fn reconcile_subject(
+    c: &mut SqliteConnection,
+    s: &sqlx::sqlite::SqliteRow,
+    r: &Reconcile<'_>,
+) -> Result<(), AppError> {
+    let required = required_review_kinds(&s.get::<String, _>("review_mode"));
+    let submission: String = s.get("current_submission_id");
+    let canceled = cancel_unrequired_reviews(c, &submission, &required, r.now).await?;
+    let mut added = Vec::new();
+    let mut advanced = false;
+    if approvals_satisfied(c, &submission).await? {
+        if r.advance && !s.get::<bool, _>("amended") {
+            advanced = advance_if_quiet(c, s, &submission, r.now).await?;
+        }
+    } else {
+        added = add_missing_reviews(c, s, &submission, &required, r.now).await?;
+    }
+    if canceled > 0 || !added.is_empty() || advanced {
+        let actor = r
+            .actor
+            .map(str::to_owned)
+            .or_else(|| s.get::<Option<String>, _>("policy_actor"));
+        record_reconciled(
+            c,
+            s,
+            &submission,
+            actor,
+            json!({"canceled_reviews":canceled,"added_reviews":added,"advanced":advanced}),
+            r.now,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Append a `workflow.reconciled` audit event for the subject's submission.
+async fn record_reconciled(
+    c: &mut SqliteConnection,
+    s: &sqlx::sqlite::SqliteRow,
+    submission: &str,
+    actor: Option<String>,
+    data: Value,
+    now: i64,
+) -> Result<(), AppError> {
+    let Some(actor) = actor else { return Ok(()) };
+    sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,'workflow.reconciled',?,?,?)")
+        .bind(s.get::<String, _>("project_id")).bind(actor).bind(submission).bind(data.to_string()).bind(now)
+        .execute(&mut *c).await?;
+    Ok(())
+}
+
 /// Cancel queued review activities whose kind the current mode no longer requires.
-/// Active ones may finish, and their approvals still count.
+/// Active ones may finish, and their approvals still count. Returns how many.
 async fn cancel_unrequired_reviews(
     c: &mut SqliteConnection,
     submission: &str,
     required: &[String],
     now: i64,
-) -> Result<(), AppError> {
+) -> Result<u64, AppError> {
     let required = serde_json::to_string(required)?;
     sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND state='queued' AND kind!='integration' AND kind NOT IN (SELECT value FROM json_each(?)))")
         .bind(submission).bind(&required).execute(&mut *c).await?;
-    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND state='queued' AND kind!='integration' AND kind NOT IN (SELECT value FROM json_each(?))")
-        .bind(now).bind(submission).bind(&required).execute(&mut *c).await?;
-    Ok(())
+    Ok(sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND state='queued' AND kind!='integration' AND kind NOT IN (SELECT value FROM json_each(?))")
+        .bind(now).bind(submission).bind(&required).execute(&mut *c).await?.rows_affected())
 }
 
 /// Queue a review activity for each required kind that has no live activity.
@@ -212,7 +281,8 @@ async fn add_missing_reviews(
     submission: &str,
     required: &[String],
     now: i64,
-) -> Result<(), AppError> {
+) -> Result<Vec<String>, AppError> {
+    let mut added = Vec::new();
     for kind in required {
         let live: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow_activities WHERE submission_id=? AND kind=? AND state!='canceled'")
             .bind(submission).bind(kind).fetch_one(&mut *c).await?;
@@ -227,31 +297,66 @@ async fn add_missing_reviews(
                 now,
             )
             .await?;
+            added.push(kind.clone());
         }
     }
-    Ok(())
+    Ok(added)
 }
 
 /// Advance a satisfied subject unless a review is still active; that review's
-/// decision advances it later.
+/// decision advances it later. Returns whether it advanced.
 async fn advance_if_quiet(
     c: &mut SqliteConnection,
     s: &sqlx::sqlite::SqliteRow,
     submission: &str,
     now: i64,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     let active: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow_activities WHERE submission_id=? AND kind!='integration' AND state='active'")
         .bind(submission).fetch_one(&mut *c).await?;
-    if active == 0 {
-        crate::workflow::advance_approved_subject(
-            c,
-            &s.get::<String, _>("project_id"),
-            &s.get::<String, _>("task_id"),
-            submission,
-            now,
-        )
-        .await?;
+    if active > 0 {
+        return Ok(false);
     }
+    crate::workflow::advance_approved_subject(
+        c,
+        &s.get::<String, _>("project_id"),
+        &s.get::<String, _>("task_id"),
+        submission,
+        now,
+    )
+    .await?;
+    Ok(true)
+}
+
+/// Startup step: reconcile review sets once before serving, but only while the
+/// service is in normal coordination with a trusted clock (never during restore
+/// reconciliation or a clock incident). Adds and cancels reviews only; advancing
+/// waits for the next review decision or policy update. Runs in one transaction,
+/// at a time no earlier than the durable clock high-water mark.
+async fn startup_reconcile(c: &mut SqliteConnection) -> Result<(), AppError> {
+    let ready: bool = sqlx::query_scalar("SELECT (SELECT coordination_state='ready' FROM service_state WHERE singleton=1) AND (SELECT status='ready' FROM clock_state WHERE singleton=1)")
+        .fetch_one(&mut *c).await?;
+    if !ready {
+        return Ok(());
+    }
+    let high_water: i64 =
+        sqlx::query_scalar("SELECT last_safe_time_ms FROM clock_state WHERE singleton=1")
+            .fetch_one(&mut *c)
+            .await?;
+    let system = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    let mut tx = sqlx::Connection::begin(&mut *c).await?;
+    reconcile_required_reviews(
+        &mut tx,
+        &Reconcile {
+            project: None,
+            actor: None,
+            advance: false,
+            now: system.max(high_water),
+        },
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -298,27 +403,31 @@ pub(crate) async fn authorize_revise(
     r: &ReviseRequest<'_>,
     now: i64,
 ) -> Result<Value, AppError> {
-    let code = r.code.ok_or_else(|| AppError::bad_request("Agents must give reason_code: conflict, check_failed, candidate_missing, requirements_changed or author_withdraw."))?;
     let recovery: String = sqlx::query_scalar("SELECT recovery_mode FROM projects WHERE id=?")
         .bind(r.project)
         .fetch_one(&mut *c)
         .await?;
     if recovery != "agent" {
-        return Err(AppError::human_gate(
+        return Err(human_coded(
             "human_reopen_required",
             "This project reserves reopening submissions to a human (recovery_mode is manual).",
         ));
     }
+    let code = r.code.ok_or_else(|| AppError::bad_request("Agents must give reason_code: conflict, check_failed, candidate_missing, requirements_changed or author_withdraw."))?;
     if revise_limit_reached(c, r.task, now).await? {
-        return Err(AppError::new(
-            axum::http::StatusCode::FORBIDDEN,
+        return Err(human_coded(
             "revise_limit_reached",
             "Agents revised this task three times in 24 hours; a human must look at it.",
-        )
-        .with_details(json!({"required_actor":"human","gate":"revise_limit_reached"})));
+        ));
     }
     ensure_revise_actor(c, actor, r, code, now).await?;
     Ok(json!({"reason_code":code,"evidence":r.evidence}))
+}
+
+/// A 403 whose top-level code names the human-only gate, labelled for the human queue.
+fn human_coded(code: &str, message: &str) -> AppError {
+    AppError::new(axum::http::StatusCode::FORBIDDEN, code, message)
+        .with_details(json!({"required_actor":"human","gate":code}))
 }
 
 /// Check the reason code's allowed actor and its service-verifiable evidence.

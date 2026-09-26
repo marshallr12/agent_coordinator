@@ -2201,10 +2201,6 @@ async fn verify_candidate_before_claim(
         .get("canonical_repository_key")
         .and_then(Value::as_str)
         != Some(candidate_remote)
-        || submission
-            .get("workflow_policy_revision")
-            .and_then(Value::as_u64)
-            != policy.get("revision").and_then(Value::as_u64)
     {
         return Err(Failure::local(
             5,

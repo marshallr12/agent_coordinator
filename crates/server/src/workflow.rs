@@ -628,6 +628,12 @@ async fn submit(
     let need_agent = matches!(subject.review_mode.as_str(), "agent" | "both");
     let need_human = matches!(subject.review_mode.as_str(), "human" | "both");
     let need_either = subject.review_mode == "either";
+    if amendment.is_some() && !(need_agent || need_human || need_either) {
+        return Err(AppError::conflict(
+            "amendment_review_required",
+            "An ac_amendment needs a reviewer to accept it; this project's review_mode is none.",
+        ));
+    }
     let phase = if need_agent || need_human || need_either {
         "review"
     } else if input.kind == "code" {
@@ -790,8 +796,8 @@ async fn activity_value(
             let record_valid = r.get::<Option<i64>, _>("invalidated_at").is_none();
             json!({"actor_id":r.get::<String,_>("actor_id"),"summary":r.get::<String,_>("summary"),"created_at":timestamp(r.get("created_at")),"invalidated_at":r.get::<Option<i64>,_>("invalidated_at").map(timestamp),"valid":record_valid && clock_ready,"validity_reason":if !clock_ready { Some("clock_reconciliation_required") } else if !record_valid { Some("authorization_invalidated") } else { None },"revision":r.get::<i64,_>("authorization_revision")})
         });
-    let intent = sqlx::query("SELECT observed_target_revision,observed_target_tree,result_revision,result_tree,created_by,created_at FROM publication_intents WHERE activity_id=?")
-        .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"observed_target_revision":r.get::<String,_>("observed_target_revision"),"observed_target_tree":r.get::<String,_>("observed_target_tree"),"result_revision":r.get::<String,_>("result_revision"),"result_tree":r.get::<String,_>("result_tree"),"created_by":r.get::<String,_>("created_by"),"created_at":timestamp(r.get("created_at"))}));
+    let intent = sqlx::query("SELECT observed_target_revision,observed_target_tree,result_revision,result_tree,created_by,created_at,roster_revision FROM publication_intents WHERE activity_id=?")
+        .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"roster_revision":r.get::<Option<i64>,_>("roster_revision"),"observed_target_revision":r.get::<String,_>("observed_target_revision"),"observed_target_tree":r.get::<String,_>("observed_target_tree"),"result_revision":r.get::<String,_>("result_revision"),"result_tree":r.get::<String,_>("result_tree"),"created_by":r.get::<String,_>("created_by"),"created_at":timestamp(r.get("created_at"))}));
     let result = sqlx::query("SELECT publication_state,observed_target_revision,result_revision,result_tree,check_job_ids_json,summary,created_at FROM integration_results WHERE activity_id=?")
         .bind(id).fetch_optional(&mut *c).await?.map(|r|json!({"publication_state":r.get::<String,_>("publication_state"),"observed_target_revision":r.get::<String,_>("observed_target_revision"),"result_revision":r.get::<String,_>("result_revision"),"result_tree":r.get::<String,_>("result_tree"),"check_job_ids":serde_json::from_str::<Value>(&r.get::<String,_>("check_job_ids_json")).unwrap_or(json!([])),"summary":r.get::<String,_>("summary"),"created_at":timestamp(r.get("created_at"))}));
     let hold = sqlx::query("SELECT id,canonical_repository_key,target_branch,state,acquired_at,released_at,release_reason FROM integration_holds WHERE activity_id=?")
@@ -1578,7 +1584,7 @@ async fn publication_readiness(
     let Some(intent) = intent else {
         return Ok((false, Vec::new()));
     };
-    let roster_json:String=sqlx::query_scalar("SELECT required_checks_json FROM workflow_policy_revisions WHERE project_id=? AND revision=?").bind(project).bind(ctx.workflow_policy_revision).fetch_one(&mut *c).await?;
+    let roster_json:String=sqlx::query_scalar("SELECT required_checks_json FROM workflow_policy_revisions WHERE project_id=? AND revision=?").bind(project).bind(ctx.roster_revision).fetch_one(&mut *c).await?;
     let roster: Vec<RequiredCheck> = serde_json::from_str(&roster_json)?;
     let result_revision: String = intent.get("result_revision");
     let result_tree: String = intent.get("result_tree");
@@ -2223,6 +2229,11 @@ pub(crate) async fn advance_approved_subject(
         .bind(submission)
         .fetch_one(&mut *c)
         .await?;
+    // Reviews still queued are no longer needed once approvals are satisfied.
+    sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND kind!='integration' AND state='queued')")
+        .bind(submission).execute(&mut *c).await?;
+    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND kind!='integration' AND state='queued'")
+        .bind(now).bind(submission).execute(&mut *c).await?;
     if kind == "general" {
         complete_general_subject(c, project, subject_task, now).await
     } else {
@@ -3187,7 +3198,16 @@ async fn ensure_judged_fields_unchanged(
     let current = crate::autonomy::current_task_digest(c, &subject.task_id).await?;
     let pinned =
         crate::autonomy::revision_task_digest(c, &subject.task_id, subject.task_revision).await?;
-    if pinned.is_some_and(|pinned| pinned != current) {
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM tasks WHERE id=?")
+        .bind(&subject.task_id)
+        .fetch_one(&mut *c)
+        .await?;
+    // Without a saved row for the pinned revision, only an unchanged revision is safe.
+    let changed = match pinned {
+        Some(pinned) => pinned != current,
+        None => revision != subject.task_revision,
+    };
+    if changed {
         return Err(AppError::conflict(
             "policy_changed",
             "The task's title, description, acceptance criteria or kind changed after this attempt was claimed. Release and claim the current task.",

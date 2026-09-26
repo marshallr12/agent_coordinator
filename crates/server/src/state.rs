@@ -522,10 +522,7 @@ impl AppState {
             sqlx::query("PRAGMA foreign_keys=ON")
                 .execute(&mut *migration_connection)
                 .await?;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis() as i64;
-            crate::autonomy::startup(&mut migration_connection, now)
+            crate::autonomy::startup(&mut migration_connection)
                 .await
                 .map_err(|error| anyhow::anyhow!("autonomy startup failed: {error}"))?;
             migration_connection.return_to_pool().await;

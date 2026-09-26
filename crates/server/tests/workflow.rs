@@ -2430,7 +2430,8 @@ async fn agent_revise_is_rate_limited_and_needs_agent_recovery() {
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{manual}");
-    assert_eq!(manual["error"]["details"]["gate"], "human_reopen_required");
+    assert_eq!(manual["error"]["code"], "human_reopen_required");
+    assert_eq!(manual["error"]["details"]["required_actor"], "human");
 }
 
 /// Change only the project's lease (rules untouched) or only its rules text.
@@ -2580,4 +2581,160 @@ async fn rejected_ac_amendment_requests_changes() {
         serde_json::from_str::<Value>(&criteria).unwrap(),
         json!(["required behavior verified"])
     );
+}
+
+// Review fix: agents with agent_rule_editing may edit rules text but never review or
+// recovery mode, so an author cannot loosen review to land its own candidate.
+#[tokio::test]
+async fn agents_cannot_change_review_or_recovery_mode() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("mode-gate", "https://example.test/mode.git")
+        .await;
+    let base = json!({"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true});
+    let mut first = base.clone();
+    first["expected_revision"] = json!(1);
+    let (status, v) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &format!("/api/v1/projects/{p}/policy"),
+            first,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    for (field, value) in [("review_mode", "none"), ("recovery_mode", "manual")] {
+        let mut change = base.clone();
+        change["expected_revision"] = json!(2);
+        change[field] = json!(value);
+        let (status, refused) = f
+            .call(
+                &f.a,
+                "PATCH",
+                &format!("/api/v1/projects/{p}/policy"),
+                change,
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+        assert_eq!(
+            refused["error"]["details"]["gate"],
+            "policy_permission_change"
+        );
+    }
+    let mut rules = base.clone();
+    rules["expected_revision"] = json!(2);
+    rules["rules"] = json!("Run the browser fixture.");
+    let (status, v) = f
+        .call(
+            &f.a,
+            "PATCH",
+            &format!("/api/v1/projects/{p}/policy"),
+            rules,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+// Review fix: an amendment needs a reviewer; review_mode none refuses it.
+#[tokio::test]
+async fn ac_amendment_without_reviewers_is_refused() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("amend-none", "https://example.test/amend-none.git")
+        .await;
+    f.policy_none(&p).await;
+    let t = f.task(&p, "general", "Unreviewed amendment").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let (status, refused) = f
+        .call(&f.a, "POST", &format!("/api/v1/projects/{p}/attempts/{}/submissions", owner["id"].as_str().unwrap()),
+            json!({"generation":owner["generation"],"task_revision":t["revision"],"project_policy_revision":2,"workflow_policy_revision":0,"kind":"general",
+                "summary":"s","handoff":"h","acceptance_evidence":[{"criterion":"easier","evidence":"e"}],
+                "ac_amendment":{"old":["required behavior verified"],"new":["easier"],"rationale":"r"}}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "amendment_review_required");
+}
+
+// Review fix: a review no longer required after a mode change, released after the
+// subject advanced, never gates integration.
+#[tokio::test]
+async fn leftover_review_does_not_gate_integration() {
+    let f = Fixture::new().await;
+    let repo = "https://example.test/leftover.git";
+    let p = f.project("leftover", repo).await;
+    f.review_policy(&p, "human").await;
+    f.workflow_policy(&p, repo).await;
+    let t = f.task(&p, "code", "Leftover review").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let base = "1111111111111111111111111111111111111111";
+    f.checkout(&f.a, &p, &owner, base).await;
+    let submitted = f
+        .submit(
+            &f.a,
+            &p,
+            &t,
+            &owner,
+            "code",
+            2,
+            Some(repo),
+            Some(base),
+            Some("2222222222222222222222222222222222222222"),
+            Some("3333333333333333333333333333333333333333"),
+        )
+        .await;
+    let human_review = activity(&submitted, "human_review").clone();
+    let integration = activity(&submitted, "integration").clone();
+    let (status, held) = f.claim_activity(&f.admin, &p, &human_review, 2, 1).await;
+    assert_eq!(status, StatusCode::OK, "{held}");
+    let (status, v) = f
+        .call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"),
+            json!({"expected_revision":2,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (_, wf) = f
+        .call(
+            &f.b,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/tasks/{}/workflow",
+                t["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    let agent_review = activity(&wf["data"], "agent_review").clone();
+    f.ack(&f.b, &p, 3).await;
+    f.ack(&f.c, &p, 3).await;
+    let claim = |a: &Value| json!({"expected_submission_id":a["submission_id"],"expected_project_policy_revision":2,"expected_workflow_policy_revision":1});
+    let claim_path = |a: &Value| {
+        format!(
+            "/api/v1/projects/{p}/workflow-activities/{}/claim",
+            a["id"].as_str().unwrap()
+        )
+    };
+    let (status, claimed) = f
+        .call(
+            &f.b,
+            "POST",
+            &claim_path(&agent_review),
+            claim(&agent_review),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let (status, decided) = f
+        .call(&f.b, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/review", agent_review["id"].as_str().unwrap()),
+            json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":agent_review["submission_id"],"decision":"approved","summary":"ok","findings":[]}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{decided}");
+    assert_eq!(decided["data"]["phase"], "integration");
+    let attempt = &held["data"]["attempt"];
+    let (status, released) = f
+        .call(&f.admin, "POST", &format!("/api/v1/projects/{p}/workflow-activities/{}/release", human_review["id"].as_str().unwrap()),
+            json!({"generation":attempt["generation"],"summary":"No longer required","blocked":false}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{released}");
+    let (status, integrating) = f
+        .call(&f.c, "POST", &claim_path(&integration), claim(&integration))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{integrating}");
 }

@@ -151,7 +151,12 @@ by approver class (a human approval satisfies any review kind, an agent approval
 satisfies agent or either reviews, each approval counts once; `both` needs one of
 each). Subjects already in integration keep the review set they were approved
 under. The required-check roster is captured on the publication intent; the
-integration result and finalization validate against that captured roster.
+integration result and finalization validate against that captured roster. The
+reconcile records a `workflow.reconciled` event; at startup it runs only in normal
+coordination with a trusted clock and only adds or cancels reviews. Agents holding
+`agent_rule_editing` may edit the rules text but never `review_mode`,
+`recovery_mode` or the permission switches, so an author cannot loosen review to
+land its own candidate. An `ac_amendment` is refused when no review is required.
 
 An authenticated agent may reconcile only when the exact current candidate and
 policy are unchanged, current scoped decisions are resolved, a fresh observation

@@ -183,6 +183,12 @@ fn build_catalog() -> Vec<Operation> {
             "POST",
             "/api/v1/projects/{project}/tasks/{task}/unblock",
         ),
+        write::<TaskCancelInput>(
+            "coordinator_task_cancel",
+            "Cancel a task at an exact revision with a rationale, optionally naming its replacement. Agents need the project's agent_rule_editing switch; active review or integration work must be resolved first.",
+            "POST",
+            "/api/v1/projects/{project}/tasks/{task}/cancel",
+        ),
         write::<ClaimInput>(
             "coordinator_claim",
             "Atomically claim an eligible task, or recover one when policy permits. Use current instruction/policy revisions. Persist returned attempt and generation; on conflict choose other work. Recovery requires inspecting saved work and still-running jobs before source changes.",

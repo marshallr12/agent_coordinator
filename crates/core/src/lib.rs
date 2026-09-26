@@ -264,3 +264,14 @@ pub struct UnblockInput {
     pub expected_revision: i64,
     pub reason: String,
 }
+
+/// Cancel a task at an exact revision with a rationale and an optional replacement.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCancelInput {
+    pub expected_revision: i64,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_task_id: Option<String>,
+}
