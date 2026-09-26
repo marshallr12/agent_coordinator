@@ -164,6 +164,7 @@ fn codex_args(spec: &LaunchSpec) -> Vec<OsString> {
         "sandbox_workspace_write.network_access=true".into(),
         "approval_policy=never".into(),
         "shell_environment_policy.inherit=all".into(),
+        "check_for_update_on_startup=false".into(),
     ] {
         push_pair(&mut args, "-c", setting);
     }
@@ -185,13 +186,22 @@ fn codex_args(spec: &LaunchSpec) -> Vec<OsString> {
 /// The complete environment of a launch; nothing else is inherited.
 fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
     let role_dir = config.state_dir.join(spec.role.slug());
-    let path = format!("{}:/usr/local/bin:/usr/bin:/bin", config.bin_dir.display());
+    let toolchain = &config.toolchain_dir;
+    let path = format!(
+        "{}:{}:/usr/local/bin:/usr/bin:/bin",
+        config.bin_dir.display(),
+        toolchain.join("cargo/bin").display()
+    );
     let mut env = vec![
         ("PATH".into(), path.into()),
         ("HOME".into(), role_dir.join("home").into()),
         ("LANG".into(), "C.UTF-8".into()),
         ("TMPDIR".into(), spec.run.join("tmp").into()),
         ("CARGO_TARGET_DIR".into(), spec.run.join("target").into()),
+        ("RUSTUP_HOME".into(), toolchain.join("rustup").into()),
+        ("CARGO_HOME".into(), role_dir.join("cargo").into()),
+        // Pinned harnesses must never replace themselves (plan §2.3).
+        ("DISABLE_AUTOUPDATER".into(), "1".into()),
         (
             "AGENT_COORDINATOR_HOME".into(),
             role_dir.join("coordinator").into(),

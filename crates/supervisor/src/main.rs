@@ -52,6 +52,8 @@ enum Commands {
     },
     /// Run the egress allowlist proxy on the configured loopback address.
     EgressProxy,
+    /// Write a run directory's generated files (settings, schema, dirs) only.
+    Prepare(SpecArgs),
     /// Report every containment problem that would block a launch.
     Preflight(SpecArgs),
     /// Preflight and run one launch (or print it with --dry-run).
@@ -118,8 +120,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => clone::create(&url, mirror.as_deref(), &revision, &dest)?,
         Commands::EgressProxy => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(egress::serve(&config.egress_listen, config.egress_allow))?
+            runtime.block_on(egress::serve(&config.egress_listen, config.egress_hosts()))?
         }
+        Commands::Prepare(args) => launch::prepare_run(&args.spec())?,
         Commands::Preflight(args) => return Ok(report(&preflight::check(&args.spec(), &config))),
         Commands::Launch { spec, dry_run } => {
             return launch_command(&spec.spec(), &config, dry_run);

@@ -25,6 +25,10 @@ pub struct Config {
     pub egress_listen: String,
     /// Hosts the proxy tunnels to (`.suffix` allows subdomains).
     pub egress_allow: Vec<String>,
+    /// Extra hosts for this host (e.g. the coordinator), added to `egress_allow`.
+    pub egress_allow_extra: Vec<String>,
+    /// Root-owned Rust toolchain: `rustup/` (read-only) and `cargo/bin` proxies.
+    pub toolchain_dir: PathBuf,
     /// Exact harness versions a launch refuses to run without.
     pub pinned: Pinned,
 }
@@ -49,6 +53,8 @@ impl Default for Config {
                 .iter()
                 .map(|host| host.to_string())
                 .collect(),
+            egress_allow_extra: Vec::new(),
+            toolchain_dir: PathBuf::from("/opt/agentc"),
             pinned: Pinned::default(),
         }
     }
@@ -58,6 +64,13 @@ impl Config {
     /// The proxy URL launches use.
     pub fn egress_proxy_url(&self) -> String {
         format!("http://{}", self.egress_listen)
+    }
+
+    /// Every host the egress proxy may tunnel to.
+    pub fn egress_hosts(&self) -> Vec<String> {
+        let mut hosts = self.egress_allow.clone();
+        hosts.extend(self.egress_allow_extra.iter().cloned());
+        hosts
     }
 
     /// Loads `path` if given, else the default path if it exists, else defaults.
