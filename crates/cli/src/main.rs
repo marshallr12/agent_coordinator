@@ -1,6 +1,7 @@
 mod artifact_transfer;
 mod config;
 mod job_state;
+mod lifecycle;
 mod mcp_client;
 mod operator;
 mod session_adoption;
@@ -164,6 +165,12 @@ enum Command {
         #[command(subcommand)]
         command: IntegrationsCommand,
     },
+    /// Revise (reopen) a task's current submission with a reason code and evidence.
+    Revise(lifecycle::ReviseArgs),
+    /// Clear a task's blocker with a rationale (agents: needs recovery_mode=agent).
+    Unblock(lifecycle::LifecycleArgs),
+    /// Cancel a task with a rationale and optional replacement (agents: needs agent_rule_editing).
+    Cancel(lifecycle::CancelArgs),
     /// Record an explicit recovery inspection and disposition.
     Recovery {
         #[command(subcommand)]
@@ -1121,6 +1128,9 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
         Command::Export(args) => shared::export(cli, &context, args).await,
         Command::Reviews { command } => reviews_command(cli, &context, command).await,
         Command::Integrations { command } => integrations_command(cli, &context, command).await,
+        Command::Revise(args) => lifecycle::revise(cli, &context, args).await,
+        Command::Unblock(args) => lifecycle::unblock(cli, &context, args).await,
+        Command::Cancel(args) => lifecycle::cancel(cli, &context, args).await,
         Command::Recovery { command } => match command {
             RecoveryCommand::Inspect(args) => {
                 validate_segment("attempt", &args.attempt).map_err(Failure::invalid)?;
