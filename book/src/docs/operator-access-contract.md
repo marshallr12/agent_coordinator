@@ -101,6 +101,29 @@ sessions or, for an administrator, another human's session. Revoking the current
 session clears its cookie. Existing task, attempt, job, and resource records are
 unchanged.
 
+## Agent credential class and access
+
+Every agent credential carries two attributes, chosen at issuance
+(`POST /api/v1/admin/agents` or `POST /api/v1/admin/agents/{principal_id}/credentials`)
+and kept by rotation:
+
+- `class`: `interactive` (default; a person drives the harness) or `supervised`
+  (launched unattended by a host supervisor). Every audited event records the
+  class of the credential behind it, so autonomy can be measured from the log.
+- `access`: `write` (default) or `read`. A read-only credential may read any
+  state its principal can see and may open, acknowledge instructions for, and
+  close its own agent session. Every other change is refused with
+  `operation_not_permitted`. Reviewer launches and shadow host principals use
+  read-only credentials; their verdicts are posted by a separate write
+  credential.
+
+```json
+{"name":"mxmini-reviewer","class":"supervised","access":"read"}
+```
+
+Omitting both fields issues an interactive write credential, which is how every
+credential issued before these attributes existed behaves.
+
 ## Agent token rotation
 
 Existing `POST /api/v1/admin/agents` enrollment creates a stable agent principal

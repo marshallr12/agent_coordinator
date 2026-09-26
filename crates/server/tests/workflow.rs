@@ -636,6 +636,11 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
                 candidate_revision,candidate_tree,created_by,contributor_session_id,created_at,
                 superseded_at FROM original.submissions"
                 .to_owned()
+        } else if table == "credentials" {
+            // Later migrations add credential attributes the old schema lacks.
+            "INSERT INTO main.credentials SELECT id,principal_id,token_hash,created_at,
+                revoked_at,expires_at,name,issued_by FROM original.credentials"
+                .to_owned()
         } else if table == "review_decisions" {
             "INSERT INTO main.review_decisions SELECT activity_id,submission_id,attempt_id,
                 reviewer_id,reviewer_session_id,decision,summary,created_at

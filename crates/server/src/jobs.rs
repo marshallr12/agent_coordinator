@@ -135,6 +135,7 @@ impl ReporterAuth {
             role: row.get("role"),
             credential_id: Some(row.get("credential_id")),
             session_id: Some(row.get("session_id")),
+            credential_attributes: None,
         })
     }
 }

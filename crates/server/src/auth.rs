@@ -15,7 +15,13 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
 use subtle::ConstantTimeEq;
 
-use crate::{error::AppError, mutation::Mutation, response, state::AppState};
+use crate::{
+    credential_attributes::{CredentialAccess, CredentialAttributes, CredentialClass},
+    error::AppError,
+    mutation::Mutation,
+    response,
+    state::AppState,
+};
 
 const SESSION_LIFETIME_MS: i64 = 12 * 60 * 60 * 1000;
 const SECURE_COOKIE: &str = "__Host-coordinator";
@@ -40,6 +46,8 @@ pub struct Actor {
     pub role: String,
     pub credential_id: Option<String>,
     pub session_id: Option<String>,
+    /// Class and access of the agent credential; `None` for browser sessions.
+    pub credential_attributes: Option<CredentialAttributes>,
 }
 
 #[derive(Clone)]
@@ -83,7 +91,7 @@ impl Auth {
                 session,
                 allow_closed,
             } => {
-                let row = sqlx::query("SELECT p.id,p.name,p.kind,p.role,c.id AS credential_id FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.token_hash=? AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>?) AND p.disabled_at IS NULL AND p.kind='agent' AND p.role='agent'")
+                let row = sqlx::query("SELECT p.id,p.name,p.kind,p.role,c.id AS credential_id,c.class,c.access FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.token_hash=? AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>?) AND p.disabled_at IS NULL AND p.kind='agent' AND p.role='agent'")
                     .bind(token_hash).bind(now).fetch_optional(&mut *connection).await?.ok_or_else(AppError::auth_required)?;
                 let mut actor = Actor {
                     id: row.get("id"),
@@ -92,6 +100,10 @@ impl Auth {
                     role: row.get("role"),
                     credential_id: Some(row.get("credential_id")),
                     session_id: None,
+                    credential_attributes: Some(CredentialAttributes::from_columns(
+                        row.get("class"),
+                        row.get("access"),
+                    )),
                 };
                 if let Some((id, proof_hash)) = session {
                     let session = sqlx::query("SELECT proof_hash,closed_at FROM agent_sessions WHERE id=? AND principal_id=? AND credential_id=?")
@@ -116,6 +128,7 @@ impl Auth {
                     role: row.get("role"),
                     credential_id: None,
                     session_id: Some(row.get("session_id")),
+                    credential_attributes: None,
                 })
             }
         }
@@ -180,6 +193,7 @@ impl Auth {
                 role: String::new(),
                 credential_id: None,
                 session_id: None,
+                credential_attributes: None,
             },
             credential,
         };
@@ -516,6 +530,7 @@ async fn login(
         role: row.get("role"),
         credential_id: None,
         session_id: Some(session_id),
+        credential_attributes: None,
     };
     tx.commit().await?;
     let mut result =
@@ -610,14 +625,14 @@ async fn credentials(
     if page.cursor.as_ref().is_some_and(|cursor| !valid_id(cursor)) {
         return Err(AppError::bad_request("Invalid cursor."));
     }
-    let rows = sqlx::query("SELECT c.id,c.name AS credential_name,p.name,c.principal_id,c.issued_by,c.created_at,c.revoked_at,c.expires_at FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.id>? ORDER BY c.id LIMIT 201")
+    let rows = sqlx::query("SELECT c.id,c.name AS credential_name,p.name,c.principal_id,c.issued_by,c.created_at,c.revoked_at,c.expires_at,c.class,c.access FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.id>? ORDER BY c.id LIMIT 201")
         .bind(page.cursor.unwrap_or_default()).fetch_all(&state.pool).await?;
     let next = if rows.len() > 200 {
         Some(rows[199].get::<String, _>("id"))
     } else {
         None
     };
-    let items: Vec<_> = rows.iter().take(200).map(|row| json!({"id":row.get::<String,_>("id"), "name":row.get::<String,_>("name"), "credential_name":row.get::<String,_>("credential_name"), "principal_name":row.get::<String,_>("name"), "principal_id":row.get::<String,_>("principal_id"), "issued_by":row.get::<Option<String>,_>("issued_by"), "created_at":timestamp(row.get("created_at")), "revoked_at":row.get::<Option<i64>,_>("revoked_at").map(timestamp), "expires_at":row.get::<Option<i64>,_>("expires_at").map(timestamp)})).collect();
+    let items: Vec<_> = rows.iter().take(200).map(|row| json!({"id":row.get::<String,_>("id"), "name":row.get::<String,_>("name"), "credential_name":row.get::<String,_>("credential_name"), "principal_name":row.get::<String,_>("name"), "principal_id":row.get::<String,_>("principal_id"), "issued_by":row.get::<Option<String>,_>("issued_by"), "created_at":timestamp(row.get("created_at")), "revoked_at":row.get::<Option<i64>,_>("revoked_at").map(timestamp), "expires_at":row.get::<Option<i64>,_>("expires_at").map(timestamp), "class":row.get::<String,_>("class"), "access":row.get::<String,_>("access")})).collect();
     Ok(response(json!({"items":items,"next_cursor":next})))
 }
 
@@ -625,6 +640,13 @@ async fn credentials(
 #[serde(deny_unknown_fields)]
 struct NewAgent {
     name: String,
+    /// Omitted means `interactive`; skipped when default so fingerprints of
+    /// pre-attribute retries are unchanged.
+    #[serde(default, skip_serializing_if = "CredentialClass::is_default")]
+    class: CredentialClass,
+    /// Omitted means `write`.
+    #[serde(default, skip_serializing_if = "CredentialAccess::is_default")]
+    access: CredentialAccess,
 }
 async fn create_agent(
     State(state): State<AppState>,
@@ -656,17 +678,19 @@ async fn create_agent(
     .bind(mutation.now)
     .execute(&mut *mutation.tx)
     .await?;
-    sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,name,issued_by,created_at) VALUES(?,?,?,'initial',?,?)")
+    sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,name,issued_by,created_at,class,access) VALUES(?,?,?,'initial',?,?,?,?)")
         .bind(&credential_id)
         .bind(&principal_id)
         .bind(digest(&token))
         .bind(&mutation.actor.id)
         .bind(mutation.now)
+        .bind(input.class.as_str())
+        .bind(input.access.as_str())
         .execute(&mut *mutation.tx)
         .await?;
     let mut data = mutation
         .finish(
-            json!({"principal_id":principal_id,"credential_id":credential_id,"name":input.name,"credential_name":"initial"}),
+            json!({"principal_id":principal_id,"credential_id":credential_id,"name":input.name,"credential_name":"initial","class":input.class,"access":input.access}),
             None,
             "agent_credential_issued",
             &credential_id,

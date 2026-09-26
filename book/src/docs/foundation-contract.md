@@ -72,8 +72,8 @@ GET /, /app.js, /style.css assets embedded by server.
 POST /api/v1/auth/login `{username,password}` -> `{actor,csrf_token}` + HttpOnly
 same-site cookie. GET /api/v1/me same response for browser restore. POST
 /api/v1/auth/logout `{}`. Cookie writes need X-CSRF-Token and expected Origin.
-Admin: GET /api/v1/admin/credentials -> `{items:[{id,name,revoked_at,...}]}`;
-POST /api/v1/admin/agents `{name}` -> `{principal_id,credential_id,token}`;
+Admin: GET /api/v1/admin/credentials -> `{items:[{id,name,revoked_at,class,access,...}]}`;
+POST /api/v1/admin/agents `{name,class?,access?}` -> `{principal_id,credential_id,token,class,access}`;
 POST /api/v1/admin/credentials/{id}/revoke `{}`.
 Agent session: POST /api/v1/sessions `{session_id,workstation_id,harness,
 capabilities:[]}` with X-Coordinator-Session-Proof (no session header yet);

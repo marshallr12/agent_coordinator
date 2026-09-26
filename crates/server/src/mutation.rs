@@ -1,6 +1,7 @@
 //! Writes recheck authorization after obtaining SQLite's writer lock.
 use crate::{
     auth::{Actor, Auth, digest},
+    credential_attributes::{event_class, require_write_access},
     error::AppError,
     state::AppState,
 };
@@ -36,6 +37,7 @@ impl Mutation {
         }
         let now = clock.now;
         let actor = auth.verify(&mut tx, now).await?;
+        require_write_access(&actor, operation)?;
         let authority_epoch = authority(&mut tx, operation, clock.incident_active).await?;
         // Session identity and proof verifier are included to reject key reuse across harnesses.
         let proof = headers
@@ -189,8 +191,8 @@ impl Mutation {
         sqlx::query("INSERT INTO mutation_receipts(principal_id,operation,key,fingerprint,result_json,created_at,authority_epoch) VALUES(?,?,?,?,?,?,?)")
             .bind(&self.actor.id).bind(&self.operation).bind(&self.key).bind(&self.fingerprint).bind(&encoded).bind(self.now).bind(&self.authority_epoch).execute(&mut *self.tx).await?;
         // Keep audit payloads small and never store credential-bearing response bodies here.
-        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,?,?,?,?)")
-            .bind(project).bind(&self.actor.id).bind(kind).bind(record_id).bind("{}").bind(self.now).execute(&mut *self.tx).await?;
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at,credential_class) VALUES(?,?,?,?,?,?,?)")
+            .bind(project).bind(&self.actor.id).bind(kind).bind(record_id).bind("{}").bind(self.now).bind(event_class(&self.actor)).execute(&mut *self.tx).await?;
         self.tx.commit().await?;
         Ok(data)
     }

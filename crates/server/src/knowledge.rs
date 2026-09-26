@@ -1393,8 +1393,8 @@ pub async fn insert_submission_lessons(
     for input in &inputs {
         let value = insert_knowledge_record(c, actor, now, project, input).await?;
         let id = value["id"].as_str().unwrap_or_default();
-        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,'knowledge.created_from_submission',?,'{}',?)")
-            .bind(project).bind(&actor.id).bind(id).bind(now).execute(&mut *c).await?;
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at,credential_class) VALUES(?,?,'knowledge.created_from_submission',?,'{}',?,?)")
+            .bind(project).bind(&actor.id).bind(id).bind(now).bind(crate::credential_attributes::event_class(actor)).execute(&mut *c).await?;
         values.push(value);
     }
     Ok(values)

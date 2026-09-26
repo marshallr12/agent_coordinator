@@ -953,7 +953,7 @@
     const offeredReplacement = new Set();
     state.credentials.forEach(credential => {
       const row = el('div', 'credential-row'), info = el('div');
-      add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}`));
+      add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}${credential.class === 'supervised' ? ' · supervised' : ''}${credential.access === 'read' ? ' · read-only' : ''}`));
       add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`));
       if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`));
       add(row, info);
@@ -1004,7 +1004,7 @@
   $('tasks-page-size').addEventListener('change', (event) => { $('archived-page-size').value = event.target.value; if (state.archivedTasks.length) renderArchivedTasks(); });
   $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; resetTaskPages(); state.taskView = 'queue'; updateTaskViewTabs(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); });
   $('status-filter').addEventListener('change', () => { state.taskPageIndex = 0; rebuildQueuePages(); showTaskPage(0); });
-  $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else showView('tasks'); }); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation(`/api/v1/admin/agents`, { name: input.value.trim() }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
+  $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else showView('tasks'); }); $('copy-task-name').addEventListener('click', () => copyTaskDetailValue($('copy-task-name'), 'Task name', 'task-detail-heading')); $('copy-task-id').addEventListener('click', () => copyTaskDetailValue($('copy-task-id'), 'Task ID', 'detail-task-id-value')); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation(`/api/v1/admin/agents`, { name: input.value.trim(), class: $('agent-class').value, access: $('agent-access').value }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
   $('refresh-archive').addEventListener('click',loadArchivedTasks); $('archive-project-select').addEventListener('change',loadArchivedTasks);
   function showToken(token) { clearCredentialDownload(); setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
   function clearCredentialDownload() {

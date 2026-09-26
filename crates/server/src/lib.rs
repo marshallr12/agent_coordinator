@@ -3,6 +3,7 @@ pub mod auth;
 pub mod autonomy;
 pub mod backup;
 pub mod coordination;
+pub mod credential_attributes;
 pub mod discovery;
 mod documentation;
 pub mod error;

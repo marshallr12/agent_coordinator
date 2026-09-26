@@ -605,6 +605,7 @@ async fn submission_lesson_helper_validates_the_batch_before_inserting() {
         role: "agent".into(),
         credential_id: Some(fixture.agent.credential.clone()),
         session_id: Some(fixture.agent.session.clone()),
+        credential_attributes: Some(Default::default()),
     };
     let lesson = |title: &str, task_ids: Vec<String>| SubmissionLessonInput {
         kind: "lesson".into(),

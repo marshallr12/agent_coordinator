@@ -15,6 +15,7 @@ use crate::{
         Auth, admin, clear_browser_cookie, digest, hash_password_bounded, secret, timestamp,
         valid_id, validate_name, verify_password,
     },
+    credential_attributes::{CredentialAccess, CredentialClass},
     error::AppError,
     mutation::Mutation,
     response,
@@ -856,7 +857,7 @@ async fn rotate_agent_credential(
         );
         return Ok(response(data));
     }
-    let old = sqlx::query("SELECT c.principal_id,c.revoked_at,p.name AS principal_name,p.disabled_at FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.id=? AND p.kind='agent' AND p.role='agent'")
+    let old = sqlx::query("SELECT c.principal_id,c.revoked_at,c.class,c.access,p.name AS principal_name,p.disabled_at FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE c.id=? AND p.kind='agent' AND p.role='agent'")
         .bind(&id)
         .fetch_optional(&mut *mutation.tx)
         .await?
@@ -873,13 +874,16 @@ async fn rotate_agent_credential(
     let principal_name: String = old.get("principal_name");
     let credential_id = uuid::Uuid::new_v4().to_string();
     let token = secret();
-    sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,name,issued_by,created_at) VALUES(?,?,?,?,?,?)")
+    // A replacement keeps the class and access of the credential it replaces.
+    sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,name,issued_by,created_at,class,access) VALUES(?,?,?,?,?,?,?,?)")
         .bind(&credential_id)
         .bind(&principal_id)
         .bind(digest(&token))
         .bind(&input.name)
         .bind(&mutation.actor.id)
         .bind(mutation.now)
+        .bind(old.get::<String, _>("class"))
+        .bind(old.get::<String, _>("access"))
         .execute(&mut *mutation.tx)
         .await?;
     if input.revoke_old {
@@ -920,6 +924,13 @@ async fn rotate_agent_credential(
 #[serde(deny_unknown_fields)]
 struct IssueExistingCredentialInput {
     name: String,
+    /// Omitted means `interactive`; skipped when default so fingerprints of
+    /// pre-attribute retries are unchanged.
+    #[serde(default, skip_serializing_if = "CredentialClass::is_default")]
+    class: CredentialClass,
+    /// Omitted means `write`.
+    #[serde(default, skip_serializing_if = "CredentialAccess::is_default")]
+    access: CredentialAccess,
 }
 
 async fn issue_existing_agent_credential(
@@ -965,13 +976,15 @@ async fn issue_existing_agent_credential(
     }
     let credential_id = uuid::Uuid::new_v4().to_string();
     let token = secret();
-    sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,name,issued_by,created_at) VALUES(?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO credentials(id,principal_id,token_hash,name,issued_by,created_at,class,access) VALUES(?,?,?,?,?,?,?,?)")
         .bind(&credential_id)
         .bind(&id)
         .bind(digest(&token))
         .bind(&input.name)
         .bind(&mutation.actor.id)
         .bind(mutation.now)
+        .bind(input.class.as_str())
+        .bind(input.access.as_str())
         .execute(&mut *mutation.tx)
         .await?;
     let data = json!({
@@ -980,6 +993,8 @@ async fn issue_existing_agent_credential(
         "credential":{
             "id":credential_id,
             "name":input.name,
+            "class":input.class,
+            "access":input.access,
             "created_at":timestamp(mutation.now),
             "expires_at":Value::Null,
             "revoked_at":Value::Null

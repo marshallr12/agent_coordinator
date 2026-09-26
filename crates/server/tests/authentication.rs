@@ -968,3 +968,111 @@ async fn host_cli_initializes_once_from_stdin_without_printing_password() {
         .fetch_one(&state.pool).await.unwrap();
     assert_eq!(count, 1);
 }
+
+/// Issues an agent credential with explicit attributes and returns its token
+/// and credential id (autonomy plan §2.2 6b).
+async fn issue_with(
+    fixture: &Fixture,
+    browser: &Browser,
+    name: &str,
+    class: &str,
+    access: &str,
+) -> (String, String) {
+    let result = fixture
+        .call(
+            "POST",
+            "/api/v1/admin/agents",
+            &browser.headers(name),
+            Some(json!({"name":name,"class":class,"access":access})),
+        )
+        .await;
+    result.ok();
+    assert_eq!(result.body["data"]["class"], class);
+    assert_eq!(result.body["data"]["access"], access);
+    let data = &result.body["data"];
+    (
+        data["token"].as_str().unwrap().into(),
+        data["credential_id"].as_str().unwrap().into(),
+    )
+}
+
+#[tokio::test]
+async fn read_only_credentials_manage_sessions_but_cannot_mutate() {
+    let fixture = Fixture::new().await;
+    let browser = fixture.login().await;
+    let (token, credential) =
+        issue_with(&fixture, &browser, "reviewer", "supervised", "read").await;
+    let proof = secret();
+    fixture
+        .register(&token, "review-session", &proof, "review-key")
+        .await
+        .ok();
+    let bearer = format!("Bearer {token}");
+    let owned = [
+        ("authorization", bearer.as_str()),
+        ("x-coordinator-session", "review-session"),
+        ("x-coordinator-session-proof", proof.as_str()),
+        ("idempotency-key", "task-key"),
+    ];
+    let me = fixture.call("GET", "/api/v1/me", &owned[..3], None).await;
+    me.ok();
+    assert_eq!(
+        me.body["data"]["actor"]["credential_attributes"]["access"], "read",
+        "{}",
+        me.text
+    );
+    fixture
+        .call("POST", "/api/v1/projects/any/tasks", &owned, Some(json!({"title":"x","description":"d","acceptance_criteria":["c"],"kind":"code","depends_on":[]})))
+        .await
+        .error(StatusCode::FORBIDDEN, "operation_not_permitted");
+    let class: Option<String> = sqlx::query_scalar(
+        "SELECT credential_class FROM events WHERE kind='agent_session_registered' OR record_id='review-session' ORDER BY seq DESC LIMIT 1",
+    )
+    .fetch_one(&fixture.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(class.as_deref(), Some("supervised"));
+    // Rotation keeps the attributes of the replaced credential.
+    let rotated = fixture
+        .call(
+            "POST",
+            &format!("/api/v1/admin/credentials/{credential}/rotate"),
+            &browser.headers("rotate"),
+            Some(json!({"name":"second"})),
+        )
+        .await;
+    rotated.ok();
+    let new_id = rotated.body["data"]["credential"]["id"].as_str().unwrap();
+    let row = sqlx::query("SELECT class,access FROM credentials WHERE id=?")
+        .bind(new_id)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<String, _>("class"), "supervised");
+    assert_eq!(row.get::<String, _>("access"), "read");
+}
+
+#[tokio::test]
+async fn credentials_default_to_interactive_write() {
+    let fixture = Fixture::new().await;
+    let browser = fixture.login().await;
+    let (_, credential) = fixture.issue(&browser, "default-agent").await;
+    let listed = fixture
+        .call(
+            "GET",
+            "/api/v1/admin/credentials",
+            &browser.headers("list")[..2],
+            None,
+        )
+        .await;
+    listed.ok();
+    let item = listed.body["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == credential.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(item["class"], "interactive");
+    assert_eq!(item["access"], "write");
+}
