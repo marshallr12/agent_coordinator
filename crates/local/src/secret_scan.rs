@@ -48,26 +48,118 @@ fn compiled() -> &'static [(&'static str, Regex)] {
 }
 
 /// Scans `git log -p --format=commit:%H` output. `known_digests` are lowercase
-/// SHA-256 hex digests of coordinator tokens that must not appear.
+/// SHA-256 hex digests of coordinator tokens that must not appear. File-name
+/// rules are applied separately by [`scan_paths`], so this only attributes
+/// added content to the path named in each file's diff header.
 pub fn scan_patch(patch: &str, known_digests: &[&str]) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let (mut commit, mut path) = (String::new(), String::new());
+    let mut state = PatchState::default();
     for line in patch.lines() {
-        if let Some(hash) = line.strip_prefix("commit:") {
-            commit = hash.trim().to_owned();
-        } else if let Some(name) = line.strip_prefix("+++ b/") {
-            path = name.to_owned();
-            if forbidden_file(&path) {
-                findings.push(finding("credential_file", &commit, &path));
-            }
-        } else if let Some(added) = line.strip_prefix('+')
+        if let Some(added) = state.advance(line)
             && let Some(rule) = matching_rule(added, known_digests)
         {
-            findings.push(finding(rule, &commit, &path));
+            findings.push(finding(rule, &state.commit, &state.path));
         }
     }
     findings.dedup();
     findings
+}
+
+/// Where the patch parser is: the current commit and file, and whether it is
+/// still inside a file's diff header (before the first `@@` hunk).
+#[derive(Default)]
+struct PatchState {
+    commit: String,
+    path: String,
+    in_header: bool,
+}
+
+impl PatchState {
+    /// Consumes one patch line and returns its content when it is an added
+    /// hunk line. Header lines (`+++ b/...`, mode and rename lines) are only
+    /// recognised between `diff --git` and the first `@@`, so an added line
+    /// whose text happens to begin with `++ b/` is still scanned as content.
+    fn advance<'a>(&mut self, line: &'a str) -> Option<&'a str> {
+        if let Some(hash) = line.strip_prefix("commit:") {
+            self.commit = hash.trim().to_owned();
+            self.in_header = false;
+        } else if line.starts_with("diff --") {
+            self.in_header = true;
+        } else if self.in_header {
+            if line.starts_with("@@") {
+                self.in_header = false;
+            } else if let Some(header) = line.strip_prefix("+++ ") {
+                self.path = header_path(header);
+            }
+        } else if let Some(added) = line.strip_prefix('+') {
+            return Some(added);
+        }
+        None
+    }
+}
+
+/// The display path from a `+++` header value: C-style quoting (used for
+/// names with tabs, quotes, backslashes or newlines) and the `b/` prefix removed.
+fn header_path(header: &str) -> String {
+    let unquoted = match header
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        Some(quoted) => unescape(quoted),
+        None => header.to_owned(),
+    };
+    match unquoted.strip_prefix("b/") {
+        Some(path) => path.to_owned(),
+        None => unquoted,
+    }
+}
+
+/// Undoes Git's C-style path escapes for display. Octal byte escapes are left
+/// as written because the result only labels a finding.
+fn unescape(quoted: &str) -> String {
+    let mut output = String::with_capacity(quoted.len());
+    let mut characters = quoted.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            output.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('t') => output.push('\t'),
+            Some('n') => output.push('\n'),
+            Some(other @ ('"' | '\\')) => output.push(other),
+            Some(other) => output.extend(['\\', other]),
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
+/// Scans `git log --name-only -z --format=commit:%H` output for credential
+/// file names. Paths come NUL-terminated and unquoted, so names containing
+/// tabs, quotes or backslashes, and rename-only commits, are all covered.
+pub fn scan_paths(listing: &[u8]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut commit = String::new();
+    for entry in listing.split(|byte| *byte == 0) {
+        let entry = String::from_utf8_lossy(entry);
+        // Git ends each commit header with NUL then starts its paths with '\n'.
+        let entry = entry.strip_prefix('\n').unwrap_or(&entry);
+        if let Some(hash) = commit_marker(entry) {
+            commit = hash.to_owned();
+        } else if forbidden_file(entry) {
+            findings.push(finding("credential_file", &commit, entry));
+        }
+    }
+    findings
+}
+
+/// The commit ID when `entry` is exactly a `commit:<full hex id>` marker;
+/// anything else (including a path that merely starts with `commit:`) is a path.
+fn commit_marker(entry: &str) -> Option<&str> {
+    let hash = entry.strip_prefix("commit:")?;
+    let full = matches!(hash.len(), 40 | 64) && hash.bytes().all(|byte| byte.is_ascii_hexdigit());
+    full.then_some(hash)
 }
 
 /// The first rule an added line matches, if any.
@@ -82,7 +174,8 @@ fn matching_rule(added: &str, known_digests: &[&str]) -> Option<&'static str> {
 }
 
 /// True when a 64-hex word in the line hashes to one of `known_digests`
-/// (coordinator tokens are 32 random bytes in hex).
+/// (coordinator tokens are 32 random bytes in hex). The word is also tried
+/// lowercased, so re-casing the token cannot slip it past the scan.
 fn contains_known_token(added: &str, known_digests: &[&str]) -> bool {
     if known_digests.is_empty() {
         return false;
@@ -90,7 +183,12 @@ fn contains_known_token(added: &str, known_digests: &[&str]) -> bool {
     added
         .split(|c: char| !c.is_ascii_hexdigit())
         .filter(|word| word.len() == 64)
-        .any(|word| known_digests.contains(&hex::encode(Sha256::digest(word.as_bytes())).as_str()))
+        .any(|word| {
+            let lowered = word.to_ascii_lowercase();
+            [word, lowered.as_str()].iter().any(|candidate| {
+                known_digests.contains(&hex::encode(Sha256::digest(candidate.as_bytes())).as_str())
+            })
+        })
 }
 
 /// True when the path's file name is a known credential file.
@@ -136,10 +234,17 @@ mod tests {
         format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP")
     }
 
+    /// A minimal `git log -p` patch adding `line` to `path` in commit `c1`.
+    fn patch_adding(path: &str, line: &str) -> String {
+        format!(
+            "commit:c1\ndiff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -0,0 +1 @@\n+{line}\n"
+        )
+    }
+
     #[test]
     fn detects_token_shapes_with_location() {
         let patch = format!(
-            "commit:0123456789abcdef\n+++ b/src/a.rs\n+k = \"{}\";\n+fine\n",
+            "commit:0123456789abcdef\ndiff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n@@ -0,0 +1,2 @@\n+k = \"{}\";\n+fine\n",
             fake_key()
         );
         let found = scan_patch(&patch, &[]);
@@ -151,23 +256,59 @@ mod tests {
     }
 
     #[test]
-    fn detects_known_credentials_and_files() {
+    fn detects_known_credentials_in_any_case() {
         let token = "f".repeat(64);
         let digest = hex::encode(Sha256::digest(token.as_bytes()));
-        let patch = format!("commit:c1\n+++ b/deploy/credentials.toml\n+token='{token}'\n");
-        let rules: Vec<_> = scan_patch(&patch, &[&digest])
-            .into_iter()
-            .map(|f| f.rule)
-            .collect();
-        assert_eq!(rules, vec!["credential_file", "coordinator_credential"]);
+        for written in [token.clone(), token.to_ascii_uppercase()] {
+            let patch = patch_adding("deploy/config.toml", &format!("token='{written}'"));
+            let rules: Vec<_> = scan_patch(&patch, &[&digest])
+                .into_iter()
+                .map(|f| f.rule)
+                .collect();
+            assert_eq!(rules, vec!["coordinator_credential"]);
+        }
     }
 
     #[test]
     fn ignores_removed_lines_and_ordinary_hashes() {
         let patch = format!(
-            "commit:c1\n+++ b/x\n-{}\n+sha 0123456789abcdef0123456789abcdef01234567\n",
+            "commit:c1\ndiff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-{}\n+sha 0123456789abcdef0123456789abcdef01234567\n",
             fake_key()
         );
         assert!(scan_patch(&patch, &[]).is_empty());
+    }
+
+    #[test]
+    fn added_line_resembling_a_header_is_scanned_as_content() {
+        // The added text is "++ b/<key>", which renders as "+++ b/<key>".
+        let patch = patch_adding("src/a.rs", &format!("++ b/{}", fake_key()));
+        assert_eq!(
+            scan_patch(&patch, &[]),
+            vec![finding("aws_access_key", "c1", "src/a.rs")]
+        );
+    }
+
+    #[test]
+    fn quoted_header_paths_are_unescaped_for_findings() {
+        let patch = format!(
+            "commit:c1\ndiff --git \"a/t\\tq\\\"\" \"b/t\\tq\\\"\"\n+++ \"b/t\\tq\\\"\"\n@@ -0,0 +1 @@\n+{}\n",
+            fake_key()
+        );
+        assert_eq!(scan_patch(&patch, &[])[0].path, "t\tq\"");
+    }
+
+    #[test]
+    fn path_listing_flags_credential_files_with_unusual_names() {
+        let commit = "a".repeat(40);
+        let listing = format!(
+            "commit:{commit}\0\nok.txt\0we\"ird\\\tdir/id_rsa\0keys/server.pem\0commit:x/.env\0"
+        );
+        let found = scan_paths(listing.as_bytes());
+        let paths: Vec<_> = found.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["we\"ird\\\tdir/id_rsa", "keys/server.pem", "commit:x/.env"]
+        );
+        assert!(found.iter().all(|f| f.commit == commit));
     }
 }

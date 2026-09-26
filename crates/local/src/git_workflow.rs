@@ -270,7 +270,12 @@ pub fn checkpoint_candidate(
             "candidate checkpoint ref already names a different commit"
         ),
         None => {
-            refuse_outgoing_secrets(&snapshot.checkout, &snapshot.revision, known_digests)?;
+            refuse_outgoing_secrets(
+                &snapshot.checkout,
+                remote.clone(),
+                &snapshot.revision,
+                known_digests,
+            )?;
             let lease = format!("--force-with-lease={reference}:");
             let source = format!("{}:{reference}", snapshot.revision);
             let pushed = git_raw(
@@ -1227,32 +1232,149 @@ fn locally_available_tree(checkout: &Path, revision: &str) -> Result<Option<Stri
     )?))
 }
 
-/// Scans every commit reachable from `revision` but not from any
-/// remote-tracking ref (what the push would send) and refuses likely secrets.
-fn refuse_outgoing_secrets(checkout: &Path, revision: &str, known_digests: &[&str]) -> Result<()> {
-    let patch = git_text(
+/// Repository settings pinned for the secret scan so local config cannot
+/// reshape the output it parses: hidden or renamed diff prefixes, colour,
+/// signature text, path quoting, directory-relative diffs, or a suppressed
+/// root-commit diff.
+const SCAN_CONFIG: &[&str] = &[
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicPrefix=false",
+    "-c",
+    "diff.relative=false",
+    "-c",
+    "color.ui=never",
+    "-c",
+    "log.showSignature=false",
+    "-c",
+    "log.showRoot=true",
+    "-c",
+    "core.quotePath=false",
+];
+
+/// `git log` options shared by the patch and path listings. Merges are diffed
+/// against their first parent so merge-resolution content is scanned, and
+/// external diff drivers and textconv filters cannot rewrite what is seen.
+const SCAN_LOG_OPTIONS: &[&str] = &[
+    "log",
+    "--stdin",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    "--diff-merges=first-parent",
+    "--root",
+    "--format=commit:%H",
+];
+
+/// Scans every commit the candidate push would send and refuses likely
+/// secrets: patch content (binary files included, decoded lossily) and
+/// credential file names from a separate NUL-delimited path listing.
+fn refuse_outgoing_secrets(
+    checkout: &Path,
+    remote: OsString,
+    revision: &str,
+    known_digests: &[&str],
+) -> Result<()> {
+    let revisions = outgoing_revisions(checkout, remote, revision)?;
+    let patch = scan_log(checkout, &revisions, &["-p", "--text"])?;
+    let paths = scan_log(
         checkout,
-        [
-            "-c",
-            "core.quotePath=false",
-            "log",
-            "-p",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--format=commit:%H",
-            revision,
-            "--not",
-            "--remotes",
-        ],
+        &revisions,
+        &["--name-only", "-z", "--diff-filter=AMRC"],
     )?;
-    let findings = crate::secret_scan::scan_patch(&patch, known_digests);
+    let patch = String::from_utf8_lossy(&patch);
+    let mut findings = crate::secret_scan::scan_patch(&patch, known_digests);
+    findings.extend(crate::secret_scan::scan_paths(&paths));
     ensure!(
         findings.is_empty(),
         "{}",
         crate::secret_scan::describe(&findings)
     );
     Ok(())
+}
+
+/// `git log --stdin` input selecting the outgoing commits: `revision` minus
+/// every commit the push destination itself advertises. Local remote-tracking
+/// refs are deliberately not used: an agent can forge them with `update-ref`
+/// to hide commits, and when none exist they would not bound the range.
+fn outgoing_revisions(checkout: &Path, remote: OsString, revision: &str) -> Result<Vec<u8>> {
+    let advertised = advertised_objects(checkout, remote)?;
+    let mut input = format!("{revision}\n");
+    for commit in local_commits(checkout, &advertised)? {
+        input.push_str(&format!("^{commit}\n"));
+    }
+    Ok(input.into_bytes())
+}
+
+/// Every object ID the configured remote advertises for its refs. The push
+/// negotiates against exactly these, so they bound what it will send.
+fn advertised_objects(checkout: &Path, remote: OsString) -> Result<Vec<String>> {
+    let arguments = [
+        OsString::from("ls-remote"),
+        OsString::from("--refs"),
+        remote,
+    ];
+    let output = git_raw(checkout, arguments, None, &[])?;
+    ensure!(
+        output.status.success(),
+        "Git could not list the configured remote's refs for the secret scan"
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            let oid = line.split_whitespace().next().unwrap_or_default();
+            validate_full_oid(oid)?;
+            Ok(oid.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// The advertised objects that peel to a commit present locally. Missing ones
+/// are not excluded (and not fetched): `git push` cannot negotiate with
+/// objects it lacks, so it would send that history too, and scanning more is
+/// the safe side.
+fn local_commits(checkout: &Path, objects: &[String]) -> Result<Vec<String>> {
+    if objects.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input: String = objects
+        .iter()
+        .map(|oid| format!("{oid}^{{commit}}\n"))
+        .collect();
+    let arguments = ["--no-replace-objects", "cat-file", "--batch-check"].map(OsString::from);
+    let output = git_raw(checkout, arguments, Some(input.as_bytes()), &[])?;
+    ensure!(
+        output.status.success(),
+        "Git could not check advertised commits for the secret scan"
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .filter_map(|line| match line.split(' ').collect::<Vec<_>>()[..] {
+            [oid, "commit", _] => Some(oid.to_owned()),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Runs `git log` over the outgoing `revisions` with pinned settings and
+/// `extra` options, returning raw bytes (patches may hold non-UTF-8 binary
+/// content). Replace refs are ignored so the scan sees the real objects.
+fn scan_log(checkout: &Path, revisions: &[u8], extra: &[&str]) -> Result<Vec<u8>> {
+    let arguments = std::iter::once("--no-replace-objects")
+        .chain(SCAN_CONFIG.iter().copied())
+        .chain(SCAN_LOG_OPTIONS.iter().copied())
+        .chain(extra.iter().copied())
+        .map(OsString::from);
+    let output = git_raw(checkout, arguments, Some(revisions), &[])?;
+    ensure!(
+        output.status.success(),
+        "Git could not list the outgoing commits for the secret scan"
+    );
+    Ok(output.stdout)
 }
 
 fn validate_full_oid(value: &str) -> Result<()> {
@@ -1570,15 +1692,26 @@ where
         command.stdin(Stdio::null());
     }
     let mut child = command.spawn().context("run Git")?;
-    if let Some(input) = stdin {
-        child
-            .stdin
-            .take()
-            .context("open Git standard input")?
-            .write_all(input)
-            .context("write Git standard input")?;
-    }
-    child.wait_with_output().context("wait for Git")
+    let pipe = child.stdin.take();
+    // Feed stdin from a scoped thread so Git can fill its stdout pipe (as
+    // `cat-file --batch-check` does per input line) without deadlocking.
+    std::thread::scope(|scope| {
+        let writer = stdin.map(|input| scope.spawn(move || write_stdin(pipe, input)));
+        let output = child.wait_with_output().context("wait for Git")?;
+        if let Some(writer) = writer {
+            writer
+                .join()
+                .map_err(|_| anyhow::anyhow!("Git standard input writer panicked"))??;
+        }
+        Ok(output)
+    })
+}
+
+/// Writes all of `input` to Git's standard input and closes it.
+fn write_stdin(pipe: Option<std::process::ChildStdin>, input: &[u8]) -> Result<()> {
+    pipe.context("open Git standard input")?
+        .write_all(input)
+        .context("write Git standard input")
 }
 
 #[cfg(not(windows))]
@@ -1954,6 +2087,181 @@ mod tests {
             observe_remote_reference(&repository.source, remote, reference).unwrap(),
             None
         );
+    }
+
+    /// A fake AWS key assembled at runtime so this file never matches the scanner.
+    fn fake_key() -> String {
+        format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP")
+    }
+
+    /// Writes `content` to `path` in the source checkout and commits it.
+    fn commit_file(repository: &Repository, path: &str, content: &[u8], message: &str) {
+        let file = repository.source.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, content).unwrap();
+        git_ok(&repository.source, ["add", "--", path]).unwrap();
+        git_ok(&repository.source, ["commit", "-m", message]).unwrap();
+    }
+
+    /// Attempts a candidate push and returns the refusal text ("" on success).
+    fn checkpoint_error(repository: &Repository, name: &str) -> String {
+        let reference = format!("refs/agent-coordinator/candidates/{name}");
+        checkpoint_candidate(
+            &repository.source,
+            repository.remote.to_str().unwrap(),
+            &reference,
+            &[],
+        )
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default()
+    }
+
+    #[test]
+    fn secret_scan_covers_merge_resolution_content() {
+        let repository = repository();
+        git_ok(
+            &repository.source,
+            ["checkout", "-B", "side", &repository.base],
+        )
+        .unwrap();
+        commit_file(&repository, "side.txt", b"side\n", "side");
+        git_ok(
+            &repository.source,
+            ["checkout", "-B", "work", &repository.base],
+        )
+        .unwrap();
+        commit_file(&repository, "work.txt", b"work\n", "work");
+        git_ok(
+            &repository.source,
+            ["merge", "--no-ff", "--no-commit", "side"],
+        )
+        .unwrap();
+        fs::write(
+            repository.source.join("base.txt"),
+            format!("{}\n", fake_key()),
+        )
+        .unwrap();
+        git_ok(&repository.source, ["add", "base.txt"]).unwrap();
+        git_ok(&repository.source, ["commit", "-m", "evil merge"]).unwrap();
+        let error = checkpoint_error(&repository, "merge");
+        assert!(
+            error.contains("aws_access_key") && error.contains("base.txt"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn secret_scan_reads_binary_and_non_utf8_content() {
+        let repository = repository();
+        git_ok(
+            &repository.source,
+            ["checkout", "-B", "blob", &repository.base],
+        )
+        .unwrap();
+        let mut content = vec![0u8, 0xff, 0xfe, b'\n'];
+        content.extend(fake_key().into_bytes());
+        content.extend([b'\n', 0, 0x80]);
+        commit_file(&repository, "blob.bin", &content, "binary");
+        let error = checkpoint_error(&repository, "binary");
+        assert!(
+            error.contains("aws_access_key") && error.contains("blob.bin"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn secret_scan_flags_renamed_and_oddly_named_credential_files() {
+        let repository = repository();
+        git_ok(
+            &repository.source,
+            ["checkout", "-B", "rename", &repository.base],
+        )
+        .unwrap();
+        git_ok(&repository.source, ["mv", "base.txt", "id_rsa"]).unwrap();
+        git_ok(&repository.source, ["commit", "-m", "rename only"]).unwrap();
+        let error = checkpoint_error(&repository, "rename");
+        assert!(
+            error.contains("credential_file") && error.contains(":id_rsa"),
+            "{error}"
+        );
+
+        git_ok(
+            &repository.source,
+            ["checkout", "-B", "odd", &repository.base],
+        )
+        .unwrap();
+        commit_file(&repository, "we\"ird\\\tdir/server.pem", b"x\n", "odd");
+        let error = checkpoint_error(&repository, "odd");
+        assert!(error.contains("credential_file"), "{error}");
+    }
+
+    #[test]
+    fn repository_config_cannot_hide_outgoing_secrets() {
+        let repository = repository();
+        for (name, value) in [
+            ("diff.noprefix", "true"),
+            ("diff.mnemonicPrefix", "true"),
+            ("color.ui", "always"),
+            ("core.quotePath", "true"),
+            ("log.showSignature", "true"),
+            ("diff.external", "true"),
+            ("diff.hide.textconv", "true"),
+            ("diff.hide.binary", "true"),
+        ] {
+            git_ok(&repository.source, ["config", name, value]).unwrap();
+        }
+        git_ok(
+            &repository.source,
+            ["checkout", "-B", "config", &repository.base],
+        )
+        .unwrap();
+        commit_file(
+            &repository,
+            ".gitattributes",
+            b"*.txt diff=hide\n",
+            "attributes",
+        );
+        commit_file(
+            &repository,
+            "leak.txt",
+            format!("{}\n", fake_key()).as_bytes(),
+            "leak",
+        );
+        commit_file(&repository, "sub dir/.env", b"x\n", "env");
+        let error = checkpoint_error(&repository, "config");
+        assert!(error.contains("aws_access_key in "), "{error}");
+        assert!(
+            error.contains(":leak.txt") && error.contains(":sub dir/.env"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn secret_scan_trusts_only_refs_the_remote_advertises() {
+        let repository = repository();
+        let leak = candidate(&repository, "leak", &format!("{}\n", fake_key()));
+        // A forged remote-tracking ref must not hide the unpublished commit.
+        git_ok(
+            &repository.source,
+            ["update-ref", "refs/remotes/origin/forged", &leak],
+        )
+        .unwrap();
+        let error = checkpoint_error(&repository, "forged");
+        assert!(error.contains("aws_access_key"), "{error}");
+
+        // Commits the remote really advertises are excluded, even with no
+        // remote-tracking refs at all; a clean commit on top may be pushed.
+        git_ok(
+            &repository.source,
+            ["push", "origin", "leak:refs/heads/published"],
+        )
+        .unwrap();
+        for tracking in ["refs/remotes/origin/forged", "refs/remotes/origin/main"] {
+            git_ok(&repository.source, ["update-ref", "-d", tracking]).unwrap();
+        }
+        commit_file(&repository, "clean.txt", b"clean\n", "clean");
+        assert_eq!(checkpoint_error(&repository, "clean"), "");
     }
 
     #[test]
