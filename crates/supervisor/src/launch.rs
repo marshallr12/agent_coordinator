@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::preflight;
 use crate::profile::{self, LaunchCommand, LaunchSpec, Role, run_files};
 use crate::role_settings;
+use crate::verification;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::fs::{self, File};
@@ -10,7 +11,7 @@ use std::process::{Command, Stdio};
 
 /// Writes the generated files a launch needs into `$RUN` (the prompt is the
 /// caller's) and creates its private temp and build directories.
-pub fn prepare_run(spec: &LaunchSpec) -> Result<()> {
+pub fn prepare_run(spec: &LaunchSpec, config: &Config) -> Result<()> {
     for dir in ["tmp", "target"] {
         fs::create_dir_all(spec.run.join(dir)).context("create run directories")?;
     }
@@ -22,13 +23,17 @@ pub fn prepare_run(spec: &LaunchSpec) -> Result<()> {
         let schema = serde_json::to_string_pretty(&profile::review_schema())?;
         fs::write(spec.run.join(run_files::SCHEMA), schema)?;
     }
+    if let Some(described) = verification::describe(spec, config) {
+        let text = serde_json::to_string_pretty(&described)?;
+        fs::write(spec.run.join(run_files::VERIFICATION), text)?;
+    }
     Ok(())
 }
 
 /// Prepares, preflights and runs a launch; returns the harness exit code.
 /// Events go to `$RUN/events.jsonl`, diagnostics to `$RUN/stderr.log`.
 pub fn run(spec: &LaunchSpec, config: &Config) -> Result<i32> {
-    prepare_run(spec)?;
+    prepare_run(spec, config)?;
     let problems = preflight::check(spec, config);
     if !problems.is_empty() {
         bail!("preflight refused the launch:\n- {}", problems.join("\n- "));

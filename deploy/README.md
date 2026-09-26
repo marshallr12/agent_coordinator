@@ -26,3 +26,43 @@ as the script prints, then verify with `sudo deploy/agentc/containment-suite.sh`
 The two services are systemd units where systemd is the init system and LSB
 `/etc/init.d` scripts otherwise (for example MX Linux with sysvinit), where the
 proxy logs to `/var/log/agentc-egress.log`.
+
+### Staging coordinator and UI verification
+
+`agentc/staging.py` runs a disposable coordinator for supervised agents on
+`127.0.0.1:18080` (the one loopback port the firewall opens to the agent
+accounts besides the proxy). Run it as the owner, not root, from a clean,
+committed tree (the service refuses clients built from a dirty tree):
+
+```sh
+cargo build --workspace --locked
+deploy/agentc/staging.py up            # first run bootstraps; later runs restart
+deploy/agentc/staging.py cli impl --json connect
+deploy/agentc/staging.py credentials   # prints the sudo install commands
+```
+
+The first `up` creates the database under `~/.local/state/agentc-staging`
+(0700; override with `--dir` or `AGENTC_STAGING_DIR`), a project with the
+production autonomy policy whose remote is a local bare clone of `main`, three
+agent credentials (`owner` interactive/write, `impl` supervised/write, `rev`
+supervised/read) and the `staging-verifier` operator login. Every child
+process runs without any `AGENT_COORDINATOR_*` or `COORDINATOR_*` variable,
+so the production credential can never reach staging. `down` stops it;
+`destroy --yes` deletes it.
+
+A reviewer launch started with `--project <id>` gets a UI verification
+environment when `/etc/agentc/supervisor.toml` has an entry for that project
+below the `KEEP` line (kept when `host-setup.sh` re-runs):
+
+```toml
+[verification.<project-id>]
+url = "http://127.0.0.1:18080"
+# browser = true
+```
+
+The supervisor writes `$RUN/verification.json` (URL, browser and the path of
+the reviewer-only login at `/var/lib/agentc/rev/verification/<project-id>.json`)
+and sets `AGENTC_VERIFICATION` and `CHROME_BIN`. For this project,
+`node scripts/verify_ui.mjs --path / --expect "text" --out "$RUN/ui"` signs in
+and saves `screenshot.png` and `dom.html` as review evidence. Implementer
+launches get no verification environment.

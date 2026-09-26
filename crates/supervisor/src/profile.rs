@@ -41,6 +41,8 @@ pub struct LaunchSpec {
     pub model: String,
     pub effort: String,
     pub session_id: Uuid,
+    /// Coordinator project the launch works on; selects `verification_env`.
+    pub project: Option<String>,
 }
 
 /// A fully resolved process to spawn; `stdin` is the prompt file.
@@ -77,6 +79,7 @@ pub mod run_files {
     pub const SETTINGS: &str = "role-settings.json";
     pub const SCHEMA: &str = "result.schema.json";
     pub const LAST_MESSAGE: &str = "last.md";
+    pub const VERIFICATION: &str = "verification.json";
 }
 
 /// Structured verdict every reviewer launch must return (plan §2.3, M5): the
@@ -219,6 +222,7 @@ fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
         ),
         Harness::Codex => ("CODEX_HOME".into(), role_dir.join("codex-home").into()),
     });
+    env.extend(crate::verification::environment(spec, config));
     env
 }
 
@@ -251,6 +255,7 @@ mod tests {
             model: "m".into(),
             effort: "high".into(),
             session_id: Uuid::nil(),
+            project: None,
         }
     }
 

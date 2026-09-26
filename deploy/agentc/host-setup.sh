@@ -20,6 +20,7 @@ PROXY_PORT=${PROXY_PORT:-3128}
 STAGING_PORT=${STAGING_PORT:-18080}
 REPO_URL=${REPO_URL:-https://github.com/marshallr12/agent_coordinator.git}
 EXTRA_EGRESS=${EXTRA_EGRESS:-agents.sithbit.com}
+KEEP="# --- entries below this line are kept when host-setup.sh re-runs ---"
 
 # Refuses to run without root and the invoking owner account.
 require_root() {
@@ -43,7 +44,7 @@ create_dirs() {
   for user in "${AGENTS[@]}"; do
     local role=${user#agentc-}
     install -d -o "$user" -g "$user" -m 0700 "$STATE/$role"
-    for sub in home claude-config codex-home coordinator cargo clones runs; do
+    for sub in home claude-config codex-home coordinator cargo clones runs verification; do
       install -d -o "$user" -g "$user" -m 0700 "$STATE/$role/$sub"
     done
   done
@@ -57,6 +58,25 @@ install_binaries() {
   install -o root -g root -m 0755 "$CLI" "$PREFIX/bin/agent-coordinator"
   install -o root -g root -m 0755 "$(readlink -f "$OWNER_HOME/.local/bin/claude")" "$PREFIX/bin/claude"
   install -o root -g root -m 0755 "$(readlink -f "$OWNER_HOME/.local/bin/codex")" "$PREFIX/bin/codex"
+  install_node
+}
+
+# Pins node (the repo's UI scripts drive the browser with it) from $NODE or
+# the owner's newest nvm install; skipped with a note when neither exists.
+install_node() {
+  local node=${NODE:-}
+  [ -n "$node" ] || node=$(ls -d "$OWNER_HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -n 1)
+  if [ -z "$node" ]; then echo "note: no node found; set NODE=<path> for UI verification" >&2; return; fi
+  install -o root -g root -m 0755 "$(readlink -f "$node")" "$PREFIX/bin/node"
+}
+
+# The system headless browser offered to verifying reviewers (plan M2).
+detect_browser() {
+  local candidate
+  for candidate in /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome; do
+    [ -x "$candidate" ] && { readlink -f "$candidate"; return; }
+  done
+  echo /usr/bin/chromium
 }
 
 # Installs a read-only toolchain matching the owner's rustc (CI uses stable).
@@ -92,11 +112,14 @@ refresh_mirror() {
 }
 
 # Writes the host config: defaults shown commented, pins and extras set.
+# Everything below the KEEP marker (the host owner's verification entries)
+# survives re-runs.
 write_config() {
-  local claude codex
+  local claude codex kept=""
   local as_agent=(sudo -u agentc-impl env -i HOME="$STATE/impl/home")
   claude=$("${as_agent[@]}" "$PREFIX/bin/claude" --version | awk '{print $1}')
   codex=$("${as_agent[@]}" "$PREFIX/bin/codex" --version | awk '{print $NF}')
+  [ -f "$ETC/supervisor.toml" ] && kept=$(sed -n "/^$KEEP\$/,\$p" "$ETC/supervisor.toml" | tail -n +2)
   cat > "$ETC/supervisor.toml" <<EOF
 # agentc-supervisor host configuration. Every entry has an in-code default;
 # commented lines show those defaults. Written by deploy/agentc/host-setup.sh.
@@ -105,13 +128,29 @@ write_config() {
 # implementer_user = "agentc-impl"
 # reviewer_user = "agentc-rev"
 # toolchain_dir = "/opt/agentc"
+# browser = "/usr/bin/chromium"
+browser = "$(detect_browser)"
 egress_listen = "127.0.0.1:$PROXY_PORT"
 egress_allow_extra = ["$EXTRA_EGRESS"]
 
 [pinned]
 claude = "$claude"
 codex = "$codex"
+
+$KEEP
 EOF
+  if [ -n "$kept" ]; then
+    printf '%s\n' "$kept" >> "$ETC/supervisor.toml"
+  else
+    cat >> "$ETC/supervisor.toml" <<EOF
+# UI verification per coordinator project (plan M2); the reviewer's test login
+# goes to $STATE/rev/verification/<project-id>.json (agentc-rev, 0600).
+# deploy/agentc/staging.py credentials prints the commands for staging.
+# [verification.<project-id>]
+# url = "http://127.0.0.1:$STAGING_PORT"
+# browser = true
+EOF
+  fi
   chmod 0644 "$ETC/supervisor.toml"
 }
 
@@ -246,6 +285,9 @@ Host ready. Manual steps (reserved bootstrap, once per role):
   (repeat for agentc-rev with rev/ paths)
 Coordinator credentials: issue class=supervised (impl: write, rev: read) in the
 dashboard and save each credentials.toml as $STATE/<role>/coordinator/credentials.toml (0600).
+Staging: deploy/agentc/staging.py up (as the owner), then run the commands
+"deploy/agentc/staging.py credentials" prints and add its [verification.<project-id>]
+entry below the KEEP line in $ETC/supervisor.toml.
 Then run: sudo deploy/agentc/containment-suite.sh
 EOF
 }

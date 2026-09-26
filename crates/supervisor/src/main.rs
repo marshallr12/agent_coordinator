@@ -10,6 +10,7 @@ mod launch;
 mod preflight;
 mod profile;
 mod role_settings;
+mod verification;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -83,6 +84,9 @@ struct SpecArgs {
     model: String,
     #[arg(long, default_value = "high")]
     effort: String,
+    /// Coordinator project id; selects the project's verification environment.
+    #[arg(long)]
+    project: Option<String>,
 }
 
 impl SpecArgs {
@@ -96,6 +100,7 @@ impl SpecArgs {
             model: self.model.clone(),
             effort: self.effort.clone(),
             session_id: uuid::Uuid::new_v4(),
+            project: self.project.clone(),
         }
     }
 }
@@ -131,7 +136,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(egress::serve(&config.egress_listen, config.egress_hosts()))?
         }
-        Commands::Prepare(args) => launch::prepare_run(&args.spec())?,
+        Commands::Prepare(args) => launch::prepare_run(&args.spec(), &config)?,
         Commands::Preflight(args) => return Ok(report(&preflight::check(&args.spec(), &config))),
         Commands::Launch { spec, dry_run } => {
             return launch_command(&spec.spec(), &config, dry_run);

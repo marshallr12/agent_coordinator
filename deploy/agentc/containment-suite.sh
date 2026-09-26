@@ -11,6 +11,7 @@ PREFIX=/opt/agentc
 STATE=/var/lib/agentc
 SUP=$PREFIX/bin/agentc-supervisor
 PROXY=http://127.0.0.1:${PROXY_PORT:-3128}
+STAGING=http://127.0.0.1:${STAGING_PORT:-18080}
 DISABLED_PUSH=disabled://push-only-via-agent-coordinator
 FAILED=0
 
@@ -103,6 +104,21 @@ check_codex_sandbox() {
   expect_fail "$user: codex sandbox cannot write the role home" as "$user" sh -c "$sandbox touch $base/home/sandbox-escape"
 }
 
+# The reviewer's pinned headless browser renders the staging dashboard under
+# uid + firewall (plan M2), and the implementer cannot read the reviewer's
+# verification logins. Skipped when no staging coordinator is listening.
+check_browser() {
+  local browser run=$STATE/rev/runs/suite
+  browser=$(sed -n 's/^browser = "\(.*\)"$/\1/p' /etc/agentc/supervisor.toml)
+  expect_fail "agentc-impl: cannot read the reviewer's verification logins" as agentc-impl ls "$STATE/rev/verification"
+  if ! curl -sf --max-time 3 "$STAGING/healthz" >/dev/null; then
+    echo "SKIP agentc-rev: browser check (no staging coordinator at $STAGING)"; return
+  fi
+  expect_ok_logged "agentc-rev: headless browser renders the staging dashboard" /root/agentc-browser.log \
+    as agentc-rev sh -c "${browser:-/usr/bin/chromium} --headless=new --disable-gpu --no-first-run \
+      --user-data-dir=$run/tmp/chrome --dump-dom $STAGING/ | grep -q 'Agent Coordinator'"
+}
+
 # Optional: the project's tests pass under the implementer profile, both
 # plainly (Claude: uid + firewall) and inside the Codex sandbox.
 check_cargo_test() {
@@ -127,6 +143,7 @@ main() {
     check_egress "$1"
     check_codex_sandbox "$1"
   done
+  check_browser
   if [ "$cargo_test" = "--cargo-test" ]; then check_cargo_test; fi
   [ "$FAILED" -eq 0 ] && echo "containment suite: all checks passed" || echo "containment suite: FAILURES above"
   exit "$FAILED"

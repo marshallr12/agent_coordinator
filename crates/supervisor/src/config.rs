@@ -1,8 +1,10 @@
 //! Host supervisor configuration. Every entry has an in-code default, so a
 //! host runs with no configuration file at all; `/etc/agentc/supervisor.toml`
 //! (or `--config`) only overrides what differs on that host.
+use crate::verification::Verification;
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Default location of the optional configuration file.
@@ -31,6 +33,10 @@ pub struct Config {
     pub toolchain_dir: PathBuf,
     /// Exact harness versions a launch refuses to run without.
     pub pinned: Pinned,
+    /// Root-owned headless browser offered to verifying reviewers.
+    pub browser: PathBuf,
+    /// UI verification environments by coordinator project id (plan M2).
+    pub verification: BTreeMap<String, Verification>,
 }
 
 /// Exact version strings reported by `--version`; empty means "not pinned".
@@ -56,6 +62,8 @@ impl Default for Config {
             egress_allow_extra: Vec::new(),
             toolchain_dir: PathBuf::from("/opt/agentc"),
             pinned: Pinned::default(),
+            browser: PathBuf::from("/usr/bin/chromium"),
+            verification: BTreeMap::new(),
         }
     }
 }

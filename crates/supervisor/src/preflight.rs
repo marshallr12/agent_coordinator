@@ -5,6 +5,7 @@ use crate::clone;
 use crate::config::Config;
 use crate::profile::{self, Harness, LaunchSpec, Role, run_files};
 use crate::role_settings;
+use crate::verification;
 use std::path::Path;
 use std::process::Command;
 
@@ -19,6 +20,7 @@ pub fn check(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     ));
     problems.extend(layout_problems(spec));
     problems.extend(settings_problem(spec));
+    problems.extend(verification_problems(spec, config));
     match clone::hardening_problems(&spec.clone) {
         Ok(found) => problems.extend(found),
         Err(error) => problems.push(format!("clone {}: {error:#}", spec.clone.display())),
@@ -121,6 +123,46 @@ fn settings_problem(spec: &LaunchSpec) -> Option<String> {
     })
 }
 
+/// A verifying reviewer needs its project's test login (private to the
+/// reviewer account) and, when offered, a browser agents cannot replace.
+fn verification_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
+    let Some(entry) = verification::for_launch(spec, config) else {
+        return Vec::new();
+    };
+    let project = spec.project.as_deref().unwrap_or_default();
+    let login = verification::credential_file(config, project);
+    let mut problems = private_file_problem(&login).into_iter().collect::<Vec<_>>();
+    if entry.browser {
+        problems.extend(match config.browser.exists() {
+            true => writable_problem(&config.browser),
+            false => Some(format!(
+                "browser {} is not installed",
+                config.browser.display()
+            )),
+        });
+    }
+    problems
+}
+
+/// The file must be readable by this account and closed to group and world.
+#[cfg(unix)]
+fn private_file_problem(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let readable = std::fs::File::open(path).is_ok();
+    let mode = std::fs::metadata(path).map(|m| m.mode()).unwrap_or(0);
+    (!readable || mode & 0o077 != 0).then(|| {
+        format!(
+            "verification login {} must exist, be readable by this account and be mode 0600",
+            path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn private_file_problem(_path: &Path) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,11 +179,13 @@ mod tests {
             model: "m".into(),
             effort: "low".into(),
             session_id: Uuid::nil(),
+            project: Some("p1".into()),
         };
-        let config = Config {
-            bin_dir: dir.path().into(),
-            ..Config::default()
-        };
+        let mut config: Config =
+            toml::from_str("[verification.p1]\nurl = \"http://127.0.0.1:1\"").unwrap();
+        config.bin_dir = dir.path().into();
+        config.state_dir = dir.path().into();
+        config.browser = dir.path().join("no-browser");
         let problems = check(&spec, &config).join("\n");
         for expected in [
             "launches run as",
@@ -151,6 +195,8 @@ mod tests {
             "schema",
             "differs",
             "clone",
+            "verification login",
+            "no-browser is not installed",
         ] {
             assert!(problems.contains(expected), "{expected}: {problems}");
         }
