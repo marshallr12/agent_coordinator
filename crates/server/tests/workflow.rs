@@ -636,6 +636,11 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
                 candidate_revision,candidate_tree,created_by,contributor_session_id,created_at,
                 superseded_at FROM original.submissions"
                 .to_owned()
+        } else if table == "review_decisions" {
+            "INSERT INTO main.review_decisions SELECT activity_id,submission_id,attempt_id,
+                reviewer_id,reviewer_session_id,decision,summary,created_at
+                FROM original.review_decisions"
+                .to_owned()
         } else {
             format!("INSERT INTO main.{table} SELECT * FROM original.{table}")
         };
@@ -2477,4 +2482,102 @@ async fn acks_and_decisions_repend_only_on_rules_changes() {
     assert!(needs_ack(&detail), "{detail}");
     let (_, stale) = f.call(&f.a, "GET", &decision_path, Value::Null).await;
     assert_eq!(stale["data"]["status"], "stale", "{stale}");
+}
+
+/// Submit a general task carrying an acceptance-criteria amendment and let `b`
+/// claim its agent review. Returns the task path, review and review claim.
+async fn amended_submission(f: &Fixture, name: &str) -> (String, Value, Value) {
+    let p = f
+        .project(name, &format!("https://example.test/{name}.git"))
+        .await;
+    f.review_policy(&p, "agent").await;
+    let t = f.task(&p, "general", "Amended criteria").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let new = ["required behavior verified", "operator docs updated"];
+    let (status, submitted) = f
+        .call(&f.a, "POST", &format!("/api/v1/projects/{p}/attempts/{}/submissions", owner["id"].as_str().unwrap()),
+            json!({"generation":owner["generation"],"task_revision":t["revision"],"project_policy_revision":2,"workflow_policy_revision":0,"kind":"general",
+                "summary":"candidate ready","handoff":"review the amendment",
+                "acceptance_evidence":new.iter().map(|c| json!({"criterion":c,"evidence":"verified"})).collect::<Vec<_>>(),
+                "ac_amendment":{"old":["required behavior verified"],"new":new,"rationale":"Docs are part of the behaviour."}}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{submitted}");
+    let review = activity(&submitted["data"], "agent_review").clone();
+    let (status, claimed) = f.claim_activity(&f.b, &p, &review, 2, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    (format!("/api/v1/projects/{p}"), review, claimed)
+}
+
+fn review_body(claimed: &Value, review: &Value, amendment: Option<&str>) -> Value {
+    json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"Reviewed","findings":[],"amendment_decision":amendment})
+}
+
+// P1 autonomy: an accepted AC amendment updates the task's criteria; approving
+// without deciding the amendment is refused.
+#[tokio::test]
+async fn accepted_ac_amendment_updates_criteria() {
+    let f = Fixture::new().await;
+    let (base, review, claimed) = amended_submission(&f, "amend-accept").await;
+    let path = format!(
+        "{base}/workflow-activities/{}/review",
+        review["id"].as_str().unwrap()
+    );
+    let (status, missing) = f
+        .call(&f.b, "POST", &path, review_body(&claimed, &review, None))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
+    let (status, done) = f
+        .call(
+            &f.b,
+            "POST",
+            &path,
+            review_body(&claimed, &review, Some("accepted")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["data"]["phase"], "done", "{done}");
+    let criteria: String = sqlx::query_scalar(
+        "SELECT t.acceptance_json FROM tasks t JOIN submissions s ON s.task_id=t.id WHERE s.id=?",
+    )
+    .bind(review["submission_id"].as_str().unwrap())
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&criteria).unwrap(),
+        json!(["required behavior verified", "operator docs updated"])
+    );
+}
+
+// P1 autonomy: a rejected AC amendment makes the whole submission changes_requested
+// and leaves the criteria untouched.
+#[tokio::test]
+async fn rejected_ac_amendment_requests_changes() {
+    let f = Fixture::new().await;
+    let (base, review, claimed) = amended_submission(&f, "amend-reject").await;
+    let path = format!(
+        "{base}/workflow-activities/{}/review",
+        review["id"].as_str().unwrap()
+    );
+    let (status, result) = f
+        .call(
+            &f.b,
+            "POST",
+            &path,
+            review_body(&claimed, &review, Some("rejected")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["data"]["phase"], "revision_needed", "{result}");
+    let criteria: String = sqlx::query_scalar(
+        "SELECT t.acceptance_json FROM tasks t JOIN submissions s ON s.task_id=t.id WHERE s.id=?",
+    )
+    .bind(review["submission_id"].as_str().unwrap())
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&criteria).unwrap(),
+        json!(["required behavior verified"])
+    );
 }

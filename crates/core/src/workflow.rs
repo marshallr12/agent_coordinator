@@ -28,6 +28,19 @@ pub struct AcceptanceEvidence {
     pub evidence: String,
 }
 
+/// A contributor's proposed acceptance-criteria change, carried in a submission and
+/// applied only when the reviewer explicitly accepts it.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AcAmendmentInput {
+    /// The task's current acceptance criteria, exactly.
+    pub old: Vec<String>,
+    /// The proposed acceptance criteria; submission evidence must cover these.
+    pub new: Vec<String>,
+    pub rationale: String,
+}
+
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +65,8 @@ pub struct SubmissionInput {
     pub candidate_remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ac_amendment: Option<AcAmendmentInput>,
 }
 
 #[cfg(test)]
@@ -100,6 +115,10 @@ pub struct ReviewInput {
     pub summary: String,
     #[serde(default)]
     pub findings: Vec<ReviewFindingInput>,
+    /// `accepted` or `rejected`; required when approving a submission that carries an
+    /// `ac_amendment`. A rejected amendment makes the whole review changes_requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amendment_decision: Option<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

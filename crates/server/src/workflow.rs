@@ -464,7 +464,7 @@ async fn submit(
     let current = sqlx::query("SELECT p.repository_url,p.target_branch FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.project_id=? AND t.id=?")
         .bind(&project).bind(&subject.task_id).fetch_one(&mut *mutation.tx).await?;
     let task_digest = ensure_judged_fields_unchanged(&mut mutation.tx, &subject).await?;
-    validate_acceptance(&input, &subject.acceptance_json)?;
+    let amendment = validate_amendment(&input, &subject.acceptance_json)?;
     crate::jobs::ensure_attempt_quiescent(&mut mutation.tx, &project, &subject.task_id).await?;
     ensure_workflow_quiescent(&mut mutation.tx, &project, &subject.task_id).await?;
 
@@ -575,14 +575,14 @@ async fn submit(
         mutation.now,
     )
     .await?;
-    sqlx::query("INSERT INTO submissions(id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,workflow_policy_revision,summary,acceptance_evidence_json,handoff,canonical_repository_key,repository_url,target_branch,base_revision,candidate_revision,candidate_tree,candidate_ref,created_by,contributor_session_id,created_at,task_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO submissions(id,project_id,task_id,attempt_id,kind,task_revision,project_policy_revision,workflow_policy_revision,summary,acceptance_evidence_json,handoff,canonical_repository_key,repository_url,target_branch,base_revision,candidate_revision,candidate_tree,candidate_ref,created_by,contributor_session_id,created_at,task_digest,ac_amendment_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&submission).bind(&project).bind(&subject.task_id).bind(&attempt).bind(&input.kind)
         .bind(input.task_revision).bind(input.project_policy_revision).bind(roster_revision)
         .bind(&input.summary).bind(serde_json::to_string(&input.acceptance_evidence)?).bind(&input.handoff)
         .bind(&canonical).bind(if input.kind=="code" {Some(repository.as_str())} else {None})
         .bind(if input.kind=="code" {Some(target.as_str())} else {None})
         .bind(&input.base_revision).bind(&input.candidate_revision).bind(&input.candidate_tree).bind(&input.candidate_ref)
-        .bind(&mutation.actor.id).bind(&owner_session).bind(mutation.now).bind(&task_digest).execute(&mut *mutation.tx).await?;
+        .bind(&mutation.actor.id).bind(&owner_session).bind(mutation.now).bind(&task_digest).bind(&amendment).execute(&mut *mutation.tx).await?;
     let lessons = crate::knowledge::insert_submission_lessons(
         &mut mutation.tx,
         &mutation.actor,
@@ -2063,12 +2063,13 @@ async fn review(
         .await?;
     }
     crate::jobs::ensure_attempt_quiescent(&mut m.tx, &project, &ctx.activity_task).await?;
+    let (decision, amendment) = amendment_outcome(&mut m.tx, &ctx.submission, &input).await?;
     let attempt_id: String = sqlx::query_scalar("SELECT current_attempt_id FROM tasks WHERE id=?")
         .bind(&ctx.activity_task)
         .fetch_one(&mut *m.tx)
         .await?;
-    sqlx::query("INSERT INTO review_decisions(activity_id,submission_id,attempt_id,reviewer_id,reviewer_session_id,decision,summary,created_at) VALUES(?,?,?,?,?,?,?,?)")
-        .bind(&ctx.id).bind(&ctx.submission).bind(&attempt_id).bind(&m.actor.id).bind(session(&m.actor)?).bind(&input.decision).bind(&input.summary).bind(m.now).execute(&mut *m.tx).await?;
+    sqlx::query("INSERT INTO review_decisions(activity_id,submission_id,attempt_id,reviewer_id,reviewer_session_id,decision,summary,created_at,amendment_decision) VALUES(?,?,?,?,?,?,?,?,?)")
+        .bind(&ctx.id).bind(&ctx.submission).bind(&attempt_id).bind(&m.actor.id).bind(session(&m.actor)?).bind(decision).bind(&input.summary).bind(m.now).bind(&input.amendment_decision).execute(&mut *m.tx).await?;
     for finding in &input.findings {
         sqlx::query("INSERT INTO review_findings(id,activity_id,severity,remedy,evidence,created_at) VALUES(?,?,?,?,?,?)")
         .bind(Uuid::new_v4().to_string()).bind(&ctx.id).bind(&finding.severity).bind(&finding.remedy).bind(&finding.evidence).bind(m.now).execute(&mut *m.tx).await?;
@@ -2090,7 +2091,7 @@ async fn review(
         .bind(&ctx.id)
         .execute(&mut *m.tx)
         .await?;
-    if input.decision == "changes_requested" {
+    if decision == "changes_requested" {
         ensure_workflow_quiescent(&mut m.tx, &project, &ctx.subject_task).await?;
         sqlx::query("UPDATE submissions SET superseded_at=? WHERE id=? AND superseded_at IS NULL")
             .bind(m.now)
@@ -2119,6 +2120,16 @@ async fn review(
             .execute(&mut *m.tx)
             .await?;
     } else if approvals_satisfied(&mut m.tx, &ctx.submission).await? {
+        if let Some(criteria) = amendment {
+            apply_amendment(
+                &mut m,
+                &project,
+                &ctx.subject_task,
+                &ctx.submission,
+                &criteria,
+            )
+            .await?;
+        }
         advance_approved_subject(
             &mut m.tx,
             &project,
@@ -2133,6 +2144,70 @@ async fn review(
         m.finish(value, Some(&project), "review.decided", &ctx.id)
             .await?,
     ))
+}
+
+/// Resolve a review's effective decision and any amendment to apply. Approving a
+/// submission that carries an `ac_amendment` needs an explicit `amendment_decision`;
+/// a rejected amendment makes the whole review `changes_requested`. Returns the
+/// accepted criteria to apply, if any.
+async fn amendment_outcome(
+    c: &mut SqliteConnection,
+    submission: &str,
+    input: &ReviewInput,
+) -> Result<(&'static str, Option<Vec<String>>), AppError> {
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT ac_amendment_json FROM submissions WHERE id=?")
+            .bind(submission)
+            .fetch_one(&mut *c)
+            .await?;
+    let decision = if input.decision == "approved" {
+        "approved"
+    } else {
+        "changes_requested"
+    };
+    match (stored, input.amendment_decision.as_deref(), decision) {
+        (None, None, _) | (Some(_), None, "changes_requested") => Ok((decision, None)),
+        (Some(_), Some("rejected"), _) => Ok(("changes_requested", None)),
+        (Some(json), Some("accepted"), "approved") => {
+            let amendment: coordinator_core::workflow::AcAmendmentInput =
+                serde_json::from_str(&json)?;
+            Ok((decision, Some(amendment.new)))
+        }
+        _ => Err(AppError::bad_request(
+            "amendment_decision (accepted or rejected) is required exactly when approving a submission with an ac_amendment.",
+        )),
+    }
+}
+
+/// Apply an accepted acceptance-criteria amendment to the task and re-pin the
+/// submission to the amended judged fields. Idempotent across reviewers.
+async fn apply_amendment(
+    m: &mut Mutation,
+    project: &str,
+    task: &str,
+    submission: &str,
+    criteria: &[String],
+) -> Result<(), AppError> {
+    let encoded = serde_json::to_string(criteria)?;
+    let current: String = sqlx::query_scalar("SELECT acceptance_json FROM tasks WHERE id=?")
+        .bind(task)
+        .fetch_one(&mut *m.tx)
+        .await?;
+    if serde_json::from_str::<Vec<String>>(&current)? != criteria {
+        sqlx::query("UPDATE tasks SET acceptance_json=?,revision=revision+1 WHERE id=?")
+            .bind(&encoded)
+            .bind(task)
+            .execute(&mut *m.tx)
+            .await?;
+        crate::coordination::save_task_revision(m, project, task).await?;
+    }
+    let digest = crate::autonomy::current_task_digest(&mut m.tx, task).await?;
+    sqlx::query("UPDATE submissions SET task_digest=? WHERE id=?")
+        .bind(digest)
+        .bind(submission)
+        .execute(&mut *m.tx)
+        .await?;
+    Ok(())
 }
 
 /// Move a subject whose required reviews are satisfied out of review: general work
@@ -3119,6 +3194,34 @@ async fn ensure_judged_fields_unchanged(
         ));
     }
     Ok(current)
+}
+
+/// Validate an optional acceptance-criteria amendment and the evidence against the
+/// criteria that will apply: the proposed ones when amending, else the current ones.
+/// Returns the amendment as stored JSON.
+fn validate_amendment(
+    input: &SubmissionInput,
+    acceptance_json: &str,
+) -> Result<Option<String>, AppError> {
+    let Some(amendment) = &input.ac_amendment else {
+        validate_acceptance(input, acceptance_json)?;
+        return Ok(None);
+    };
+    let current: Vec<String> = serde_json::from_str(acceptance_json)?;
+    if amendment.old != current || amendment.new == current {
+        return Err(AppError::bad_request(
+            "ac_amendment.old must equal the current acceptance criteria and new must differ.",
+        ));
+    }
+    if amendment.new.is_empty() || amendment.new.len() > 100 {
+        return Err(AppError::bad_request("Provide 1–100 amended criteria."));
+    }
+    for criterion in &amendment.new {
+        bounded(criterion, "amended criterion", 2048, true)?;
+    }
+    bounded(&amendment.rationale, "amendment rationale", 8192, true)?;
+    validate_acceptance(input, &serde_json::to_string(&amendment.new)?)?;
+    Ok(Some(serde_json::to_string(amendment)?))
 }
 
 fn validate_acceptance(input: &SubmissionInput, acceptance_json: &str) -> Result<(), AppError> {
