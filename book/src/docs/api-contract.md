@@ -129,7 +129,7 @@ instruction versions, session work, recovery candidates, blockers/decisions,
 relevant lessons, candidate tasks, and next actions. Required rules may require
 pagination; `instructions_complete: false` prevents new work until acknowledged.
 Workflow subjects include service-known precondition blockers and hints for
-candidate merge preflight and operator reopen.
+candidate merge preflight and reopen or agent revise.
 `POST /api/v1/sessions/{id}/instruction-acknowledgments` records the project,
 policy/instruction revisions, and required section IDs the client has received
 and read. Claims require the current complete acknowledgment. This establishes
@@ -142,7 +142,11 @@ blockers. Results are observations and can become stale immediately; guarded
 claim and mutation endpoints remain authoritative. Code integration also returns
 a local merge-preflight hint: the service cannot inspect workstation Git or
 determine whether an immutable candidate conflicts with the current remote target.
-An operator must reopen a candidate when its pinned submission or policy is stale.
+A candidate whose submission is superseded or whose task's judged fields changed
+must be reopened by an operator or revised by an agent (`reason_code`
+`requirements_changed`). Refusals and preconditions that only a human can clear keep
+`operation_not_permitted` and add `details.required_actor: "human"` and a
+`details.gate` name, or `required_actor: "human"` on the precondition.
 
 `GET /api/v1/projects/{project_id}/state-wait` accepts `target_kind=task|activity|job`,
 `target_id`, an `after_state_token` returned by task detail/precondition inspection,

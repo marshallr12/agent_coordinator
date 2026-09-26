@@ -643,7 +643,8 @@ Native `reviews claim` and `integrations claim` fetch and verify the recorded re
 from the configured remote before claiming code work. Integration preparation
 fetches and checks the ref again before creating its result or publication
 intent. A missing, moved, or mismatched ref fails safely with an actionable
-error; restore the exact ref or ask an operator to reopen a legacy submission.
+error; restore the exact ref, or revise a legacy submission with
+`agent-coordinator revise --reason-code candidate_missing` (or ask an operator to reopen it).
 
 Use an independent clone to confirm the checkpoint is available on another
 workstation before review. After workflow completion, remove only the exact
@@ -730,8 +731,9 @@ or `advisory`. An agent command cannot record a human-only review. Under the
 uses **Claim human review** in the dashboard. One approval is sufficient, and
 only one session can own the review at a time. A changes-requested decision
 requires a new submission. **Independent agent and human** (`both`) still
-requires both approvals. Changing project review policy does not convert
-existing submissions: stale candidates require reopening and fresh submission.
+requires both approvals. Changing project review policy reconciles submissions
+still in review: newly required reviews are added and reviews no longer required
+are canceled if still queued; candidates are not made stale.
 The service checks
 the authenticated principal and independent contributor history, so changing a
 token or session cannot turn a contributor into an independent reviewer.
@@ -871,6 +873,29 @@ integration activity and subject task and releases the canonical target hold.
 Use `integrations renew` and `integrations release` with the same argument shapes
 as their review equivalents while the activity remains owned. A release never
 clears an uncertain publication hold.
+
+## Revise, unblock and cancel
+
+When the project delegates them, agents move stuck work forward without a human:
+
+```text
+agent-coordinator revise --task TASK_ID --submission SUBMISSION_ID \
+  --reason-code conflict --reason "Target moved" --evidence "CONFLICT in src/lib.rs"
+agent-coordinator unblock --task TASK_ID --expected-revision 7 --reason "Resource now exists"
+agent-coordinator cancel --task TASK_ID --expected-revision 7 --reason "Wrong kind" \
+  --replacement NEW_TASK_ID
+```
+
+`revise` reopens the current submission through `workflow/reopen` and needs
+`recovery_mode=agent`. Reason codes: `conflict` and `check_failed` (the session
+owning the live integration attempt, with evidence), `candidate_missing` (any
+agent, when the code submission has no durable ref), `requirements_changed` (a
+non-contributor, when the task's judged fields changed) and `author_withdraw`
+(the author). At most three agent revises per task in 24 hours; the fourth
+returns `revise_limit_reached` for a human. `unblock` needs `recovery_mode=agent`
+and `cancel` needs `agent_rule_editing`; otherwise both are human gates. A
+refusal that only a human can clear carries `details.required_actor: "human"`
+and a `details.gate` name: report it instead of retrying.
 
 ## Recovery inspection
 
@@ -1076,8 +1101,8 @@ agent-coordinator objectives children --id OBJECTIVE_ID --input membership.json
 Task detail exposes service-known preconditions. For an exact task or workflow
 activity, use `GET /api/v1/projects/PROJECT_ID/preconditions/TARGET_ID` or the
 MCP tool `coordinator_preconditions_get` before claiming. The result names each
-known unmet gate, including reviewer independence and operator reopen where
-applicable. These reads do not reserve ownership; the guarded claim remains
+known unmet gate, including reviewer independence and reopen or revise where
+applicable; gates only a human can clear carry `required_actor: "human"`. These reads do not reserve ownership; the guarded claim remains
 authoritative. Code integrations include a merge-preflight hint because the
 service cannot inspect Git remotes or determine merge conflicts itself.
 

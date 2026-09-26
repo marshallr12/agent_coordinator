@@ -83,7 +83,9 @@ Rows created before candidate refs were required retain `candidate_ref = null`.
 They remain visible as historical records, but are not treated as remotely
 available. Their review and integration activities are blocked with an explicit
 `candidate_checkpoint_missing` condition. An operator may reopen an eligible
-pre-publication submission for a new revision; the next code submission must
+pre-publication submission for a new revision, and under `recovery_mode=agent` any
+agent may revise it with `reason_code: "candidate_missing"` (the service verifies the
+missing ref itself); the next code submission must
 create and verify a durable checkpoint. Never infer or synthesize a ref for a
 legacy commit.
 
@@ -131,11 +133,25 @@ global across projects and survives attempt/session/credential expiry.
 
 Expired or revoked activity ownership respects the project's recovery mode.
 In manual mode, agents cannot take over. A human inspects saved work and physical
-resources. Before publication intent exists, the human may reopen an expired,
-revoked, or policy-stale candidate; this fences its linked attempts and requires a
-new submission and new reviews. Live current owners must release first, and
+resources. Before publication intent exists, a human may reopen an expired,
+revoked, or requirements-stale candidate; under `recovery_mode=agent` an agent may
+revise it with a reason code (see below). Either fences its linked attempts and
+requires a new submission and new reviews. Live current owners must release first
+(the integration owner revising its own candidate is the exception), and
 unresolved jobs/resources always block reopening. After publication intent, use
 publication reconciliation. Completed workflows cannot be reopened.
+
+A submission pins a digest of the task's judged fields (title, description,
+acceptance criteria, kind), not whole task or policy revisions. Priority edits and
+policy changes such as the lease length no longer make a candidate stale. A policy
+update reconciles required reviews for subjects still in review: it adds reviews a
+tightened `review_mode` now requires, cancels queued ones no longer required, and
+advances subjects whose approvals already satisfy the mode. Approvals are matched
+by approver class (a human approval satisfies any review kind, an agent approval
+satisfies agent or either reviews, each approval counts once; `both` needs one of
+each). Subjects already in integration keep the review set they were approved
+under. The required-check roster is captured on the publication intent; the
+integration result and finalization validate against that captured roster.
 
 An authenticated agent may reconcile only when the exact current candidate and
 policy are unchanged, current scoped decisions are resolved, a fresh observation
@@ -335,6 +351,20 @@ released and reclaimed; callers cannot choose a newer revision at submission.
 
 An authenticated human may cancel a stale current submission with
 `POST /api/v1/projects/{project}/tasks/{task}/workflow/reopen` and
-`{submission_id, reason}`. This requires subject and activity quiescence, refuses
+`{submission_id, reason}`. An agent session uses the same endpoint to **revise**
+(CLI `agent-coordinator revise`) and must add `reason_code` and, where noted,
+`evidence`; the project must use `recovery_mode=agent`, otherwise the refusal is
+a labelled human gate (`details.gate: "human_reopen_required"`):
+
+| `reason_code` | Allowed agent caller |
+|---|---|
+| `conflict`, `check_failed` | The session owning the submission's live integration attempt; `evidence` required |
+| `candidate_missing` | Any agent, when the code submission has no durable candidate ref |
+| `requirements_changed` | Any agent that is not a task contributor, when the judged-field digest changed |
+| `author_withdraw` | The submission's author |
+
+Agents may revise a subject at most three times in 24 hours; the fourth attempt
+returns `revise_limit_reached` with `details.required_actor: "human"` and the task
+preconditions show the same code until a human acts. Reopening requires subject and activity quiescence, refuses
 uncertain or known publication, cancels pending activities, preserves all evidence,
 closes any safely releasable hold, and makes ordinary revision work eligible.

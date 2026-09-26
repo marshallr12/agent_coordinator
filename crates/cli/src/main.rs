@@ -1526,7 +1526,7 @@ async fn prepare_integration(
                 Failure::local(
                     5,
                     "candidate_checkpoint_missing",
-                    "this legacy code submission has no durable candidate ref; an operator must reopen it for a checkpointed submission",
+                    "this legacy code submission has no durable candidate ref; revise it with --reason-code candidate_missing (or ask an operator to reopen it) for a checkpointed submission",
                     false,
                 )
             })?;
@@ -2165,7 +2165,7 @@ async fn verify_candidate_before_claim(
             Failure::local(
                 5,
                 "candidate_checkpoint_missing",
-                "this legacy code submission has no durable candidate ref; have an operator reopen it for a new checkpointed submission",
+                "this legacy code submission has no durable candidate ref; revise it with --reason-code candidate_missing (or have an operator reopen it) for a new checkpointed submission",
                 false,
             )
         })?;

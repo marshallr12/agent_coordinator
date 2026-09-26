@@ -957,7 +957,7 @@ pub(crate) async fn activity_preconditions(
     {
         add(
             "candidate_checkpoint_missing",
-            "This historical code submission has no durable candidate ref. Reopen it through an operator before review or integration.",
+            "This historical code submission has no durable candidate ref. Revise it (reason_code candidate_missing) or ask an operator to reopen it before review or integration.",
         );
     }
     if ctx.kind == "integration" {
@@ -1663,7 +1663,7 @@ async fn claim_activity(
     {
         return Err(AppError::conflict(
             "candidate_checkpoint_missing",
-            "This historical code submission has no durable candidate ref. Ask an operator to reopen it for a checkpointed submission.",
+            "This historical code submission has no durable candidate ref. Revise it (reason_code candidate_missing) or ask an operator to reopen it for a checkpointed submission.",
         ));
     }
     if m.actor.kind == "agent"

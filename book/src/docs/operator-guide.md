@@ -122,7 +122,8 @@ needs it.
 
 Legacy code submissions without a ref remain visible as history but are blocked
 from review and integration claims. An operator can reopen an eligible
-pre-publication candidate for a new revision; the next code submission must
+pre-publication candidate for a new revision (agents may revise it with
+`reason_code: "candidate_missing"` under `recovery_mode=agent`); the next code submission must
 create a verified checkpoint. Do not infer a ref from a commit ID or move an
 existing checkpoint ref.
 

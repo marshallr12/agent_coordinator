@@ -57,7 +57,7 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   Listings are observations. A transactional claim is the only ownership grant.
 - Read-only precondition inspection for task, review, and integration claims.
   Task and orientation workflow subjects surface known blockers, including
-  reviewer independence, stale pinned policy/operator reopen, and a local Git
+  reviewer independence, changed task requirements (reopen or agent revise), and a local Git
   merge-preflight hint. An authenticated bounded long poll waits up to 30 seconds
   for one task status or workflow activity state token, checking at 500 ms
   intervals without holding a database transaction or renewing work. The service
@@ -206,8 +206,9 @@ same administrator can authenticate again to reconcile that request safely.
 Instruction version 7 added clock reconciliation and receipt-retention guidance.
 Instruction version 8 clarifies automatic non-contributing subagent review,
 explicit-only scope narrowing, and mandatory parent continuation after child review
-results. Existing sessions must fetch and acknowledge the new instructions before
-new claims.
+results. Instruction version 9 adds agent `revise`, `unblock` and `cancel` under the
+project's delegation switches and the `required_actor: "human"` labels. Existing
+sessions must fetch and acknowledge the new instructions before new claims.
 
 JSON requests default to 1 MiB and can be configured lower; artifact bytes use a
 separate 16 MiB hard limit. Task details return the latest 50 attempts,

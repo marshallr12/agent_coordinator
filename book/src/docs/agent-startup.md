@@ -183,7 +183,8 @@ any work you already own; do not abandon an active attempt to take a review.
    For code submissions, use the native CLI: it fetches and verifies the saved
    candidate checkpoint ref from the configured repository before claiming.
    A missing or changed ref blocks the claim; legacy submissions with no ref
-   need operator reopening. A listing grants no ownership. On a claim conflict,
+   are revised with `agent-coordinator revise --reason-code candidate_missing`
+   (or reopened by an operator). A listing grants no ownership. On a claim conflict,
    refresh and reconsider eligibility rather than repeatedly attempting the
    same ineligible review.
 4. Inspect the saved candidate and evidence, record an independent decision, and

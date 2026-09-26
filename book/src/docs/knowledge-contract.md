@@ -94,12 +94,15 @@ An answer requires:
 
 A prior allow stops blocking only while all of the following remain true:
 
-- every affected task has the exact pinned revision;
-- the project has the exact pinned policy revision;
+- every affected task's judged fields (title, description, acceptance criteria,
+  kind) are unchanged since the pinned revision; priority and dependency edits do
+  not count;
+- the project's rules text is unchanged since the pinned policy revision; other
+  policy changes such as the lease length or review mode do not count;
 - the allow explicitly confirmed the recorded conditions and environment;
 - the decision has not expired.
 
-If any pin changes or the allow expires, every affected task remains blocked until the decision is reopened against all current revisions and answered again. This prevents an answer for one task in a multi-task scope from silently carrying forward after another affected task changes. Reopening creates a new immutable generation and cannot change the question, options, or required actor, so it cannot weaken a human requirement. Older generations and answers remain inspectable.
+If any of these scoped pins changes or the allow expires, every affected task remains blocked until the decision is reopened against all current revisions and answered again. This prevents an answer for one task in a multi-task scope from silently carrying forward after another affected task changes. Reopening creates a new immutable generation and cannot change the question, options, or required actor, so it cannot weaken a human requirement. Older generations and answers remain inspectable.
 
 Opening or reopening a decision is rejected while any affected subject or activity holds integration publication authority. This avoids issuing a new blocker after a publisher has already received exclusive authority for an external compare-and-swap operation.
 
