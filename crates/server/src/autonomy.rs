@@ -418,6 +418,20 @@ async fn submission_author(c: &mut SqliteConnection, submission: &str) -> Result
     )
 }
 
+/// True when the session acknowledged the current instruction version for this
+/// project under the current rules text. The key is (INSTRUCTION_VERSION, rules),
+/// computed on read, so policy changes that leave the rules untouched (lease, review
+/// mode, switches) do not force every agent to re-acknowledge.
+pub(crate) async fn instructions_acknowledged(
+    c: &mut SqliteConnection,
+    session: &str,
+    project: &str,
+) -> Result<bool, AppError> {
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM instruction_acknowledgments ia JOIN projects p ON p.id=ia.project_id LEFT JOIN policy_revisions pr ON pr.project_id=ia.project_id AND pr.revision=ia.policy_revision WHERE ia.session_id=? AND ia.project_id=? AND ia.instruction_version=? AND (ia.policy_revision=p.policy_revision OR json_extract(pr.data_json,'$.rules')=p.rules)")
+        .bind(session).bind(project).bind(coordinator_core::INSTRUCTION_VERSION).fetch_one(&mut *c).await?;
+    Ok(n > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::reviews_satisfied;

@@ -1057,16 +1057,9 @@ async fn decision_value(
         .bind(generation)
         .fetch_optional(&mut *c)
         .await?;
-    let current_policy: i64 = sqlx::query_scalar("SELECT policy_revision FROM projects WHERE id=?")
-        .bind(project)
-        .fetch_one(&mut *c)
-        .await?;
     let tasks=sqlx::query("SELECT dt.task_id,dt.task_revision,t.revision AS current_revision FROM decision_affected_tasks dt JOIN tasks t ON t.project_id=dt.project_id AND t.id=dt.task_id WHERE dt.decision_id=? AND dt.generation=? ORDER BY dt.task_id")
         .bind(id).bind(generation).fetch_all(&mut *c).await?;
-    let stale = current_policy != cycle.get::<i64, _>("policy_revision")
-        || tasks
-            .iter()
-            .any(|r| r.get::<i64, _>("task_revision") != r.get::<i64, _>("current_revision"));
+    let stale = decision_scope_changed(c, id, generation).await?;
     let expires = cycle.get::<Option<i64>, _>("expires_at");
     let status = if stale {
         "stale"
@@ -1284,9 +1277,37 @@ pub async fn pending_decision_ids(
     limit: usize,
 ) -> Result<Vec<String>, AppError> {
     let bounded_limit = limit.clamp(1, 200) as i64;
-    let rows=sqlx::query_scalar::<_,String>("SELECT d.id FROM decisions d JOIN decision_cycles c ON c.decision_id=d.id AND c.generation=d.current_generation JOIN projects p ON p.id=d.project_id LEFT JOIN decision_answers a ON a.decision_id=d.id AND a.generation=d.current_generation WHERE d.project_id=? AND (? IS NULL OR EXISTS(SELECT 1 FROM decision_affected_tasks target WHERE target.decision_id=d.id AND target.generation=d.current_generation AND target.task_id=?)) AND (c.policy_revision!=p.policy_revision OR EXISTS(SELECT 1 FROM decision_affected_tasks scoped JOIN tasks current ON current.project_id=scoped.project_id AND current.id=scoped.task_id WHERE scoped.decision_id=d.id AND scoped.generation=d.current_generation AND scoped.task_revision!=current.revision) OR a.decision_id IS NULL OR a.disposition!='allow' OR a.conditions_confirmed=0 OR (c.expires_at IS NOT NULL AND c.expires_at<=?)) ORDER BY d.created_at,d.id LIMIT ?")
+    let rows=sqlx::query_scalar::<_,String>("SELECT d.id FROM decisions d JOIN decision_cycles c ON c.decision_id=d.id AND c.generation=d.current_generation JOIN projects p ON p.id=d.project_id LEFT JOIN decision_answers a ON a.decision_id=d.id AND a.generation=d.current_generation WHERE d.project_id=? AND (? IS NULL OR EXISTS(SELECT 1 FROM decision_affected_tasks target WHERE target.decision_id=d.id AND target.generation=d.current_generation AND target.task_id=?)) AND (COALESCE((SELECT json_extract(pr.data_json,'$.rules') FROM policy_revisions pr WHERE pr.project_id=d.project_id AND pr.revision=c.policy_revision)!=p.rules, c.policy_revision!=p.policy_revision) OR EXISTS(SELECT 1 FROM decision_affected_tasks scoped JOIN tasks current ON current.project_id=scoped.project_id AND current.id=scoped.task_id LEFT JOIN task_revisions tr ON tr.task_id=scoped.task_id AND tr.revision=scoped.task_revision WHERE scoped.decision_id=d.id AND scoped.generation=d.current_generation AND scoped.task_revision!=current.revision AND (tr.task_id IS NULL OR json_extract(tr.data_json,'$.title') IS NOT current.title OR json_extract(tr.data_json,'$.description') IS NOT current.description OR json(json_extract(tr.data_json,'$.acceptance_criteria')) IS NOT json(current.acceptance_json) OR json_extract(tr.data_json,'$.kind') IS NOT current.kind)) OR a.decision_id IS NULL OR a.disposition!='allow' OR a.conditions_confirmed=0 OR (c.expires_at IS NOT NULL AND c.expires_at<=?)) ORDER BY d.created_at,d.id LIMIT ?")
         .bind(project).bind(task).bind(task).bind(now).bind(bounded_limit).fetch_all(c).await?;
     Ok(rows)
+}
+
+/// True when a decision's scope changed since its cycle opened: the project's rules
+/// text, or the judged fields (title, description, acceptance criteria, kind) of an
+/// affected task. Priority edits and other policy changes leave decisions current.
+async fn decision_scope_changed(
+    c: &mut SqliteConnection,
+    id: &str,
+    generation: i64,
+) -> Result<bool, AppError> {
+    let rules_changed: bool = sqlx::query_scalar("SELECT COALESCE((SELECT json_extract(pr.data_json,'$.rules') FROM policy_revisions pr WHERE pr.project_id=d.project_id AND pr.revision=c.policy_revision)!=p.rules, c.policy_revision!=p.policy_revision) FROM decisions d JOIN decision_cycles c ON c.decision_id=d.id AND c.generation=? JOIN projects p ON p.id=d.project_id WHERE d.id=?")
+        .bind(generation).bind(id).fetch_one(&mut *c).await?;
+    if rules_changed {
+        return Ok(true);
+    }
+    let tasks: Vec<(String, i64, i64)> = sqlx::query_as("SELECT dt.task_id,dt.task_revision,t.revision FROM decision_affected_tasks dt JOIN tasks t ON t.id=dt.task_id WHERE dt.decision_id=? AND dt.generation=?")
+        .bind(id).bind(generation).fetch_all(&mut *c).await?;
+    for (task, revision, current_revision) in tasks {
+        if revision == current_revision {
+            continue;
+        }
+        let current = crate::autonomy::current_task_digest(c, &task).await?;
+        let recorded = crate::autonomy::revision_task_digest(c, &task, revision).await?;
+        if recorded.is_none_or(|recorded| recorded != current) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Guard ownership-dependent work after the caller has acquired the SQLite

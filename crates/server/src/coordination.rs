@@ -542,10 +542,8 @@ pub(crate) async fn task_preconditions_snapshot(
         }
     }
     if actor.kind == "agent" {
-        let ack: i64 = sqlx::query_scalar("SELECT count(*) FROM instruction_acknowledgments WHERE session_id=? AND project_id=? AND policy_revision=? AND instruction_version=?")
-            .bind(actor.session_id.as_deref().unwrap_or("")).bind(project_id).bind(current_project.policy_revision).bind(INSTRUCTION_VERSION)
-            .fetch_one(&mut *c).await?;
-        if ack == 0 {
+        let session = actor.session_id.as_deref().unwrap_or("");
+        if !crate::autonomy::instructions_acknowledged(c, session, project_id).await? {
             unmet.push(json!({"code":"instructions_required","message":"Read and acknowledge the current coordination instructions before claiming."}));
         }
     }
@@ -1589,15 +1587,13 @@ async fn claim(
             "Read and acknowledge the current orientation before claiming.",
         ));
     }
-    if m.actor.kind == "agent" {
-        let acknowledged:i64=sqlx::query_scalar("SELECT count(*) FROM instruction_acknowledgments WHERE session_id=? AND project_id=? AND policy_revision=? AND instruction_version=?")
-            .bind(&owner_session).bind(&p).bind(proj.policy_revision).bind(INSTRUCTION_VERSION).fetch_one(&mut *m.tx).await?;
-        if acknowledged == 0 {
-            return Err(AppError::conflict(
-                "instructions_required",
-                "Read orientation and acknowledge its required sections before claiming.",
-            ));
-        }
+    if m.actor.kind == "agent"
+        && !crate::autonomy::instructions_acknowledged(&mut m.tx, &owner_session, &p).await?
+    {
+        return Err(AppError::conflict(
+            "instructions_required",
+            "Read orientation and acknowledge its required sections before claiming.",
+        ));
     }
     if input.mode == "recovery" && proj.recovery_mode == "manual" && m.actor.kind != "human" {
         return Err(AppError::human_gate(

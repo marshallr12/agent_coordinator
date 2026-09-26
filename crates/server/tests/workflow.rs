@@ -2427,3 +2427,54 @@ async fn agent_revise_is_rate_limited_and_needs_agent_recovery() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{manual}");
     assert_eq!(manual["error"]["details"]["gate"], "human_reopen_required");
 }
+
+/// Change only the project's lease (rules untouched) or only its rules text.
+async fn patch_policy(f: &Fixture, p: &str, expected: i64, lease: i64, rules: &str) {
+    let (status, v) = f
+        .call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"),
+            json!({"expected_revision":expected,"review_mode":"none","recovery_mode":"agent","lease_seconds":lease,"rules":rules,"agent_rule_editing":false,"automatic_integration":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+// P1 autonomy: instruction acks and decisions are keyed on the rules text and the
+// judged task fields, so a lease-only change keeps them current and a rules change
+// re-pends them.
+#[tokio::test]
+async fn acks_and_decisions_repend_only_on_rules_changes() {
+    let f = Fixture::new().await;
+    let p = f.project("ack-scope", "https://example.test/ack.git").await;
+    f.policy_none(&p).await;
+    let t = f.task(&p, "general", "Scoped decision").await;
+    f.ack(&f.a, &p, 2).await;
+    let decision = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO decisions(id,project_id,question,options_json,rationale,required_actor,created_by,created_at) VALUES(?,?,'Proceed?','[\"Yes\",\"No\"]','scope','either',?,?)")
+        .bind(&decision).bind(&p).bind(&f.admin.principal).bind(f.state.now()).execute(&f.state.pool).await.unwrap();
+    sqlx::query("INSERT INTO decision_cycles(decision_id,generation,policy_revision,environment,conditions,expires_at,rationale,opened_by,created_at) VALUES(?,1,2,'test','none',NULL,'scope',?,?)")
+        .bind(&decision).bind(&f.admin.principal).bind(f.state.now()).execute(&f.state.pool).await.unwrap();
+    sqlx::query("INSERT INTO decision_affected_tasks(decision_id,generation,project_id,task_id,task_revision) VALUES(?,1,?,?,?)")
+        .bind(&decision).bind(&p).bind(t["id"].as_str().unwrap()).bind(t["revision"].as_i64().unwrap()).execute(&f.state.pool).await.unwrap();
+    sqlx::query("INSERT INTO decision_answers(decision_id,generation,disposition,answer,rationale,actor_id,actor_session_id,conditions_confirmed,created_at) VALUES(?,1,'allow','Yes','ok',?,?,1,?)")
+        .bind(&decision).bind(&f.admin.principal).bind(&f.admin.session).bind(f.state.now()).execute(&f.state.pool).await.unwrap();
+    let task_path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let decision_path = format!("/api/v1/projects/{p}/decisions/{decision}");
+    let needs_ack = |v: &Value| {
+        v["data"]["preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["code"] == "instructions_required")
+    };
+
+    patch_policy(&f, &p, 2, 3600, "").await;
+    let (_, detail) = f.call(&f.a, "GET", &task_path, Value::Null).await;
+    assert!(!needs_ack(&detail), "{detail}");
+    let (_, current) = f.call(&f.a, "GET", &decision_path, Value::Null).await;
+    assert_eq!(current["data"]["status"], "allowed", "{current}");
+
+    patch_policy(&f, &p, 3, 3600, "Always run the browser fixture.").await;
+    let (_, detail) = f.call(&f.a, "GET", &task_path, Value::Null).await;
+    assert!(needs_ack(&detail), "{detail}");
+    let (_, stale) = f.call(&f.a, "GET", &decision_path, Value::Null).await;
+    assert_eq!(stale["data"]["status"], "stale", "{stale}");
+}

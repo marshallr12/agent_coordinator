@@ -8,10 +8,9 @@ use axum::{
 };
 use coordinator_core::{
     ActivityClaimInput, ActivityReleaseInput, AgentPublicationReconciliationInput,
-    FinalizeIntegrationInput, INSTRUCTION_VERSION, IntegrationAuthorizationInput,
-    IntegrationResultInput, PublicationIntentInput, PublicationReconciliationInput,
-    ReopenSubmissionInput, RequiredCheck, ReviewInput, SubmissionInput, WorkflowPolicyInput,
-    timestamp,
+    FinalizeIntegrationInput, IntegrationAuthorizationInput, IntegrationResultInput,
+    PublicationIntentInput, PublicationReconciliationInput, ReopenSubmissionInput, RequiredCheck,
+    ReviewInput, SubmissionInput, WorkflowPolicyInput, timestamp,
 };
 use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection};
@@ -918,10 +917,7 @@ pub(crate) async fn activity_preconditions(
     }
     if actor.kind == "agent" {
         let session_id = actor.session_id.as_deref().unwrap_or("");
-        let ack: i64 = sqlx::query_scalar("SELECT count(*) FROM instruction_acknowledgments WHERE session_id=? AND project_id=? AND policy_revision=? AND instruction_version=?")
-            .bind(session_id).bind(project).bind(ctx.project_current_policy).bind(INSTRUCTION_VERSION)
-            .fetch_one(&mut *c).await?;
-        if ack == 0 {
+        if !crate::autonomy::instructions_acknowledged(c, session_id, project).await? {
             add(
                 "instructions_required",
                 "Read and acknowledge current coordination instructions before claiming workflow work.",
@@ -1670,16 +1666,13 @@ async fn claim_activity(
             "This historical code submission has no durable candidate ref. Ask an operator to reopen it for a checkpointed submission.",
         ));
     }
-    if m.actor.kind == "agent" {
-        let acknowledged:i64=sqlx::query_scalar("SELECT count(*) FROM instruction_acknowledgments WHERE session_id=? AND project_id=? AND policy_revision=? AND instruction_version=?")
-            .bind(&owner_session).bind(&project).bind(ctx.project_current_policy).bind(INSTRUCTION_VERSION)
-            .fetch_one(&mut *m.tx).await?;
-        if acknowledged == 0 {
-            return Err(AppError::conflict(
-                "instructions_required",
-                "Read and acknowledge the current coordination instructions before claiming workflow work.",
-            ));
-        }
+    if m.actor.kind == "agent"
+        && !crate::autonomy::instructions_acknowledged(&mut m.tx, &owner_session, &project).await?
+    {
+        return Err(AppError::conflict(
+            "instructions_required",
+            "Read and acknowledge the current coordination instructions before claiming workflow work.",
+        ));
     }
     match ctx.kind.as_str() {
         "agent_review" | "either_review" if m.actor.kind == "agent" => {
