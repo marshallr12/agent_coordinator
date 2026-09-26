@@ -35,3 +35,10 @@ integrations. Native Windows client coverage remains valuable and is retained in
 CI, but it is not a default release-blocking required check. A project may opt
 into a native Windows check when its change or release specifically needs that
 assurance; its live required-check roster is authoritative for the integration.
+
+Human changes reach `main` only as fast-forwards to commits whose required
+checks are already green. Run `python3 scripts/ship.py` from a clean,
+committed branch: it pushes HEAD to `ac/human/<branch>`, waits for
+*Coordination checks* and *Documentation checks* to succeed on that exact
+commit, then fast-forwards `main` and confirms the remote tip. It never
+force-pushes; if `main` moved, rebase and ship again.
