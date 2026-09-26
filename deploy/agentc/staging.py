@@ -106,7 +106,10 @@ class Staging:
         return json.loads(path.read_text()) if path.is_file() else None
 
     def pid(self):
-        """The running server's pid, or None (stale pid files are ignored)."""
+        """The running server's pid, or None (stale pid files are ignored).
+
+        A process counts as this instance's server when its command line names
+        this instance's database, whichever build profile it was started from."""
         path = self.path("server.pid")
         if not path.is_file():
             return None
@@ -115,7 +118,8 @@ class Staging:
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
         except OSError:
             return None
-        return pid if str(self.server).encode() in cmdline else None
+        database = str(self.path("db", "coordinator.sqlite3")).encode()
+        return pid if database in cmdline.split(b"\0") else None
 
 
 def healthy(origin):
@@ -128,17 +132,22 @@ def healthy(origin):
 
 
 def start_server(st):
-    """Starts `serve` detached, logging to server.log; waits until healthy."""
+    """Starts `serve` detached, logging to server.log; waits until healthy.
+
+    Refuses when something already answers on the port, since a health check
+    could not tell that process from the new one."""
+    if healthy(st.origin):
+        sys.exit(f"{st.origin} is already served by a process this instance does not own")
     log = open(st.path("server.log"), "ab")
     process = subprocess.Popen(st.server_command("serve"), stdout=log, stderr=log,
                                stdin=subprocess.DEVNULL, env=clean_env(),
                                start_new_session=True)
     st.path("server.pid").write_text(str(process.pid))
     for _ in range(200):
-        if healthy(st.origin):
-            return
         if process.poll() is not None:
             sys.exit(f"server exited; see {st.path('server.log')}")
+        if healthy(st.origin):
+            return
         time.sleep(0.05)
     sys.exit("server did not become healthy")
 
