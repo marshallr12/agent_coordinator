@@ -210,22 +210,32 @@ Record answers here.
 
 | # | Decision | Recommendation | Answer (date, choice, note) |
 |---|---|---|---|
-| U0 | Apply the day-0 ruleset now (`non_fast_forward` + `deletion` on `main`; binds everyone incl. the owner; no bypass) | Yes | |
-| U1 | Windows: required producer or non-blocking Actions observer | Observer | |
-| U2 | Human changes: FF pushes of green SHAs via `ship` under rulesets; pre-merge review for agent paths; post-hoc review only for landings with agent trailers/unknown provenance | Yes | |
-| U3 | Billing for the unattended pool | API billing (also enables Claude `--bare`); ceiling after the pilot ($5–30/task est.). If subscription: P2 must prove another way to stop candidate `CLAUDE.md` loading, or the pilot runs Codex-only | |
-| U4 | Move repo to a GitHub org | No, unless the ruleset test fails | |
-| U5 | Review independence default | `distinct_launch` (separate reviewer uid, landing-range contributors); `distinct_vendor` where both vendors configured | |
-| U6 | Hosts | oracle-1 primary supervisor, mxmini secondary (quiet hours), MINIAIR opportunistic, integrator on the e2-micro | |
-| U7 | GitHub Actions receipts as required default | Yes (native-producer receipts kept as escape hatch) | |
-| U8 | Agent rule edits | Autonomous above the constitution with elevated review + post-hoc notification | |
-| U9 | Coordinator production deploys (incl. dea68719 and the P1 deploy) | Reserved decisions until dogfood data exists | |
-| U10 | `requires_human_acceptance` blocks done? | No; non-blocking follow-up | |
-| U11 | Probe spend (~10 prompts, <$1, in P2) and 5-task pilot budget | Approve | |
-| U12 | Admission rule for agent-originated work | Always admit reverts/fix-target/de-flake/refusal fixes + 5 agent tasks per week | |
-| U13 | Notification channel for digest and pages | User's choice (ntfy/email) | |
-| U14 | After P1 is deployed, may autonomy work run as coordinator tasks (dogfooding), or stay outside the workflow as originally instructed? | Dogfood | |
+| U0 | Apply the day-0 ruleset now (`non_fast_forward` + `deletion` on `main`; binds everyone incl. the owner; no bypass) | Yes || 2026-09-25: **yes** (apply now) |
+| U1 | Windows: required producer or non-blocking Actions observer | Observer || 2026-09-25: **observer** |
+| U2 | Human changes: FF pushes of green SHAs via `ship` under rulesets; pre-merge review for agent paths; post-hoc review only for landings with agent trailers/unknown provenance | Yes || 2026-09-25: **yes** (`ship` + rulesets) |
+| U3 | Billing for the unattended pool | API billing (also enables Claude `--bare`); ceiling after the pilot ($5–30/task est.). If subscription: P2 must prove another way to stop candidate `CLAUDE.md` loading, or the pilot runs Codex-only || 2026-09-25: **subscription** (against recommendation) ⇒ P2 must prove candidate `CLAUDE.md` does not load, else pilot is Codex-only |
+| U4 | Move repo to a GitHub org | No, unless the ruleset test fails || 2026-09-25: **no**, unless the ruleset test fails |
+| U5 | Review independence default | `distinct_launch` (separate reviewer uid, landing-range contributors); `distinct_vendor` where both vendors configured || 2026-09-25: **`distinct_launch`** |
+| U6 | Hosts | oracle-1 primary supervisor, mxmini secondary (quiet hours), MINIAIR opportunistic, integrator on the e2-micro || 2026-09-25: **as recommended** |
+| U7 | GitHub Actions receipts as required default | Yes (native-producer receipts kept as escape hatch) || 2026-09-25: **yes** |
+| U8 | Agent rule edits | Autonomous above the constitution with elevated review + post-hoc notification || 2026-09-25: **as recommended** |
+| U9 | Coordinator production deploys (incl. dea68719 and the P1 deploy) | Reserved decisions until dogfood data exists || 2026-09-25: **agent-deployable after the preflight** (against recommendation) ⇒ plan §0 Reserved and §2.7 need updating; P1 deploy still needs the preflight at 0 |
+| U10 | `requires_human_acceptance` blocks done? | No; non-blocking follow-up || 2026-09-25: **no** (non-blocking follow-up) |
+| U11 | Probe spend (~10 prompts, <$1, in P2) and 5-task pilot budget | Approve || 2026-09-25: **approve** (probes + 5-task pilot) |
+| U12 | Admission rule for agent-originated work | Always admit reverts/fix-target/de-flake/refusal fixes + 5 agent tasks per week || 2026-09-25: **as recommended** (fixes + 5/week) |
+| U13 | Notification channel for digest and pages | User's choice (ntfy/email) || 2026-09-25: **ntfy pages + email digest** |
+| U14 | After P1 is deployed, may autonomy work run as coordinator tasks (dogfooding), or stay outside the workflow as originally instructed? | Dogfood || 2026-09-25: **dogfood** after P1 deploy |
 | U15 | Commit `planning/autonomy/` on `autonomy-plan` after a redaction pass, or keep it local (repo is public) | Commit after redaction | 2026-09-25: **commit and push** `autonomy-plan` to origin; redaction pass done (private repo name, home paths) |
+
+**Impact of answers that differ from the recommendation (2026-09-25):**
+- **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
+  `CLAUDE.md`/`.claude/` never loads for Claude launches; if it cannot, the pilot runs Codex-only.
+- **U9 = agent-deployable after the preflight:** production deploys are no longer a reserved
+  decision. Plan-final §0 "Reserved" and §2.7 are amended by this answer: a deploy may proceed
+  without the user once the §2.2-P1 preflight shows all counts 0 (and, from P4, the release's
+  required checks are green). Guard-code releases and non-expand migrations still need the
+  preflight; the fenced deploy gate stays [F]. For the P1 deploy, §5 step 5's "user's U9
+  decision" becomes "agent deploy after a clean preflight".
 
 ## 7. Sign-off and risk register
 
@@ -354,3 +364,5 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
 | Date | Phase / step | Commit | Gate | Notes |
 |---|---|---|---|---|
 | 2026-09-25 | Planning complete | committed and pushed on `autonomy-plan` | n/a | Handoff, plan-final, transcript, reviews, tools |
+| 2026-09-25 | P0: decisions U0–U14 | — | n/a | All answered (see §6) |
+| 2026-09-25 | P0: day-0 ruleset | — | read-back `["deletion","non_fast_forward"]` | Ruleset id 24031302 `day0-main` on `~DEFAULT_BRANCH`, no bypass |
