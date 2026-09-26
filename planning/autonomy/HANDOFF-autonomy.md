@@ -400,6 +400,28 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
 | 2026-09-26 | P2: staging running on mxmini | `ff286ec` | owner/impl/rev `connect` ok; impl creates a task; rev refused `operation_not_permitted`, can list | `127.0.0.1:18080`, state `~/.local/state/agentc-staging`, project `1dad5306-cbaf-4e6c-a7ed-20b9f369362d`, server = worktree debug build (pid in `server.pid`; `staging.py down` stops it) |
 | 2026-09-26 | P2: release build + staging on it | `cce0342` (binaries from `ff286ec`) | release build ok; staging `compatibility` all true | Found and fixed a `staging.py` bug: `down` matched the pid by binary path, so after the first release build it ignored the running debug server and `up` reported a bind-failed server as healthy. Now matched by database path; `up` refuses a foreign listener. Awaiting the user's sudo steps (step 2 below) |
 | 2026-09-26 | **P2 exit**: user re-ran host-setup (release `ff286ec` binaries, node, browser, verification dirs), staging credentials, verification entry, suite | `cce0342` | **containment suite: all checks PASS** incl. reviewer headless browser on staging, cargo test under uid+firewall and inside the Codex sandbox; CI green on `cce0342` | Next: fresh-context review of `origin/main..autonomy/p2` (running), user's OK, preflight, FF `main`, deploy migration 0023 |
+| 2026-09-26 | P2 fresh-context review + fixes | `8d2dafa` `81bd199` `a34944d` `1d5bc3d` | full CI gate green (299 tests, smoke, backup smoke, docs) | Fixed: root symlink takeover in host-setup (blocker), secret-scan gaps (merges, binary, names, config, forged refs), DevTools port reachable cross-uid (now pipe), re-issued credential widening read→write, preflight firewall/proxy probes + proxy refuses local addresses. Deferred items below are [R-P3b] |
+
+### [R-P3b] Deferred from the P2 review (must be done before the first live launch)
+
+Nothing launches unattended before P3b, so P2 ships without these; each is a launch-model change.
+1. **Claude-profile write confinement** (review #6): a Claude launch can write anything its uid owns —
+   other launches' clones/runs, `$CARGO_HOME/config.toml` (`rustc-wrapper` persists into later builds),
+   `$HOME`, and `claude-config/settings.json` (loaded by the next launch via `--setting-sources user`).
+   Make settings/`CLAUDE.md`/`CARGO_HOME/config*` root-owned read-only or preflight-verified, give each
+   launch its own writable state, and add Claude-profile write probes to the suite.
+2. **Push and scan outside the agent's reach** (review #7): the scan runs in the agent's own CLI process,
+   `.git/config` is editable, and the deny rules are prefix matches. Safe today only because agent uids
+   have no GitHub credential. Before P3 provisions one: ruleset restricting `main` (P4 ruleset A) and a
+   candidate-push helper under a separate uid that the agent cannot modify.
+3. **Reviewer builds run candidate code with reviewer secrets** (review #8): `cargo test` as
+   `agentc-rev` executes the implementer's `build.rs`/tests with the reviewer's token, staging password
+   and harness logins readable. Run candidate code under a third uid or a sandbox that hides those paths.
+4. **Cross-uid loopback**: the firewall opens loopback 32768-60999 to both agent uids, so each can reach
+   the other's (and the owner's) listeners. Narrow it (per-uid network namespace or owner-matched rules).
+5. Nits: `ship.py` fetch/ls-remote race and no overall Actions timeout (and `gh run list` default repo);
+   launches lack `no_new_privs` and leftover-process cleanup; `--uninstall` does not kill agent processes
+   or remove crontabs/`/tmp` files; read-only credentials can still create subagent sessions.
 
 ### Next session: resume P2 here
 
