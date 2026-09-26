@@ -2170,6 +2170,13 @@ mod tests {
         );
     }
 
+    /// A credential file name Git quotes in patch headers: quote, backslash and
+    /// tab where the file system allows them, else a space and non-ASCII.
+    #[cfg(not(windows))]
+    const ODD_CREDENTIAL_PATH: &str = "we\"ird\\\tdir/server.pem";
+    #[cfg(windows)]
+    const ODD_CREDENTIAL_PATH: &str = "we ird d\u{ed}r/s\u{e9}rver.pem";
+
     #[test]
     fn secret_scan_flags_renamed_and_oddly_named_credential_files() {
         let repository = repository();
@@ -2191,7 +2198,7 @@ mod tests {
             ["checkout", "-B", "odd", &repository.base],
         )
         .unwrap();
-        commit_file(&repository, "we\"ird\\\tdir/server.pem", b"x\n", "odd");
+        commit_file(&repository, ODD_CREDENTIAL_PATH, b"x\n", "odd");
         let error = checkpoint_error(&repository, "odd");
         assert!(error.contains("credential_file"), "{error}");
     }
