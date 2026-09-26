@@ -29,6 +29,11 @@ pub struct Config {
     pub egress_allow: Vec<String>,
     /// Extra hosts for this host (e.g. the coordinator), added to `egress_allow`.
     pub egress_allow_extra: Vec<String>,
+    /// Public `ip:port` preflight connects to directly; reaching it means
+    /// the firewall is not enforcing (an IP literal, so no DNS is needed).
+    pub egress_probe_target: String,
+    /// Name preflight asks the proxy to tunnel; it must answer 403.
+    pub egress_probe_blocked_host: String,
     /// Root-owned Rust toolchain: `rustup/` (read-only) and `cargo/bin` proxies.
     pub toolchain_dir: PathBuf,
     /// Exact harness versions a launch refuses to run without.
@@ -60,6 +65,8 @@ impl Default for Config {
                 .map(|host| host.to_string())
                 .collect(),
             egress_allow_extra: Vec::new(),
+            egress_probe_target: "1.1.1.1:443".into(),
+            egress_probe_blocked_host: "blocked.invalid".into(),
             toolchain_dir: PathBuf::from("/opt/agentc"),
             pinned: Pinned::default(),
             browser: PathBuf::from("/usr/bin/chromium"),

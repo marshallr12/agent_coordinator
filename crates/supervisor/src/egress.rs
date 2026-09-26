@@ -3,6 +3,7 @@
 //! proxy; the proxy tunnels HTTPS (`CONNECT host:443`) to allowlisted hosts
 //! and refuses everything else. Decisions are logged as JSON lines on stderr.
 use anyhow::{Context, Result};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -69,24 +70,75 @@ pub async fn serve(listen: &str, allow: Vec<String>) -> Result<()> {
     }
 }
 
-/// Handles one client: read the head, decide, then tunnel or refuse.
+/// Handles one client: read the head, decide, then tunnel or refuse. An
+/// allowlisted name is tunnelled only to a resolved address that is public.
 async fn handle(mut client: TcpStream, allow: &[String]) -> Result<()> {
     let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client)).await??;
     let target = connect_target(&head);
-    let decision = target.as_deref().is_some_and(|host| allowed(host, allow));
-    log(target.as_deref().unwrap_or("-"), decision);
-    let Some(host) = target.filter(|_| decision) else {
+    let addresses = match target.as_deref().filter(|host| allowed(host, allow)) {
+        Some(host) => permitted_addresses(host).await,
+        None => Vec::new(),
+    };
+    log(target.as_deref().unwrap_or("-"), !addresses.is_empty());
+    if addresses.is_empty() {
         client
             .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             .await?;
         return Ok(());
-    };
-    let mut upstream = TcpStream::connect((host.as_str(), 443)).await?;
+    }
+    let mut upstream = TcpStream::connect(&addresses[..]).await?;
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
     Ok(())
+}
+
+/// Resolves `host:443` and keeps only publicly routable addresses, so an
+/// allowlisted name cannot be pointed at loopback or the local network.
+async fn permitted_addresses(host: &str) -> Vec<SocketAddr> {
+    match tokio::net::lookup_host((host, 443)).await {
+        Ok(resolved) => resolved.filter(|a| public_address(a.ip())).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Whether `ip` may be tunnelled to: not loopback, private, link-local,
+/// unspecified, multicast or otherwise local (IPv4-mapped IPv6 included).
+pub fn public_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => public_v4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => public_v4(v4),
+            None => public_v6(v6),
+        },
+    }
+}
+
+/// IPv4 addresses that are not local, private or non-unicast.
+fn public_v4(ip: Ipv4Addr) -> bool {
+    let [first, second, ..] = ip.octets();
+    let this_network = first == 0;
+    let shared = first == 100 && (second & 0xc0) == 64; // 100.64.0.0/10
+    !(ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || this_network
+        || shared)
+}
+
+/// IPv6 addresses that are not local, unique-local or non-unicast.
+fn public_v6(ip: Ipv6Addr) -> bool {
+    let site_local = (ip.segments()[0] & 0xffc0) == 0xfec0; // fec0::/10
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+        || site_local)
 }
 
 /// Reads until the blank line that ends the request head.
@@ -142,21 +194,72 @@ mod tests {
         assert_eq!(connect_target("CONNECT a b:443 HTTP/1.1\r\n\r\n"), None);
     }
 
-    #[tokio::test]
-    async fn refused_hosts_get_403_without_upstream_contact() {
+    /// Sends one CONNECT for `host` to a proxy allowing `allow`; the reply.
+    async fn proxy_reply(host: &str, allow: Vec<String>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (client, _) = listener.accept().await.unwrap();
-            handle(client, &list()).await.unwrap();
+            handle(client, &allow).await.unwrap();
         });
         let mut stream = TcpStream::connect(address).await.unwrap();
-        stream
-            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
-            .await
-            .unwrap();
+        let request = format!("CONNECT {host}:443 HTTP/1.1\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await.unwrap();
+        reply
+    }
+
+    #[tokio::test]
+    async fn refused_hosts_get_403_without_upstream_contact() {
+        let reply = proxy_reply("example.com", list()).await;
         assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn allowlisted_name_resolving_to_loopback_gets_403() {
+        let reply = proxy_reply("localhost", vec!["localhost".into()]).await;
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+    }
+
+    #[test]
+    fn local_and_non_unicast_addresses_are_not_public() {
+        for local in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "0.1.2.3",
+            "224.0.0.1",
+            "255.255.255.255",
+            "100.64.0.1",
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd12::1",
+            "fec0::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:169.254.1.1",
+        ] {
+            assert!(!public_address(local.parse().unwrap()), "{local}");
+        }
+    }
+
+    #[test]
+    fn public_addresses_are_permitted() {
+        for public in [
+            "1.1.1.1",
+            "140.82.112.3",
+            "100.128.0.1",
+            "2606:4700::1111",
+            "::ffff:1.1.1.1",
+        ] {
+            assert!(public_address(public.parse().unwrap()), "{public}");
+        }
     }
 }

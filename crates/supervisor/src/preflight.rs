@@ -3,6 +3,7 @@
 //! human-readable problem instead of failing fast, so one run lists them all.
 use crate::clone;
 use crate::config::Config;
+use crate::network_probe;
 use crate::profile::{self, Harness, LaunchSpec, Role, run_files};
 use crate::role_settings;
 use crate::verification;
@@ -21,11 +22,25 @@ pub fn check(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     problems.extend(layout_problems(spec));
     problems.extend(settings_problem(spec));
     problems.extend(verification_problems(spec, config));
+    problems.extend(network_problems(config));
     match clone::hardening_problems(&spec.clone) {
         Ok(found) => problems.extend(found),
         Err(error) => problems.push(format!("clone {}: {error:#}", spec.clone.display())),
     }
     problems
+}
+
+/// The firewall and egress proxy must be in force for this identity (the
+/// role account, per `account_problem`), which is also the launch's.
+fn network_problems(config: &Config) -> Vec<String> {
+    let timeout = network_probe::PROBE_TIMEOUT;
+    let direct = network_probe::direct_egress_problem(&config.egress_probe_target, timeout);
+    let proxy = network_probe::proxy_problem(
+        &config.egress_listen,
+        &config.egress_probe_blocked_host,
+        timeout,
+    );
+    direct.into_iter().chain(proxy).collect()
 }
 
 /// The pinned version string for a harness.
@@ -168,6 +183,12 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    /// A loopback address with nothing listening (bound, then released).
+    fn closed_port() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().to_string()
+    }
+
     #[test]
     fn missing_containment_is_reported_not_skipped() {
         let dir = tempfile::tempdir().unwrap();
@@ -186,6 +207,9 @@ mod tests {
         config.bin_dir = dir.path().into();
         config.state_dir = dir.path().into();
         config.browser = dir.path().join("no-browser");
+        let open = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        config.egress_probe_target = open.local_addr().unwrap().to_string();
+        config.egress_listen = closed_port();
         let problems = check(&spec, &config).join("\n");
         for expected in [
             "launches run as",
@@ -197,6 +221,8 @@ mod tests {
             "clone",
             "verification login",
             "no-browser is not installed",
+            "direct egress reachable",
+            "egress proxy not running",
         ] {
             assert!(problems.contains(expected), "{expected}: {problems}");
         }

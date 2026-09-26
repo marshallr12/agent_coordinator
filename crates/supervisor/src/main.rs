@@ -7,6 +7,7 @@ mod clone;
 mod config;
 mod egress;
 mod launch;
+mod network_probe;
 mod preflight;
 mod profile;
 mod role_settings;
