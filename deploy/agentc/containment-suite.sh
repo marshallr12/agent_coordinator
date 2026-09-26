@@ -19,6 +19,12 @@ fail() { echo "FAIL $*"; FAILED=1; }
 
 # expect_ok / expect_fail DESCRIPTION COMMAND...: judge a command's exit status.
 expect_ok() { local d=$1; shift; if "$@" >/dev/null 2>&1; then pass "$d"; else fail "$d"; fi; }
+# expect_ok_logged DESCRIPTION LOG COMMAND...: like expect_ok, keeping the
+# output in LOG and printing its tail when the command fails.
+expect_ok_logged() {
+  local d=$1 log=$2; shift 2
+  if "$@" >"$log" 2>&1; then pass "$d"; else fail "$d (log: $log)"; tail -n 40 "$log" | sed 's/^/    /'; fi
+}
 expect_fail() { local d=$1; shift; if "$@" >/dev/null 2>&1; then fail "$d"; else pass "$d"; fi; }
 
 # Runs a command as an agent account with an empty environment.
@@ -101,10 +107,11 @@ check_codex_sandbox() {
 check_cargo_test() {
   local base=$STATE/impl clone=$STATE/impl/clones/suite run=$STATE/impl/runs/suite
   local env="PATH=$PREFIX/bin:$PREFIX/cargo/bin:/usr/bin:/bin RUSTUP_HOME=$PREFIX/rustup CARGO_HOME=$base/cargo CARGO_TARGET_DIR=$run/target HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=127.0.0.1,localhost"
-  expect_ok "impl: cargo test (uid + firewall)" as agentc-impl sh -c "cd $clone && env $env cargo test --workspace --locked"
+  expect_ok_logged "impl: cargo test (uid + firewall)" /root/agentc-cargo-test.log \
+    as agentc-impl sh -c "cd $clone && env $env cargo test --workspace --locked --no-fail-fast"
   local roots="sandbox_workspace_write.writable_roots=[\"$run\",\"$base/cargo\"]"
-  expect_ok "impl: cargo test inside codex sandbox" as agentc-impl sh -c \
-    "cd $clone && env $env CODEX_HOME=$base/codex-home $PREFIX/bin/codex sandbox -c sandbox_mode=workspace-write -c sandbox_workspace_write.network_access=true -c '$roots' -- cargo test --workspace --locked"
+  expect_ok_logged "impl: cargo test inside codex sandbox" /root/agentc-cargo-test-codex.log as agentc-impl sh -c \
+    "cd $clone && env $env CODEX_HOME=$base/codex-home $PREFIX/bin/codex sandbox -c sandbox_mode=workspace-write -c sandbox_workspace_write.network_access=true -c '$roots' -- cargo test --workspace --locked --no-fail-fast"
 }
 
 main() {
