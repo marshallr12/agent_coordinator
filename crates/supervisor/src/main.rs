@@ -5,6 +5,7 @@
 //! supervised launch. Scheduling, leases and reviews arrive in P3.
 mod clone;
 mod config;
+mod egress;
 mod launch;
 mod preflight;
 mod profile;
@@ -49,6 +50,8 @@ enum Commands {
         #[arg(long)]
         mirror: Option<PathBuf>,
     },
+    /// Run the egress allowlist proxy on the configured loopback address.
+    EgressProxy,
     /// Report every containment problem that would block a launch.
     Preflight(SpecArgs),
     /// Preflight and run one launch (or print it with --dry-run).
@@ -113,6 +116,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             dest,
             mirror,
         } => clone::create(&url, mirror.as_deref(), &revision, &dest)?,
+        Commands::EgressProxy => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(egress::serve(&config.egress_listen, config.egress_allow))?
+        }
         Commands::Preflight(args) => return Ok(report(&preflight::check(&args.spec(), &config))),
         Commands::Launch { spec, dry_run } => {
             return launch_command(&spec.spec(), &config, dry_run);

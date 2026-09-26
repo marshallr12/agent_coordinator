@@ -20,8 +20,11 @@ pub struct Config {
     pub implementer_user: String,
     /// Unix account that runs reviewer launches.
     pub reviewer_user: String,
-    /// Loopback CONNECT proxy that enforces the egress allowlist.
-    pub egress_proxy: String,
+    /// Loopback address of the CONNECT proxy that enforces egress; launches
+    /// get it as `HTTPS_PROXY`, and the firewall lets agents reach only it.
+    pub egress_listen: String,
+    /// Hosts the proxy tunnels to (`.suffix` allows subdomains).
+    pub egress_allow: Vec<String>,
     /// Exact harness versions a launch refuses to run without.
     pub pinned: Pinned,
 }
@@ -41,13 +44,22 @@ impl Default for Config {
             state_dir: PathBuf::from("/var/lib/agentc"),
             implementer_user: "agentc-impl".into(),
             reviewer_user: "agentc-rev".into(),
-            egress_proxy: "http://127.0.0.1:3128".into(),
+            egress_listen: "127.0.0.1:3128".into(),
+            egress_allow: crate::egress::DEFAULT_ALLOW
+                .iter()
+                .map(|host| host.to_string())
+                .collect(),
             pinned: Pinned::default(),
         }
     }
 }
 
 impl Config {
+    /// The proxy URL launches use.
+    pub fn egress_proxy_url(&self) -> String {
+        format!("http://{}", self.egress_listen)
+    }
+
     /// Loads `path` if given, else the default path if it exists, else defaults.
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let default = Path::new(DEFAULT_CONFIG_PATH);

@@ -200,7 +200,7 @@ fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
         ("no_proxy".into(), "127.0.0.1,localhost".into()),
     ];
     for name in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
-        env.push((name.into(), config.egress_proxy.clone().into()));
+        env.push((name.into(), config.egress_proxy_url().into()));
     }
     env.push(match spec.harness {
         Harness::Claude => (
