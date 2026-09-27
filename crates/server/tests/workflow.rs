@@ -2743,3 +2743,76 @@ async fn leftover_review_does_not_gate_integration() {
         .await;
     assert_eq!(status, StatusCode::OK, "{integrating}");
 }
+
+/// Reads `next` for `role` as `c`.
+async fn next_action(f: &Fixture, c: &Caller, p: &str, role: &str) -> Value {
+    let path = format!("/api/v1/projects/{p}/next?role={role}");
+    let (status, value) = f.call(c, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    value["data"].clone()
+}
+
+/// Follows a `next` call template exactly, after acknowledging instructions.
+async fn follow(f: &Fixture, c: &Caller, p: &str, offered: &Value) -> Value {
+    f.ack(c, p, 1).await;
+    let call = &offered["action"]["call"];
+    let path = call["path"].as_str().unwrap();
+    let (status, value) = f.call(c, "POST", path, call["body"].clone()).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    value["data"].clone()
+}
+
+#[tokio::test]
+async fn next_offers_a_claim_template_and_an_independent_review() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("next-action", "https://example.test/next.git")
+        .await;
+    let t = f.task(&p, "general", "Write the guide").await;
+    let offered = next_action(&f, &f.a, &p, "implementer").await;
+    assert_eq!(offered["action"]["kind"], "claim_task", "{offered}");
+    assert_eq!(offered["action"]["task_id"], t["id"]);
+    assert_eq!(offered["caller_steps"][0]["code"], "instructions_required");
+    let owner = follow(&f, &f.a, &p, &offered).await["claim"]["attempt"].clone();
+    let idle = next_action(&f, &f.b, &p, "implementer").await;
+    assert!(idle["action"].is_null(), "{idle}");
+    assert_eq!(idle["retry_after_seconds"], 30);
+    f.submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
+        .await;
+    let author = next_action(&f, &f.a, &p, "reviewer").await;
+    assert!(author["action"].is_null(), "{author}");
+    assert_eq!(author["inspected"], 1);
+    let review = next_action(&f, &f.b, &p, "reviewer").await;
+    assert_eq!(review["action"]["kind"], "claim_review", "{review}");
+    assert_eq!(review["action"]["subject_task_id"], t["id"]);
+    let claimed = follow(&f, &f.b, &p, &review).await;
+    assert_eq!(claimed["attempt"]["state"], "active", "{claimed}");
+}
+
+#[tokio::test]
+async fn next_serves_read_only_credentials_and_routes_human_gates() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("next-recovery", "https://example.test/next.git")
+        .await;
+    let t = f.task(&p, "general", "Stranded work").await;
+    f.claim(&f.a, &p, &t, 1).await;
+    f.clock.0.fetch_add(3_600_000, Ordering::SeqCst);
+    sqlx::query("UPDATE credentials SET access='read' WHERE id=?")
+        .bind(&f.b.credential)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let recover = next_action(&f, &f.b, &p, "implementer").await;
+    assert_eq!(recover["action"]["kind"], "recover_task", "{recover}");
+    assert_eq!(recover["action"]["call"]["body"]["mode"], "recovery");
+    let (status, v) = f.call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"manual","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let gated = next_action(&f, &f.b, &p, "implementer").await;
+    assert!(gated["action"].is_null(), "{gated}");
+    assert_eq!(gated["human_queue"], 1);
+    assert_eq!(gated["skipped"]["human_recovery_required"], 1);
+    let path = format!("/api/v1/projects/{p}/next?role=integrator");
+    let (status, _) = f.call(&f.b, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

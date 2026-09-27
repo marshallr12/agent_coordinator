@@ -14,6 +14,7 @@ pub mod knowledge;
 pub mod maintenance;
 pub mod mcp;
 pub mod mutation;
+pub mod next;
 pub mod objectives;
 pub mod operator_access;
 pub mod restore;
@@ -47,6 +48,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
     Router::new()
         .merge(coordination::routes())
         .merge(workflow::routes())
+        .merge(next::routes())
         .merge(jobs::routes())
         .merge(auth::routes())
         .merge(artifacts::routes())

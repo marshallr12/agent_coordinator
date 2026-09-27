@@ -148,6 +148,19 @@ must be reopened by an operator or revised by an agent (`reason_code`
 `operation_not_permitted` and add `details.required_actor: "human"` and a
 `details.gate` name, or `required_actor: "human"` on the precondition.
 
+`GET /api/v1/projects/{project_id}/next?role=implementer|reviewer` is a read-only
+answer to "what should a launch of this role do now". It walks the same
+candidates and preconditions a claim would check and returns at most one
+`action` (`claim_task`, `recover_task` or `claim_review`) with an exact `call`
+template (method, path and body) and the equivalent CLI command. Recoverable
+work comes before new work; reviews are ordered by subject priority and must be
+independent of the caller. `caller_steps` lists preconditions the caller clears
+itself (acknowledging current instructions); `human_queue` counts inspected
+candidates that only a human can unblock, and `skipped` counts every blocking
+precondition code seen. With no action, `retry_after_seconds` suggests a poll
+interval. Read-access credentials may call it, so a shadow supervisor can log
+what it would launch without holding write authority.
+
 `GET /api/v1/projects/{project_id}/state-wait` accepts `target_kind=task|activity|job`,
 `target_id`, an `after_state_token` returned by task detail/precondition inspection,
 activity detail/precondition inspection, or individual job detail, and optional `timeout_seconds` from
