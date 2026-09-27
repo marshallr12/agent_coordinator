@@ -2816,3 +2816,40 @@ async fn next_serves_read_only_credentials_and_routes_human_gates() {
     let (status, _) = f.call(&f.b, "GET", &path, Value::Null).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn next_is_not_starved_by_blocked_higher_priority_tasks() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("next-starve", "https://example.test/next.git")
+        .await;
+    let prerequisite = f.task(&p, "general", "Prerequisite").await;
+    let ready = f.task(&p, "general", "Ready work").await;
+    for (task, priority) in [(&prerequisite, 3), (&ready, 2)] {
+        sqlx::query("UPDATE tasks SET priority=? WHERE id=?")
+            .bind(priority)
+            .bind(task["id"].as_str().unwrap())
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+    }
+    for n in 0..51 {
+        let blocked = f.task(&p, "general", &format!("Blocked {n}")).await;
+        sqlx::query("UPDATE tasks SET priority=0 WHERE id=?")
+            .bind(blocked["id"].as_str().unwrap())
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dependencies(project_id,task_id,prerequisite_id) VALUES(?,?,?)",
+        )
+        .bind(&p)
+        .bind(blocked["id"].as_str().unwrap())
+        .bind(prerequisite["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    }
+    let offered = next_action(&f, &f.b, &p, "implementer").await;
+    assert_eq!(offered["action"]["task_id"], ready["id"], "{offered}");
+}

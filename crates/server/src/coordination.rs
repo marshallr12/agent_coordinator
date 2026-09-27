@@ -1429,8 +1429,9 @@ pub(crate) async fn current_policy_revision(
 }
 
 /// Ids of tasks a claim could take, in claim order: recoverable work first
-/// (stranded attempts), then unclaimed ready work. Used by `next`, which
-/// re-checks each id with the full claim preconditions.
+/// (stranded attempts), then unclaimed ready work filtered exactly like
+/// `claim --next`, so blocked tasks never crowd ready ones out of the limit.
+/// Used by `next`, which re-checks each id with the full claim preconditions.
 pub(crate) async fn next_task_candidates(
     c: &mut SqliteConnection,
     p: &str,
@@ -1439,7 +1440,7 @@ pub(crate) async fn next_task_candidates(
 ) -> Result<Vec<String>, AppError> {
     let recovery: Vec<String> = sqlx::query_scalar(task_sql!("SELECT id FROM visible WHERE archived_at IS NULL AND lifecycle='open' AND workflow_activity_kind IS NULL AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized) ORDER BY priority,ready_since,id LIMIT ?"))
         .bind(now).bind(now).bind(now).bind(p).bind(now).bind(limit).fetch_all(&mut *c).await?;
-    let work: Vec<String> = sqlx::query_scalar(task_sql!("SELECT id FROM visible WHERE archived_at IS NULL AND lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND current_attempt_id IS NULL ORDER BY priority,ready_since,id LIMIT ?"))
+    let work: Vec<String> = sqlx::query_scalar(task_sql!("SELECT id FROM visible WHERE archived_at IS NULL AND lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND objective_children_ready AND decisions_ready AND current_attempt_id IS NULL ORDER BY priority,ready_since,id LIMIT ?"))
         .bind(now).bind(now).bind(now).bind(p).bind(limit).fetch_all(&mut *c).await?;
     Ok(recovery.into_iter().chain(work).collect())
 }

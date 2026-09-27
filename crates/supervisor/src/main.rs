@@ -6,11 +6,13 @@
 mod clone;
 mod config;
 mod egress;
+mod estimate;
 mod launch;
 mod network_probe;
 mod preflight;
 mod profile;
 mod role_settings;
+mod shadow;
 mod verification;
 
 use anyhow::Result;
@@ -67,6 +69,17 @@ enum Commands {
         spec: SpecArgs,
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Poll `next` read-only and log what would be launched (P3a shadow mode).
+    Shadow {
+        /// Poll once and exit instead of looping.
+        #[arg(long)]
+        once: bool,
+    },
+    /// Summarise a would-launch log (default: the configured shadow log).
+    ShadowReport {
+        #[arg(long)]
+        log: Option<PathBuf>,
     },
 }
 
@@ -141,6 +154,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Preflight(args) => return Ok(report(&preflight::check(&args.spec(), &config))),
         Commands::Launch { spec, dry_run } => {
             return launch_command(&spec.spec(), &config, dry_run);
+        }
+        Commands::Shadow { once } => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(shadow::run(&config.shadow, once))?
+        }
+        Commands::ShadowReport { log } => {
+            let log = log.unwrap_or_else(|| config.shadow.log.clone());
+            println!("{}", serde_json::to_string_pretty(&shadow::report(&log)?)?);
         }
     }
     Ok(ExitCode::SUCCESS)

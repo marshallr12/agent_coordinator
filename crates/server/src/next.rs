@@ -47,6 +47,7 @@ impl Role {
         }
     }
 
+    /// The wire name echoed in the response.
     fn as_str(self) -> &'static str {
         match self {
             Self::Implementer => "implementer",
@@ -110,6 +111,7 @@ impl Scan {
     }
 }
 
+/// The `next` route.
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/projects/{project}/next", get(next))
 }
@@ -178,6 +180,8 @@ fn task_action(p: &str, task: &Value, policy: i64) -> Value {
 }
 
 /// Finds the first agent-claimable review, highest subject priority first.
+/// Independence is judged against the caller, so a shadow principal that
+/// never contributed may be offered reviews a contributor could not claim.
 async fn scan_reviews(
     c: &mut SqliteConnection,
     p: &str,
@@ -211,7 +215,8 @@ async fn review_candidates(
          FROM workflow_activities wa JOIN submissions s ON s.id=wa.submission_id \
          JOIN tasks t ON t.id=wa.subject_task_id \
          WHERE wa.project_id=? AND wa.kind IN ('agent_review','either_review') \
-         AND wa.state IN ('queued','active','recovery_required') \
+         AND wa.state IN ('queued','active') \
+         AND t.deleted_at IS NULL AND t.archived_at IS NULL \
          ORDER BY t.priority,wa.created_at,wa.id LIMIT ?",
     )
     .bind(p)
@@ -224,25 +229,46 @@ async fn review_candidates(
 fn review_action(p: &str, row: &sqlx::sqlite::SqliteRow) -> Value {
     let id: String = row.get("id");
     let submission: String = row.get("submission_id");
-    let project_policy: i64 = row.get("project_policy_revision");
-    let workflow_policy: i64 = row.get("workflow_policy_revision");
+    let kind: String = row.get("submission_kind");
+    let revisions = (
+        row.get::<i64, _>("project_policy_revision"),
+        row.get::<i64, _>("workflow_policy_revision"),
+    );
     json!({
         "kind": "claim_review",
         "activity_id": id,
         "activity_kind": row.get::<String, _>("kind"),
         "subject_task_id": row.get::<String, _>("subject_task_id"),
         "submission_id": submission,
-        "submission_kind": row.get::<String, _>("submission_kind"),
+        "submission_kind": kind,
         "title": row.get::<String, _>("title"),
         "priority": row.get::<i64, _>("priority"),
-        "call": {
-            "method": "POST",
-            "path": format!("/api/v1/projects/{p}/workflow-activities/{id}/claim"),
-            "body": {"expected_submission_id": submission,
-                     "expected_project_policy_revision": project_policy,
-                     "expected_workflow_policy_revision": workflow_policy},
-        },
-        "cli": format!("agent-coordinator reviews claim --activity {id} --submission {submission} \
-                        --project-policy-revision {project_policy} --workflow-policy-revision {workflow_policy}"),
+        "call": review_call(p, &id, &submission, revisions),
+        "cli": review_cli(&id, &submission, revisions, &kind),
     })
+}
+
+/// The HTTP template for claiming a review with the submission's pinned revisions.
+fn review_call(p: &str, id: &str, submission: &str, (project, workflow): (i64, i64)) -> Value {
+    json!({
+        "method": "POST",
+        "path": format!("/api/v1/projects/{p}/workflow-activities/{id}/claim"),
+        "body": {"expected_submission_id": submission,
+                 "expected_project_policy_revision": project,
+                 "expected_workflow_policy_revision": workflow},
+    })
+}
+
+/// The equivalent CLI command; code reviews also need a clean checkout to
+/// fetch the candidate into, which the caller must fill in.
+fn review_cli(id: &str, submission: &str, (project, workflow): (i64, i64), kind: &str) -> String {
+    let checkout = if kind == "code" {
+        " --candidate-checkout CLEAN_CHECKOUT"
+    } else {
+        ""
+    };
+    format!(
+        "agent-coordinator reviews claim --activity {id} --submission {submission} \
+         --project-policy-revision {project} --workflow-policy-revision {workflow}{checkout}"
+    )
 }

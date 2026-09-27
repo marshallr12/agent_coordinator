@@ -42,6 +42,8 @@ pub struct Config {
     pub browser: PathBuf,
     /// UI verification environments by coordinator project id (plan M2).
     pub verification: BTreeMap<String, Verification>,
+    /// Shadow mode: read-only `next` polling and the would-launch log (P3a).
+    pub shadow: crate::shadow::ShadowConfig,
 }
 
 /// Exact version strings reported by `--version`; empty means "not pinned".
@@ -71,6 +73,7 @@ impl Default for Config {
             pinned: Pinned::default(),
             browser: PathBuf::from("/usr/bin/chromium"),
             verification: BTreeMap::new(),
+            shadow: crate::shadow::ShadowConfig::default(),
         }
     }
 }

@@ -158,6 +158,31 @@ EOF
 # [verification.<project-id>]
 # url = "http://127.0.0.1:$STAGING_PORT"
 # browser = true
+
+# Shadow mode (plan P3a): \`agentc-supervisor shadow\` polls the read-only
+# \`next\` endpoint with a read-access host credential and logs would-launch
+# records with cost estimates; \`shadow-report\` summarises the log.
+# [shadow]
+# credential_file = "$ETC/shadow-credentials.toml"
+# origin = ""                    # empty: the file's first [[credentials]] entry
+# allow_insecure_loopback = false
+# projects = []                  # empty: every project the credential lists
+# poll_seconds = 60
+# log = "$STATE/shadow/would-launch.jsonl"
+# [shadow.implementer]           # per-launch token profile (estimates); any
+# harness = "claude"             # key left out keeps the role's default
+# model = "claude-opus-5-5"
+# effort = "high"
+# input_tokens = 4000000
+# cached_share = 0.9
+# output_tokens = 80000
+# [shadow.reviewer]              # same keys and defaults, except
+# input_tokens = 1200000
+# output_tokens = 20000
+# [shadow.prices.<model-id>]     # USD per million tokens, all three keys; added
+# input = 4.0                    # to the defaults (claude-opus-5-5 4/0.2/20,
+# cached_input = 0.2             # claude-sonnet-5 2/0.2/10,
+# output = 20.0                  # claude-haiku-4-5 1/0.1/5)
 EOF
   fi
   chmod 0644 "$ETC/supervisor.toml"
