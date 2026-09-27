@@ -225,6 +225,7 @@ Record answers here.
 | U12 | Admission rule for agent-originated work | Always admit reverts/fix-target/de-flake/refusal fixes + 5 agent tasks per week || 2026-09-25: **as recommended** (fixes + 5/week) |
 | U13 | Notification channel for digest and pages | User's choice (ntfy/email) || 2026-09-25: **ntfy pages + email digest** |
 | U14 | After P1 is deployed, may autonomy work run as coordinator tasks (dogfooding), or stay outside the workflow as originally instructed? | Dogfood || 2026-09-25: **dogfood** after P1 deploy |
+| U16 | Integrator host (VM is IPv6-only; GitHub is IPv4-only; see `p4-design.md` §0) | oracle-1, uid `agentc-integrator`, integrator attestation + ancestry audit | 2026-09-27: **oracle-1** (supersedes U6's integrator placement) |
 | U15 | Commit `planning/autonomy/` on `autonomy-plan` after a redaction pass, or keep it local (repo is public) | Commit after redaction | 2026-09-25: **commit and push** `autonomy-plan` to origin; redaction pass done (private repo name, home paths) |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
@@ -411,6 +412,7 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
 | 2026-09-27 | P3a: workstation CLI | `4e71f81` | `upgrade_client.py` installed and verified 4e71f81 | `--source-root` = P3a worktree; rollback `~/.local/bin/agent-coordinator.rollback` |
 | 2026-09-27 | **P3a shadow started** (05:12 UTC / 01:12 EDT) | `4e71f81` | first poll: 1 project, implementer + reviewer idle, 0 errors | Runs as `marshall` from `~/src/worktrees/agent-coordinator-p3a/target/release/agentc-supervisor shadow` (setsid nohup via `~/.local/share/agent-coordinator-autonomy/start-shadow.sh`); credential `/etc/agentc/shadow-credentials.toml` (user-issued, principal `agentc`, supervised/read, origin agents.sithbit.com, 0600 marshall); log `/var/lib/agentc/shadow/would-launch.jsonl`, stdout `shadow.out`. Does not survive a reboot. **Do not remove the P3a worktree while it runs** |
 | 2026-09-27 | Release workflow: 5-minute load run for binaries-only deploys | `7c5079d` | branch CI green; test dispatch 36294875176 green in 14m48s (`Load workload: 300s`); `main` FF `4e71f81..7c5079d` with the user's explicit OK | `gh workflow run release.yml --ref main -f binaries_only_since=<production commit>`; fails if that commit is not an ancestor or any migration changed since; tags, PRs and runs without the input keep 30 min. Production stays on 4e71f81 (diff is release.yml + one book paragraph; the served docs lag until the next deploy) |
+| 2026-09-27 | P4 design pass | autonomy-plan | n/a | `planning/autonomy/p4-design.md`: GitHub has no IPv6 ⇒ integrator on oracle-1 (U16), service trusts integrator attestation (no outbound GitHub from the VM); job-level required checks (U1); new crate `crates/integrator`; 6 build steps S1–S6; user steps listed (U4 test, GitHub App, host setup, credential, rulesets at cutover). Worktree `~/src/worktrees/agent-coordinator-p4`, branch `autonomy/p4` from `main` 7c5079d. Plan's `3590591f` = commit `1ba7d7a` |
 
 ### [R-P3b] Deferred from the P2 review (must be done before the first live launch)
 
@@ -488,10 +490,9 @@ Nothing launches unattended before P3b, so P2 ships without these; each is a lau
       sudo SUPERVISOR=target/release/agentc-supervisor CLI=target/release/agent-coordinator deploy/agentc/host-setup.sh
       sudo deploy/agentc/containment-suite.sh --cargo-test
       ```
-   d. **Next phase: P4-min integrator** (plan-final §2.4, §2.4a, §2.4b; the P4 row in §5). Needs the
-      user for: creating the GitHub App (integrator identity), rulesets A/B + tag ruleset, the
-      e2-micro integrator host (U6). Start with a design pass and the list of user steps; estimate
-      3–5 sessions.
+   d. **P4-min integrator: design done 2026-09-27 — follow `p4-design.md`** (§4 build order S1–S6,
+      §5 user steps). Integrator runs on oracle-1 (U16). S1 and S2 are service-only and need nothing
+      from the user; the GitHub App (user step 3) is needed before S3's live test.
    e. **Future deploys** (U9, agent-run): preflight → `gh workflow run release.yml --ref main
       -f binaries_only_since=<production commit>` when no migration changed (else omit the input) →
       download + `sha256sum --check` → `gcloud compute scp` to `~/release-<sha>` → `deploy-pre.sh` →
