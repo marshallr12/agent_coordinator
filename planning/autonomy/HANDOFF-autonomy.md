@@ -407,6 +407,10 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
 | 2026-09-27 | P3a step 1: `GET /api/v1/projects/{p}/next?role=implementer\|reviewer` | `4344fd2` | server tests + clippy green | Read-only (read-access credentials may call it); reuses `task_preconditions_snapshot` / `activity_preconditions`; returns one action + exact call template + CLI line, `caller_steps` (instruction ack), `human_queue`, `skipped`. Recovery before new work; reviews by subject priority; independence judged against the caller |
 | 2026-09-27 | P3a step 2: `agentc-supervisor shadow` / `shadow-report` + review fixes | `4e71f81` | full CI gate green (309 tests, smoke, backup smoke, docs); disposable staging on :18090 with the read-only rev credential logged an implementer would-launch ($3.92 est.) and reviewer idle | JSONL would-launch log deduped per (project, role); report counts distinct targets. Cost = token profile per role × price (API-equivalent; U3 is subscription); defaults Opus 5.5 impl 4M in/90% cached/80k out, rev 1.2M/20k; `[shadow]` keys are per-key overrides. Fresh-context review: fixed readiness starvation in `next` (regression test), partial-table defaults, report over-count, code-review `--candidate-checkout` hint, archived/recovery-only review candidates, non-fatal log writes. Accepted as-is: `human_queue` counts only inspected candidates; up to ~1k queries per call (fine at shadow cadence). `autonomy/p3a` pushed |
 | 2026-09-27 | P3a: `main` fast-forward | `4e71f81` | CI green on `autonomy/p3a`; preflight 0/0/0/0 (user; classifier blocks agent production reads); user OK; `d77c328..4e71f81` | Next: production deploy (binaries only, no migration) after a second clean preflight, then shadow install on mxmini |
+| 2026-09-27 | P3a: production deploy (agent, per U9) | `4e71f81` | preflight 0/0/0/0 before and after service stop (agent, exact-command rule); `/healthz` ok; public `/api/v1/info` `source_commit` 4e71f81, not dirty, instructions 9; no migration | Release run 36294497323 (all 3 jobs green; server `2f9bb1fb…`, CLI `952932d1…`, MCP `15868f11…`). Old-binary snapshot `20260927T051119.687Z-2feb25e1…` verified; new-binary snapshot `20260927T051200.901Z-73347980…` verified; maintenance complete; transfer ok; timers restarted. Rollback binaries `/usr/local/bin/*-0.1.1-d77c328`. Downtime ~31 s (05:11:29–05:12:00 UTC). Host scripts: `~/.local/share/agent-coordinator-autonomy/deploy-{pre,swap}.sh` (outside the repo; `REL=~/release-4e71f81` on the VM) |
+| 2026-09-27 | P3a: workstation CLI | `4e71f81` | `upgrade_client.py` installed and verified 4e71f81 | `--source-root` = P3a worktree; rollback `~/.local/bin/agent-coordinator.rollback` |
+| 2026-09-27 | **P3a shadow started** (05:12 UTC / 01:12 EDT) | `4e71f81` | first poll: 1 project, implementer + reviewer idle, 0 errors | Runs as `marshall` from `~/src/worktrees/agent-coordinator-p3a/target/release/agentc-supervisor shadow` (setsid nohup via `~/.local/share/agent-coordinator-autonomy/start-shadow.sh`); credential `/etc/agentc/shadow-credentials.toml` (user-issued, principal `agentc`, supervised/read, origin agents.sithbit.com, 0600 marshall); log `/var/lib/agentc/shadow/would-launch.jsonl`, stdout `shadow.out`. Does not survive a reboot. **Do not remove the P3a worktree while it runs** |
+| 2026-09-27 | Release workflow: 5-minute load run for binaries-only deploys | `7c5079d` | branch CI green; test dispatch 36294875176 green in 14m48s (`Load workload: 300s`); `main` FF `4e71f81..7c5079d` with the user's explicit OK | `gh workflow run release.yml --ref main -f binaries_only_since=<production commit>`; fails if that commit is not an ancestor or any migration changed since; tags, PRs and runs without the input keep 30 min. Production stays on 4e71f81 (diff is release.yml + one book paragraph; the served docs lag until the next deploy) |
 
 ### [R-P3b] Deferred from the P2 review (must be done before the first live launch)
 
@@ -429,7 +433,7 @@ Nothing launches unattended before P3b, so P2 ships without these; each is a lau
    launches lack `no_new_privs` and leftover-process cleanup; `--uninstall` does not kill agent processes
    or remove crontabs/`/tmp` files; read-only credentials can still create subagent sessions.
 
-### Next session: resume P2 here
+### Next session: resume here (items 1–3 are P2 history; start at item 4)
 
 1. DONE 2026-09-26 (all PASS). For reference, the host setup and suite (re-run after binary changes): Fix any FAIL; common
    causes: a login/auth host missing from the egress allowlist (see `/var/log/agentc-egress.log` on sysvinit hosts or `journalctl -u agentc-egress`,
@@ -460,16 +464,39 @@ Nothing launches unattended before P3b, so P2 ships without these; each is a lau
 3. DONE 2026-09-27 (P2 shipped to `main` `d77c328` and deployed). Was: P2 exit = suite all PASS under both profiles. Then ship `autonomy/p2` (fresh-context review, the
    user's OK, preflight, `scripts/ship.py` or FF push) and deploy migration 0023 (U9: agent deploy
    after a clean preflight). P3a (shadow `next`, would-launch log) can start in parallel (no root).
-4. **P3a (in progress; branch `autonomy/p3a`, worktree `~/src/worktrees/agent-coordinator-p3a`).**
-   Code done and pushed (`4e71f81`). Remaining, in order:
-   a. CI green on `autonomy/p3a` (`gh run list --branch autonomy/p3a`).
-   b. DONE 2026-09-27: user OK + preflight 0/0/0/0, FF `main` to `4e71f81`. Remaining: agent deploy per U9
-      (no migration in P3a; binaries only), workstation CLI upgrade.
-   c. Shadow host principal: the user issues a **supervised/read** agent credential for production
-      (dashboard), writes it as `[[credentials]] origin/token` to `/etc/agentc/shadow-credentials.toml`
-      (0600, readable only by the account running the shadow), and starts
-      `agentc-supervisor shadow` on mxmini (sysvinit: nohup or an init script; log
-      `/var/lib/agentc/shadow/would-launch.jsonl`). Never the owner's exported production token.
-   d. **P3a exit:** after ≥24 h, `agentc-supervisor shadow-report`; record launches/day, estimated $/day,
-      max human queue, errors here. Then P4-min.
-
+4. **P3a — shadow running; exit pending (next session starts here).** State at 2026-09-27 05:30 UTC:
+   `main` = `7c5079d`; production = `4e71f81` (binaries only; schema unchanged at 23); workstation CLI =
+   `4e71f81`; shadow poller running since 05:12 UTC on mxmini (see the execution log for paths).
+   a. **P3a exit (≥ 2026-09-28 05:12 UTC / 01:12 EDT):** confirm the poller is alive, then summarise:
+      ```
+      pgrep -af "agentc-supervisor shadow"
+      ~/src/worktrees/agent-coordinator-p3a/target/release/agentc-supervisor shadow-report
+      tail -n 20 /var/lib/agentc/shadow/shadow.out
+      ```
+      Record here: span hours, would-launch per role and estimated $ (divide by span for per-day
+      figures), max human queue, errors. Production had **no claimable work** at start (both roles
+      idle), so a quiet log is expected unless tasks are created; that is still a valid P3a exit
+      (the poller, credential and endpoint are proven), but note it — the pilot needs real tasks.
+      If the poller died (reboot): `bash ~/.local/share/agent-coordinator-autonomy/start-shadow.sh`.
+   b. Then stop it or leave it running (it is cheap: one GET per project per role per minute); it
+      must be stopped before the P3a worktree is removed: `pkill -f "agentc-supervisor shadow"`.
+   c. Housekeeping: the installed pinned supervisor under `/opt/agentc` is still the P2 build; the
+      user re-runs host-setup with the `4e71f81` binaries before P3b (not needed for the shadow):
+      ```
+      cd ~/src/worktrees/agent-coordinator-p3a
+      COORDINATOR_BUILD_COMMIT=$(git rev-parse HEAD) cargo build --release --locked -p agentc-supervisor -p coordinator-cli
+      sudo SUPERVISOR=target/release/agentc-supervisor CLI=target/release/agent-coordinator deploy/agentc/host-setup.sh
+      sudo deploy/agentc/containment-suite.sh --cargo-test
+      ```
+   d. **Next phase: P4-min integrator** (plan-final §2.4, §2.4a, §2.4b; the P4 row in §5). Needs the
+      user for: creating the GitHub App (integrator identity), rulesets A/B + tag ruleset, the
+      e2-micro integrator host (U6). Start with a design pass and the list of user steps; estimate
+      3–5 sessions.
+   e. **Future deploys** (U9, agent-run): preflight → `gh workflow run release.yml --ref main
+      -f binaries_only_since=<production commit>` when no migration changed (else omit the input) →
+      download + `sha256sum --check` → `gcloud compute scp` to `~/release-<sha>` → `deploy-pre.sh` →
+      preflight again → `deploy-swap.sh` → check `/api/v1/info` `build.source_commit` →
+      `upgrade_client.py --source-root <clean worktree at that commit>`. Update `REL=` in both host
+      scripts and the user's exact-command permission rules for a new `git push origin <sha>:main`.
+      The classifier refused a stdin-redirected preflight under the broad
+      `gcloud compute ssh agent-coordinator:*` rule; exact-command rules worked.
