@@ -404,6 +404,8 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
 | 2026-09-26 | P2: `main` fast-forward | `d77c328` | user re-ran host-setup + suite on `1d5bc3d` (all PASS); preflight 0/0/0/0 (user); CI green on `d77c328` (Windows fixture fix after `1d5bc3d` failed natively); `0a55699..d77c328` | Pushed with the user's explicit permission. Release dispatch + deploy of migration 0023 blocked by the auto-mode classifier ("Production Deploy"); awaiting the user |
 | 2026-09-26 | P2: production deploy (agent, per U9; user added Bash rules for `gh workflow run`, `gcloud compute ssh agent-coordinator`, `gcloud compute scp`) | `d77c328` | preflight 0/0/0/0 before and after service stop; schema 22→23; `/healthz` ok; public `/api/v1/info` commit d77c328, instructions 9 | Release run 36286387635. Old-binary snapshot `20260927T022547.825Z-63ea9b0e…` verified; new-binary snapshot `20260927T022606.188Z-a771c0ce…` verified; maintenance ok; timers restarted. Rollback binaries `/usr/local/bin/*-0.1.1-0a55699`. Downtime ~5 s (02:25:59–02:26:04 UTC) |
 | 2026-09-27 | P2: workstation CLI | `d77c328` | `compatibility` true | `scripts/upgrade_client.py --source-root` from the P2 worktree; rollback `~/.local/bin/agent-coordinator.rollback` |
+| 2026-09-27 | P3a step 1: `GET /api/v1/projects/{p}/next?role=implementer\|reviewer` | `4344fd2` | server tests + clippy green | Read-only (read-access credentials may call it); reuses `task_preconditions_snapshot` / `activity_preconditions`; returns one action + exact call template + CLI line, `caller_steps` (instruction ack), `human_queue`, `skipped`. Recovery before new work; reviews by subject priority; independence judged against the caller |
+| 2026-09-27 | P3a step 2: `agentc-supervisor shadow` / `shadow-report` + review fixes | `4e71f81` | full CI gate green (309 tests, smoke, backup smoke, docs); disposable staging on :18090 with the read-only rev credential logged an implementer would-launch ($3.92 est.) and reviewer idle | JSONL would-launch log deduped per (project, role); report counts distinct targets. Cost = token profile per role × price (API-equivalent; U3 is subscription); defaults Opus 5.5 impl 4M in/90% cached/80k out, rev 1.2M/20k; `[shadow]` keys are per-key overrides. Fresh-context review: fixed readiness starvation in `next` (regression test), partial-table defaults, report over-count, code-review `--candidate-checkout` hint, archived/recovery-only review candidates, non-fatal log writes. Accepted as-is: `human_queue` counts only inspected candidates; up to ~1k queries per call (fine at shadow cadence). `autonomy/p3a` pushed |
 
 ### [R-P3b] Deferred from the P2 review (must be done before the first live launch)
 
@@ -457,3 +459,16 @@ Nothing launches unattended before P3b, so P2 ships without these; each is a lau
 3. DONE 2026-09-27 (P2 shipped to `main` `d77c328` and deployed). Was: P2 exit = suite all PASS under both profiles. Then ship `autonomy/p2` (fresh-context review, the
    user's OK, preflight, `scripts/ship.py` or FF push) and deploy migration 0023 (U9: agent deploy
    after a clean preflight). P3a (shadow `next`, would-launch log) can start in parallel (no root).
+4. **P3a (in progress; branch `autonomy/p3a`, worktree `~/src/worktrees/agent-coordinator-p3a`).**
+   Code done and pushed (`4e71f81`). Remaining, in order:
+   a. CI green on `autonomy/p3a` (`gh run list --branch autonomy/p3a`).
+   b. The user's OK + preflight 0/0/0/0, FF `main` (`git push origin 4e71f81:main`), agent deploy per U9
+      (no migration in P3a; binaries only), workstation CLI upgrade.
+   c. Shadow host principal: the user issues a **supervised/read** agent credential for production
+      (dashboard), writes it as `[[credentials]] origin/token` to `/etc/agentc/shadow-credentials.toml`
+      (0600, readable only by the account running the shadow), and starts
+      `agentc-supervisor shadow` on mxmini (sysvinit: nohup or an init script; log
+      `/var/lib/agentc/shadow/would-launch.jsonl`). Never the owner's exported production token.
+   d. **P3a exit:** after ≥24 h, `agentc-supervisor shadow-report`; record launches/day, estimated $/day,
+      max human queue, errors here. Then P4-min.
+
