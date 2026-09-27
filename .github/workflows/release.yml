@@ -3,6 +3,13 @@ name: Release package acceptance
 "on":
   pull_request:
   workflow_dispatch:
+    inputs:
+      binaries_only_since:
+        description: >-
+          Commit production currently runs. When set, and no database migration
+          changed since that commit, the load workload runs 5 minutes instead of 30.
+        required: false
+        default: ""
   push:
     tags:
       - "v*"
@@ -200,6 +207,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Download the accepted Linux package
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -231,7 +239,29 @@ jobs:
           with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as environment:
               environment.write(f"ACCEPTED_SERVER={server}\n")
           PY
-      - name: Run the 30-minute release-size workload
+      - name: Choose the workload length
+        shell: bash
+        env:
+          SINCE: ${{ github.event_name == 'workflow_dispatch' && inputs.binaries_only_since || '' }}
+        run: |
+          set -euo pipefail
+          duration=1800
+          if [ -n "$SINCE" ]; then
+            if ! [[ "$SINCE" =~ ^[0-9a-f]{7,40}$ ]]; then
+              echo "::error::binaries_only_since must be a commit SHA"; exit 1
+            fi
+            if ! git merge-base --is-ancestor "$SINCE" HEAD; then
+              echo "::error::$SINCE is not an ancestor of the release commit"; exit 1
+            fi
+            changed=$(git diff --name-only "$SINCE" HEAD -- crates/server/migrations)
+            if [ -n "$changed" ]; then
+              echo "::error::Migrations changed since $SINCE; run the full workload"; echo "$changed"; exit 1
+            fi
+            duration=300
+          fi
+          echo "LOAD_DURATION=$duration" >> "$GITHUB_ENV"
+          echo "Load workload: ${duration}s"
+      - name: Run the release-size workload
         shell: bash
         env:
           EXPECTED_SERVER_SHA256: ${{ needs.linux-package.outputs.server_sha256 }}
@@ -243,7 +273,7 @@ jobs:
             runuser -u "$(id -un)" -- \
             python3 scripts/load_acceptance.py --server "$ACCEPTED_SERVER" \
             --expected-server-sha256 "$EXPECTED_SERVER_SHA256" \
-            --duration 1800 --rate 50 --history 100000 --require-baseline --report load-acceptance.json
+            --duration "$LOAD_DURATION" --rate 50 --history 100000 --require-baseline --report load-acceptance.json
       - name: Upload the sanitized load report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

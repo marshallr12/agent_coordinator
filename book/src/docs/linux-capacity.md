@@ -93,7 +93,17 @@ still run, although a backup may finish after short metadata traffic ends. A
 30-minute run without every verified baseline condition also has
 `full_acceptance: false`. Neither substitutes for the constrained release run.
 Local CPU contention from unrelated builds can affect the result and should be
-avoided for final measurements. The native Windows workstation exercise remains
+avoided for final measurements.
+
+The release workflow runs the full 30-minute workload for tag pushes, pull
+requests and manual runs by default. A manual run may set the
+`binaries_only_since` input to the commit production currently runs
+(`gh workflow run release.yml --ref main -f binaries_only_since=SHA`). The
+workflow then checks that the commit is an ancestor of the release and that no
+file under `crates/server/migrations` changed since it, and fails otherwise. If
+both hold, it runs a 5-minute workload with the same assertions. That report has
+`full_acceptance: false`: use it only for binaries-only deploys, where the schema
+and its migrations were already accepted under the full workload. The native Windows workstation exercise remains
 [backlog item 7](implementation-history.md), separate from all of these checks.
 
 ## Search index change
