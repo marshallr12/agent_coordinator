@@ -406,6 +406,7 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
 | 2026-09-27 | P2: workstation CLI | `d77c328` | `compatibility` true | `scripts/upgrade_client.py --source-root` from the P2 worktree; rollback `~/.local/bin/agent-coordinator.rollback` |
 | 2026-09-27 | P3a step 1: `GET /api/v1/projects/{p}/next?role=implementer\|reviewer` | `4344fd2` | server tests + clippy green | Read-only (read-access credentials may call it); reuses `task_preconditions_snapshot` / `activity_preconditions`; returns one action + exact call template + CLI line, `caller_steps` (instruction ack), `human_queue`, `skipped`. Recovery before new work; reviews by subject priority; independence judged against the caller |
 | 2026-09-27 | P3a step 2: `agentc-supervisor shadow` / `shadow-report` + review fixes | `4e71f81` | full CI gate green (309 tests, smoke, backup smoke, docs); disposable staging on :18090 with the read-only rev credential logged an implementer would-launch ($3.92 est.) and reviewer idle | JSONL would-launch log deduped per (project, role); report counts distinct targets. Cost = token profile per role × price (API-equivalent; U3 is subscription); defaults Opus 5.5 impl 4M in/90% cached/80k out, rev 1.2M/20k; `[shadow]` keys are per-key overrides. Fresh-context review: fixed readiness starvation in `next` (regression test), partial-table defaults, report over-count, code-review `--candidate-checkout` hint, archived/recovery-only review candidates, non-fatal log writes. Accepted as-is: `human_queue` counts only inspected candidates; up to ~1k queries per call (fine at shadow cadence). `autonomy/p3a` pushed |
+| 2026-09-27 | P3a: `main` fast-forward | `4e71f81` | CI green on `autonomy/p3a`; preflight 0/0/0/0 (user; classifier blocks agent production reads); user OK; `d77c328..4e71f81` | Next: production deploy (binaries only, no migration) after a second clean preflight, then shadow install on mxmini |
 
 ### [R-P3b] Deferred from the P2 review (must be done before the first live launch)
 
@@ -462,7 +463,7 @@ Nothing launches unattended before P3b, so P2 ships without these; each is a lau
 4. **P3a (in progress; branch `autonomy/p3a`, worktree `~/src/worktrees/agent-coordinator-p3a`).**
    Code done and pushed (`4e71f81`). Remaining, in order:
    a. CI green on `autonomy/p3a` (`gh run list --branch autonomy/p3a`).
-   b. The user's OK + preflight 0/0/0/0, FF `main` (`git push origin 4e71f81:main`), agent deploy per U9
+   b. DONE 2026-09-27: user OK + preflight 0/0/0/0, FF `main` to `4e71f81`. Remaining: agent deploy per U9
       (no migration in P3a; binaries only), workstation CLI upgrade.
    c. Shadow host principal: the user issues a **supervised/read** agent credential for production
       (dashboard), writes it as `[[credentials]] origin/token` to `/etc/agentc/shadow-credentials.toml`
