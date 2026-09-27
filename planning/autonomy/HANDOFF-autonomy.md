@@ -402,6 +402,8 @@ day-0 ruleset is verified by API read-back, **never by force-pushing production 
 | 2026-09-26 | **P2 exit**: user re-ran host-setup (release `ff286ec` binaries, node, browser, verification dirs), staging credentials, verification entry, suite | `cce0342` | **containment suite: all checks PASS** incl. reviewer headless browser on staging, cargo test under uid+firewall and inside the Codex sandbox; CI green on `cce0342` | Next: fresh-context review of `origin/main..autonomy/p2` (running), user's OK, preflight, FF `main`, deploy migration 0023 |
 | 2026-09-26 | P2 fresh-context review + fixes | `8d2dafa` `81bd199` `a34944d` `1d5bc3d` | full CI gate green (299 tests, smoke, backup smoke, docs) | Fixed: root symlink takeover in host-setup (blocker), secret-scan gaps (merges, binary, names, config, forged refs), DevTools port reachable cross-uid (now pipe), re-issued credential widening read→write, preflight firewall/proxy probes + proxy refuses local addresses. Deferred items below are [R-P3b] |
 | 2026-09-26 | P2: `main` fast-forward | `d77c328` | user re-ran host-setup + suite on `1d5bc3d` (all PASS); preflight 0/0/0/0 (user); CI green on `d77c328` (Windows fixture fix after `1d5bc3d` failed natively); `0a55699..d77c328` | Pushed with the user's explicit permission. Release dispatch + deploy of migration 0023 blocked by the auto-mode classifier ("Production Deploy"); awaiting the user |
+| 2026-09-26 | P2: production deploy (agent, per U9; user added Bash rules for `gh workflow run`, `gcloud compute ssh agent-coordinator`, `gcloud compute scp`) | `d77c328` | preflight 0/0/0/0 before and after service stop; schema 22→23; `/healthz` ok; public `/api/v1/info` commit d77c328, instructions 9 | Release run 36286387635. Old-binary snapshot `20260927T022547.825Z-63ea9b0e…` verified; new-binary snapshot `20260927T022606.188Z-a771c0ce…` verified; maintenance ok; timers restarted. Rollback binaries `/usr/local/bin/*-0.1.1-0a55699`. Downtime ~5 s (02:25:59–02:26:04 UTC) |
+| 2026-09-27 | P2: workstation CLI | `d77c328` | `compatibility` true | `scripts/upgrade_client.py --source-root` from the P2 worktree; rollback `~/.local/bin/agent-coordinator.rollback` |
 
 ### [R-P3b] Deferred from the P2 review (must be done before the first live launch)
 
@@ -452,6 +454,6 @@ Nothing launches unattended before P3b, so P2 ships without these; each is a lau
    #   url = "http://127.0.0.1:18080"
    sudo deploy/agentc/containment-suite.sh --cargo-test
    ```
-3. P2 exit = suite all PASS under both profiles. Then ship `autonomy/p2` (fresh-context review, the
+3. DONE 2026-09-27 (P2 shipped to `main` `d77c328` and deployed). Was: P2 exit = suite all PASS under both profiles. Then ship `autonomy/p2` (fresh-context review, the
    user's OK, preflight, `scripts/ship.py` or FF push) and deploy migration 0023 (U9: agent deploy
    after a clean preflight). P3a (shadow `next`, would-launch log) can start in parallel (no root).
