@@ -2,6 +2,7 @@
 //! uses the `class=integrator` bearer credential and no session. Refusals
 //! (non-2xx replies with an error code) are returned as values, not errors,
 //! because most of them steer the loop rather than stop it.
+use crate::state::target_key;
 use anyhow::{Context, Result, anyhow};
 use coordinator_client::{ApiResponse, CoordinatorClient};
 use serde::de::DeserializeOwned;
@@ -43,11 +44,51 @@ pub struct ResultRecord {
     pub authority_expires_at: Option<String>,
 }
 
-/// The queue plus the service's current required-check roster.
+impl QueueItem {
+    /// The target this item integrates into.
+    pub fn target(&self) -> Target {
+        Target {
+            repository_url: self.repository_url.clone(),
+            target_branch: self.target_branch.clone(),
+        }
+    }
+}
+
+/// A (repository, branch) pair the project integrates into.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Target {
+    pub repository_url: String,
+    pub target_branch: String,
+}
+
+impl Target {
+    /// The key this target's tip, freeze and episodes are stored under.
+    pub fn key(&self) -> String {
+        target_key(&self.repository_url, &self.target_branch)
+    }
+}
+
+/// The queue plus the service's current required-check roster and the
+/// targets the project integrates into (watched even with no items).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Queue {
     pub roster: ServiceRoster,
+    #[serde(default)]
+    pub targets: Vec<Target>,
     pub items: Vec<QueueItem>,
+}
+
+impl Queue {
+    /// The listed targets plus any other target an item names, each once.
+    pub fn all_targets(&self) -> Vec<Target> {
+        let mut all = self.targets.clone();
+        for target in self.items.iter().map(QueueItem::target) {
+            if !all.contains(&target) {
+                all.push(target);
+            }
+        }
+        all
+    }
 }
 
 /// The project's required-check identities as the service stores them.

@@ -1,7 +1,8 @@
 //! Steps 5–7 of an integration: R on its result branch, one poll of the
 //! required checks per cycle (so the queue GET heartbeat never stalls),
 //! receipts for every completed attempt, flake attribution (`attribution.rs`),
-//! push authority, the lease-guarded push and the observation
+//! push authority (recording R and its T0 as this integrator's before the push, see
+//! `LoopState::record_published`), the lease-guarded push and the observation
 //! that always follows a grant — even when the push step fails — because
 //! the service keeps authority outstanding until an observation ends it.
 use crate::checks::{CheckRun, ChecksSource, RosterCheck};
@@ -10,6 +11,7 @@ use crate::git;
 use crate::integrate::{Integrator, Job, Step};
 use crate::roster::Roster;
 use crate::service::{Ancestry, Observation, Receipt, Reply, ResultRecord};
+use crate::state::TipMove;
 use anyhow::{Context, Result, bail, ensure};
 use coordinator_local::git_workflow::{
     self, FreshPublicationAuthority, PublicationAuthorizationContext,
@@ -103,6 +105,8 @@ impl<C: ChecksSource> Integrator<C> {
             self.discard_local(job)?;
             return Ok(Step::ReturnedToReview);
         }
+        self.state
+            .record_published(&job.target_key(), &result.t0, &result.r)?;
         if let Err(error) = self.try_push(job, result, &grant, sent).await {
             eprintln!(
                 "agentc-integrator: push of {} not completed: {error:#}",
@@ -145,7 +149,8 @@ impl<C: ChecksSource> Integrator<C> {
 
     /// Observes the target, attests it, drops local state (every disposition
     /// either finishes the subject or is rebuilt from the service next
-    /// cycle), and checks the observed tip for a rewrite.
+    /// cycle), and checks the observed tip for a rewrite. The tip is not
+    /// recorded here: the next cycle's tip monitor classifies the move.
     pub(crate) async fn observe_and_close(
         &mut self,
         job: &Job,
@@ -158,7 +163,9 @@ impl<C: ChecksSource> Integrator<C> {
             Err(refusal) => return Ok(Step::Refused(refusal.code)),
         };
         self.discard_local(job)?;
-        if let Some(reason) = self.state.check_tip(&job.target_key(), &job.mirror, &tip)? {
+        if let TipMove::Frozen(reason) =
+            self.state.tip_move(&job.target_key(), &job.mirror, &tip)?
+        {
             return Ok(Step::Frozen(reason));
         }
         Ok(Step::Observed(

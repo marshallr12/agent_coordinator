@@ -6,7 +6,7 @@
 //! `crates/server/tests/workflow.rs`).
 use crate::checks::{FakeChecks, FakeFile};
 use crate::config::{ChecksKind, Config};
-use crate::git::testing::{Remote, commit, git, remote};
+use crate::git::testing::{Remote, commit, commit_message, git, remote};
 use crate::integrate::{Integrator, Step};
 use crate::service::Service;
 use crate::state::LoopState;
@@ -25,10 +25,14 @@ const RULES: [&str; 2] = ["non_fast_forward", "required_status_checks"];
 
 type Reply = (StatusCode, Json<Value>);
 
-/// What the mock service has been told, and the one queued subject.
+/// What the mock service has been told, the one queued subject and the
+/// targets it lists.
 #[derive(Default)]
 struct Mock {
     item: Option<Value>,
+    targets: Vec<Value>,
+    /// While set, the reports route answers 500.
+    reports_down: bool,
     results: Vec<Value>,
     receipts: Vec<Value>,
     observations: Vec<Value>,
@@ -100,7 +104,7 @@ async fn queue(State(mock): State<Shared>) -> Reply {
     let items: Vec<Value> = mock.item.iter().map(with_results).collect();
     let roster = json!({"revision": 1, "required_checks": [{"identity": "tests"}]});
     ok(
-        json!({"project_id": "p", "roster": roster, "items": items, "skipped_ineligible": 0, "retry_after_seconds": 30}),
+        json!({"project_id": "p", "roster": roster, "targets": mock.targets, "items": items, "skipped_ineligible": 0, "retry_after_seconds": 30}),
     )
 }
 
@@ -222,8 +226,13 @@ async fn revise(State(mock): State<Shared>, headers: HeaderMap, Json(body): Json
     })
 }
 
-/// Stores the first report per (kind, dedupe_key) and returns the stored row.
+/// Stores the first report per (kind, dedupe_key) and returns the stored row;
+/// answers 500 while `reports_down` is set.
 async fn reports(State(mock): State<Shared>, headers: HeaderMap, Json(body): Json<Value>) -> Reply {
+    if mock.lock().unwrap().reports_down {
+        let error = json!({"error": {"code": "internal", "message": "down"}});
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(error));
+    }
     idempotent(&mock, &headers, body, |mock, body| {
         let same = |r: &&Value| r["kind"] == body["kind"] && r["dedupe_key"] == body["dedupe_key"];
         if let Some(existing) = mock.reports.iter().find(same) {
@@ -267,11 +276,22 @@ fn seeded_remote() -> (Remote, String) {
 
 /// Pushes a candidate branch off `base` changing `file` to `content`.
 fn push_candidate(remote: &Remote, base: &str, file: &str, content: &str) -> String {
+    push_candidate_message(remote, base, (file, content), file)
+}
+
+/// Pushes a candidate branch off `base` writing `(file, content)`, with the
+/// commit message `message`.
+fn push_candidate_message(
+    remote: &Remote,
+    base: &str,
+    (file, content): (&str, &str),
+    message: &str,
+) -> String {
     git(
         &remote.source,
         &["checkout", "--quiet", "-B", "candidate", base],
     );
-    let c = commit(&remote.source, file, content);
+    let c = commit_message(&remote.source, file, content, message);
     git(
         &remote.source,
         &[
@@ -288,7 +308,13 @@ fn push_candidate(remote: &Remote, base: &str, file: &str, content: &str) -> Str
 
 /// Moves the remote's `main` forward with one new commit.
 fn advance_main(remote: &Remote, file: &str) -> String {
-    let sha = commit(&remote.source, file, "x\n");
+    land(remote, file, file)
+}
+
+/// Lands one commit writing `file` with `message` on the remote's `main`,
+/// out of band.
+fn land(remote: &Remote, file: &str, message: &str) -> String {
+    let sha = commit_message(&remote.source, file, "x\n", message);
     git(&remote.source, &["push", "--quiet", "origin", "main"]);
     sha
 }
@@ -329,12 +355,32 @@ struct Harness {
 }
 
 impl Harness {
-    /// Starts the mock with `item` queued and builds the integrator.
+    /// Starts the mock with `item` queued and no listed targets (the
+    /// integrator watches the item's) and builds the integrator.
     async fn new(item: Value) -> Self {
-        let mock: Shared = Arc::new(Mutex::new(Mock {
+        Self::start(Mock {
             item: Some(item),
             ..Mock::default()
-        }));
+        })
+        .await
+    }
+
+    /// Starts the mock with no item and `remote`'s `main` as the one target.
+    async fn idle(remote: &Remote) -> Self {
+        let h = Self::start(Mock::default()).await;
+        h.watch(remote);
+        h
+    }
+
+    /// Lists `remote`'s `main` as a target of the project.
+    fn watch(&self, remote: &Remote) {
+        let target = json!({"repository_url": remote.url, "target_branch": "main"});
+        self.mock.lock().unwrap().targets = vec![target];
+    }
+
+    /// Starts `mock` and builds the integrator over it.
+    async fn start(mock: Mock) -> Self {
+        let mock: Shared = Arc::new(Mutex::new(mock));
         let origin = serve(mock.clone()).await;
         let state = tempfile::tempdir().unwrap();
         let credentials = state.path().join("credentials.toml");
@@ -873,4 +919,203 @@ async fn already_contained_candidates_are_observed_without_a_push() {
     h.checks(None, &RULES);
     assert_eq!(h.cycle().await, Step::Observed("published".into()));
     assert!(h.peek(|m| m.receipts.is_empty()));
+}
+
+/// A commit message whose trailers mark an agent-authored commit.
+const AGENT_MESSAGE: &str =
+    "Agent change\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>";
+
+/// The details of the mock's report `index`.
+fn report_details(h: &Harness, index: usize) -> Value {
+    h.peek(|m| m.reports[index]["details"].clone())
+}
+
+/// The SHAs a report lists as flagged.
+fn flagged_shas(details: &Value) -> Vec<Value> {
+    let flagged = details["flagged"].as_array().unwrap().iter();
+    flagged.map(|commit| commit["sha"].clone()).collect()
+}
+
+#[tokio::test]
+async fn an_idle_target_is_watched_for_missing_rules() {
+    let (remote, _) = seeded_remote();
+    let mut h = Harness::idle(&remote).await;
+    h.checks(None, &["non_fast_forward"]);
+    let frozen = Step::Frozen("ruleset_missing: required_status_checks".into());
+    assert_eq!(h.cycle().await, frozen);
+    assert_eq!(h.cycle().await, frozen);
+    assert_eq!(report_kinds(&h), ["ruleset_missing"]);
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::Idle, "the rules are back");
+    h.checks(None, &["non_fast_forward"]);
+    assert_eq!(h.cycle().await, frozen);
+    assert_eq!(report_kinds(&h), ["ruleset_missing", "ruleset_missing"]);
+    let keys = h.peek(|m| {
+        (
+            m.reports[0]["dedupe_key"].clone(),
+            m.reports[1]["dedupe_key"].clone(),
+        )
+    });
+    assert_ne!(keys.0, keys.1, "the idle cycle ended the first episode");
+}
+
+#[tokio::test]
+async fn an_agent_trailer_landing_is_reported_once() {
+    let (remote, base) = seeded_remote();
+    let mut h = Harness::idle(&remote).await;
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::Idle);
+    let agent = land(&remote, "agent.txt", AGENT_MESSAGE);
+    let own = advance_main(&remote, "own.txt");
+    for _ in 0..2 {
+        assert_eq!(h.cycle().await, Step::Idle);
+    }
+    assert_eq!(report_kinds(&h), ["unreviewed_landing"]);
+    let details = report_details(&h, 0);
+    assert_eq!(
+        (details["from"].clone(), details["to"].clone()),
+        (json!(base), json!(own))
+    );
+    assert_eq!(flagged_shas(&details), [json!(agent)]);
+    let trailers = &details["flagged"][0]["trailers"];
+    assert_eq!(trailers, &json!([AGENT_MESSAGE.lines().last().unwrap()]));
+    assert_eq!(details["flagged"][0]["subject"], "Agent change");
+    assert_eq!(
+        (
+            details["flagged_count"].clone(),
+            details["unflagged_count"].clone()
+        ),
+        (json!(1), json!(1))
+    );
+    assert_eq!(h.peek(|m| m.reports[0]["task_id"].clone()), Value::Null);
+}
+
+#[tokio::test]
+async fn the_users_own_landing_is_not_reported() {
+    let (remote, _) = seeded_remote();
+    let mut h = Harness::idle(&remote).await;
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::Idle);
+    let human = "Pair work\n\nCo-authored-by: Jane Doe <jane@example.com>";
+    land(&remote, "pair.txt", human);
+    advance_main(&remote, "solo.txt");
+    assert_eq!(h.cycle().await, Step::Idle);
+    assert!(report_kinds(&h).is_empty());
+}
+
+/// A harness whose first cycle published an agent-authored candidate, with
+/// `main` listed as a target; returns it with the remote and R.
+async fn published_agent_candidate() -> (Harness, Remote, String) {
+    let (remote, base) = seeded_remote();
+    let file = ("feature.txt", "feature\n");
+    let c = push_candidate_message(&remote, &base, file, AGENT_MESSAGE);
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.watch(&remote);
+    h.checks(Some("success"), &RULES);
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    let r = remote_main(&remote);
+    (h, remote, r)
+}
+
+#[tokio::test]
+async fn the_integrators_own_publish_is_not_reported() {
+    let (mut h, _remote, r) = published_agent_candidate().await;
+    assert_eq!(h.latest_r(), r);
+    assert_eq!(h.cycle().await, Step::Idle);
+    assert_eq!(h.cycle().await, Step::Idle);
+    assert!(report_kinds(&h).is_empty());
+}
+
+#[tokio::test]
+async fn only_commits_after_a_publish_are_out_of_band() {
+    let (mut h, remote, r) = published_agent_candidate().await;
+    git(
+        &remote.source,
+        &["pull", "--quiet", "--ff-only", "origin", "main"],
+    );
+    let late = land(&remote, "late.txt", AGENT_MESSAGE);
+    assert_eq!(h.cycle().await, Step::Idle);
+    assert_eq!(report_kinds(&h), ["unreviewed_landing"]);
+    let details = report_details(&h, 0);
+    assert_eq!(flagged_shas(&details), [json!(late)]);
+    assert_eq!(details["integrator_results"], json!([r]));
+    assert_eq!(details["unflagged_count"], 0);
+}
+
+#[tokio::test]
+async fn an_unreachable_service_keeps_the_move_for_the_next_cycle() {
+    let (remote, base) = seeded_remote();
+    let mut h = Harness::idle(&remote).await;
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::Idle);
+    let agent = land(&remote, "agent.txt", AGENT_MESSAGE);
+    h.mock.lock().unwrap().reports_down = true;
+    assert_unsettled(h.cycle().await);
+    h.mock.lock().unwrap().reports_down = false;
+    let own = advance_main(&remote, "own.txt");
+    assert_eq!(h.cycle().await, Step::Idle);
+    assert_eq!(report_kinds(&h), ["unreviewed_landing"]);
+    let details = report_details(&h, 0);
+    assert_eq!(
+        (details["from"].clone(), details["to"].clone()),
+        (json!(base), json!(own))
+    );
+    assert_eq!(flagged_shas(&details), [json!(agent)]);
+}
+
+#[tokio::test]
+async fn a_rewritten_idle_target_freezes() {
+    let (remote, _) = seeded_remote();
+    let mut h = Harness::idle(&remote).await;
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::Idle);
+    git(&remote.source, &["reset", "--quiet", "--hard", "HEAD~1"]);
+    git(
+        &remote.source,
+        &[
+            "push",
+            "--quiet",
+            "--force",
+            "origin",
+            "HEAD:refs/heads/main",
+        ],
+    );
+    for _ in 0..2 {
+        let frozen = h.cycle().await;
+        assert!(
+            matches!(&frozen, Step::Frozen(r) if r.starts_with("target_rewritten")),
+            "{frozen:?}"
+        );
+    }
+    assert_eq!(report_kinds(&h), ["target_rewritten"]);
+}
+
+/// Asserts the step that holds a target whose tip move is not yet reported.
+fn assert_unsettled(step: Step) {
+    assert!(
+        matches!(&step, Step::Blocked(r) if r.starts_with("tip_move_unsettled")),
+        "{step:?}"
+    );
+}
+
+#[tokio::test]
+async fn nothing_publishes_on_a_tip_whose_landing_is_unreported() {
+    let (remote, base) = seeded_remote();
+    let mut h = Harness::idle(&remote).await;
+    h.checks(Some("success"), &RULES);
+    assert_eq!(h.cycle().await, Step::Idle);
+    let agent = land(&remote, "agent.txt", AGENT_MESSAGE);
+    let file = ("feature.txt", "feature\n");
+    let c = push_candidate_message(&remote, &base, file, AGENT_MESSAGE);
+    h.mock.lock().unwrap().item = Some(item(&remote, &base, &c));
+    h.mock.lock().unwrap().reports_down = true;
+    assert_unsettled(h.cycle().await);
+    assert_eq!(remote_main(&remote), agent, "nothing was published");
+    h.mock.lock().unwrap().reports_down = false;
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    for _ in 0..2 {
+        assert_eq!(h.cycle().await, Step::Idle);
+    }
+    assert_eq!(report_kinds(&h), ["unreviewed_landing"]);
+    assert_eq!(flagged_shas(&report_details(&h, 0)), [json!(agent)]);
 }

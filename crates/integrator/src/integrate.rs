@@ -1,7 +1,7 @@
-//! One integration cycle per project (p4-design §3 steps 1–7; the
-//! `unreviewed_landing` tip-move reports are not built yet). The freeze
-//! reports and the privilege decision are in `gates.rs`, flake attribution
-//! in `attribution.rs`.
+//! One integration cycle per project (p4-design §3). The
+//! per-target watchdog and tip monitor are in `watch.rs` (the tip monitor's
+//! `unreviewed_landing` check in `landing.rs`), the freeze reports and the
+//! privilege decision in `gates.rs`, flake attribution in `attribution.rs`.
 //! Everything durable lives in the service (results, receipts, authority);
 //! local intents and worktrees are disposable and are rebuilt from the
 //! service's pinned result, whose R must reproduce exactly.
@@ -65,17 +65,23 @@ impl Job {
 }
 
 impl<C: ChecksSource> Integrator<C> {
-    /// Runs one cycle for `project`: the first queue item that is not
-    /// blocked is taken as far as it can go. Blocked items are logged to
+    /// Runs one cycle for `project`: every target is watched first, then
+    /// the first queue item that is not blocked is taken as far as it can
+    /// go. Items of a held target (frozen, or its tip move not yet
+    /// reported) are skipped; blocked items are logged to
     /// stderr and skipped so they cannot stall the rest of the queue.
     pub async fn cycle(&mut self, project: &str) -> Result<Step> {
         let queue: Queue = match self.service.queue(project).await? {
             Ok(queue) => queue,
             Err(refusal) => return Ok(Step::Refused(refusal.code)),
         };
-        let mut last = Step::Idle;
+        let watched = self.watch_targets(project, &queue).await?;
+        let mut last = watched.first_held().unwrap_or(Step::Idle);
         for item in &queue.items {
-            last = self.item_cycle(project, &queue, item.clone()).await?;
+            let Some(x) = watched.tip(&item.target().key()) else {
+                continue;
+            };
+            last = self.item_cycle(project, &queue, item.clone(), x).await?;
             if !matches!(last, Step::Blocked(_)) {
                 return Ok(last);
             }
@@ -87,24 +93,15 @@ impl<C: ChecksSource> Integrator<C> {
         Ok(last)
     }
 
-    /// Watchdog, target observation, held authority, then integration.
-    async fn item_cycle(&mut self, project: &str, queue: &Queue, item: QueueItem) -> Result<Step> {
-        let repo = RepoId::from_url(&item.repository_url);
-        let missing = self
-            .missing_rules(repo.as_ref(), &item.target_branch)
-            .await?;
-        if !missing.is_empty() {
-            return self.ruleset_frozen(project, &item, &missing).await;
-        }
-        let target = target_key(&item.repository_url, &item.target_branch);
-        self.state.end_ruleset_episode(&target)?;
-        let job = self.open_job(project, item, repo)?;
-        if let Some(reason) = self
-            .state
-            .check_tip(&job.target_key(), &job.mirror, &job.x)?
-        {
-            return self.rewrite_frozen(&job, reason).await;
-        }
+    /// Held authority first, then integration against the watched tip X.
+    async fn item_cycle(
+        &mut self,
+        project: &str,
+        queue: &Queue,
+        item: QueueItem,
+        x: String,
+    ) -> Result<Step> {
+        let job = self.open_job(project, item, x)?;
         if let Some(held) = held_elsewhere(&job) {
             let nonce = held.authority_expires_at.clone().unwrap_or_default();
             return self.observe_and_close(&job, &held, &nonce).await;
@@ -112,33 +109,19 @@ impl<C: ChecksSource> Integrator<C> {
         self.integrate(&job, queue).await
     }
 
-    /// The required rule types missing from the target branch, in
-    /// configuration order; empty when the branch carries them all.
-    async fn missing_rules(&self, repo: Option<&RepoId>, branch: &str) -> Result<Vec<String>> {
-        let active = self.checks.branch_rules(repo, branch).await?;
-        let required = self.config.required_rules.iter();
-        Ok(required
-            .filter(|rule| !active.contains(rule))
-            .cloned()
-            .collect())
-    }
-
-    /// Mirrors the repository, observes X and fetches X and C.
-    fn open_job(&self, project: &str, item: QueueItem, repo: Option<RepoId>) -> Result<Job> {
+    /// Fetches C into the target's mirror, which the watch already created
+    /// and brought up to X.
+    fn open_job(&self, project: &str, item: QueueItem, x: String) -> Result<Job> {
         let mirror = git::mirror_dir(&self.config.state_dir, &item.repository_url);
-        git::ensure_mirror(&mirror, &item.repository_url)?;
-        let target_ref = format!("refs/heads/{}", item.target_branch);
-        let x = git::ls_remote(&mirror, &item.repository_url, &target_ref)?
-            .with_context(|| format!("target {target_ref} does not exist"))?;
         let candidate = match &item.candidate_ref {
             Some(reference) => format!("+{reference}:{reference}"),
             None => item.candidate_revision.clone(),
         };
-        git::fetch(&mirror, &[format!("+{target_ref}:{target_ref}"), candidate])?;
+        git::fetch(&mirror, &[candidate])?;
         Ok(Job {
             project: project.into(),
+            repo: RepoId::from_url(&item.repository_url),
             item,
-            repo,
             mirror,
             x,
         })

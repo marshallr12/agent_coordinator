@@ -2949,6 +2949,8 @@ async fn integrator_queue_is_owner_switched_and_class_scoped() {
     let items = v["data"]["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["subject_task_id"], t["id"]);
+    let target = json!({"repository_url": items[0]["repository_url"], "target_branch": "main"});
+    assert_eq!(v["data"]["targets"], json!([target]), "one target per pair");
     assert_eq!(
         items[0]["reviewed_base"],
         "1111111111111111111111111111111111111111"
@@ -2976,6 +2978,25 @@ async fn integrator_queue_is_owner_switched_and_class_scoped() {
         status,
         StatusCode::FORBIDDEN,
         "integrator is scoped to its API: {v}"
+    );
+}
+
+#[tokio::test]
+async fn integrator_queue_lists_targets_with_no_items() {
+    let f = Fixture::new().await;
+    let repo = "https://example.test/idle-target.git";
+    let p = f.project("idle-target", repo).await;
+    f.policy_none(&p).await;
+    let (status, v) = set_integration_owner(&f, &f.admin, &p, "integrator").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let i = integrator_caller(&f).await;
+    let queue = format!("/api/v1/projects/{p}/integrator/queue");
+    let (status, v) = f.call(&i, "GET", &queue, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["items"], json!([]));
+    assert_eq!(
+        v["data"]["targets"],
+        json!([{"repository_url": repo, "target_branch": "main"}])
     );
 }
 

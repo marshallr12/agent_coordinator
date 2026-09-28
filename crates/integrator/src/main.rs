@@ -17,12 +17,14 @@ mod gates;
 mod git;
 mod github;
 mod integrate;
+mod landing;
 mod local_actions;
 mod privilege;
 mod publish;
 mod roster;
 mod service;
 mod state;
+mod watch;
 
 use anyhow::{Result, bail};
 use checks::{ChecksSource, FakeChecks, GithubChecks};

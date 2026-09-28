@@ -1,6 +1,7 @@
 //! Findings the integrator reports to the service (p4-design §3 steps 1, 2
 //! and 4): the watchdog's `ruleset_missing` and the tip monitor's
-//! `target_rewritten` freezes, and the `privilege_gate` decision. Each
+//! `target_rewritten` freezes, and the `privilege_gate` decision (the tip
+//! monitor's `unreviewed_landing` is built in `landing.rs`). Each
 //! report carries a dedupe key, so repeating it every cycle stores one row.
 //! Freezes stay local and unconditional; their reports are best effort. The
 //! privilege gate is the one report the loop waits on: R is pushed only
@@ -8,29 +9,28 @@
 use crate::checks::ChecksSource;
 use crate::integrate::{Integrator, Job, Step};
 use crate::privilege::{self, Finding};
-use crate::service::{NewReport, QueueItem, ResultRecord};
-use crate::state::target_key;
+use crate::service::{NewReport, ResultRecord, Target};
 use anyhow::Result;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 impl<C: ChecksSource> Integrator<C> {
     /// Watchdog freeze: reports the missing rules once per target, freeze
-    /// episode and rule set, then freezes the item's target. The episode
-    /// lasts until the rules are back, so a later loss of the same rules is
-    /// a new report even after a human resolved the earlier one.
+    /// episode and rule set, then freezes the target. The episode lasts
+    /// until the rules are back, so a later loss of the same rules is a new
+    /// report even after a human resolved the earlier one.
     pub(crate) async fn ruleset_frozen(
         &mut self,
         project: &str,
-        item: &QueueItem,
+        target: &Target,
         missing: &[String],
     ) -> Result<Step> {
-        let target = target_key(&item.repository_url, &item.target_branch);
-        let details = json!({"repository_url": item.repository_url,
-            "target_branch": item.target_branch, "missing_rules": missing});
-        let episode = self.state.ruleset_episode(&target)?;
-        let key = format!("{}:{episode}:{}", short_digest(&target), missing.join(","));
-        self.report_best_effort(project, target_report("ruleset_missing", key, details))
+        let key = target.key();
+        let details = json!({"repository_url": target.repository_url,
+            "target_branch": target.target_branch, "missing_rules": missing});
+        let episode = self.state.ruleset_episode(&key)?;
+        let dedupe = format!("{}:{episode}:{}", short_digest(&key), missing.join(","));
+        self.report_best_effort(project, target_report("ruleset_missing", dedupe, details))
             .await;
         Ok(Step::Frozen(format!(
             "ruleset_missing: {}",
@@ -40,30 +40,38 @@ impl<C: ChecksSource> Integrator<C> {
 
     /// Tip-monitor freeze: reports the rewrite once per target and recorded
     /// freeze (which names both tips), then stays frozen.
-    pub(crate) async fn rewrite_frozen(&self, job: &Job, reason: String) -> Result<Step> {
-        let target = job.target_key();
-        let recorded = self.state.freeze_reason(&target).unwrap_or(&reason);
-        let details = json!({"repository_url": job.item.repository_url,
-            "target_branch": job.item.target_branch, "reason": recorded});
-        let key = format!("{}:{}", short_digest(&target), short_digest(recorded));
-        let report = target_report("target_rewritten", key, details);
-        self.report_best_effort(&job.project, report).await;
-        Ok(Step::Frozen(reason))
+    pub(crate) async fn rewrite_frozen(
+        &self,
+        project: &str,
+        target: &Target,
+        reason: String,
+    ) -> Step {
+        let key = target.key();
+        let recorded = self.state.freeze_reason(&key).unwrap_or(&reason);
+        let details = json!({"repository_url": target.repository_url,
+            "target_branch": target.target_branch, "reason": recorded});
+        let dedupe = format!("{}:{}", short_digest(&key), short_digest(recorded));
+        let report = target_report("target_rewritten", dedupe, details);
+        self.report_best_effort(project, report).await;
+        Step::Frozen(reason)
     }
 
     /// Posts a report whose outcome does not steer the loop; a failure is
-    /// logged and the next cycle posts it again.
-    pub(crate) async fn report_best_effort(&self, project: &str, report: NewReport) {
+    /// logged. True when the service stored or refused it (a refusal is
+    /// final); false on any other failure (transport, or a non-refusal
+    /// error status such as 400 or 500), so a caller can retry next cycle.
+    pub(crate) async fn report_best_effort(&self, project: &str, report: NewReport) -> bool {
         let outcome = self.service.report(project, &report).await;
-        let failure = match outcome {
-            Ok(Ok(_)) => return,
-            Ok(Err(refusal)) => refusal.code,
-            Err(error) => format!("{error:#}"),
+        let (failure, settled) = match outcome {
+            Ok(Ok(_)) => return true,
+            Ok(Err(refusal)) => (refusal.code, true),
+            Err(error) => (format!("{error:#}"), false),
         };
         eprintln!(
             "agentc-integrator: {project}: {} report: {failure}",
             report.kind
         );
+        settled
     }
 
     /// Step 4: `None` when R may proceed (it changes no gated path, or

@@ -132,6 +132,41 @@ pub fn landing_range(mirror: &Path, x: &str, c: &str) -> Result<Vec<String>> {
     Ok(out.lines().map(str::to_owned).collect())
 }
 
+/// One commit's identity, subject and trailer lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub subject: String,
+    /// The commit's trailers, one `Key: value` per entry, continuation
+    /// lines unfolded.
+    pub trailers: Vec<String>,
+}
+
+/// The commits in `from..to`, in topological order (every commit before its
+/// ancestors), with their subjects and trailers.
+pub fn commits_between(mirror: &Path, from: &str, to: &str) -> Result<Vec<CommitInfo>> {
+    let format = "--format=%H%x1f%s%x1f%(trailers:only,unfold)%x1e";
+    let out = text(
+        mirror,
+        ["log", "--topo-order", format, &format!("{from}..{to}")],
+    )?;
+    Ok(out.split('\x1e').filter_map(parse_commit).collect())
+}
+
+/// Parses one `commits_between` record; blank separators yield `None`.
+fn parse_commit(record: &str) -> Option<CommitInfo> {
+    let mut fields = record.trim_start_matches('\n').splitn(3, '\x1f');
+    let sha = fields.next().filter(|sha| !sha.is_empty())?.to_owned();
+    let subject = fields.next()?.to_owned();
+    let trailers = fields.next().unwrap_or_default().lines();
+    let trailers = trailers.filter(|line| !line.trim().is_empty());
+    Some(CommitInfo {
+        sha,
+        subject,
+        trailers: trailers.map(str::to_owned).collect(),
+    })
+}
+
 /// The blob id of `path` in `rev`, or `None` when the file is absent.
 pub fn blob_at(mirror: &Path, rev: &str, path: &str) -> Result<Option<String>> {
     let out = run(
@@ -300,12 +335,17 @@ pub mod testing {
 
     /// Writes one file, commits it and returns the new HEAD.
     pub fn commit(repo: &Path, file: &str, content: &str) -> String {
+        commit_message(repo, file, content, file)
+    }
+
+    /// Writes one file, commits it with `message` and returns the new HEAD.
+    pub fn commit_message(repo: &Path, file: &str, content: &str, message: &str) -> String {
         if let Some(parent) = Path::new(file).parent() {
             std::fs::create_dir_all(repo.join(parent)).unwrap();
         }
         std::fs::write(repo.join(file), content).unwrap();
         git(repo, &["add", file]);
-        git(repo, &["commit", "--quiet", "-m", file]);
+        git(repo, &["commit", "--quiet", "-m", message]);
         git(repo, &["rev-parse", "HEAD"])
     }
 }

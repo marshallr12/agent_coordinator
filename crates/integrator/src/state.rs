@@ -1,6 +1,8 @@
 //! The integrator's only local state besides mirrors and intents: the last
 //! target tip seen per target (repository URL + branch, see [`target_key`]),
-//! sticky freezes, ruleset-missing episodes and the check reruns requested
+//! sticky freezes, ruleset-missing episodes, the results granted push
+//! authority to this integrator per target (so the tip monitor can tell its
+//! own landings from out-of-band ones) and the check reruns requested
 //! (so a rerun the checks source has not started yet is not requested
 //! again, and reruns per run stay capped). Only Git's "not an ancestor" verdict freezes; a Git failure
 //! (missing object, lock) is an ordinary error and retries. A tip that stops
@@ -19,6 +21,49 @@ pub fn target_key(url: &str, branch: &str) -> String {
     format!("{url}#{branch}")
 }
 
+/// Published results remembered per target; the tip monitor only needs the
+/// ones landed since its previous observation.
+const MAX_PUBLISHED: usize = 64;
+
+/// A result granted push authority to this integrator: R and its tip T0.
+/// `t0` is `None` for an entry stored in `state.json` as a bare R string;
+/// only R itself then counts as the integrator's.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(from = "PublishedEntry")]
+pub struct Published {
+    pub r: String,
+    pub t0: Option<String>,
+}
+
+/// The stored forms of [`Published`]: a pair, or a bare R.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PublishedEntry {
+    Pair { r: String, t0: Option<String> },
+    Bare(String),
+}
+
+/// Reads either stored form.
+impl From<PublishedEntry> for Published {
+    fn from(entry: PublishedEntry) -> Self {
+        match entry {
+            PublishedEntry::Pair { r, t0 } => Self { r, t0 },
+            PublishedEntry::Bare(r) => Self { r, t0: None },
+        }
+    }
+}
+
+/// How the target tip moved since the last recorded observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TipMove {
+    /// The target is frozen (now or earlier); the reason names both tips.
+    Frozen(String),
+    /// The tip is the recorded one.
+    Unchanged,
+    /// The tip descends from the recorded one (`None` on first sight).
+    Forward(Option<String>),
+}
+
 /// Last tips and freezes, persisted as `state.json`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LoopState {
@@ -34,6 +79,9 @@ pub struct LoopState {
     /// Episodes started so far; part of every episode name.
     #[serde(default)]
     episode_seq: u64,
+    /// Results granted push authority, per target key, oldest first.
+    #[serde(default)]
+    published: BTreeMap<String, Vec<Published>>,
     /// Reruns requested, keyed `<result id>:<run id>`.
     #[serde(default)]
     reruns: BTreeMap<String, RerunRecord>,
@@ -71,22 +119,27 @@ impl LoopState {
         std::fs::rename(&temp, &self.path).context("replace state file")
     }
 
-    /// Freeze reason for `target`, freezing it now if `x` does not descend
-    /// from the last recorded tip; otherwise records `x` and returns `None`.
-    pub fn check_tip(&mut self, target: &str, mirror: &Path, x: &str) -> Result<Option<String>> {
+    /// Classifies the move of `target` to tip `x` without recording it:
+    /// freezes the target when `x` does not descend from the recorded tip.
+    /// The caller records `x` with [`LoopState::record_tip`] once the move
+    /// is dealt with.
+    pub fn tip_move(&mut self, target: &str, mirror: &Path, x: &str) -> Result<TipMove> {
         if let Some(reason) = self.frozen.get(target) {
-            return Ok(Some(format!(
-                "{reason} (remove it from {} to resume)",
-                self.path.display()
-            )));
+            let hint = format!("(remove it from {} to resume)", self.path.display());
+            return Ok(TipMove::Frozen(format!("{reason} {hint}")));
         }
-        match self.tips.get(target) {
-            Some(previous) if previous != x && !git::is_ancestor(mirror, previous, x)? => {
-                let reason = format!("target_rewritten: {previous} is not an ancestor of {x}");
-                self.freeze(target, &reason).map(|()| Some(reason))
-            }
-            _ => self.record_tip(target, x).map(|()| None),
+        let Some(previous) = self.tips.get(target).cloned() else {
+            return Ok(TipMove::Forward(None));
+        };
+        if previous == x {
+            return Ok(TipMove::Unchanged);
         }
+        if git::is_ancestor(mirror, &previous, x)? {
+            return Ok(TipMove::Forward(Some(previous)));
+        }
+        let reason = format!("target_rewritten: {previous} is not an ancestor of {x}");
+        self.freeze(target, &reason)
+            .map(|()| TipMove::Frozen(reason))
     }
 
     /// The stored freeze reason of `target`, if it is frozen.
@@ -136,8 +189,31 @@ impl LoopState {
         self.save()
     }
 
+    /// Remembers that this integrator may publish result `r`, built on tip
+    /// `t0`, on `target` (recorded before the push, so a crash after it
+    /// cannot make the landing look out-of-band); keeps the latest
+    /// [`MAX_PUBLISHED`].
+    pub fn record_published(&mut self, target: &str, t0: &str, r: &str) -> Result<()> {
+        let list = self.published.entry(target.into()).or_default();
+        if list.iter().any(|known| known.r == r) {
+            return Ok(());
+        }
+        list.push(Published {
+            r: r.into(),
+            t0: Some(t0.into()),
+        });
+        let excess = list.len().saturating_sub(MAX_PUBLISHED);
+        list.drain(..excess);
+        self.save()
+    }
+
+    /// The results recorded by [`LoopState::record_published`] for `target`.
+    pub fn published(&self, target: &str) -> &[Published] {
+        self.published.get(target).map_or(&[], Vec::as_slice)
+    }
+
     /// Remembers the latest observed tip.
-    fn record_tip(&mut self, target: &str, tip: &str) -> Result<()> {
+    pub fn record_tip(&mut self, target: &str, tip: &str) -> Result<()> {
         if self.tips.get(target).map(String::as_str) == Some(tip) {
             return Ok(());
         }
@@ -180,6 +256,15 @@ mod tests {
         assert_eq!(reloaded.rerun_of("res2", 7).count, 0);
     }
 
+    /// Records `x` as the tip of `target` when it is a forward move.
+    fn observe(state: &mut LoopState, mirror: &Path, x: &str) -> TipMove {
+        let moved = state.tip_move("p", mirror, x).unwrap();
+        if matches!(moved, TipMove::Forward(_)) {
+            state.record_tip("p", x).unwrap();
+        }
+        moved
+    }
+
     #[test]
     fn forward_moves_pass_and_rewrites_freeze_stickily() {
         let remote = remote();
@@ -188,30 +273,79 @@ mod tests {
         let mut state = LoopState::load(&path).unwrap();
         let base = git(&remote.source, &["rev-parse", "HEAD"]);
         let next = commit(&remote.source, "n.txt", "n\n");
-        assert_eq!(state.check_tip("p", &remote.source, &base).unwrap(), None);
-        assert_eq!(state.check_tip("p", &remote.source, &next).unwrap(), None);
+        assert_eq!(
+            observe(&mut state, &remote.source, &base),
+            TipMove::Forward(None)
+        );
+        assert_eq!(
+            observe(&mut state, &remote.source, &base),
+            TipMove::Unchanged
+        );
+        let forward = TipMove::Forward(Some(base.clone()));
+        assert_eq!(observe(&mut state, &remote.source, &next), forward);
+        let rewritten = observe(&mut state, &remote.source, &base);
         assert!(
-            state
-                .check_tip("p", &remote.source, &base)
-                .unwrap()
-                .unwrap()
-                .starts_with("target_rewritten")
+            matches!(&rewritten, TipMove::Frozen(r) if r.starts_with("target_rewritten")),
+            "{rewritten:?}"
         );
         assert!(state.freeze_reason("p").unwrap().ends_with(&base));
         let other = dir.path().join("other.json");
         let mut fresh = LoopState::load(&other).unwrap();
         fresh.tips.insert("p".into(), "ab".repeat(20));
         assert!(
-            fresh.check_tip("p", &remote.source, &base).is_err(),
+            fresh.tip_move("p", &remote.source, &base).is_err(),
             "missing object is not a rewrite"
         );
         assert!(fresh.frozen.is_empty());
         let mut reloaded = LoopState::load(&path).unwrap();
-        assert!(
-            reloaded
-                .check_tip("p", &remote.source, &next)
-                .unwrap()
-                .is_some()
-        );
+        let frozen = reloaded.tip_move("p", &remote.source, &next).unwrap();
+        assert!(matches!(frozen, TipMove::Frozen(_)), "{frozen:?}");
+    }
+
+    #[test]
+    fn a_pending_forward_move_is_not_recorded() {
+        let remote = remote();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = LoopState::load(&dir.path().join("state.json")).unwrap();
+        let base = git(&remote.source, &["rev-parse", "HEAD"]);
+        observe(&mut state, &remote.source, &base);
+        let next = commit(&remote.source, "n.txt", "n\n");
+        let forward = TipMove::Forward(Some(base));
+        assert_eq!(state.tip_move("p", &remote.source, &next).unwrap(), forward);
+        assert_eq!(state.tip_move("p", &remote.source, &next).unwrap(), forward);
+    }
+
+    #[test]
+    fn published_results_persist_and_stay_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = LoopState::load(&path).unwrap();
+        for n in 0..=MAX_PUBLISHED {
+            state.record_published("t", "x", &format!("r{n}")).unwrap();
+        }
+        state.record_published("t", "x", "r1").unwrap();
+        let reloaded = LoopState::load(&path).unwrap();
+        let published = reloaded.published("t");
+        assert_eq!(published.len(), MAX_PUBLISHED);
+        assert_eq!(published[0].r, "r1", "the oldest is dropped");
+        let last = published.last().unwrap();
+        assert_eq!(last.r, format!("r{MAX_PUBLISHED}"));
+        assert_eq!(last.t0.as_deref(), Some("x"));
+        assert!(reloaded.published("other").is_empty());
+    }
+
+    #[test]
+    fn bare_published_entries_load_as_r_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let text = r#"{"published": {"t": ["r0", {"r": "r1", "t0": "x"}]}}"#;
+        std::fs::write(&path, text).unwrap();
+        let state = LoopState::load(&path).unwrap();
+        let bare = Published {
+            r: "r0".into(),
+            t0: None,
+        };
+        assert_eq!(state.published("t")[0], bare);
+        assert_eq!(state.published("t")[1].t0.as_deref(), Some("x"));
     }
 }

@@ -226,7 +226,11 @@ reports and only a human resolves one.
   reviewed base, the pinned task digest and any results already recorded for it
   (each with `authority_expires_at`, set while its push authority is outstanding,
   so the integrator can observe that result before pinning a newer one);
-  the response adds the current required-check roster. Each call records the
+  the response adds the current required-check roster and `targets`, the
+  distinct `{repository_url, target_branch}` pairs the project integrates
+  into: the project's configured repository and branch first, then any other
+  pair a listed item's submission pinned. The integrator watches every target
+  each cycle, with or without queued items. Each call records the
   integrator heartbeat. Projects still owned by agents answer
   `integration_owned_by_agents`.
 - `POST /api/v1/projects/{project_id}/integrator/results` pins one integration
@@ -307,7 +311,30 @@ reports and only a human resolves one.
   the codes do not decide the gate. It pushes that result only once
   the report shows `allowed: true`. It raises `ruleset_missing` (once per
   freeze episode, which ends when the rules are back) and `target_rewritten`
-  when it freezes a target. Flake attribution counts a check's attempts on
+  when it freezes a target. Its tip monitor compares each target's tip with
+  the tip it recorded last: a tip that does not descend from it is
+  `target_rewritten`; a forward move the integrator did not make itself is an
+  out-of-band landing. A result's own landing range (the commits from the
+  tip `t0` of that result up to its `r`) counts as the integrator's when the
+  service granted this integrator push authority for that result; every
+  other commit of the move is out-of-band. If any of those
+  carries an agent trailer (a `Claude-Session` trailer, or a
+  `Co-authored-by` trailer naming Claude or Codex or the address
+  `noreply@anthropic.com` or `noreply@openai.com`), it raises
+  `unreviewed_landing`, keyed by target, `from` and `to`, with `details`
+  `{repository_url, target_branch, from, to, integrator_results, flagged,
+  flagged_count, unflagged_count}`; `flagged` lists flagged commits as
+  `{sha, subject, trailers}`, cut to fit the details size limit
+  (`flagged_count` is the total). The
+  report does not block anything; it feeds post-hoc review through the
+  digest. Commits without an agent trailer are the user's own work and are
+  not reported. Trailer detection is best effort and not a security
+  control: a session can strip its trailers, and commits of unknown
+  provenance are not detected. When a move has flagged commits, its new tip
+  becomes the recorded tip only once the report is stored or refused
+  (`409`/`403`); until then the target's items wait
+  (`tip_move_unsettled`), so nothing is integrated on that tip, and the next
+  cycle reports the whole move from the recorded tip. Flake attribution counts a check's attempts on
   `r` as GitHub does: `success`, `skipped` and `neutral` pass, `failure` and
   `timed_out` fail, and any other conclusion (such as `cancelled`) has no
   result; the latest attempt decides. When it failed for the first time or

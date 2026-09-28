@@ -204,8 +204,34 @@ pub(crate) async fn eligible_items(
     Ok((items, skipped))
 }
 
+/// The distinct (repository_url, target_branch) pairs the project integrates
+/// into: the project's configured target first, then any other target a
+/// queued item's submission pinned.
+async fn queue_targets(
+    c: &mut SqliteConnection,
+    p: &str,
+    items: &[Value],
+) -> Result<Vec<Value>, AppError> {
+    let project = sqlx::query("SELECT repository_url,target_branch FROM projects WHERE id=?")
+        .bind(p)
+        .fetch_one(&mut *c)
+        .await?;
+    let configured = json!({"repository_url": project.get::<String, _>("repository_url"),
+        "target_branch": project.get::<String, _>("target_branch")});
+    let mut targets = vec![configured];
+    for item in items {
+        let target = json!({"repository_url": item["repository_url"],
+            "target_branch": item["target_branch"]});
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    Ok(targets)
+}
+
 /// `GET …/integrator/queue`: approved, pins-current subjects awaiting
-/// integration. Each call also records the integrator heartbeat.
+/// integration, and the targets the integrator watches even when no item is
+/// queued. Each call also records the integrator heartbeat.
 async fn queue(State(s): State<AppState>, auth: Auth, Path(p): Path<String>) -> Reply {
     require_integrator(&auth.actor)?;
     let mut c = s.pool.acquire().await?;
@@ -213,9 +239,11 @@ async fn queue(State(s): State<AppState>, auth: Auth, Path(p): Path<String>) -> 
     heartbeat(&mut c, &p, s.now()).await?;
     let (items, skipped) = eligible_items(&mut c, &p).await?;
     let roster = current_roster(&mut c, &p).await?;
+    let targets = queue_targets(&mut c, &p, &items).await?;
     Ok(response(json!({
         "project_id": p,
         "roster": roster,
+        "targets": targets,
         "items": items,
         "skipped_ineligible": skipped,
         "retry_after_seconds": RETRY_AFTER_SECONDS,
