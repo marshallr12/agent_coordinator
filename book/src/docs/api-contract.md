@@ -157,8 +157,10 @@ work comes before new work; reviews are ordered by subject priority and must be
 independent of the caller. `caller_steps` lists preconditions the caller clears
 itself (acknowledging current instructions); `human_queue` counts inspected
 candidates that only a human can unblock, and `skipped` counts every blocking
-precondition code seen. With no action, `retry_after_seconds` suggests a poll
-interval. Read-access credentials may call it, so a shadow supervisor can log
+precondition code seen. For every role, `human_queue_items` lists the project's open integrator
+reports that need a human, each with `required_actor: "human"`, the report kind
+as `gate`, the report and its resolve `call`. With no action,
+`retry_after_seconds` suggests a poll interval. Read-access credentials may call it, so a shadow supervisor can log
 what it would launch without holding write authority.
 
 `GET /api/v1/projects/{project_id}/state-wait` accepts `target_kind=task|activity|job`,
@@ -214,7 +216,8 @@ agents integrate through the workflow activities above) or `integrator`. Only a
 human may change it; omitting it on `PATCH …/policy` keeps the current value.
 The integrator authenticates with an agent credential of class `integrator`
 (see the operator access contract). That class may call only the routes below,
-and only that class may call them.
+and only that class may call them, except that any reader may list integrator
+reports and only a human resolves one.
 
 - `GET /api/v1/projects/{project_id}/integrator/queue` lists approved code
   subjects in integration whose submission is current and whose judged task
@@ -268,6 +271,44 @@ and only that class may call them.
   only `conflict` and `check_failed` are accepted, never while push authority is
   outstanding (`observation_required`), and the three-per-day revise limit parks
   the subject for a human.
+- `POST /api/v1/projects/{project_id}/integrator/reports` with
+  `{kind, dedupe_key, task_id?, submission_id?, result_id?, details}` records a
+  finding for the digest. `kind` is `privilege_gate`, `flaky`, `fix_target`,
+  `unreviewed_landing`, `target_rewritten` or `ruleset_missing`; a
+  `privilege_gate` report must name its `result_id`. The first report per kind
+  and `dedupe_key` wins: sending it again returns the stored report, whatever
+  its `details`, including any resolution. The service sets `requires_human`
+  for `privilege_gate`, `target_rewritten` and `ruleset_missing`. The
+  integrator raises `privilege_gate`, failing closed, when any path that
+  differs between the target tip and the result lies under `.github/`, is the
+  `.github` entry itself, `.gitmodules` or a `CODEOWNERS` file, or is in
+  the local-action scope read from the target tip (paths compared ignoring
+  letter case). That scope holds the directories named by `uses: ./<dir>` in
+  files under `.github/` and in the referenced actions' definitions, the paths a referenced action's `main`, `pre`,
+  `post` and local `image` name, and the targets of symbolic links under
+  `.github/` or a scope directory. Reading the scope from the target tip is
+  safe because every change the result makes under `.github/` is gated
+  anyway. A `uses` value the integrator cannot read as a plain path (an
+  alias, an escape, an expression) makes the whole repository the scope
+  (`unparsed_local_action_reference`), and a gated path that cannot be read
+  is `unreadable`. The report lists each gated path with reason codes that
+  hint at what changed (for example `adds_secrets`, `removes_permissions`,
+  `triggers_changed`, `changed_ci_definition` or `changed_local_action`);
+  the codes do not decide the gate. It pushes that result only once
+  the report shows `allowed: true`. It raises `ruleset_missing` (once per
+  freeze episode, which ends when the rules are back) and `target_rewritten`
+  when it freezes a target.
+- `GET /api/v1/projects/{project_id}/integrator/reports` lists a project's
+  reports, newest first, for any authenticated reader. `open=true` keeps only
+  unresolved ones; `limit` is 1 to 1000 (default 200); `before=<report_id>`
+  continues after that report, and each page's `next_before` is the cursor of
+  the following page (null on the last).
+- `POST /api/v1/projects/{project_id}/integrator/reports/{report_id}/resolve`
+  with `{note, decision?}` is human-only (other callers get the
+  `integrator_report_resolution` gate). A `privilege_gate` report needs
+  `decision` `allow` (its result may be pushed; the report then shows
+  `allowed: true`) or `deny`; other kinds take no decision. A resolved report
+  is `report_already_resolved`.
 - `GET /api/v1/projects/{project_id}/next?role=integrator` returns the queue head
   as an `integrate` action (integrator credentials only).
 

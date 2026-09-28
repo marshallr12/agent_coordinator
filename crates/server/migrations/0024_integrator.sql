@@ -116,6 +116,31 @@ CREATE TABLE integrator_revise_requests (
     follow_up_task_id TEXT REFERENCES tasks(id)
 );
 
+-- Findings the integrator reports (step S4) for the digest and, when
+-- requires_human is set, the human queue. First write per
+-- (project, kind, dedupe_key) wins; only a human resolves one. A resolved
+-- privilege_gate report with decision 'allow' permits pushing its result.
+CREATE TABLE integrator_reports (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    kind TEXT NOT NULL CHECK(kind IN ('privilege_gate','flaky','fix_target',
+        'unreviewed_landing','target_rewritten','ruleset_missing')),
+    task_id TEXT REFERENCES tasks(id),
+    submission_id TEXT REFERENCES submissions(id),
+    result_id TEXT REFERENCES integrator_results(id),
+    dedupe_key TEXT NOT NULL,
+    details_json TEXT NOT NULL CHECK(json_valid(details_json)),
+    requires_human INTEGER NOT NULL CHECK(requires_human IN (0,1)),
+    created_by TEXT NOT NULL REFERENCES principals(id),
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    resolved_by TEXT REFERENCES principals(id),
+    resolution_note TEXT,
+    decision TEXT CHECK(decision IS NULL OR decision IN ('allow','deny')),
+    UNIQUE(project_id,kind,dedupe_key)
+);
+CREATE INDEX integrator_reports_open ON integrator_reports(project_id,resolved_at,created_at);
+
 -- An approval voided because its reviewer contributed to the landing range.
 ALTER TABLE review_decisions ADD COLUMN invalidated_at INTEGER;
 ALTER TABLE review_decisions ADD COLUMN invalidated_reason TEXT;

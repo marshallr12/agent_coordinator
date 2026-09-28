@@ -1,8 +1,9 @@
-//! One integration cycle per project (p4-design §3 steps 1–3 and 5–7; the
-//! labelled privilege decision, flake attribution and tip-move reports
-//! arrive in S4). Everything durable lives in the service (results,
-//! receipts, authority); local intents and worktrees are disposable and are
-//! rebuilt from the service's pinned result, whose R must reproduce exactly.
+//! One integration cycle per project (p4-design §3 steps 1–5 and 7; flake
+//! attribution and `unreviewed_landing` tip-move reports are not built yet).
+//! The freeze reports and the privilege decision are in `gates.rs`.
+//! Everything durable lives in the service (results, receipts, authority);
+//! local intents and worktrees are disposable and are rebuilt from the
+//! service's pinned result, whose R must reproduce exactly.
 //! Checks, pushing and observations are in `publish.rs`.
 use crate::checks::ChecksSource;
 use crate::config::Config;
@@ -88,18 +89,20 @@ impl<C: ChecksSource> Integrator<C> {
     /// Watchdog, target observation, held authority, then integration.
     async fn item_cycle(&mut self, project: &str, queue: &Queue, item: QueueItem) -> Result<Step> {
         let repo = RepoId::from_url(&item.repository_url);
-        if let Some(missing) = self
+        let missing = self
             .missing_rules(repo.as_ref(), &item.target_branch)
-            .await?
-        {
-            return Ok(Step::Frozen(format!("ruleset_missing: {missing}")));
+            .await?;
+        if !missing.is_empty() {
+            return self.ruleset_frozen(project, &item, &missing).await;
         }
+        let target = target_key(&item.repository_url, &item.target_branch);
+        self.state.end_ruleset_episode(&target)?;
         let job = self.open_job(project, item, repo)?;
         if let Some(reason) = self
             .state
             .check_tip(&job.target_key(), &job.mirror, &job.x)?
         {
-            return Ok(Step::Frozen(reason));
+            return self.rewrite_frozen(&job, reason).await;
         }
         if let Some(held) = held_elsewhere(&job) {
             let nonce = held.authority_expires_at.clone().unwrap_or_default();
@@ -108,15 +111,15 @@ impl<C: ChecksSource> Integrator<C> {
         self.integrate(&job, queue).await
     }
 
-    /// The first required rule type missing from the target branch, if any.
-    async fn missing_rules(&self, repo: Option<&RepoId>, branch: &str) -> Result<Option<String>> {
+    /// The required rule types missing from the target branch, in
+    /// configuration order; empty when the branch carries them all.
+    async fn missing_rules(&self, repo: Option<&RepoId>, branch: &str) -> Result<Vec<String>> {
         let active = self.checks.branch_rules(repo, branch).await?;
-        let missing = self
-            .config
-            .required_rules
-            .iter()
-            .find(|rule| !active.contains(rule));
-        Ok(missing.cloned())
+        let required = self.config.required_rules.iter();
+        Ok(required
+            .filter(|rule| !active.contains(rule))
+            .cloned()
+            .collect())
     }
 
     /// Mirrors the repository, observes X and fetches X and C.
@@ -154,10 +157,8 @@ impl<C: ChecksSource> Integrator<C> {
         if result.r == job.x {
             return self.observe_and_close(job, &result, "").await;
         }
-        if let Some(path) = changed_workflow(job, &result)? {
-            return Ok(Step::Blocked(format!(
-                "privilege_gate: R changes required workflow {path}"
-            )));
+        if let Some(skip) = self.privilege_gate(job, &result).await? {
+            return Ok(skip);
         }
         self.check_and_publish(job, &result, &roster).await
     }
@@ -263,22 +264,4 @@ fn reproduced(existing: &ResultRecord, computed: &NewResult) -> Result<ResultRec
         "result {} pins R {} but this host computes {}",
         existing.id, existing.r, computed.r
     )))
-}
-
-/// The first roster workflow whose blob in R differs from its T0 blob: its
-/// checks could never satisfy the roster, and running them would execute
-/// the candidate's own definition of a required check.
-fn changed_workflow(job: &Job, result: &ResultRecord) -> Result<Option<String>> {
-    let checks = result.roster["required_checks"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    for check in checks {
-        let path = check["workflow_path"].as_str().unwrap_or_default();
-        let pinned = check["workflow_blob"].as_str();
-        if git::blob_at(&job.mirror, &result.r, path)?.as_deref() != pinned {
-            return Ok(Some(path.to_owned()));
-        }
-    }
-    Ok(None)
 }

@@ -5,8 +5,8 @@
 //! Only projects whose `integration_owner` is `integrator` are served, and
 //! only an integrator-class credential may call these routes (the reverse is
 //! enforced for writes in `Mutation::begin`). Push authority lives in
-//! `integrator_authority`, observations and revises in `integrator_observe`;
-//! on integrator projects the agent integration routes refuse with
+//! `integrator_authority`, observations and revises in `integrator_observe`,
+//! reports in `integrator_reports`; on integrator projects the agent integration routes refuse with
 //! `integration_owned_by_integrator`.
 use crate::{
     auth::{Actor, Auth},

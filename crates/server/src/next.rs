@@ -6,7 +6,8 @@
 //! what it would launch, and a live supervisor gets a ready-made call
 //! template. Caller-local steps (such as acknowledging the current
 //! instructions) are reported separately instead of disqualifying work, and
-//! candidates only a human can unblock are counted as the human queue.
+//! candidates only a human can unblock are counted as the human queue. Open
+//! integrator reports that need a human are listed as `human_queue_items`.
 use crate::{auth::Actor, auth::Auth, error::AppError, response, state::AppState};
 use axum::{
     Json, Router,
@@ -130,12 +131,18 @@ async fn next(
     let mut c = s.pool.acquire().await?;
     let policy = crate::coordination::current_policy_revision(&mut c, &p).await?;
     let now = s.now();
-    let scan = match role {
-        Role::Implementer => scan_tasks(&mut c, &p, &auth.actor, policy, now).await?,
-        Role::Reviewer => scan_reviews(&mut c, &p, &auth.actor, now).await?,
-        Role::Integrator => return Ok(response(integrator_next(&mut c, &p, &auth.actor).await?)),
+    let mut body = match role {
+        Role::Implementer => scan_tasks(&mut c, &p, &auth.actor, policy, now)
+            .await?
+            .into_value(role),
+        Role::Reviewer => scan_reviews(&mut c, &p, &auth.actor, now)
+            .await?
+            .into_value(role),
+        Role::Integrator => integrator_next(&mut c, &p, &auth.actor).await?,
     };
-    Ok(response(scan.into_value(role)))
+    body["human_queue_items"] =
+        json!(crate::integrator_reports::human_queue_items(&mut c, &p).await?);
+    Ok(response(body))
 }
 
 /// Finds the first task the caller could claim (recovery before new work).

@@ -1,7 +1,7 @@
 //! End-to-end cycles against a real local bare remote, file-backed checks and
 //! an in-process mock of the coordinator's integrator routes (same paths,
-//! envelopes, field names, idempotency-key semantics and held-authority rule
-//! as the S1/S2 server; the server's own rules are covered by
+//! envelopes, field names, idempotency-key semantics, held-authority rule and
+//! first-write-wins reports as the server; the server's own rules are covered by
 //! `crates/server/tests/workflow.rs`).
 use crate::checks::FakeChecks;
 use crate::config::{ChecksKind, Config};
@@ -32,6 +32,7 @@ struct Mock {
     receipts: Vec<Value>,
     observations: Vec<Value>,
     revises: Vec<Value>,
+    reports: Vec<Value>,
     keys: HashMap<String, (Value, Reply)>,
 }
 
@@ -202,6 +203,22 @@ async fn revise(State(mock): State<Shared>, headers: HeaderMap, Json(body): Json
     })
 }
 
+/// Stores the first report per (kind, dedupe_key) and returns the stored row.
+async fn reports(State(mock): State<Shared>, headers: HeaderMap, Json(body): Json<Value>) -> Reply {
+    idempotent(&mock, &headers, body, |mock, body| {
+        let same = |r: &&Value| r["kind"] == body["kind"] && r["dedupe_key"] == body["dedupe_key"];
+        if let Some(existing) = mock.reports.iter().find(same) {
+            return ok(existing.clone());
+        }
+        let mut record = body.clone();
+        record["id"] = json!(format!("rep{}", mock.reports.len() + 1));
+        record["resolved_at"] = Value::Null;
+        record["allowed"] = json!(false);
+        mock.reports.push(record.clone());
+        ok(record)
+    })
+}
+
 /// Serves the mock on a loopback port and returns its origin.
 async fn serve(mock: Shared) -> String {
     let base = "/api/v1/projects/{p}/integrator";
@@ -212,6 +229,7 @@ async fn serve(mock: Shared) -> String {
         .route(&format!("{base}/push-authority"), post(authority))
         .route(&format!("{base}/observations"), post(observations))
         .route(&format!("{base}/revise"), post(revise))
+        .route(&format!("{base}/reports"), post(reports))
         .with_state(mock);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -491,6 +509,115 @@ async fn missing_rules_rewrites_and_workflow_edits_stop_the_integrator() {
         matches!(&frozen, Step::Frozen(r) if r.starts_with("target_rewritten")),
         "{frozen:?}"
     );
+    assert!(matches!(h.cycle().await, Step::Frozen(_)));
+    assert_eq!(
+        report_kinds(&h),
+        ["ruleset_missing", "privilege_gate", "target_rewritten"],
+        "one report per freeze and gate"
+    );
+}
+
+/// The kinds of the reports the mock has stored.
+fn report_kinds(h: &Harness) -> Vec<Value> {
+    h.peek(|m| m.reports.iter().map(|r| r["kind"].clone()).collect())
+}
+
+#[tokio::test]
+async fn privilege_gated_results_wait_for_a_human_allow() {
+    let (remote, base) = seeded_remote();
+    let deploy = "on: push\njobs:\n  d:\n    env:\n      T: ${{ secrets.TOKEN }}\n";
+    let c = push_candidate(&remote, &base, ".github/workflows/deploy.yml", deploy);
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.checks(Some("success"), &RULES);
+    for _ in 0..2 {
+        let blocked = h.cycle().await;
+        assert!(
+            matches!(&blocked, Step::Blocked(r) if r.contains("awaits a human decision")),
+            "{blocked:?}"
+        );
+    }
+    assert_eq!(
+        report_kinds(&h),
+        ["privilege_gate"],
+        "a retry does not duplicate"
+    );
+    let workflow = h.peek(|m| m.reports[0]["details"]["workflows"][0].clone());
+    assert_eq!(workflow["path"], ".github/workflows/deploy.yml");
+    assert_eq!(
+        workflow["reasons"],
+        json!(["new_file", "adds_secrets", "adds_token"])
+    );
+    assert_eq!(h.peek(|m| m.reports[0]["result_id"].clone()), "res1");
+    assert!(h.peek(|m| m.receipts.is_empty()), "nothing ran on R");
+    resolve_report(&h, 0, true);
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+}
+
+/// Marks the mock's report `index` resolved by a human, allowed or not.
+fn resolve_report(h: &Harness, index: usize, allowed: bool) {
+    let mut mock = h.mock.lock().unwrap();
+    mock.reports[index]["resolved_at"] = json!("2026-09-28T00:00:00.000Z");
+    mock.reports[index]["allowed"] = json!(allowed);
+}
+
+#[tokio::test]
+async fn a_denied_privilege_gate_keeps_r_unpushed() {
+    let (remote, base) = seeded_remote();
+    let deploy = "on: push\njobs:\n  d:\n    permissions:\n      contents: write\n";
+    let c = push_candidate(&remote, &base, ".github/workflows/deploy.yml", deploy);
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.checks(Some("success"), &RULES);
+    assert!(matches!(h.cycle().await, Step::Blocked(_)));
+    resolve_report(&h, 0, false);
+    let blocked = h.cycle().await;
+    assert!(
+        matches!(&blocked, Step::Blocked(r) if r.contains("denied")),
+        "{blocked:?}"
+    );
+    assert_eq!(remote_main(&remote), base, "the target did not move");
+    assert!(h.peek(|m| m.receipts.is_empty() && m.observations.is_empty()));
+    let branch = git(
+        &remote.source,
+        &["ls-remote", "origin", "refs/heads/ac/results/res1"],
+    );
+    assert!(branch.is_empty(), "R was never pushed for checks");
+}
+
+#[tokio::test]
+async fn a_ruleset_lost_again_after_resolution_is_reported_again() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.checks(None, &[]);
+    assert!(matches!(h.cycle().await, Step::Frozen(_)));
+    resolve_report(&h, 0, false);
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    h.checks(None, &[]);
+    assert!(matches!(h.cycle().await, Step::Frozen(_)));
+    assert!(matches!(h.cycle().await, Step::Frozen(_)));
+    assert_eq!(report_kinds(&h), ["ruleset_missing", "ruleset_missing"]);
+    let keys = h.peek(|m| {
+        (
+            m.reports[0]["dedupe_key"].clone(),
+            m.reports[1]["dedupe_key"].clone(),
+        )
+    });
+    assert_ne!(keys.0, keys.1, "each freeze episode has its own key");
+}
+
+#[tokio::test]
+async fn a_missing_ruleset_is_reported_once_across_cycles() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.checks(Some("success"), &[]);
+    let frozen = Step::Frozen("ruleset_missing: non_fast_forward, required_status_checks".into());
+    assert_eq!(h.cycle().await, frozen);
+    assert_eq!(h.cycle().await, frozen);
+    assert_eq!(report_kinds(&h), ["ruleset_missing"]);
+    let missing = h.peek(|m| m.reports[0]["details"]["missing_rules"].clone());
+    assert_eq!(missing, json!(RULES));
 }
 
 #[tokio::test]

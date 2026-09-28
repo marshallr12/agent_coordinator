@@ -109,7 +109,8 @@ and kept by rotation:
 
 - `class`: `interactive` (default; a person drives the harness), `supervised`
   (launched unattended by a host supervisor) or `integrator` (the deterministic
-  integrator; it may call only the integrator API, and only it may). Every
+  integrator; it may call only the integrator API, and only it may, except
+  that humans resolve integrator reports). Every
   audited event records the class of the credential behind it, so autonomy can
   be measured from the log.
 - `access`: `write` (default) or `read`. A read-only credential may read any

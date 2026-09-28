@@ -150,6 +150,48 @@ pub fn file_at(mirror: &Path, rev: &str, path: &str) -> Result<Option<String>> {
     text(mirror, ["show", &format!("{rev}:{path}")]).map(Some)
 }
 
+/// Runs git and splits its stdout on NUL, so paths arrive raw rather than
+/// C-quoted; failure carries git's last stderr line.
+fn nul_list<const N: usize>(dir: &Path, args: [&str; N]) -> Result<Vec<String>> {
+    let output = run(dir, args)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git failed: {}", stderr.lines().last().unwrap_or("").trim());
+    }
+    let entries = output.stdout.split(|byte| *byte == 0);
+    let paths = entries.filter(|entry| !entry.is_empty());
+    Ok(paths
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect())
+}
+
+/// Every path whose entry differs between `from` and `to` (added, modified,
+/// deleted, type or mode changed; a rename is its old and new path).
+pub fn changed_paths(mirror: &Path, from: &str, to: &str) -> Result<Vec<String>> {
+    nul_list(
+        mirror,
+        ["diff", "-z", "--no-renames", "--name-only", from, to, "--"],
+    )
+}
+
+/// Git's mode for a symbolic link tree entry.
+pub const SYMLINK_MODE: &str = "120000";
+
+/// Every (mode, path) tree entry in `rev` at or under `path` (the whole
+/// tree when empty), recursing into subtrees.
+pub fn tree_entries(mirror: &Path, rev: &str, path: &str) -> Result<Vec<(String, String)>> {
+    let path = if path.is_empty() { "." } else { path };
+    let raw = nul_list(
+        mirror,
+        ["ls-tree", "-r", "-z", "--full-tree", rev, "--", path],
+    )?;
+    let parse = |entry: &String| {
+        let (meta, name) = entry.split_once('\t')?;
+        Some((meta.split(' ').next()?.to_owned(), name.to_owned()))
+    };
+    Ok(raw.iter().filter_map(parse).collect())
+}
+
 /// Creates (or reuses) a linked worktree on `branch`, started at `at`.
 pub fn ensure_worktree(mirror: &Path, dir: &Path, branch: &str, at: &str) -> Result<()> {
     if dir.join(".git").exists() {
@@ -332,5 +374,16 @@ mod tests {
                 .is_some()
         );
         assert_eq!(file_at(&remote.source, &right, "missing").unwrap(), None);
+        let changed = changed_paths(&remote.source, &base, &right).unwrap();
+        assert_eq!(changed, ["base.txt"]);
+        let tree = tree_entries(&remote.source, &right, "").unwrap();
+        assert_eq!(tree, [("100644".to_owned(), "base.txt".to_owned())]);
+        assert!(
+            tree_entries(&remote.source, &right, "docs")
+                .unwrap()
+                .is_empty()
+        );
+        let entries = tree_entries(&remote.source, &right, "base.txt").unwrap();
+        assert_eq!(entries, [("100644".to_owned(), "base.txt".to_owned())]);
     }
 }

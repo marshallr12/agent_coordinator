@@ -122,6 +122,31 @@ pub struct Observation<'a> {
     pub nonce: &'a str,
 }
 
+/// One finding to report (`POST …/integrator/reports`); the service keeps
+/// the first report per (kind, dedupe_key).
+#[derive(Debug, Clone, Serialize)]
+pub struct NewReport {
+    pub kind: &'static str,
+    pub dedupe_key: String,
+    pub task_id: Option<String>,
+    pub submission_id: Option<String>,
+    pub result_id: Option<String>,
+    pub details: Value,
+}
+
+/// A stored report as the service returns it.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ReportRecord {
+    pub id: String,
+    pub kind: String,
+    /// Set once a human resolved the report.
+    #[serde(default)]
+    pub resolved_at: Option<String>,
+    /// True only for a resolved `privilege_gate` report a human allowed.
+    #[serde(default)]
+    pub allowed: bool,
+}
+
 /// Integrator API for one coordinator origin.
 pub struct Service {
     client: CoordinatorClient,
@@ -224,6 +249,15 @@ impl Service {
             json!({"submission_id": submission, "reason_code": reason, "evidence": evidence});
         let key = format!("revise-{}", uuid::Uuid::new_v4());
         self.post(project, "revise", &body, &key).await
+    }
+
+    /// Reports a finding and returns the stored row, including any human
+    /// resolution. Deduplication is the service's (kind, dedupe_key) rule,
+    /// so every call uses a fresh idempotency key: a replayed key would
+    /// return the reply stored before a later resolution.
+    pub async fn report(&self, project: &str, report: &NewReport) -> Result<Reply<ReportRecord>> {
+        let key = format!("report-{}", uuid::Uuid::new_v4());
+        self.post(project, "reports", &json!(report), &key).await
     }
 
     /// POSTs to `…/integrator/<route>` with an idempotency key.

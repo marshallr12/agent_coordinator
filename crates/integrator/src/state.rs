@@ -26,6 +26,12 @@ pub struct LoopState {
     tips: BTreeMap<String, String>,
     #[serde(default)]
     frozen: BTreeMap<String, String>,
+    /// Open ruleset-missing episodes: target key to episode name.
+    #[serde(default)]
+    ruleset_episodes: BTreeMap<String, String>,
+    /// Episodes started so far; part of every episode name.
+    #[serde(default)]
+    episode_seq: u64,
 }
 
 impl LoopState {
@@ -69,6 +75,33 @@ impl LoopState {
         }
     }
 
+    /// The stored freeze reason of `target`, if it is frozen.
+    pub fn freeze_reason(&self, target: &str) -> Option<&str> {
+        self.frozen.get(target).map(String::as_str)
+    }
+
+    /// The open ruleset-missing episode of `target`, starting one if none is
+    /// open. Its name joins the start time in milliseconds and a sequence
+    /// number, so a later episode never reuses an earlier name.
+    pub fn ruleset_episode(&mut self, target: &str) -> Result<String> {
+        if let Some(open) = self.ruleset_episodes.get(target) {
+            return Ok(open.clone());
+        }
+        self.episode_seq += 1;
+        let millis = chrono::Utc::now().timestamp_millis();
+        let name = format!("{millis}-{}", self.episode_seq);
+        self.ruleset_episodes.insert(target.into(), name.clone());
+        self.save().map(|()| name)
+    }
+
+    /// Ends the ruleset-missing episode of `target` (its rules are back).
+    pub fn end_ruleset_episode(&mut self, target: &str) -> Result<()> {
+        if self.ruleset_episodes.remove(target).is_none() {
+            return Ok(());
+        }
+        self.save()
+    }
+
     /// Freezes `target` until a human clears the entry.
     fn freeze(&mut self, target: &str, reason: &str) -> Result<()> {
         self.frozen.insert(target.into(), reason.into());
@@ -91,6 +124,18 @@ mod tests {
     use crate::git::testing::{commit, git, remote};
 
     #[test]
+    fn ruleset_episodes_persist_until_ended_and_never_repeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = LoopState::load(&path).unwrap();
+        let first = state.ruleset_episode("t").unwrap();
+        let mut reloaded = LoopState::load(&path).unwrap();
+        assert_eq!(reloaded.ruleset_episode("t").unwrap(), first);
+        reloaded.end_ruleset_episode("t").unwrap();
+        assert_ne!(reloaded.ruleset_episode("t").unwrap(), first);
+    }
+
+    #[test]
     fn forward_moves_pass_and_rewrites_freeze_stickily() {
         let remote = remote();
         let dir = tempfile::tempdir().unwrap();
@@ -107,6 +152,7 @@ mod tests {
                 .unwrap()
                 .starts_with("target_rewritten")
         );
+        assert!(state.freeze_reason("p").unwrap().ends_with(&base));
         let other = dir.path().join("other.json");
         let mut fresh = LoopState::load(&other).unwrap();
         fresh.tips.insert("p".into(), "ab".repeat(20));

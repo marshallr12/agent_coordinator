@@ -8,7 +8,8 @@
 //! refused before it touches coordination state.
 //!
 //! `class=integrator` marks the deterministic integrator's credential. It is
-//! scoped both ways: it may only call the integrator routes, and only it may.
+//! scoped both ways: it may only call the integrator routes, and only it may
+//! (resolving an integrator report is the one integrator write left to humans).
 use serde::{Deserialize, Serialize};
 
 use crate::{auth::Actor, error::AppError};
@@ -111,9 +112,17 @@ pub fn require_write_access(actor: &Actor, operation: &str) -> Result<(), AppErr
     Ok(())
 }
 
-/// True for the integrator-only API surface.
+/// True for the integrator-only API surface: every integrator write except
+/// a human's resolution of an integrator report.
 fn integrator_operation(operation: &str) -> bool {
-    operation.starts_with("POST /api/v1/projects/") && operation.contains("/integrator/")
+    operation.starts_with("POST /api/v1/projects/")
+        && operation.contains("/integrator/")
+        && !report_resolution(operation)
+}
+
+/// True for `POST …/integrator/reports/{id}/resolve`, which only a human may call.
+fn report_resolution(operation: &str) -> bool {
+    operation.contains("/integrator/reports/") && operation.ends_with("/resolve")
 }
 
 /// True when the caller holds an integrator credential.
@@ -164,6 +173,12 @@ mod tests {
         ));
         assert!(!integrator_operation("POST /api/v1/projects/p/tasks"));
         assert!(!integrator_operation("POST /api/v1/sessions"));
+        assert!(integrator_operation(
+            "POST /api/v1/projects/p/integrator/reports"
+        ));
+        assert!(!integrator_operation(
+            "POST /api/v1/projects/p/integrator/reports/r1/resolve"
+        ));
     }
 
     #[test]

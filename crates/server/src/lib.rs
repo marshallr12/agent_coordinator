@@ -12,6 +12,7 @@ pub mod imports;
 pub mod integrator;
 pub mod integrator_authority;
 pub mod integrator_observe;
+pub mod integrator_reports;
 pub mod jobs;
 pub mod knowledge;
 pub mod maintenance;
@@ -55,6 +56,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(integrator::routes())
         .merge(integrator_authority::routes())
         .merge(integrator_observe::routes())
+        .merge(integrator_reports::routes())
         .merge(jobs::routes())
         .merge(auth::routes())
         .merge(artifacts::routes())

@@ -5,14 +5,18 @@
 //! required checks run on R, and fast-forwards the target to R under push
 //! authority and a lease on X — attesting every outcome back to the service.
 //! No LLM is involved. See planning/autonomy/p4-design.md.
+mod action_refs;
 mod askpass;
 mod checks;
 mod config;
 #[cfg(test)]
 mod e2e_tests;
+mod gates;
 mod git;
 mod github;
 mod integrate;
+mod local_actions;
+mod privilege;
 mod publish;
 mod roster;
 mod service;

@@ -3655,3 +3655,268 @@ async fn unapproved_stacked_work_blocks_authority() {
         (StatusCode::CONFLICT, json!("stacked_on_unapproved"))
     );
 }
+
+/// Posts one integrator report of `kind` under `key`.
+async fn report(
+    f: &Fixture,
+    i: &Caller,
+    p: &str,
+    kind: &str,
+    key: &str,
+    result: Option<&str>,
+    details: Value,
+) -> (StatusCode, Value) {
+    let body = json!({"kind":kind,"dedupe_key":key,"result_id":result,"details":details});
+    integrator_post(f, i, p, "reports", body).await
+}
+
+/// Resolves report `id` as `c` with `body`.
+async fn resolve(f: &Fixture, c: &Caller, p: &str, id: &Value, body: Value) -> (StatusCode, Value) {
+    let path = format!(
+        "/api/v1/projects/{p}/integrator/reports/{}/resolve",
+        id.as_str().unwrap()
+    );
+    f.call(c, "POST", &path, body).await
+}
+
+// P4 S4: reports are first-write-wins attestations, written only by the
+// integrator on its own projects; the service derives requires_human.
+#[tokio::test]
+async fn integrator_reports_are_idempotent_and_integrator_scoped() {
+    let f = Fixture::new().await;
+    let (p, _, integration, i) = integrator_task(&f, "integrator-reports").await;
+    let result = pinned_result(&f, &i, &p, &integration["submission_id"], T0).await;
+    let gate = json!({"workflows":[{"path":".github/workflows/ci.yml","reasons":["secrets"]}]});
+    let (status, first) = report(
+        &f,
+        &i,
+        &p,
+        "privilege_gate",
+        "k1",
+        Some(&result),
+        gate.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["requires_human"], true);
+    assert_eq!(first["data"]["allowed"], false);
+    let (status, again) = report(
+        &f,
+        &i,
+        &p,
+        "privilege_gate",
+        "k1",
+        Some(&result),
+        json!({"other":1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["data"]["id"], first["data"]["id"]);
+    assert_eq!(again["data"]["details"], gate, "first write wins");
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE kind='integrator.report_recorded'")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(recorded, 1, "a replay emits no event");
+    let (status, flaky) = report(&f, &i, &p, "flaky", "k1", None, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{flaky}");
+    assert_eq!(flaky["data"]["requires_human"], false);
+    let (status, v) = report(&f, &i, &p, "privilege_gate", "k2", None, json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "privilege_gate names its result: {v}"
+    );
+    let (status, v) = report(&f, &i, &p, "bogus", "k3", None, json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let (status, v) = report(&f, &f.a, &p, "flaky", "k4", None, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "agents cannot report: {v}");
+    let (agent_project, _, _) = integrating_code_task(&f, "agent-owned-reports").await;
+    let (status, v) = report(&f, &i, &agent_project, "flaky", "k5", None, json!({})).await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("integration_owned_by_agents"))
+    );
+}
+
+// P4 S4: only a human resolves a report; a privilege_gate resolution carries
+// the allow/deny decision, and open human-required reports are listed by
+// `next` as human-queue items until resolved.
+#[tokio::test]
+async fn humans_resolve_integrator_reports_listed_by_next() {
+    let f = Fixture::new().await;
+    let (p, _, integration, i) = integrator_task(&f, "integrator-resolve").await;
+    let result = pinned_result(&f, &i, &p, &integration["submission_id"], T0).await;
+    let (_, allow) = report(
+        &f,
+        &i,
+        &p,
+        "privilege_gate",
+        "allow",
+        Some(&result),
+        json!({}),
+    )
+    .await;
+    let (_, deny) = report(
+        &f,
+        &i,
+        &p,
+        "privilege_gate",
+        "deny",
+        Some(&result),
+        json!({}),
+    )
+    .await;
+    let (_, flaky) = report(&f, &i, &p, "flaky", "f", None, json!({})).await;
+    let listed = next_action(&f, &f.a, &p, "implementer").await["human_queue_items"].clone();
+    assert_eq!(listed.as_array().unwrap().len(), 2, "{listed}");
+    assert_eq!(listed[0]["required_actor"], "human");
+    assert_eq!(listed[0]["gate"], "privilege_gate");
+    assert_eq!(listed[0]["report"]["id"], allow["data"]["id"]);
+    let path = format!("/api/v1/projects/{p}/integrator/reports?open=true");
+    let (status, open) = f.call(&f.a, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{open}");
+    assert_eq!(open["data"]["items"].as_array().unwrap().len(), 3);
+    let (status, v) = resolve(
+        &f,
+        &f.a,
+        &p,
+        &allow["data"]["id"],
+        json!({"note":"ok","decision":"allow"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(
+        v["error"]["details"]["gate"],
+        "integrator_report_resolution"
+    );
+    let (status, v) = resolve(
+        &f,
+        &i,
+        &p,
+        &allow["data"]["id"],
+        json!({"note":"ok","decision":"allow"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the integrator cannot resolve: {v}"
+    );
+    let (status, v) = resolve(&f, &f.admin, &p, &allow["data"]["id"], json!({"note":"ok"})).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a gate needs a decision: {v}"
+    );
+    let (status, v) = resolve(
+        &f,
+        &f.admin,
+        &p,
+        &allow["data"]["id"],
+        json!({"note":"ok","decision":"allow"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["allowed"], true);
+    assert_eq!(v["data"]["resolved_by"], json!(f.admin.principal));
+    let (_, replay) = report(
+        &f,
+        &i,
+        &p,
+        "privilege_gate",
+        "allow",
+        Some(&result),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        replay["data"]["allowed"], true,
+        "the integrator reads the decision back"
+    );
+    let (status, v) = resolve(
+        &f,
+        &f.admin,
+        &p,
+        &allow["data"]["id"],
+        json!({"note":"again","decision":"deny"}),
+    )
+    .await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("report_already_resolved"))
+    );
+    let (status, v) = resolve(
+        &f,
+        &f.admin,
+        &p,
+        &deny["data"]["id"],
+        json!({"note":"no","decision":"deny"}),
+    )
+    .await;
+    assert_eq!(
+        (status, v["data"]["allowed"].clone()),
+        (StatusCode::OK, json!(false)),
+        "{v}"
+    );
+    let (status, v) = resolve(
+        &f,
+        &f.admin,
+        &p,
+        &flaky["data"]["id"],
+        json!({"note":"x","decision":"allow"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "only gates take a decision: {v}"
+    );
+    let listed = next_action(&f, &f.a, &p, "implementer").await["human_queue_items"].clone();
+    assert_eq!(listed, json!([]), "resolved reports leave the human queue");
+    let (_, open) = f.call(&f.a, "GET", &path, Value::Null).await;
+    assert_eq!(
+        open["data"]["items"].as_array().unwrap().len(),
+        1,
+        "the flaky report stays open"
+    );
+}
+
+// P4 S4: report listings page newest first with a `before` cursor.
+#[tokio::test]
+async fn integrator_reports_page_newest_first() {
+    let f = Fixture::new().await;
+    let (p, _, _, i) = integrator_task(&f, "integrator-report-pages").await;
+    for key in ["k1", "k2", "k3"] {
+        let (status, v) = report(&f, &i, &p, "flaky", key, None, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+    }
+    let list = |query: &str| format!("/api/v1/projects/{p}/integrator/reports?{query}");
+    let keys = |v: &Value| -> Vec<Value> {
+        let items = v["data"]["items"].as_array().unwrap();
+        items.iter().map(|r| r["dedupe_key"].clone()).collect()
+    };
+    let (status, first) = f.call(&f.a, "GET", &list("limit=2"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(keys(&first), [json!("k3"), json!("k2")]);
+    let cursor = first["data"]["next_before"].as_str().unwrap().to_owned();
+    let (_, rest) = f
+        .call(
+            &f.a,
+            "GET",
+            &list(&format!("limit=2&before={cursor}")),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(keys(&rest), [json!("k1")]);
+    assert!(rest["data"]["next_before"].is_null(), "{rest}");
+    for bad in ["limit=0", "limit=1001"] {
+        let (status, v) = f.call(&f.a, "GET", &list(bad), Value::Null).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {v}");
+    }
+    let (status, _) = f
+        .call(&f.a, "GET", &list("before=missing"), Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
