@@ -6,6 +6,9 @@
 //! audit log. `access=read` credentials (reviewer and shadow host principals)
 //! may inspect state and manage their own session, but every other mutation is
 //! refused before it touches coordination state.
+//!
+//! `class=integrator` marks the deterministic integrator's credential. It is
+//! scoped both ways: it may only call the integrator routes, and only it may.
 use serde::{Deserialize, Serialize};
 
 use crate::{auth::Actor, error::AppError};
@@ -17,6 +20,7 @@ pub enum CredentialClass {
     #[default]
     Interactive,
     Supervised,
+    Integrator,
 }
 
 /// Whether a credential may change coordination state.
@@ -48,6 +52,7 @@ impl CredentialClass {
         match self {
             Self::Interactive => "interactive",
             Self::Supervised => "supervised",
+            Self::Integrator => "integrator",
         }
     }
 }
@@ -73,6 +78,7 @@ impl CredentialAttributes {
     pub fn from_columns(class: &str, access: &str) -> Self {
         let class = match class {
             "supervised" => CredentialClass::Supervised,
+            "integrator" => CredentialClass::Integrator,
             _ => CredentialClass::Interactive,
         };
         let access = match access {
@@ -105,6 +111,33 @@ pub fn require_write_access(actor: &Actor, operation: &str) -> Result<(), AppErr
     Ok(())
 }
 
+/// True for the integrator-only API surface.
+fn integrator_operation(operation: &str) -> bool {
+    operation.starts_with("POST /api/v1/projects/") && operation.contains("/integrator/")
+}
+
+/// True when the caller holds an integrator credential.
+pub fn is_integrator(actor: &Actor) -> bool {
+    actor
+        .credential_attributes
+        .is_some_and(|a| a.class == CredentialClass::Integrator)
+}
+
+/// Keeps the integrator credential and the integrator routes paired: an
+/// integrator credential may call nothing else (not even sessions), and no
+/// other principal may call the integrator routes.
+pub fn require_class_scope(actor: &Actor, operation: &str) -> Result<(), AppError> {
+    match (is_integrator(actor), integrator_operation(operation)) {
+        (true, false) => Err(AppError::forbidden(
+            "This integrator credential may only call the integrator API.",
+        )),
+        (false, true) => Err(AppError::forbidden(
+            "Only an integrator credential may call the integrator API.",
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// The class recorded on audit events; `None` for human browser sessions and
 /// job reporters, which are not agent credentials.
 pub fn event_class(actor: &Actor) -> Option<&'static str> {
@@ -120,6 +153,17 @@ mod tests {
         let parsed = CredentialAttributes::from_columns("bogus", "bogus");
         assert_eq!(parsed.class, CredentialClass::Interactive);
         assert_eq!(parsed.access, CredentialAccess::Read);
+    }
+
+    #[test]
+    fn integrator_class_round_trips_and_is_scoped_both_ways() {
+        let parsed = CredentialAttributes::from_columns("integrator", "write");
+        assert_eq!(parsed.class.as_str(), "integrator");
+        assert!(integrator_operation(
+            "POST /api/v1/projects/p/integrator/results"
+        ));
+        assert!(!integrator_operation("POST /api/v1/projects/p/tasks"));
+        assert!(!integrator_operation("POST /api/v1/sessions"));
     }
 
     #[test]

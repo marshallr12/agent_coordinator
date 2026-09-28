@@ -641,6 +641,15 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
             "INSERT INTO main.credentials SELECT id,principal_id,token_hash,created_at,
                 revoked_at,expires_at,name,issued_by FROM original.credentials"
                 .to_owned()
+        } else if table == "projects" {
+            // Later migrations add the integration owner the old schema lacks.
+            "INSERT INTO main.projects(id,name,repository_url,target_branch,policy_revision,
+                review_mode,recovery_mode,lease_seconds,rules,agent_rule_editing,
+                automatic_integration,created_at,allow_subagent_reviews)
+                SELECT id,name,repository_url,target_branch,policy_revision,review_mode,
+                recovery_mode,lease_seconds,rules,agent_rule_editing,automatic_integration,
+                created_at,allow_subagent_reviews FROM original.projects"
+                .to_owned()
         } else if table == "review_decisions" {
             "INSERT INTO main.review_decisions SELECT activity_id,submission_id,attempt_id,
                 reviewer_id,reviewer_session_id,decision,summary,created_at
@@ -2852,4 +2861,297 @@ async fn next_is_not_starved_by_blocked_higher_priority_tasks() {
     }
     let offered = next_action(&f, &f.b, &p, "implementer").await;
     assert_eq!(offered["action"]["task_id"], ready["id"], "{offered}");
+}
+
+/// An agent caller whose credential is switched to the integrator class.
+async fn integrator_caller(f: &Fixture) -> Caller {
+    let c = seed(&f.state, false, "integrator").await;
+    sqlx::query("UPDATE credentials SET class='integrator' WHERE id=?")
+        .bind(&c.credential)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    c
+}
+
+/// Patches the owner at `expected` with agent rule editing on and every other
+/// field unchanged from `policy_none`.
+async fn patch_owner(
+    f: &Fixture,
+    c: &Caller,
+    p: &str,
+    expected: i64,
+    owner: &str,
+) -> (StatusCode, Value) {
+    f.call(c, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":expected,"review_mode":"none","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"integration_owner":owner})).await
+}
+
+/// Hands a project's integration to the integrator (policy revision 2 → 3).
+async fn set_integration_owner(
+    f: &Fixture,
+    c: &Caller,
+    p: &str,
+    owner: &str,
+) -> (StatusCode, Value) {
+    patch_owner(f, c, p, 2, owner).await
+}
+
+/// A result body for the fixture candidate at target tip `t0`.
+fn result_body(submission: &str, t0: &str, r: &str) -> Value {
+    json!({"submission_id":submission,"t0":t0,"t0_tree":"4444444444444444444444444444444444444444","c":"2222222222222222222222222222222222222222","r":r,"r_tree":"6666666666666666666666666666666666666666","landing_range":["2222222222222222222222222222222222222222"],"roster":{"revision":1}})
+}
+
+#[tokio::test]
+async fn integrator_queue_is_owner_switched_and_class_scoped() {
+    let f = Fixture::new().await;
+    let (p, t, _) = integrating_code_task(&f, "integrator-queue").await;
+    let i = integrator_caller(&f).await;
+    let queue = format!("/api/v1/projects/{p}/integrator/queue");
+    let (status, refused) = f.call(&i, "GET", &queue, json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "integration_owned_by_agents");
+    let (status, v) = set_integration_owner(&f, &f.admin, &p, "agent").await;
+    assert_eq!(status, StatusCode::OK, "delegate rule editing only: {v}");
+    let (status, v) = patch_owner(&f, &f.a, &p, 3, "integrator").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "agents cannot switch the owner: {v}"
+    );
+    assert_eq!(v["error"]["details"]["gate"], "policy_permission_change");
+    let (status, v) = patch_owner(&f, &f.admin, &p, 3, "integrator").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["integration_owner"], "integrator");
+    let (status, v) = f.call(&f.a, "GET", &queue, json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "agents cannot read the queue: {v}"
+    );
+    let (status, v) = f.call(&i, "GET", &queue, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let items = v["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["subject_task_id"], t["id"]);
+    assert_eq!(
+        items[0]["reviewed_base"],
+        "1111111111111111111111111111111111111111"
+    );
+    assert_eq!(
+        v["data"]["roster"]["required_checks"][0]["identity"],
+        "workspace-tests"
+    );
+    let seen: Option<i64> =
+        sqlx::query_scalar("SELECT integrator_last_seen FROM projects WHERE id=?")
+            .bind(&p)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(seen, Some(f.state.now()));
+    let (status, v) = f
+        .call(
+            &i,
+            "POST",
+            &format!("/api/v1/projects/{p}/tasks"),
+            json!({"title":"x","description":"x","acceptance_criteria":["x"],"kind":"general"}),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "integrator is scoped to its API: {v}"
+    );
+}
+
+#[tokio::test]
+async fn integrator_results_pin_one_r_per_submission_and_tip() {
+    let f = Fixture::new().await;
+    let (p, _, integration) = integrating_code_task(&f, "integrator-results").await;
+    set_integration_owner(&f, &f.admin, &p, "integrator").await;
+    let i = integrator_caller(&f).await;
+    let submission = integration["submission_id"].as_str().unwrap();
+    let path = format!("/api/v1/projects/{p}/integrator/results");
+    let t0 = "7777777777777777777777777777777777777777";
+    let r = "5555555555555555555555555555555555555555";
+    let (status, first) = f
+        .call(&i, "POST", &path, result_body(submission, t0, r))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, again) = f
+        .call(&i, "POST", &path, result_body(submission, t0, r))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(
+        again["data"]["id"], first["data"]["id"],
+        "same key replays the pinned result"
+    );
+    let (status, v) = f
+        .call(
+            &i,
+            "POST",
+            &path,
+            result_body(submission, t0, "8888888888888888888888888888888888888888"),
+        )
+        .await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("result_conflict"))
+    );
+    let mut stale = result_body(submission, t0, r);
+    stale["c"] = json!("9999999999999999999999999999999999999999");
+    let (status, v) = f.call(&i, "POST", &path, stale).await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("candidate_changed"))
+    );
+    let (status, v) = f
+        .call(&f.a, "POST", &path, result_body(submission, t0, r))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "only the integrator records results: {v}"
+    );
+    let class: String = sqlx::query_scalar(
+        "SELECT credential_class FROM events WHERE kind='integrator.result_recorded' LIMIT 1",
+    )
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(class, "integrator");
+    let (_, queue) = f
+        .call(
+            &i,
+            "GET",
+            &format!("/api/v1/projects/{p}/integrator/queue"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(queue["data"]["items"][0]["results"][0]["r"], r);
+}
+
+#[tokio::test]
+async fn integrator_receipts_bind_to_r_and_the_latest_attempt_decides() {
+    let f = Fixture::new().await;
+    let (p, _, integration) = integrating_code_task(&f, "integrator-receipts").await;
+    set_integration_owner(&f, &f.admin, &p, "integrator").await;
+    let i = integrator_caller(&f).await;
+    let r = "5555555555555555555555555555555555555555";
+    let body = result_body(
+        integration["submission_id"].as_str().unwrap(),
+        "7777777777777777777777777777777777777777",
+        r,
+    );
+    let (_, result) = f
+        .call(
+            &i,
+            "POST",
+            &format!("/api/v1/projects/{p}/integrator/results"),
+            body,
+        )
+        .await;
+    let receipt = |attempt: i64, head: &str, conclusion: &str| json!({"result_id":result["data"]["id"],"check_name":"Linux format, Clippy, and workspace tests","run_id":900,"run_attempt":attempt,"head_sha":head,"app_id":15368,"workflow_path":".github/workflows/checks.yml","workflow_blob":"abababababababababababababababababababab","conclusion":conclusion});
+    let path = format!("/api/v1/projects/{p}/integrator/receipts");
+    let (status, v) = f
+        .call(
+            &i,
+            "POST",
+            &path,
+            receipt(1, "7777777777777777777777777777777777777777", "success"),
+        )
+        .await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("receipt_head_mismatch"))
+    );
+    let (status, v) = f.call(&i, "POST", &path, receipt(1, r, "failure")).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = f.call(&i, "POST", &path, receipt(2, r, "success")).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["data"]["deciding_run"],
+        json!({"run_id":900,"run_attempt":2,"conclusion":"success"})
+    );
+    let (status, v) = f.call(&i, "POST", &path, receipt(2, r, "failure")).await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("receipt_conflict"))
+    );
+    let (status, v) = f.call(&i, "POST", &path, receipt(2, r, "success")).await;
+    assert_eq!(status, StatusCode::OK, "an identical attempt replays: {v}");
+}
+
+#[tokio::test]
+async fn integrator_migration_keeps_credentials_events_and_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let migrations = dir.path().join("schema23");
+    std::fs::create_dir(&migrations).unwrap();
+    for m in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 23)
+    {
+        let name = format!("{:04}_{}.sql", m.version, m.description.replace(' ', "_"));
+        std::fs::write(migrations.join(name), m.sql.as_str().as_bytes()).unwrap();
+    }
+    let database = dir.path().join("upgrade.sqlite3");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&database)
+        .create_if_missing(true)
+        .foreign_keys(false);
+    let mut old = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::migrate::Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&mut old)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO principals(id,name,kind,role,created_at) VALUES('p1','old-agent','agent','agent',1)").execute(&mut old).await.unwrap();
+    sqlx::query("INSERT INTO credentials(rowid,id,principal_id,token_hash,created_at,name,class,access) VALUES(42,'c1','p1','h1',1,'shadow','supervised','read')").execute(&mut old).await.unwrap();
+    for seq in 1..=3 {
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at,credential_class) VALUES(NULL,'p1','old.event',?,'{}',1,'supervised')").bind(seq.to_string()).execute(&mut old).await.unwrap();
+    }
+    sqlx::query("DELETE FROM events WHERE seq=3")
+        .execute(&mut old)
+        .await
+        .unwrap();
+    old.close().await.unwrap();
+    let state = AppState::open(Config {
+        database_path: database,
+        public_origin: "http://127.0.0.1:8080".into(),
+        allow_insecure_loopback: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let row = sqlx::query("SELECT rowid,class,access,name FROM credentials WHERE id='c1'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            row.get::<i64, _>("rowid"),
+            row.get::<String, _>("class"),
+            row.get::<String, _>("access")
+        ),
+        (42, "supervised".into(), "read".into())
+    );
+    assert_eq!(row.get::<String, _>("name"), "shadow");
+    sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at,credential_class) VALUES(NULL,'p1','new.event','n','{}',2,'integrator')").execute(&state.pool).await.unwrap();
+    let seqs: Vec<i64> = sqlx::query_scalar("SELECT seq FROM events ORDER BY seq")
+        .fetch_all(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        seqs,
+        vec![1, 2, 4],
+        "a deleted sequence number is never reused"
+    );
+    let owner: String = sqlx::query_scalar("SELECT integration_owner FROM projects LIMIT 1")
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| "agent".into());
+    assert_eq!(owner, "agent");
 }

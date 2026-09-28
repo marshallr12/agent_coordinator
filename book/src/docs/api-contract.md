@@ -207,6 +207,38 @@ status; it cannot return a different task as a substitute.
 CLI equivalents are `tasks list`, `claim --task <id> --revision <n>`, and
 `claim --next`, with explicit project binding and JSON output available.
 
+## Deterministic integrator (P4, additive)
+
+A project's human-managed policy carries `integration_owner`: `agent` (default;
+agents integrate through the workflow activities above) or `integrator`. Only a
+human may change it; omitting it on `PATCH …/policy` keeps the current value.
+The integrator authenticates with an agent credential of class `integrator`
+(see the operator access contract). That class may call only the routes below,
+and only that class may call them.
+
+- `GET /api/v1/projects/{project_id}/integrator/queue` lists approved code
+  subjects in integration whose submission is current and whose judged task
+  fields still match the pinned digest, by subject priority and then time in
+  integration. Each item carries the candidate revision, tree and ref, the
+  reviewed base, the pinned task digest and any results already recorded for it;
+  the response adds the current required-check roster. Each call records the
+  integrator heartbeat. Projects still owned by agents answer
+  `integration_owned_by_agents`.
+- `POST /api/v1/projects/{project_id}/integrator/results` pins one integration
+  result `r` (with its tree, the target tip `t0` and tree it was computed on, the
+  landing range and the roster read from `t0`) per submission and `t0`. Sending
+  the same result again returns the stored one; a different `r` for the same pair
+  is `result_conflict`, and a `c` that is not the submission's candidate is
+  `candidate_changed`.
+- `POST /api/v1/projects/{project_id}/integrator/receipts` records one GitHub
+  Actions check run observed on `r` (`head_sha` must equal `r`, otherwise
+  `receipt_head_mismatch`). A run attempt is recorded once; a different outcome
+  for it is `receipt_conflict`. The response names the deciding run for that
+  check and workflow blob: the latest attempt of the latest run.
+
+Push authority and publication observations follow in a later release; until a
+project is switched, nothing in the agent integration path changes.
+
 ## Attempt operations
 
 All paths below are under `/api/v1/projects/{project_id}`. Attempts have their

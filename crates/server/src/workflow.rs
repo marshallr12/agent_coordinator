@@ -79,13 +79,13 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-fn payload<T>(value: Result<Json<T>, JsonRejection>) -> Result<T, AppError> {
+pub(crate) fn payload<T>(value: Result<Json<T>, JsonRejection>) -> Result<T, AppError> {
     value.map(|Json(v)| v).map_err(|_| {
         AppError::bad_request("The JSON body does not match this operation's request schema.")
     })
 }
 
-fn bounded(value: &str, name: &str, max: usize, required: bool) -> Result<(), AppError> {
+pub(crate) fn bounded(value: &str, name: &str, max: usize, required: bool) -> Result<(), AppError> {
     if value.len() > max || value.contains('\0') || (required && value.trim().is_empty()) {
         return Err(AppError::bad_request(&format!(
             "{name} must {}contain at most {max} bytes and no NUL characters.",
@@ -95,7 +95,7 @@ fn bounded(value: &str, name: &str, max: usize, required: bool) -> Result<(), Ap
     Ok(())
 }
 
-fn revision(value: &str, name: &str) -> Result<(), AppError> {
+pub(crate) fn revision(value: &str, name: &str) -> Result<(), AppError> {
     if !matches!(value.len(), 40 | 64) || !value.bytes().all(|v| v.is_ascii_hexdigit()) {
         return Err(AppError::bad_request(&format!(
             "{name} must be a full 40–64 character hexadecimal revision identity."

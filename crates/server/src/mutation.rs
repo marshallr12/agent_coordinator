@@ -1,7 +1,7 @@
 //! Writes recheck authorization after obtaining SQLite's writer lock.
 use crate::{
     auth::{Actor, Auth, digest},
-    credential_attributes::{event_class, require_write_access},
+    credential_attributes::{event_class, require_class_scope, require_write_access},
     error::AppError,
     state::AppState,
 };
@@ -38,6 +38,7 @@ impl Mutation {
         let now = clock.now;
         let actor = auth.verify(&mut tx, now).await?;
         require_write_access(&actor, operation)?;
+        require_class_scope(&actor, operation)?;
         let authority_epoch = authority(&mut tx, operation, clock.incident_active).await?;
         // Session identity and proof verifier are included to reject key reuse across harnesses.
         let proof = headers

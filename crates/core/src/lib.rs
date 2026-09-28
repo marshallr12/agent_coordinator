@@ -193,6 +193,10 @@ pub struct PolicyInput {
     /// Omission preserves the current policy for older clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_subagent_reviews: Option<bool>,
+    /// `agent` (default) or `integrator`: who integrates approved code
+    /// subjects. Human-only; omission preserves the current owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_owner: Option<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

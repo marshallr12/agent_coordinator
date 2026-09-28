@@ -156,6 +156,7 @@ struct Project {
     agent_rule_editing: bool,
     automatic_integration: bool,
     allow_subagent_reviews: bool,
+    integration_owner: String,
     #[serde(serialize_with = "serialize_timestamp")]
     created_at: i64,
 }
@@ -273,9 +274,13 @@ async fn update_policy(
     if !["none", "agent", "human", "both", "either"].contains(&input.review_mode.as_str())
         || !["agent", "manual"].contains(&input.recovery_mode.as_str())
         || !(30..=3600).contains(&input.lease_seconds)
+        || input
+            .integration_owner
+            .as_deref()
+            .is_some_and(|owner| !["agent", "integrator"].contains(&owner))
     {
         return Err(AppError::bad_request(
-            "Invalid review/recovery mode or lease_seconds (30–3600).",
+            "Invalid review/recovery mode, integration_owner or lease_seconds (30–3600).",
         ));
     }
     bounded(&input.rules, "rules", 32768, false)?;
@@ -297,11 +302,15 @@ async fn update_policy(
             || current.recovery_mode != input.recovery_mode
             || input
                 .allow_subagent_reviews
-                .is_some_and(|value| value != current.allow_subagent_reviews))
+                .is_some_and(|value| value != current.allow_subagent_reviews)
+            || input
+                .integration_owner
+                .as_ref()
+                .is_some_and(|owner| *owner != current.integration_owner))
     {
         return Err(AppError::human_gate(
             "policy_permission_change",
-            "This project has not delegated this rule change. Agents cannot alter permission grants, review mode or recovery mode.",
+            "This project has not delegated this rule change. Agents cannot alter permission grants, review mode, recovery mode or the integration owner.",
         ));
     }
     if let Some(v) = m.replay {
@@ -324,8 +333,8 @@ async fn update_policy(
             "Finish or reconcile the held integration before changing its policy. Publication may already be in progress.",
         ));
     }
-    sqlx::query("UPDATE projects SET policy_revision=policy_revision+1,review_mode=?,recovery_mode=?,lease_seconds=?,rules=?,agent_rule_editing=?,automatic_integration=?,allow_subagent_reviews=? WHERE id=?")
-        .bind(&input.review_mode).bind(&input.recovery_mode).bind(input.lease_seconds).bind(&input.rules).bind(input.agent_rule_editing).bind(input.automatic_integration).bind(input.allow_subagent_reviews.unwrap_or(current.allow_subagent_reviews)).bind(&id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE projects SET policy_revision=policy_revision+1,review_mode=?,recovery_mode=?,lease_seconds=?,rules=?,agent_rule_editing=?,automatic_integration=?,allow_subagent_reviews=?,integration_owner=? WHERE id=?")
+        .bind(&input.review_mode).bind(&input.recovery_mode).bind(input.lease_seconds).bind(&input.rules).bind(input.agent_rule_editing).bind(input.automatic_integration).bind(input.allow_subagent_reviews.unwrap_or(current.allow_subagent_reviews)).bind(input.integration_owner.as_ref().unwrap_or(&current.integration_owner)).bind(&id).execute(&mut *m.tx).await?;
     let value = serde_json::to_value(project(&mut m.tx, &id).await?)?;
     sqlx::query("INSERT INTO policy_revisions(project_id,revision,data_json,actor_id,created_at,provenance) VALUES(?,?,?,?,?,?)")
         .bind(&id).bind(current.policy_revision+1).bind(value.to_string()).bind(&m.actor.id).bind(m.now).bind(&input.provenance).execute(&mut *m.tx).await?;

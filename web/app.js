@@ -953,7 +953,7 @@
     const offeredReplacement = new Set();
     state.credentials.forEach(credential => {
       const row = el('div', 'credential-row'), info = el('div');
-      add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}${credential.class === 'supervised' ? ' · supervised' : ''}${credential.access === 'read' ? ' · read-only' : ''}`));
+      add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}${credential.class && credential.class !== 'interactive' ? ` · ${credential.class}` : ''}${credential.access === 'read' ? ' · read-only' : ''}`));
       add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`));
       if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`));
       add(row, info);
@@ -2017,7 +2017,7 @@
   // Adds class and access selects matching the issue form, pre-filled from the
   // principal's current credential so a re-issued token keeps its authority.
   function credentialAttributeFields(view, credential) {
-    selectField(view, 'class', 'Class', credential.class || 'interactive', [['interactive', 'Interactive (a person drives the harness)'], ['supervised', 'Supervised (launched by the supervisor)']]);
+    selectField(view, 'class', 'Class', credential.class || 'interactive', [['interactive', 'Interactive (a person drives the harness)'], ['supervised', 'Supervised (launched by the supervisor)'], ['integrator', 'Integrator (the deterministic integrator only)']]);
     selectField(view, 'access', 'Access', credential.access || 'write', [['write', 'Write'], ['read', 'Read-only (reviewers, shadow hosts)']]);
   }
   $('refresh-restore').addEventListener('click', () => loadRestore());
