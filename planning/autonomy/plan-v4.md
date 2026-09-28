@@ -389,7 +389,7 @@ dogfood**.
   Production deploys remain reserved decisions.
 - **Switch to dogfooding once P1 is deployed to production**: P3a/P3b items and all follow-ups become
   coordinator tasks, worked by interactive sessions first and by the supervisor from P3b.
-- **Start execution in a new session** from `HANDOFF-autonomy.md`, not in the planning session.
+- **Start execution in a new session** from the root `HANDOFF.md` (formerly `planning/autonomy/HANDOFF-autonomy.md`), not in the planning session.
 
 **First three steps for the next session:**
 1. **P0 with the user** (~15 min): U1–U13 via AskUserQuestion (recommendation first); day-0 ruleset;

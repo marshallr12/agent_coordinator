@@ -33,5 +33,8 @@ under `book/src`.
 Current work is coordinated through the live service, discovered using the short
 [AGENTS.md](AGENTS.md) bootstrap. See [engineering requirements](CONTRIBUTING.md),
 [automatic agent startup](book/src/docs/agent-startup.md), and
-[implementation history](book/src/docs/implementation-history.md). Historical
-[handoff](HANDOFF.md) and [lessons](DURABLE-RECORD.md) remain reference records.
+[implementation history](book/src/docs/implementation-history.md). The
+[current handoff](HANDOFF.md) covers the agent-autonomy work, with its plan and
+review material under `planning/autonomy/`. The earlier
+[implementation handoff](HANDOFF-archive.md) and [lessons](DURABLE-RECORD.md)
+remain reference records.

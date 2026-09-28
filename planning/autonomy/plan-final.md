@@ -255,7 +255,7 @@ Where this section and earlier §2.2 text differ, **this section wins**.
   subagent review of the final P1 diff inside the interactive session, then **the user's explicit OK**
   (and optional diff review) before the fast-forward of `main`. **Every push** (any branch; the repo is
   public) and the `main` fast-forward need the user's go-ahead at that moment.
-- **Progress record**: an "Execution log" section in `HANDOFF-autonomy.md` on `autonomy-plan` (phase,
+- **Progress record**: an "Execution log" section in the root `HANDOFF.md` on `autonomy-plan` (phase,
   step, commit SHA, gate result).
 
 ### 2.3 Supervisor (P3a shadow ∥ P2; P3b live)
@@ -564,9 +564,9 @@ dogfood**.
   0. Staging Git remote: a local bare repo under `<staging>/remote.git` (as `scripts/completion_smoke.py`
   does); never create GitHub repos. This host (mxmini) runs staging.
 - **(r7) LLM spend:** P0–P1 need none beyond the interactive session; U11 first applies in P2.
-- **Start execution in a new session** from `HANDOFF-autonomy.md`, not in the planning session.
+- **Start execution in a new session** from the root `HANDOFF.md`, not in the planning session.
 
-**First steps for the next session:** follow `HANDOFF-autonomy.md` §5 exactly (it supersedes the
+**First steps for the next session:** follow the root `HANDOFF.md` §5 exactly (it supersedes the
 earlier three-step summary; P1 order and rules are in §2.2-P1 here).
 
 ## 7. (final) Sign-off and risk register

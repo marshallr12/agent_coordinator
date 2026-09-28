@@ -59,5 +59,6 @@
 
 - [Repository instructions](AGENTS.md)
 - [Current handoff](HANDOFF.md)
+- [Previous handoff (archive)](HANDOFF-archive.md)
 - [Implementation history](docs/implementation-history.md)
 - [Durable record](DURABLE-RECORD.md)

@@ -2,6 +2,8 @@
 
 Session: 2026-09-25. Participants: lead (Claude Opus 5.5, main session) and reviewer subagents (Opus 5.5, high effort). Entries are appended in order with UTC timestamps; messages are verbatim unless marked [summary].
 
+Editor's note (2026-09-28): the handoff files were renamed after this discussion. `planning/autonomy/HANDOFF-autonomy.md` became the root `HANDOFF.md`, and the earlier root `HANDOFF.md` became `HANDOFF-archive.md`. Stale file references are marked in place with [sic: now …]; the wording is otherwise unchanged. Bare "HANDOFF §n" section references mean the autonomy handoff, whose section numbers did not change.
+
 
 ---
 
@@ -227,7 +229,7 @@ Also note that `claude --bg` plus `claude agents --json` / `attach` / `logs` / `
 
 One mechanical gotcha: Actions do not trigger on pushes to `refs/agent-coordinator/*`. Only branches and tags fire `push` or accept `workflow_dispatch`, so results must be pushed as branches (e.g. `ac/results/<id>`).
 
-**7. e2-micro.** The capacity test (84.6 MiB RSS) ran on a 2-CPU/4-GiB scope, not the 1-GiB e2-micro, and HANDOFF says so. The service will cope with supervisors. Keep these constraints:
+**7. e2-micro.** The capacity test (84.6 MiB RSS) ran on a 2-CPU/4-GiB scope, not the 1-GiB e2-micro, and HANDOFF [sic: now `HANDOFF-archive.md`] says so. The service will cope with supervisors. Keep these constraints:
 - long-polls must stay under Cloudflare's roughly 100 s proxy timeout;
 - nothing that builds Rust or runs checks goes on the VM;
 - heartbeat events should be compacted, since 67% of events are already liveness.
@@ -1373,7 +1375,7 @@ What round 4 changed:
 2. **Errors:** anything in v4 that misstates what we agreed, or that I dropped. Quote the transcript.
 3. **Top risk:** the single highest remaining risk to the goal, one sentence, for the handoff's risk register.
 
-Keep it short. After this I'll write `HANDOFF-autonomy.md` and ask you to cold-read it for executability in a final round.
+Keep it short. After this I'll write `HANDOFF-autonomy.md` [sic: now root `HANDOFF.md`] and ask you to cold-read it for executability in a final round.
 
 
 ---
@@ -1486,19 +1488,19 @@ Thank you for the sign-offs. Every reservation is applied and marked **(final)**
 - The day-0 ruleset is verified by API read-back, never by force-pushing `main`.
 - A new §7 risk register holds each of your top risks, plus K4 (scope re-growth).
 
-The handoff is `planning/autonomy/HANDOFF-autonomy.md`. The decisions are parked in `.claude/decisions-pending.md` for the SessionStart hook.
+The handoff is `planning/autonomy/HANDOFF-autonomy.md` [sic: now root `HANDOFF.md`]. The decisions are parked in `.claude/decisions-pending.md` for the SessionStart hook.
 
 **Participant joining:** **Casey (cold reader)**, a fresh Opus agent with *no* access to this discussion's context. Casey reads only the handoff and what it links, then posts a P0/P1 execution outline plus questions. Please treat Casey's post as the test result: wherever Casey misunderstands, the handoff is wrong, not Casey.
 
 **Assignments:**
-- **Dana, Sol, Hari:** audit `HANDOFF-autonomy.md` and `plan-final.md` for contradictions (with each other, and with what you agreed in the transcript), for missing information a fresh session would need, and for anything unsafe to execute literally. Post findings as a numbered list with exact text fixes. Then, once Casey has posted, reply to Casey's questions and flag any misreadings.
+- **Dana, Sol, Hari:** audit `HANDOFF-autonomy.md` [sic: now root `HANDOFF.md`] and `plan-final.md` for contradictions (with each other, and with what you agreed in the transcript), for missing information a fresh session would need, and for anything unsafe to execute literally. Post findings as a numbered list with exact text fixes. Then, once Casey has posted, reply to Casey's questions and flag any misreadings.
 
 
 ---
 
 ### Dana (devil's advocate) — 2026-09-25T17:09:36Z
 
-**Round 6 audit (Dana): HANDOFF-autonomy.md and plan-final.md.** Items are ordered by severity, and each gives the exact text fix.
+**Round 6 audit (Dana): HANDOFF-autonomy.md [sic: now root `HANDOFF.md`] and plan-final.md.** Items are ordered by severity, and each gives the exact text fix.
 
 **Unsafe or wrong if executed literally**
 
@@ -1606,7 +1608,7 @@ Casey, I'll reply once you've posted.
 
 ### Sol (systems & protocol) — 2026-09-25T17:09:57Z
 
-**Round 6 audit (Sol): protocol and state-machine findings in HANDOFF-autonomy.md and plan-final.md.** Items 1–3 are unsafe if executed literally. Items 4–7 are gaps or contradictions.
+**Round 6 audit (Sol): protocol and state-machine findings in HANDOFF-autonomy.md [sic: now root `HANDOFF.md`] and plan-final.md.** Items 1–3 are unsafe if executed literally. Items 4–7 are gaps or contradictions.
 
 **1. Unsafe in P1: "roster at push time" as written strands published work.** plan-final §2.2.2 says *"Roster at push time (P1: current `workflow_policies`…)"*. In today's code the roster is validated *after* the push, in `integration-result` (`workflow.rs:2437`) and in `finalize` (`:2912`). Both call `validate_check_jobs`, which reads `ctx.workflow_policy_revision` (`:2308`). If P1 switches that lookup to "current", then any roster edit that lands between `publish` and `finish` turns an already-published R into `required_checks_incomplete`. The work is published but can never be finalized, which is a new human gate.
 **Text fix** (replace the P1 clause): *"P1: the roster revision is captured on the publication intent (the last service call before the push), and `integration-result`/`finalize` validate against that captured revision, never the current one. A roster change after the intent applies to the next integration only. P4: the roster file in T0."*
@@ -1648,14 +1650,14 @@ Everything else in the protocol sections of both files matches the transcript: t
 
 ### Casey (cold reader) — 2026-09-25T17:10:56Z
 
-**Cold read (Casey).** I read only HANDOFF-autonomy.md, plan-final.md, review/service-data.md §3, transcript rounds 2–4 (lines 310–1357), `.claude/decisions-pending.md`, CONTRIBUTING.md and the code sites the handoff cites. I did not read rounds 1, 5 or 6 before drafting this. Verdict: **the handoff is enough to start P0 and the first half of P1 faithfully. It is not enough to finish P1 without guessing**, and two P0 steps would fail as written.
+**Cold read (Casey).** I read only HANDOFF-autonomy.md [sic: now root `HANDOFF.md`], plan-final.md, review/service-data.md §3, transcript rounds 2–4 (lines 310–1357), `.claude/decisions-pending.md`, CONTRIBUTING.md and the code sites the handoff cites. I did not read rounds 1, 5 or 6 before drafting this. Verdict: **the handoff is enough to start P0 and the first half of P1 faithfully. It is not enough to finish P1 without guessing**, and two P0 steps would fail as written.
 
 **1. Execution outline as I would run it**
 
 *Session start.* Echo the `[git-sync]` and `[decisions] 13 pending` lines. AGENTS.md says "automatically select and claim eligible work", but the handoff and the user's "DO NOT create a task" say to work outside the coordinator. I would follow the handoff and say so in one line, rather than claim anything.
 
 *P0 (with the user):*
-1. Put U1–U13 to the user in four AskUserQuestion batches (the tool takes about 4 questions per call), recommendation first. Order: U4, U9, U11 and U13 first, because they gate actions in this plan. The rest only shape P2–P6. Delete each entry from `.claude/decisions-pending.md` once it is answered, and record the answers in HANDOFF-autonomy.md §6 (my guess at the location; see Q1).
+1. Put U1–U13 to the user in four AskUserQuestion batches (the tool takes about 4 questions per call), recommendation first. Order: U4, U9, U11 and U13 first, because they gate actions in this plan. The rest only shape P2–P6. Delete each entry from `.claude/decisions-pending.md` once it is answered, and record the answers in HANDOFF-autonomy.md [sic: now root `HANDOFF.md`] §6 (my guess at the location; see Q1).
 2. Ask separately for explicit approval of the day-0 ruleset. §10 says "do not change rulesets without the user's recorded decision", and no U-number covers it (Q2).
 3. Apply it with `gh api -X POST repos/marshallr12/agent_coordinator/rulesets` (target branch `~DEFAULT_BRANCH`/`refs/heads/main`, rules `non_fast_forward` + `deletion`, no bypass actors). Verify by reading back `GET …/rules/branches/main`, **never** by force-pushing. The payload is not in the handoff, so I would write it and show it to the user first.
 4. Hand the U4 throwaway-repo test to the user as instructions: create a repo, add an `update` ruleset with a test App as bypass, confirm a collaborator push is rejected. I would neither create the repo nor the App.
@@ -1899,7 +1901,7 @@ No objections from Hari (harness & ops). All round-6 rulings in my area are acce
 
 **Round 8 (lead): verification.** I've applied every round-6/7 ruling:
 - to `plan-final.md`, marked **(r7)**;
-- to `HANDOFF-autonomy.md`, where §4–§6 are rewritten with U0–U15 and an Answer column, the exact ruleset payload, user-performed dashboard actions, overrides, the exact gate, manual ship and staging env vars;
+- to `HANDOFF-autonomy.md` [sic: now root `HANDOFF.md`], where §4–§6 are rewritten with U0–U15 and an Answer column, the exact ruleset payload, user-performed dashboard actions, overrides, the exact gate, manual ship and staging env vars;
 - to `.claude/decisions-pending.md`, now 16 entries.
 
 I also redacted the private repo name in the transcript (marked [redacted]).
@@ -1970,7 +1972,7 @@ Everything else is verified. Robin, I'll reply once you've posted.
 
 ### Robin (second cold reader) — 2026-09-25T17:21:07Z
 
-**Cold read (Robin, second cold reader).** I read HANDOFF-autonomy.md, plan-final.md, review/service-data.md §3, transcript rounds 2–4 (Dana's PoC section in full, the rest skimmed) and rounds 6–8 in full, `.claude/decisions-pending.md`, CONTRIBUTING.md, and every code site the handoff cites. Read-only, no network.
+**Cold read (Robin, second cold reader).** I read HANDOFF-autonomy.md [sic: now root `HANDOFF.md`], plan-final.md, review/service-data.md §3, transcript rounds 2–4 (Dana's PoC section in full, the rest skimmed) and rounds 6–8 in full, `.claude/decisions-pending.md`, CONTRIBUTING.md, and every code site the handoff cites. Read-only, no network.
 
 **Verdict.** Casey's gaps are closed: U0 and its payload, the Answer column, the dashboard-only P0 actions, the `main` base, the (r7) rulings on `reopen`, digest, ack key and roster-on-intent, the exact gate, and the manual ship steps. P0 can be run as written. P1 can be started but not finished without guessing. There is one **unsafe** item: the staging CLI line is wrong against the code and runs next to a production token. There is one real **contradiction**: plan-final §6's "first three steps" still contradict the (r7) rulings. Several P1 design points are under-specified, listed below.
 
@@ -1989,7 +1991,7 @@ Everything else is verified. Robin, I'll reply once you've posted.
 1. AskUserQuestion, recommendation first, 4 per call: {U0, U9, U14, U15}, then {U1, U2, U3, U4}, {U5, U6, U7, U8}, {U10, U11, U12, U13}. After each answer, write it into the HANDOFF §6 Answer column and delete its `## Un` block from `.claude/decisions-pending.md`.
 2. U0 = yes: show the payload, **ask once more before running the POST** (it is an external write to a public repo), run it, then read back and expect `["deletion","non_fast_forward"]`. Never test with a force-push.
 3. Give the user the U4 throwaway-repo test as instructions. Ask the user to cancel 5655e94d and decide dea68719 in the dashboard. After the dea68719 decision, run `git worktree remove` (no `--force`) on the two `/tmp/ac-deployment-worktrees/*`, and ask about their `codex/deploy-archived-*` branches (Q-R10). Leave every other worktree alone (CONTRIBUTING: "Preserve other worktrees").
-4. U15 = commit: run a redaction pass on `planning/autonomy/` (hostnames, VM details, private repo names not already in HANDOFF.md), show the diff, and commit only `planning/autonomy/` explicitly on `autonomy-plan`, never `.claude/`. Push only if the user says so.
+4. U15 = commit: run a redaction pass on `planning/autonomy/` (hostnames, VM details, private repo names not already in HANDOFF.md [sic: now `HANDOFF-archive.md`]), show the diff, and commit only `planning/autonomy/` explicitly on `autonomy-plan`, never `.claude/`. Push only if the user says so.
 
 *P1 (branch `autonomy/p1` from a freshly fetched `origin/main`, a worktree outside the repo, e.g. `~/src/worktrees/ac-p1`).* Stage explicit paths only. Run the full gate after each step, then make a checkpoint commit (local only). My order differs from HANDOFF §5.3 in one place, marked ★:
 1. **Labelled gates.** Add `AppError::human_required(code,msg)` in `error.rs` (403, `details.required_actor="human"`). Route through it: `workflow.rs:114 human()`, `coordination.rs:39 admin_or_operator()`, `lifecycle_change :681`, `imports.rs:60`/`:547` (label only), `jobs.rs:267` (label only). Rename `operator_reopen_required` → `reopen_required` and fix `tests/workflow.rs:~1706`. Test: each refusal carries `required_actor`.
@@ -2031,7 +2033,7 @@ Everything else is verified. Robin, I'll reply once you've posted.
 - **Q-R9 Staging repository for the B2/B8 replay.** plan-final §6.3 says "throwaway project and repo", but §5.2 forbids creating repos. Is it a local bare repo? Does the native CLI accept a non-HTTPS remote? And B8 (a legacy null `candidate_ref`) can't be produced through the current API. Do we seed it by SQL, or build an old binary? (HANDOFF §5.4.)
 - **Q-R10 The dea68719 leftovers.** Delete the `codex/deploy-archived-task-pagination-e96b11a[-g2]` branches too, or only the worktrees?
 - **Q-R11 Credential attributes.** Are they in P1? See Contradictions #3.
-- **Q-R12 Where is P1 progress recorded across sessions?** P1 is 1–2 days, so it will span sessions. Work runs outside the coordinator, and HANDOFF-autonomy.md lives untracked (or on `autonomy-plan`), not on `autonomy/p1`. Do we update HANDOFF-autonomy.md §6-style, or the repo's root HANDOFF.md?
+- **Q-R12 Where is P1 progress recorded across sessions?** P1 is 1–2 days, so it will span sessions. Work runs outside the coordinator, and HANDOFF-autonomy.md [sic: now root `HANDOFF.md`] lives untracked (or on `autonomy-plan`), not on `autonomy/p1`. Do we update HANDOFF-autonomy.md [sic: now root `HANDOFF.md`] §6-style, or the repo's root HANDOFF.md [sic: now `HANDOFF-archive.md`]?
 
 **3. Unsafe, contradictory or under-specified**
 
@@ -2123,7 +2125,7 @@ Answers in my area:
 - **Q-R9 (staging repository).** Use a **local bare repo** under `<staging>/remote.git`, bound as the project's canonical repository. `scripts/completion_smoke.py:21` already does exactly this (`git init --bare`, `canonical_repository_key`), and `git_workflow.rs:1337` handles `file://`. Copy that setup; creating a GitHub repo is not needed and is not allowed. B8 (a legacy null `candidate_ref`) can't be produced through the current API. Seed it with one SQL `UPDATE` on the **staging** DB only, and write that down in the replay script.
 - **Q-R10 (dea68719 leftovers).** Remove the worktrees without force, after the user's decision. Delete the `codex/deploy-archived-*` branches only with the user's OK, since they are the user's Codex branches. Local deletion only; no remote branch deletion.
 - **Contradiction #4 (`CARGO_TARGET_DIR`).** I'd rather follow CONTRIBUTING than override it: the target dir goes *inside* the worktree (git-ignored via `**/target/`). That matches what I told Casey. Either way, the documents must say one thing.
-- **Q-R12 (where P1 progress is recorded).** Record it in HANDOFF-autonomy.md on `autonomy-plan`: a §11 "Execution log" with the phase, step, commit SHA and gate result. Commit it with explicit paths once U15 allows it; until then leave it untracked. Keep it separate from the repo root HANDOFF.md, which describes the product.
+- **Q-R12 (where P1 progress is recorded).** Record it in HANDOFF-autonomy.md [sic: now root `HANDOFF.md`] on `autonomy-plan`: a §11 "Execution log" with the phase, step, commit SHA and gate result. Commit it with explicit paths once U15 allows it; until then leave it untracked. Keep it separate from the repo root HANDOFF.md [sic: now `HANDOFF-archive.md`], which describes the product.
 - **Q-R1 (who reviews P1).** This is outside my area, so only an ops note: P1 is agent-authored guard code landing by a human fast-forward. Under the plan's own `unreviewed_landing` rule (agent trailers), it would be flagged later anyway. The cheapest honest option is for the user to review the diff before the fast-forward to `main`. The lead should put that to the user as part of U2/U9.
 
 
@@ -2169,7 +2171,7 @@ Answers in my area:
 **Round 9 (lead): closing.** Every round-8 fix is applied.
 - `plan-final.md` has a new **§2.2-P1 consolidated P1 specification**, which takes precedence on any conflict, the safe staging wrapper, the P1 review and push rules, and risk K5.
 - I verified Sol's preflight SQL columns against migrations 0003, 0004 and 0018.
-- `HANDOFF-autonomy.md` §5 is rewritten to match, and §11 now holds an execution log.
+- `HANDOFF-autonomy.md` [sic: now root `HANDOFF.md`] §5 is rewritten to match, and §11 now holds an execution log.
 - One lead ruling to note: the digest is **stored** in `submissions.task_digest` (Sol) rather than computed on read (Dana), because that decouples P1 from the shape of `task_revisions.data_json`.
 
 Last word: each of you, **one sentence** addressed to the user, the most important thing they should know before approving execution. Then we're done. Thank you. This was an excellent discussion.
@@ -2200,5 +2202,5 @@ Before approving, know that the unattended agents must never run under your own 
 
 ### Lead (Claude, main session) — 2026-09-25T17:26:17Z
 
-**Discussion closed (lead).** Consensus reached after 9 rounds (16:27 to 17:26 UTC). Final artifacts: `plan-final.md`, `HANDOFF-autonomy.md`, the review reports in `review/`, and this transcript. Thank you, Dana, Sol, Hari, Casey and Robin.
+**Discussion closed (lead).** Consensus reached after 9 rounds (16:27 to 17:26 UTC). Final artifacts: `plan-final.md`, `HANDOFF-autonomy.md` [sic: now root `HANDOFF.md`], the review reports in `review/`, and this transcript. Thank you, Dana, Sol, Hari, Casey and Robin.
 

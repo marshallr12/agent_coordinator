@@ -1,6 +1,6 @@
 # Agent Coordinator: development history and what it says about autonomy
 
-Scope: git history (256 commits, 2026-09-09 → 2026-09-25), HANDOFF.md, DURABLE-RECORD.md,
+Scope: git history (256 commits, 2026-09-09 → 2026-09-25), HANDOFF.md (now `HANDOFF-archive.md`), DURABLE-RECORD.md,
 `book/src/docs/implementation-history.md`, 52 Codex rollout files that mention agent_coordinator
 (about 30 top-level sessions and 22 child/subagent/assessor sessions), `~/.codex/history.jsonl`,
 and one prior Claude Code session (`9782905e…`, 2026-09-22). The Claude `memory/` directory is empty.
