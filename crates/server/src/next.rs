@@ -33,6 +33,7 @@ const CALLER_LOCAL: &[&str] = &["instructions_required"];
 enum Role {
     Implementer,
     Reviewer,
+    Integrator,
 }
 
 impl Role {
@@ -41,8 +42,9 @@ impl Role {
         match value.unwrap_or("implementer") {
             "implementer" => Ok(Self::Implementer),
             "reviewer" => Ok(Self::Reviewer),
+            "integrator" => Ok(Self::Integrator),
             _ => Err(AppError::bad_request(
-                "role must be implementer or reviewer.",
+                "role must be implementer, reviewer or integrator.",
             )),
         }
     }
@@ -52,6 +54,7 @@ impl Role {
         match self {
             Self::Implementer => "implementer",
             Self::Reviewer => "reviewer",
+            Self::Integrator => "integrator",
         }
     }
 }
@@ -116,7 +119,7 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/projects/{project}/next", get(next))
 }
 
-/// `GET /api/v1/projects/{project}/next?role=implementer|reviewer`.
+/// `GET /api/v1/projects/{project}/next?role=implementer|reviewer|integrator`.
 async fn next(
     State(s): State<AppState>,
     auth: Auth,
@@ -130,6 +133,7 @@ async fn next(
     let scan = match role {
         Role::Implementer => scan_tasks(&mut c, &p, &auth.actor, policy, now).await?,
         Role::Reviewer => scan_reviews(&mut c, &p, &auth.actor, now).await?,
+        Role::Integrator => return Ok(response(integrator_next(&mut c, &p, &auth.actor).await?)),
     };
     Ok(response(scan.into_value(role)))
 }
@@ -271,4 +275,33 @@ fn review_cli(id: &str, submission: &str, (project, workflow): (i64, i64), kind:
         "agent-coordinator reviews claim --activity {id} --submission {submission} \
          --project-policy-revision {project} --workflow-policy-revision {workflow}{checkout}"
     )
+}
+
+/// The integrator's next action: the head of its queue (planning p4-design
+/// §2 "`next` / digest"). Read-only; the queue call itself is the heartbeat.
+async fn integrator_next(
+    c: &mut SqliteConnection,
+    p: &str,
+    actor: &Actor,
+) -> Result<Value, AppError> {
+    crate::integrator::require_integrator(actor)?;
+    crate::integrator::require_integrator_project(c, p).await?;
+    let (items, skipped) = crate::integrator::eligible_items(c, p).await?;
+    let action = items.first().map(|item| {
+        json!({
+            "kind": "integrate",
+            "subject_task_id": item["subject_task_id"],
+            "submission_id": item["submission_id"],
+            "item": item,
+            "call": {"method": "GET", "path": format!("/api/v1/projects/{p}/integrator/queue")},
+        })
+    });
+    let found = action.is_some();
+    Ok(json!({
+        "role": "integrator",
+        "action": action,
+        "queued": items.len(),
+        "skipped": {"ineligible": skipped},
+        "retry_after_seconds": if found { 0 } else { RETRY_AFTER_SECONDS },
+    }))
 }

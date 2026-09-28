@@ -1005,6 +1005,12 @@ pub(crate) async fn activity_preconditions(
         }
     }
     label_human_preconditions(&mut unmet);
+    if ctx.kind == "integration" && ctx.integration_owner == "integrator" {
+        unmet.push(
+            json!({"code":"integration_owned_by_integrator","required_actor":"integrator",
+            "message":"The deterministic integrator integrates this project."}),
+        );
+    }
     let mut result = json!({
         "target_kind":"activity",
         "target_id":id,
@@ -1133,6 +1139,17 @@ async fn reopen(
         ));
     }
     let revise = revise_record(&mut m, &project, &task, &input).await?;
+    if let Some(deferred) = defer_agent_revise(&mut m, &input, &revise).await? {
+        return Ok(response(
+            m.finish(
+                deferred,
+                Some(&project),
+                "submission.revise_deferred",
+                &input.submission_id,
+            )
+            .await?,
+        ));
+    }
     let effects:i64=sqlx::query_scalar("SELECT count(*) FROM workflow_activities wa JOIN publication_intents pi ON pi.activity_id=wa.id LEFT JOIN publication_reconciliations pr ON pr.activity_id=wa.id WHERE wa.submission_id=? AND (pr.activity_id IS NULL OR pr.disposition!='not_published')")
         .bind(&input.submission_id).fetch_one(&mut *m.tx).await?;
     if effects > 0 {
@@ -1160,34 +1177,18 @@ async fn reopen(
             }
         }
     }
-    crate::jobs::ensure_attempt_quiescent(&mut m.tx, &project, &task).await?;
-    ensure_workflow_quiescent(&mut m.tx, &project, &task).await?;
-    sqlx::query("UPDATE attempts SET state='canceled',ended_at=?,outcome='Workflow reopened: expired, revoked, stale, or revised authority.' WHERE id IN (SELECT t.current_attempt_id FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id WHERE wa.submission_id=? AND t.current_attempt_id IS NOT NULL) AND state='active'")
-        .bind(m.now).bind(&input.submission_id).execute(&mut *m.tx).await?;
-    sqlx::query("UPDATE tasks SET current_attempt_id=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=?)")
-        .bind(&input.submission_id).execute(&mut *m.tx).await?;
-    sqlx::query("UPDATE submissions SET superseded_at=? WHERE id=? AND superseded_at IS NULL")
-        .bind(m.now)
-        .bind(&input.submission_id)
-        .execute(&mut *m.tx)
-        .await?;
-    sqlx::query(
-        "UPDATE workflow_subjects SET phase='revision_needed',updated_at=? WHERE task_id=?",
+    supersede_submission(
+        &mut m.tx,
+        &Supersede {
+            project: &project,
+            task: &task,
+            submission: &input.submission_id,
+            actor: &m.actor.id,
+            reason: &input.reason,
+        },
+        m.now,
     )
-    .bind(m.now)
-    .bind(&task)
-    .execute(&mut *m.tx)
     .await?;
-    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND state IN ('queued','active')").bind(m.now).bind(&input.submission_id).execute(&mut *m.tx).await?;
-    sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND state='canceled')")
-        .bind(&input.submission_id).execute(&mut *m.tx).await?;
-    sqlx::query("UPDATE integration_holds SET state='released',released_by=?,released_at=?,release_reason=? WHERE activity_id IN (SELECT id FROM workflow_activities WHERE submission_id=?) AND state='held'")
-        .bind(&m.actor.id).bind(m.now).bind(&input.reason).bind(&input.submission_id).execute(&mut *m.tx).await?;
-    sqlx::query("UPDATE tasks SET blocked_reason=NULL,ready_since=? WHERE id=?")
-        .bind(m.now)
-        .bind(&task)
-        .execute(&mut *m.tx)
-        .await?;
     let mut value = workflow_snapshot(&mut m.tx, &project, &task, m.now).await?;
     value["revise"] = revise;
     Ok(response(
@@ -1199,6 +1200,75 @@ async fn reopen(
         )
         .await?,
     ))
+}
+
+/// What superseding a submission needs: who reopens it and why.
+pub(crate) struct Supersede<'a> {
+    pub project: &'a str,
+    pub task: &'a str,
+    pub submission: &'a str,
+    pub actor: &'a str,
+    pub reason: &'a str,
+}
+
+/// Supersedes the current submission and sends its task back to revision:
+/// cancels its live activity attempts and queued activities, releases its
+/// integration hold and makes the task claimable again. Callers check
+/// authority and publication effects first.
+pub(crate) async fn supersede_submission(
+    c: &mut SqliteConnection,
+    r: &Supersede<'_>,
+    now: i64,
+) -> Result<(), AppError> {
+    crate::jobs::ensure_attempt_quiescent(c, r.project, r.task).await?;
+    ensure_workflow_quiescent(c, r.project, r.task).await?;
+    sqlx::query("UPDATE attempts SET state='canceled',ended_at=?,outcome='Workflow reopened: expired, revoked, stale, or revised authority.' WHERE id IN (SELECT t.current_attempt_id FROM workflow_activities wa JOIN tasks t ON t.id=wa.activity_task_id WHERE wa.submission_id=? AND t.current_attempt_id IS NOT NULL) AND state='active'")
+        .bind(now).bind(r.submission).execute(&mut *c).await?;
+    sqlx::query("UPDATE tasks SET current_attempt_id=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=?)")
+        .bind(r.submission).execute(&mut *c).await?;
+    sqlx::query("UPDATE submissions SET superseded_at=? WHERE id=? AND superseded_at IS NULL")
+        .bind(now)
+        .bind(r.submission)
+        .execute(&mut *c)
+        .await?;
+    sqlx::query(
+        "UPDATE workflow_subjects SET phase='revision_needed',updated_at=? WHERE task_id=?",
+    )
+    .bind(now)
+    .bind(r.task)
+    .execute(&mut *c)
+    .await?;
+    sqlx::query("UPDATE workflow_activities SET state='canceled',canceled_at=? WHERE submission_id=? AND state IN ('queued','active')").bind(now).bind(r.submission).execute(&mut *c).await?;
+    sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id IN (SELECT activity_task_id FROM workflow_activities WHERE submission_id=? AND state='canceled')")
+        .bind(r.submission).execute(&mut *c).await?;
+    sqlx::query("UPDATE integration_holds SET state='released',released_by=?,released_at=?,release_reason=? WHERE activity_id IN (SELECT id FROM workflow_activities WHERE submission_id=?) AND state='held'")
+        .bind(r.actor).bind(now).bind(r.reason).bind(r.submission).execute(&mut *c).await?;
+    sqlx::query("UPDATE tasks SET blocked_reason=NULL,ready_since=? WHERE id=?")
+        .bind(now)
+        .bind(r.task)
+        .execute(&mut *c)
+        .await?;
+    Ok(())
+}
+
+/// Defers an agent revise while the integrator holds push authority for the
+/// submission (revise loses to a landed push). Humans reopen immediately.
+async fn defer_agent_revise(
+    m: &mut Mutation,
+    input: &ReopenSubmissionInput,
+    revise: &Value,
+) -> Result<Option<Value>, AppError> {
+    if m.actor.kind == "human" {
+        return Ok(None);
+    }
+    let deferral = crate::integrator_observe::ReviseDeferral {
+        submission: &input.submission_id,
+        requested_by: &m.actor.id,
+        reason: &input.reason,
+        reason_code: revise["reason_code"].as_str().unwrap_or_default(),
+        evidence: input.evidence.as_deref(),
+    };
+    crate::integrator_observe::defer_revise(&mut m.tx, &deferral, m.now).await
 }
 
 /// Authorize the caller of a reopen. Humans reopen without a reason code; agents
@@ -1419,6 +1489,8 @@ struct ActivityContext {
     /// Roster this activity validates checks against: the one captured on its
     /// publication intent, else the current roster (0 for general work).
     roster_revision: i64,
+    /// Who integrates this project: `agent` (LLM path) or `integrator`.
+    integration_owner: String,
 }
 
 impl ActivityContext {
@@ -1453,7 +1525,7 @@ async fn activity_context(
     project: &str,
     id: &str,
 ) -> Result<ActivityContext, AppError> {
-    let r=sqlx::query("SELECT wa.id,wa.kind,wa.subject_task_id,wa.submission_id,wa.activity_task_id,wa.state,ws.current_submission_id,ws.phase,s.superseded_at,s.task_revision,s.project_policy_revision,s.workflow_policy_revision,s.canonical_repository_key,s.target_branch,s.task_digest,p.policy_revision,p.review_mode,p.automatic_integration,p.recovery_mode,p.lease_seconds,wp.revision AS current_workflow_revision,st.title,st.description,st.acceptance_json,st.kind AS subject_kind, \
+    let r=sqlx::query("SELECT wa.id,wa.kind,wa.subject_task_id,wa.submission_id,wa.activity_task_id,wa.state,ws.current_submission_id,ws.phase,s.superseded_at,s.task_revision,s.project_policy_revision,s.workflow_policy_revision,s.canonical_repository_key,s.target_branch,s.task_digest,p.policy_revision,p.review_mode,p.automatic_integration,p.recovery_mode,p.lease_seconds,p.integration_owner,wp.revision AS current_workflow_revision,st.title,st.description,st.acceptance_json,st.kind AS subject_kind, \
         CASE WHEN s.kind='code' THEN COALESCE((SELECT COALESCE(pi.roster_revision,s.workflow_policy_revision) FROM publication_intents pi WHERE pi.activity_id=wa.id),wp.revision,s.workflow_policy_revision) ELSE 0 END AS roster_revision \
         FROM workflow_activities wa JOIN workflow_subjects ws ON ws.task_id=wa.subject_task_id JOIN submissions s ON s.id=wa.submission_id JOIN projects p ON p.id=wa.project_id JOIN tasks st ON st.id=wa.subject_task_id LEFT JOIN workflow_policies wp ON wp.project_id=wa.project_id WHERE wa.project_id=? AND wa.id=?")
         .bind(project).bind(id).fetch_optional(&mut *c).await?.ok_or_else(AppError::not_found)?;
@@ -1478,7 +1550,25 @@ async fn activity_context(
         pinned_digest: r.get("task_digest"),
         current_digest: crate::autonomy::row_digest(&r, "subject_kind")?,
         roster_revision: r.get("roster_revision"),
+        integration_owner: r.get("integration_owner"),
     })
+}
+
+/// The refusal served to LLM integration calls on integrator-owned projects.
+pub(crate) fn integration_owned_by_integrator() -> AppError {
+    AppError::conflict(
+        "integration_owned_by_integrator",
+        "The deterministic integrator integrates this project; agents and humans do not claim, publish or finalize its integrations.",
+    )
+    .with_details(json!({"required_actor":"integrator","gate":"integration_owned_by_integrator"}))
+}
+
+/// Refuses the LLM integration path on a project handed to the integrator.
+fn ensure_agent_integration(a: &ActivityContext) -> Result<(), AppError> {
+    if a.kind == "integration" && a.integration_owner == "integrator" {
+        return Err(integration_owned_by_integrator());
+    }
+    Ok(())
 }
 
 fn ensure_current(a: &ActivityContext) -> Result<(), AppError> {
@@ -1623,6 +1713,7 @@ async fn claim_activity(
     .await?;
     let owner_session = session(&m.actor)?.to_owned();
     let ctx = activity_context(&mut m.tx, &project, &id).await?;
+    ensure_agent_integration(&ctx)?;
     ensure_activity_decisions(&mut m, &project, &ctx).await?;
     if let Some(mut value) = m.replay {
         let checkpoint_ready = ctx.workflow_policy_revision == 0
@@ -1914,6 +2005,7 @@ async fn owned_activity(
     kind: &str,
 ) -> Result<ActivityContext, AppError> {
     let ctx = activity_context(&mut m.tx, project, id).await?;
+    ensure_agent_integration(&ctx)?;
     ensure_current(&ctx)?;
     if ctx.kind != kind {
         return Err(AppError::conflict(
@@ -1938,7 +2030,7 @@ async fn owned_activity(
     Ok(ctx)
 }
 
-async fn ready_dependents(
+pub(crate) async fn ready_dependents(
     c: &mut SqliteConnection,
     task_id: &str,
     now: i64,
@@ -1973,6 +2065,39 @@ async fn ensure_workflow_quiescent(
     Ok(())
 }
 
+/// True when this principal (or, for a shared-credential subagent, its
+/// identity or session) is a recorded contributor to `task`.
+pub(crate) async fn contributed(
+    c: &mut SqliteConnection,
+    project: &str,
+    task: &str,
+    principal: &str,
+    session: &str,
+) -> Result<bool, AppError> {
+    let identity: Option<String> = sqlx::query_scalar("SELECT i.id FROM agent_sessions s JOIN subagent_identities i ON i.id=s.subagent_identity_id JOIN projects p ON p.id=i.project_id WHERE s.id=? AND s.principal_id=? AND i.project_id=? AND p.allow_subagent_reviews=1")
+        .bind(session).bind(principal).bind(project).fetch_optional(&mut *c).await?;
+    let n: i64 = if let Some(identity) = identity {
+        sqlx::query_scalar("SELECT count(*) FROM task_contributors tc LEFT JOIN agent_sessions s ON s.id=tc.session_id WHERE tc.task_id=? AND (s.subagent_identity_id=? OR tc.session_id=?)")
+            .bind(task).bind(identity).bind(session).fetch_one(&mut *c).await?
+    } else {
+        sqlx::query_scalar("SELECT count(*) FROM task_contributors WHERE task_id=? AND (principal_id=? OR session_id=?)")
+            .bind(task).bind(principal).bind(session).fetch_one(&mut *c).await?
+    };
+    Ok(n > 0)
+}
+
+/// Other tasks whose commits the current submission's landing range carries,
+/// as recorded by the integrator (plan-final §2.2 item 5a).
+async fn stacked_contributor_tasks(
+    c: &mut SqliteConnection,
+    task: &str,
+) -> Result<Vec<String>, AppError> {
+    Ok(sqlx::query_scalar("SELECT DISTINCT j.value FROM integrator_results r JOIN workflow_subjects ws ON ws.current_submission_id=r.submission_id, json_each(r.contributor_tasks_json) j WHERE ws.task_id=? AND r.contributor_tasks_json IS NOT NULL")
+        .bind(task).fetch_all(&mut *c).await?)
+}
+
+/// Refuses a reviewer who contributed to the subject task or to any task whose
+/// commits its landing range carries.
 async fn ensure_independent_reviewer(
     c: &mut SqliteConnection,
     project: &str,
@@ -1980,20 +2105,15 @@ async fn ensure_independent_reviewer(
     principal: &str,
     session: &str,
 ) -> Result<(), AppError> {
-    let identity: Option<String> = sqlx::query_scalar("SELECT i.id FROM agent_sessions s JOIN subagent_identities i ON i.id=s.subagent_identity_id JOIN projects p ON p.id=i.project_id WHERE s.id=? AND s.principal_id=? AND i.project_id=? AND p.allow_subagent_reviews=1")
-        .bind(session).bind(principal).bind(project).fetch_optional(&mut *c).await?;
-    let contributed: i64 = if let Some(identity) = identity {
-        sqlx::query_scalar("SELECT count(*) FROM task_contributors tc LEFT JOIN agent_sessions s ON s.id=tc.session_id WHERE tc.task_id=? AND (s.subagent_identity_id=? OR tc.session_id=?)")
-            .bind(task).bind(identity).bind(session).fetch_one(&mut *c).await?
-    } else {
-        sqlx::query_scalar("SELECT count(*) FROM task_contributors WHERE task_id=? AND (principal_id=? OR session_id=?)")
-            .bind(task).bind(principal).bind(session).fetch_one(&mut *c).await?
-    };
-    if contributed > 0 {
-        return Err(AppError::conflict(
-            "reviewer_not_independent",
-            "A recorded contributor cannot review this task. Shared-credential subagents require explicit project policy and a separate non-contributing identity.",
-        ));
+    let mut tasks = stacked_contributor_tasks(c, task).await?;
+    tasks.push(task.to_owned());
+    for candidate in &tasks {
+        if contributed(c, project, candidate, principal, session).await? {
+            return Err(AppError::conflict(
+                "reviewer_not_independent",
+                "A recorded contributor cannot review this task. Shared-credential subagents require explicit project policy and a separate non-contributing identity.",
+            ));
+        }
     }
     Ok(())
 }
@@ -2321,6 +2441,7 @@ async fn authorize_integration(
     .await?;
     human(&m.actor, "integration_authorization")?;
     let ctx = activity_context(&mut m.tx, &project, &id).await?;
+    ensure_agent_integration(&ctx)?;
     if let Some(v) = m.replay {
         return Ok(response(v));
     }
@@ -2681,6 +2802,7 @@ async fn reconcile_publication(
     .await?;
     human(&m.actor, "publication_reconciliation")?;
     let ctx = activity_context(&mut m.tx, &project, &id).await?;
+    ensure_agent_integration(&ctx)?;
     if let Some(v) = m.replay {
         return Ok(response(v));
     }
@@ -2830,6 +2952,7 @@ async fn agent_reconcile_publication(
     }
     session(&m.actor)?;
     let ctx = activity_context(&mut m.tx, &project, &id).await?;
+    ensure_agent_integration(&ctx)?;
     if let Some(v) = m.replay {
         return Ok(response(v));
     }

@@ -155,7 +155,7 @@ pub(crate) async fn approvals_satisfied(
             .fetch_all(&mut *c)
             .await?
     };
-    let approvers: Vec<String> = sqlx::query_scalar("SELECT pr.kind FROM review_decisions rd JOIN principals pr ON pr.id=rd.reviewer_id WHERE rd.submission_id=? AND rd.decision='approved'")
+    let approvers: Vec<String> = sqlx::query_scalar("SELECT pr.kind FROM review_decisions rd JOIN principals pr ON pr.id=rd.reviewer_id WHERE rd.submission_id=? AND rd.decision='approved' AND rd.invalidated_at IS NULL")
         .bind(submission)
         .fetch_all(&mut *c)
         .await?;

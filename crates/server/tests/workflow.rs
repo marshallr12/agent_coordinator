@@ -2823,6 +2823,13 @@ async fn next_serves_read_only_credentials_and_routes_human_gates() {
     assert_eq!(gated["skipped"]["human_recovery_required"], 1);
     let path = format!("/api/v1/projects/{p}/next?role=integrator");
     let (status, _) = f.call(&f.b, "GET", &path, Value::Null).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "integrator role needs the class"
+    );
+    let path = format!("/api/v1/projects/{p}/next?role=bogus");
+    let (status, _) = f.call(&f.b, "GET", &path, Value::Null).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -2896,9 +2903,18 @@ async fn set_integration_owner(
     patch_owner(f, c, p, 2, owner).await
 }
 
+/// The fixture roster check's GitHub check-run name and workflow blob.
+const CHECK: &str = "Linux format, Clippy, and workspace tests";
+const BLOB: &str = "abababababababababababababababababababab";
+
 /// A result body for the fixture candidate at target tip `t0`.
 fn result_body(submission: &str, t0: &str, r: &str) -> Value {
-    json!({"submission_id":submission,"t0":t0,"t0_tree":"4444444444444444444444444444444444444444","c":"2222222222222222222222222222222222222222","r":r,"r_tree":"6666666666666666666666666666666666666666","landing_range":["2222222222222222222222222222222222222222"],"roster":{"revision":1}})
+    json!({"submission_id":submission,"t0":t0,"t0_tree":"4444444444444444444444444444444444444444","c":"2222222222222222222222222222222222222222","r":r,"r_tree":"6666666666666666666666666666666666666666","landing_range":["2222222222222222222222222222222222222222"],"roster":roster()})
+}
+
+/// The roster the fixture integrator reads from T0: the protected check.
+fn roster() -> Value {
+    json!({"revision":1,"required_checks":[{"identity":"workspace-tests","check_name":CHECK,"workflow_path":".github/workflows/checks.yml","workflow_blob":BLOB}]})
 }
 
 #[tokio::test]
@@ -3154,4 +3170,466 @@ async fn integrator_migration_keeps_credentials_events_and_sequence() {
         .unwrap()
         .unwrap_or_else(|| "agent".into());
     assert_eq!(owner, "agent");
+}
+
+const T0: &str = "7777777777777777777777777777777777777777";
+const R: &str = "5555555555555555555555555555555555555555";
+
+/// An integrating code task on a project handed to the integrator, with the
+/// integrator's caller.
+async fn integrator_task(f: &Fixture, name: &str) -> (String, Value, Value, Caller) {
+    let (p, t, integration) = integrating_code_task(f, name).await;
+    let (status, v) = set_integration_owner(f, &f.admin, &p, "integrator").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    (p, t, integration, integrator_caller(f).await)
+}
+
+/// The path of one workflow activity route.
+fn activity_path(p: &str, a: &Value, route: &str) -> String {
+    format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/{route}",
+        a["id"].as_str().unwrap()
+    )
+}
+
+/// A claim body pinned to the fixture submission's revisions (2 and 1).
+fn activity_claim(a: &Value) -> Value {
+    json!({"expected_submission_id":a["submission_id"],"expected_project_policy_revision":2,"expected_workflow_policy_revision":1})
+}
+
+/// Posts as the integrator to `/integrator/{route}`.
+async fn integrator_post(
+    f: &Fixture,
+    i: &Caller,
+    p: &str,
+    route: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let path = format!("/api/v1/projects/{p}/integrator/{route}");
+    f.call(i, "POST", &path, body).await
+}
+
+/// Records the result for (submission, t0) and returns its id.
+async fn pinned_result(f: &Fixture, i: &Caller, p: &str, submission: &Value, t0: &str) -> String {
+    let body = result_body(submission.as_str().unwrap(), t0, R);
+    let (status, v) = integrator_post(f, i, p, "results", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"]["id"].as_str().unwrap().to_owned()
+}
+
+/// Posts one receipt for the roster check on R.
+async fn receipt(f: &Fixture, i: &Caller, p: &str, result: &str, run: i64, conclusion: &str) {
+    let body = json!({"result_id":result,"check_name":CHECK,"run_id":run,"run_attempt":1,"head_sha":R,"app_id":15368,"workflow_path":".github/workflows/checks.yml","workflow_blob":BLOB,"conclusion":conclusion});
+    let (status, v) = integrator_post(f, i, p, "receipts", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+/// Asks for push authority on `result`.
+async fn authority(f: &Fixture, i: &Caller, p: &str, result: &str) -> (StatusCode, Value) {
+    integrator_post(f, i, p, "push-authority", json!({"result_id":result})).await
+}
+
+/// Pins R at `t0`, passes its check and takes push authority.
+async fn authorized(f: &Fixture, i: &Caller, p: &str, submission: &Value, t0: &str) -> String {
+    let result = pinned_result(f, i, p, submission, t0).await;
+    receipt(f, i, p, &result, 900, "success").await;
+    let (status, v) = authority(f, i, p, &result).await;
+    assert_eq!(
+        (status, v["data"]["granted"].clone()),
+        (StatusCode::OK, json!(true)),
+        "{v}"
+    );
+    result
+}
+
+/// Posts an observation of `tip` for `result`.
+async fn observe(
+    f: &Fixture,
+    i: &Caller,
+    p: &str,
+    result: &str,
+    tip: &str,
+    ancestry: &str,
+) -> (StatusCode, Value) {
+    let body = json!({"result_id":result,"tip":tip,"ancestry":ancestry,"evidence":"git ls-remote"});
+    integrator_post(f, i, p, "observations", body).await
+}
+
+/// The number of held integration holds in the project.
+async fn held_holds(f: &Fixture, p: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM integration_holds h JOIN workflow_activities a ON a.id=h.activity_id WHERE a.project_id=? AND h.state='held'")
+        .bind(p).fetch_one(&f.state.pool).await.unwrap()
+}
+
+/// The subject's workflow phase and task lifecycle.
+async fn subject_state(f: &Fixture, t: &Value) -> (String, String) {
+    sqlx::query_as("SELECT ws.phase,t.lifecycle FROM workflow_subjects ws JOIN tasks t ON t.id=ws.task_id WHERE ws.task_id=?")
+        .bind(t["id"].as_str().unwrap()).fetch_one(&f.state.pool).await.unwrap()
+}
+
+// P4 S2: on an integrator-owned project the LLM integration path is refused
+// with a labelled gate, and `next` serves the integrator its queue head.
+#[tokio::test]
+async fn integrator_projects_refuse_the_agent_integration_path() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "integrator-refusal").await;
+    let (status, v) = f
+        .call(
+            &f.c,
+            "POST",
+            &activity_path(&p, &integration, "claim"),
+            activity_claim(&integration),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "integration_owned_by_integrator");
+    assert_eq!(v["error"]["details"]["required_actor"], "integrator");
+    let path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/authorization",
+        integration["id"].as_str().unwrap()
+    );
+    let (status, v) = f
+        .call(&f.admin, "POST", &path, json!({"submission_id":integration["submission_id"],"expected_project_policy_revision":2,"expected_workflow_policy_revision":1,"summary":"ship it"}))
+        .await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (
+            StatusCode::CONFLICT,
+            json!("integration_owned_by_integrator")
+        )
+    );
+    let next = next_action(&f, &i, &p, "integrator").await;
+    assert_eq!(next["action"]["kind"], "integrate", "{next}");
+    assert_eq!(next["action"]["subject_task_id"], t["id"]);
+}
+
+// P4 S2: push authority needs a deciding success receipt for every roster
+// check, and a roster that keeps every protected check.
+#[tokio::test]
+async fn push_authority_needs_passing_checks_and_the_protected_roster() {
+    let f = Fixture::new().await;
+    let (p, _, integration, i) = integrator_task(&f, "integrator-authority").await;
+    let submission = &integration["submission_id"];
+    let result = pinned_result(&f, &i, &p, submission, T0).await;
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("checks_not_passed"))
+    );
+    assert_eq!(v["error"]["details"]["pending"], json!(["workspace-tests"]));
+    receipt(&f, &i, &p, &result, 900, "failure").await;
+    let (_, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(
+        v["error"]["details"]["failed"],
+        json!(["workspace-tests"]),
+        "{v}"
+    );
+    receipt(&f, &i, &p, &result, 901, "success").await;
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["deciding_runs"][0]["run_id"], 901);
+    assert_eq!(v["data"]["protected_ids"], json!(["workspace-tests"]));
+    assert_eq!(held_holds(&f, &p).await, 1);
+    observe(&f, &i, &p, &result, T0, "equal_t0").await;
+    let mut dropped = result_body(
+        submission.as_str().unwrap(),
+        "8888888888888888888888888888888888888888",
+        R,
+    );
+    dropped["roster"]["required_checks"][0]["identity"] = json!("renamed");
+    let (status, v) = integrator_post(&f, &i, &p, "results", dropped).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let other = v["data"]["id"].as_str().unwrap().to_owned();
+    let (_, v) = authority(&f, &i, &p, &other).await;
+    assert_eq!(v["error"]["code"], "protected_check_missing", "{v}");
+}
+
+// P4 S2: roll-forward. Not published and target moved release the hold; a
+// contained R completes the subject.
+#[tokio::test]
+async fn observations_roll_forward_until_r_is_contained() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "integrator-observe").await;
+    let submission = &integration["submission_id"];
+    let result = authorized(&f, &i, &p, submission, T0).await;
+    let (status, v) = observe(&f, &i, &p, &result, R, "equal_t0").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "tip contradicts ancestry: {v}"
+    );
+    let (status, v) = observe(&f, &i, &p, &result, T0, "equal_t0").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["disposition"], "not_published");
+    assert_eq!(held_holds(&f, &p).await, 0);
+    let (_, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(v["data"]["granted"], true, "authority is re-issued: {v}");
+    let moved = "9999999999999999999999999999999999999999";
+    let (_, v) = observe(&f, &i, &p, &result, moved, "moved").await;
+    assert_eq!(v["data"]["disposition"], "target_moved", "{v}");
+    let next = authorized(&f, &i, &p, submission, moved).await;
+    let (_, v) = observe(
+        &f,
+        &i,
+        &p,
+        &next,
+        "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        "contained",
+    )
+    .await;
+    assert_eq!(v["data"]["disposition"], "published", "{v}");
+    assert_eq!(subject_state(&f, &t).await, ("done".into(), "done".into()));
+    assert_eq!(held_holds(&f, &p).await, 0);
+    let (status, v) = observe(&f, &i, &p, &next, moved, "moved").await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("result_already_published"))
+    );
+}
+
+// P4 S2: a revise during an outstanding push is deferred; it becomes a
+// follow-up (a revert for author_withdraw) when the push lands, and applies
+// when it does not.
+#[tokio::test]
+async fn revise_loses_to_a_landed_push() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "integrator-revise-loses").await;
+    let submission = &integration["submission_id"];
+    let result = authorized(&f, &i, &p, submission, T0).await;
+    f.ack(&f.a, &p, 3).await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    );
+    let (status, v) = f
+        .call(
+            &f.a,
+            "POST",
+            &path,
+            revise_body(submission, "author_withdraw", None),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["revise_deferred"], true);
+    let (_, v) = observe(&f, &i, &p, &result, R, "contained").await;
+    let follow_up = v["data"]["revise"]["follow_up_task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (title, priority): (String, i64) =
+        sqlx::query_as("SELECT title,priority FROM tasks WHERE id=?")
+            .bind(&follow_up)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (title.as_str(), priority),
+        ("Revert: Conflicting candidate", 0)
+    );
+    assert_eq!(subject_state(&f, &t).await.0, "done");
+
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "integrator-revise-applies").await;
+    let submission = &integration["submission_id"];
+    let result = authorized(&f, &i, &p, submission, T0).await;
+    f.ack(&f.a, &p, 3).await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    );
+    let (_, v) = f
+        .call(
+            &f.a,
+            "POST",
+            &path,
+            revise_body(submission, "author_withdraw", None),
+        )
+        .await;
+    assert_eq!(v["data"]["revise_deferred"], true, "{v}");
+    let (_, v) = observe(&f, &i, &p, &result, T0, "equal_t0").await;
+    assert_eq!(v["data"]["revise"]["resolution"], "applied", "{v}");
+    assert_eq!(subject_state(&f, &t).await.0, "revision_needed");
+}
+
+// P4 S2: the integrator revises a conflicting candidate itself, but only
+// after observing any push it was authorized to make.
+#[tokio::test]
+async fn integrator_revise_waits_for_its_own_observation() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "integrator-revise").await;
+    let submission = &integration["submission_id"];
+    let body = json!({"submission_id":submission,"reason_code":"conflict","evidence":"CONFLICT (content): src/lib.rs"});
+    let (status, v) = integrator_post(
+        &f,
+        &i,
+        &p,
+        "revise",
+        json!({"submission_id":submission,"reason_code":"author_withdraw","evidence":"x"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let result = authorized(&f, &i, &p, submission, T0).await;
+    let (status, v) = integrator_post(&f, &i, &p, "revise", body.clone()).await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("observation_required"))
+    );
+    observe(&f, &i, &p, &result, T0, "equal_t0").await;
+    let (status, v) = integrator_post(&f, &i, &p, "revise", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(subject_state(&f, &t).await.0, "revision_needed");
+}
+
+/// Submits a code task by `author` in an agent-review project and has
+/// `reviewer` approve it; returns the task and its submission id.
+async fn approved_code_task(
+    f: &Fixture,
+    p: &str,
+    repo: &str,
+    (author, reviewer): (&Caller, &Caller),
+    (title, candidate): (&str, &str),
+) -> (Value, Value) {
+    let t = f.task(p, "code", title).await;
+    let owner = f.claim(author, p, &t, 2).await;
+    let base = "1111111111111111111111111111111111111111";
+    f.checkout(author, p, &owner, base).await;
+    let submitted = f
+        .submit(
+            author,
+            p,
+            &t,
+            &owner,
+            "code",
+            2,
+            Some(repo),
+            Some(base),
+            Some(candidate),
+            Some("3333333333333333333333333333333333333333"),
+        )
+        .await;
+    let review = activity(&submitted, "agent_review").clone();
+    let (status, claimed) = f.claim_activity(reviewer, p, &review, 2, 1).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/review",
+        review["id"].as_str().unwrap()
+    );
+    let (status, v) = f.call(reviewer, "POST", &path, json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"ok","findings":[]})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    (t, review["submission_id"].clone())
+}
+
+// P4 S2 (plan-final §2.2 5a): an approver who contributed to another task
+// whose commits the landing range carries sends the subject back to review,
+// and cannot claim the replacement review; unapproved stacked work is refused.
+#[tokio::test]
+async fn contributor_approvals_and_unapproved_stacks_block_authority() {
+    let f = Fixture::new().await;
+    let repo = "https://example.test/integrator-stack.git";
+    let p = f.project("integrator-stack", repo).await;
+    f.review_policy(&p, "agent").await;
+    f.workflow_policy(&p, repo).await;
+    let below = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    approved_code_task(&f, &p, repo, (&f.b, &f.c), ("Stacked below", below)).await;
+    let (t, submission) = approved_code_task(
+        &f,
+        &p,
+        repo,
+        (&f.a, &f.b),
+        ("Stacked above", "2222222222222222222222222222222222222222"),
+    )
+    .await;
+    let (status, v) = f.call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":2,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"integration_owner":"integrator"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let i = integrator_caller(&f).await;
+    let mut body = result_body(submission.as_str().unwrap(), T0, R);
+    body["landing_range"] = json!([below, "2222222222222222222222222222222222222222"]);
+    let (_, v) = integrator_post(&f, &i, &p, "results", body).await;
+    let result = v["data"]["id"].as_str().unwrap().to_owned();
+    receipt(&f, &i, &p, &result, 900, "success").await;
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["refusal"], "approver_is_contributor");
+    assert_eq!(subject_state(&f, &t).await.0, "review");
+    assert_eq!(held_holds(&f, &p).await, 0);
+    let (_, wf) = f
+        .call(
+            &f.b,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/tasks/{}/workflow",
+                t["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    let replacement = wf["data"]["activities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["kind"] == "agent_review" && a["status"] == "queued")
+        .unwrap()
+        .clone();
+    let (status, v) = {
+        f.ack(&f.b, &p, 3).await;
+        f.call(
+            &f.b,
+            "POST",
+            &activity_path(&p, &replacement, "claim"),
+            activity_claim(&replacement),
+        )
+        .await
+    };
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("reviewer_not_independent"))
+    );
+}
+
+#[tokio::test]
+async fn unapproved_stacked_work_blocks_authority() {
+    let f = Fixture::new().await;
+    let repo = "https://example.test/integrator-unapproved.git";
+    let p = f.project("integrator-unapproved", repo).await;
+    f.review_policy(&p, "agent").await;
+    f.workflow_policy(&p, repo).await;
+    let below = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+    let base = "1111111111111111111111111111111111111111";
+    let pending = f.task(&p, "code", "Unreviewed below").await;
+    let owner = f.claim(&f.b, &p, &pending, 2).await;
+    f.checkout(&f.b, &p, &owner, base).await;
+    f.submit(
+        &f.b,
+        &p,
+        &pending,
+        &owner,
+        "code",
+        2,
+        Some(repo),
+        Some(base),
+        Some(below),
+        Some("3333333333333333333333333333333333333333"),
+    )
+    .await;
+    let (_, submission) = approved_code_task(
+        &f,
+        &p,
+        repo,
+        (&f.a, &f.c),
+        ("Above", "2222222222222222222222222222222222222222"),
+    )
+    .await;
+    let (status, v) = f.call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":2,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"integration_owner":"integrator"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let i = integrator_caller(&f).await;
+    let mut body = result_body(submission.as_str().unwrap(), T0, R);
+    body["landing_range"] = json!([below, "2222222222222222222222222222222222222222"]);
+    let (_, v) = integrator_post(&f, &i, &p, "results", body).await;
+    let result = v["data"]["id"].as_str().unwrap().to_owned();
+    receipt(&f, &i, &p, &result, 900, "success").await;
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("stacked_on_unapproved"))
+    );
 }

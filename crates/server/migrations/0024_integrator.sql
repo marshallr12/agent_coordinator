@@ -68,6 +68,11 @@ CREATE TABLE integrator_results (
     roster_json TEXT NOT NULL CHECK(json_valid(roster_json)),
     created_by TEXT NOT NULL REFERENCES principals(id),
     created_at INTEGER NOT NULL,
+    -- Push authority (S2): outstanding from issue until the next observation.
+    authority_issued_at INTEGER, authority_expires_at INTEGER,
+    -- Other tasks whose commits the landing range carries (5a contributors).
+    contributor_tasks_json TEXT CHECK(contributor_tasks_json IS NULL
+        OR json_valid(contributor_tasks_json)),
     UNIQUE(submission_id,t0)
 );
 CREATE INDEX integrator_results_project ON integrator_results(project_id,created_at,id);
@@ -84,6 +89,36 @@ CREATE TABLE integrator_receipts (
     observed_at INTEGER NOT NULL,
     PRIMARY KEY(result_id,check_name,run_id,run_attempt)
 );
+
+-- Tip observations the integrator attests after (or instead of) a push.
+CREATE TABLE integrator_observations (
+    id TEXT PRIMARY KEY NOT NULL,
+    result_id TEXT NOT NULL REFERENCES integrator_results(id),
+    tip TEXT NOT NULL,
+    ancestry TEXT NOT NULL CHECK(ancestry IN ('contained','equal_t0','moved')),
+    disposition TEXT NOT NULL CHECK(disposition IN ('published','already_contained',
+        'published_after_reopen','not_published','target_moved')),
+    evidence TEXT NOT NULL,
+    observed_by TEXT NOT NULL REFERENCES principals(id),
+    observed_at INTEGER NOT NULL
+);
+CREATE INDEX integrator_observations_result ON integrator_observations(result_id,observed_at);
+
+-- An agent revise that arrived while push authority was outstanding. It
+-- applies if the push does not land, and becomes a follow-up task if it does.
+CREATE TABLE integrator_revise_requests (
+    submission_id TEXT PRIMARY KEY NOT NULL REFERENCES submissions(id),
+    result_id TEXT NOT NULL REFERENCES integrator_results(id),
+    requested_by TEXT NOT NULL REFERENCES principals(id),
+    reason TEXT NOT NULL, reason_code TEXT NOT NULL, evidence TEXT,
+    requested_at INTEGER NOT NULL, resolved_at INTEGER,
+    resolution TEXT CHECK(resolution IS NULL OR resolution IN ('applied','follow_up')),
+    follow_up_task_id TEXT REFERENCES tasks(id)
+);
+
+-- An approval voided because its reviewer contributed to the landing range.
+ALTER TABLE review_decisions ADD COLUMN invalidated_at INTEGER;
+ALTER TABLE review_decisions ADD COLUMN invalidated_reason TEXT;
 
 -- Fail and roll back both the schema change and its migration receipt if any
 -- relationship was lost. Request connections always enforce foreign keys.

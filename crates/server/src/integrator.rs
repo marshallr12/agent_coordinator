@@ -4,8 +4,10 @@
 //!
 //! Only projects whose `integration_owner` is `integrator` are served, and
 //! only an integrator-class credential may call these routes (the reverse is
-//! enforced for writes in `Mutation::begin`). The agent integration path is
-//! untouched; push authority and observations arrive in S2.
+//! enforced for writes in `Mutation::begin`). Push authority lives in
+//! `integrator_authority`, observations and revises in `integrator_observe`;
+//! on integrator projects the agent integration routes refuse with
+//! `integration_owned_by_integrator`.
 use crate::{
     auth::{Actor, Auth},
     credential_attributes::is_integrator,
@@ -78,7 +80,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Refuses callers that do not hold an integrator credential.
-fn require_integrator(actor: &Actor) -> Result<(), AppError> {
+pub(crate) fn require_integrator(actor: &Actor) -> Result<(), AppError> {
     if is_integrator(actor) {
         Ok(())
     } else {
@@ -89,7 +91,10 @@ fn require_integrator(actor: &Actor) -> Result<(), AppError> {
 }
 
 /// Refuses projects that have not handed integration to the integrator.
-async fn require_integrator_project(c: &mut SqliteConnection, p: &str) -> Result<(), AppError> {
+pub(crate) async fn require_integrator_project(
+    c: &mut SqliteConnection,
+    p: &str,
+) -> Result<(), AppError> {
     let owner: Option<String> =
         sqlx::query_scalar("SELECT integration_owner FROM projects WHERE id=?")
             .bind(p)
@@ -174,7 +179,10 @@ async fn heartbeat(c: &mut SqliteConnection, p: &str, now: i64) -> Result<(), Ap
 }
 
 /// Eligible subjects in subject-priority order, then by time in integration.
-async fn eligible_items(c: &mut SqliteConnection, p: &str) -> Result<(Vec<Value>, u64), AppError> {
+pub(crate) async fn eligible_items(
+    c: &mut SqliteConnection,
+    p: &str,
+) -> Result<(Vec<Value>, u64), AppError> {
     let sql = concat!(
         subjects_sql!(),
         " ORDER BY t.priority,ws.updated_at,ws.task_id LIMIT ?"
@@ -258,12 +266,12 @@ impl ResultInput {
                 "roster must be a JSON object of at most 64 KiB.",
             ));
         }
-        Ok(())
+        crate::integrator_authority::parse_roster(&self.roster).map(|_| ())
     }
 }
 
 /// Serializes one stored result row.
-fn result_value(row: &SqliteRow) -> Result<Value, AppError> {
+pub(crate) fn result_value(row: &SqliteRow) -> Result<Value, AppError> {
     Ok(json!({
         "id": row.get::<String, _>("id"),
         "submission_id": row.get::<String, _>("submission_id"),
@@ -279,7 +287,7 @@ fn result_value(row: &SqliteRow) -> Result<Value, AppError> {
 }
 
 /// Loads the eligible subject that `submission` is current for, or refuses.
-async fn eligible_subject(
+pub(crate) async fn eligible_subject(
     c: &mut SqliteConnection,
     p: &str,
     submission: &str,

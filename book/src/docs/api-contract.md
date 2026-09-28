@@ -229,15 +229,55 @@ and only that class may call them.
   landing range and the roster read from `t0`) per submission and `t0`. Sending
   the same result again returns the stored one; a different `r` for the same pair
   is `result_conflict`, and a `c` that is not the submission's candidate is
-  `candidate_changed`.
+  `candidate_changed`. The roster is
+  `{"required_checks":[{"identity","check_name","workflow_path","workflow_blob"}]}`.
 - `POST /api/v1/projects/{project_id}/integrator/receipts` records one GitHub
   Actions check run observed on `r` (`head_sha` must equal `r`, otherwise
   `receipt_head_mismatch`). A run attempt is recorded once; a different outcome
   for it is `receipt_conflict`. The response names the deciding run for that
   check and workflow blob: the latest attempt of the latest run.
 
-Push authority and publication observations follow in a later release; until a
-project is switched, nothing in the agent integration path changes.
+- `POST /api/v1/projects/{project_id}/integrator/push-authority` with
+  `{result_id}` authorizes pushing `r`. It refuses `checks_not_passed` (details
+  list `pending` and `failed` roster checks) unless every roster check has a
+  deciding `success` run with the roster's workflow blob; `protected_check_missing`
+  when the roster drops a check in the project's workflow policy;
+  `stacked_on_unapproved` when the landing range carries commits of another
+  task's submission that is neither approved nor integrated; `observation_required`
+  while another result of the submission holds authority; and
+  `integration_target_held` while another integration holds the target. If an
+  approving reviewer contributed to another task whose commits the landing range
+  carries, the approval is voided, a replacement review is queued (that reviewer
+  cannot claim it) and the response is `{"granted":false,"refusal":"approver_is_contributor"}`.
+  Otherwise it takes the submission's integration hold and returns
+  `{granted:true, r, t0, deciding_runs, roster_ids, protected_ids, expires_at}`;
+  authority stays outstanding until the next observation.
+- `POST /api/v1/projects/{project_id}/integrator/observations` with
+  `{result_id, tip, ancestry, evidence}` records what the integrator saw at the
+  target; the service cannot reach the Git host, so it trusts this attestation.
+  `contained` (r is in the tip) completes the subject and its integration and
+  readies dependents (`published`, or `already_contained` when `r` equals `t0`;
+  `published_after_reopen` if a human reopened the submission meanwhile);
+  `equal_t0` (`not_published`) and `moved` (`target_moved`, compute a new result
+  on the new tip) end the authority and release the hold. Never infer publication
+  from a push exit code.
+- `POST /api/v1/projects/{project_id}/integrator/revise` with
+  `{submission_id, reason_code, evidence}` sends a candidate back to its author;
+  only `conflict` and `check_failed` are accepted, never while push authority is
+  outstanding (`observation_required`), and the three-per-day revise limit parks
+  the subject for a human.
+- `GET /api/v1/projects/{project_id}/next?role=integrator` returns the queue head
+  as an `integrate` action (integrator credentials only).
+
+On integrator-owned projects the agent and human integration routes (claiming or
+authorizing an integration activity, publication intents, integration results,
+finalize, both publication reconciliations) refuse with
+`integration_owned_by_integrator` (`details.required_actor` is `integrator`). An
+agent revise that arrives while push authority is outstanding is recorded and
+answered with `revise_deferred: true`: it applies if the push does not land, and
+becomes a follow-up task (for `author_withdraw`, an urgent `Revert:` task) if it
+does. A human reopen always applies immediately. Until a project is switched,
+nothing in the agent integration path changes.
 
 ## Attempt operations
 
