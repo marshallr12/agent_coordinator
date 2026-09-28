@@ -53,7 +53,7 @@ impl<C: ChecksSource> Integrator<C> {
 
     /// Posts a report whose outcome does not steer the loop; a failure is
     /// logged and the next cycle posts it again.
-    async fn report_best_effort(&self, project: &str, report: NewReport) {
+    pub(crate) async fn report_best_effort(&self, project: &str, report: NewReport) {
         let outcome = self.service.report(project, &report).await;
         let failure = match outcome {
             Ok(Ok(_)) => return,
@@ -95,7 +95,11 @@ impl<C: ChecksSource> Integrator<C> {
 }
 
 /// A report about a target rather than one subject.
-fn target_report(kind: &'static str, dedupe_key: String, details: serde_json::Value) -> NewReport {
+pub(crate) fn target_report(
+    kind: &'static str,
+    dedupe_key: String,
+    details: serde_json::Value,
+) -> NewReport {
     NewReport {
         kind,
         dedupe_key,
@@ -129,6 +133,6 @@ fn roster_paths(result: &ResultRecord) -> Vec<String> {
 }
 
 /// A short, stable digest for dedupe keys built from long or free text.
-fn short_digest(text: &str) -> String {
+pub(crate) fn short_digest(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))[..16].to_owned()
 }

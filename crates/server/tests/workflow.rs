@@ -3722,6 +3722,13 @@ async fn integrator_reports_are_idempotent_and_integrator_scoped() {
     let (status, flaky) = report(&f, &i, &p, "flaky", "k1", None, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{flaky}");
     assert_eq!(flaky["data"]["requires_human"], false);
+    let blocking = json!({"verdict":"rerun_refused","blocks_subject":true});
+    let (status, stuck) = report(&f, &i, &p, "flaky", "k6", None, blocking).await;
+    assert_eq!(status, StatusCode::OK, "{stuck}");
+    assert_eq!(
+        stuck["data"]["requires_human"], true,
+        "a report that blocks its subject needs a human"
+    );
     let (status, v) = report(&f, &i, &p, "privilege_gate", "k2", None, json!({})).await;
     assert_eq!(
         status,
@@ -3919,4 +3926,97 @@ async fn integrator_reports_page_newest_first() {
         .call(&f.a, "GET", &list("before=missing"), Value::Null)
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Posts attempt `attempt` of run 900 of the roster check on R under `blob`.
+async fn receipt_attempt(
+    f: &Fixture,
+    i: &Caller,
+    p: &str,
+    result: &str,
+    (attempt, blob, conclusion): (i64, &str, &str),
+) {
+    let body = json!({"result_id":result,"check_name":CHECK,"run_id":900,"run_attempt":attempt,"head_sha":R,"app_id":15368,"workflow_path":".github/workflows/checks.yml","workflow_blob":blob,"conclusion":conclusion});
+    let (status, v) = integrator_post(f, i, p, "receipts", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+/// An integrator `check_failed` revise citing `cited`.
+fn check_failed_body(submission: &Value, cited: Value) -> Value {
+    json!({"submission_id":submission,"reason_code":"check_failed","evidence":"workspace tests failed twice","result_id":cited})
+}
+
+/// Asserts a `check_failure_not_reproduced` refusal.
+fn assert_not_reproduced(status: StatusCode, v: &Value) {
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("check_failure_not_reproduced")),
+        "{v}"
+    );
+}
+
+// P4 S4b: the integrator's check_failed revise must cite a result on which
+// one roster check's deciding attempt failed after an earlier failure.
+#[tokio::test]
+async fn integrator_check_failed_needs_a_reproduced_deciding_failure() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "integrator-check-failed").await;
+    let submission = &integration["submission_id"];
+    let result = pinned_result(&f, &i, &p, submission, T0).await;
+    let (status, v) = integrator_post(
+        &f,
+        &i,
+        &p,
+        "revise",
+        check_failed_body(submission, Value::Null),
+    )
+    .await;
+    assert_not_reproduced(status, &v);
+    receipt_attempt(&f, &i, &p, &result, (1, BLOB, "failure")).await;
+    receipt_attempt(&f, &i, &p, &result, (2, &"cd".repeat(20), "failure")).await;
+    let revise = check_failed_body(submission, json!(result));
+    let (status, v) = integrator_post(&f, &i, &p, "revise", revise.clone()).await;
+    assert_not_reproduced(status, &v);
+    assert_eq!(
+        v["error"]["details"]["checks"]["workspace-tests"]["failures"],
+        1
+    );
+    let (status, _) = integrator_post(
+        &f,
+        &i,
+        &p,
+        "revise",
+        check_failed_body(submission, json!("nope")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    receipt_attempt(&f, &i, &p, &result, (3, BLOB, "timed_out")).await;
+    receipt_attempt(&f, &i, &p, &result, (4, BLOB, "success")).await;
+    let (status, v) = integrator_post(&f, &i, &p, "revise", revise.clone()).await;
+    assert_not_reproduced(status, &v);
+    receipt_attempt(&f, &i, &p, &result, (5, BLOB, "failure")).await;
+    let (status, v) = integrator_post(&f, &i, &p, "revise", revise).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(subject_state(&f, &t).await.0, "revision_needed");
+}
+
+// P4 S4b: cancelled and skipped attempts are not failures; a skipped
+// deciding attempt passes the check for push authority, as on GitHub.
+#[tokio::test]
+async fn cancelled_and_skipped_receipts_are_not_failures() {
+    let f = Fixture::new().await;
+    let (p, _, integration, i) = integrator_task(&f, "integrator-skipped").await;
+    let submission = &integration["submission_id"];
+    let result = pinned_result(&f, &i, &p, submission, T0).await;
+    receipt_attempt(&f, &i, &p, &result, (1, BLOB, "cancelled")).await;
+    receipt_attempt(&f, &i, &p, &result, (2, BLOB, "skipped")).await;
+    let revise = check_failed_body(submission, json!(result));
+    let (status, v) = integrator_post(&f, &i, &p, "revise", revise).await;
+    assert_not_reproduced(status, &v);
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(
+        (status, v["data"]["granted"].clone()),
+        (StatusCode::OK, json!(true)),
+        "{v}"
+    );
 }

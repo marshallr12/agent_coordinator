@@ -29,6 +29,11 @@ use sqlx::{Row, SqliteConnection, sqlite::SqliteRow};
 
 type Reply = Result<Json<Value>, AppError>;
 
+/// Deciding conclusions that pass a required check, as on GitHub.
+const PASSING: &[&str] = &["success", "skipped", "neutral"];
+/// Conclusions that count as a failed attempt of a required check.
+pub(crate) const FAILING: &[&str] = &["failure", "timed_out"];
+
 /// How long the integrator may start a push after authority is issued.
 const AUTHORITY_MS: i64 = 600_000;
 
@@ -170,6 +175,35 @@ async fn deciding_run(
         .fetch_optional(&mut *c).await?)
 }
 
+/// One roster check's failure record on R under the roster's workflow
+/// blob: its deciding conclusion and how many attempts failed.
+pub(crate) struct FailureRecord {
+    pub identity: String,
+    pub deciding: Option<String>,
+    pub failures: i64,
+}
+
+/// The failure record of every roster check on R.
+pub(crate) async fn failure_records(
+    c: &mut SqliteConnection,
+    result: &str,
+    roster: &[RosterCheck],
+) -> Result<Vec<FailureRecord>, AppError> {
+    let mut records = Vec::new();
+    for check in roster {
+        let deciding = deciding_run(c, result, check).await?;
+        let failures: i64 = sqlx::query_scalar("SELECT count(*) FROM integrator_receipts WHERE result_id=? AND check_name=? AND workflow_blob=? AND conclusion IN ('failure','timed_out')")
+            .bind(result).bind(&check.check_name).bind(&check.workflow_blob)
+            .fetch_one(&mut *c).await?;
+        records.push(FailureRecord {
+            identity: check.identity.clone(),
+            deciding: deciding.map(|run| run.get("conclusion")),
+            failures,
+        });
+    }
+    Ok(records)
+}
+
 /// The deciding success run of every roster check, or a refusal naming the
 /// pending and failed ones.
 async fn deciding_runs(
@@ -181,7 +215,7 @@ async fn deciding_runs(
     for check in roster {
         match deciding_run(c, result, check).await? {
             None => pending.push(check.identity.clone()),
-            Some(run) if run.get::<String, _>("conclusion") == "success" => passed.push(json!({
+            Some(run) if PASSING.contains(&run.get::<String, _>("conclusion").as_str()) => passed.push(json!({
                 "identity": check.identity, "check_name": check.check_name,
                 "run_id": run.get::<i64, _>("run_id"), "run_attempt": run.get::<i64, _>("run_attempt")})),
             Some(_) => failed.push(check.identity.clone()),

@@ -1,7 +1,9 @@
 //! The integrator's only local state besides mirrors and intents: the last
-//! target tip seen per target (repository URL + branch, see [`target_key`])
-//! and sticky freezes. Only Git's "not an ancestor" verdict freezes; a Git
-//! failure (missing object, lock) is an ordinary error and retries. A tip that stops
+//! target tip seen per target (repository URL + branch, see [`target_key`]),
+//! sticky freezes, ruleset-missing episodes and the check reruns requested
+//! (so a rerun the checks source has not started yet is not requested
+//! again, and reruns per run stay capped). Only Git's "not an ancestor" verdict freezes; a Git failure
+//! (missing object, lock) is an ordinary error and retries. A tip that stops
 //! descending from the previous one means the target was rewritten (force
 //! push); the target then stays frozen until a human deletes its entry from
 //! `state.json`, because every published/not-published judgement assumes a
@@ -32,6 +34,18 @@ pub struct LoopState {
     /// Episodes started so far; part of every episode name.
     #[serde(default)]
     episode_seq: u64,
+    /// Reruns requested, keyed `<result id>:<run id>`.
+    #[serde(default)]
+    reruns: BTreeMap<String, RerunRecord>,
+}
+
+/// The reruns requested for one workflow run of one result.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RerunRecord {
+    /// The attempt the latest request reran.
+    pub attempt: i64,
+    /// Requests made so far.
+    pub count: u32,
 }
 
 impl LoopState {
@@ -102,6 +116,20 @@ impl LoopState {
         self.save()
     }
 
+    /// The reruns requested for `run_id` of `result` (zero when none).
+    pub fn rerun_of(&self, result: &str, run_id: i64) -> RerunRecord {
+        let key = format!("{result}:{run_id}");
+        self.reruns.get(&key).copied().unwrap_or_default()
+    }
+
+    /// Records a request to rerun attempt `attempt` of `run_id` for `result`.
+    pub fn record_rerun(&mut self, result: &str, run_id: i64, attempt: i64) -> Result<()> {
+        let record = self.reruns.entry(format!("{result}:{run_id}")).or_default();
+        record.attempt = attempt;
+        record.count += 1;
+        self.save()
+    }
+
     /// Freezes `target` until a human clears the entry.
     fn freeze(&mut self, target: &str, reason: &str) -> Result<()> {
         self.frozen.insert(target.into(), reason.into());
@@ -133,6 +161,23 @@ mod tests {
         assert_eq!(reloaded.ruleset_episode("t").unwrap(), first);
         reloaded.end_ruleset_episode("t").unwrap();
         assert_ne!(reloaded.ruleset_episode("t").unwrap(), first);
+    }
+
+    #[test]
+    fn requested_reruns_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = LoopState::load(&path).unwrap();
+        assert_eq!(state.rerun_of("res1", 7), RerunRecord::default());
+        state.record_rerun("res1", 7, 1).unwrap();
+        state.record_rerun("res1", 7, 2).unwrap();
+        let reloaded = LoopState::load(&path).unwrap();
+        let record = RerunRecord {
+            attempt: 2,
+            count: 2,
+        };
+        assert_eq!(reloaded.rerun_of("res1", 7), record);
+        assert_eq!(reloaded.rerun_of("res2", 7).count, 0);
     }
 
     #[test]

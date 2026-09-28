@@ -1,9 +1,10 @@
 //! End-to-end cycles against a real local bare remote, file-backed checks and
 //! an in-process mock of the coordinator's integrator routes (same paths,
 //! envelopes, field names, idempotency-key semantics, held-authority rule and
-//! first-write-wins reports as the server; the server's own rules are covered by
+//! first-write-wins reports and receipt-backed `check_failed` revises as the
+//! server; the server's own rules are covered by
 //! `crates/server/tests/workflow.rs`).
-use crate::checks::FakeChecks;
+use crate::checks::{FakeChecks, FakeFile};
 use crate::config::{ChecksKind, Config};
 use crate::git::testing::{Remote, commit, git, remote};
 use crate::integrate::{Integrator, Step};
@@ -195,8 +196,26 @@ async fn observations(
     })
 }
 
+/// True when the cited result has at least two failed receipts of one check.
+fn reproduced(mock: &Mock, result: &Value) -> bool {
+    let failed = mock
+        .receipts
+        .iter()
+        .filter(|r| &r["result_id"] == result && r["conclusion"] != "success");
+    let mut per_check: HashMap<String, usize> = HashMap::new();
+    for receipt in failed {
+        *per_check
+            .entry(receipt["check_name"].to_string())
+            .or_default() += 1;
+    }
+    per_check.values().any(|count| *count >= 2)
+}
+
 async fn revise(State(mock): State<Shared>, headers: HeaderMap, Json(body): Json<Value>) -> Reply {
     idempotent(&mock, &headers, body, |mock, body| {
+        if body["reason_code"] == "check_failed" && !reproduced(mock, &body["result_id"]) {
+            return refuse("check_failure_not_reproduced");
+        }
         mock.item = None;
         mock.revises.push(body.clone());
         ok(json!({"revise": body}))
@@ -346,6 +365,38 @@ impl Harness {
         std::fs::write(&self.integrator.config.fake_checks_file, body.to_string()).unwrap();
     }
 
+    /// Scripts the per-attempt conclusions of `check` on `sha` in the fake
+    /// checks file, keeping its rules, other scripts and recorded reruns.
+    fn script(&self, sha: &str, check: &str, outcomes: &[Option<&str>]) {
+        let outcomes = outcomes.iter().map(|o| o.map(str::to_owned)).collect();
+        self.edit_fake(|file| {
+            let scripts = file.scripts.entry(sha.to_owned()).or_default();
+            scripts.insert(check.to_owned(), outcomes);
+        });
+    }
+
+    /// Applies `change` to the fake checks file, keeping everything else.
+    fn edit_fake(&self, change: impl FnOnce(&mut FakeFile)) {
+        let path = &self.integrator.config.fake_checks_file;
+        let mut file: FakeFile = std::fs::read_to_string(path)
+            .map(|text| serde_json::from_str(&text).unwrap())
+            .unwrap_or_default();
+        change(&mut file);
+        std::fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
+    }
+
+    /// Reruns the fake has recorded, over all runs.
+    fn reruns(&self) -> i64 {
+        let text = std::fs::read_to_string(&self.integrator.config.fake_checks_file).unwrap();
+        let file: FakeFile = serde_json::from_str(&text).unwrap();
+        file.reruns.values().sum()
+    }
+
+    /// The R of the latest pinned result.
+    fn latest_r(&self) -> String {
+        self.peek(|m| m.results.last().unwrap()["r"].as_str().unwrap().to_owned())
+    }
+
     /// Runs one cycle for project `p`.
     async fn cycle(&mut self) -> Step {
         self.integrator.cycle("p").await.unwrap()
@@ -415,12 +466,202 @@ async fn conflicts_and_failed_checks_revise() {
     assert_eq!(h.cycle().await, Step::Revised("conflict".into()));
     let c2 = push_candidate(&remote, &base, "other.txt", "other\n");
     h.mock.lock().unwrap().item = Some(item(&remote, &base, &c2));
-    h.checks(Some("failure"), &RULES);
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[PASS]);
+    assert_eq!(h.cycle().await, Step::ChecksPending, "first failure reruns");
     assert_eq!(h.cycle().await, Step::Revised("check_failed".into()));
     assert_eq!(
         h.peek(|m| m.revises[1]["reason_code"].clone()),
         "check_failed"
     );
+}
+
+const FAIL: Option<&str> = Some("failure");
+const PASS: Option<&str> = Some("success");
+
+/// Scripts "Linux tests" on the latest R and on the remote's `main` (X);
+/// "Lint" passes once on R.
+fn script_attempts(h: &Harness, remote: &Remote, on_r: &[Option<&str>], on_x: &[Option<&str>]) {
+    let r = h.latest_r();
+    h.script(&r, "Linux tests", on_r);
+    h.script(&r, "Lint", &[PASS]);
+    if !on_x.is_empty() {
+        h.script(&remote_main(remote), "Linux tests", on_x);
+    }
+}
+
+/// A harness whose first cycle pinned R with no check runs yet.
+async fn pinned_harness() -> (Harness, Remote) {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    (h, remote)
+}
+
+#[tokio::test]
+async fn a_reproduced_failure_that_passes_on_the_target_revises_with_receipts() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[FAIL], &[PASS]);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    assert_eq!(
+        h.cycle().await,
+        Step::ChecksPending,
+        "rerun not started yet"
+    );
+    assert_eq!(h.reruns(), 1, "a rerun in flight is not requested again");
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[PASS]);
+    assert_eq!(h.cycle().await, Step::Revised("check_failed".into()));
+    let revise = h.peek(|m| m.revises[0].clone());
+    assert_eq!(revise["result_id"], "res1");
+    let evidence = revise["evidence"].as_str().unwrap();
+    assert!(evidence.contains("attempt 1, run"), "{evidence}");
+    assert!(
+        evidence.contains("attempt 2) and passed on target"),
+        "{evidence}"
+    );
+    assert_eq!(
+        h.peek(|m| m.receipts.len()),
+        4,
+        "every attempt of both jobs has a receipt"
+    );
+    assert!(report_kinds(&h).is_empty());
+}
+
+const CANCELLED: Option<&str> = Some("cancelled");
+
+/// The conclusions listed in report `index`'s attempts.
+fn reported_attempts(h: &Harness, index: usize) -> Vec<Value> {
+    let details = h.peek(|m| m.reports[index]["details"].clone());
+    let attempts = details["attempts"].as_array().unwrap().iter();
+    attempts.map(|a| a["conclusion"].clone()).collect()
+}
+
+#[tokio::test]
+async fn a_failure_then_a_pass_is_flaky_and_publishes() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[FAIL, PASS], &[]);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    assert_eq!(h.reruns(), 1, "a passing run is never rerun");
+    assert_eq!(report_kinds(&h), ["flaky"]);
+    let details = h.peek(|m| m.reports[0]["details"].clone());
+    assert_eq!(
+        (details["check_name"].clone(), details["verdict"].clone()),
+        (json!("Linux tests"), json!("flaky"))
+    );
+    assert_eq!(details["blocks_subject"], false, "a flaky pass publishes");
+    assert_eq!(
+        reported_attempts(&h, 0),
+        [json!("failure"), json!("success")]
+    );
+    assert!(h.peek(|m| m.revises.is_empty()));
+}
+
+#[tokio::test]
+async fn a_cancelled_attempt_is_rerun_and_is_not_flaky() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[CANCELLED, PASS], &[]);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    assert!(report_kinds(&h).is_empty());
+}
+
+#[tokio::test]
+async fn a_check_without_a_result_blocks_after_the_last_rerun() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[CANCELLED, CANCELLED, CANCELLED], &[]);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    for _ in 0..2 {
+        let blocked = h.cycle().await;
+        assert!(
+            matches!(&blocked, Step::Blocked(r) if r.starts_with("no_result")),
+            "{blocked:?}"
+        );
+    }
+    assert_eq!(h.reruns(), 2);
+    assert_eq!(report_kinds(&h), ["flaky"]);
+    let verdict = h.peek(|m| m.reports[0]["details"]["verdict"].clone());
+    assert_eq!(verdict, "no_result");
+    assert!(h.peek(|m| m.revises.is_empty()));
+}
+
+#[tokio::test]
+async fn a_refused_rerun_blocks_and_is_asked_again() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[PASS]);
+    h.edit_fake(|file| file.rerun_error = Some("403 actions: write".into()));
+    let blocked = h.cycle().await;
+    assert!(
+        matches!(&blocked, Step::Blocked(r) if r.starts_with("rerun_refused")),
+        "{blocked:?}"
+    );
+    let verdict = h.peek(|m| m.reports[0]["details"]["verdict"].clone());
+    assert_eq!(verdict, "rerun_refused");
+    let blocks = h.peek(|m| m.reports[0]["details"]["blocks_subject"].clone());
+    assert_eq!(blocks, true, "a refused rerun needs a human");
+    h.edit_fake(|file| file.rerun_error = None);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    assert_eq!(h.cycle().await, Step::Revised("check_failed".into()));
+}
+
+#[tokio::test]
+async fn a_target_run_in_progress_waits_without_a_report() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[None]);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    assert_eq!(h.cycle().await, Step::ChecksPending, "X is still running");
+    assert!(report_kinds(&h).is_empty());
+    assert!(h.peek(|m| m.revises.is_empty()));
+    h.script(&remote_main(&remote), "Linux tests", &[PASS]);
+    assert_eq!(h.cycle().await, Step::Revised("check_failed".into()));
+}
+
+#[tokio::test]
+async fn a_failure_on_the_target_too_blocks_and_reports_fix_target_once() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[FAIL]);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    for _ in 0..2 {
+        let blocked = h.cycle().await;
+        assert!(
+            matches!(&blocked, Step::Blocked(r) if r.starts_with("target_failing")),
+            "{blocked:?}"
+        );
+    }
+    assert!(
+        h.peek(|m| m.revises.is_empty()),
+        "the author is not revised"
+    );
+    assert_eq!(report_kinds(&h), ["fix_target"]);
+    let details = h.peek(|m| m.reports[0]["details"].clone());
+    assert_eq!(details["verdict"], "target_failing");
+    assert_eq!(
+        details["blocks_subject"], true,
+        "a blocked subject needs a human"
+    );
+    advance_main(&remote, "fix.txt");
+    assert_eq!(h.cycle().await, Step::ChecksPending, "a new X re-evaluates");
+    assert_eq!(h.peek(|m| m.results.len()), 2);
+}
+
+#[tokio::test]
+async fn a_failure_with_no_run_on_the_target_is_unverified() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[]);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    let blocked = h.cycle().await;
+    assert!(
+        matches!(&blocked, Step::Blocked(r) if r.starts_with("target_unverified")),
+        "{blocked:?}"
+    );
+    assert!(h.peek(|m| m.revises.is_empty()));
+    assert_eq!(report_kinds(&h), ["fix_target"]);
+    let details = h.peek(|m| m.reports[0]["details"].clone());
+    assert_eq!(details["verdict"], "target_unverified");
 }
 
 #[tokio::test]

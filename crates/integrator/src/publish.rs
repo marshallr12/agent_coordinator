@@ -1,9 +1,11 @@
 //! Steps 5–7 of an integration: R on its result branch, one poll of the
 //! required checks per cycle (so the queue GET heartbeat never stalls),
-//! receipts, push authority, the lease-guarded push and the observation
+//! receipts for every completed attempt, flake attribution (`attribution.rs`),
+//! push authority, the lease-guarded push and the observation
 //! that always follows a grant — even when the push step fails — because
 //! the service keeps authority outstanding until an observation ends it.
-use crate::checks::{ACTIONS_APP_ID, CheckRun, ChecksSource, RosterCheck};
+use crate::checks::{CheckRun, ChecksSource, RosterCheck};
+use crate::flake::attempts_by_check;
 use crate::git;
 use crate::integrate::{Integrator, Job, Step};
 use crate::roster::Roster;
@@ -39,10 +41,11 @@ impl<C: ChecksSource> Integrator<C> {
         self.publish(job, result).await
     }
 
-    /// Polls the roster's checks on R once and posts receipts; `None` when
-    /// all passed. A failure revises (S4 adds rerun-based flake attribution).
+    /// Polls the roster's checks on R once; once every latest attempt
+    /// completed and no requested rerun is outstanding, posts a receipt per
+    /// attempt and attributes failures. `None` when R may proceed.
     async fn checks_gate(
-        &self,
+        &mut self,
         job: &Job,
         result: &ResultRecord,
         wanted: &[RosterCheck],
@@ -51,19 +54,16 @@ impl<C: ChecksSource> Integrator<C> {
             .checks
             .check_runs(job.repo.as_ref(), &result.r, wanted)
             .await?;
-        let Some(runs) = completed_runs(&runs, wanted, &result.r) else {
+        let Some(checks) = attempts_by_check(&runs, wanted, &result.r) else {
             return Ok(Some(Step::ChecksPending));
         };
-        for run in &runs {
+        if self.rerun_in_flight(result, &checks) {
+            return Ok(Some(Step::ChecksPending));
+        }
+        for run in checks.iter().flat_map(|check| &check.attempts) {
             self.post_receipt(job, result, run).await?;
         }
-        match failed_checks(&runs) {
-            None => Ok(None),
-            Some(names) => {
-                let evidence = format!("required checks failed on {}: {names}", result.r);
-                self.revise(job, "check_failed", &evidence).await.map(Some)
-            }
-        }
+        self.attribute(job, result, &checks).await
     }
 
     /// Posts one receipt, bound to the workflow blob the run used (in R).
@@ -205,16 +205,6 @@ impl<C: ChecksSource> Integrator<C> {
     }
 }
 
-/// The names of failed checks, joined, or `None` when all succeeded.
-fn failed_checks(runs: &[CheckRun]) -> Option<String> {
-    let failed: Vec<&str> = runs
-        .iter()
-        .filter(|run| run.conclusion.as_deref() != Some("success"))
-        .map(|run| run.check_name.as_str())
-        .collect();
-    (!failed.is_empty()).then(|| failed.join(", "))
-}
-
 /// The `publish_prepared` callback: hands over the local authority budget
 /// only when the intent's R and T0 are the authorized result's.
 fn authorize_only(
@@ -231,23 +221,6 @@ fn authorize_only(
             Err(anyhow::anyhow!("local intent is not the authorized result"))
         })
     }
-}
-
-/// Completed runs for every wanted check (same name and workflow file,
-/// Actions app, latest run and attempt), or `None` while any is missing or
-/// still running.
-fn completed_runs(runs: &[CheckRun], wanted: &[RosterCheck], sha: &str) -> Option<Vec<CheckRun>> {
-    let latest = |check: &RosterCheck| {
-        runs.iter()
-            .filter(|run| {
-                run.check_name == check.check_name && run.workflow_path == check.workflow_path
-            })
-            .filter(|run| run.head_sha == sha && run.app_id == ACTIONS_APP_ID)
-            .max_by_key(|run| (run.run_id, run.run_attempt))
-            .filter(|run| run.conclusion.is_some())
-            .cloned()
-    };
-    wanted.iter().map(latest).collect()
 }
 
 /// Local push budget: the grant's remaining lifetime (never more than the
@@ -268,53 +241,6 @@ fn authority_budget(grant: &Value, sent: Instant) -> Result<Duration> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    const CI: &str = ".github/workflows/ci.yml";
-
-    /// A completed or pending run of check `name` in `path`.
-    fn run(name: &str, path: &str, id: i64, attempt: i64, conclusion: Option<&str>) -> CheckRun {
-        CheckRun {
-            check_name: name.into(),
-            run_id: id,
-            run_attempt: attempt,
-            app_id: ACTIONS_APP_ID,
-            head_sha: "r".into(),
-            workflow_path: path.into(),
-            conclusion: conclusion.map(str::to_owned),
-        }
-    }
-
-    /// A roster check named `name` in `ci.yml`.
-    fn wanted(name: &str) -> RosterCheck {
-        RosterCheck {
-            identity: name.into(),
-            check_name: name.into(),
-            workflow_path: CI.into(),
-        }
-    }
-
-    #[test]
-    fn latest_attempt_of_the_roster_workflow_decides() {
-        let runs = [
-            run("a", CI, 1, 1, Some("failure")),
-            run("a", CI, 1, 2, Some("success")),
-        ];
-        let done = completed_runs(&runs, &[wanted("a")], "r").unwrap();
-        assert_eq!(done[0].conclusion.as_deref(), Some("success"));
-        let pending = [
-            run("a", CI, 1, 1, Some("failure")),
-            run("a", CI, 1, 2, None),
-        ];
-        assert!(completed_runs(&pending, &[wanted("a")], "r").is_none());
-        let elsewhere = [run(
-            "a",
-            ".github/workflows/other.yml",
-            9,
-            1,
-            Some("success"),
-        )];
-        assert!(completed_runs(&elsewhere, &[wanted("a")], "r").is_none());
-    }
 
     /// A context naming result `r` on target `t0`.
     fn context(r: &str, t0: &str) -> PublicationAuthorizationContext {

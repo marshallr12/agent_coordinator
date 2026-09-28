@@ -11,6 +11,7 @@ use crate::{
     auth::Auth,
     error::AppError,
     integrator::{require_integrator_project, result_value},
+    integrator_authority::{FAILING, FailureRecord, RosterCheck, failure_records, parse_roster},
     mutation::Mutation,
     response,
     state::AppState,
@@ -30,6 +31,9 @@ type Reply = Result<Json<Value>, AppError>;
 
 /// Revise reasons the integrator itself may give.
 const INTEGRATOR_REASONS: &[&str] = &["conflict", "check_failed"];
+/// Failed attempts of one roster check on R, its deciding one included,
+/// that make a failure reproduced.
+const REPRODUCED_FAILURES: i64 = 2;
 
 /// The observation and integrator revise routes.
 pub fn routes() -> Router<AppState> {
@@ -371,11 +375,14 @@ async fn observe(
 }
 
 /// The integrator's own revise: a conflict or a reproduced check failure.
+/// A `check_failed` names the result whose receipts reproduce the failure.
 #[derive(Deserialize, Serialize)]
 struct IntegratorReviseInput {
     submission_id: String,
     reason_code: String,
     evidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result_id: Option<String>,
 }
 
 impl IntegratorReviseInput {
@@ -383,6 +390,12 @@ impl IntegratorReviseInput {
     fn validate(&self) -> Result<(), AppError> {
         bounded(&self.submission_id, "submission_id", 100, true)?;
         bounded(&self.evidence, "evidence", 16384, true)?;
+        bounded(
+            self.result_id.as_deref().unwrap_or_default(),
+            "result_id",
+            100,
+            false,
+        )?;
         if !INTEGRATOR_REASONS.contains(&self.reason_code.as_str()) {
             return Err(AppError::bad_request(
                 "The integrator revises only with reason_code conflict or check_failed.",
@@ -426,6 +439,69 @@ async fn ensure_revisable(
     Ok(())
 }
 
+/// The `check_failure_not_reproduced` refusal with its details.
+fn not_reproduced(details: Value) -> AppError {
+    AppError::conflict(
+        "check_failure_not_reproduced",
+        "check_failed needs a result of this submission on which one roster check's deciding attempt failed and at least two attempts failed.",
+    )
+    .with_details(details)
+}
+
+/// True when the check's deciding attempt failed and at least
+/// [`REPRODUCED_FAILURES`] attempts failed.
+fn reproduced(record: &FailureRecord) -> bool {
+    let deciding = record.deciding.as_deref().unwrap_or_default();
+    FAILING.contains(&deciding) && record.failures >= REPRODUCED_FAILURES
+}
+
+/// The roster of `result`, which must be a result of `submission` in `p`.
+async fn cited_roster(
+    c: &mut SqliteConnection,
+    p: &str,
+    submission: &str,
+    result: &str,
+) -> Result<Vec<RosterCheck>, AppError> {
+    let roster: String = sqlx::query_scalar("SELECT roster_json FROM integrator_results WHERE id=? AND project_id=? AND submission_id=?")
+        .bind(result).bind(p).bind(submission)
+        .fetch_optional(&mut *c).await?.ok_or_else(AppError::not_found)?;
+    parse_roster(&serde_json::from_str(&roster)?)
+}
+
+/// Refuses a `check_failed` revise unless, on its cited result of this
+/// submission, one roster check's deciding receipt is a failure and at
+/// least [`REPRODUCED_FAILURES`] of its receipts are (`failure` or
+/// `timed_out`, under the roster's workflow blob).
+async fn ensure_reproduced(
+    c: &mut SqliteConnection,
+    p: &str,
+    input: &IntegratorReviseInput,
+) -> Result<(), AppError> {
+    if input.reason_code != "check_failed" {
+        return Ok(());
+    }
+    let Some(result) = input.result_id.as_deref() else {
+        return Err(not_reproduced(json!({"result_id": null})));
+    };
+    let roster = cited_roster(c, p, &input.submission_id, result).await?;
+    let records = failure_records(c, result, &roster).await?;
+    if records.iter().any(reproduced) {
+        return Ok(());
+    }
+    let checks: serde_json::Map<String, Value> = records
+        .into_iter()
+        .map(|r| {
+            (
+                r.identity,
+                json!({"deciding": r.deciding, "failures": r.failures}),
+            )
+        })
+        .collect();
+    Err(not_reproduced(
+        json!({"result_id": result, "checks": checks}),
+    ))
+}
+
 /// `POST …/integrator/revise`: sends a conflicting or check-failing candidate
 /// back to its author.
 async fn revise(
@@ -445,6 +521,7 @@ async fn revise(
     require_integrator_project(&mut m.tx, &p).await?;
     let task = integrating_task(&mut m.tx, &p, &input.submission_id).await?;
     ensure_revisable(&mut m.tx, &task, &input.submission_id, m.now).await?;
+    ensure_reproduced(&mut m.tx, &p, &input).await?;
     let reason = format!("Integrator revise: {}", input.reason_code);
     let target = Supersede {
         project: &p,

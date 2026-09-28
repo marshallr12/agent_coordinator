@@ -7,10 +7,12 @@
 //! No LLM is involved. See planning/autonomy/p4-design.md.
 mod action_refs;
 mod askpass;
+mod attribution;
 mod checks;
 mod config;
 #[cfg(test)]
 mod e2e_tests;
+mod flake;
 mod gates;
 mod git;
 mod github;

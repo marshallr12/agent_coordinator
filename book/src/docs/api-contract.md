@@ -245,7 +245,8 @@ reports and only a human resolves one.
 - `POST /api/v1/projects/{project_id}/integrator/push-authority` with
   `{result_id}` authorizes pushing `r`. It refuses `checks_not_passed` (details
   list `pending` and `failed` roster checks) unless every roster check has a
-  deciding `success` run with the roster's workflow blob; `protected_check_missing`
+  deciding run with the roster's workflow blob that concluded `success`,
+  `skipped` or `neutral` (as a GitHub required check passes); `protected_check_missing`
   when the roster drops a check in the project's workflow policy;
   `stacked_on_unapproved` when the landing range carries commits of another
   task's submission that is neither approved nor integrated; `observation_required`
@@ -267,10 +268,16 @@ reports and only a human resolves one.
   on the new tip) end the authority and release the hold. Never infer publication
   from a push exit code.
 - `POST /api/v1/projects/{project_id}/integrator/revise` with
-  `{submission_id, reason_code, evidence}` sends a candidate back to its author;
-  only `conflict` and `check_failed` are accepted, never while push authority is
-  outstanding (`observation_required`), and the three-per-day revise limit parks
-  the subject for a human.
+  `{submission_id, reason_code, evidence, result_id?}` sends a candidate back to
+  its author; only `conflict` and `check_failed` are accepted, never while push
+  authority is outstanding (`observation_required`), and the three-per-day
+  revise limit parks the subject for a human. A `check_failed` revise must name
+  in `result_id` a result of that submission on which one roster check, under
+  the roster's workflow blob, is reproduced: its deciding run concluded
+  `failure` or `timed_out`, and at least two of its attempts did. Otherwise
+  it is refused with `check_failure_not_reproduced` (details give each roster
+  identity's deciding conclusion and failure count under `checks`), or not
+  found when the result is not the submission's.
 - `POST /api/v1/projects/{project_id}/integrator/reports` with
   `{kind, dedupe_key, task_id?, submission_id?, result_id?, details}` records a
   finding for the digest. `kind` is `privilege_gate`, `flaky`, `fix_target`,
@@ -278,7 +285,10 @@ reports and only a human resolves one.
   `privilege_gate` report must name its `result_id`. The first report per kind
   and `dedupe_key` wins: sending it again returns the stored report, whatever
   its `details`, including any resolution. The service sets `requires_human`
-  for `privilege_gate`, `target_rewritten` and `ruleset_missing`. The
+  for `privilege_gate`, `target_rewritten` and `ruleset_missing`, and for any
+  report whose `details.blocks_subject` is `true` (the integrator sets it on
+  `fix_target` reports and on `flaky` reports that leave a subject blocked:
+  `no_result` and `rerun_refused`), so a subject never waits unseen. The
   integrator raises `privilege_gate`, failing closed, when any path that
   differs between the target tip and the result lies under `.github/`, is the
   `.github` entry itself, `.gitmodules` or a `CODEOWNERS` file, or is in
@@ -297,7 +307,25 @@ reports and only a human resolves one.
   the codes do not decide the gate. It pushes that result only once
   the report shows `allowed: true`. It raises `ruleset_missing` (once per
   freeze episode, which ends when the rules are back) and `target_rewritten`
-  when it freezes a target.
+  when it freezes a target. Flake attribution counts a check's attempts on
+  `r` as GitHub does: `success`, `skipped` and `neutral` pass, `failure` and
+  `timed_out` fail, and any other conclusion (such as `cancelled`) has no
+  result; the latest attempt decides. When it failed for the first time or
+  had no result, the integrator reruns that workflow run's failed jobs
+  (never a run whose jobs all passed; the GitHub App needs the
+  `actions: write` permission) and posts a receipt for every attempt. A pass
+  after a failure is a `flaky` report and the result proceeds. A check that two
+  reruns of its run leave undecided (its latest attempt has no result, or is
+  its only failure), or a rerun request GitHub refuses, is a `flaky` report with `verdict` `no_result` or `rerun_refused`
+  and skips the subject; `flaky` reports are keyed by result, check and
+  verdict (a refused rerun by result and run). A failure is reproduced once
+  the deciding attempt and at least one earlier attempt failed; it revises
+  the author with `check_failed` only when the same check's latest attempt
+  with a result on the target tip passed, and waits while the tip's run is
+  still going. When that attempt failed, or the tip has no result for the
+  check, the integrator raises `fix_target` with `verdict` `target_failing`
+  or `target_unverified` (one per target, tip, verdict and check) and skips
+  the subject until the tip moves or the check passes there.
 - `GET /api/v1/projects/{project_id}/integrator/reports` lists a project's
   reports, newest first, for any authenticated reader. `open=true` keeps only
   unresolved ones; `limit` is 1 to 1000 (default 200); `before=<report_id>`

@@ -165,8 +165,15 @@ fn report_value(row: &SqliteRow) -> Result<Value, AppError> {
     }))
 }
 
+/// Whether a report needs a human: its kind always does, or the integrator
+/// marked it `blocks_subject` (a subject it cannot move on its own, such as a
+/// failure on the target or a refused rerun), so it is never parked unseen.
+fn needs_human(input: &ReportInput) -> bool {
+    HUMAN_KINDS.contains(&input.kind.as_str()) || input.details["blocks_subject"] == true
+}
+
 /// Inserts the report unless its (project, kind, dedupe_key) is taken,
-/// deriving `requires_human` from its kind. Returns the stored row and
+/// deriving `requires_human` from its kind or its `blocks_subject` detail. Returns the stored row and
 /// whether this call created it.
 async fn insert_report(
     m: &mut Mutation,
@@ -174,7 +181,7 @@ async fn insert_report(
     input: &ReportInput,
 ) -> Result<(SqliteRow, bool), AppError> {
     let id = uuid::Uuid::new_v4().to_string();
-    let human = HUMAN_KINDS.contains(&input.kind.as_str());
+    let human = needs_human(input);
     sqlx::query("INSERT INTO integrator_reports(id,project_id,kind,task_id,submission_id,result_id,dedupe_key,details_json,requires_human,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,kind,dedupe_key) DO NOTHING")
         .bind(&id).bind(p).bind(&input.kind).bind(&input.task_id).bind(&input.submission_id)
         .bind(&input.result_id).bind(&input.dedupe_key).bind(input.details.to_string())

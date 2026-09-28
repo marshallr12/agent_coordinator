@@ -1,6 +1,7 @@
-//! One integration cycle per project (p4-design §3 steps 1–5 and 7; flake
-//! attribution and `unreviewed_landing` tip-move reports are not built yet).
-//! The freeze reports and the privilege decision are in `gates.rs`.
+//! One integration cycle per project (p4-design §3 steps 1–7; the
+//! `unreviewed_landing` tip-move reports are not built yet). The freeze
+//! reports and the privilege decision are in `gates.rs`, flake attribution
+//! in `attribution.rs`.
 //! Everything durable lives in the service (results, receipts, authority);
 //! local intents and worktrees are disposable and are rebuilt from the
 //! service's pinned result, whose R must reproduce exactly.
@@ -169,7 +170,7 @@ impl<C: ChecksSource> Integrator<C> {
         let c = &job.item.candidate_revision;
         if !git::merges_cleanly(&job.mirror, &job.x, c)? {
             let evidence = format!("candidate {c} conflicts with target tip {}", job.x);
-            return self.revise(job, "conflict", &evidence).await.map(Err);
+            return self.revise(job, "conflict", &evidence, None).await.map(Err);
         }
         let computed = self.compute_result(job, roster)?;
         if let Some(existing) = job.item.results.iter().find(|r| r.t0 == job.x) {
@@ -235,10 +236,18 @@ impl<C: ChecksSource> Integrator<C> {
     }
 
     /// Sends the subject back to its implementer and drops local state.
-    pub(crate) async fn revise(&self, job: &Job, reason: &str, evidence: &str) -> Result<Step> {
+    /// `result` names the result whose receipts back a `check_failed`.
+    pub(crate) async fn revise(
+        &self,
+        job: &Job,
+        reason: &str,
+        evidence: &str,
+        result: Option<&str>,
+    ) -> Result<Step> {
+        let submission = &job.item.submission_id;
         let reply = self
             .service
-            .revise(&job.project, &job.item.submission_id, reason, evidence)
+            .revise(&job.project, submission, reason, evidence, result)
             .await?;
         self.discard_local(job)?;
         Ok(match reply {

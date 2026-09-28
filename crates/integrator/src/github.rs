@@ -104,6 +104,14 @@ impl GithubApp {
         self.send(self.http.get(url), &token).await
     }
 
+    /// POSTs an empty body to `path` (relative to the API base) with the
+    /// installation token.
+    pub async fn post(&self, path: &str) -> Result<Value> {
+        let token = self.installation_token().await?;
+        let url = format!("{}{path}", self.config.api_base);
+        self.send(self.http.post(url), &token).await
+    }
+
     /// Sends one request with GitHub's headers; non-2xx is an error.
     async fn send(&self, request: reqwest::RequestBuilder, bearer: &str) -> Result<Value> {
         let response = request

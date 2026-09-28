@@ -237,16 +237,18 @@ impl Service {
         self.post(project, "observations", &body, &key).await
     }
 
-    /// Sends the subject back to its implementer (`conflict` or `check_failed`).
+    /// Sends the subject back to its implementer (`conflict` or `check_failed`;
+    /// the latter cites the result whose receipts reproduce the failure).
     pub async fn revise(
         &self,
         project: &str,
         submission: &str,
         reason: &str,
         evidence: &str,
+        result_id: Option<&str>,
     ) -> Result<Reply<Value>> {
-        let body =
-            json!({"submission_id": submission, "reason_code": reason, "evidence": evidence});
+        let body = json!({"submission_id": submission, "reason_code": reason,
+            "evidence": evidence, "result_id": result_id});
         let key = format!("revise-{}", uuid::Uuid::new_v4());
         self.post(project, "revise", &body, &key).await
     }
