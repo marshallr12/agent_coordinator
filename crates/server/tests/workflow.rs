@@ -3255,6 +3255,20 @@ async fn observe(
     integrator_post(f, i, p, "observations", body).await
 }
 
+/// `authority_expires_at` of the queue head's first result.
+async fn queued_authority(f: &Fixture, i: &Caller, p: &str) -> Value {
+    let (status, v) = f
+        .call(
+            i,
+            "GET",
+            &format!("/api/v1/projects/{p}/integrator/queue"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"]["items"][0]["results"][0]["authority_expires_at"].clone()
+}
+
 /// The number of held integration holds in the project.
 async fn held_holds(f: &Fixture, p: &str) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM integration_holds h JOIN workflow_activities a ON a.id=h.activity_id WHERE a.project_id=? AND h.state='held'")
@@ -3352,6 +3366,10 @@ async fn observations_roll_forward_until_r_is_contained() {
     let (p, t, integration, i) = integrator_task(&f, "integrator-observe").await;
     let submission = &integration["submission_id"];
     let result = authorized(&f, &i, &p, submission, T0).await;
+    assert!(
+        queued_authority(&f, &i, &p).await.is_string(),
+        "held authority is visible"
+    );
     let (status, v) = observe(&f, &i, &p, &result, R, "equal_t0").await;
     assert_eq!(
         status,
@@ -3362,6 +3380,10 @@ async fn observations_roll_forward_until_r_is_contained() {
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["data"]["disposition"], "not_published");
     assert_eq!(held_holds(&f, &p).await, 0);
+    assert!(
+        queued_authority(&f, &i, &p).await.is_null(),
+        "observation ends authority"
+    );
     let (_, v) = authority(&f, &i, &p, &result).await;
     assert_eq!(v["data"]["granted"], true, "authority is re-issued: {v}");
     let moved = "9999999999999999999999999999999999999999";

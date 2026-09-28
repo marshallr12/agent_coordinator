@@ -1,0 +1,31 @@
+# agentc-integrator configuration (/etc/agentc/integrator.toml).
+# Every entry is optional; the values shown are the in-code defaults.
+# Production typically sets `projects`, `checks = "github"`, `allow_insecure_loopback = false`
+# and the [github] App identity.
+
+# Credentials file with the class=integrator credential ([[credentials]] origin, token).
+# credential_file = "/etc/agentc/integrator-credentials.toml"
+# Origin to pick from that file; empty = its first entry.
+# origin = ""
+# Allow plain HTTP to a loopback origin (the staging coordinator).
+# allow_insecure_loopback = true
+# Coordinator project ids this integrator owns; empty = idle.
+# projects = []
+# state_dir = "/var/lib/agentc/integrator"
+# poll_seconds = 30
+# result_branch_prefix = "ac/results/"
+# "github" (Actions check runs + rules API) or "fake" (local JSON file; with
+# no file nothing publishes). Production sets "github" and the [github] App.
+# checks = "fake"
+# fake_checks_file = "/var/lib/agentc/integrator/fake-checks.json"
+# Branch rule types the target must carry; a missing one freezes pushes.
+# required_rules = ["non_fast_forward", "required_status_checks"]
+# File in the target repository mapping roster identities to check runs.
+# roster_path = ".agent-coordinator/roster.toml"
+
+# [github]
+# api_base = "https://api.github.com"
+# App id and installation id; 0 = not configured.
+# app_id = 0
+# installation_id = 0
+# private_key = "/etc/agentc/integrator-app.pem"

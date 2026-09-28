@@ -270,7 +270,9 @@ impl ResultInput {
     }
 }
 
-/// Serializes one stored result row.
+/// Serializes one stored result row. `authority_expires_at` is set while
+/// push authority is outstanding (until an observation ends it), so the
+/// integrator can observe a held result before pinning a newer one.
 pub(crate) fn result_value(row: &SqliteRow) -> Result<Value, AppError> {
     Ok(json!({
         "id": row.get::<String, _>("id"),
@@ -283,6 +285,9 @@ pub(crate) fn result_value(row: &SqliteRow) -> Result<Value, AppError> {
         "landing_range": serde_json::from_str::<Value>(row.get("landing_range_json"))?,
         "roster": serde_json::from_str::<Value>(row.get("roster_json"))?,
         "created_at": coordinator_core::timestamp(row.get("created_at")),
+        "authority_expires_at": row
+            .get::<Option<i64>, _>("authority_expires_at")
+            .map(coordinator_core::timestamp),
     }))
 }
 

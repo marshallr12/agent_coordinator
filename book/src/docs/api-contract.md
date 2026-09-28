@@ -220,7 +220,9 @@ and only that class may call them.
   subjects in integration whose submission is current and whose judged task
   fields still match the pinned digest, by subject priority and then time in
   integration. Each item carries the candidate revision, tree and ref, the
-  reviewed base, the pinned task digest and any results already recorded for it;
+  reviewed base, the pinned task digest and any results already recorded for it
+  (each with `authority_expires_at`, set while its push authority is outstanding,
+  so the integrator can observe that result before pinning a newer one);
   the response adds the current required-check roster. Each call records the
   integrator heartbeat. Projects still owned by agents answer
   `integration_owned_by_agents`.
