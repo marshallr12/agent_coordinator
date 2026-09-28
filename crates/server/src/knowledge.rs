@@ -783,6 +783,11 @@ async fn context(
     } else {
         json!([])
     };
+    // Never hold a SQLite transaction while waiting for an optional model call.
+    drop(c);
+    if let Some(reranked) = crate::context_rerank::try_rerank(&query.q, &items).await {
+        items = reranked;
+    }
     Ok(response(
         json!({"query":query.q,"policy":mandatory,"instructions_complete":instructions_complete,"items":items,"include_shared":query.include_shared,"budget_bytes":budget,"used_bytes":used,"truncated":truncated,"next_actions":next_actions}),
     ))

@@ -1,6 +1,7 @@
 pub mod artifacts;
 pub mod auth;
 pub mod backup;
+mod context_rerank;
 pub mod coordination;
 pub mod discovery;
 mod documentation;
