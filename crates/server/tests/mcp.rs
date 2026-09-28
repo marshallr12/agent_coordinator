@@ -572,6 +572,12 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
             .unwrap()
             .contains(coordinator_server::discovery::WORKTREE_CLEANUP_INSTRUCTIONS)
     );
+    assert!(
+        legacy.body["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with(coordinator_server::discovery::CHECKOUT_SYNC_INSTRUCTIONS)
+    );
     let bootstrap = coordinator_server::discovery::agent_startup();
     assert_eq!(
         bootstrap["connection_preference"][0],

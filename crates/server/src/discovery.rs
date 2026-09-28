@@ -4,9 +4,14 @@ pub const CONTINUATION_INSTRUCTIONS: &str = "Keep claiming eligible tasks in the
 
 pub const TASK_ATTACHMENT_INSTRUCTIONS: &str = "Before implementing a selected task, inspect its task history for artifacts. Download available image and file attachments that provide task context before making assumptions; use the native CLI `tasks history --id TASK_ID --kind artifacts`, `artifacts show --id ARTIFACT_ID`, and `artifacts download --id ARTIFACT_ID --output PATH`. If a relevant attachment is unavailable or cannot be downloaded, report that limitation instead of guessing its contents.";
 
+/// Session-start synchronization of the checkout the agent was started in.
+/// Delivered first in the MCP instructions and summarized in `local_bootstrap`,
+/// because it must happen before connecting or claiming.
+pub const CHECKOUT_SYNC_INSTRUCTIONS: &str = "First thing in a session, before connecting or claiming, synchronize the checkout you were started in. If `git status --porcelain` is empty and the current branch tracks an upstream, run `git pull --ff-only`. If there are uncommitted changes, do not pull, stash, reset, commit or discard them: tell the user the checkout has uncommitted changes and recommend a `git fetch` and reconciliation with the upstream branch first. If the branch has no upstream, HEAD is detached, the pull cannot fast-forward, or the fetch fails, report that and recommend a fetch and reconciliation; never merge, rebase, or force automatically, and do not retry in a loop. Task worktrees are still created from the fetched remote base, so this does not replace the per-task base check.";
+
 pub fn mcp_instructions() -> String {
     format!(
-        "{MCP_INSTRUCTIONS}\n\n{INSPECTION_INSTRUCTIONS}\n\n{REVIEW_SELECTION_INSTRUCTIONS}\n\n{TASK_ATTACHMENT_INSTRUCTIONS}\n\n{CONTINUATION_INSTRUCTIONS}\n\n{WORKTREE_CLEANUP_INSTRUCTIONS}"
+        "{CHECKOUT_SYNC_INSTRUCTIONS}\n\n{MCP_INSTRUCTIONS}\n\n{INSPECTION_INSTRUCTIONS}\n\n{REVIEW_SELECTION_INSTRUCTIONS}\n\n{TASK_ATTACHMENT_INSTRUCTIONS}\n\n{CONTINUATION_INSTRUCTIONS}\n\n{WORKTREE_CLEANUP_INSTRUCTIONS}"
     )
 }
 
@@ -71,6 +76,6 @@ pub fn agent_startup() -> Value {
             "terminal_conditions": ["no_eligible_work", "required_input", "access_blocker", "policy_blocker", "capability_blocker"],
             "host_requirement": "Keep the parent turn active or automatically re-prompt it; the service cannot wake an ended turn."
         },
-        "local_bootstrap": "Read .agent-coordinator.toml. Fetch service_url + /api/v1/info anonymously over HTTPS without redirects. Read data.agent_startup.guide and same-origin authentication_help. Prefer an available authenticated MCP connection; otherwise use the native CLI. Automatically claim eligible work unless this session's user request changes the scope. If neither is usable, report setup needs. Never expose credentials."
+        "local_bootstrap": "Read .agent-coordinator.toml. Fetch service_url + /api/v1/info anonymously over HTTPS without redirects. Read data.agent_startup.guide and same-origin authentication_help. Before connecting, run git pull --ff-only when the checkout is clean and tracks an upstream; if it has uncommitted changes, tell the user and recommend a fetch and reconciliation first instead of pulling. Prefer an available authenticated MCP connection; otherwise use the native CLI. Automatically claim eligible work unless this session's user request changes the scope. If neither is usable, report setup needs. Never expose credentials."
     })
 }

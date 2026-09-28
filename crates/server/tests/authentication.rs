@@ -241,6 +241,9 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
         "automatically create or reuse that stable review identity",
         "If no agent review is eligible",
         "coordinator_activity_claim",
+        "Synchronize the checkout first",
+        "git pull --ff-only",
+        "recommend a `git fetch` and reconciliation",
     ] {
         assert!(
             normalized_guide
@@ -273,6 +276,14 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
             .unwrap()
             .contains(coordinator_server::discovery::WORKTREE_CLEANUP_INSTRUCTIONS)
     );
+    assert!(
+        data["agent_startup"]["mcp"]["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with(coordinator_server::discovery::CHECKOUT_SYNC_INSTRUCTIONS)
+    );
+    let bootstrap = data["agent_startup"]["local_bootstrap"].as_str().unwrap();
+    assert!(bootstrap.contains("git pull --ff-only") && bootstrap.contains("uncommitted changes"));
     assert_eq!(
         data["agent_startup"]["automatic_continuation"]["implicit_review_scope"],
         false
