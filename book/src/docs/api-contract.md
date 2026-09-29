@@ -271,9 +271,13 @@ reports and only a human resolves one.
   when the roster drops a check in the project's workflow policy;
   `stacked_on_unapproved` when the landing range carries commits of another
   task's submission that is neither approved nor integrated; `observation_required`
-  while another result of the submission holds authority; and
-  `integration_target_held` while another integration holds the target. If an
-  approving reviewer contributed to another task whose commits the landing range
+  while another result of the submission holds authority;
+  `integration_target_held` while another integration holds the target;
+  `privilege_gate_unresolved` while a `privilege_gate` report on the result
+  is open; and `privilege_gate_denied` once a human resolved one with `deny`
+  (both name the report as `details.report_id`). A result with no
+  `privilege_gate` report, or whose report carries the decision `allow`,
+  passes. If an approving reviewer contributed to another task whose commits the landing range
   carries, the approval is voided, a replacement review is queued (that reviewer
   cannot claim it) and the response is `{"granted":false,"refusal":"approver_is_contributor"}`.
   Otherwise it takes the submission's integration hold and returns
@@ -287,8 +291,11 @@ reports and only a human resolves one.
   `published_after_reopen` if a human reopened the submission meanwhile); a
   published revert whose reason is `defect` also proposes its re-land task;
   `equal_t0` (`not_published`) and `moved` (`target_moved`, compute a new result
-  on the new tip) end the authority and release the hold. Never infer publication
-  from a push exit code.
+  on the new tip) end the authority and release the hold. Only the result
+  holding the submission's push authority can be observed while it is
+  outstanding (another result is `observation_required`), and `r` is observed
+  `published` only while its result holds authority (otherwise
+  `authority_not_issued`). Never infer publication from a push exit code.
 - `POST /api/v1/projects/{project_id}/integrator/revise` with
   `{submission_id, reason_code, evidence, result_id?, moved_by_result_id?}`
   sends a candidate back to its author; only `conflict`, `check_failed` and
@@ -436,7 +443,10 @@ becomes a follow-up task if it does; for `author_withdraw` the follow-up is a
 revert task (priority 0, reason `author_withdraw`, the withdraw request as its
 evidence, review required), or the open revert of that result when one exists.
 Only a `published` observation creates that revert; after `already_contained`
-nothing new landed, and the follow-up is an ordinary task.
+nothing new landed, and the follow-up is an ordinary task. When a human reopen
+superseded the submission meanwhile, the observation resolves the deferred
+revise as moot (`revise.resolution` is `moot`): it is neither applied nor
+followed up, whether or not the push landed.
 A human reopen always applies immediately. Until a project is switched,
 nothing in the agent integration path changes.
 
@@ -476,7 +486,9 @@ limit applies to reverts.
   it is skipped by next-eligible claims, and a revise of its candidate blocks
   it again and returns it to the queue's `reverts`. Apart from the
   integrator's candidate or not-mechanical report, its only exit is a human
-  canceling the task. The revert task stays
+  canceling the task. Canceling or archiving any revert task is human-only:
+  an agent gets the `revert_cancel` gate even where the project delegates
+  canceling to agents. The revert task stays
   blocked while it waits for its candidate and is listed under the queue's
   `reverts`. The integrator computes the candidate
   itself on the target's current tip X, in a disposable worktree:
@@ -507,9 +519,9 @@ limit applies to reverts.
   human's) and then follows the integrator path above. Sending the same
   commit and tree for the same `t0` again returns the same submission
   (`candidate_submission_id`) while that submission is still the revert's
-  candidate in review or integration; a different candidate for that `t0`,
-  or any candidate for a `t0` whose earlier candidate is superseded, is
-  `revert_candidate_conflict`. Other refusals: `revert_not_mechanical`,
+  candidate in review or integration; once a revise or reopen sent that
+  candidate back, the same commit and tree are recorded as a new submission.
+  A different candidate for that `t0` is `revert_candidate_conflict`. Other refusals: `revert_not_mechanical`,
   `revert_not_open`, `revert_claimed`, `revert_candidate_exists` (a candidate
   is already in review or integration) and `workflow_policy_required`.
 - `POST /api/v1/projects/{project_id}/integrator/reverts/{task_id}/not-mechanical`
@@ -523,7 +535,8 @@ limit applies to reverts.
   `revert_not_mechanical`. A capped cascade of further reverts is future
   work.
 - A review that requests changes on a mechanical revert's candidate rejects
-  the decision to revert: the revert task is canceled, its `rejection`
+  the decision to revert: the revert task is canceled (a new task
+  revision, recorded in its history), its `rejection`
   records the review (`activity_id`, `reviewer_id`, `summary`,
   `rejected_at`), it leaves the queue and the original's `reverted_by` no
   longer names it. A human may create a new revert. A revert converted to

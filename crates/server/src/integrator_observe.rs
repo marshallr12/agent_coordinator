@@ -8,9 +8,11 @@
 //! authority is outstanding is deferred: it applies if the push did not land
 //! and becomes a follow-up task if it did ("revise loses to a landed push"),
 //! an urgent revert when the revise is an `author_withdraw` and the
-//! observation is `published`. Observations are never refused for reverted
-//! history; a no-op result over a reverted landing is refused when it is
-//! pinned instead.
+//! observation is `published`; it is moot once a human reopen superseded its
+//! submission. Only the result holding push authority can end it, and only
+//! a result that holds it can be observed `published`. Observations are
+//! never refused for reverted history; a no-op result over a reverted
+//! landing is refused when it is pinned instead.
 use crate::{
     auth::Auth,
     error::AppError,
@@ -200,11 +202,41 @@ async fn insert_observation(
     Ok(())
 }
 
-/// Ends push authority on the result and releases the submission's hold.
+/// Refuses an observation that would end or claim push authority the
+/// observed result does not hold: another result of the submission holds it
+/// (`observation_required`), or R is reported `published` for a result
+/// that holds no push authority (`authority_not_issued`).
+async fn ensure_observable(
+    c: &mut SqliteConnection,
+    row: &SqliteRow,
+    disposition: &str,
+) -> Result<(), AppError> {
+    let (id, submission): (String, String) = (row.get("id"), row.get("submission_id"));
+    if outstanding_authority(c, &submission)
+        .await?
+        .is_some_and(|held| held != id)
+    {
+        return Err(AppError::conflict(
+            "observation_required",
+            "Another result of this submission holds push authority; observe that result first.",
+        ));
+    }
+    let issued = row.get::<Option<i64>, _>("authority_issued_at").is_some();
+    if disposition == "published" && !issued {
+        return Err(AppError::conflict(
+            "authority_not_issued",
+            "R is reported published, but this result holds no push authority.",
+        ));
+    }
+    Ok(())
+}
+
+/// Ends push authority on the observed result and releases the submission's
+/// hold.
 async fn end_authority(m: &mut Mutation, row: &SqliteRow, why: &str) -> Result<(), AppError> {
     let submission: String = row.get("submission_id");
-    sqlx::query("UPDATE integrator_results SET authority_issued_at=NULL,authority_expires_at=NULL WHERE submission_id=?")
-        .bind(&submission).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE integrator_results SET authority_issued_at=NULL,authority_expires_at=NULL WHERE id=?")
+        .bind(row.get::<String, _>("id")).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE integration_holds SET state='released',released_by=?,released_at=?,release_reason=? WHERE activity_id IN (SELECT id FROM workflow_activities WHERE submission_id=?) AND state='held'")
         .bind(&m.actor.id).bind(m.now).bind(why).bind(&submission).execute(&mut *m.tx).await?;
     Ok(())
@@ -236,6 +268,19 @@ async fn pending_revise(
     .bind(submission)
     .fetch_optional(&mut *c)
     .await?)
+}
+
+/// Resolves a revise request whose submission is not its subject's current
+/// one (a human reopen superseded it): it is neither applied nor followed up. The
+/// request is left with `resolved_at` set and no `resolution`, which is how
+/// a moot request is stored.
+async fn moot_revise(m: &mut Mutation, submission: &str) -> Result<Value, AppError> {
+    sqlx::query("UPDATE integrator_revise_requests SET resolved_at=? WHERE submission_id=?")
+        .bind(m.now)
+        .bind(submission)
+        .execute(&mut *m.tx)
+        .await?;
+    Ok(json!({"resolution": "moot"}))
 }
 
 /// Marks a revise request resolved.
@@ -314,9 +359,10 @@ async fn apply_revise(
     resolve_revise(m, &submission, "applied", None).await
 }
 
-/// Settles a deferred revise after an observation with `disposition`: a
-/// follow-up task when R is in the target (`published` or
-/// `already_contained`), the revise itself otherwise. Returns what happened.
+/// Settles a deferred revise after an observation with `disposition`: moot
+/// when the submission is not the current one, a follow-up task when R is in
+/// the target (`published` or `already_contained`), the revise itself
+/// otherwise. Returns what happened.
 async fn settle_revise(
     m: &mut Mutation,
     p: &str,
@@ -328,6 +374,9 @@ async fn settle_revise(
     let Some(request) = pending_revise(&mut m.tx, &submission).await? else {
         return Ok(Value::Null);
     };
+    if !still_current(row) {
+        return moot_revise(m, &submission).await;
+    }
     if !landed {
         apply_revise(m, p, row, &request).await?;
         return Ok(json!({"resolution": "applied"}));
@@ -356,7 +405,6 @@ async fn apply_disposition(
             }
             settle_revise(m, p, row, disposition).await
         }
-        "published_after_reopen" => Ok(Value::Null),
         _ => settle_revise(m, p, row, disposition).await,
     }
 }
@@ -379,6 +427,7 @@ async fn observe(
     require_integrator_project(&mut m.tx, &p).await?;
     let row = observed_result(&mut m.tx, &p, &input.result_id).await?;
     let disposition = disposition(&row, &input)?;
+    ensure_observable(&mut m.tx, &row, disposition).await?;
     insert_observation(&mut m, &input, disposition).await?;
     let revise = apply_disposition(&mut m, &p, &row, disposition).await?;
     let value = json!({"result": result_value(&row)?, "tip": input.tip,

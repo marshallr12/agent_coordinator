@@ -2249,13 +2249,14 @@ async fn review(
             .bind(&ctx.subject_task)
             .execute(&mut *m.tx)
             .await?;
+        let reviewer = m.actor.id.clone();
         let rejection = crate::revert_rules::Rejection {
             task: &ctx.subject_task,
             activity: &ctx.id,
-            reviewer: &m.actor.id,
+            reviewer: &reviewer,
             summary: &input.summary,
         };
-        crate::revert_rules::reject_mechanical(&mut m.tx, &rejection, m.now).await?;
+        crate::revert_rules::reject_mechanical(&mut m, &project, &rejection).await?;
     } else if approvals_satisfied(&mut m.tx, &ctx.submission).await? {
         if let Some(criteria) = amendment {
             apply_amendment(

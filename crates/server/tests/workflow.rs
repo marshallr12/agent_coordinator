@@ -5099,3 +5099,193 @@ async fn a_deferred_withdraw_on_a_no_op_result_is_observed_as_already_contained(
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["data"]["disposition"], "already_contained", "{v}");
 }
+
+/// The reopen path of task `t` in `p`.
+fn reopen_path(p: &str, t: &Value) -> String {
+    format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    )
+}
+
+/// An integrating subject whose result R1 holds push authority at T0, with
+/// an agent revise deferred on it and then a human reopen of its
+/// submission: the project, the task, R1 and the integrator.
+async fn reopened_under_authority(f: &Fixture, name: &str) -> (String, Value, String, Caller) {
+    let (p, t, integration, i) = integrator_task(f, name).await;
+    let submission = &integration["submission_id"];
+    let result = authorized(f, &i, &p, submission, T0).await;
+    f.ack(&f.a, &p, 3).await;
+    let body = revise_body(submission, "author_withdraw", None);
+    let (status, v) = f.call(&f.a, "POST", &reopen_path(&p, &t), body).await;
+    assert_eq!(v["data"]["revise_deferred"], true, "{status} {v}");
+    let body = json!({"submission_id":submission,"reason":"a human takes it back"});
+    let (status, v) = f.call(&f.admin, "POST", &reopen_path(&p, &t), body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    (p, t, result, i)
+}
+
+/// `resolved_at` and `resolution` of the revise request deferred on the
+/// submission of `result`.
+async fn revise_request(f: &Fixture, result: &str) -> (Option<i64>, Option<String>) {
+    sqlx::query_as(
+        "SELECT resolved_at,resolution FROM integrator_revise_requests WHERE result_id=?",
+    )
+    .bind(result)
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap()
+}
+
+// P4 S5 review: a revise deferred on a submission a human reopen then
+// superseded is moot. Observing its result neither applies it to the
+// author's newer submission nor leaves it pending, whether or not R landed.
+#[tokio::test]
+async fn s5_review_a_revise_on_a_reopened_submission_is_moot() {
+    let f = Fixture::new().await;
+    let (p, t, r1, i) = reopened_under_authority(&f, "s5-moot-not-published").await;
+    submit_code(&f, &p, &t, &candidate(0x51)).await;
+    assert_eq!(subject_state(&f, &t).await.0, "integration");
+    let (status, v) = observe(&f, &i, &p, &r1, T0, "equal_t0").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["revise"]["resolution"], "moot", "{v}");
+    assert_eq!(subject_state(&f, &t).await.0, "integration");
+    let (resolved, resolution) = revise_request(&f, &r1).await;
+    assert!(resolved.is_some() && resolution.is_none());
+
+    let f = Fixture::new().await;
+    let (p, _, r1, i) = reopened_under_authority(&f, "s5-moot-published").await;
+    let (_, v) = observe(&f, &i, &p, &r1, R, "contained").await;
+    assert_eq!(v["data"]["disposition"], "published_after_reopen", "{v}");
+    assert_eq!(v["data"]["revise"]["resolution"], "moot", "{v}");
+    assert!(revise_request(&f, &r1).await.0.is_some());
+}
+
+// P4 S5 review: push authority waits for a privilege_gate report on the
+// result to be resolved allow; an open or denied gate refuses it.
+#[tokio::test]
+async fn s5_review_push_authority_waits_for_the_privilege_gate() {
+    for (name, decision) in [("s5-gate-allow", "allow"), ("s5-gate-deny", "deny")] {
+        let f = Fixture::new().await;
+        let (p, _, integration, i) = integrator_task(&f, name).await;
+        let result = pinned_result(&f, &i, &p, &integration["submission_id"], T0).await;
+        receipt(&f, &i, &p, &result, 900, "success").await;
+        let (_, gate) = report(&f, &i, &p, "privilege_gate", name, Some(&result), json!({})).await;
+        let (status, v) = authority(&f, &i, &p, &result).await;
+        let expected = (StatusCode::CONFLICT, json!("privilege_gate_unresolved"));
+        assert_eq!(refusal(status, &v), expected, "{v}");
+        assert_eq!(v["error"]["details"]["report_id"], gate["data"]["id"]);
+        let body = json!({"note":"checked","decision":decision});
+        let (status, v) = resolve(&f, &f.admin, &p, &gate["data"]["id"], body).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let (status, v) = authority(&f, &i, &p, &result).await;
+        if decision == "allow" {
+            assert_eq!(v["data"]["granted"], true, "{status} {v}");
+        } else {
+            let expected = (StatusCode::CONFLICT, json!("privilege_gate_denied"));
+            assert_eq!(refusal(status, &v), expected, "{v}");
+        }
+    }
+}
+
+// P4 S5 review: only a human cancels a revert task, even on a project that
+// delegates canceling to agents and for the reverted task's author.
+#[tokio::test]
+async fn s5_review_only_a_human_cancels_a_revert() {
+    let f = Fixture::new().await;
+    let (p, _, result, _) = published_subject(&f, "s5-revert-cancel").await;
+    let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/cancel",
+        revert["id"].as_str().unwrap()
+    );
+    let body = json!({"expected_revision":revert["revision"],"reason":"not needed"});
+    for agent in [&f.a, &f.b] {
+        let (status, v) = f.call(agent, "POST", &path, body.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+        assert_eq!(v["error"]["details"]["gate"], "revert_cancel", "{v}");
+        assert_eq!(v["error"]["details"]["required_actor"], "human", "{v}");
+    }
+    let (status, v) = f.call(&f.admin, "POST", &path, body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["lifecycle"], "canceled", "{v}");
+}
+
+// P4 S5 review: once a revise sends a mechanical revert's candidate back
+// while the tip is unchanged, the integrator's identical candidate for that
+// tip is recorded as a new submission; a different one still conflicts.
+#[tokio::test]
+async fn s5_review_a_sent_back_revert_candidate_is_recorded_again() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "s5-revert-resend").await;
+    let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (_, v) = revert_candidate(&f, &i, &p, &revert, body.clone()).await;
+    let first = v["data"]["candidate_submission_id"].clone();
+    let (status, v) = conflict_revise(&f, &i, &p, &first, None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let other = candidate_body(R, &candidate(0xbeef));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, other).await;
+    let expected = (StatusCode::CONFLICT, json!("revert_candidate_conflict"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let second = v["data"]["candidate_submission_id"].clone();
+    assert!(second.is_string() && second != first, "{v}");
+    assert_eq!(v["data"]["phase"], "integration", "{v}");
+    let (_, again) = revert_candidate(&f, &i, &p, &revert, body).await;
+    assert_eq!(again["data"]["candidate_submission_id"], second, "{again}");
+}
+
+// P4 S5 review: an observation of a result other than the one holding push
+// authority is refused and leaves that authority outstanding, and R is
+// observed published only while its result holds authority.
+#[tokio::test]
+async fn s5_review_observations_bind_to_the_result_holding_authority() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "s5-observe-bound").await;
+    let submission = &integration["submission_id"];
+    let other_tip = "8888888888888888888888888888888888888888";
+    let other = pinned_result(&f, &i, &p, submission, other_tip).await;
+    let held = authorized(&f, &i, &p, submission, T0).await;
+    let (status, v) = observe(&f, &i, &p, &other, other_tip, "equal_t0").await;
+    let expected = (StatusCode::CONFLICT, json!("observation_required"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    assert_eq!(held_holds(&f, &p).await, 1);
+    let (status, v) = observe(&f, &i, &p, &held, T0, "equal_t0").await;
+    assert_eq!(v["data"]["disposition"], "not_published", "{status} {v}");
+    let (status, v) = observe(&f, &i, &p, &held, R, "contained").await;
+    let expected = (StatusCode::CONFLICT, json!("authority_not_issued"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    assert_eq!(subject_state(&f, &t).await.0, "integration");
+}
+
+// P4 S5 review: a review that rejects a mechanical revert cancels it as a
+// new task revision, recorded in the task's revision history.
+#[tokio::test]
+async fn s5_review_a_rejected_revert_is_a_new_task_revision() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "s5-revert-revision").await;
+    let revert = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (_, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    let before = fresh_task(&f, &p, &revert).await["revision"]
+        .as_i64()
+        .unwrap();
+    let review = activity(&v["data"], "agent_review").clone();
+    let (_, claimed) = claim_revert_review(&f, &f.c, &p, &v["data"]).await;
+    let path = activity_path(&p, &review, "review");
+    let (status, decided) = f.call(&f.c, "POST", &path, json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"changes_requested","summary":"no defect shown","findings":[]})).await;
+    assert_eq!(status, StatusCode::OK, "{decided}");
+    let view = fresh_task(&f, &p, &revert).await;
+    assert_eq!(view["lifecycle"], "canceled", "{view}");
+    assert_eq!(view["revision"], before + 1, "{view}");
+    let saved: String =
+        sqlx::query_scalar("SELECT data_json FROM task_revisions WHERE task_id=? AND revision=?")
+            .bind(revert["id"].as_str().unwrap())
+            .bind(before + 1)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert!(saved.contains(r#""lifecycle":"canceled""#), "{saved}");
+}

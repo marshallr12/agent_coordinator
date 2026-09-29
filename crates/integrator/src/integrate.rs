@@ -15,7 +15,9 @@ use crate::git;
 use crate::github::RepoId;
 use crate::reverts::reverted_commits;
 use crate::roster::{self, Roster};
-use crate::service::{Cite, NewResult, Queue, QueueItem, ResultRecord, Service};
+use crate::service::{
+    Cite, NewResult, Queue, QueueItem, ResultRecord, Service, is_service_failure,
+};
 use crate::state::{LoopState, Published, target_key};
 use anyhow::{Context, Result};
 use coordinator_local::git_workflow::{self, IntegrationIntentSummary, PrepareIntegration};
@@ -37,6 +39,10 @@ pub enum Step {
     /// The revert is now ordinary implementation work (not mechanical), for
     /// this reason.
     NotMechanical(String),
+    /// Working this subject or watching this target failed with an error
+    /// that is not a [`crate::service::ServiceFailure`]; it is skipped this
+    /// cycle and retried on the next.
+    Failed(String),
 }
 
 /// The integrator's long-lived parts.
@@ -75,10 +81,12 @@ impl Job {
 
 impl<C: ChecksSource> Integrator<C> {
     /// Runs one cycle for `project`: every target is watched first, then
-    /// the first revert or queue item that is not blocked is taken as far as
+    /// the first revert or queue item that is not skipped is taken as far as
     /// it can go (reverts first; one of either per cycle). Work on a held
-    /// target (frozen, or its tip move not yet reported) is skipped; blocked
-    /// work is logged to stderr and skipped so it cannot stall the rest.
+    /// target (frozen, its tip move not yet reported, or its watch failed) is
+    /// skipped; blocked, refused and failed work is logged to stderr and
+    /// skipped so it cannot stall the rest. A [`crate::service::ServiceFailure`]
+    /// aborts the cycle.
     pub async fn cycle(&mut self, project: &str) -> Result<Step> {
         let queue: Queue = match self.service.queue(project).await? {
             Ok(queue) => queue,
@@ -90,7 +98,10 @@ impl<C: ChecksSource> Integrator<C> {
             let Some(x) = revert.target().and_then(|t| watched.tip(&t.key())) else {
                 continue;
             };
-            last = self.revert_cycle(project, revert, x).await?;
+            last = self
+                .revert_cycle(project, revert, x)
+                .await
+                .or_else(failed)?;
             if !skipped(project, &revert.id, &last) {
                 return Ok(last);
             }
@@ -99,7 +110,8 @@ impl<C: ChecksSource> Integrator<C> {
             let Some(x) = watched.tip(&item.target().key()) else {
                 continue;
             };
-            last = self.item_cycle(project, &queue, item.clone(), x).await?;
+            let outcome = self.item_cycle(project, &queue, item.clone(), x).await;
+            last = outcome.or_else(failed)?;
             if !skipped(project, &item.submission_id, &last) {
                 return Ok(last);
             }
@@ -274,14 +286,30 @@ impl<C: ChecksSource> Integrator<C> {
     }
 }
 
-/// Logs `step` when it is `Blocked`, which skips `subject` for this cycle;
-/// true when it did.
+/// Logs `step` when it is `Blocked`, `Refused` or `Failed`, which skips
+/// `subject` for this cycle; true when it did.
 fn skipped(project: &str, subject: &str, step: &Step) -> bool {
-    let blocked = matches!(step, Step::Blocked(_));
-    if blocked {
-        eprintln!("agentc-integrator: {project}/{subject}: {step:?}");
+    let skip = matches!(step, Step::Blocked(_) | Step::Refused(_) | Step::Failed(_));
+    if skip {
+        log_skip(project, subject, step);
     }
-    blocked
+    skip
+}
+
+/// Logs to stderr that `subject` (an item, revert or target) is skipped
+/// this cycle, and the step that skips it.
+pub(crate) fn log_skip(project: &str, subject: &str, step: &Step) {
+    eprintln!("agentc-integrator: {project}/{subject}: {step:?}");
+}
+
+/// Turns the error of one subject or target into `Step::Failed`, which skips
+/// it this cycle; a [`crate::service::ServiceFailure`] stays an error and
+/// aborts the cycle.
+pub(crate) fn failed(error: anyhow::Error) -> Result<Step> {
+    if is_service_failure(&error) {
+        return Err(error);
+    }
+    Ok(Step::Failed(format!("{error:#}")))
 }
 
 /// A result of this submission for another tip that still holds push

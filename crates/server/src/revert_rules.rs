@@ -9,8 +9,10 @@
 //! are recorded contributors, so they cannot review it. A review that requests changes on a mechanical revert rejects
 //! the decision to revert: the revert task is canceled with the review's
 //! rationale. Once the integrator reports it cannot revert mechanically the
-//! task is ordinary implementation work and none of these rules apply.
-use crate::{error::AppError, reverts::AWAITING_CANDIDATE};
+//! task is ordinary implementation work and none of these rules apply,
+//! except that, as for every revert task, only a human cancels or archives
+//! it.
+use crate::{error::AppError, mutation::Mutation, reverts::AWAITING_CANDIDATE};
 use serde_json::json;
 use sqlx::SqliteConnection;
 
@@ -71,6 +73,32 @@ pub(crate) async fn ensure_not_mechanical(
     Ok(())
 }
 
+/// Refuses an agent canceling or archiving a revert task, whatever its mode,
+/// with the `revert_cancel` human gate; humans pass.
+pub(crate) async fn ensure_human_revert_exit(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    (p, task): (&str, &str),
+    action: &str,
+) -> Result<(), AppError> {
+    if actor.kind == "human" || !matches!(action, "cancel" | "archive") {
+        return Ok(());
+    }
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM task_reverts WHERE project_id=? AND task_id=?")
+            .bind(p)
+            .bind(task)
+            .fetch_one(&mut *c)
+            .await?;
+    if n == 0 {
+        return Ok(());
+    }
+    Err(AppError::human_gate(
+        "revert_cancel",
+        "Only a human cancels or archives a revert task.",
+    ))
+}
+
 /// Blocks a reopened mechanical revert again until the integrator records
 /// a new candidate.
 pub(crate) async fn restore_awaiting(c: &mut SqliteConnection, task: &str) -> Result<(), AppError> {
@@ -91,27 +119,30 @@ pub(crate) struct Rejection<'a> {
     pub summary: &'a str,
 }
 
-/// When the subject is a mechanical revert, cancels it and records the
-/// review that rejected the decision to revert; other subjects are left
-/// to the ordinary revision flow.
+/// When the subject is a mechanical revert, cancels it (a new task
+/// revision) and records the review that rejected the decision to revert;
+/// other subjects are left to the ordinary revision flow.
 pub(crate) async fn reject_mechanical(
-    c: &mut SqliteConnection,
+    m: &mut Mutation,
+    p: &str,
     r: &Rejection<'_>,
-    now: i64,
 ) -> Result<(), AppError> {
-    if !is_mechanical(c, r.task).await? {
+    if !is_mechanical(&mut m.tx, r.task).await? {
         return Ok(());
     }
     let record = json!({"activity_id": r.activity, "reviewer_id": r.reviewer,
-        "summary": r.summary, "rejected_at": coordinator_core::timestamp(now)});
+        "summary": r.summary, "rejected_at": coordinator_core::timestamp(m.now)});
     sqlx::query("UPDATE task_reverts SET rejection_json=? WHERE task_id=?")
         .bind(record.to_string())
         .bind(r.task)
-        .execute(&mut *c)
+        .execute(&mut *m.tx)
         .await?;
-    sqlx::query("UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL WHERE id=?")
-        .bind(r.task)
-        .execute(&mut *c)
-        .await?;
+    sqlx::query(
+        "UPDATE tasks SET lifecycle='canceled',blocked_reason=NULL,revision=revision+1 WHERE id=?",
+    )
+    .bind(r.task)
+    .execute(&mut *m.tx)
+    .await?;
+    crate::coordination::save_task_revision(m, p, r.task).await?;
     Ok(())
 }

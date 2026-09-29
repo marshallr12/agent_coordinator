@@ -5,7 +5,8 @@
 //! when the approvals still hold under the pinned task digest, every check in
 //! the roster read from T0 has a deciding success receipt on R, the protected
 //! checks are all in that roster, the landing range carries no unapproved
-//! stacked work, and no approving reviewer contributed to that range. Issuing
+//! stacked work, no approving reviewer contributed to that range, and every
+//! `privilege_gate` report on the result carries a human's `allow`. Issuing
 //! it takes the submission's integration hold; the authority stays outstanding
 //! until the integrator's next observation of the target.
 use crate::{
@@ -443,9 +444,33 @@ struct Judged {
     contributor_tasks: Vec<String>,
 }
 
+/// Refuses a result whose `privilege_gate` report a human has not resolved
+/// (`privilege_gate_unresolved`) or resolved with `deny`
+/// (`privilege_gate_denied`); a result without such a report, or whose
+/// report carries the decision `allow`, passes.
+async fn ensure_privilege_allowed(c: &mut SqliteConnection, result: &str) -> Result<(), AppError> {
+    let gate: Option<(String, Option<i64>)> = sqlx::query_as("SELECT id,resolved_at FROM integrator_reports WHERE kind='privilege_gate' AND result_id=? AND (resolved_at IS NULL OR decision IS NOT 'allow') ORDER BY resolved_at IS NOT NULL,created_at LIMIT 1")
+        .bind(result).fetch_optional(&mut *c).await?;
+    let Some((report, resolved)) = gate else {
+        return Ok(());
+    };
+    let (code, message) = match resolved {
+        None => (
+            "privilege_gate_unresolved",
+            "A privilege_gate report on this result awaits a human decision.",
+        ),
+        Some(_) => (
+            "privilege_gate_denied",
+            "A human denied pushing this result in its privilege_gate report.",
+        ),
+    };
+    Err(AppError::conflict(code, message).with_details(json!({"report_id": report})))
+}
+
 /// Loads the result and applies every refusal that has no side effect.
 async fn judge(m: &mut Mutation, p: &str, id: &str) -> Result<(Judged, Vec<Value>), AppError> {
     let result = load_result(&mut m.tx, p, id).await?;
+    ensure_privilege_allowed(&mut m.tx, id).await?;
     let subject = authority_subject(&mut m.tx, p, &result).await?;
     let roster = parse_roster(&serde_json::from_str(result.get("roster_json"))?)?;
     ensure_protected(&roster, &protected_ids(&mut m.tx, p).await?)?;

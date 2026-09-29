@@ -8,7 +8,7 @@ use crate::checks::{FakeChecks, FakeFile};
 use crate::config::{ChecksKind, Config};
 use crate::git::testing::{Remote, commit, commit_message, git, remote};
 use crate::integrate::{Integrator, Step};
-use crate::service::Service;
+use crate::service::{Service, is_service_failure};
 use crate::state::LoopState;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -25,10 +25,12 @@ const RULES: [&str; 2] = ["non_fast_forward", "required_status_checks"];
 
 type Reply = (StatusCode, Json<Value>);
 
-/// What the mock service has been told, the one queued subject, the
+/// What the mock service has been told, the queued subjects, the
 /// targets and reverts it lists, and the refusals it is told to give.
 #[derive(Default)]
 struct Mock {
+    /// Subjects queued ahead of `item`, in queue order.
+    ahead: Vec<Value>,
     item: Option<Value>,
     targets: Vec<Value>,
     /// Reverts awaiting a candidate (the queue's `reverts`).
@@ -42,6 +44,9 @@ struct Mock {
     revise_refusal: Option<String>,
     /// While set, both revert routes refuse with this code.
     revert_refusal: Option<String>,
+    /// Push authority for a result of one of these submissions is refused
+    /// with the mapped code.
+    authority_refusals: HashMap<String, String>,
     /// While set, the reports route answers 500.
     reports_down: bool,
     results: Vec<Value>,
@@ -121,7 +126,8 @@ async fn queue(State(mock): State<Shared>) -> Reply {
         item["reverted"] = json!(mock.reverted);
         item
     };
-    let items: Vec<Value> = mock.item.iter().map(with_results).collect();
+    let queued = mock.ahead.iter().chain(&mock.item);
+    let items: Vec<Value> = queued.map(with_results).collect();
     let roster = json!({"revision": 1, "required_checks": [{"identity": "tests"}]});
     ok(
         json!({"project_id": "p", "roster": roster, "targets": mock.targets, "items": items, "reverts": mock.reverts, "skipped_ineligible": 0, "retry_after_seconds": 30}),
@@ -177,9 +183,15 @@ async fn authority(
     idempotent(&mock, &headers, body, grant)
 }
 
-/// Grants authority when every check passed and no other result holds it.
+/// Grants authority when the result's submission is not refused, every
+/// check passed and no other result holds it.
 fn grant(mock: &mut Mock, body: &Value) -> Reply {
     let id = &body["result_id"];
+    let submission = mock.results.iter().find(|r| &r["id"] == id);
+    let submission = submission.and_then(|r| r["submission_id"].as_str());
+    if let Some(code) = submission.and_then(|s| mock.authority_refusals.get(s)) {
+        return refuse(code);
+    }
     if mock
         .results
         .iter()
@@ -1563,4 +1575,117 @@ async fn a_revert_already_undone_on_the_tip_is_not_mechanical() {
     let evidence = unmechanical_evidence(&mut h).await;
     assert!(evidence.contains("is already undone on"), "{evidence}");
     assert_eq!(h.cycle().await, Step::Idle, "nothing was published");
+}
+
+/// The queue item for subject `s0`, queued ahead of the harness's item,
+/// with candidate `c` reviewed at `base` under its own candidate ref.
+fn ahead_item(remote: &Remote, base: &str, c: &str) -> Value {
+    let mut ahead = item(remote, base, c);
+    ahead["subject_task_id"] = json!("t0");
+    ahead["submission_id"] = json!("s0");
+    ahead["candidate_ref"] = json!("refs/agent-coordinator/candidates/s0");
+    ahead
+}
+
+/// Pushes a candidate off `base` writing `file` and copies it to subject
+/// `s0`'s candidate ref, so a later `push_candidate` does not replace it.
+fn push_ahead_candidate(remote: &Remote, base: &str, file: &str, content: &str) -> String {
+    let c = push_candidate(remote, base, file, content);
+    let refspec = format!("{c}:refs/agent-coordinator/candidates/s0");
+    git(&remote.source, &["push", "--quiet", "origin", &refspec]);
+    c
+}
+
+/// A harness whose queue holds `ahead` (subject `s0`) and then a clean
+/// candidate of `s1`, with every check passing.
+async fn queued_behind(remote: &Remote, base: &str, ahead: Value) -> Harness {
+    let c = push_candidate(remote, base, "feature.txt", "feature\n");
+    let h = Harness::new(item(remote, base, &c)).await;
+    h.mock.lock().unwrap().ahead = vec![ahead];
+    h.checks(Some("success"), &RULES);
+    h
+}
+
+#[tokio::test]
+async fn s5_review_an_item_whose_candidate_is_gone_is_skipped() {
+    let (remote, base) = seeded_remote();
+    let mut gone = ahead_item(&remote, &base, &"ab".repeat(20));
+    gone["candidate_ref"] = json!("refs/agent-coordinator/candidates/gone");
+    let mut h = queued_behind(&remote, &base, gone).await;
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    let skipped = h.cycle().await;
+    assert!(
+        matches!(&skipped, Step::Failed(e) if e.contains("candidates/gone")),
+        "{skipped:?}"
+    );
+}
+
+#[tokio::test]
+async fn s5_review_a_result_branch_at_another_commit_is_skipped() {
+    let (remote, base) = seeded_remote();
+    let c0 = push_ahead_candidate(&remote, &base, "zero.txt", "zero\n");
+    let taken = format!("{base}:refs/heads/ac/results/res1");
+    git(&remote.source, &["push", "--quiet", "origin", &taken]);
+    let mut h = queued_behind(&remote, &base, ahead_item(&remote, &base, &c0)).await;
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    let published = h.peek(|m| m.observations[0]["result_id"].clone());
+    assert_eq!(published, "res2", "the item behind the failed one landed");
+    assert_eq!(remote_ref(&remote, "refs/heads/ac/results/res1"), base);
+}
+
+#[tokio::test]
+async fn s5_review_a_missing_target_does_not_stop_the_others() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    let gone = json!({"repository_url": remote.url, "target_branch": "gone"});
+    h.mock.lock().unwrap().targets = vec![gone];
+    h.checks(Some("success"), &RULES);
+    h.edit_fake(|file| {
+        let rules = RULES.map(str::to_owned).to_vec();
+        file.rules.insert("gone".into(), rules);
+    });
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    let held = h.cycle().await;
+    assert!(
+        matches!(&held, Step::Failed(e) if e.contains("refs/heads/gone does not exist")),
+        "{held:?}"
+    );
+}
+
+#[tokio::test]
+async fn s5_review_a_refused_item_is_skipped_and_retried() {
+    let (remote, base) = seeded_remote();
+    let c0 = push_ahead_candidate(&remote, &base, "zero.txt", "zero\n");
+    let mut h = queued_behind(&remote, &base, ahead_item(&remote, &base, &c0)).await;
+    let refusals = [("s0".to_owned(), "checks_not_passed".to_owned())];
+    h.mock.lock().unwrap().authority_refusals = refusals.into();
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    let published = h.peek(|m| m.observations[0]["result_id"].clone());
+    assert_eq!(published, "res2", "the item behind the refused one landed");
+    let retried = h.cycle().await;
+    assert_eq!(retried, Step::Refused("checks_not_passed".into()));
+    assert_eq!(
+        h.peek(|m| m.results.len()),
+        3,
+        "s0 was pinned again on the new tip"
+    );
+}
+
+#[tokio::test]
+async fn s5_review_a_service_failure_still_aborts_the_cycle() {
+    let (remote, base) = seeded_remote();
+    let deploy = "on: push\njobs:\n  d:\n    env:\n      T: ${{ secrets.TOKEN }}\n";
+    let c0 = push_ahead_candidate(&remote, &base, ".github/workflows/deploy.yml", deploy);
+    let mut h = queued_behind(&remote, &base, ahead_item(&remote, &base, &c0)).await;
+    h.mock.lock().unwrap().reports_down = true;
+    let outcome = h.integrator.cycle("p").await;
+    let error = outcome.unwrap_err();
+    assert!(is_service_failure(&error), "{error:#}");
+    assert_eq!(
+        h.peek(|m| m.results.len()),
+        1,
+        "nothing behind it was worked"
+    );
+    assert_eq!(remote_main(&remote), base);
 }

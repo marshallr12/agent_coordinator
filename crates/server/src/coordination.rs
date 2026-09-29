@@ -732,6 +732,7 @@ async fn lifecycle_change(
     bounded(&input.reason, "reason", 4096, true)?;
     let operation = format!("POST /api/v1/projects/{p}/tasks/{id}/{action}");
     let mut m = Mutation::begin(&s, &auth, &headers, &operation, &input).await?;
+    crate::revert_rules::ensure_human_revert_exit(&mut m.tx, &m.actor, (&p, &id), action).await?;
     ensure_lifecycle_actor(&mut m.tx, &m.actor, &p, action).await?;
     if let Some(v) = m.replay {
         return Ok(response(v));

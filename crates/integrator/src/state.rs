@@ -205,8 +205,11 @@ impl LoopState {
 
     /// Remembers that this integrator may publish `entry` on `target`
     /// (recorded before the push, so a crash after it cannot make the
-    /// landing look out-of-band); keeps the latest [`MAX_PUBLISHED`].
+    /// landing look out-of-band); keeps the latest [`MAX_PUBLISHED`]. When
+    /// the save fails the entry is forgotten again, so a retry saves it
+    /// before any push instead of finding it already known in memory.
     pub fn record_published(&mut self, target: &str, entry: Published) -> Result<()> {
+        let previous = self.published.get(target).cloned();
         let list = self.published.entry(target.into()).or_default();
         if list.iter().any(|known| known.r == entry.r) {
             return Ok(());
@@ -215,6 +218,15 @@ impl LoopState {
         let excess = list.len().saturating_sub(MAX_PUBLISHED);
         list.drain(..excess);
         self.save()
+            .inspect_err(|_| self.restore_published(target, previous))
+    }
+
+    /// Puts `target`'s published list back to `previous` (absent when `None`).
+    fn restore_published(&mut self, target: &str, previous: Option<Vec<Published>>) {
+        match previous {
+            Some(list) => self.published.insert(target.into(), list),
+            None => self.published.remove(target),
+        };
     }
 
     /// The results recorded by [`LoopState::record_published`] for `target`.
@@ -354,6 +366,23 @@ mod tests {
         assert_eq!(last.t0.as_deref(), Some("x"));
         assert_eq!(last.result_id, Some(format!("id-r{MAX_PUBLISHED}")));
         assert!(reloaded.published("other").is_empty());
+    }
+
+    #[test]
+    fn a_published_entry_whose_save_failed_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = LoopState::load(&path).unwrap();
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(state.record_published("t", entry("r")).is_err());
+        assert!(state.published("t").is_empty(), "rolled back in memory");
+        assert!(
+            state.record_published("t", entry("r")).is_err(),
+            "retry saves again"
+        );
+        std::fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        state.record_published("t", entry("r")).unwrap();
+        assert_eq!(LoopState::load(&path).unwrap().published("t").len(), 1);
     }
 
     #[test]

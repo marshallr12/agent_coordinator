@@ -2,18 +2,21 @@
 //! target of the queue whether or not an item is queued for it: the ruleset
 //! watchdog, then the tip monitor. Each target is observed with one
 //! `ls-remote` and one fetch of its branch into the mirror per cycle; the
-//! items integrate against the tip observed here.
+//! items integrate against the tip observed here. A target whose watch fails
+//! (other than by a service failure, which aborts the cycle) is held as
+//! `Step::Failed` for this cycle, so the other targets are still watched.
 use crate::checks::ChecksSource;
 use crate::git;
 use crate::github::RepoId;
-use crate::integrate::{Integrator, Step};
+use crate::integrate::{Integrator, Step, failed, log_skip};
 use crate::service::{Queue, Target};
 use crate::state::TipMove;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 /// Each watched target's key with its tip X, or the step that holds its
-/// items this cycle (a freeze, or a tip move not yet classified).
+/// items this cycle (a freeze, a tip move not yet classified, or a failed
+/// watch).
 pub(crate) struct Watched(Vec<(String, Result<String, Step>)>);
 
 impl Watched {
@@ -31,11 +34,18 @@ impl Watched {
 }
 
 impl<C: ChecksSource> Integrator<C> {
-    /// Runs the watchdog and the tip monitor on every target of `queue`.
+    /// Runs the watchdog and the tip monitor on every target of `queue`; a
+    /// target whose watch fails is logged and held as `Step::Failed`.
     pub(crate) async fn watch_targets(&mut self, project: &str, queue: &Queue) -> Result<Watched> {
         let mut watched = Vec::new();
         for target in queue.all_targets() {
-            let status = self.watch_target(project, &target).await?;
+            let status = match self.watch_target(project, &target).await {
+                Ok(status) => status,
+                Err(error) => Err(failed(error)?),
+            };
+            if let Err(step @ Step::Failed(_)) = &status {
+                log_skip(project, &target.key(), step);
+            }
             watched.push((target.key(), status));
         }
         Ok(Watched(watched))

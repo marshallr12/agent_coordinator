@@ -463,7 +463,8 @@ async fn candidate_reviews(
     Ok(crate::autonomy::required_review_kinds(&mode))
 }
 
-/// Records the candidate as the revert's submission and its candidate row;
+/// Records the candidate as the revert's submission and its candidate row,
+/// which a re-sent candidate for the same tip points at the new submission;
 /// returns the submission id.
 async fn record_candidate(
     m: &mut Mutation,
@@ -476,26 +477,31 @@ async fn record_candidate(
     let submission = insert_submission(m, p, (revert, &attempt), &pins, input).await?;
     let reviews = candidate_reviews(&mut m.tx, revert, &pins).await?;
     enter_workflow(m, p, revert, &submission, &reviews).await?;
-    sqlx::query("INSERT INTO revert_candidates(revert_task_id,t0,submission_id,candidate_commit,candidate_tree,attestation,recorded_by,recorded_at) VALUES(?,?,?,?,?,'mechanical',?,?)")
+    sqlx::query("INSERT INTO revert_candidates(revert_task_id,t0,submission_id,candidate_commit,candidate_tree,attestation,recorded_by,recorded_at) VALUES(?,?,?,?,?,'mechanical',?,?) \
+        ON CONFLICT(revert_task_id,t0) DO UPDATE SET submission_id=excluded.submission_id,recorded_by=excluded.recorded_by,recorded_at=excluded.recorded_at")
         .bind(revert.get::<String, _>("task_id")).bind(&input.t0).bind(&submission)
         .bind(&input.candidate_commit).bind(&input.candidate_tree).bind(&m.actor.id).bind(m.now)
         .execute(&mut *m.tx).await?;
     Ok(submission)
 }
 
-/// True when `stored` (submission, commit, tree) is `input` and still the
-/// revert's live candidate in review or integration.
+/// True when `stored` (submission, commit, tree) has `input`'s commit and
+/// tree.
+fn same_candidate(stored: &(String, String, String), input: &CandidateInput) -> bool {
+    let (_, commit, tree) = stored;
+    *commit == input.candidate_commit && *tree == input.candidate_tree
+}
+
+/// True when `stored` is `input` and still the revert's live candidate in
+/// review or integration.
 fn replays(revert: &SqliteRow, stored: &(String, String, String), input: &CandidateInput) -> bool {
-    let (submission, commit, tree) = stored;
-    *commit == input.candidate_commit
-        && *tree == input.candidate_tree
-        && live_candidate(revert).as_ref() == Some(submission)
+    same_candidate(stored, input) && live_candidate(revert).as_ref() == Some(&stored.0)
 }
 
 /// Records the candidate unless one is stored for this tip: the same
-/// commit and tree replay while that submission is still live; a stored
-/// candidate that differs, or is superseded, conflicts. Returns the
-/// submission.
+/// commit and tree replay while that submission is still live, and are
+/// recorded as a new submission once a revise or reopen sent it back; a
+/// stored candidate that differs conflicts. Returns the submission.
 async fn candidate_for_tip(
     m: &mut Mutation,
     p: &str,
@@ -508,10 +514,10 @@ async fn candidate_for_tip(
         return Ok(stored.0.clone());
     }
     refuse(&revert, retired_refusal)?;
-    if stored.is_some() {
+    if stored.is_some_and(|s| !same_candidate(&s, input)) {
         return Err(AppError::conflict(
             "revert_candidate_conflict",
-            "A different or superseded candidate is already recorded for this revert and target tip; compute the revert on the current tip.",
+            "A different candidate is already recorded for this revert and target tip; compute the revert on the current tip.",
         ));
     }
     refuse(&revert, busy_refusal)?;

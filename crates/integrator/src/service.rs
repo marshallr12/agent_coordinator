@@ -2,7 +2,8 @@
 //! revert routes of S4). Every call uses the `class=integrator` bearer
 //! credential and no session. Refusals (non-2xx replies with an error code)
 //! are returned as values, not errors, because most of them steer the loop
-//! rather than stop it.
+//! rather than stop it. Any other failure to get an answer from the service
+//! is a [`ServiceFailure`], which aborts the cycle (see [`is_service_failure`]).
 use crate::state::target_key;
 use anyhow::{Context, Result, anyhow};
 use coordinator_client::{ApiResponse, CoordinatorClient};
@@ -264,6 +265,27 @@ pub struct ReportRecord {
     pub allowed: bool,
 }
 
+/// A failure to get an answer from the service: transport, an error status
+/// that is not a coded 403/409 refusal (such as 401 or 500), or an
+/// undecodable reply. It aborts the cycle instead of skipping one subject
+/// (see [`crate::integrate::failed`]).
+#[derive(Debug)]
+pub struct ServiceFailure(String);
+
+impl std::fmt::Display for ServiceFailure {
+    /// Writes the failure's message.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ServiceFailure {}
+
+/// True when `error` or any error in its source chain is a [`ServiceFailure`].
+pub fn is_service_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<ServiceFailure>())
+}
+
 /// Integrator API for one coordinator origin.
 pub struct Service {
     client: CoordinatorClient,
@@ -451,16 +473,16 @@ fn body_key(prefix: &str, body: &Value, nonce: &str) -> String {
 
 /// Wraps a transport error without its (possibly credential-bearing) source.
 fn transport(error: coordinator_client::ClientError) -> anyhow::Error {
-    anyhow!("coordinator request failed: {error}")
+    ServiceFailure(format!("coordinator request failed: {error}")).into()
 }
 
-/// Splits a response into data, a coded refusal, or an error.
+/// Splits a response into data, a coded refusal, or a [`ServiceFailure`].
 fn decode<T: DeserializeOwned>(response: ApiResponse) -> Result<Reply<T>> {
     if response.is_success() {
         let data = response.body.get("data").cloned().unwrap_or(Value::Null);
-        return Ok(Ok(
-            serde_json::from_value(data).context("decode service reply")?
-        ));
+        let decoded = serde_json::from_value(data)
+            .map_err(|error| ServiceFailure(format!("decode service reply: {error}")))?;
+        return Ok(Ok(decoded));
     }
     let error = &response.body["error"];
     match error["code"].as_str() {
@@ -468,11 +490,12 @@ fn decode<T: DeserializeOwned>(response: ApiResponse) -> Result<Reply<T>> {
             code: code.to_string(),
             details: error["details"].clone(),
         })),
-        code => Err(anyhow!(
+        code => Err(ServiceFailure(format!(
             "service error {} {}",
             response.status,
             code.unwrap_or("unknown")
-        )),
+        ))
+        .into()),
     }
 }
 
@@ -491,6 +514,16 @@ mod tests {
         assert_eq!(reply.unwrap_err().code, "result_conflict");
         let missing = json!({"error": {"code": "record_not_found"}});
         assert!(decode::<Value>(response(404, missing)).is_err());
+    }
+
+    #[test]
+    fn only_failures_to_reach_the_service_are_service_failures() {
+        let down = json!({"error": {"code": "internal"}});
+        let failure = decode::<Value>(response(500, down)).unwrap_err();
+        assert!(is_service_failure(&failure.context("post a receipt")));
+        let garbled = decode::<i64>(response(200, json!({"data": "x"}))).unwrap_err();
+        assert!(is_service_failure(&garbled));
+        assert!(!is_service_failure(&anyhow!("remote ref is not at R")));
     }
 
     #[test]
