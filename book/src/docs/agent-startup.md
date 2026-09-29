@@ -30,6 +30,24 @@ the service. A missing contract, source mismatch, unsupported target, dirty
 build, or missing capability requires a verified client upgrade before new work.
 The compatibility commands need no credential; neither follows redirects.
 
+## Synchronize the checkout first
+
+First thing in a session, before connecting or claiming, synchronize the
+checkout the agent was started in:
+
+- If `git status --porcelain` is empty and the current branch tracks an
+  upstream, run `git pull --ff-only`.
+- If there are uncommitted changes, do not pull, stash, reset, commit, or
+  discard them. Tell the user the checkout has uncommitted changes and
+  recommend a `git fetch` and reconciliation with the upstream branch first.
+- If the branch has no upstream, HEAD is detached, the pull cannot
+  fast-forward, or the fetch fails, report it and recommend a fetch and
+  reconciliation. Never merge, rebase, or force automatically, and do not
+  retry in a loop.
+
+Task worktrees are still created from the fetched remote base, so this sync
+does not replace the per-task base check.
+
 ## Choose a connection
 
 Prefer an already configured MCP connection to this exact service origin when its
