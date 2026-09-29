@@ -33,9 +33,12 @@ pub enum ContextRerankMode {
 pub struct ApiKey(String);
 
 impl ApiKey {
-    /// Wrap `value`, or return `None` when it is empty or only whitespace.
+    /// Wrap `value` without surrounding whitespace (a key read from a file
+    /// often ends in a newline, which is not a valid header value), or
+    /// return `None` when nothing is left.
     pub fn new(value: String) -> Option<Self> {
-        (!value.trim().is_empty()).then_some(Self(value))
+        let key = value.trim();
+        (!key.is_empty()).then(|| Self(key.to_owned()))
     }
 }
 

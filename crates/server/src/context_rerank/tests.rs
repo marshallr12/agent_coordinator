@@ -273,6 +273,12 @@ fn off_or_keyless_configurations_build_no_reranker() {
 }
 
 #[test]
+fn api_keys_drop_surrounding_whitespace() {
+    let key = ApiKey::new(" test-key\n".into()).unwrap();
+    assert_eq!(key.0, "test-key");
+}
+
+#[test]
 fn defaults_are_off_with_the_production_endpoint_and_a_redacted_key() {
     let config = ContextRerankConfig::default();
     assert_eq!(config.mode, ContextRerankMode::Off);
