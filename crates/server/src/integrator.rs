@@ -51,15 +51,18 @@ const CONCLUSIONS: &[&str] = &[
     "startup_failure",
 ];
 
-/// Subjects in integration with their current, unsuperseded code submission.
-/// A macro so each query stays one compile-time literal (sqlx refuses
-/// runtime-built SQL).
+/// Subjects in integration with their current, unsuperseded code submission,
+/// and the subject's own id as `revert_task_id` when it is a revert task the
+/// integrator computes mechanically. A macro so each query stays one
+/// compile-time literal (sqlx refuses runtime-built SQL).
 macro_rules! subjects_sql {
     () => {
         "SELECT ws.task_id,s.id AS submission_id,s.candidate_revision,s.candidate_tree,\
          s.candidate_ref,s.base_revision,s.repository_url,s.target_branch,\
          s.canonical_repository_key,s.task_digest,t.title,t.description,t.acceptance_json,\
-         t.kind AS subject_kind,t.priority,ws.updated_at FROM workflow_subjects ws \
+         t.kind AS subject_kind,t.priority,ws.updated_at,\
+         (SELECT tr.task_id FROM task_reverts tr WHERE tr.task_id=ws.task_id \
+         AND tr.mode='mechanical') AS revert_task_id FROM workflow_subjects ws \
          JOIN submissions s ON s.id=ws.current_submission_id JOIN tasks t ON t.id=ws.task_id \
          WHERE ws.project_id=? AND ws.phase='integration' AND s.kind='code' \
          AND s.superseded_at IS NULL"
@@ -165,6 +168,7 @@ fn queue_item(row: &SqliteRow, results: Vec<Value>) -> Value {
         "repository_url": row.get::<String, _>("repository_url"),
         "target_branch": row.get::<String, _>("target_branch"),
         "task_digest": row.get::<Option<String>, _>("task_digest"),
+        "revert_task_id": row.get::<Option<String>, _>("revert_task_id"),
         "results": results,
     })
 }

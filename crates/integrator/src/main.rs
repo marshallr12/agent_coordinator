@@ -21,6 +21,8 @@ mod landing;
 mod local_actions;
 mod privilege;
 mod publish;
+mod revert;
+mod reverts;
 mod roster;
 mod service;
 mod state;

@@ -235,7 +235,10 @@ reports and only a human resolves one.
   for every result of the project on the item's repository and target branch
   that a revert task (not canceled) targets, so the integrator can refuse a
   no-op (`r` equal to `t0`) whose candidate commits intersect a reverted
-  landing. The response adds `reverts`, the revert tasks awaiting a mechanical
+  landing, and `revert_task_id`: the subject's own task id when it is a
+  revert task in `mechanical` mode (null otherwise), so the integrator
+  reports a reproduced check failure of that candidate `not-mechanical`
+  rather than revising it. The response adds `reverts`, the revert tasks awaiting a mechanical
   candidate (see Reverts below): `{id, task_id, result_id, r, title, priority,
   repository_url, target_branch, target}`, where `id` is the revert task id
   and `target` is `{submission_id, result_id, original_task_id, r, t0, c,
@@ -296,8 +299,11 @@ reports and only a human resolves one.
   submission's candidate commit, or the landing range of a result recorded
   for it, must share a commit with the landing range, on the same repository
   and target branch, of a result a revert task (not canceled) targets,
-  otherwise `not_reverted_in_history`. It counts toward the limits below
-  like any integrator revise and never serializes.
+  otherwise `not_reverted_in_history`. The integrator sends it instead of
+  pinning a no-op result whose candidate commit or landing range meets a
+  landing listed in the item's `reverted`, and when `results` refuses with
+  `candidate_reverted_in_history`, citing `details.commits`. It counts
+  toward the limits below like any integrator revise and never serializes.
   A `conflict` revise may name in `moved_by_result_id` the result whose landing
   moved the target: the newest result the integrator published on that target
   since the candidate's reviewed base. The service resolves it to that
@@ -339,7 +345,10 @@ reports and only a human resolves one.
   for `privilege_gate`, `target_rewritten` and `ruleset_missing`, and for any
   report whose `details.blocks_subject` is `true` (the integrator sets it on
   `fix_target` reports and on `flaky` reports that leave a subject blocked:
-  `no_result` and `rerun_refused`), so a subject never waits unseen. The
+  `no_result` and `rerun_refused`), so a subject never waits unseen. A
+  `reverted_in_history` revise the service refuses with
+  `not_reverted_in_history` is a `fix_target` report with `verdict`
+  `not_reverted_in_history`, and the integrator skips the subject. The
   integrator raises `privilege_gate`, failing closed, when any path that
   differs between the target tip and the result lies under `.github/`, is the
   `.github` entry itself, `.gitmodules` or a `CODEOWNERS` file, or is in
@@ -399,7 +408,10 @@ reports and only a human resolves one.
   still going. When that attempt failed, or the tip has no result for the
   check, the integrator raises `fix_target` with `verdict` `target_failing`
   or `target_unverified` (one per target, tip, verdict and check) and skips
-  the subject until the tip moves or the check passes there.
+  the subject until the tip moves or the check passes there. A mechanical
+  revert's candidate has no author: when its failure is reproduced and passes
+  on the tip, the integrator reports the revert `not-mechanical` with reason
+  `check_failed` instead of revising it.
 - `GET /api/v1/projects/{project_id}/integrator/reports` lists a project's
   reports, newest first, for any authenticated reader. `open=true` keeps only
   unresolved ones; `limit` is 1 to 1000 (default 200); `before=<report_id>`
@@ -467,8 +479,26 @@ limit applies to reverts.
   canceling the task. The revert task stays
   blocked while it waits for its candidate and is listed under the queue's
   `reverts`. The integrator computes the candidate
-  itself: `git revert -m 1 R` on the current tip, or the landed range when R
-  landed fast-forward.
+  itself on the target's current tip X, in a disposable worktree:
+  `git revert -m 1 R` when R is its merge into `t0`, otherwise the landed
+  range `t0..R` reverted as one step. It commits with a pinned identity and
+  date and the message `Revert "<candidate subject>"` with the trailers
+  `Agent-Coordinator-Revert-Task` and `Agent-Coordinator-Reverted-Result`,
+  and without the host's global or system Git configuration, so the same X
+  and R always give the same commit. A known limit: the target's own
+  `.gitattributes`, including merge drivers such as the builtin `union`,
+  still apply to the revert (they are reviewed repository content). A clean
+  revert is pushed create-only to
+  `refs/agent-coordinator/candidates/reverts/<task_id>/<X>` and recorded
+  with the candidate route below, `t0` being X. A revert that conflicts on
+  X, whose R is not in X's history, or that would change nothing on X is
+  reported `not-mechanical` with reason `conflict`, its evidence naming the
+  conflicting paths, or saying that R is not in the target history or is
+  already undone; the integrator never proposes an empty candidate. A
+  refusal of either post (such as `revert_candidate_conflict`) skips the
+  revert for that cycle; the next cycle computes it again. The integrator
+  works reverts before ordinary items, one revert or item per cycle, and
+  skips those of a held target.
 - `POST /api/v1/projects/{project_id}/integrator/reverts/{task_id}/candidate`
   with `{t0, candidate_commit, candidate_tree, mechanical: true,
   candidate_ref?}` records that candidate as the revert's code submission,

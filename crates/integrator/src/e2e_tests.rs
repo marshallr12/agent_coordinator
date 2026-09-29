@@ -1,8 +1,8 @@
 //! End-to-end cycles against a real local bare remote, file-backed checks and
 //! an in-process mock of the coordinator's integrator routes (same paths,
 //! envelopes, field names, idempotency-key semantics, held-authority rule and
-//! first-write-wins reports and receipt-backed `check_failed` revises as the
-//! server; the server's own rules are covered by
+//! first-write-wins reports, receipt-backed `check_failed` revises and the
+//! revert routes as the server; the server's own rules are covered by
 //! `crates/server/tests/workflow.rs`).
 use crate::checks::{FakeChecks, FakeFile};
 use crate::config::{ChecksKind, Config};
@@ -10,7 +10,7 @@ use crate::git::testing::{Remote, commit, commit_message, git, remote};
 use crate::integrate::{Integrator, Step};
 use crate::service::Service;
 use crate::state::LoopState;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -25,15 +25,28 @@ const RULES: [&str; 2] = ["non_fast_forward", "required_status_checks"];
 
 type Reply = (StatusCode, Json<Value>);
 
-/// What the mock service has been told, the one queued subject and the
-/// targets it lists.
+/// What the mock service has been told, the one queued subject, the
+/// targets and reverts it lists, and the refusals it is told to give.
 #[derive(Default)]
 struct Mock {
     item: Option<Value>,
     targets: Vec<Value>,
+    /// Reverts awaiting a candidate (the queue's `reverts`).
+    reverts: Vec<Value>,
+    /// The `reverted` landings every served item carries.
+    reverted: Vec<Value>,
+    /// While set, a no-op result is refused `candidate_reverted_in_history`
+    /// with these details.
+    reverted_history: Option<Value>,
+    /// While set, every revise is refused with this code.
+    revise_refusal: Option<String>,
+    /// While set, both revert routes refuse with this code.
+    revert_refusal: Option<String>,
     /// While set, the reports route answers 500.
     reports_down: bool,
     results: Vec<Value>,
+    candidates: Vec<Value>,
+    not_mechanical: Vec<Value>,
     receipts: Vec<Value>,
     observations: Vec<Value>,
     revises: Vec<Value>,
@@ -53,7 +66,12 @@ fn ok(data: Value) -> Reply {
 
 /// A 409 refusal envelope.
 fn refuse(code: &str) -> Reply {
-    let error = json!({"code": code, "message": code, "details": {}});
+    refuse_with(code, json!({}))
+}
+
+/// A 409 refusal envelope with `details`.
+fn refuse_with(code: &str, details: Value) -> Reply {
+    let error = json!({"code": code, "message": code, "details": details});
     (
         StatusCode::CONFLICT,
         Json(json!({"error": error, "request_id": "r", "server_time": "t"})),
@@ -98,20 +116,31 @@ async fn queue(State(mock): State<Shared>) -> Reply {
     let mock = mock.lock().unwrap();
     let with_results = |item: &Value| {
         let mut item = item.clone();
-        item["results"] = json!(mock.results);
+        let own = |r: &&Value| r["submission_id"] == item["submission_id"];
+        item["results"] = json!(mock.results.iter().filter(own).collect::<Vec<_>>());
+        item["reverted"] = json!(mock.reverted);
         item
     };
     let items: Vec<Value> = mock.item.iter().map(with_results).collect();
     let roster = json!({"revision": 1, "required_checks": [{"identity": "tests"}]});
     ok(
-        json!({"project_id": "p", "roster": roster, "targets": mock.targets, "items": items, "skipped_ineligible": 0, "retry_after_seconds": 30}),
+        json!({"project_id": "p", "roster": roster, "targets": mock.targets, "items": items, "reverts": mock.reverts, "skipped_ineligible": 0, "retry_after_seconds": 30}),
     )
 }
 
 async fn results(State(mock): State<Shared>, headers: HeaderMap, Json(body): Json<Value>) -> Reply {
     idempotent(&mock, &headers, body, |mock, body| {
-        if let Some(existing) = mock.results.iter().find(|r| r["t0"] == body["t0"]) {
+        let same =
+            |r: &&Value| r["t0"] == body["t0"] && r["submission_id"] == body["submission_id"];
+        if let Some(existing) = mock.results.iter().find(same) {
             return ok(existing.clone());
+        }
+        if let Some(details) = mock
+            .reverted_history
+            .clone()
+            .filter(|_| body["r"] == body["t0"])
+        {
+            return refuse_with("candidate_reverted_in_history", details);
         }
         let mut record = body.clone();
         record["id"] = json!(format!("res{}", mock.results.len() + 1));
@@ -220,6 +249,9 @@ async fn revise(State(mock): State<Shared>, headers: HeaderMap, Json(body): Json
         if body["reason_code"] == "check_failed" && !reproduced(mock, &body["result_id"]) {
             return refuse("check_failure_not_reproduced");
         }
+        if let Some(code) = &mock.revise_refusal {
+            return refuse(code);
+        }
         mock.item = None;
         mock.revises.push(body.clone());
         ok(json!({"revise": body}))
@@ -247,6 +279,68 @@ async fn reports(State(mock): State<Shared>, headers: HeaderMap, Json(body): Jso
     })
 }
 
+/// Records revert `id`'s candidate and queues it as the revert's subject
+/// (`rs-<id>`, marked with `revert_task_id`), like the server's candidate
+/// route for a human's revert, which needs no review.
+async fn revert_candidate(
+    State(mock): State<Shared>,
+    Path((_, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Reply {
+    idempotent(&mock, &headers, body, |mock, body| {
+        if let Some(code) = &mock.revert_refusal {
+            return refuse(code);
+        }
+        let revert = mock
+            .reverts
+            .iter()
+            .find(|r| r["id"] == id.as_str())
+            .cloned();
+        let Some(revert) = revert else {
+            return refuse("revert_candidate_exists");
+        };
+        mock.reverts.retain(|r| r["id"] != id.as_str());
+        mock.candidates.push(body.clone());
+        mock.item = Some(
+            json!({"subject_task_id": id, "submission_id": format!("rs-{id}"),
+            "title": revert["title"], "priority": 0, "candidate_revision": body["candidate_commit"],
+            "candidate_tree": body["candidate_tree"], "candidate_ref": body["candidate_ref"],
+            "reviewed_base": body["t0"], "repository_url": revert["repository_url"],
+            "target_branch": revert["target_branch"], "task_digest": null,
+            "revert_task_id": id, "results": []}),
+        );
+        ok(json!({"revert_task_id": id, "candidate_submission_id": format!("rs-{id}")}))
+    })
+}
+
+/// Records a not-mechanical report and drops revert `id` from the queue,
+/// both as a pending revert and as a queued candidate.
+async fn not_mechanical(
+    State(mock): State<Shared>,
+    Path((_, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Reply {
+    idempotent(&mock, &headers, body, |mock, body| {
+        if let Some(code) = &mock.revert_refusal {
+            return refuse(code);
+        }
+        mock.reverts.retain(|r| r["id"] != id.as_str());
+        let queued = mock
+            .item
+            .as_ref()
+            .map(|i| i["revert_task_id"] == id.as_str());
+        if queued == Some(true) {
+            mock.item = None;
+        }
+        let mut record = body.clone();
+        record["id"] = json!(id);
+        mock.not_mechanical.push(record);
+        ok(json!({"id": id, "revert": {"mode": "not_mechanical"}}))
+    })
+}
+
 /// Serves the mock on a loopback port and returns its origin.
 async fn serve(mock: Shared) -> String {
     let base = "/api/v1/projects/{p}/integrator";
@@ -258,6 +352,14 @@ async fn serve(mock: Shared) -> String {
         .route(&format!("{base}/observations"), post(observations))
         .route(&format!("{base}/revise"), post(revise))
         .route(&format!("{base}/reports"), post(reports))
+        .route(
+            &format!("{base}/reverts/{{id}}/candidate"),
+            post(revert_candidate),
+        )
+        .route(
+            &format!("{base}/reverts/{{id}}/not-mechanical"),
+            post(not_mechanical),
+        )
         .with_state(mock);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -1162,4 +1264,303 @@ async fn a_conflict_with_an_out_of_band_landing_cites_no_result() {
     h.mock.lock().unwrap().item = Some(second_item(&remote, &r, &c2));
     assert_eq!(h.cycle().await, Step::Revised("conflict".into()));
     assert_eq!(cited_landing(&h), Value::Null);
+}
+
+/// The queue's `reverts` entry for revert task `rt1` of the mock's first
+/// result (subject `t1`'s published candidate) on `remote`'s `main`.
+fn revert_of(h: &Harness, remote: &Remote) -> Value {
+    let result = h.peek(|m| m.results[0].clone());
+    let target = json!({"submission_id": "s1", "result_id": result["id"],
+        "original_task_id": "t1", "r": result["r"], "t0": result["t0"], "c": result["c"],
+        "landing_range": result["landing_range"], "reason": "human", "evidence": null});
+    json!({"id": "rt1", "task_id": "rt1", "result_id": result["id"], "r": result["r"],
+        "title": "Revert: task", "priority": 0, "repository_url": remote.url,
+        "target_branch": "main", "target": target})
+}
+
+/// Publishes candidate `c` (reviewed at `base`) with `main` watched and
+/// passing checks, then queues its revert.
+async fn published_then_reverted(remote: &Remote, base: &str, c: &str) -> Harness {
+    let mut h = Harness::new(item(remote, base, c)).await;
+    h.watch(remote);
+    h.checks(Some("success"), &RULES);
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    let revert = revert_of(&h, remote);
+    h.mock.lock().unwrap().reverts = vec![revert];
+    h
+}
+
+/// The files in the remote's `main`, fetched into the source clone.
+fn main_files(remote: &Remote) -> String {
+    git(&remote.source, &["fetch", "--quiet", "origin"]);
+    git(&remote.source, &["ls-tree", "--name-only", "origin/main"])
+}
+
+/// The commit the remote's `ref` names; empty when it is absent.
+fn remote_ref(remote: &Remote, reference: &str) -> String {
+    let line = git(&remote.source, &["ls-remote", "origin", reference]);
+    line.split('\t').next().unwrap_or_default().to_owned()
+}
+
+#[tokio::test]
+async fn a_clean_merge_revert_is_proposed_on_the_tip_and_publishes() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    advance_main(&remote, "side.txt");
+    let mut h = published_then_reverted(&remote, &base, &c).await;
+    let x = remote_main(&remote);
+    assert_eq!(h.cycle().await, Step::RevertCandidate("rt1".into()));
+    let candidate = h.peek(|m| m.candidates[0].clone());
+    assert_eq!(candidate["t0"], x.as_str());
+    assert_eq!(candidate["mechanical"], true);
+    let commit = candidate["candidate_commit"].as_str().unwrap().to_owned();
+    let reference = candidate["candidate_ref"].as_str().unwrap();
+    assert_eq!(
+        reference,
+        format!("refs/agent-coordinator/candidates/reverts/rt1/{x}")
+    );
+    assert_eq!(
+        remote_ref(&remote, reference),
+        commit,
+        "candidate ref pushed"
+    );
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    assert_eq!(remote_main(&remote), commit, "the revert fast-forwards X");
+    let files = main_files(&remote);
+    assert!(
+        !files.contains("feature.txt") && files.contains("side.txt"),
+        "{files}"
+    );
+    assert_eq!(
+        h.peek(|m| m.observations[1]["ancestry"].clone()),
+        "contained"
+    );
+}
+
+/// Pushes a candidate branch off `base` whose commits write `one.txt` and
+/// then `two.txt`, and returns its tip.
+fn push_two_commit_candidate(remote: &Remote, base: &str) -> String {
+    push_candidate(remote, base, "one.txt", "one\n");
+    git(&remote.source, &["checkout", "--quiet", "candidate"]);
+    let c = commit(&remote.source, "two.txt", "two\n");
+    let refspec = format!("{c}:{CANDIDATE_REF}");
+    git(
+        &remote.source,
+        &["push", "--quiet", "--force", "origin", &refspec],
+    );
+    git(&remote.source, &["checkout", "--quiet", "main"]);
+    c
+}
+
+#[tokio::test]
+async fn a_fast_forward_range_revert_undoes_every_commit() {
+    let (remote, base) = seeded_remote();
+    let c = push_two_commit_candidate(&remote, &base);
+    let mut h = published_then_reverted(&remote, &base, &c).await;
+    assert_eq!(remote_main(&remote), c, "the candidate landed fast-forward");
+    assert_eq!(h.cycle().await, Step::RevertCandidate("rt1".into()));
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    let tree = |rev: &str| git(&remote.source, &["rev-parse", &format!("{rev}^{{tree}}")]);
+    assert_eq!(main_files(&remote), ".agent-coordinator\n.github\nbase.txt");
+    assert_eq!(tree("origin/main"), tree(&base), "the range is undone");
+}
+
+#[tokio::test]
+async fn a_conflicting_revert_is_reported_not_mechanical() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = published_then_reverted(&remote, &base, &c).await;
+    let pull = ["pull", "--quiet", "--ff-only", "origin", "main"];
+    git(&remote.source, &pull);
+    let x = land(&remote, "feature.txt", "Later change");
+    assert_eq!(h.cycle().await, Step::NotMechanical("conflict".into()));
+    let report = h.peek(|m| m.not_mechanical[0].clone());
+    assert_eq!(
+        (report["id"].clone(), report["t0"].clone()),
+        (json!("rt1"), json!(x))
+    );
+    let evidence = report["evidence"].as_str().unwrap();
+    assert!(
+        evidence.contains("feature.txt") && evidence.contains(&c),
+        "{evidence}"
+    );
+    assert!(h.peek(|m| m.candidates.is_empty() && m.revises.is_empty()));
+    assert_eq!(h.cycle().await, Step::Idle, "the revert left the queue");
+}
+
+#[tokio::test]
+async fn a_reproduced_check_failure_on_a_revert_is_not_mechanical() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = published_then_reverted(&remote, &base, &c).await;
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::RevertCandidate("rt1".into()));
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[PASS]);
+    assert_eq!(h.cycle().await, Step::ChecksPending, "first failure reruns");
+    assert_eq!(h.cycle().await, Step::NotMechanical("check_failed".into()));
+    assert!(
+        h.peek(|m| m.revises.is_empty()),
+        "a revert is never revised"
+    );
+    let report = h.peek(|m| m.not_mechanical[0].clone());
+    assert_eq!(report["t0"], remote_main(&remote).as_str());
+    let evidence = report["evidence"].as_str().unwrap();
+    assert!(evidence.contains("passed on target"), "{evidence}");
+    assert_eq!(remote_main(&remote), c, "nothing was published");
+}
+
+#[tokio::test]
+async fn a_frozen_target_skips_its_reverts() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = published_then_reverted(&remote, &base, &c).await;
+    h.checks(Some("success"), &["non_fast_forward"]);
+    let frozen = Step::Frozen("ruleset_missing: required_status_checks".into());
+    assert_eq!(h.cycle().await, frozen);
+    assert!(h.peek(|m| m.candidates.is_empty() && m.not_mechanical.is_empty()));
+    let prefix = "refs/agent-coordinator/candidates/reverts/";
+    assert!(remote_ref(&remote, &format!("{prefix}*")).is_empty());
+    h.checks(Some("success"), &RULES);
+    assert_eq!(h.cycle().await, Step::RevertCandidate("rt1".into()));
+}
+
+/// A harness whose queued candidate `c` is already contained in `main`
+/// (a no-op), with the harness's mock configured by `setup`; returns it with
+/// the remote and `c`.
+async fn contained_candidate(setup: impl FnOnce(&mut Mock, &str)) -> (Harness, Remote, String) {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let refspec = format!("{c}:refs/heads/main");
+    git(&remote.source, &["push", "--quiet", "origin", &refspec]);
+    let h = Harness::new(item(&remote, &base, &c)).await;
+    setup(&mut h.mock.lock().unwrap(), &c);
+    h.checks(None, &RULES);
+    (h, remote, c)
+}
+
+/// The `reverted` entry of a landing `[c]` a revert undid on `main`.
+fn reverted_landing(c: &str) -> Value {
+    json!({"revert_task_id": "rt0", "result_id": "res0", "landing_range": [c],
+        "repository_url": null, "target_branch": "main"})
+}
+
+/// Asserts the first revise is `reverted_in_history` naming `c`, and that
+/// the mock holds no result and no observation.
+fn assert_reverted_revise(h: &Harness, c: &str) {
+    let revise = h.peek(|m| m.revises[0].clone());
+    assert_eq!(revise["reason_code"], "reverted_in_history");
+    let evidence = revise["evidence"].as_str().unwrap();
+    assert!(evidence.ends_with(&format!(": {c}")), "{evidence}");
+    assert!(h.peek(|m| m.results.is_empty() && m.observations.is_empty()));
+}
+
+#[tokio::test]
+async fn a_no_op_over_a_reverted_landing_is_revised_not_pinned() {
+    let (mut h, _remote, c) =
+        contained_candidate(|mock, c| mock.reverted = vec![reverted_landing(c)]).await;
+    assert_eq!(h.cycle().await, Step::Revised("reverted_in_history".into()));
+    assert_reverted_revise(&h, &c);
+}
+
+#[tokio::test]
+async fn a_no_op_the_service_refuses_as_reverted_is_revised() {
+    let (mut h, _remote, c) = contained_candidate(|mock, c| {
+        mock.reverted_history = Some(json!({"reverted_results": ["res0"], "commits": [c]}));
+    })
+    .await;
+    assert_eq!(h.cycle().await, Step::Revised("reverted_in_history".into()));
+    assert_reverted_revise(&h, &c);
+}
+
+#[tokio::test]
+async fn a_disputed_reverted_history_blocks_and_reports() {
+    let (mut h, _remote, c) = contained_candidate(|mock, c| {
+        mock.reverted = vec![reverted_landing(c)];
+        mock.revise_refusal = Some("not_reverted_in_history".into());
+    })
+    .await;
+    let blocked = h.cycle().await;
+    assert!(
+        matches!(&blocked, Step::Blocked(r) if r.starts_with("not_reverted_in_history")),
+        "{blocked:?}"
+    );
+    assert_eq!(report_kinds(&h), ["fix_target"]);
+    let details = report_details(&h, 0);
+    assert_eq!(details["verdict"], "not_reverted_in_history");
+    assert_eq!(
+        (
+            details["blocks_subject"].clone(),
+            details["commits"].clone()
+        ),
+        (json!(true), json!([c]))
+    );
+    assert!(h.peek(|m| m.results.is_empty()));
+}
+
+/// A `reverts` entry `rt1` for R `r` (computed on `t0`, candidate `r`) on
+/// `remote`'s `main`, as if the service had published it.
+fn revert_entry(remote: &Remote, r: &str, t0: &str) -> Value {
+    let target = json!({"submission_id": "s0", "result_id": "res0",
+        "original_task_id": "t0", "r": r, "t0": t0, "c": r, "landing_range": [r],
+        "reason": "human", "evidence": null});
+    json!({"id": "rt1", "task_id": "rt1", "result_id": "res0", "r": r, "title": "Revert",
+        "priority": 0, "repository_url": remote.url, "target_branch": "main", "target": target})
+}
+
+#[tokio::test]
+async fn a_refused_revert_is_skipped_and_items_still_integrate() {
+    let (remote, base) = seeded_remote();
+    let t0 = advance_main(&remote, "a.txt");
+    let r = advance_main(&remote, "b.txt");
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.watch(&remote);
+    h.checks(None, &RULES);
+    {
+        let mut mock = h.mock.lock().unwrap();
+        mock.reverts = vec![revert_entry(&remote, &r, &t0)];
+        mock.revert_refusal = Some("workflow_policy_required".into());
+    }
+    assert_eq!(h.cycle().await, Step::ChecksPending, "the item is reached");
+    assert_eq!(h.peek(|m| m.results.len()), 1);
+    assert!(h.peek(|m| m.candidates.is_empty() && m.reverts.len() == 1));
+}
+
+/// Runs the cycle that reports revert `rt1` not mechanical and returns the
+/// report's evidence; asserts the mock holds no candidate.
+async fn unmechanical_evidence(h: &mut Harness) -> String {
+    assert_eq!(h.cycle().await, Step::NotMechanical("conflict".into()));
+    assert!(h.peek(|m| m.candidates.is_empty()), "no empty candidate");
+    let report = h.peek(|m| m.not_mechanical[0].clone());
+    report["evidence"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn a_revert_of_a_result_outside_the_history_is_not_mechanical() {
+    let (remote, base) = seeded_remote();
+    let r = push_candidate(&remote, &base, "never.txt", "never landed\n");
+    let mut h = Harness::idle(&remote).await;
+    h.checks(None, &RULES);
+    h.mock.lock().unwrap().reverts = vec![revert_entry(&remote, &r, &base)];
+    let evidence = unmechanical_evidence(&mut h).await;
+    assert!(
+        evidence.contains("is not in the target history"),
+        "{evidence}"
+    );
+}
+
+#[tokio::test]
+async fn a_revert_already_undone_on_the_tip_is_not_mechanical() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = published_then_reverted(&remote, &base, &c).await;
+    let pull = ["pull", "--quiet", "--ff-only", "origin", "main"];
+    git(&remote.source, &pull);
+    git(&remote.source, &["rm", "--quiet", "feature.txt"]);
+    git(&remote.source, &["commit", "--quiet", "-m", "Undo by hand"]);
+    git(&remote.source, &["push", "--quiet", "origin", "main"]);
+    let evidence = unmechanical_evidence(&mut h).await;
+    assert!(evidence.contains("is already undone on"), "{evidence}");
+    assert_eq!(h.cycle().await, Step::Idle, "nothing was published");
 }

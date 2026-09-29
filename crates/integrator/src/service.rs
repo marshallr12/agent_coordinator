@@ -1,7 +1,8 @@
-//! Typed calls to the coordinator's integrator routes (P4 S1/S2). Every call
-//! uses the `class=integrator` bearer credential and no session. Refusals
-//! (non-2xx replies with an error code) are returned as values, not errors,
-//! because most of them steer the loop rather than stop it.
+//! Typed calls to the coordinator's integrator routes (P4 S1/S2, and the
+//! revert routes of S4). Every call uses the `class=integrator` bearer
+//! credential and no session. Refusals (non-2xx replies with an error code)
+//! are returned as values, not errors, because most of them steer the loop
+//! rather than stop it.
 use crate::state::target_key;
 use anyhow::{Context, Result, anyhow};
 use coordinator_client::{ApiResponse, CoordinatorClient};
@@ -25,6 +26,75 @@ pub struct QueueItem {
     pub target_branch: String,
     #[serde(default)]
     pub results: Vec<ResultRecord>,
+    /// Set when the subject is a mechanical revert task (its id): a
+    /// reproduced check failure then reports the revert not mechanical
+    /// instead of revising it.
+    #[serde(default)]
+    pub revert_task_id: Option<String>,
+    /// Landings on this item's target that a revert undid; a no-op that
+    /// re-lands one of their commits is revised `reverted_in_history`.
+    #[serde(default)]
+    pub reverted: Vec<RevertedLanding>,
+}
+
+/// The landing range of a result a revert task (not canceled) targets.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RevertedLanding {
+    pub revert_task_id: String,
+    pub result_id: String,
+    pub landing_range: Vec<String>,
+    #[serde(default)]
+    pub repository_url: Option<String>,
+    #[serde(default)]
+    pub target_branch: Option<String>,
+}
+
+/// A revert task awaiting the integrator's mechanical candidate.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RevertItem {
+    /// The revert task id.
+    pub id: String,
+    pub title: String,
+    pub priority: i64,
+    #[serde(default)]
+    pub repository_url: Option<String>,
+    #[serde(default)]
+    pub target_branch: Option<String>,
+    pub target: RevertTarget,
+}
+
+/// The published result a revert undoes.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RevertTarget {
+    pub submission_id: String,
+    pub result_id: String,
+    pub original_task_id: String,
+    pub r: String,
+    pub t0: String,
+    pub c: String,
+    #[serde(default)]
+    pub landing_range: Vec<String>,
+}
+
+impl RevertItem {
+    /// The target the reverted result landed on; `None` when the service
+    /// names no repository or branch for it.
+    pub fn target(&self) -> Option<Target> {
+        Some(Target {
+            repository_url: self.repository_url.clone()?,
+            target_branch: self.target_branch.clone()?,
+        })
+    }
+}
+
+/// A mechanical revert candidate (`POST …/integrator/reverts/{id}/candidate`).
+#[derive(Debug, Clone, Serialize)]
+pub struct RevertCandidate {
+    pub t0: String,
+    pub candidate_commit: String,
+    pub candidate_tree: String,
+    pub mechanical: bool,
+    pub candidate_ref: String,
 }
 
 /// A pinned result: R computed from target tip T0 and candidate C.
@@ -68,21 +138,27 @@ impl Target {
     }
 }
 
-/// The queue plus the service's current required-check roster and the
-/// targets the project integrates into (watched even with no items).
+/// The queue plus the service's current required-check roster, the
+/// targets the project integrates into (watched even with no items) and the
+/// reverts awaiting a mechanical candidate.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Queue {
     pub roster: ServiceRoster,
     #[serde(default)]
     pub targets: Vec<Target>,
     pub items: Vec<QueueItem>,
+    #[serde(default)]
+    pub reverts: Vec<RevertItem>,
 }
 
 impl Queue {
-    /// The listed targets plus any other target an item names, each once.
+    /// The listed targets plus any other target an item or a revert names,
+    /// each once.
     pub fn all_targets(&self) -> Vec<Target> {
         let mut all = self.targets.clone();
-        for target in self.items.iter().map(QueueItem::target) {
+        let items = self.items.iter().map(QueueItem::target);
+        let reverts = self.reverts.iter().filter_map(RevertItem::target);
+        for target in items.chain(reverts) {
             if !all.contains(&target) {
                 all.push(target);
             }
@@ -290,8 +366,8 @@ impl Service {
         self.post(project, "observations", &body, &key).await
     }
 
-    /// Sends the subject back to its implementer (`conflict` or `check_failed`)
-    /// with what the revise cites.
+    /// Sends the subject back to its implementer (`conflict`, `check_failed`
+    /// or `reverted_in_history`) with what the revise cites.
     pub async fn revise(
         &self,
         project: &str,
@@ -304,6 +380,39 @@ impl Service {
             "moved_by_result_id": cite.moved_by_result_id});
         let key = format!("revise-{}", uuid::Uuid::new_v4());
         self.post(project, "revise", &body, &key).await
+    }
+
+    /// Records the mechanical candidate of revert task `id`; a replay of the
+    /// same candidate for the same tip returns the same submission.
+    pub async fn revert_candidate(
+        &self,
+        project: &str,
+        id: &str,
+        candidate: &RevertCandidate,
+    ) -> Result<Reply<Value>> {
+        let body = json!(candidate);
+        let key = body_key("revert-candidate", &body, id);
+        self.post(project, &format!("reverts/{id}/candidate"), &body, &key)
+            .await
+    }
+
+    /// Reports that revert task `id` cannot be reverted mechanically on tip
+    /// `t0` (`reason` is `conflict` or `check_failed`).
+    pub async fn not_mechanical(
+        &self,
+        project: &str,
+        id: &str,
+        (t0, reason, evidence): (&str, &str, &str),
+    ) -> Result<Reply<Value>> {
+        let body = json!({"t0": t0, "reason": reason, "evidence": evidence});
+        let key = body_key("not-mechanical", &body, id);
+        self.post(
+            project,
+            &format!("reverts/{id}/not-mechanical"),
+            &body,
+            &key,
+        )
+        .await
     }
 
     /// Reports a finding and returns the stored row, including any human

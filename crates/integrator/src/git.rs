@@ -1,9 +1,11 @@
 //! The integrator's own Git plumbing around `coordinator_local::git_workflow`:
 //! one bare mirror per repository (hooks disabled), a linked worktree per
 //! result, fetches, arbitrary-ref observation and the create-only push of R
-//! to its result branch. Computing R and the lease-guarded publish stay in
-//! `git_workflow`. Remotes are passed as URLs; credentials come from the
-//! askpass helper, so no diagnostics here can carry a token.
+//! to its result branch (and of a revert candidate to its candidate ref).
+//! Computing R and the lease-guarded publish stay in `git_workflow`; the
+//! mechanical revert is computed in `revert.rs`. Remotes are passed as URLs;
+//! credentials come from the askpass helper, so no diagnostics here can carry
+//! a token.
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -11,7 +13,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 /// Runs `git -C dir <args>` with hooks disabled and no prompts.
-fn run<I, S>(dir: &Path, args: I) -> Result<Output>
+pub(crate) fn run<I, S>(dir: &Path, args: I) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_env(dir, args, &[])
+}
+
+/// [`run`] with extra environment variables (a pinned commit identity).
+pub(crate) fn run_env<I, S>(dir: &Path, args: I, env: &[(&str, &str)]) -> Result<Output>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -22,18 +33,28 @@ where
         .args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .output()
         .context("spawn git")
 }
 
 /// Runs git and returns trimmed stdout; failure carries git's last stderr line.
-fn text<I, S>(dir: &Path, args: I) -> Result<String>
+pub(crate) fn text<I, S>(dir: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = run(dir, args)?;
+    text_env(dir, args, &[])
+}
+
+/// [`text`] with extra environment variables (a pinned commit identity).
+pub(crate) fn text_env<I, S>(dir: &Path, args: I, env: &[(&str, &str)]) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = run_env(dir, args, env)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git failed: {}", stderr.lines().last().unwrap_or("").trim());
@@ -187,8 +208,17 @@ pub fn file_at(mirror: &Path, rev: &str, path: &str) -> Result<Option<String>> {
 
 /// Runs git and splits its stdout on NUL, so paths arrive raw rather than
 /// C-quoted; failure carries git's last stderr line.
-fn nul_list<const N: usize>(dir: &Path, args: [&str; N]) -> Result<Vec<String>> {
-    let output = run(dir, args)?;
+pub(crate) fn nul_list<const N: usize>(dir: &Path, args: [&str; N]) -> Result<Vec<String>> {
+    nul_list_env(dir, args, &[])
+}
+
+/// [`nul_list`] with extra environment variables.
+pub(crate) fn nul_list_env<const N: usize>(
+    dir: &Path,
+    args: [&str; N],
+    env: &[(&str, &str)],
+) -> Result<Vec<String>> {
+    let output = run_env(dir, args, env)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git failed: {}", stderr.lines().last().unwrap_or("").trim());
@@ -254,9 +284,10 @@ pub fn remove_worktree(mirror: &Path, dir: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Pushes `sha` to a new remote ref (create-only lease) and confirms it by
-/// observation, never by the push's exit status. An existing ref already at
-/// `sha` is success; one at another commit is an error.
+/// Pushes `sha` to a new remote ref (a result branch or a revert candidate
+/// ref) with a create-only lease and confirms it by observation, never by the
+/// push's exit status. An existing ref already at `sha` is success; one at
+/// another commit is an error.
 pub fn push_create_only(mirror: &Path, url: &str, sha: &str, refname: &str) -> Result<()> {
     let url = remote_url(url)?;
     if ls_remote(mirror, url, refname)?.as_deref() == Some(sha) {
@@ -270,7 +301,7 @@ pub fn push_create_only(mirror: &Path, url: &str, sha: &str, refname: &str) -> R
     let observed = ls_remote(mirror, url, refname)?;
     ensure!(
         observed.as_deref() == Some(sha),
-        "result branch {refname} is not at {sha}"
+        "remote ref {refname} is not at {sha}"
     );
     Ok(())
 }

@@ -4651,6 +4651,36 @@ async fn revert_candidates_are_integrator_only_and_idempotent_per_tip() {
     assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
 }
 
+// P4 S4f (M6): a mechanical revert's candidate in integration is marked in
+// the queue with its revert task id, so the integrator reports a reproduced
+// check failure not mechanical; an ordinary subject carries null.
+#[tokio::test]
+async fn a_mechanical_revert_candidate_is_marked_in_the_queue() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-marker").await;
+    let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let queue = integrator_queue(&f, &i, &p).await;
+    assert_eq!(
+        queue["items"][0]["subject_task_id"], revert["id"],
+        "{queue}"
+    );
+    assert_eq!(queue["items"][0]["revert_task_id"], revert["id"], "{queue}");
+    let (q, t, _) = integrating_code_task(&f, "revert-marker-ordinary").await;
+    let (status, v) = set_integration_owner(&f, &f.admin, &q, "integrator").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let queue = integrator_queue(&f, &i, &q).await;
+    let ordinary = queue["items"][0].as_object().unwrap();
+    assert_eq!(ordinary["subject_task_id"], t["id"], "{queue}");
+    assert_eq!(
+        ordinary.get("revert_task_id"),
+        Some(&Value::Null),
+        "{queue}"
+    );
+}
+
 /// Claims, checks out and submits converted revert `t` of the fixture
 /// project `revert-not-mechanical` as `f.a`, with one evidence entry per
 /// current acceptance criterion; returns the workflow snapshot.

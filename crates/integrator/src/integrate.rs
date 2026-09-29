@@ -5,11 +5,15 @@
 //! Everything durable lives in the service (results, receipts, authority);
 //! local intents and worktrees are disposable and are rebuilt from the
 //! service's pinned result, whose R must reproduce exactly.
-//! Checks, pushing and observations are in `publish.rs`.
+//! Checks, pushing and observations are in `publish.rs`. Reverts awaiting
+//! a mechanical candidate are worked before ordinary items (they are always
+//! admitted and usually urgent); their computation, and the refusal of a
+//! no-op that re-lands reverted commits, are in `reverts.rs`.
 use crate::checks::ChecksSource;
 use crate::config::Config;
 use crate::git;
 use crate::github::RepoId;
+use crate::reverts::reverted_commits;
 use crate::roster::{self, Roster};
 use crate::service::{Cite, NewResult, Queue, QueueItem, ResultRecord, Service};
 use crate::state::{LoopState, Published, target_key};
@@ -28,6 +32,11 @@ pub enum Step {
     ChecksPending,
     ReturnedToReview,
     Observed(String),
+    /// The service now holds a mechanical candidate for this revert task.
+    RevertCandidate(String),
+    /// The revert is now ordinary implementation work (not mechanical), for
+    /// this reason.
+    NotMechanical(String),
 }
 
 /// The integrator's long-lived parts.
@@ -66,10 +75,10 @@ impl Job {
 
 impl<C: ChecksSource> Integrator<C> {
     /// Runs one cycle for `project`: every target is watched first, then
-    /// the first queue item that is not blocked is taken as far as it can
-    /// go. Items of a held target (frozen, or its tip move not yet
-    /// reported) are skipped; blocked items are logged to
-    /// stderr and skipped so they cannot stall the rest of the queue.
+    /// the first revert or queue item that is not blocked is taken as far as
+    /// it can go (reverts first; one of either per cycle). Work on a held
+    /// target (frozen, or its tip move not yet reported) is skipped; blocked
+    /// work is logged to stderr and skipped so it cannot stall the rest.
     pub async fn cycle(&mut self, project: &str) -> Result<Step> {
         let queue: Queue = match self.service.queue(project).await? {
             Ok(queue) => queue,
@@ -77,18 +86,23 @@ impl<C: ChecksSource> Integrator<C> {
         };
         let watched = self.watch_targets(project, &queue).await?;
         let mut last = watched.first_held().unwrap_or(Step::Idle);
+        for revert in &queue.reverts {
+            let Some(x) = revert.target().and_then(|t| watched.tip(&t.key())) else {
+                continue;
+            };
+            last = self.revert_cycle(project, revert, x).await?;
+            if !skipped(project, &revert.id, &last) {
+                return Ok(last);
+            }
+        }
         for item in &queue.items {
             let Some(x) = watched.tip(&item.target().key()) else {
                 continue;
             };
             last = self.item_cycle(project, &queue, item.clone(), x).await?;
-            if !matches!(last, Step::Blocked(_)) {
+            if !skipped(project, &item.submission_id, &last) {
                 return Ok(last);
             }
-            eprintln!(
-                "agentc-integrator: {project}/{}: {last:?}",
-                item.submission_id
-            );
         }
         Ok(last)
     }
@@ -149,17 +163,24 @@ impl<C: ChecksSource> Integrator<C> {
 
     /// The pinned result for (S, X). R is always (re)computed locally, so
     /// the intent and worktree exist; a reused service result must match it.
+    /// A no-op that re-lands reverted commits is revised instead of pinned.
     async fn pin_result(&self, job: &Job, roster: &Roster) -> Result<Result<ResultRecord, Step>> {
         let c = &job.item.candidate_revision;
         if !git::merges_cleanly(&job.mirror, &job.x, c)? {
             return self.revise_conflict(job).await.map(Err);
         }
         let computed = self.compute_result(job, roster)?;
+        let relanded = reverted_commits(&job.item, &computed);
+        if !relanded.is_empty() {
+            return self.revise_reverted(job, &relanded).await.map(Err);
+        }
         if let Some(existing) = job.item.results.iter().find(|r| r.t0 == job.x) {
             return Ok(reproduced(existing, &computed));
         }
-        let reply = self.service.record_result(&job.project, &computed).await?;
-        Ok(reply.map_err(|refusal| Step::Refused(refusal.code)))
+        match self.service.record_result(&job.project, &computed).await? {
+            Ok(result) => Ok(Ok(result)),
+            Err(refusal) => self.result_refused(job, refusal).await.map(Err),
+        }
     }
 
     /// Revises a candidate that conflicts with X, citing the result this
@@ -251,6 +272,16 @@ impl<C: ChecksSource> Integrator<C> {
             Err(refusal) => Step::Refused(refusal.code),
         })
     }
+}
+
+/// Logs `step` when it is `Blocked`, which skips `subject` for this cycle;
+/// true when it did.
+fn skipped(project: &str, subject: &str, step: &Step) -> bool {
+    let blocked = matches!(step, Step::Blocked(_));
+    if blocked {
+        eprintln!("agentc-integrator: {project}/{subject}: {step:?}");
+    }
+    blocked
 }
 
 /// A result of this submission for another tip that still holds push

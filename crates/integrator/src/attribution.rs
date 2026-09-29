@@ -5,7 +5,8 @@
 //! cancelled jobs rerun), a pass after a failure is `flaky` and R proceeds,
 //! and a failure is reproduced once the deciding attempt and at least one
 //! other attempt failed. A reproduced failure goes back to the author only
-//! when the same check passed on the target tip X; when it fails on X too
+//! when the same check passed on the target tip X (a mechanical revert,
+//! which has no author, is then reported not mechanical, see `reverts.rs`); when it fails on X too
 //! (`fix_target`, verdict `target_failing`) or X has no result for it
 //! (`fix_target`, verdict `target_unverified`) the subject is skipped until
 //! X moves or X's check passes, and while X's run is still going the gate
@@ -134,7 +135,7 @@ impl<C: ChecksSource> Integrator<C> {
         Step::Blocked(reason)
     }
 
-    /// Revises the author when any reproduced failure passed on X; waits
+    /// Blames the author when any reproduced failure passed on X; waits
     /// while X's run is going; otherwise reports target problems and skips.
     async fn attribute_reproduced(
         &self,
@@ -152,22 +153,31 @@ impl<C: ChecksSource> Integrator<C> {
             }
         }
         if !author.is_empty() {
-            let evidence = author.join("; ");
-            return self
-                .revise(
-                    job,
-                    ("check_failed", &evidence),
-                    Cite {
-                        result_id: Some(&result.id),
-                        ..Cite::default()
-                    },
-                )
-                .await;
+            return self.author_failed(job, result, &author.join("; ")).await;
         }
         Ok(match waiting {
             true => Step::ChecksPending,
             false => Step::Blocked(target.join("; ")),
         })
+    }
+
+    /// A reproduced failure that passes on X: the author gets a
+    /// `check_failed` revise citing the result, except that a mechanical
+    /// revert has no author and is reported not mechanical instead.
+    async fn author_failed(
+        &self,
+        job: &Job,
+        result: &ResultRecord,
+        evidence: &str,
+    ) -> Result<Step> {
+        if let Some(revert) = &job.item.revert_task_id {
+            return self.revert_check_failed(job, revert, evidence).await;
+        }
+        let cite = Cite {
+            result_id: Some(&result.id),
+            ..Cite::default()
+        };
+        self.revise(job, ("check_failed", evidence), cite).await
     }
 
     /// The same check on the target tip X (one poll of X).
