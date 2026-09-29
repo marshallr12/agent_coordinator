@@ -467,6 +467,25 @@ Nothing launches unattended before P3b, so P2 ships without these; each is a lau
    launches lack `no_new_privs` and leftover-process cleanup; `--uninstall` does not kill agent processes
    or remove crontabs/`/tmp` files; read-only credentials can still create subagent sessions.
 
+### [Optional before P3b] Shadow cost run
+
+The P3a shadow proved the credential, `next` and the would-launch log, but production had no claimable
+work, so it produced **no cost data**; the poller was stopped and its worktree removed on 2026-09-29.
+If the P3b go/no-go should be costed from observed load rather than estimates, run the shadow again
+**after real tasks are queued** in the pilot project(s), for about a day:
+```
+git worktree add --detach ~/src/worktrees/ac-main origin/main
+cd ~/src/worktrees/ac-main && export CARGO_TARGET_DIR=$PWD/target
+COORDINATOR_BUILD_COMMIT=$(git rev-parse HEAD) cargo build --release --locked -p agentc-supervisor
+# edit BIN= in ~/.local/share/agent-coordinator-autonomy/start-shadow.sh to this worktree's binary, then:
+bash ~/.local/share/agent-coordinator-autonomy/start-shadow.sh
+# a day later:
+target/release/agentc-supervisor shadow-report     # would-launch per role, estimated $, max human queue
+pkill -f '[a]gentc-supervisor shadow'   # the [a] keeps the pattern from matching this shell's own command line
+```
+The poller is not reboot-safe (check `pgrep -af "agentc-supervisor shadow"` before reading the report).
+Skip this step if the pilot's 5-task budget is acceptable without observed load.
+
 ### Next session: resume here (items 1–3 are P2 history; start at item 4)
 
 1. DONE 2026-09-26 (all PASS). For reference, the host setup and suite (re-run after binary changes): Fix any FAIL; common
