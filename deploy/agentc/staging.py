@@ -199,21 +199,24 @@ def seed_remote(st, seed):
     return remote
 
 
-def create_project(st, api, remote):
-    """Creates the throwaway project and applies the autonomy policy."""
-    project = api.call("/api/v1/projects", {"name": "Staging", "target_branch": "main",
+def create_project(st, api, remote, name="Staging", policy=None):
+    """Creates the throwaway project and applies `policy` (default: the
+    autonomy policy)."""
+    project = api.call("/api/v1/projects", {"name": name, "target_branch": "main",
                                             "repository_url": str(remote)})
-    policy = dict(POLICY, expected_revision=project["policy_revision"],
+    policy = dict(POLICY if policy is None else policy,
+                  expected_revision=project["policy_revision"],
                   lease_seconds=project["lease_seconds"])
     api.call(f"/api/v1/projects/{project['id']}/policy", policy, method="PATCH")
     return project["id"]
 
 
-def issue_credentials(st, api):
-    """Issues one agent credential per role; each lands in its own 0600 file."""
+def issue_credentials(st, api, roles=None, prefix="staging"):
+    """Issues one agent credential per role (default: ROLES) named
+    `<prefix>-<role>`; each lands in its own 0600 file."""
     issued = {}
-    for role, (klass, access) in ROLES.items():
-        agent = api.call("/api/v1/admin/agents", {"name": f"staging-{role}",
+    for role, (klass, access) in (ROLES if roles is None else roles).items():
+        agent = api.call("/api/v1/admin/agents", {"name": f"{prefix}-{role}",
                                                   "class": klass, "access": access})
         write_private(st.path("home", role, "credentials.toml"),
                       f'[[credentials]]\norigin = "{st.origin}"\ntoken = "{agent["token"]}"\n')

@@ -66,3 +66,35 @@ and sets `AGENTC_VERIFICATION` and `CHROME_BIN`. For this project,
 `node scripts/verify_ui.mjs --path / --expect "text" --out "$RUN/ui"` signs in
 and saves `screenshot.png` and `dom.html` as review evidence. Implementer
 launches get no verification environment.
+
+### Integrator staging soak
+
+`agentc/soak.py` exercises the deterministic integrator end to end without an
+LLM. Each run builds its own disposable instance in
+`~/.local/state/agentc-soak` (emptied at the start of every run; override with
+`--dir`): a server on `127.0.0.1:18091`, a local bare remote seeded from this
+repository's `HEAD` plus a roster commit, a project owned by the integrator,
+and the `impl-a`, `impl-b`, `rev-1`, `rev-2` and `integrator` credentials.
+Scripted agents drive the real `agent-coordinator` CLI and `agentc-integrator
+run` runs as a child with file-backed fake checks that the soak edits live:
+
+```sh
+COORDINATOR_BUILD_COMMIT=$(git rev-parse HEAD) cargo build --locked \
+  -p coordinator-server -p coordinator-cli -p agentc-integrator
+deploy/agentc/soak.py list                         # the scenarios
+deploy/agentc/soak.py run                          # all of them
+deploy/agentc/soak.py run --scenario crash_restart --minutes 10
+```
+
+The scenarios cover clean landings, conflicts (including the three-way
+serialize-before-park case), target moves, flaky and reproduced check
+failures, SIGKILL/restart of the integrator and the server, and agent and
+human reverts; `--minutes` adds a random mix afterwards. After each one the
+soak checks that `main` only fast-forwarded, that every published result is
+contained in it, that each subject landed exactly once, and that nothing
+needs a human. It writes `soak-report.json` and `soak-report.md` (pass/fail,
+human-required interventions, approval-to-published latency, integrator
+restarts, reports by kind) into the directory and prints the path; the exit
+status is 0 only when every scenario passed. `--keep` keeps the database,
+remote and clones for inspection. The server and integrator are stopped on
+exit, including Ctrl-C.
