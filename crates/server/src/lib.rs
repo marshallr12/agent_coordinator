@@ -13,6 +13,7 @@ pub mod integrator;
 pub mod integrator_authority;
 pub mod integrator_observe;
 pub mod integrator_reports;
+mod integrator_serialize;
 pub mod jobs;
 pub mod knowledge;
 pub mod maintenance;

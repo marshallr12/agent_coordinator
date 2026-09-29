@@ -570,7 +570,7 @@ pub(crate) async fn task_preconditions_snapshot(
         unmet.push(json!({"code":"operator_reopen_required","message":"The task's judged fields changed after this candidate was submitted. Reopen or revise it before creating a replacement submission."}));
     }
     if crate::autonomy::revise_limit_reached(c, id, now).await? {
-        unmet.push(json!({"code":"revise_limit_reached","message":"Agents revised this task three times in 24 hours; a human must look at it."}));
+        unmet.push(json!({"code":"revise_limit_reached","message":"Agents revised this task too often in 24 hours (three revises not serialized after a new landing, or six in all); a human must look at it."}));
     }
     crate::workflow::label_human_preconditions(&mut unmet);
     value["preconditions"] = json!(unmet);
@@ -861,6 +861,18 @@ async fn delete_task(
 ) -> Reply {
     lifecycle_change(s, auth, headers, p, id, payload(input)?, "delete").await
 }
+/// True when making `task` depend on `prerequisite` would close a cycle:
+/// `task` is already reachable from `prerequisite` through dependencies or
+/// objective children.
+pub(crate) async fn dependency_cycles(
+    c: &mut SqliteConnection,
+    task: &str,
+    prerequisite: &str,
+) -> Result<bool, AppError> {
+    let cycle: i64 = sqlx::query_scalar("WITH RECURSIVE ancestors(id) AS (SELECT ? UNION SELECT d.prerequisite_id FROM task_dependencies d JOIN ancestors a ON a.id=d.task_id UNION SELECT oc.child_task_id FROM objective_children oc JOIN ancestors a ON a.id=oc.objective_task_id) SELECT count(*) FROM ancestors WHERE id=?")
+        .bind(prerequisite).bind(task).fetch_one(&mut *c).await?;
+    Ok(cycle > 0)
+}
 async fn set_dependencies(
     c: &mut SqliteConnection,
     p: &str,
@@ -890,9 +902,7 @@ async fn set_dependencies(
                 "Every dependency must identify a task in this project.",
             ));
         }
-        let cycle:i64=sqlx::query_scalar("WITH RECURSIVE ancestors(id) AS (SELECT ? UNION SELECT d.prerequisite_id FROM task_dependencies d JOIN ancestors a ON a.id=d.task_id UNION SELECT oc.child_task_id FROM objective_children oc JOIN ancestors a ON a.id=oc.objective_task_id) SELECT count(*) FROM ancestors WHERE id=?")
-            .bind(d).bind(id).fetch_one(&mut *c).await?;
-        if cycle > 0 {
+        if dependency_cycles(c, id, d).await? {
             return Err(AppError::conflict(
                 "dependency_cycle",
                 "This dependency would create a cycle.",
@@ -1575,6 +1585,50 @@ async fn acknowledge(
         .await?,
     ))
 }
+/// Candidates a next-eligible claim reads per page.
+const CLAIM_PAGE: i64 = 20;
+
+/// The first task in claim order that a next-eligible claim in `mode` may
+/// take, paging through the candidates until one passes
+/// [`first_unparked`] or none are left.
+async fn next_eligible(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    p: &str,
+    mode: &str,
+    now: i64,
+) -> Result<Option<Task>, AppError> {
+    for page in 0.. {
+        let candidates = sqlx::query_as::<_,Task>(task_sql!("SELECT * FROM visible WHERE archived_at IS NULL AND lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND ((?='work' AND objective_children_ready AND decisions_ready AND current_attempt_id IS NULL) OR (?='recovery' AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized))) ORDER BY priority,ready_since,id LIMIT ? OFFSET ?"))
+            .bind(now).bind(now).bind(now).bind(p).bind(mode).bind(mode).bind(now)
+            .bind(CLAIM_PAGE).bind(page * CLAIM_PAGE).fetch_all(&mut *c).await?;
+        if candidates.is_empty() {
+            break;
+        }
+        if let Some(t) = first_unparked(c, actor, candidates, now).await? {
+            return Ok(Some(t));
+        }
+    }
+    Ok(None)
+}
+
+/// The first of `candidates` (in claim order) the caller may claim: a
+/// recovery candidate, or a work candidate the revise limit has not parked
+/// for this caller (see [`crate::autonomy::ensure_not_parked`]).
+async fn first_unparked(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    candidates: Vec<Task>,
+    now: i64,
+) -> Result<Option<Task>, AppError> {
+    for t in candidates {
+        let exempt = t.current_attempt_id.is_some() || actor.kind != "agent";
+        if exempt || !crate::autonomy::revise_limit_reached(c, &t.id, now).await? {
+            return Ok(Some(t));
+        }
+    }
+    Ok(None)
+}
 async fn claim(
     State(s): State<AppState>,
     auth: Auth,
@@ -1646,8 +1700,7 @@ async fn claim(
     let chosen = if let Some(id) = &input.task_id {
         Some(task(&mut m.tx, &p, id, m.now).await?)
     } else {
-        sqlx::query_as::<_,Task>(task_sql!("SELECT * FROM visible WHERE archived_at IS NULL AND lifecycle='open' AND workflow_activity_kind IS NULL AND (workflow_phase IS NULL OR workflow_phase='revision_needed') AND blocked_reason IS NULL AND dependencies_ready AND ((?='work' AND objective_children_ready AND decisions_ready AND current_attempt_id IS NULL) OR (?='recovery' AND current_attempt_id IS NOT NULL AND (attempt_state!='active' OR attempt_expires<=? OR NOT owner_authorized))) ORDER BY priority,ready_since,id LIMIT 1"))
-            .bind(m.now).bind(m.now).bind(m.now).bind(&p).bind(&input.mode).bind(&input.mode).bind(m.now).fetch_optional(&mut *m.tx).await?
+        next_eligible(&mut m.tx, &m.actor, &p, &input.mode, m.now).await?
     };
     let Some(t) = chosen else {
         return Ok(response(m.finish(json!({"claim":null,"reasons":["No eligible task in this project and mode. Inspect task blockers, active owners, or recovery candidates."],"retry_after_seconds":30}),Some(&p),"claim.empty",&p).await?));
@@ -1661,6 +1714,7 @@ async fn claim(
     crate::workflow::guard_normal_claim(&mut m.tx, &p, &t.id).await?;
     if input.mode == "work" {
         crate::knowledge::ensure_decisions_resolved(&mut m.tx, &p, &t.id, m.now).await?;
+        crate::autonomy::ensure_not_parked(&mut m.tx, &m.actor, &t.id, m.now).await?;
     }
     if input
         .expected_task_revision

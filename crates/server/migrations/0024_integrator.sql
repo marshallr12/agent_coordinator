@@ -116,6 +116,24 @@ CREATE TABLE integrator_revise_requests (
     follow_up_task_id TEXT REFERENCES tasks(id)
 );
 
+-- Every revise the integrator applied itself. landing_task_id is the task
+-- whose published result the integrator cited as having moved the target;
+-- serialized_after is set when the revise that would reach the per-subject
+-- limit made the subject depend on that task instead (such revises do not
+-- count toward the limit); park_reason says why applying the revise parked
+-- the subject.
+CREATE TABLE integrator_revises (
+    submission_id TEXT PRIMARY KEY NOT NULL REFERENCES submissions(id),
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    reason_code TEXT NOT NULL,
+    moved_by_result_id TEXT REFERENCES integrator_results(id),
+    landing_task_id TEXT REFERENCES tasks(id),
+    serialized_after TEXT REFERENCES tasks(id),
+    park_reason TEXT,
+    revised_at INTEGER NOT NULL
+);
+CREATE INDEX integrator_revises_task ON integrator_revises(task_id,revised_at);
+
 -- Findings the integrator reports (step S4) for the digest and, when
 -- requires_human is set, the human queue. First write per
 -- (project, kind, dedupe_key) wins; only a human resolves one. A resolved

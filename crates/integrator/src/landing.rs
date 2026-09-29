@@ -281,6 +281,7 @@ mod tests {
         let pair = Published {
             r: r.clone(),
             t0: Some(o.clone()),
+            result_id: None,
         };
         let (foreign, results) = out_of_band(&remote.source, (&p, &l), &[pair]).unwrap();
         let shas: Vec<&str> = foreign.iter().map(|c| c.sha.as_str()).collect();
@@ -290,7 +291,11 @@ mod tests {
             "C and R are the integrator's"
         );
         assert_eq!(results, std::slice::from_ref(&r));
-        let bare = Published { r, t0: None };
+        let bare = Published {
+            r,
+            t0: None,
+            result_id: None,
+        };
         let (foreign, _) = out_of_band(&remote.source, (&p, &l), &[bare]).unwrap();
         assert!(
             foreign.iter().any(|commit| commit.sha == c),

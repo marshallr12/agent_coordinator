@@ -2,7 +2,8 @@
 //! target tip seen per target (repository URL + branch, see [`target_key`]),
 //! sticky freezes, ruleset-missing episodes, the results granted push
 //! authority to this integrator per target (so the tip monitor can tell its
-//! own landings from out-of-band ones) and the check reruns requested
+//! own landings from out-of-band ones, and a conflict revise can cite the
+//! landing that moved the target) and the check reruns requested
 //! (so a rerun the checks source has not started yet is not requested
 //! again, and reruns per run stay capped). Only Git's "not an ancestor" verdict freezes; a Git failure
 //! (missing object, lock) is an ordinary error and retries. A tip that stops
@@ -25,21 +26,30 @@ pub fn target_key(url: &str, branch: &str) -> String {
 /// ones landed since its previous observation.
 const MAX_PUBLISHED: usize = 64;
 
-/// A result granted push authority to this integrator: R and its tip T0.
-/// `t0` is `None` for an entry stored in `state.json` as a bare R string;
-/// only R itself then counts as the integrator's.
+/// A result granted push authority to this integrator: R, its tip T0 and
+/// the service's result id. `t0` is `None` for an entry stored in
+/// `state.json` as a bare R string; only R itself then counts as the
+/// integrator's. `result_id` is `None` for an entry stored without one; such
+/// an entry is never cited as the landing that moved the target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(from = "PublishedEntry")]
 pub struct Published {
     pub r: String,
     pub t0: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
 }
 
-/// The stored forms of [`Published`]: a pair, or a bare R.
+/// The stored forms of [`Published`]: an object, or a bare R.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum PublishedEntry {
-    Pair { r: String, t0: Option<String> },
+    Pair {
+        r: String,
+        t0: Option<String>,
+        #[serde(default)]
+        result_id: Option<String>,
+    },
     Bare(String),
 }
 
@@ -47,8 +57,12 @@ enum PublishedEntry {
 impl From<PublishedEntry> for Published {
     fn from(entry: PublishedEntry) -> Self {
         match entry {
-            PublishedEntry::Pair { r, t0 } => Self { r, t0 },
-            PublishedEntry::Bare(r) => Self { r, t0: None },
+            PublishedEntry::Pair { r, t0, result_id } => Self { r, t0, result_id },
+            PublishedEntry::Bare(r) => Self {
+                r,
+                t0: None,
+                result_id: None,
+            },
         }
     }
 }
@@ -189,19 +203,15 @@ impl LoopState {
         self.save()
     }
 
-    /// Remembers that this integrator may publish result `r`, built on tip
-    /// `t0`, on `target` (recorded before the push, so a crash after it
-    /// cannot make the landing look out-of-band); keeps the latest
-    /// [`MAX_PUBLISHED`].
-    pub fn record_published(&mut self, target: &str, t0: &str, r: &str) -> Result<()> {
+    /// Remembers that this integrator may publish `entry` on `target`
+    /// (recorded before the push, so a crash after it cannot make the
+    /// landing look out-of-band); keeps the latest [`MAX_PUBLISHED`].
+    pub fn record_published(&mut self, target: &str, entry: Published) -> Result<()> {
         let list = self.published.entry(target.into()).or_default();
-        if list.iter().any(|known| known.r == r) {
+        if list.iter().any(|known| known.r == entry.r) {
             return Ok(());
         }
-        list.push(Published {
-            r: r.into(),
-            t0: Some(t0.into()),
-        });
+        list.push(entry);
         let excess = list.len().saturating_sub(MAX_PUBLISHED);
         list.drain(..excess);
         self.save()
@@ -315,15 +325,26 @@ mod tests {
         assert_eq!(state.tip_move("p", &remote.source, &next).unwrap(), forward);
     }
 
+    /// A published entry for R `r` on tip `x`, with result id `id-<r>`.
+    fn entry(r: &str) -> Published {
+        Published {
+            r: r.into(),
+            t0: Some("x".into()),
+            result_id: Some(format!("id-{r}")),
+        }
+    }
+
     #[test]
     fn published_results_persist_and_stay_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         let mut state = LoopState::load(&path).unwrap();
         for n in 0..=MAX_PUBLISHED {
-            state.record_published("t", "x", &format!("r{n}")).unwrap();
+            state
+                .record_published("t", entry(&format!("r{n}")))
+                .unwrap();
         }
-        state.record_published("t", "x", "r1").unwrap();
+        state.record_published("t", entry("r1")).unwrap();
         let reloaded = LoopState::load(&path).unwrap();
         let published = reloaded.published("t");
         assert_eq!(published.len(), MAX_PUBLISHED);
@@ -331,6 +352,7 @@ mod tests {
         let last = published.last().unwrap();
         assert_eq!(last.r, format!("r{MAX_PUBLISHED}"));
         assert_eq!(last.t0.as_deref(), Some("x"));
+        assert_eq!(last.result_id, Some(format!("id-r{MAX_PUBLISHED}")));
         assert!(reloaded.published("other").is_empty());
     }
 
@@ -344,8 +366,10 @@ mod tests {
         let bare = Published {
             r: "r0".into(),
             t0: None,
+            result_id: None,
         };
         assert_eq!(state.published("t")[0], bare);
         assert_eq!(state.published("t")[1].t0.as_deref(), Some("x"));
+        assert_eq!(state.published("t")[1].result_id, None, "no id stored");
     }
 }

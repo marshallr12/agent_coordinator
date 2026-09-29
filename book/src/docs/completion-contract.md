@@ -370,6 +370,11 @@ a labelled human gate (`details.gate: "human_reopen_required"`):
 
 Agents may revise a subject at most three times in 24 hours; the fourth attempt
 returns `revise_limit_reached` with `details.required_actor: "human"` and the task
-preconditions show the same code until a human acts. Reopening requires subject and activity quiescence, refuses
+preconditions show the same code until a human acts; agent claims of the task are
+refused with it. On integrator projects the integrator's own `conflict` revise
+may instead serialize the subject after the landing that moved the target; a
+serialized revise does not count toward the three, but six revises of any kind
+in 24 hours park the subject (see the integrator revise route in the API
+contract). Reopening requires subject and activity quiescence, refuses
 uncertain or known publication, cancels pending activities, preserves all evidence,
 closes any safely releasable hold, and makes ordinary revision work eligible.

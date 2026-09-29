@@ -272,10 +272,34 @@ reports and only a human resolves one.
   on the new tip) end the authority and release the hold. Never infer publication
   from a push exit code.
 - `POST /api/v1/projects/{project_id}/integrator/revise` with
-  `{submission_id, reason_code, evidence, result_id?}` sends a candidate back to
-  its author; only `conflict` and `check_failed` are accepted, never while push
-  authority is outstanding (`observation_required`), and the three-per-day
-  revise limit parks the subject for a human. A `check_failed` revise must name
+  `{submission_id, reason_code, evidence, result_id?, moved_by_result_id?}`
+  sends a candidate back to its author; only `conflict` and `check_failed` are
+  accepted, never while push authority is outstanding (`observation_required`).
+  A `conflict` revise may name in `moved_by_result_id` the result whose landing
+  moved the target: the newest result the integrator published on that target
+  since the candidate's reviewed base. The service resolves it to that
+  result's task only when it is a result of this project with a `published`
+  observation, and otherwise ignores it. The response carries
+  `serialized_after` (a task id, or null), `park_reason` (or null) and, under
+  `revise`, the resolved `landing_task_id`. A subject parks for agents (the
+  unmet `revise_limit_reached` precondition; agent claims are refused with that
+  code) once it has, in the last 24 hours, three agent revises not serialized
+  after a landing, or six agent revises of any kind. A revise that leaves the
+  subject below the first limit only records the landing. The revise that
+  would reach it is serialized when it is a `conflict` citing a landing task
+  that no serialized revise of the subject cited in the last 24 hours: the
+  subject gains a dependency on the landing task (already satisfied when that
+  task is done), the revise applies without counting toward the limit, and
+  `serialized_after` names the landing task, so the subject stays claimable.
+  Otherwise that revise applies and parks the subject, and `park_reason` says
+  why: the reason is not `conflict` (`not_a_conflict`), the landing is missing
+  or unresolved (`landing_unknown`), is the subject's own task
+  (`landing_is_subject`), is cited by a serialized revise in the window
+  (`landing_repeated`, a persistent cycle), or would close a dependency cycle
+  (`dependency_cycle`). A revise that reaches the cap of six revises
+  reports `serialized_cap`. A revise of a subject that is already parked is
+  refused with `details.gate: "revise_limit_reached"` and `details.park_reason`
+  (`subject_parked`, or `serialized_cap`). A `check_failed` revise must name
   in `result_id` a result of that submission on which one roster check, under
   the roster's workflow blob, is reproduced: its deciding run concluded
   `failure` or `timed_out`, and at least two of its attempts did. Otherwise

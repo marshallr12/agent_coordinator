@@ -1119,3 +1119,47 @@ async fn nothing_publishes_on_a_tip_whose_landing_is_unreported() {
     assert_eq!(report_kinds(&h), ["unreviewed_landing"]);
     assert_eq!(flagged_shas(&report_details(&h, 0)), [json!(agent)]);
 }
+
+/// The queue item for a second subject `s2` with candidate `c` reviewed at
+/// `base`.
+fn second_item(remote: &Remote, base: &str, c: &str) -> Value {
+    let mut second = item(remote, base, c);
+    second["subject_task_id"] = json!("t2");
+    second["submission_id"] = json!("s2");
+    second
+}
+
+/// The `moved_by_result_id` of the first revise the mock received.
+fn cited_landing(h: &Harness) -> Value {
+    h.peek(|m| m.revises[0]["moved_by_result_id"].clone())
+}
+
+#[tokio::test]
+async fn a_conflict_with_a_published_subject_cites_its_result() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "shared.txt", "first\n");
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.checks(Some("success"), &RULES);
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    let c2 = push_candidate(&remote, &base, "shared.txt", "second\n");
+    h.mock.lock().unwrap().item = Some(second_item(&remote, &base, &c2));
+    assert_eq!(h.cycle().await, Step::Revised("conflict".into()));
+    assert_eq!(cited_landing(&h), "res1");
+}
+
+#[tokio::test]
+async fn a_conflict_with_an_out_of_band_landing_cites_no_result() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.checks(Some("success"), &RULES);
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    let r = remote_main(&remote);
+    let pull = ["pull", "--quiet", "--ff-only", "origin", "main"];
+    git(&remote.source, &pull);
+    let c2 = push_candidate(&remote, &r, "shared.txt", "candidate\n");
+    land(&remote, "shared.txt", "Out of band");
+    h.mock.lock().unwrap().item = Some(second_item(&remote, &r, &c2));
+    assert_eq!(h.cycle().await, Step::Revised("conflict".into()));
+    assert_eq!(cited_landing(&h), Value::Null);
+}

@@ -21,7 +21,7 @@ use crate::flake::{
 };
 use crate::gates::{short_digest, target_report};
 use crate::integrate::{Integrator, Job, Step};
-use crate::service::{NewReport, ResultRecord};
+use crate::service::{Cite, NewReport, ResultRecord};
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -154,7 +154,14 @@ impl<C: ChecksSource> Integrator<C> {
         if !author.is_empty() {
             let evidence = author.join("; ");
             return self
-                .revise(job, "check_failed", &evidence, Some(&result.id))
+                .revise(
+                    job,
+                    ("check_failed", &evidence),
+                    Cite {
+                        result_id: Some(&result.id),
+                        ..Cite::default()
+                    },
+                )
                 .await;
         }
         Ok(match waiting {

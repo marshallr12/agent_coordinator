@@ -205,6 +205,18 @@ struct CredentialEntry {
     token: String,
 }
 
+/// What an integrator revise cites: the result whose receipts reproduce a
+/// `check_failed`, and the published result whose landing moved the target
+/// under a `conflict` (the service may then serialize the subject after that
+/// landing's task instead of parking it).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Cite<'a> {
+    /// The result whose receipts reproduce a `check_failed`.
+    pub result_id: Option<&'a str>,
+    /// The published result whose landing moved the target (`conflict`).
+    pub moved_by_result_id: Option<&'a str>,
+}
+
 impl Service {
     /// Builds a client from the matching entry of a CLI-format credentials file.
     pub fn from_credential_file(
@@ -278,18 +290,18 @@ impl Service {
         self.post(project, "observations", &body, &key).await
     }
 
-    /// Sends the subject back to its implementer (`conflict` or `check_failed`;
-    /// the latter cites the result whose receipts reproduce the failure).
+    /// Sends the subject back to its implementer (`conflict` or `check_failed`)
+    /// with what the revise cites.
     pub async fn revise(
         &self,
         project: &str,
         submission: &str,
-        reason: &str,
-        evidence: &str,
-        result_id: Option<&str>,
+        (reason, evidence): (&str, &str),
+        cite: Cite<'_>,
     ) -> Result<Reply<Value>> {
         let body = json!({"submission_id": submission, "reason_code": reason,
-            "evidence": evidence, "result_id": result_id});
+            "evidence": evidence, "result_id": cite.result_id,
+            "moved_by_result_id": cite.moved_by_result_id});
         let key = format!("revise-{}", uuid::Uuid::new_v4());
         self.post(project, "revise", &body, &key).await
     }

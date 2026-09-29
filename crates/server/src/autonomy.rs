@@ -360,10 +360,14 @@ async fn startup_reconcile(c: &mut SqliteConnection) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Agent revises allowed per subject in any 24 hours before the subject parks in
-/// the human queue.
-const REVISE_LIMIT: i64 = 3;
-const DAY_MS: i64 = 86_400_000;
+/// Agent revises per subject in any 24 hours, the integrator's serialized
+/// revises excluded, at which the subject parks in the human queue.
+pub(crate) const REVISE_LIMIT: i64 = 3;
+/// Agent revises per subject in any 24 hours, serialized ones included, at
+/// which the subject parks even when every revise at the limit is serialized.
+pub(crate) const SERIALIZED_REVISE_CAP: i64 = 6;
+/// The window the revise limits count over: 24 hours in milliseconds.
+pub(crate) const DAY_MS: i64 = 86_400_000;
 
 /// Number of agent revises (agent-called reopens) of a task's submissions in the
 /// last 24 hours.
@@ -376,13 +380,49 @@ pub(crate) async fn agent_revise_count(
         .bind(task).bind(now - DAY_MS).fetch_one(&mut *c).await?)
 }
 
-/// True when agents may no longer revise this task until a human looks at it.
+/// Number of agent revises of a task's submissions in the last 24 hours that
+/// count toward [`REVISE_LIMIT`]: every one except the integrator's revises
+/// recorded as serialized after a landing.
+pub(crate) async fn park_revise_count(
+    c: &mut SqliteConnection,
+    task: &str,
+    now: i64,
+) -> Result<i64, AppError> {
+    Ok(sqlx::query_scalar("SELECT count(*) FROM events e JOIN principals pr ON pr.id=e.actor_id JOIN submissions s ON s.id=e.record_id WHERE e.kind='submission.reopened' AND pr.kind='agent' AND s.task_id=? AND e.created_at>? AND NOT EXISTS(SELECT 1 FROM integrator_revises ir WHERE ir.submission_id=e.record_id AND ir.serialized_after IS NOT NULL)")
+        .bind(task).bind(now - DAY_MS).fetch_one(&mut *c).await?)
+}
+
+/// True when the task is parked for agents (no agent revise or claim until
+/// a human looks at it): [`REVISE_LIMIT`] revises not serialized, or
+/// [`SERIALIZED_REVISE_CAP`] revises of any kind, in the last 24 hours.
 pub(crate) async fn revise_limit_reached(
     c: &mut SqliteConnection,
     task: &str,
     now: i64,
 ) -> Result<bool, AppError> {
-    Ok(agent_revise_count(c, task, now).await? >= REVISE_LIMIT)
+    Ok(park_revise_count(c, task, now).await? >= REVISE_LIMIT
+        || agent_revise_count(c, task, now).await? >= SERIALIZED_REVISE_CAP)
+}
+
+/// The human-coded refusal for an agent revise or claim of a parked task.
+pub(crate) fn revise_limit_refusal() -> AppError {
+    human_coded(
+        "revise_limit_reached",
+        "Agents revised this task too often in 24 hours (three revises not serialized after a new landing, or six in all); a human must look at it.",
+    )
+}
+
+/// Refuses an agent's work claim on a task that the revise limit parked.
+pub(crate) async fn ensure_not_parked(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    task: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    if actor.kind == "agent" && revise_limit_reached(c, task, now).await? {
+        return Err(revise_limit_refusal());
+    }
+    Ok(())
 }
 
 /// What an agent revise needs to be checked against.
@@ -415,10 +455,7 @@ pub(crate) async fn authorize_revise(
     }
     let code = r.code.ok_or_else(|| AppError::bad_request("Agents must give reason_code: conflict, check_failed, candidate_missing, requirements_changed or author_withdraw."))?;
     if revise_limit_reached(c, r.task, now).await? {
-        return Err(human_coded(
-            "revise_limit_reached",
-            "Agents revised this task three times in 24 hours; a human must look at it.",
-        ));
+        return Err(revise_limit_refusal());
     }
     ensure_revise_actor(c, actor, r, code, now).await?;
     Ok(json!({"reason_code":code,"evidence":r.evidence}))

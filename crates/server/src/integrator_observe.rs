@@ -12,6 +12,7 @@ use crate::{
     error::AppError,
     integrator::{require_integrator_project, result_value},
     integrator_authority::{FAILING, FailureRecord, RosterCheck, failure_records, parse_roster},
+    integrator_serialize::{self, Admission, ReviseCase},
     mutation::Mutation,
     response,
     state::AppState,
@@ -375,7 +376,10 @@ async fn observe(
 }
 
 /// The integrator's own revise: a conflict or a reproduced check failure.
-/// A `check_failed` names the result whose receipts reproduce the failure.
+/// A `check_failed` names the result whose receipts reproduce the failure;
+/// a `conflict` may name the published result whose landing moved the
+/// target (`moved_by_result_id`), which lets a revise past the limit
+/// serialize the subject instead of parking it.
 #[derive(Deserialize, Serialize)]
 struct IntegratorReviseInput {
     submission_id: String,
@@ -383,6 +387,8 @@ struct IntegratorReviseInput {
     evidence: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     result_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    moved_by_result_id: Option<String>,
 }
 
 impl IntegratorReviseInput {
@@ -390,12 +396,12 @@ impl IntegratorReviseInput {
     fn validate(&self) -> Result<(), AppError> {
         bounded(&self.submission_id, "submission_id", 100, true)?;
         bounded(&self.evidence, "evidence", 16384, true)?;
-        bounded(
-            self.result_id.as_deref().unwrap_or_default(),
-            "result_id",
-            100,
-            false,
-        )?;
+        for (value, field) in [
+            (&self.result_id, "result_id"),
+            (&self.moved_by_result_id, "moved_by_result_id"),
+        ] {
+            bounded(value.as_deref().unwrap_or_default(), field, 100, false)?;
+        }
         if !INTEGRATOR_REASONS.contains(&self.reason_code.as_str()) {
             return Err(AppError::bad_request(
                 "The integrator revises only with reason_code conflict or check_failed.",
@@ -416,27 +422,21 @@ async fn integrating_task(
         .ok_or_else(|| AppError::conflict("subject_not_integrable", "This submission is not a current candidate awaiting integration."))
 }
 
-/// Refuses an integrator revise that must first observe its own push, or that
-/// has hit the per-subject limit (the subject then parks for a human).
+/// Refuses an integrator revise that must first observe its own push, or
+/// that the per-subject limit parks for a human (see
+/// [`integrator_serialize::admit`]); returns what the limit admitted.
 async fn ensure_revisable(
     c: &mut SqliteConnection,
-    task: &str,
-    submission: &str,
+    case: &ReviseCase<'_>,
     now: i64,
-) -> Result<(), AppError> {
-    if outstanding_authority(c, submission).await?.is_some() {
+) -> Result<Admission, AppError> {
+    if outstanding_authority(c, case.submission).await?.is_some() {
         return Err(AppError::conflict(
             "observation_required",
             "Push authority is outstanding for this submission; observe the target first.",
         ));
     }
-    if crate::autonomy::revise_limit_reached(c, task, now).await? {
-        return Err(AppError::forbidden(
-            "Agents revised this task three times in 24 hours; a human must look at it.",
-        )
-        .with_details(json!({"required_actor":"human","gate":"revise_limit_reached"})));
-    }
-    Ok(())
+    integrator_serialize::admit(c, case, now).await
 }
 
 /// The `check_failure_not_reproduced` refusal with its details.
@@ -502,6 +502,40 @@ async fn ensure_reproduced(
     ))
 }
 
+/// Supersedes the subject's submission and records the revise; a serialized
+/// revise also makes the subject depend on the landing task.
+async fn apply_integrator_revise(
+    m: &mut Mutation,
+    case: &ReviseCase<'_>,
+    admission: &Admission,
+) -> Result<(), AppError> {
+    let mut reason = format!("Integrator revise: {}", case.reason_code);
+    if let Some(landing) = &admission.serialized_after {
+        reason.push_str(&format!("; serialized after task {landing}"));
+    }
+    let target = Supersede {
+        project: case.project,
+        task: case.task,
+        submission: case.submission,
+        actor: &m.actor.id,
+        reason: &reason,
+    };
+    supersede_submission(&mut m.tx, &target, m.now).await?;
+    integrator_serialize::record(m, case, admission).await
+}
+
+/// The integrator revise response: the subject, the revise with the landing
+/// task it cited (when resolved), `serialized_after` (the landing task the
+/// subject now depends on, or null) and `park_reason` (why the revise parked
+/// the subject, or null).
+fn revise_value(input: &IntegratorReviseInput, task: &str, admission: &Admission) -> Value {
+    let landing = admission.landing.as_ref().map(|l| &l.task);
+    json!({"subject_task_id": task, "submission_id": input.submission_id,
+        "serialized_after": admission.serialized_after, "park_reason": admission.park_reason,
+        "revise": {"reason_code": input.reason_code, "evidence": input.evidence,
+            "moved_by_result_id": input.moved_by_result_id, "landing_task_id": landing}})
+}
+
 /// `POST …/integrator/revise`: sends a conflicting or check-failing candidate
 /// back to its author.
 async fn revise(
@@ -520,19 +554,17 @@ async fn revise(
     }
     require_integrator_project(&mut m.tx, &p).await?;
     let task = integrating_task(&mut m.tx, &p, &input.submission_id).await?;
-    ensure_revisable(&mut m.tx, &task, &input.submission_id, m.now).await?;
-    ensure_reproduced(&mut m.tx, &p, &input).await?;
-    let reason = format!("Integrator revise: {}", input.reason_code);
-    let target = Supersede {
+    let case = ReviseCase {
         project: &p,
         task: &task,
         submission: &input.submission_id,
-        actor: &m.actor.id,
-        reason: &reason,
+        reason_code: &input.reason_code,
+        moved_by: input.moved_by_result_id.as_deref(),
     };
-    supersede_submission(&mut m.tx, &target, m.now).await?;
-    let value = json!({"subject_task_id": task, "submission_id": input.submission_id,
-        "revise": {"reason_code": input.reason_code, "evidence": input.evidence}});
+    let admission = ensure_revisable(&mut m.tx, &case, m.now).await?;
+    ensure_reproduced(&mut m.tx, &p, &input).await?;
+    apply_integrator_revise(&mut m, &case, &admission).await?;
+    let value = revise_value(&input, &task, &admission);
     Ok(response(
         m.finish(value, Some(&p), "submission.reopened", &input.submission_id)
             .await?,

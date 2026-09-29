@@ -2402,12 +2402,23 @@ async fn agent_revise_is_rate_limited_and_needs_agent_recovery() {
         "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
         t["id"].as_str().unwrap()
     );
-    for round in 0..4 {
+    let mut first = Value::Null;
+    for round in 0..3 {
         let owner = f.claim(&f.a, &p, &t, 2).await;
         let submitted = f
             .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
             .await;
         let submission = activity(&submitted, "agent_review")["submission_id"].clone();
+        if round == 0 {
+            first = submission.clone();
+        } else if round == 2 {
+            // Agents cannot claim a parked task, so the limit is reached by
+            // recording a third agent revise directly, against the first
+            // submission, before this round's revise.
+            sqlx::query("INSERT INTO events(actor_id,kind,record_id,data_json,created_at) VALUES(?,'submission.reopened',?,'{}',?)")
+                .bind(&f.a.principal).bind(first.as_str().unwrap()).bind(f.state.now())
+                .execute(&f.state.pool).await.unwrap();
+        }
         let (status, result) = f
             .call(
                 &f.a,
@@ -2416,7 +2427,7 @@ async fn agent_revise_is_rate_limited_and_needs_agent_recovery() {
                 revise_body(&submission, "author_withdraw", None),
             )
             .await;
-        if round < 3 {
+        if round < 2 {
             assert_eq!(status, StatusCode::OK, "{result}");
         } else {
             assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
@@ -2446,6 +2457,92 @@ async fn agent_revise_is_rate_limited_and_needs_agent_recovery() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{manual}");
     assert_eq!(manual["error"]["code"], "human_reopen_required");
     assert_eq!(manual["error"]["details"]["required_actor"], "human");
+}
+
+/// A general task in `p` at `priority` (lower is more urgent).
+async fn task_at(f: &Fixture, p: &str, title: &str, priority: i64) -> Value {
+    let body = json!({"title":title,"description":"workflow test","acceptance_criteria":["required behavior verified"],"kind":"general","priority":priority});
+    let (status, v) = f
+        .call(&f.a, "POST", &format!("/api/v1/projects/{p}/tasks"), body)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"].clone()
+}
+
+/// Claims and submits general task `t` as `f.a`, then withdraws the
+/// submission (an agent revise); returns the withdrawn submission id.
+async fn withdrawn_round(f: &Fixture, p: &str, t: &Value) -> Value {
+    let path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let (_, current) = f.call(&f.a, "GET", &path, Value::Null).await;
+    let t = &current["data"];
+    let owner = f.claim(&f.a, p, t, 2).await;
+    let submitted = f
+        .submit(&f.a, p, t, &owner, "general", 2, None, None, None, None)
+        .await;
+    let submission = activity(&submitted, "agent_review")["submission_id"].clone();
+    let body = revise_body(&submission, "author_withdraw", None);
+    let (status, v) = f
+        .call(&f.a, "POST", &format!("{path}/workflow/reopen"), body)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    submission
+}
+
+/// Posts an agent work claim as `f.a`: of `t` when given, otherwise of the
+/// next eligible task.
+async fn work_claim(f: &Fixture, p: &str, t: Option<&Value>) -> (StatusCode, Value) {
+    let mut body = json!({"mode":"work","policy_revision":2,"instruction_version":coordinator_core::INSTRUCTION_VERSION});
+    if let Some(t) = t {
+        body["task_id"] = t["id"].clone();
+        body["expected_task_revision"] = t["revision"].clone();
+    }
+    f.call(&f.a, "POST", &format!("/api/v1/projects/{p}/claims"), body)
+        .await
+}
+
+// P4 S4d: on a project without the integrator, three agent revises in 24
+// hours park the task, and an agent's explicit work claim is refused.
+#[tokio::test]
+async fn an_agent_cannot_claim_a_task_parked_by_revises() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("revise-claim", "https://example.test/revise-claim.git")
+        .await;
+    f.review_policy(&p, "agent").await;
+    let t = f.task(&p, "general", "Withdrawn three times").await;
+    for _ in 0..3 {
+        withdrawn_round(&f, &p, &t).await;
+    }
+    let path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let (_, current) = f.call(&f.a, "GET", &path, Value::Null).await;
+    let (status, v) = work_claim(&f, &p, Some(&current["data"])).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"]["code"], "revise_limit_reached", "{v}");
+    assert_eq!(v["error"]["details"]["required_actor"], "human", "{v}");
+}
+
+// P4 S4d: a next-eligible claim pages past any number of parked
+// higher-priority tasks to the first eligible one.
+#[tokio::test]
+async fn a_next_eligible_claim_pages_past_parked_tasks() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("revise-paging", "https://example.test/revise-paging.git")
+        .await;
+    f.review_policy(&p, "agent").await;
+    for n in 0..21 {
+        let parked = task_at(&f, &p, &format!("Parked {n}"), 0).await;
+        let submission = withdrawn_round(&f, &p, &parked).await;
+        for _ in 0..2 {
+            sqlx::query("INSERT INTO events(actor_id,kind,record_id,data_json,created_at) VALUES(?,'submission.reopened',?,'{}',?)")
+                .bind(&f.a.principal).bind(submission.as_str().unwrap()).bind(f.state.now())
+                .execute(&f.state.pool).await.unwrap();
+        }
+    }
+    let eligible = task_at(&f, &p, "Eligible", 3).await;
+    let (status, v) = work_claim(&f, &p, None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["claim"]["task"]["id"], eligible["id"], "{v}");
 }
 
 /// Change only the project's lease (rules untouched) or only its rules text.
@@ -4040,4 +4137,344 @@ async fn cancelled_and_skipped_receipts_are_not_failures() {
         (StatusCode::OK, json!(true)),
         "{v}"
     );
+}
+
+/// The task as the service reports it now, as seen by `f.a`: its current
+/// revision, `eligible_to_claim` and unmet preconditions.
+async fn fresh_task(f: &Fixture, p: &str, t: &Value) -> Value {
+    let path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let (status, v) = f.call(&f.a, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"].clone()
+}
+
+/// A 40-hex-digit fixture candidate revision numbered `n`.
+fn candidate(n: u32) -> String {
+    format!("{n:040x}")
+}
+
+/// Claims, checks out and submits code task `t` with candidate `c` on an
+/// integrator project (policy revision 3); returns the submission id.
+async fn submit_code(f: &Fixture, p: &str, t: &Value, c: &str) -> Value {
+    let t = fresh_task(f, p, t).await;
+    let owner = f.claim(&f.a, p, &t, 3).await;
+    f.checkout(&f.a, p, &owner, BASE).await;
+    let repo: String = sqlx::query_scalar("SELECT repository_url FROM projects WHERE id=?")
+        .bind(p)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let submitted = f
+        .submit(
+            &f.a,
+            p,
+            &t,
+            &owner,
+            "code",
+            3,
+            Some(&repo),
+            Some(BASE),
+            Some(c),
+            Some(R),
+        )
+        .await;
+    activity(&submitted, "integration")["submission_id"].clone()
+}
+
+/// A new code task in `p` submitted with candidate `c`: the task and its
+/// submission id.
+async fn new_subject(f: &Fixture, p: &str, c: &str) -> (Value, Value) {
+    let t = f.task(p, "code", "Revised subject").await;
+    let submission = submit_code(f, p, &t, c).await;
+    (t, submission)
+}
+
+/// Pins a result of `submission` (candidate `c`) at T0 and returns its id.
+async fn result_of(f: &Fixture, i: &Caller, p: &str, submission: &Value, c: &str) -> String {
+    let mut body = result_body(submission.as_str().unwrap(), T0, R);
+    body["c"] = json!(c);
+    body["landing_range"] = json!([c]);
+    let (status, v) = integrator_post(f, i, p, "results", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"]["id"].as_str().unwrap().to_owned()
+}
+
+/// A new code task in `p` with candidate `c` that the integrator
+/// published; returns its task id and published result id.
+async fn published_landing(f: &Fixture, i: &Caller, p: &str, c: &str) -> (String, String) {
+    let (t, submission) = new_subject(f, p, c).await;
+    let result = result_of(f, i, p, &submission, c).await;
+    receipt(f, i, p, &result, 900, "success").await;
+    let (status, v) = authority(f, i, p, &result).await;
+    assert_eq!(v["data"]["granted"], true, "{status} {v}");
+    let (status, v) = observe(f, i, p, &result, R, "contained").await;
+    assert_eq!(v["data"]["disposition"], "published", "{status} {v}");
+    (t["id"].as_str().unwrap().to_owned(), result)
+}
+
+/// Posts a `conflict` revise of `submission` citing `moved_by`.
+async fn conflict_revise(
+    f: &Fixture,
+    i: &Caller,
+    p: &str,
+    submission: &Value,
+    moved_by: Option<&str>,
+) -> (StatusCode, Value) {
+    let body = json!({"submission_id":submission,"reason_code":"conflict","evidence":"CONFLICT (content): src/lib.rs","moved_by_result_id":moved_by});
+    integrator_post(f, i, p, "revise", body).await
+}
+
+/// Revises `submission` of `t` and resubmits candidate `c`; returns the new
+/// submission id.
+async fn revise_and_resubmit(
+    f: &Fixture,
+    i: &Caller,
+    p: &str,
+    (t, submission): (&Value, &Value),
+    moved_by: Option<&str>,
+    c: &str,
+) -> Value {
+    let (status, v) = conflict_revise(f, i, p, submission, moved_by).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["park_reason"], Value::Null, "{v}");
+    submit_code(f, p, t, c).await
+}
+
+/// Brings subject `t` to the edge of the revise limit (one revise short of
+/// `REVISE_LIMIT`) with revises that are not serialized, each followed by a
+/// resubmission of `c`. Returns the current submission id.
+async fn at_the_edge(
+    f: &Fixture,
+    i: &Caller,
+    p: &str,
+    t: &Value,
+    submission: Value,
+    c: &str,
+) -> Value {
+    let mut submission = submission;
+    for _ in 0..2 {
+        submission = revise_and_resubmit(f, i, p, (t, &submission), None, c).await;
+    }
+    submission
+}
+
+/// Asserts the revise applied without serializing and parked the subject
+/// for `reason`.
+fn assert_parking(status: StatusCode, v: &Value, reason: &str) {
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["serialized_after"], Value::Null, "{v}");
+    assert_eq!(v["data"]["park_reason"], reason, "{v}");
+}
+
+/// Asserts task `t` is parked for agents: GET shows the unmet
+/// `revise_limit_reached` precondition and an explicit claim is refused
+/// with the same code.
+async fn assert_parked(f: &Fixture, p: &str, t: &Value) {
+    let task = fresh_task(f, p, t).await;
+    assert_eq!(task["eligible_to_claim"], false, "{task}");
+    let codes: Vec<&Value> = task["unmet_preconditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| &u["code"])
+        .collect();
+    assert!(codes.contains(&&json!("revise_limit_reached")), "{task}");
+    let (status, v) = f.call(&f.a, "POST", &format!("/api/v1/projects/{p}/claims"), json!({"task_id":task["id"],"expected_task_revision":task["revision"],"mode":"work","policy_revision":3,"instruction_version":coordinator_core::INSTRUCTION_VERSION})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"]["code"], "revise_limit_reached", "{v}");
+    assert_eq!(v["error"]["details"]["required_actor"], "human", "{v}");
+}
+
+/// Asserts task `t` is claimable and is what `next` offers an implementer.
+async fn assert_claimable(f: &Fixture, p: &str, t: &Value) {
+    let task = fresh_task(f, p, t).await;
+    assert_eq!(task["eligible_to_claim"], true, "{task}");
+    let offered = next_action(f, &f.a, p, "implementer").await;
+    assert_eq!(offered["action"]["task_id"], t["id"], "{offered}");
+}
+
+/// The prerequisites recorded for task `t`.
+async fn prerequisites(f: &Fixture, t: &Value) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT prerequisite_id FROM task_dependencies WHERE task_id=? ORDER BY prerequisite_id",
+    )
+    .bind(t["id"].as_str().unwrap())
+    .fetch_all(&f.state.pool)
+    .await
+    .unwrap()
+}
+
+// P4 S4d: a revise below the edge of the limit only records the landing.
+#[tokio::test]
+async fn integrator_revise_below_the_limit_only_records_the_landing() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "serialize-below").await;
+    let (landing, result) = published_landing(&f, &i, &p, &candidate(0xa1)).await;
+    let submission = &integration["submission_id"];
+    let (status, v) = conflict_revise(&f, &i, &p, submission, Some(&result)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["serialized_after"], Value::Null);
+    assert_eq!(v["data"]["park_reason"], Value::Null);
+    assert_eq!(v["data"]["revise"]["landing_task_id"], json!(landing));
+    assert!(prerequisites(&f, &t).await.is_empty());
+    let row: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT landing_task_id,serialized_after FROM integrator_revises WHERE submission_id=?",
+    )
+    .bind(submission.as_str().unwrap())
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (Some(landing), None));
+}
+
+// P4 S4d: the revise that would reach the limit is serialized after a new
+// landing, does not count toward the limit, and leaves the subject
+// claimable and offered by `next`.
+#[tokio::test]
+async fn a_serialized_subject_stays_claimable() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "serialize-claimable").await;
+    let (landing, result) = published_landing(&f, &i, &p, &candidate(0xa1)).await;
+    let c = "2222222222222222222222222222222222222222";
+    let submission = at_the_edge(&f, &i, &p, &t, integration["submission_id"].clone(), c).await;
+    let (status, v) = conflict_revise(&f, &i, &p, &submission, Some(&result)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["serialized_after"], json!(landing));
+    assert_eq!(v["data"]["park_reason"], Value::Null);
+    assert_eq!(prerequisites(&f, &t).await, std::slice::from_ref(&landing));
+    assert_eq!(subject_state(&f, &t).await.0, "revision_needed");
+    assert_claimable(&f, &p, &t).await;
+}
+
+// P4 S4d: landings A, B, then A again: the repeat is a persistent cycle, so
+// that revise applies and parks the subject, and agents cannot claim it.
+#[tokio::test]
+async fn a_repeated_landing_parks_the_subject() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "serialize-repeat").await;
+    let (a, result_a) = published_landing(&f, &i, &p, &candidate(0xa1)).await;
+    let (b, result_b) = published_landing(&f, &i, &p, &candidate(0xb1)).await;
+    let c = "2222222222222222222222222222222222222222";
+    let mut submission = at_the_edge(&f, &i, &p, &t, integration["submission_id"].clone(), c).await;
+    for (landing, result) in [(&a, &result_a), (&b, &result_b)] {
+        let (status, v) = conflict_revise(&f, &i, &p, &submission, Some(result)).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["data"]["serialized_after"], json!(landing), "{v}");
+        assert_claimable(&f, &p, &t).await;
+        submission = submit_code(&f, &p, &t, c).await;
+    }
+    let (status, v) = conflict_revise(&f, &i, &p, &submission, Some(&result_a)).await;
+    assert_parking(status, &v, "landing_repeated");
+    let mut both = vec![a, b];
+    both.sort();
+    assert_eq!(prerequisites(&f, &t).await, both);
+    assert_parked(&f, &p, &t).await;
+    let offered = next_action(&f, &f.a, &p, "implementer").await;
+    assert_ne!(offered["action"]["task_id"], t["id"], "{offered}");
+    let next_claim = json!({"mode":"work","policy_revision":3,"instruction_version":coordinator_core::INSTRUCTION_VERSION});
+    let path = format!("/api/v1/projects/{p}/claims");
+    let (status, v) = f.call(&f.a, "POST", &path, next_claim).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["data"]["claim"],
+        Value::Null,
+        "a parked task is skipped: {v}"
+    );
+}
+
+// P4 S4d: at the edge, a revise that cannot be serialized applies and parks
+// the subject, naming why; a parked subject refuses further revises.
+#[tokio::test]
+async fn an_unserializable_revise_at_the_edge_parks_the_subject() {
+    let f = Fixture::new().await;
+    let (p, _, _, i) = integrator_task(&f, "serialize-park").await;
+    let (landing, result) = published_landing(&f, &i, &p, &candidate(0xa1)).await;
+    for (n, moved_by) in [(1, None), (2, Some("nope"))] {
+        let (t, s) = edge_subject(&f, &i, &p, n).await;
+        let (status, v) = conflict_revise(&f, &i, &p, &s, moved_by).await;
+        assert_parking(status, &v, "landing_unknown");
+        assert_parked(&f, &p, &t).await;
+    }
+    let (t, s) = edge_subject(&f, &i, &p, 3).await;
+    let own = result_of(&f, &i, &p, &s, &candidate(3)).await;
+    let (status, v) = conflict_revise(&f, &i, &p, &s, Some(&own)).await;
+    assert_parking(status, &v, "landing_unknown");
+    assert_parked(&f, &p, &t).await;
+    let (t, s) = edge_subject(&f, &i, &p, 4).await;
+    let own = result_of(&f, &i, &p, &s, &candidate(4)).await;
+    sqlx::query("INSERT INTO integrator_observations(id,result_id,tip,ancestry,disposition,evidence,observed_by,observed_at) VALUES('own',?,?,'contained','published','x',?,0)")
+        .bind(&own).bind(R).bind(&i.principal).execute(&f.state.pool).await.unwrap();
+    let (status, v) = conflict_revise(&f, &i, &p, &s, Some(&own)).await;
+    assert_parking(status, &v, "landing_is_subject");
+    assert_parked(&f, &p, &t).await;
+    let (t, s) = edge_subject(&f, &i, &p, 5).await;
+    let failed = result_of(&f, &i, &p, &s, &candidate(5)).await;
+    receipt_attempt(&f, &i, &p, &failed, (1, BLOB, "failure")).await;
+    receipt_attempt(&f, &i, &p, &failed, (2, BLOB, "failure")).await;
+    let body = json!({"submission_id":s,"reason_code":"check_failed","evidence":"x","result_id":failed,"moved_by_result_id":result});
+    let (status, v) = integrator_post(&f, &i, &p, "revise", body).await;
+    assert_parking(status, &v, "not_a_conflict");
+    assert_parked(&f, &p, &t).await;
+    let (t, s) = edge_subject(&f, &i, &p, 6).await;
+    sqlx::query("INSERT INTO task_dependencies(project_id,task_id,prerequisite_id) VALUES(?,?,?)")
+        .bind(&p)
+        .bind(&landing)
+        .bind(t["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, v) = conflict_revise(&f, &i, &p, &s, Some(&result)).await;
+    assert_parking(status, &v, "dependency_cycle");
+    assert!(prerequisites(&f, &t).await.is_empty());
+    let (t, s) = new_subject(&f, &p, &candidate(7)).await;
+    seed_revises(&f, &i, &t, 3).await;
+    let (status, v) = conflict_revise(&f, &i, &p, &s, Some(&result)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"]["details"]["gate"], "revise_limit_reached", "{v}");
+    assert_eq!(
+        v["error"]["details"]["park_reason"], "subject_parked",
+        "{v}"
+    );
+}
+
+/// A new subject in `p` with candidate number `n`, brought to the edge of
+/// the revise limit; returns the task and its current submission id.
+async fn edge_subject(f: &Fixture, i: &Caller, p: &str, n: u32) -> (Value, Value) {
+    let c = candidate(n);
+    let (t, submission) = new_subject(f, p, &c).await;
+    let submission = at_the_edge(f, i, p, &t, submission, &c).await;
+    (t, submission)
+}
+
+/// Seeds `n` agent revises of task `t`'s current submission in the last
+/// 24 hours (the limits count `submission.reopened` events).
+async fn seed_revises(f: &Fixture, i: &Caller, t: &Value, n: usize) {
+    for _ in 0..n {
+        sqlx::query("INSERT INTO events(actor_id,kind,record_id,data_json,created_at) SELECT ?,'submission.reopened',current_submission_id,'{}',? FROM workflow_subjects WHERE task_id=?")
+            .bind(&i.principal).bind(f.state.now()).bind(t["id"].as_str().unwrap())
+            .execute(&f.state.pool).await.unwrap();
+    }
+}
+
+// P4 S4d: SERIALIZED_REVISE_CAP revises in 24 hours park the subject even
+// when every revise at the edge is serialized after a new landing.
+#[tokio::test]
+async fn the_cap_parks_a_subject_whose_revises_were_serialized() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "serialize-cap").await;
+    let c = "2222222222222222222222222222222222222222";
+    let mut submission = at_the_edge(&f, &i, &p, &t, integration["submission_id"].clone(), c).await;
+    for n in 1..=4 {
+        let (landing, result) = published_landing(&f, &i, &p, &candidate(0xa0 + n)).await;
+        let (status, v) = conflict_revise(&f, &i, &p, &submission, Some(&result)).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["data"]["serialized_after"], json!(landing), "{v}");
+        if n < 4 {
+            assert_eq!(v["data"]["park_reason"], Value::Null, "{v}");
+            submission = submit_code(&f, &p, &t, c).await;
+        } else {
+            assert_eq!(v["data"]["park_reason"], "serialized_cap", "{v}");
+        }
+    }
+    assert_parked(&f, &p, &t).await;
 }

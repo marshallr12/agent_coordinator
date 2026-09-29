@@ -11,7 +11,7 @@ use crate::git;
 use crate::integrate::{Integrator, Job, Step};
 use crate::roster::Roster;
 use crate::service::{Ancestry, Observation, Receipt, Reply, ResultRecord};
-use crate::state::TipMove;
+use crate::state::{Published, TipMove};
 use anyhow::{Context, Result, bail, ensure};
 use coordinator_local::git_workflow::{
     self, FreshPublicationAuthority, PublicationAuthorizationContext,
@@ -105,8 +105,12 @@ impl<C: ChecksSource> Integrator<C> {
             self.discard_local(job)?;
             return Ok(Step::ReturnedToReview);
         }
-        self.state
-            .record_published(&job.target_key(), &result.t0, &result.r)?;
+        let entry = Published {
+            r: result.r.clone(),
+            t0: Some(result.t0.clone()),
+            result_id: Some(result.id.clone()),
+        };
+        self.state.record_published(&job.target_key(), entry)?;
         if let Err(error) = self.try_push(job, result, &grant, sent).await {
             eprintln!(
                 "agentc-integrator: push of {} not completed: {error:#}",

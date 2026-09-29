@@ -11,11 +11,11 @@ use crate::config::Config;
 use crate::git;
 use crate::github::RepoId;
 use crate::roster::{self, Roster};
-use crate::service::{NewResult, Queue, QueueItem, ResultRecord, Service};
-use crate::state::{LoopState, target_key};
+use crate::service::{Cite, NewResult, Queue, QueueItem, ResultRecord, Service};
+use crate::state::{LoopState, Published, target_key};
 use anyhow::{Context, Result};
 use coordinator_local::git_workflow::{self, IntegrationIntentSummary, PrepareIntegration};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What one cycle did; logged, and asserted by tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,8 +152,7 @@ impl<C: ChecksSource> Integrator<C> {
     async fn pin_result(&self, job: &Job, roster: &Roster) -> Result<Result<ResultRecord, Step>> {
         let c = &job.item.candidate_revision;
         if !git::merges_cleanly(&job.mirror, &job.x, c)? {
-            let evidence = format!("candidate {c} conflicts with target tip {}", job.x);
-            return self.revise(job, "conflict", &evidence, None).await.map(Err);
+            return self.revise_conflict(job).await.map(Err);
         }
         let computed = self.compute_result(job, roster)?;
         if let Some(existing) = job.item.results.iter().find(|r| r.t0 == job.x) {
@@ -161,6 +160,21 @@ impl<C: ChecksSource> Integrator<C> {
         }
         let reply = self.service.record_result(&job.project, &computed).await?;
         Ok(reply.map_err(|refusal| Step::Refused(refusal.code)))
+    }
+
+    /// Revises a candidate that conflicts with X, citing the result this
+    /// integrator published on the target since the candidate's reviewed
+    /// base, when there is one (see [`landing_result`]).
+    async fn revise_conflict(&self, job: &Job) -> Result<Step> {
+        let c = &job.item.candidate_revision;
+        let evidence = format!("candidate {c} conflicts with target tip {}", job.x);
+        let published = self.state.published(&job.target_key());
+        let moved_by = landing_result(&job.mirror, published, &job.x, &job.item.reviewed_base);
+        let cite = Cite {
+            moved_by_result_id: moved_by,
+            ..Cite::default()
+        };
+        self.revise(job, ("conflict", &evidence), cite).await
     }
 
     /// Computes R in a linked worktree through `git_workflow` (deterministic;
@@ -218,19 +232,18 @@ impl<C: ChecksSource> Integrator<C> {
         Ok(())
     }
 
-    /// Sends the subject back to its implementer and drops local state.
-    /// `result` names the result whose receipts back a `check_failed`.
+    /// Sends the subject back to its implementer with `(reason, evidence)`
+    /// and what the revise cites, and drops local state.
     pub(crate) async fn revise(
         &self,
         job: &Job,
-        reason: &str,
-        evidence: &str,
-        result: Option<&str>,
+        (reason, evidence): (&str, &str),
+        cite: Cite<'_>,
     ) -> Result<Step> {
         let submission = &job.item.submission_id;
         let reply = self
             .service
-            .revise(&job.project, submission, reason, evidence, result)
+            .revise(&job.project, submission, (reason, evidence), cite)
             .await?;
         self.discard_local(job)?;
         Ok(match reply {
@@ -247,6 +260,32 @@ fn held_elsewhere(job: &Job) -> Option<ResultRecord> {
     job.item.results.iter().find(held).cloned()
 }
 
+/// The id of the newest result this integrator published on the target that
+/// landed since the candidate's reviewed `base`: its R is an ancestor of X
+/// and not of `base`. Published results land on a fast-forward-only target,
+/// so the qualifying Rs form one line and the newest descends from the rest.
+/// Entries without a result id, or that Git cannot place, never qualify.
+pub(crate) fn landing_result<'a>(
+    mirror: &Path,
+    published: &'a [Published],
+    x: &str,
+    base: &str,
+) -> Option<&'a str> {
+    let ancestor = |a: &str, d: &str| git::is_ancestor(mirror, a, d).ok();
+    let landed = |p: &&Published| {
+        p.result_id.is_some()
+            && ancestor(&p.r, x) == Some(true)
+            && ancestor(&p.r, base) == Some(false)
+    };
+    let mut newest: Option<&Published> = None;
+    for entry in published.iter().filter(landed) {
+        if newest.is_none_or(|n| ancestor(&n.r, &entry.r) == Some(true)) {
+            newest = Some(entry);
+        }
+    }
+    newest.and_then(|p| p.result_id.as_deref())
+}
+
 /// The service's result when the local computation reproduced its R.
 fn reproduced(existing: &ResultRecord, computed: &NewResult) -> Result<ResultRecord, Step> {
     if existing.r == computed.r && existing.c == computed.c {
@@ -256,4 +295,45 @@ fn reproduced(existing: &ResultRecord, computed: &NewResult) -> Result<ResultRec
         "result {} pins R {} but this host computes {}",
         existing.id, existing.r, computed.r
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::testing::{commit, git, remote};
+
+    /// A published entry for R `r` with result id `id`.
+    fn published(r: &str, id: Option<&str>) -> Published {
+        Published {
+            r: r.into(),
+            t0: None,
+            result_id: id.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn the_newest_result_landed_since_the_base_is_cited() {
+        let remote = remote();
+        let dir = &remote.source;
+        let base = git(dir, &["rev-parse", "HEAD"]);
+        let first = commit(dir, "a.txt", "a\n");
+        let second = commit(dir, "b.txt", "b\n");
+        let unnamed = commit(dir, "c.txt", "c\n");
+        let x = commit(dir, "d.txt", "d\n");
+        git(dir, &["checkout", "--quiet", "-b", "side", &base]);
+        let unlanded = commit(dir, "e.txt", "e\n");
+        let list = [
+            published(&second, Some("b")),
+            published(&first, Some("a")),
+            published(&unnamed, None),
+            published(&unlanded, Some("u")),
+        ];
+        let newest = landing_result(dir, &list, &x, &base);
+        assert_eq!(newest, Some("b"), "newest by ancestry, not list order");
+        assert_eq!(landing_result(dir, &list[1..], &x, &base), Some("a"));
+        let none = landing_result(dir, &list, &x, &second);
+        assert_eq!(none, None, "results in the base did not move the target");
+        let missing = [published(&"ab".repeat(20), Some("m"))];
+        assert_eq!(landing_result(dir, &missing, &x, &base), None);
+    }
 }
