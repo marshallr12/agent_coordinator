@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use coordinator_server::{
     auth::init_admin,
+    context_rerank::{ApiKey, ContextRerankConfig, ContextRerankMode},
     router,
     state::{AppState, Config},
 };
@@ -43,6 +44,10 @@ struct Options {
     artifact_quota_bytes: i64,
     #[arg(long, env = "COORDINATOR_ARTIFACT_DISK_RESERVE_BYTES", default_value_t = 256 * 1024 * 1024, global = true)]
     artifact_disk_reserve_bytes: u64,
+    /// Reorder context search results with an external reranker. `typesafe`
+    /// also requires TYPESAFE_API_KEY in the process environment.
+    #[arg(long, env = "COORDINATOR_CONTEXT_RERANK", value_enum, default_value_t = ContextRerankMode::Off, global = true)]
+    context_rerank: ContextRerankMode,
     #[command(subcommand)]
     command: Command,
 }
@@ -160,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         json_body_limit_bytes: options.json_body_limit_bytes,
         artifact_quota_bytes: options.artifact_quota_bytes,
         artifact_disk_reserve_bytes: options.artifact_disk_reserve_bytes,
+        context_rerank: context_rerank_config(options.context_rerank),
     };
     let state = if matches!(&options.command, Command::Backup { .. }) {
         AppState::open_existing_read_only(config).await?
@@ -233,6 +239,20 @@ async fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
+/// Reranking settings for `mode`. The TypeSafe key is read from the
+/// environment only here, and only when TypeSafe reranking is selected.
+fn context_rerank_config(mode: ContextRerankMode) -> ContextRerankConfig {
+    let api_key = match mode {
+        ContextRerankMode::Off => None,
+        ContextRerankMode::Typesafe => std::env::var("TYPESAFE_API_KEY").ok().and_then(ApiKey::new),
+    };
+    ContextRerankConfig {
+        mode,
+        api_key,
+        ..ContextRerankConfig::default()
+    }
+}
+
 async fn shutdown() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;

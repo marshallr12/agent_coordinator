@@ -11,7 +11,10 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
-use crate::error::AppError;
+use crate::{
+    context_rerank::{ContextRerankConfig, ContextReranker},
+    error::AppError,
+};
 
 #[derive(Clone)]
 pub struct Config {
@@ -22,6 +25,8 @@ pub struct Config {
     pub json_body_limit_bytes: usize,
     pub artifact_quota_bytes: i64,
     pub artifact_disk_reserve_bytes: u64,
+    /// Optional reranking of context search results; off by default.
+    pub context_rerank: ContextRerankConfig,
 }
 
 impl Default for Config {
@@ -34,6 +39,7 @@ impl Default for Config {
             json_body_limit_bytes: 1024 * 1024,
             artifact_quota_bytes: 10 * 1024 * 1024 * 1024,
             artifact_disk_reserve_bytes: 256 * 1024 * 1024,
+            context_rerank: ContextRerankConfig::default(),
         }
     }
 }
@@ -114,6 +120,7 @@ pub struct AppState {
     pub(crate) login_limits: Arc<Mutex<LoginLimits>>,
     pub(crate) password_workers: Arc<Semaphore>,
     pub(crate) dummy_password_hash: Arc<String>,
+    pub(crate) context_reranker: Option<Arc<ContextReranker>>,
     clock_runtime: Arc<Mutex<ClockRuntime>>,
     authoritative_clock_gate: Arc<AsyncMutex<AuthoritativeClockGate>>,
 }
@@ -542,6 +549,7 @@ impl AppState {
             initialized: true,
             incident_active: clock_row.get::<String, _>("status") == "clock_reconciliation",
         };
+        let context_reranker = ContextReranker::from_config(&config.context_rerank)?.map(Arc::new);
         Ok(Self {
             pool,
             config,
@@ -549,6 +557,7 @@ impl AppState {
             login_limits: Arc::new(Mutex::new(LoginLimits::default())),
             password_workers: Arc::new(Semaphore::new(2)),
             dummy_password_hash: Arc::new(dummy_password_hash),
+            context_reranker,
             clock_runtime: Arc::new(Mutex::new(clock_runtime)),
             authoritative_clock_gate: Arc::new(AsyncMutex::new(AuthoritativeClockGate::default())),
         })

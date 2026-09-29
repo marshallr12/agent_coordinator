@@ -2,7 +2,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod autonomy;
 pub mod backup;
-mod context_rerank;
+pub mod context_rerank;
 pub mod coordination;
 pub mod credential_attributes;
 pub mod discovery;
