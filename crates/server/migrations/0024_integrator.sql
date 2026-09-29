@@ -159,6 +159,49 @@ CREATE TABLE integrator_reports (
 );
 CREATE INDEX integrator_reports_open ON integrator_reports(project_id,resolved_at,created_at);
 
+-- Revert tasks (M6, step S4). A revert is a code task that undoes one
+-- published integration result; this row carries its structured target.
+-- review_required is 0 only for a human's one-click revert. mode is
+-- 'mechanical' while the integrator computes the candidate and
+-- 'not_mechanical' once it reported it could not (the task is then ordinary
+-- implementation work with full review). rejection_json records the review
+-- that rejected a mechanical revert's decision (the revert task is then
+-- canceled). reland_task_id is the proposed re-land task a published
+-- 'defect' revert creates.
+CREATE TABLE task_reverts (
+    task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id),
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    result_id TEXT NOT NULL REFERENCES integrator_results(id),
+    submission_id TEXT NOT NULL REFERENCES submissions(id),
+    original_task_id TEXT NOT NULL REFERENCES tasks(id),
+    r TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK(reason IN ('defect','author_withdraw','audit_rejection','human')),
+    evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+    review_required INTEGER NOT NULL CHECK(review_required IN (0,1)),
+    mode TEXT NOT NULL DEFAULT 'mechanical' CHECK(mode IN ('mechanical','not_mechanical')),
+    not_mechanical_json TEXT CHECK(not_mechanical_json IS NULL OR json_valid(not_mechanical_json)),
+    rejection_json TEXT CHECK(rejection_json IS NULL OR json_valid(rejection_json)),
+    reland_task_id TEXT REFERENCES tasks(id),
+    created_by TEXT NOT NULL REFERENCES principals(id),
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX task_reverts_result ON task_reverts(result_id,created_at);
+CREATE INDEX task_reverts_original ON task_reverts(original_task_id,created_at);
+
+-- Mechanical revert candidates the integrator recorded, one per
+-- (revert, target tip t0 the candidate is based on); each is the revert's
+-- submission.
+CREATE TABLE revert_candidates (
+    revert_task_id TEXT NOT NULL REFERENCES task_reverts(task_id),
+    t0 TEXT NOT NULL,
+    submission_id TEXT NOT NULL UNIQUE REFERENCES submissions(id),
+    candidate_commit TEXT NOT NULL, candidate_tree TEXT NOT NULL,
+    attestation TEXT NOT NULL CHECK(attestation IN ('mechanical')),
+    recorded_by TEXT NOT NULL REFERENCES principals(id),
+    recorded_at INTEGER NOT NULL,
+    PRIMARY KEY(revert_task_id,t0)
+);
+
 -- An approval voided because its reviewer contributed to the landing range.
 ALTER TABLE review_decisions ADD COLUMN invalidated_at INTEGER;
 ALTER TABLE review_decisions ADD COLUMN invalidated_reason TEXT;

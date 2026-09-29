@@ -6,7 +6,11 @@
 //! `moved` elsewhere. The service cannot reach GitHub (p4-design §0), so it
 //! trusts that attestation and records it. A revise that arrives while push
 //! authority is outstanding is deferred: it applies if the push did not land
-//! and becomes a follow-up task if it did ("revise loses to a landed push").
+//! and becomes a follow-up task if it did ("revise loses to a landed push"),
+//! an urgent revert when the revise is an `author_withdraw` and the
+//! observation is `published`. Observations are never refused for reverted
+//! history; a no-op result over a reverted landing is refused when it is
+//! pinned instead.
 use crate::{
     auth::Auth,
     error::AppError,
@@ -30,8 +34,9 @@ use sqlx::{Row, SqliteConnection, sqlite::SqliteRow};
 
 type Reply = Result<Json<Value>, AppError>;
 
-/// Revise reasons the integrator itself may give.
-const INTEGRATOR_REASONS: &[&str] = &["conflict", "check_failed"];
+/// Revise reasons the integrator itself may give; `reverted_in_history`
+/// sends back a candidate that re-lands commits a revert undid.
+const INTEGRATOR_REASONS: &[&str] = &["conflict", "check_failed", "reverted_in_history"];
 /// Failed attempts of one roster check on R, its deciding one included,
 /// that make a failure reproduced.
 const REPRODUCED_FAILURES: i64 = 2;
@@ -248,13 +253,8 @@ async fn resolve_revise(
 
 /// Title, priority and description of the follow-up for a revise that lost.
 fn follow_up_fields(subject: &SqliteRow, request: &SqliteRow, r: &str) -> (String, i64, String) {
-    let title: String = subject.get("title");
-    let code: String = request.get("reason_code");
-    let (title, priority) = if code == "author_withdraw" {
-        (format!("Revert: {title}"), 0)
-    } else {
-        (format!("Follow up: {title}"), subject.get("priority"))
-    };
+    let title = format!("Follow up: {}", subject.get::<String, _>("title"));
+    let (code, priority): (String, i64) = (request.get("reason_code"), subject.get("priority"));
     let description = format!(
         "A {code} revise arrived while {r} was being pushed, and the push landed. Reason: {}\n\nEvidence: {}",
         request.get::<String, _>("reason"),
@@ -265,13 +265,20 @@ fn follow_up_fields(subject: &SqliteRow, request: &SqliteRow, r: &str) -> (Strin
     (title.chars().take(300).collect(), priority, description)
 }
 
-/// Creates the follow-up task for a revise that lost to a landed push.
+/// Creates the follow-up task for a revise that lost to a landed push. An
+/// `author_withdraw` follow-up of a `published` result is an urgent revert
+/// of it; a no-op (`already_contained`) landed nothing new to revert, so its
+/// follow-up stays an ordinary task.
 async fn create_follow_up(
     m: &mut Mutation,
     p: &str,
-    row: &SqliteRow,
+    (row, published): (&SqliteRow, bool),
     request: &SqliteRow,
 ) -> Result<String, AppError> {
+    if published && request.get::<String, _>("reason_code") == "author_withdraw" {
+        let result: String = row.get("id");
+        return crate::reverts::create_automatic(m, p, &result, request).await;
+    }
     let subject = sqlx::query("SELECT title,priority,kind FROM tasks WHERE id=?")
         .bind(row.get::<String, _>("task_id"))
         .fetch_one(&mut *m.tx)
@@ -307,14 +314,16 @@ async fn apply_revise(
     resolve_revise(m, &submission, "applied", None).await
 }
 
-/// Settles a deferred revise after the observation: a follow-up task when R
-/// landed, the revise itself when it did not. Returns what happened.
+/// Settles a deferred revise after an observation with `disposition`: a
+/// follow-up task when R is in the target (`published` or
+/// `already_contained`), the revise itself otherwise. Returns what happened.
 async fn settle_revise(
     m: &mut Mutation,
     p: &str,
     row: &SqliteRow,
-    landed: bool,
+    disposition: &str,
 ) -> Result<Value, AppError> {
+    let landed = matches!(disposition, "published" | "already_contained");
     let submission: String = row.get("submission_id");
     let Some(request) = pending_revise(&mut m.tx, &submission).await? else {
         return Ok(Value::Null);
@@ -323,13 +332,14 @@ async fn settle_revise(
         apply_revise(m, p, row, &request).await?;
         return Ok(json!({"resolution": "applied"}));
     }
-    let task = create_follow_up(m, p, row, &request).await?;
+    let published = disposition == "published";
+    let task = create_follow_up(m, p, (row, published), &request).await?;
     resolve_revise(m, &submission, "follow_up", Some(&task)).await?;
     Ok(json!({"resolution": "follow_up", "follow_up_task_id": task}))
 }
 
 /// Applies the state change a disposition implies and returns the revise
-/// outcome.
+/// outcome. A published `defect` revert also proposes its re-land task.
 async fn apply_disposition(
     m: &mut Mutation,
     p: &str,
@@ -340,10 +350,14 @@ async fn apply_disposition(
     match disposition {
         "published" | "already_contained" => {
             complete_subject(m, row).await?;
-            settle_revise(m, p, row, true).await
+            if disposition == "published" {
+                let task: String = row.get("task_id");
+                crate::integrator_reverts::propose_reland(m, p, &task).await?;
+            }
+            settle_revise(m, p, row, disposition).await
         }
         "published_after_reopen" => Ok(Value::Null),
-        _ => settle_revise(m, p, row, false).await,
+        _ => settle_revise(m, p, row, disposition).await,
     }
 }
 
@@ -375,7 +389,10 @@ async fn observe(
     ))
 }
 
-/// The integrator's own revise: a conflict or a reproduced check failure.
+/// The integrator's own revise: a conflict, a reproduced check failure, or
+/// `reverted_in_history` (a candidate whose commits a recorded revert undid,
+/// which the service verifies; its evidence names the intersecting commits,
+/// and like any non-`conflict` revise it never serializes).
 /// A `check_failed` names the result whose receipts reproduce the failure;
 /// a `conflict` may name the published result whose landing moved the
 /// target (`moved_by_result_id`), which lets a revise past the limit
@@ -404,7 +421,7 @@ impl IntegratorReviseInput {
         }
         if !INTEGRATOR_REASONS.contains(&self.reason_code.as_str()) {
             return Err(AppError::bad_request(
-                "The integrator revises only with reason_code conflict or check_failed.",
+                "The integrator revises only with reason_code conflict, check_failed or reverted_in_history.",
             ));
         }
         Ok(())
@@ -563,6 +580,10 @@ async fn revise(
     };
     let admission = ensure_revisable(&mut m.tx, &case, m.now).await?;
     ensure_reproduced(&mut m.tx, &p, &input).await?;
+    if input.reason_code == "reverted_in_history" {
+        crate::integrator_reverts::ensure_reverted_in_history(&mut m.tx, &p, &input.submission_id)
+            .await?;
+    }
     apply_integrator_revise(&mut m, &case, &admission).await?;
     let value = revise_value(&input, &task, &admission);
     Ok(response(

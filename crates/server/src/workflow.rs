@@ -625,9 +625,12 @@ async fn submit(
         .execute(&mut *mutation.tx)
         .await?;
 
-    let need_agent = matches!(subject.review_mode.as_str(), "agent" | "both");
-    let need_human = matches!(subject.review_mode.as_str(), "human" | "both");
-    let need_either = subject.review_mode == "either";
+    let review_mode =
+        crate::reverts::review_mode_floor(&mut mutation.tx, &subject.task_id, &subject.review_mode)
+            .await?;
+    let need_agent = matches!(review_mode.as_str(), "agent" | "both");
+    let need_human = matches!(review_mode.as_str(), "human" | "both");
+    let need_either = review_mode == "either";
     if amendment.is_some() && !(need_agent || need_human || need_either) {
         return Err(AppError::conflict(
             "amendment_review_required",
@@ -1213,8 +1216,9 @@ pub(crate) struct Supersede<'a> {
 
 /// Supersedes the current submission and sends its task back to revision:
 /// cancels its live activity attempts and queued activities, releases its
-/// integration hold and makes the task claimable again. Callers check
-/// authority and publication effects first.
+/// integration hold and makes the task claimable again (a mechanical revert
+/// waits for the integrator instead). Callers check authority and
+/// publication effects first.
 pub(crate) async fn supersede_submission(
     c: &mut SqliteConnection,
     r: &Supersede<'_>,
@@ -1248,7 +1252,7 @@ pub(crate) async fn supersede_submission(
         .bind(r.task)
         .execute(&mut *c)
         .await?;
-    Ok(())
+    crate::revert_rules::restore_awaiting(c, r.task).await
 }
 
 /// Defers an agent revise while the integrator holds push authority for the
@@ -2245,6 +2249,13 @@ async fn review(
             .bind(&ctx.subject_task)
             .execute(&mut *m.tx)
             .await?;
+        let rejection = crate::revert_rules::Rejection {
+            task: &ctx.subject_task,
+            activity: &ctx.id,
+            reviewer: &m.actor.id,
+            summary: &input.summary,
+        };
+        crate::revert_rules::reject_mechanical(&mut m.tx, &rejection, m.now).await?;
     } else if approvals_satisfied(&mut m.tx, &ctx.submission).await? {
         if let Some(criteria) = amendment {
             apply_amendment(
@@ -3387,7 +3398,9 @@ fn validate_acceptance(input: &SubmissionInput, acceptance_json: &str) -> Result
     Ok(())
 }
 
-fn validate_candidate_ref(value: &str) -> Result<(), AppError> {
+/// Refuses a candidate ref that is not a valid Git ref name under
+/// `refs/agent-coordinator/candidates/`.
+pub(crate) fn validate_candidate_ref(value: &str) -> Result<(), AppError> {
     let invalid = value.len() > 240
         || !value.starts_with("refs/agent-coordinator/candidates/")
         || value.is_empty()

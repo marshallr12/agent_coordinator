@@ -16,6 +16,12 @@ A task represents an outcome. Its kind is `code`, `general`, `objective`,
 general tasks. An objective groups required children. Review and integration
 tasks are linked workflow activities, created transactionally from a submission
 and the applicable project policy, with stable identities preventing duplicates.
+A revert is a `code` task that undoes one published integration result on an
+integrator-owned project; its task view carries a `revert` target and the
+original task's view names it in `reverted_by`. While the integrator computes
+its candidate nobody claims or unblocks it, and a review that requests
+changes on that candidate cancels the revert (see the API contract,
+"Reverts").
 
 Persist a task lifecycle of `planned`, `open`, `done`, `canceled`, or `superseded`.
 Expose a derived work status alongside it, so agents do not have to infer

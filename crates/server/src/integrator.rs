@@ -6,7 +6,8 @@
 //! only an integrator-class credential may call these routes (the reverse is
 //! enforced for writes in `Mutation::begin`). Push authority lives in
 //! `integrator_authority`, observations and revises in `integrator_observe`,
-//! reports in `integrator_reports`; on integrator projects the agent integration routes refuse with
+//! reports in `integrator_reports`, revert candidates in `integrator_reverts`;
+//! on integrator projects the agent integration routes refuse with
 //! `integration_owned_by_integrator`.
 use crate::{
     auth::{Actor, Auth},
@@ -229,15 +230,37 @@ async fn queue_targets(
     Ok(targets)
 }
 
+/// Adds to every item the landing ranges of the project's reverted results
+/// on the item's repository and target branch (`reverted`), so the
+/// integrator refuses a no-op that re-lands them.
+async fn with_reverted(
+    c: &mut SqliteConnection,
+    p: &str,
+    mut items: Vec<Value>,
+) -> Result<Vec<Value>, AppError> {
+    let reverted = crate::integrator_reverts::reverted_landings(c, p).await?;
+    for item in &mut items {
+        let same_target = |r: &&Value| {
+            r["repository_url"] == item["repository_url"]
+                && r["target_branch"] == item["target_branch"]
+        };
+        item["reverted"] = json!(reverted.iter().filter(same_target).collect::<Vec<_>>());
+    }
+    Ok(items)
+}
+
 /// `GET …/integrator/queue`: approved, pins-current subjects awaiting
-/// integration, and the targets the integrator watches even when no item is
-/// queued. Each call also records the integrator heartbeat.
+/// integration, reverts awaiting a mechanical candidate, and the targets the
+/// integrator watches even when nothing is queued. Each call also records the
+/// integrator heartbeat.
 async fn queue(State(s): State<AppState>, auth: Auth, Path(p): Path<String>) -> Reply {
     require_integrator(&auth.actor)?;
     let mut c = s.pool.acquire().await?;
     require_integrator_project(&mut c, &p).await?;
     heartbeat(&mut c, &p, s.now()).await?;
     let (items, skipped) = eligible_items(&mut c, &p).await?;
+    let items = with_reverted(&mut c, &p, items).await?;
+    let reverts = crate::integrator_reverts::pending_reverts(&mut c, &p).await?;
     let roster = current_roster(&mut c, &p).await?;
     let targets = queue_targets(&mut c, &p, &items).await?;
     Ok(response(json!({
@@ -245,6 +268,7 @@ async fn queue(State(s): State<AppState>, auth: Auth, Path(p): Path<String>) -> 
         "roster": roster,
         "targets": targets,
         "items": items,
+        "reverts": reverts,
         "skipped_ineligible": skipped,
         "retry_after_seconds": RETRY_AFTER_SECONDS,
     })))
@@ -376,6 +400,30 @@ fn replay_result(row: &SqliteRow, input: &ResultInput) -> Result<Value, AppError
     result_value(row)
 }
 
+/// Refuses a new no-op result (`r` equal to `t0`) whose candidate commits a
+/// recorded revert undid on the subject's repository and target branch
+/// (see [`crate::integrator_reverts::ensure_not_reverted_in_history`]).
+async fn ensure_new_commits(
+    c: &mut SqliteConnection,
+    p: &str,
+    subject: &SqliteRow,
+    input: &ResultInput,
+) -> Result<(), AppError> {
+    if input.r != input.t0 {
+        return Ok(());
+    }
+    let (repository_url, target_branch): (String, String) =
+        (subject.get("repository_url"), subject.get("target_branch"));
+    let mut commits = input.landing_range.clone();
+    commits.push(input.c.clone());
+    let noop = crate::integrator_reverts::NoOp {
+        repository_url: &repository_url,
+        target_branch: &target_branch,
+        commits,
+    };
+    crate::integrator_reverts::ensure_not_reverted_in_history(c, p, &noop).await
+}
+
 /// Stores the result unless an identical one is already pinned.
 async fn store_result(m: &mut Mutation, p: &str, input: &ResultInput) -> Result<Value, AppError> {
     let row = eligible_subject(&mut m.tx, p, &input.submission_id).await?;
@@ -388,6 +436,7 @@ async fn store_result(m: &mut Mutation, p: &str, input: &ResultInput) -> Result<
     if let Some(existing) = existing_result(&mut m.tx, input).await? {
         return replay_result(&existing, input);
     }
+    ensure_new_commits(&mut m.tx, p, &row, input).await?;
     let id = insert_result(m, p, input).await?;
     let row = sqlx::query("SELECT * FROM integrator_results WHERE id=?")
         .bind(&id)

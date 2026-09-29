@@ -136,19 +136,22 @@ pub(crate) fn reviews_satisfied(required: &[String], approvers: &[String]) -> bo
 }
 
 /// True when the submission's approvals satisfy its required reviews. Subjects still
-/// in review are judged against the current review mode; subjects past review keep
+/// in review are judged against the current review mode (raised to an agent review
+/// for a revert that needs review, see `reverts::review_mode_floor`); subjects past review keep
 /// the reviews that completed before they advanced, so a leftover review that was no
 /// longer required (and later released) never gates integration.
 pub(crate) async fn approvals_satisfied(
     c: &mut SqliteConnection,
     submission: &str,
 ) -> Result<bool, AppError> {
-    let row = sqlx::query("SELECT ws.phase,p.review_mode FROM submissions s JOIN projects p ON p.id=s.project_id LEFT JOIN workflow_subjects ws ON ws.current_submission_id=s.id WHERE s.id=?")
+    let row = sqlx::query("SELECT ws.phase,p.review_mode,s.task_id FROM submissions s JOIN projects p ON p.id=s.project_id LEFT JOIN workflow_subjects ws ON ws.current_submission_id=s.id WHERE s.id=?")
         .bind(submission)
         .fetch_one(&mut *c)
         .await?;
     let required = if row.get::<Option<String>, _>("phase").as_deref() == Some("review") {
-        required_review_kinds(&row.get::<String, _>("review_mode"))
+        let mode = row.get::<String, _>("review_mode");
+        let task = row.get::<String, _>("task_id");
+        required_review_kinds(&crate::reverts::review_mode_floor(c, &task, &mode).await?)
     } else {
         sqlx::query_scalar("SELECT kind FROM workflow_activities WHERE submission_id=? AND kind!='integration' AND state='completed'")
             .bind(submission)
@@ -173,7 +176,8 @@ pub(crate) struct Reconcile<'a> {
     pub now: i64,
 }
 
-/// Bring every subject in review up to the project's current review mode, so a
+/// Bring every subject in review up to the project's current review mode (with the
+/// revert floor of `reverts::review_mode_floor`), so a
 /// policy change never grandfathers a tightened `review_mode` and never strands a
 /// candidate: add missing review activities, cancel queued ones no longer required,
 /// and (when allowed) advance subjects whose approvals already satisfy the mode.
@@ -213,7 +217,9 @@ async fn reconcile_subject(
     s: &sqlx::sqlite::SqliteRow,
     r: &Reconcile<'_>,
 ) -> Result<(), AppError> {
-    let required = required_review_kinds(&s.get::<String, _>("review_mode"));
+    let (mode, task): (String, String) = (s.get("review_mode"), s.get("task_id"));
+    let required =
+        required_review_kinds(&crate::reverts::review_mode_floor(c, &task, &mode).await?);
     let submission: String = s.get("current_submission_id");
     let canceled = cancel_unrequired_reviews(c, &submission, &required, r.now).await?;
     let mut added = Vec::new();

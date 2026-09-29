@@ -13,6 +13,7 @@ pub mod integrator;
 pub mod integrator_authority;
 pub mod integrator_observe;
 pub mod integrator_reports;
+pub mod integrator_reverts;
 mod integrator_serialize;
 pub mod jobs;
 pub mod knowledge;
@@ -23,6 +24,8 @@ pub mod next;
 pub mod objectives;
 pub mod operator_access;
 pub mod restore;
+mod revert_rules;
+pub mod reverts;
 pub mod state;
 pub mod state_wait;
 pub mod workflow;
@@ -58,6 +61,8 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(integrator_authority::routes())
         .merge(integrator_observe::routes())
         .merge(integrator_reports::routes())
+        .merge(integrator_reverts::routes())
+        .merge(reverts::routes())
         .merge(jobs::routes())
         .merge(auth::routes())
         .merge(artifacts::routes())

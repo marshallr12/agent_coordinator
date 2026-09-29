@@ -4478,3 +4478,594 @@ async fn the_cap_parks_a_subject_whose_revises_were_serialized() {
     }
     assert_parked(&f, &p, &t).await;
 }
+
+/// A subject of an integrator project that the integrator published at T0
+/// (candidate `2222…`, landing range `[2222…]`): the project, the task, the
+/// published result id and the integrator's caller.
+async fn published_subject(f: &Fixture, name: &str) -> (String, Value, String, Caller) {
+    let (p, t, integration, i) = integrator_task(f, name).await;
+    let result = authorized(f, &i, &p, &integration["submission_id"], T0).await;
+    let (status, v) = observe(f, &i, &p, &result, R, "contained").await;
+    assert_eq!(v["data"]["disposition"], "published", "{status} {v}");
+    (p, t, result, i)
+}
+
+/// Posts `POST …/reverts` as `c`.
+async fn post_revert(f: &Fixture, c: &Caller, p: &str, body: Value) -> (StatusCode, Value) {
+    f.call(c, "POST", &format!("/api/v1/projects/{p}/reverts"), body)
+        .await
+}
+
+/// Reverts `result` as `c` with `reason` and `evidence`; returns the task.
+async fn reverted(
+    f: &Fixture,
+    c: &Caller,
+    p: &str,
+    result: &str,
+    (reason, evidence): (&str, Value),
+) -> Value {
+    let body = json!({"result_id":result,"reason":reason,"evidence":evidence});
+    let (status, v) = post_revert(f, c, p, body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"].clone()
+}
+
+/// The integrator queue of `p` as `i` sees it.
+async fn integrator_queue(f: &Fixture, i: &Caller, p: &str) -> Value {
+    let path = format!("/api/v1/projects/{p}/integrator/queue");
+    let (status, v) = f.call(i, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"].clone()
+}
+
+/// A mechanical candidate body computed on `t0` with commit `commit`.
+fn candidate_body(t0: &str, commit: &str) -> Value {
+    json!({"t0":t0,"candidate_commit":commit,"candidate_tree":"8888888888888888888888888888888888888888","mechanical":true,"candidate_ref":format!("refs/agent-coordinator/candidates/revert-{commit}")})
+}
+
+/// Posts the mechanical candidate of revert task `revert` as `c`.
+async fn revert_candidate(
+    f: &Fixture,
+    c: &Caller,
+    p: &str,
+    revert: &Value,
+    body: Value,
+) -> (StatusCode, Value) {
+    let route = format!("reverts/{}/candidate", revert["id"].as_str().unwrap());
+    integrator_post(f, c, p, &route, body).await
+}
+
+/// The number of `kind` events recorded for `record`.
+async fn events_of(f: &Fixture, kind: &str, record: &Value) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM events WHERE kind=? AND record_id=?")
+        .bind(kind)
+        .bind(record.as_str().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap()
+}
+
+/// The status and error code of a refused call.
+fn refusal(status: StatusCode, v: &Value) -> (StatusCode, Value) {
+    (status, v["error"]["code"].clone())
+}
+
+// P4 S4e (M6): a human's one-click revert needs no review, is recorded as an
+// escaped-defect canary, is listed for the integrator, and its mechanical
+// candidate goes straight to integration; the original shows reverted_by.
+#[tokio::test]
+async fn a_human_revert_needs_no_review_and_counts_as_a_canary() {
+    let f = Fixture::new().await;
+    let (p, t, result, i) = published_subject(&f, "revert-human").await;
+    let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    assert_eq!(revert["revert"]["review_required"], false, "{revert}");
+    assert_eq!(revert["work_status"], "blocked", "{revert}");
+    let canaries = events_of(&f, "revert.escaped_defect_canary", &revert["id"]).await;
+    assert_eq!(canaries, 1);
+    let queue = integrator_queue(&f, &i, &p).await;
+    assert_eq!(queue["reverts"][0]["task_id"], revert["id"], "{queue}");
+    assert_eq!(queue["reverts"][0]["target"]["r"], R, "{queue}");
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["phase"], "integration", "{v}");
+    assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], revert["id"]);
+}
+
+// P4 S4e (M6): an agent reverts only with a reason other than human and
+// non-empty evidence, and its candidate needs a review even though the
+// project's review mode is none.
+#[tokio::test]
+async fn an_agent_revert_needs_evidence_and_review() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-agent").await;
+    let body = json!({"result_id":result,"reason":"human"});
+    let (status, v) = post_revert(&f, &f.b, &p, body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(
+        v["error"]["details"]["gate"], "revert_without_evidence",
+        "{v}"
+    );
+    let body = json!({"result_id":result,"reason":"defect","evidence":""});
+    let (status, v) = post_revert(&f, &f.b, &p, body).await;
+    let expected = (StatusCode::BAD_REQUEST, json!("revert_evidence_required"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let evidence = json!({"check":"workspace-tests","first_parent":"pass","tip":"fail"});
+    let revert = reverted(&f, &f.b, &p, &result, ("defect", evidence)).await;
+    assert_eq!(revert["revert"]["review_required"], true, "{revert}");
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["phase"], "review", "{v}");
+    assert_eq!(
+        activity(&v["data"], "agent_review")["status"],
+        "queued",
+        "{v}"
+    );
+}
+
+// P4 S4e (M6): one open revert per result; a result with no published
+// observation, or of another project, cannot be reverted.
+#[tokio::test]
+async fn a_second_revert_and_unpublished_or_foreign_results_are_refused() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-duplicate").await;
+    reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let body = json!({"result_id":result,"reason":"human"});
+    let (status, v) = post_revert(&f, &f.admin, &p, body.clone()).await;
+    let expected = (StatusCode::CONFLICT, json!("revert_exists"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let (q, _, integration) = integrating_code_task(&f, "revert-unpublished").await;
+    let (status, v) = set_integration_owner(&f, &f.admin, &q, "integrator").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = post_revert(&f, &f.admin, &q, body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    let pinned = pinned_result(&f, &i, &q, &integration["submission_id"], T0).await;
+    let body = json!({"result_id":pinned,"reason":"human"});
+    let (status, v) = post_revert(&f, &f.admin, &q, body).await;
+    let expected = (StatusCode::CONFLICT, json!("result_not_published"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+}
+
+// P4 S4e (M6): only the integrator records a revert's candidate; the same
+// candidate for the same tip replays, a different one conflicts, and a
+// revert with a candidate leaves the queue's reverts.
+#[tokio::test]
+async fn revert_candidates_are_integrator_only_and_idempotent_per_tip() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-candidate").await;
+    let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (status, v) = revert_candidate(&f, &f.a, &p, &revert, body.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    let (_, first) = revert_candidate(&f, &i, &p, &revert, body.clone()).await;
+    let (status, again) = revert_candidate(&f, &i, &p, &revert, body).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    let id = &first["data"]["candidate_submission_id"];
+    assert!(id.is_string(), "{first}");
+    assert_eq!(id, &again["data"]["candidate_submission_id"]);
+    let other = candidate_body(R, &candidate(0xbeef));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, other).await;
+    let expected = (StatusCode::CONFLICT, json!("revert_candidate_conflict"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
+}
+
+/// Claims, checks out and submits converted revert `t` of the fixture
+/// project `revert-not-mechanical` as `f.a`, with one evidence entry per
+/// current acceptance criterion; returns the workflow snapshot.
+async fn submit_revert_work(f: &Fixture, p: &str, t: &Value) -> Value {
+    let t = fresh_task(f, p, t).await;
+    let owner = f.claim(&f.a, p, &t, 3).await;
+    f.checkout(&f.a, p, &owner, BASE).await;
+    let repo = "https://example.test/revert-not-mechanical.git";
+    let evidence: Vec<Value> = t["acceptance_criteria"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| json!({"criterion":c,"evidence":"verified in workflow test"}))
+        .collect();
+    let path = format!(
+        "/api/v1/projects/{p}/attempts/{}/submissions",
+        owner["id"].as_str().unwrap()
+    );
+    let (status, v) = f.call(&f.a, "POST", &path, json!({"generation":owner["generation"],"task_revision":t["revision"],"project_policy_revision":3,"workflow_policy_revision":1,"kind":"code","summary":"undone by hand","acceptance_evidence":evidence,"handoff":"","repository":repo,"base_revision":BASE,"candidate_revision":candidate(0xcafe),"candidate_tree":R,"candidate_remote":repo,"candidate_ref":"refs/agent-coordinator/candidates/undo"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"].clone()
+}
+
+// P4 S4e (M6): a revert the integrator cannot compute mechanically becomes
+// claimable implementation work that needs review, and leaves the queue.
+#[tokio::test]
+async fn a_revert_that_is_not_mechanical_becomes_reviewed_implementation_work() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-not-mechanical").await;
+    let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let route = format!("reverts/{}/not-mechanical", revert["id"].as_str().unwrap());
+    let body = json!({"t0":R,"reason":"conflict","evidence":"CONFLICT (content): src/lib.rs"});
+    let (status, v) = integrator_post(&f, &i, &p, &route, body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["revert"]["mode"], "not_mechanical", "{v}");
+    assert_eq!(v["data"]["revert"]["review_required"], true, "{v}");
+    assert_eq!(fresh_task(&f, &p, &revert).await["eligible_to_claim"], true);
+    assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    let expected = (StatusCode::CONFLICT, json!("revert_not_mechanical"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let submitted = submit_revert_work(&f, &p, &revert).await;
+    assert_eq!(submitted["phase"], "review", "{submitted}");
+    assert_eq!(activity(&submitted, "agent_review")["status"], "queued");
+}
+
+// P4 S4e (M6, plan-final §2.4): an author_withdraw revise that loses to a
+// landed push yields an urgent, reviewed revert of the landed result.
+#[tokio::test]
+async fn an_author_withdraw_that_loses_to_a_push_yields_an_urgent_revert() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "revert-withdraw").await;
+    let submission = &integration["submission_id"];
+    let result = authorized(&f, &i, &p, submission, T0).await;
+    f.ack(&f.a, &p, 3).await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    );
+    let body = revise_body(submission, "author_withdraw", Some("wrong approach"));
+    let (status, v) = f.call(&f.a, "POST", &path, body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["revise_deferred"], true, "{v}");
+    let (_, v) = observe(&f, &i, &p, &result, R, "contained").await;
+    let revert = json!({"id": v["data"]["revise"]["follow_up_task_id"]});
+    let view = fresh_task(&f, &p, &revert).await;
+    assert_eq!(view["priority"], 0, "{view}");
+    assert_eq!(view["revert"]["reason"], "author_withdraw", "{view}");
+    assert_eq!(view["revert"]["review_required"], true, "{view}");
+    assert_eq!(
+        view["revert"]["evidence"]["evidence"], "wrong approach",
+        "{view}"
+    );
+    assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], view["id"]);
+}
+
+/// Posts a no-op result (`r == t0`) of `submission` with candidate `c`.
+async fn no_op_result(
+    f: &Fixture,
+    i: &Caller,
+    p: &str,
+    submission: &Value,
+    c: &str,
+) -> (StatusCode, Value) {
+    let mut body = result_body(submission.as_str().unwrap(), T0, T0);
+    (body["c"], body["landing_range"]) = (json!(c), json!([c]));
+    integrator_post(f, i, p, "results", body).await
+}
+
+/// The candidate commit of the fixture subject `published_subject` lands.
+const LANDED: &str = "2222222222222222222222222222222222222222";
+
+// P4 S4e (plan-final §2.4 no-op): the queue lists reverted landing ranges,
+// and pinning a no-op result whose candidate a recorded revert undid is
+// refused with the shared commits; a no-op of new commits and a result
+// that is not a no-op are still pinned.
+#[tokio::test]
+async fn a_no_op_over_a_reverted_landing_is_refused() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-history").await;
+    reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let (_, submission) = new_subject(&f, &p, LANDED).await;
+    let queue = integrator_queue(&f, &i, &p).await;
+    let items = queue["items"].as_array().unwrap();
+    let item = items
+        .iter()
+        .find(|v| v["submission_id"] == submission)
+        .unwrap();
+    assert_eq!(item["reverted"][0]["result_id"], json!(result), "{item}");
+    let (status, v) = no_op_result(&f, &i, &p, &submission, LANDED).await;
+    let expected = (StatusCode::CONFLICT, json!("candidate_reverted_in_history"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    assert_eq!(v["error"]["details"]["commits"], json!([LANDED]), "{v}");
+    result_of(&f, &i, &p, &submission, LANDED).await;
+    let fresh = candidate(0x77);
+    let (_, submission) = new_subject(&f, &p, &fresh).await;
+    let (status, v) = no_op_result(&f, &i, &p, &submission, &fresh).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let noop = v["data"]["id"].as_str().unwrap();
+    let (status, v) = observe(&f, &i, &p, noop, R, "contained").await;
+    assert_eq!(
+        v["data"]["disposition"], "already_contained",
+        "{status} {v}"
+    );
+}
+
+// P4 S4e: reverted history is scoped to the repository and target branch
+// the reverted result landed on.
+#[tokio::test]
+async fn reverted_history_is_scoped_to_its_target_branch() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-history-scope").await;
+    reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    sqlx::query("UPDATE submissions SET target_branch='release' WHERE id=(SELECT submission_id FROM integrator_results WHERE id=?)")
+        .bind(&result).execute(&f.state.pool).await.unwrap();
+    let (_, submission) = new_subject(&f, &p, LANDED).await;
+    let queue = integrator_queue(&f, &i, &p).await;
+    let items = queue["items"].as_array().unwrap();
+    let item = items
+        .iter()
+        .find(|v| v["submission_id"] == submission)
+        .unwrap();
+    assert_eq!(item["reverted"], json!([]), "{item}");
+    let (status, v) = no_op_result(&f, &i, &p, &submission, LANDED).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+// P4 S4e: the integrator sends a candidate reverted in history back to its
+// author with the reverted_in_history revise, which needs evidence and is
+// refused for a candidate that no revert touched.
+#[tokio::test]
+async fn a_candidate_reverted_in_history_is_revised_back_to_its_author() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-history-revise").await;
+    reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let (t, submission) = new_subject(&f, &p, LANDED).await;
+    let body =
+        json!({"submission_id":submission,"reason_code":"reverted_in_history","evidence":""});
+    let (status, v) = integrator_post(&f, &i, &p, "revise", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let fresh = candidate(0x99);
+    let (_, other) = new_subject(&f, &p, &fresh).await;
+    let body = json!({"submission_id":other,"reason_code":"reverted_in_history","evidence":fresh});
+    let (status, v) = integrator_post(&f, &i, &p, "revise", body).await;
+    let expected = (StatusCode::CONFLICT, json!("not_reverted_in_history"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let body =
+        json!({"submission_id":submission,"reason_code":"reverted_in_history","evidence":LANDED});
+    let (status, v) = integrator_post(&f, &i, &p, "revise", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["serialized_after"], Value::Null, "{v}");
+    assert_eq!(subject_state(&f, &t).await.0, "revision_needed");
+}
+
+/// Approves the queued agent review of snapshot `v` as `f.c`.
+async fn approve_review(f: &Fixture, p: &str, v: &Value) {
+    let review = activity(v, "agent_review").clone();
+    let (status, claimed) = f.claim_activity(&f.c, p, &review, 3, 1).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let path = activity_path(p, &review, "review");
+    let (status, v) = f.call(&f.c, "POST", &path, json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"the evidence shows the defect","findings":[]})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+/// Pins, checks, authorizes and observes as published the revert's
+/// candidate submission (commit `commit`).
+async fn publish_revert(f: &Fixture, i: &Caller, p: &str, submission: &Value, commit: &str) {
+    let mut body = result_body(submission.as_str().unwrap(), T0, R);
+    (body["c"], body["landing_range"]) = (json!(commit), json!([commit]));
+    let (status, v) = integrator_post(f, i, p, "results", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let result = v["data"]["id"].as_str().unwrap().to_owned();
+    receipt(f, i, p, &result, 901, "success").await;
+    let (status, v) = authority(f, i, p, &result).await;
+    assert_eq!(v["data"]["granted"], true, "{status} {v}");
+    let (status, v) = observe(f, i, p, &result, R, "contained").await;
+    assert_eq!(v["data"]["disposition"], "published", "{status} {v}");
+}
+
+// P4 S4e (M6): a published defect revert proposes a planned re-land task
+// seeded with the original and the revert evidence; the original stays done
+// and names its revert.
+#[tokio::test]
+async fn a_published_defect_revert_proposes_a_reland() {
+    let f = Fixture::new().await;
+    let (p, t, result, i) = published_subject(&f, "revert-reland").await;
+    let evidence = json!("workspace-tests fails on the tip and passes on the first parent");
+    let revert = reverted(&f, &f.b, &p, &result, ("defect", evidence)).await;
+    let commit = candidate(0xfeed);
+    let body = candidate_body(R, &commit);
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    approve_review(&f, &p, &v["data"]).await;
+    let submission = &v["data"]["candidate_submission_id"];
+    publish_revert(&f, &i, &p, submission, &commit).await;
+    let view = fresh_task(&f, &p, &revert).await;
+    assert_eq!(view["lifecycle"], "done", "{view}");
+    let reland = json!({"id": view["revert"]["reland_task_id"]});
+    let reland = fresh_task(&f, &p, &reland).await;
+    assert_eq!(reland["lifecycle"], "planned", "{reland}");
+    let criteria = reland["acceptance_criteria"].as_array().unwrap();
+    let last = criteria.last().unwrap().as_str().unwrap();
+    assert!(last.contains("passes on the first parent"), "{reland}");
+    let original = fresh_task(&f, &p, &t).await;
+    assert_eq!(original["lifecycle"], "done", "{original}");
+    assert_eq!(original["reverted_by"], revert["id"], "{original}");
+}
+
+/// Claims the queued agent review of snapshot `v` as `c`.
+async fn claim_revert_review(f: &Fixture, c: &Caller, p: &str, v: &Value) -> (StatusCode, Value) {
+    let review = activity(v, "agent_review").clone();
+    f.claim_activity(c, p, &review, 3, 1).await
+}
+
+/// The author's `author_withdraw` that lost to the push of the fixture
+/// subject: the project, the automatic revert id and the integrator.
+async fn withdrawn_landing(f: &Fixture, name: &str) -> (String, Value, Caller) {
+    let (p, t, integration, i) = integrator_task(f, name).await;
+    let submission = &integration["submission_id"];
+    let result = authorized(f, &i, &p, submission, T0).await;
+    f.ack(&f.a, &p, 3).await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    );
+    let body = revise_body(submission, "author_withdraw", Some("wrong approach"));
+    let (status, v) = f.call(&f.a, "POST", &path, body).await;
+    assert_eq!(v["data"]["revise_deferred"], true, "{status} {v}");
+    let (_, v) = observe(f, &i, &p, &result, R, "contained").await;
+    (
+        p,
+        json!({"id": v["data"]["revise"]["follow_up_task_id"]}),
+        i,
+    )
+}
+
+// P4 S4e (red team B1): the agent that decided a revert, the reverted
+// task's author, and the author whose withdraw lost to the push are
+// contributors and cannot review it.
+#[tokio::test]
+async fn a_revert_creator_cannot_review_it() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-creator").await;
+    let revert = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (_, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    let (status, claimed) = claim_revert_review(&f, &f.b, &p, &v["data"]).await;
+    let expected = (StatusCode::CONFLICT, json!("reviewer_not_independent"));
+    assert_eq!(refusal(status, &claimed), expected, "{claimed}");
+    let (status, claimed) = claim_revert_review(&f, &f.a, &p, &v["data"]).await;
+    assert_eq!(refusal(status, &claimed), expected, "{claimed}");
+
+    let f = Fixture::new().await;
+    let (p, revert, i) = withdrawn_landing(&f, "revert-requester").await;
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (_, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    let (status, claimed) = claim_revert_review(&f, &f.a, &p, &v["data"]).await;
+    assert_eq!(refusal(status, &claimed), expected, "{claimed}");
+}
+
+// P4 S4e (red team B2): a deferred author_withdraw whose no-op result is
+// observed contained completes as already_contained with an ordinary
+// follow-up; nothing new landed, so nothing is reverted.
+#[tokio::test]
+async fn a_withdraw_before_a_no_op_keeps_an_ordinary_follow_up() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "revert-withdraw-noop").await;
+    let submission = &integration["submission_id"];
+    let (status, v) = integrator_post(
+        &f,
+        &i,
+        &p,
+        "results",
+        result_body(submission.as_str().unwrap(), R, R),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let result = v["data"]["id"].as_str().unwrap().to_owned();
+    receipt(&f, &i, &p, &result, 900, "success").await;
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(v["data"]["granted"], true, "{status} {v}");
+    f.ack(&f.a, &p, 3).await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    );
+    let body = revise_body(submission, "author_withdraw", Some("wrong approach"));
+    let (_, v) = f.call(&f.a, "POST", &path, body).await;
+    assert_eq!(v["data"]["revise_deferred"], true, "{v}");
+    let (status, v) = observe(&f, &i, &p, &result, R, "contained").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["disposition"], "already_contained", "{v}");
+    let follow_up = json!({"id": v["data"]["revise"]["follow_up_task_id"]});
+    let view = fresh_task(&f, &p, &follow_up).await;
+    assert_eq!(view["revert"], Value::Null, "{view}");
+}
+
+// P4 S4e (red team S2, A2): the reviewer sees the integrator's attestation;
+// a review that requests changes rejects the decision to revert, which
+// cancels the revert, clears reverted_by and leaves the queue.
+#[tokio::test]
+async fn a_rejected_revert_review_cancels_the_revert() {
+    let f = Fixture::new().await;
+    let (p, t, result, i) = published_subject(&f, "revert-rejected").await;
+    let revert = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+    let commit = candidate(0xfeed);
+    let (_, v) = revert_candidate(&f, &i, &p, &revert, candidate_body(R, &commit)).await;
+    let view = fresh_task(&f, &p, &revert).await;
+    assert_eq!(
+        view["revert"]["candidates"][0]["candidate_commit"],
+        json!(commit),
+        "{view}"
+    );
+    assert_eq!(
+        view["revert"]["candidates"][0]["attestation"], "mechanical",
+        "{view}"
+    );
+    let review = activity(&v["data"], "agent_review").clone();
+    let (status, claimed) = claim_revert_review(&f, &f.c, &p, &v["data"]).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let path = activity_path(&p, &review, "review");
+    let (status, decided) = f.call(&f.c, "POST", &path, json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"changes_requested","summary":"the evidence does not show a defect","findings":[]})).await;
+    assert_eq!(status, StatusCode::OK, "{decided}");
+    let view = fresh_task(&f, &p, &revert).await;
+    assert_eq!(view["lifecycle"], "canceled", "{view}");
+    assert_eq!(
+        view["revert"]["rejection"]["summary"],
+        "the evidence does not show a defect"
+    );
+    assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], Value::Null);
+    assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, candidate_body(R, &commit)).await;
+    let expected = (StatusCode::CONFLICT, json!("revert_not_open"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+}
+
+// P4 S4e (red team A1): nobody claims or unblocks a mechanical revert, and
+// a revise of its candidate blocks it again for the integrator.
+#[tokio::test]
+async fn a_mechanical_revert_cannot_be_claimed_or_unblocked() {
+    let f = Fixture::new().await;
+    let (p, _, result, i) = published_subject(&f, "revert-mechanical").await;
+    let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/unblock",
+        revert["id"].as_str().unwrap()
+    );
+    let body = json!({"expected_revision":revert["revision"],"reason":"claim it by hand"});
+    let (status, v) = f.call(&f.b, "POST", &path, body).await;
+    let expected = (StatusCode::CONFLICT, json!("revert_awaits_integrator"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    f.ack(&f.b, &p, 3).await;
+    let claim = json!({"task_id":revert["id"],"expected_task_revision":revert["revision"],"mode":"work","policy_revision":3,"instruction_version":coordinator_core::INSTRUCTION_VERSION});
+    let (status, v) = f
+        .call(&f.b, "POST", &format!("/api/v1/projects/{p}/claims"), claim)
+        .await;
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let (_, v) = revert_candidate(&f, &i, &p, &revert, candidate_body(R, &candidate(0xfeed))).await;
+    let submission = &v["data"]["candidate_submission_id"];
+    let (status, v) = conflict_revise(&f, &i, &p, submission, None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(fresh_task(&f, &p, &revert).await["work_status"], "blocked");
+    assert_eq!(
+        integrator_queue(&f, &i, &p).await["reverts"][0]["id"],
+        revert["id"]
+    );
+}
+
+// P4 S4e (red-team probe D): a deferred author_withdraw on a no-op result
+// (r == t0) that holds push authority is observed contained at T0 as
+// already_contained.
+#[tokio::test]
+async fn a_deferred_withdraw_on_a_no_op_result_is_observed_as_already_contained() {
+    let f = Fixture::new().await;
+    let (p, t, integration, i) = integrator_task(&f, "revert-probe-noop-withdraw").await;
+    let submission = &integration["submission_id"];
+    let body = result_body(submission.as_str().unwrap(), T0, T0);
+    let (status, v) = integrator_post(&f, &i, &p, "results", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let noop = v["data"]["id"].as_str().unwrap().to_owned();
+    let body = json!({"result_id":noop,"check_name":CHECK,"run_id":960,"run_attempt":1,"head_sha":T0,"app_id":15368,"workflow_path":".github/workflows/checks.yml","workflow_blob":BLOB,"conclusion":"success"});
+    let (status, v) = integrator_post(&f, &i, &p, "receipts", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = authority(&f, &i, &p, &noop).await;
+    assert_eq!(v["data"]["granted"], true, "{status} {v}");
+    f.ack(&f.a, &p, 3).await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/workflow/reopen",
+        t["id"].as_str().unwrap()
+    );
+    let body = revise_body(submission, "author_withdraw", Some("wrong"));
+    let (status, v) = f.call(&f.a, "POST", &path, body).await;
+    assert_eq!(v["data"]["revise_deferred"], true, "{status} {v}");
+    let (status, v) = observe(&f, &i, &p, &noop, T0, "contained").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["disposition"], "already_contained", "{v}");
+}

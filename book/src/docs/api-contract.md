@@ -230,7 +230,16 @@ reports and only a human resolves one.
   distinct `{repository_url, target_branch}` pairs the project integrates
   into: the project's configured repository and branch first, then any other
   pair a listed item's submission pinned. The integrator watches every target
-  each cycle, with or without queued items. Each call records the
+  each cycle, with or without queued items. Each item also carries `reverted`:
+  `{revert_task_id, result_id, repository_url, target_branch, landing_range}`
+  for every result of the project on the item's repository and target branch
+  that a revert task (not canceled) targets, so the integrator can refuse a
+  no-op (`r` equal to `t0`) whose candidate commits intersect a reverted
+  landing. The response adds `reverts`, the revert tasks awaiting a mechanical
+  candidate (see Reverts below): `{id, task_id, result_id, r, title, priority,
+  repository_url, target_branch, target}`, where `id` is the revert task id
+  and `target` is `{submission_id, result_id, original_task_id, r, t0, c,
+  landing_range, reason, evidence}`. Each call records the
   integrator heartbeat. Projects still owned by agents answer
   `integration_owned_by_agents`.
 - `POST /api/v1/projects/{project_id}/integrator/results` pins one integration
@@ -238,7 +247,12 @@ reports and only a human resolves one.
   landing range and the roster read from `t0`) per submission and `t0`. Sending
   the same result again returns the stored one; a different `r` for the same pair
   is `result_conflict`, and a `c` that is not the submission's candidate is
-  `candidate_changed`. The roster is
+  `candidate_changed`. A new no-op result (`r` equal to `t0`) whose `c` or
+  landing range shares a commit with the landing range, on the same
+  repository and target branch, of a result a revert task (not canceled)
+  targets is refused with `candidate_reverted_in_history`
+  (`details.reverted_results` and the shared `details.commits`): re-land
+  candidates must be new commits. Results that are not no-ops are unaffected. The roster is
   `{"required_checks":[{"identity","check_name","workflow_path","workflow_blob"}]}`.
 - `POST /api/v1/projects/{project_id}/integrator/receipts` records one GitHub
   Actions check run observed on `r` (`head_sha` must equal `r`, otherwise
@@ -267,14 +281,23 @@ reports and only a human resolves one.
   target; the service cannot reach the Git host, so it trusts this attestation.
   `contained` (r is in the tip) completes the subject and its integration and
   readies dependents (`published`, or `already_contained` when `r` equals `t0`;
-  `published_after_reopen` if a human reopened the submission meanwhile);
+  `published_after_reopen` if a human reopened the submission meanwhile); a
+  published revert whose reason is `defect` also proposes its re-land task;
   `equal_t0` (`not_published`) and `moved` (`target_moved`, compute a new result
   on the new tip) end the authority and release the hold. Never infer publication
   from a push exit code.
 - `POST /api/v1/projects/{project_id}/integrator/revise` with
   `{submission_id, reason_code, evidence, result_id?, moved_by_result_id?}`
-  sends a candidate back to its author; only `conflict` and `check_failed` are
-  accepted, never while push authority is outstanding (`observation_required`).
+  sends a candidate back to its author; only `conflict`, `check_failed` and
+  `reverted_in_history` are accepted, never while push authority is
+  outstanding (`observation_required`). `reverted_in_history` sends back a
+  candidate whose no-op result `results` refuses with `candidate_reverted_in_history`;
+  its `evidence` names the shared commits. The service verifies it: the
+  submission's candidate commit, or the landing range of a result recorded
+  for it, must share a commit with the landing range, on the same repository
+  and target branch, of a result a revert task (not canceled) targets,
+  otherwise `not_reverted_in_history`. It counts toward the limits below
+  like any integrator revise and never serializes.
   A `conflict` revise may name in `moved_by_result_id` the result whose landing
   moved the target: the newest result the integrator published on that target
   since the candidate's reviewed base. The service resolves it to that
@@ -397,9 +420,89 @@ finalize, both publication reconciliations) refuse with
 `integration_owned_by_integrator` (`details.required_actor` is `integrator`). An
 agent revise that arrives while push authority is outstanding is recorded and
 answered with `revise_deferred: true`: it applies if the push does not land, and
-becomes a follow-up task (for `author_withdraw`, an urgent `Revert:` task) if it
-does. A human reopen always applies immediately. Until a project is switched,
+becomes a follow-up task if it does; for `author_withdraw` the follow-up is a
+revert task (priority 0, reason `author_withdraw`, the withdraw request as its
+evidence, review required), or the open revert of that result when one exists.
+Only a `published` observation creates that revert; after `already_contained`
+nothing new landed, and the follow-up is an ordinary task.
+A human reopen always applies immediately. Until a project is switched,
 nothing in the agent integration path changes.
+
+### Reverts
+
+A revert task undoes one published integration result R. It is an ordinary
+`code` task whose task view carries `revert`: `{result_id, submission_id,
+original_task_id, r, reason, evidence, review_required, mode, not_mechanical,
+rejection, reland_task_id, created_by, created_at, candidates}` (null on other
+tasks). `candidates` lists the integrator's attested candidates `{t0,
+submission_id, candidate_commit, candidate_tree, attestation, attested_by,
+attested_at}`, so reviewers see what they judge. Every task
+view also carries `reverted_by`, the id of the newest revert of that task
+that is not canceled (or null); the original task stays `done`. No admission
+limit applies to reverts.
+
+- `POST /api/v1/projects/{project_id}/reverts` with `{result_id, reason,
+  evidence?, note?, priority?}` creates a revert on an integrator-owned
+  project. `reason` is `defect`, `author_withdraw`, `audit_rejection` or
+  `human`; `priority` defaults to 1. `result_id` must name a result of this
+  project (otherwise not found) with a `published` observation whose task is
+  `done` (otherwise `result_not_published`). A second revert of a result
+  whose revert task is still planned or open is `revert_exists`
+  (`details.revert_task_id`); reverting a revert's own result is allowed. A
+  human's revert needs no review and records a `revert.escaped_defect_canary`
+  event. An agent's revert needs a reason other than `human` (otherwise the
+  `revert_without_evidence` human gate) and non-empty `evidence`, text or
+  JSON (otherwise `revert_evidence_required`); its candidate needs the
+  project's reviews and at least an agent review even when `review_mode` is
+  `none`. That review judges the decision to revert and its evidence, not the
+  inverse diff. The creator (for an automatic revert, the author whose
+  withdraw lost to the push) and every contributor of the reverted task are
+  recorded as contributors to the revert, so none of them can review it
+  (`reviewer_not_independent`).
+- While `mode` is `mechanical` only the integrator produces the candidate:
+  claiming or unblocking the task is refused with `revert_awaits_integrator`,
+  it is skipped by next-eligible claims, and a revise of its candidate blocks
+  it again and returns it to the queue's `reverts`. Apart from the
+  integrator's candidate or not-mechanical report, its only exit is a human
+  canceling the task. The revert task stays
+  blocked while it waits for its candidate and is listed under the queue's
+  `reverts`. The integrator computes the candidate
+  itself: `git revert -m 1 R` on the current tip, or the landed range when R
+  landed fast-forward.
+- `POST /api/v1/projects/{project_id}/integrator/reverts/{task_id}/candidate`
+  with `{t0, candidate_commit, candidate_tree, mechanical: true,
+  candidate_ref?}` records that candidate as the revert's code submission,
+  created by the integrator with the attestation `mechanical` and based on
+  `t0`. The submission enters review (an agent's revert) or integration (a
+  human's) and then follows the integrator path above. Sending the same
+  commit and tree for the same `t0` again returns the same submission
+  (`candidate_submission_id`) while that submission is still the revert's
+  candidate in review or integration; a different candidate for that `t0`,
+  or any candidate for a `t0` whose earlier candidate is superseded, is
+  `revert_candidate_conflict`. Other refusals: `revert_not_mechanical`,
+  `revert_not_open`, `revert_claimed`, `revert_candidate_exists` (a candidate
+  is already in review or integration) and `workflow_policy_required`.
+- `POST /api/v1/projects/{project_id}/integrator/reverts/{task_id}/not-mechanical`
+  with `{t0, reason, evidence}` (`reason` is `conflict` or `check_failed`)
+  reports that the revert cannot be computed mechanically. The service
+  supersedes any candidate still in review or integration (refused with
+  `observation_required` while its push authority is outstanding) and turns
+  the revert into ordinary implementation work: undo the original's
+  behaviour while keeping the changes integrated after it, with review
+  required. The same `t0` and `reason` again replay; anything else is
+  `revert_not_mechanical`. A capped cascade of further reverts is future
+  work.
+- A review that requests changes on a mechanical revert's candidate rejects
+  the decision to revert: the revert task is canceled, its `rejection`
+  records the review (`activity_id`, `reviewer_id`, `summary`,
+  `rejected_at`), it leaves the queue and the original's `reverted_by` no
+  longer names it. A human may create a new revert. A revert converted to
+  implementation work is revised like any code change instead.
+- When a revert whose reason is `defect` is observed `published`, the
+  service creates a planned (not yet admitted) re-land task seeded with the
+  original's description, its candidate reference and its acceptance
+  criteria, plus the revert evidence as one more criterion; the revert's
+  `reland_task_id` names it.
 
 ## Attempt operations
 

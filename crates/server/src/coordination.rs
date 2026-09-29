@@ -1230,6 +1230,7 @@ async fn unblock_task(
     }
     let t = task(&mut m.tx, &p, &id, m.now).await?;
     crate::workflow::guard_subject_mutation(&mut m.tx, &p, &id).await?;
+    crate::revert_rules::ensure_not_mechanical(&mut m.tx, &id).await?;
     if t.revision != input.expected_revision {
         return Err(AppError::conflict(
             "revision_conflict",
@@ -1364,6 +1365,8 @@ async fn task_detail(
     value["job_evidence"] = crate::jobs::task_evidence(&mut c, &p, &id, s.now()).await?;
     let workflow = crate::workflow::workflow_snapshot(&mut c, &p, &id, s.now()).await?;
     value["workflow"] = workflow;
+    value["revert"] = crate::reverts::revert_view(&mut c, &id).await?;
+    value["reverted_by"] = crate::reverts::reverted_by(&mut c, &id).await?;
     Ok(response(value))
 }
 
@@ -1515,7 +1518,7 @@ async fn orientation(State(s): State<AppState>, auth: Auth, Path(p): Path<String
           "steps":[
             "1. Read the operator-configured required check roster and shared repository identity. Preserve exact task/project/workflow policy revisions; changed policy requires reconciliation, not reuse of historical approvals.",
             "2. Complete implementation in its isolated worktree, commit clean source, make the candidate available through your Git remote to other workstations, and release terminal job resources. Use submissions code (or general) with one evidence entry per acceptance criterion and a handoff. The service creates independent review/integration activities and ends implementation ownership.",
-            "3. Use reviews list/status and reviews claim for an eligible current candidate. Read its source and evidence. Reviewers must be independent of recorded contributors; human review requires a human browser account. Use reviews decide with approved or changes_requested and findings. Required findings block integration; revisions create fresh submissions.",
+            "3. Use reviews list/status and reviews claim for an eligible current candidate. Read its source and evidence. Reviewers must be independent of recorded contributors; human review requires a human browser account. Use reviews decide with approved or changes_requested and findings. Required findings block integration; revisions create fresh submissions. Reviewing a revert task (an agent's revert of an integrated result, whose candidate the integrator computed and attested as the mechanical revert) judges the decision to revert and its evidence, not the inverse diff; a revert converted to implementation work is reviewed like any code change.",
             "4. Use integrations claim only after required approvals and any required human authorization. This acquires a global target hold. Prepare the isolated integrated result with integrations prepare. Run every roster check as a jobs run --activity ACTIVITY_ID producer with check_identity, check_version and check_environment matching policy. Check jobs must succeed with exit0 and unchanged exact source; then explicitly release job resource reservations.",
             "5. After prepare saves publication intent, use integrations publish to recheck current authority, compare the remote target with the observed base, and publish the exact prepared result. Never force an unexpected target or retry an uncertain side effect as a new publication. Use integrations reconcile to observe the retained intent. Agent publication reconciliation is limited to a fresh exact observation of the immutable base or intended result after the prior publisher is confirmed stopped from a verified durable journal, its activity owner is expired/revoked, policy and decisions are current, and no live/uncertain jobs or held reservations remain. A moved target, unavailable/mismatched durable intent, or any uncertainty stays human-gated; reconciliation never publishes or fabricates checks.",
             "6. Use integrations finish with all required check job IDs. It records the known outcome, freshly observes the remote commit/tree, and requests finalization. Only the final transaction completes the subject and releases dependents. Publishing alone does not complete work. Keep renewing activity leases while checking; their checkpoint/renewal commands use their own attempt IDs.",
@@ -1614,7 +1617,8 @@ async fn next_eligible(
 
 /// The first of `candidates` (in claim order) the caller may claim: a
 /// recovery candidate, or a work candidate the revise limit has not parked
-/// for this caller (see [`crate::autonomy::ensure_not_parked`]).
+/// for this caller (see [`crate::autonomy::ensure_not_parked`]); never a
+/// mechanical revert, whose candidate only the integrator records.
 async fn first_unparked(
     c: &mut SqliteConnection,
     actor: &crate::auth::Actor,
@@ -1622,6 +1626,9 @@ async fn first_unparked(
     now: i64,
 ) -> Result<Option<Task>, AppError> {
     for t in candidates {
+        if crate::revert_rules::is_mechanical(c, &t.id).await? {
+            continue;
+        }
         let exempt = t.current_attempt_id.is_some() || actor.kind != "agent";
         if exempt || !crate::autonomy::revise_limit_reached(c, &t.id, now).await? {
             return Ok(Some(t));
@@ -1712,6 +1719,7 @@ async fn claim(
         ));
     }
     crate::workflow::guard_normal_claim(&mut m.tx, &p, &t.id).await?;
+    crate::revert_rules::ensure_not_mechanical(&mut m.tx, &t.id).await?;
     if input.mode == "work" {
         crate::knowledge::ensure_decisions_resolved(&mut m.tx, &p, &t.id, m.now).await?;
         crate::autonomy::ensure_not_parked(&mut m.tx, &m.actor, &t.id, m.now).await?;
