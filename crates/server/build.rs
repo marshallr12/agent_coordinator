@@ -30,7 +30,12 @@ fn main() {
         root.join("book.toml").display()
     );
     println!("cargo:rerun-if-changed={}", root.join("book/src").display());
-    for record in ["AGENTS.md", "HANDOFF.md", "HANDOFF-archive.md", "DURABLE-RECORD.md"] {
+    for record in [
+        "AGENTS.md",
+        "HANDOFF.md",
+        "HANDOFF-archive.md",
+        "DURABLE-RECORD.md",
+    ] {
         println!("cargo:rerun-if-changed={}", root.join(record).display());
     }
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());

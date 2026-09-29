@@ -1,8 +1,69 @@
-# HANDOFF — Full agent autonomy for Agent Coordinator (planning complete, execution not started)
+# HANDOFF — Full agent autonomy for Agent Coordinator (P4 service deployed; S6 pending)
 
 Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of a review and
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
+
+## Current resume point (2026-09-29)
+
+The user explicitly disabled the Agent Coordinator workflow for this session. Do not create,
+claim or update service tasks; use this handoff for progress. This session override takes
+precedence over U14's earlier dogfood approval.
+
+- Fetched `origin/main`: `4a72018` (P4 service plus key-enabled TypeSafe reranking). Production
+  and workstation CLI were verified at this commit in the preceding session; this resume did
+  not contact production or exercise TypeSafe.
+- The clean starting checkout was `autonomy-plan` at `b5d76de`. It contains planning history
+  and the older prototype, rather than the current product implementation. Work from the
+  newly created branch `autonomy/s6`, worktree `~/src/worktrees/agent-coordinator-s6`, based
+  on `origin/main` `4a72018`. Keep its Cargo target directory inside that worktree.
+- Corrected the planning branch's pre-existing formatting failure in
+  `crates/server/build.rs`; formatting checks now pass on both checkouts. The formatting
+  correction is recorded with this handoff update. No product code was changed on S6.
+  The pinned mdBook 0.5.4 build and documentation source/package/local-link checks passed.
+- **Next phase: P4 S6**, following `planning/autonomy/p4-design.md` §§4–5: integrator host
+  setup on oracle-1, a production shadow day, required-check flip-rate evidence, cutover
+  preflight, full rulesets, then `integration_owner=integrator`. P3b follows S6; the optional
+  shadow cost run is not a prerequisite.
+- **U4 ruleset test complete (2026-09-29):** with the user's explicit permission, created
+  public `marshallr12/agentc-ruleset-test`, active ruleset `app-only-test` (id `24210180`,
+  `update` rule, sole bypass = App `5127380`, mode `always`). A real Git push authenticated
+  as `marshallr12` was rejected with `GH013: Cannot update this protected ref`, both before
+  and after adding the App bypass; the remote tip stayed unchanged. An App installation
+  token then successfully pushed the same candidate `1547f6534183978fe4d373cc63229eb55657e7fe`,
+  verified by remote read-back. The token was restricted to test-repo Contents write and
+  revoked after use. U4 does not require moving to an organization. Evidence and candidate
+  bundle are outside the repository at `~/.local/share/agent-coordinator-autonomy/ruleset-test/`.
+- **App registered and test-installed:** `marshallr12-agentc-integrator`, id `5127380`,
+  installation id `166293403`, private, no webhook,
+  Contents/Actions write and Checks/Administration/Metadata read. The user connected Brave
+  and completed GitHub's authentication and manifest-registration steps. The manifest helper
+  transferred the generated key directly from memory over SSH to oracle-1:
+  `/etc/agentc/integrator-app.pem`, verified `root:root`, mode `0400`; no PEM was saved on
+  this workstation. The SSH connection is the user's Bash alias `oracle` (`ssh oracle-1`
+  itself does not resolve). The user completed the test-only installation in Brave. The App
+  currently has selected-repository access only to `agentc-ruleset-test`: **before the S6 live
+  test/shadow, add `agent_coordinator` and subsequently remove the test repo from the installation**.
+  Production rulesets and coordinator ownership have not been changed. Temporary host test
+  files were removed, and the local manifest-registration helper was stopped.
+  Never request or copy the App private key into this checkout;
+  keep it on oracle-1. Host setup and credential installation remain user steps.
+- S6 implementation also remains: the deployed integrator CLI currently exposes `run`
+  and `config`, with no shadow command; the S6 host-setup script and cutover runbook are
+  not present. Prepare these before running the shadow day or changing production ownership.
+- The P3a shadow poller is stopped, and the old P2/P3a/P4 worktrees are gone. Historical
+  commands below that refer to those worktrees must not be run unchanged.
+
+First local commands for implementation:
+```sh
+cd ~/src/worktrees/agent-coordinator-s6
+export CARGO_TARGET_DIR="$PWD/target"
+git status --short
+cargo fmt --all -- --check
+```
+Read the design from the planning checkout: `~/src/agent_coordinator/planning/autonomy/p4-design.md`.
+The previous full product gate passed on `4a72018` (see §11); this resume does not claim a
+fresh full workspace gate. Run the full applicable gate when implementing S6.
 
 ## 1. What was asked
 
@@ -220,7 +281,7 @@ Record answers here.
 | U1 | Windows: required producer or non-blocking Actions observer | Observer || 2026-09-25: **observer** |
 | U2 | Human changes: FF pushes of green SHAs via `ship` under rulesets; pre-merge review for agent paths; post-hoc review only for landings with agent trailers/unknown provenance | Yes || 2026-09-25: **yes** (`ship` + rulesets) |
 | U3 | Billing for the unattended pool | API billing (also enables Claude `--bare`); ceiling after the pilot ($5–30/task est.). If subscription: P2 must prove another way to stop candidate `CLAUDE.md` loading, or the pilot runs Codex-only || 2026-09-25: **subscription** (against recommendation) ⇒ P2 must prove candidate `CLAUDE.md` does not load, else pilot is Codex-only |
-| U4 | Move repo to a GitHub org | No, unless the ruleset test fails || 2026-09-25: **no**, unless the ruleset test fails |
+| U4 | Move repo to a GitHub org | No, unless the ruleset test fails || 2026-09-25: **no**, unless the ruleset test fails; 2026-09-29: **ruleset test PASS** (ordinary-login push rejected; App-token push succeeds on personal public test repo) |
 | U5 | Review independence default | `distinct_launch` (separate reviewer uid, landing-range contributors); `distinct_vendor` where both vendors configured || 2026-09-25: **`distinct_launch`** |
 | U6 | Hosts | oracle-1 primary supervisor, mxmini secondary (quiet hours), MINIAIR opportunistic, integrator on the e2-micro || 2026-09-25: **as recommended** |
 | U7 | GitHub Actions receipts as required default | Yes (native-producer receipts kept as escape hatch) || 2026-09-25: **yes** |
@@ -486,7 +547,7 @@ pkill -f '[a]gentc-supervisor shadow'   # the [a] keeps the pattern from matchin
 The poller is not reboot-safe (check `pgrep -af "agentc-supervisor shadow"` before reading the report).
 Skip this step if the pilot's 5-task budget is acceptable without observed load.
 
-### Next session: resume here (items 1–3 are P2 history; start at item 4)
+### Historical P2–P4 instructions (use the current resume point above)
 
 1. DONE 2026-09-26 (all PASS). For reference, the host setup and suite (re-run after binary changes): Fix any FAIL; common
    causes: a login/auth host missing from the egress allowlist (see `/var/log/agentc-egress.log` on sysvinit hosts or `journalctl -u agentc-egress`,

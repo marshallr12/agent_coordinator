@@ -117,7 +117,12 @@ results, reconciliations, journal attestations, human authorization, agent `PATC
 ## 5. User steps (in order; none needed before S3)
 
 1. **Answer U16** (integrator host). 
-2. **U4 ruleset test** (was never recorded as run): on a throwaway public repo, a ruleset with `update`
+2. **U4 ruleset test — DONE 2026-09-29:** on `marshallr12/agentc-ruleset-test`, active ruleset
+   `24210180` restricts `update`, sole bypass App `5127380` (`always`). Ordinary-login Git pushes
+   were rejected with `GH013`, including after adding the App bypass; the App installation token
+   successfully pushed the same candidate `1547f6534183978fe4d373cc63229eb55657e7fe`. Token revoked;
+   no org move needed. Evidence: `~/.local/share/agent-coordinator-autonomy/ruleset-test/` outside
+   the repository. Original requirement: on a throwaway public repo, a ruleset with `update`
    and bypass = a test GitHub App; confirm a plain collaborator push to the protected branch is rejected
    and an App-token push succeeds. If it fails, U4 (move to an org) comes back.
 3. **Create the GitHub App** (before S3's live test): personal account, no webhook; repository
@@ -125,6 +130,11 @@ results, reconciliations, journal attestations, human authorization, agent `PATC
    Metadata: read**; install on `marshallr12/agent_coordinator` only; download the private key and
    place it on the integrator host as root-owned `0400`, readable by `agentc-integrator` only (never on
    this workstation's user account, never in the repo). Give me the App id and installation id.
+   **Registered 2026-09-29:** `marshallr12-agentc-integrator`, App id `5127380`, installation id
+   `166293403`, permissions as above, private. Manifest-generated key went directly over SSH to
+   oracle-1 `/etc/agentc/integrator-app.pem` (`root:root`, `0400`); the runtime's key access must be
+   arranged by host setup. Currently installed only on the test repo: add `agent_coordinator`
+   before live use and subsequently remove the test repo from the selected-repository list.
 4. **Run the integrator host setup** on the chosen host with sudo (the script will be written in S6;
    the agent does not run root scripts).
 5. **Issue the integrator credential** in the dashboard (class `integrator`, write) and install it on
