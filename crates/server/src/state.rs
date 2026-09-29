@@ -25,7 +25,7 @@ pub struct Config {
     pub json_body_limit_bytes: usize,
     pub artifact_quota_bytes: i64,
     pub artifact_disk_reserve_bytes: u64,
-    /// Optional reranking of context search results; off by default.
+    /// Optional reranking of context search results; off without an API key.
     pub context_rerank: ContextRerankConfig,
 }
 

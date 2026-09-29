@@ -1,6 +1,6 @@
 //! Optional relevance ordering for already bounded context items.
-//! Reranking runs only when `ContextRerankMode::Typesafe` is configured with a
-//! nonempty API key. Any skip or failure keeps the original SQLite ordering.
+//! Reranking runs only when the configuration carries a nonempty TypeSafe API
+//! key. Any skip or failure keeps the original SQLite ordering.
 
 use reqwest::redirect::Policy;
 use serde_json::{Map, Value, json};
@@ -17,16 +17,6 @@ const MAX_CANDIDATES: usize = 40;
 const MAX_EXCERPT_CHARS: usize = 1_800;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_SCORE: f64 = 3.0;
-
-/// Which reranker, if any, reorders context search results.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum ContextRerankMode {
-    /// Keep the SQLite FTS order; no external request is made.
-    #[default]
-    Off,
-    /// Ask TypeSafe to score the selected task and knowledge items.
-    Typesafe,
-}
 
 /// A nonempty TypeSafe API key whose `Debug` output never shows the value.
 #[derive(Clone)]
@@ -52,9 +42,7 @@ impl fmt::Debug for ApiKey {
 /// Context reranking settings, read once at startup.
 #[derive(Clone, Debug)]
 pub struct ContextRerankConfig {
-    /// Selected reranker; `Off` unless explicitly enabled.
-    pub mode: ContextRerankMode,
-    /// TypeSafe API key; `Typesafe` mode without a key behaves as `Off`.
+    /// TypeSafe API key; reranking is off without one.
     pub api_key: Option<ApiKey>,
     /// Scoring endpoint URL; tests point it at a local mock server.
     pub endpoint: String,
@@ -65,10 +53,10 @@ pub struct ContextRerankConfig {
 }
 
 impl Default for ContextRerankConfig {
-    /// Off, no key, the production endpoint, 1 s connect and 3 s total timeouts.
+    /// No key (so reranking is off), the production endpoint, 1 s connect
+    /// and 3 s total timeouts.
     fn default() -> Self {
         Self {
-            mode: ContextRerankMode::Off,
             api_key: None,
             endpoint: TYPESAFE_ENDPOINT.into(),
             connect_timeout: Duration::from_secs(1),
@@ -95,16 +83,9 @@ pub(crate) struct ContextReranker {
 }
 
 impl ContextReranker {
-    /// Build the reranker for `config`, or `None` when reranking is off.
-    /// Enabled without a key logs one warning and behaves as off.
+    /// Build the reranker for `config`, or `None` when it has no API key.
     pub(crate) fn from_config(config: &ContextRerankConfig) -> anyhow::Result<Option<Self>> {
-        if config.mode == ContextRerankMode::Off {
-            return Ok(None);
-        }
         let Some(key) = config.api_key.clone() else {
-            tracing::warn!(
-                "Context reranking is set to typesafe but TYPESAFE_API_KEY is empty or unset; reranking is off."
-            );
             return Ok(None);
         };
         let client = reqwest::Client::builder()

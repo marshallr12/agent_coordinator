@@ -59,13 +59,15 @@ retain the loopback listener. The example contains no credentials. Keep the
 SQLite database, WAL files, artifact directory, and backups private because they
 contain authentication verifiers and work evidence.
 
-Context reranking is off by default: `COORDINATOR_CONTEXT_RERANK=off`. Setting it
-to `typesafe` sends context search excerpts to TypeSafe, a third party, as
-described in the [knowledge contract](knowledge-contract.md#bounded-context-search),
-and also requires a nonempty `TYPESAFE_API_KEY` in the service environment. That
-key is a credential, so supply it through a protected secret mechanism rather
-than `service.env`. Without the key the service logs a warning and keeps
-reranking off.
+Setting a nonempty `TYPESAFE_API_KEY` in the service environment turns on
+TypeSafe context reranking: context requests then send the query and up to 40
+excerpts of at most 1,800 characters each (task or knowledge title, description
+or body, and acceptance criteria or applicability) to TypeSafe, a third party,
+at `api.typesafe.ai`, as described in the
+[knowledge contract](knowledge-contract.md#bounded-context-search). That key is
+a credential, so supply it through a protected secret mechanism rather than
+`service.env`. Without the key the service logs one warning at startup and keeps
+context results in their search order.
 
 Initialize the first administrator at a hidden terminal prompt:
 

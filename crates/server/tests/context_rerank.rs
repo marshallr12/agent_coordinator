@@ -1,6 +1,8 @@
 //! Context endpoint reranking against a local mock scoring server. Every
 //! configuration here sets its own endpoint and key, so no test reads
-//! TYPESAFE_API_KEY or reaches TypeSafe.
+//! TYPESAFE_API_KEY or reaches TypeSafe. The startup-warning test sets the
+//! variable to a literal or removes it only in the server processes it
+//! spawns, which receive no context requests.
 
 use axum::{
     Router,
@@ -11,7 +13,7 @@ use axum::{
 };
 use coordinator_server::{
     auth::{digest, secret},
-    context_rerank::{ApiKey, ContextRerankConfig, ContextRerankMode},
+    context_rerank::{ApiKey, ContextRerankConfig},
     router,
     state::{AppState, Config},
 };
@@ -85,8 +87,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Build the fixture; `configure` receives a TypeSafe-mode config with a
-    /// test key aimed at a mock that fails with `failure` when given.
+    /// Build the fixture; `configure` receives a config with a literal test
+    /// key aimed at a mock that fails with `failure` when given.
     async fn new(
         failure: Option<StatusCode>,
         configure: impl FnOnce(&mut ContextRerankConfig),
@@ -99,7 +101,6 @@ impl Fixture {
         })
         .await;
         let mut rerank = ContextRerankConfig {
-            mode: ContextRerankMode::Typesafe,
             api_key: ApiKey::new("test-key".into()),
             endpoint,
             ..ContextRerankConfig::default()
@@ -184,7 +185,7 @@ async fn open(dir: &Path, context_rerank: ContextRerankConfig) -> AppState {
 }
 
 #[tokio::test]
-async fn enabled_reranking_reorders_candidates_around_decisions() {
+async fn a_key_reranks_candidates_around_decisions() {
     let f = Fixture::new(None, |_| {}).await;
     let path = f.seed_context().await;
     let original = f.context(&f.plain, &path).await;
@@ -200,8 +201,8 @@ async fn enabled_reranking_reorders_candidates_around_decisions() {
 }
 
 #[tokio::test]
-async fn reranking_is_off_by_default_and_makes_no_request() {
-    let f = Fixture::new(None, |config| config.mode = ContextRerankMode::default()).await;
+async fn without_a_key_reranking_is_off_and_makes_no_request() {
+    let f = Fixture::new(None, |config| config.api_key = None).await;
     let path = f.seed_context().await;
     let original = f.context(&f.plain, &path).await;
     assert_eq!(f.context(&f.reranked, &path).await, original);
@@ -209,8 +210,8 @@ async fn reranking_is_off_by_default_and_makes_no_request() {
 }
 
 #[tokio::test]
-async fn enabled_without_a_key_behaves_as_off() {
-    let f = Fixture::new(None, |config| config.api_key = None).await;
+async fn a_blank_key_is_no_key_and_makes_no_request() {
+    let f = Fixture::new(None, |config| config.api_key = ApiKey::new(" \t\n".into())).await;
     let path = f.seed_context().await;
     let original = f.context(&f.plain, &path).await;
     assert_eq!(f.context(&f.reranked, &path).await, original);
@@ -224,6 +225,88 @@ async fn scoring_failure_keeps_the_search_order() {
     let original = f.context(&f.plain, &path).await;
     assert_eq!(f.context(&f.reranked, &path).await, original);
     assert_eq!(f.hits(), 1);
+}
+
+/// The part of the serve-time warning that names the missing key.
+const KEY_WARNING: &str = "TYPESAFE_API_KEY is not set";
+
+/// Run the server binary on `database` with `args`, with TYPESAFE_API_KEY
+/// set to `key` or removed. A `serve` run is killed once it logs its start
+/// line; other commands run to completion. Returns the log lines, which the
+/// binary writes to stdout, up to that point.
+fn run_binary(database: &Path, args: &[&str], key: Option<&str>) -> Vec<String> {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agent-coordinator-server"));
+    command
+        .arg("--database")
+        .arg(database)
+        .args(["--listen", "127.0.0.1:0"])
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    match key {
+        Some(key) => command.env("TYPESAFE_API_KEY", key),
+        None => command.env_remove("TYPESAFE_API_KEY"),
+    };
+    let mut child = command.spawn().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    std::thread::spawn(move || {
+        stdout
+            .lines()
+            .map_while(Result::ok)
+            .try_for_each(|line| sender.send(line))
+    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut lines = Vec::new();
+    while let Ok(line) = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        let started = line.contains("Agent Coordinator service started");
+        lines.push(line);
+        if started {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let status = child.wait().unwrap();
+    let serving = lines.iter().any(|line| line.contains("service started"));
+    assert!(serving || status.success(), "{status}: {lines:?}");
+    lines
+}
+
+/// Log lines from `lines` that carry the missing-key warning.
+fn key_warnings(lines: &[String]) -> usize {
+    lines
+        .iter()
+        .filter(|line| line.contains(KEY_WARNING))
+        .count()
+}
+
+#[test]
+fn only_serve_without_a_key_warns_once_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("startup.sqlite3");
+    let keyless = run_binary(&database, &["serve"], None);
+    assert!(
+        keyless.iter().any(|line| line.contains("service started")),
+        "{keyless:?}"
+    );
+    assert_eq!(key_warnings(&keyless), 1, "{keyless:?}");
+    let blank = run_binary(&database, &["serve"], Some("  "));
+    assert_eq!(key_warnings(&blank), 1, "{blank:?}");
+    let keyed = run_binary(&database, &["serve"], Some("test-key"));
+    assert!(
+        keyed.iter().any(|line| line.contains("service started")),
+        "{keyed:?}"
+    );
+    assert_eq!(key_warnings(&keyed), 0, "{keyed:?}");
+    let maintenance = run_binary(&database, &["maintenance"], None);
+    assert!(!maintenance.is_empty(), "maintenance printed nothing");
+    assert_eq!(key_warnings(&maintenance), 0, "{maintenance:?}");
 }
 
 /// Insert a human admin with a browser session, or an agent with a

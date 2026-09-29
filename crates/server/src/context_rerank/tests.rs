@@ -74,10 +74,9 @@ async fn respond(State(mock): State<Mock>, headers: HeaderMap, body: String) -> 
     (mock.status, reply, mock.body.clone())
 }
 
-/// A TypeSafe-mode reranker aimed at `endpoint` with a short test timeout.
+/// A keyed reranker aimed at `endpoint` with a short test timeout.
 fn reranker(endpoint: String) -> ContextReranker {
     let config = ContextRerankConfig {
-        mode: ContextRerankMode::Typesafe,
         api_key: ApiKey::new("test-key".into()),
         endpoint,
         timeout: Duration::from_millis(300),
@@ -257,19 +256,20 @@ async fn candidate_counts_outside_the_range_make_no_request() {
 }
 
 #[test]
-fn off_or_keyless_configurations_build_no_reranker() {
+fn only_keyed_configurations_build_a_reranker() {
     let keyed = ContextRerankConfig {
         api_key: ApiKey::new("test-key".into()),
         ..ContextRerankConfig::default()
     };
-    assert!(ContextReranker::from_config(&keyed).unwrap().is_none());
-    let keyless = ContextRerankConfig {
-        mode: ContextRerankMode::Typesafe,
-        api_key: ApiKey::new("  ".into()),
+    assert!(ContextReranker::from_config(&keyed).unwrap().is_some());
+    let unset = ContextRerankConfig::default();
+    assert!(ContextReranker::from_config(&unset).unwrap().is_none());
+    let blank = ContextRerankConfig {
+        api_key: ApiKey::new(" \n ".into()),
         ..ContextRerankConfig::default()
     };
-    assert!(keyless.api_key.is_none());
-    assert!(ContextReranker::from_config(&keyless).unwrap().is_none());
+    assert!(blank.api_key.is_none());
+    assert!(ContextReranker::from_config(&blank).unwrap().is_none());
 }
 
 #[test]
@@ -279,11 +279,11 @@ fn api_keys_drop_surrounding_whitespace() {
 }
 
 #[test]
-fn defaults_are_off_with_the_production_endpoint_and_a_redacted_key() {
+fn defaults_have_no_key_the_production_endpoint_and_a_redacted_key() {
     let config = ContextRerankConfig::default();
-    assert_eq!(config.mode, ContextRerankMode::Off);
     assert!(config.api_key.is_none());
     assert_eq!(config.endpoint, TYPESAFE_ENDPOINT);
+    assert_eq!(config.connect_timeout, Duration::from_secs(1));
     assert_eq!(config.timeout, Duration::from_secs(3));
     let key = ApiKey::new("secret-value".into()).unwrap();
     assert!(!format!("{key:?}").contains("secret-value"));
