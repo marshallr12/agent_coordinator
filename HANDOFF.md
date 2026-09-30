@@ -1,18 +1,17 @@
-# HANDOFF — Full agent autonomy for Agent Coordinator (S6 tooling ready; cutover pending)
+# HANDOFF — Full agent autonomy for Agent Coordinator (S6 shipped; host bootstrap next)
 
 Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of a review and
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point (2026-09-29)
+## Current resume point (2026-09-29 evening; 2026-09-30 UTC)
 
 The user explicitly disabled the Agent Coordinator workflow for this session. Do not create,
 claim or update service tasks; use this handoff for progress. This session override takes
 precedence over U14's earlier dogfood approval.
 
-- Fetched `origin/main`: `4a72018` (P4 service plus key-enabled TypeSafe reranking). Production
-  and workstation CLI were verified at this commit in the preceding session; this resume did
-  not contact production or exercise TypeSafe.
+- `origin/main` and production are now `1e8aebb9d67d1bde4c3b2de36c34703f63fcfd28`.
+  S6 was reviewed, shipped and deployed this session; no coordinator tasks were created or claimed.
 - The clean starting checkout was `autonomy-plan` at `b5d76de`. It contains planning history
   and the older prototype, rather than the current product implementation. Work from the
   newly created branch `autonomy/s6`, worktree `~/src/worktrees/agent-coordinator-s6`, based
@@ -49,31 +48,53 @@ precedence over U14's earlier dogfood approval.
   files were removed, and the local manifest-registration helper was stopped.
   Never request or copy the App private key into this checkout;
   keep it on oracle-1. Host setup and credential installation remain user steps.
-- **S6 local tooling implemented this session (2026-09-29):** `autonomy/s6` at `14e2fda`
-  in the existing worktree. Adds `agentc-integrator shadow [--once]`, a read-access integrator
-  queue view before cutover (`?shadow=true`, no live heartbeat), separate local shadow state,
-  owner-run `deploy/agentc/integrator-host-setup.sh`, read-only `integrator-preflight.py`,
-  `integrator-flip-rate.py` and four ops regressions. Canonical runbook:
-  `book/src/docs/integrator-cutover.md` in the S6 worktree. The shadow regression computes R
-  with a real bare remote and proves no publication mutations, pushes or reruns. `WouldPush`
-  is provisional (`authority_verified=false`); reverts are counted but not computed in shadow.
-  The host installer uses systemd LoadCredential (>=247) so the root-owned key stays in place;
-  a shared flock prevents simultaneous live/shadow daemons. It installs but does not start a unit.
-  Local verification: 502 workspace tests, final focused shadow-queue test (read credential,
-  no heartbeat, missing project 404), warnings-denied workspace Clippy, locked dependency audit,
-  pinned documentation checks, four ops regressions, bash syntax and systemd unit verification
-  passed. Rendered runbook inspected in Brave. Full workspace build, service/CLI smoke and backup/restore smoke
-  passed on clean committed candidate `14e2fda`. A documentation-only verification record
-  follows that candidate in the S6 worktree. Logs: `/tmp/agentc-s6-*.log`.
-  No branch push, production deployment, root host setup, credential issue or ruleset change
-  happened. **S6 is not complete.** Next: review/ship/deploy this candidate, land the target roster
-  using exact live service check identities (the current target has no roster file), owner-run
-  host setup and read credential (App access is complete), 24-hour shadow and live candidate test,
-  >=20 required-job
-  attempts on pinned main each <2% non-success, zero drain preflight, full rulesets, write
-  credential and human ownership switch plus canary. App repository selection was completed
-  by the user and browser-verified after the local tooling gate; no host bootstrap or deployment
-  has occurred.
+- **S6 source shipped/deployed (2026-09-30 UTC):** product candidate `1e8aebb` in the
+  existing `autonomy/s6` worktree, incorporating `14e2fda`, `e042e26` and `291b680`.
+  Fresh-context review used **gpt-6-astra/xhigh** (model-select score 8, security review).
+  Review reproduced a false-green preflight for expired/revoked ordinary task and review
+  attempts whose recovery is derived rather than persisted. Fixed by requiring zero
+  `tasks.current_attempt_id`; added an expired-task/review regression (five ops tests pass).
+  No remaining concrete S6 shipping blocker was found.
+  Read-only live roster revision 3 confirmed `linux-validation`, `documentation`,
+  `dependency-audit`; their exact GitHub job names/paths are now committed in
+  `.agent-coordinator/roster.toml`. App access remains complete.
+  Local gate: 502 workspace tests, format, warnings-denied Clippy, locked audit, workspace
+  build, service/CLI smoke, backup/restore smoke, pinned documentation checks and five ops
+  regressions passed. CI runs **36662950828** and **36662950832** passed on the exact SHA.
+  `main` was fast-forwarded and remote read-back verified. Release acceptance
+  **36663055767** passed Linux package/systemd/HTTPS, five-minute load and Windows packaging.
+  Binaries-only production deploy: all seven preflight counts zero before deployment and
+  after stopping; health and public build identity verified; backup, maintenance, transfer
+  and timers passed. Stop/start 03:23:02–03:23:25 UTC (health at 03:23:26).
+  Rollback binaries use suffix `-0.1.1-4a72018`; verified old snapshot
+  `20260930T032256.016Z-88af7c3f-0b71-4134-8da5-92be7292612f`, new snapshot
+  `20260930T032326.636Z-fdd008a6-28f0-42ed-b119-9aca91aaedb7`.
+  Workstation CLI upgraded and verified at `1e8aebb`; rollback remains
+  `~/.local/bin/agent-coordinator.rollback`. Explicit-path compatibility is green.
+  This noninteractive shell resolves an older `/usr/local/bin/agent-coordinator`;
+  use the verified `~/.local/bin/agent-coordinator` path for product commands.
+  Evidence/logs/scripts/archive: `~/.local/share/agent-coordinator-autonomy/release-1e8aebb/`.
+  Live policy still revision **6**, `integration_owner=agent`; no ruleset changes.
+- **oracle-1 prepared, not installed:** ARM64, systemd 259, Rust 1.98.1; separate clean detached
+  checkout `/home/ubuntu/src/worktrees/agent-coordinator-s6-release` at `1e8aebb`.
+  Host-native integrator release build passed; binary SHA256
+  `4018b8cee4e1bda30b64da585fc899bb1b35a0b177b50c508d8f1bb46cce01fa`.
+  `/home/ubuntu/integrator-shadow.toml` contains the verified production project/App ids and
+  runtime credential paths; the native binary parsed it successfully. No secret was copied.
+  **Next owner commands on oracle-1:**
+  ```sh
+  cd ~/src/worktrees/agent-coordinator-s6-release
+  sudo INTEGRATOR="$PWD/target/release/agentc-integrator" bash deploy/agentc/integrator-host-setup.sh
+  sudo install -o root -g root -m 0644 ~/integrator-shadow.toml /etc/agentc/integrator.toml
+  ```
+  Then issue a **read-only, integrator-class** credential in the dashboard and save CLI-format
+  TOML to `/etc/agentc/integrator-credentials.toml`, `root:root` mode `0400`, without putting
+  its token in chat or Git. Only after that, start `agentc-integrator@shadow.service`.
+  Root host setup, credential issue and rulesets remain user steps per the design.
+  **S6 remains incomplete:** still needs 24-hour production shadow, reviewed live candidate
+  test, >=20 required-job attempts on pinned main each <2% non-success, zero drain preflight,
+  full rulesets, write credential, human ownership switch and canary. Canonical instructions:
+  `book/src/docs/integrator-cutover.md` in the S6 worktree.
 - The P3a shadow poller is stopped, and the old P2/P3a/P4 worktrees are gone. Historical
   commands below that refer to those worktrees must not be run unchanged.
 
@@ -86,7 +107,7 @@ cargo fmt --all -- --check
 ```
 Read the design from the planning checkout: `~/src/agent_coordinator/planning/autonomy/p4-design.md`.
 The previous deployed product gate passed on `4a72018` (see §11). The S6 candidate verification
-is recorded above; production remains at `4a72018`. Follow the S6 runbook for live prerequisites.
+is recorded above; production is now at `1e8aebb`. Follow the S6 runbook for live prerequisites.
 
 ## 1. What was asked
 
