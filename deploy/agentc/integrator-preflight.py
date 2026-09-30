@@ -16,6 +16,10 @@ QUERIES = {
     'jobs': "SELECT count(*) FROM jobs WHERE state IN ('registered','running','unknown')",
     'recovery': "SELECT count(*) FROM workflow_activities WHERE state='recovery_required'",
     'active_integrations': "SELECT count(*) FROM workflow_activities WHERE kind='integration' AND state='active'",
+    # Recovery is also projected from expired/revoked current attempts, not
+    # necessarily persisted as workflow_activities.state='recovery_required'.
+    # Require complete drain rather than duplicating the service's projection.
+    'current_attempts': "SELECT count(*) FROM tasks WHERE current_attempt_id IS NOT NULL",
 }
 
 

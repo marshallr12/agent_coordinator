@@ -52,6 +52,7 @@ class CutoverGates(unittest.TestCase):
                     CREATE TABLE reservations(state);
                     CREATE TABLE jobs(state);
                     CREATE TABLE workflow_activities(kind,state);
+                    CREATE TABLE tasks(current_attempt_id);
                 ''')
             command = [sys.executable, str(ROOT / 'integrator-preflight.py'), '--database', str(path)]
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
@@ -65,6 +66,32 @@ class CutoverGates(unittest.TestCase):
             counts = json.loads(result.stdout)
             self.assertEqual((counts['jobs'], counts['recovery'], counts['publication_intents']), (1, 1, 1))
             self.assertEqual(path.read_bytes(), before)
+
+    def test_preflight_rejects_unprojected_task_and_review_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'db.sqlite'
+            with sqlite3.connect(path) as db:
+                db.executescript('''
+                    CREATE TABLE publication_intents(activity_id);
+                    CREATE TABLE integration_results(activity_id,publication_state);
+                    CREATE TABLE publication_reconciliations(activity_id);
+                    CREATE TABLE integration_holds(state);
+                    CREATE TABLE reservations(state);
+                    CREATE TABLE jobs(state);
+                    CREATE TABLE workflow_activities(kind,state);
+                    CREATE TABLE tasks(current_attempt_id);
+                    CREATE TABLE attempts(id,state,expires_at);
+                    INSERT INTO workflow_activities VALUES ('review','active');
+                    INSERT INTO tasks VALUES ('expired-review'), ('expired-task');
+                    INSERT INTO attempts VALUES ('expired-review','active',0),
+                                                ('expired-task','active',0);
+                ''')
+            result = subprocess.run([sys.executable, str(ROOT / 'integrator-preflight.py'),
+                                     '--database', str(path)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            counts = json.loads(result.stdout)
+            self.assertEqual(counts['recovery'], 0)
+            self.assertEqual(counts['current_attempts'], 2)
 
 
 if __name__ == '__main__':

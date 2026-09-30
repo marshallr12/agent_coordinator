@@ -1,0 +1,16 @@
+# Production service roster revision 3, verified 2026-09-30 UTC.
+# Identities are the service's floor; names and paths select GitHub Actions jobs.
+[[required_checks]]
+identity = "linux-validation"
+check_name = "Linux format, Clippy, and workspace tests"
+workflow_path = ".github/workflows/ci.yml"
+
+[[required_checks]]
+identity = "documentation"
+check_name = "Pinned mdBook build and local-link validation"
+workflow_path = ".github/workflows/docs.yml"
+
+[[required_checks]]
+identity = "dependency-audit"
+check_name = "Audit locked dependencies"
+workflow_path = ".github/workflows/ci.yml"

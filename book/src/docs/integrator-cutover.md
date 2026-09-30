@@ -8,8 +8,9 @@ and ruleset changes are owner steps. Never put credentials or App keys in Git.
 
 ## Install and observe
 
-1. Add `agent_coordinator` to App `5127380`, installation `166293403`, then
-   remove `agentc-ruleset-test`. Contents and Actions write, Checks,
+1. Repository selection is complete: App `5127380`, installation `166293403`,
+   has access to `agent_coordinator` only; `agentc-ruleset-test` is removed.
+   Contents and Actions write, Checks,
    Administration and Metadata read are required. The existing private key stays
    at `/etc/agentc/integrator-app.pem` on oracle-1, root-owned mode `0400`.
 2. Ship and deploy the reviewed S6 service change using the normal release
@@ -34,8 +35,9 @@ and ruleset changes are owner steps. Never put credentials or App keys in Git.
 4. Edit `/etc/agentc/integrator.toml`: set the project id in `projects`, verify
    `origin`, App ids, `checks = "github"`, and credential/key paths under
    `/run/credentials/agentc-integrator@shadow.service/`. Keep insecure loopback
-   disabled. Before the shadow, land `.agent-coordinator/roster.toml` on `main`
-   through the current reviewed workflow. Each `[[required_checks]]` entry
+   disabled. This release includes `.agent-coordinator/roster.toml`, mapped to
+   the live service roster revision 3. Verify it remains current before the
+   shadow. Each `[[required_checks]]` entry
    needs the service's exact `identity`, GitHub `check_name`, and `workflow_path`.
    The names/paths are:
 
@@ -100,8 +102,10 @@ sudo python3 integrator-preflight.py --database /var/lib/agent-coordinator/coord
 
 Transfer `deploy/agentc/integrator-preflight.py` there first. Every count must
 be zero: unresolved publication intents, held integration holds, held physical
-reservations, registered/running/unknown jobs, recovery activities and active
-integrations. A nonzero count returns failure; inspect/reconcile it through the
+reservations, registered/running/unknown jobs, recovery activities, active
+integrations and all current task/review attempts. Expired or revoked attempts
+must be reconciled too: recovery can be derived without a stored recovery state.
+A nonzero count returns failure; inspect/reconcile it through the
 existing workflow. Never clear database rows directly. The read snapshot is
 not a lock: keep new work paused, repeat the check before flipping ownership.
 
