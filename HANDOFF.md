@@ -75,22 +75,34 @@ precedence over U14's earlier dogfood approval.
   use the verified `~/.local/bin/agent-coordinator` path for product commands.
   Evidence/logs/scripts/archive: `~/.local/share/agent-coordinator-autonomy/release-1e8aebb/`.
   Live policy still revision **6**, `integration_owner=agent`; no ruleset changes.
-- **oracle-1 prepared, not installed:** ARM64, systemd 259, Rust 1.98.1; separate clean detached
+- **oracle-1 bootstrap verified (2026-09-30 04:28 UTC):** owner completed installation,
+  configuration and credential setup. Shadow unit enabled/running since **04:28:08 UTC**;
+  first successful target observation **04:28:12 UTC**, zero restarts and no observed errors.
+  App and coordinator source files are `root:root` mode `0400`; config is mode `0644`.
+  Live `@run` unit is inactive. Shadow reads main `1e8aebb` and successful Actions checks;
+  missing `required_status_checks` is expected before full rulesets. Only Target records have
+  been observed: candidate computation/publication remains unexercised on production.
+  Startup journal evidence: `~/.local/share/agent-coordinator-autonomy/release-1e8aebb/shadow-start.log`.
+  **Earliest 24-hour checkpoint: 2026-10-01 04:28:08 UTC / 00:28:08 EDT.** Verify continuous
+  coverage, errors/restarts and any WouldPush records then; elapsed time alone is not a pass.
+  Remaining S6 gates: live candidate test, pinned-main stability sample, full rulesets,
+  zero drain preflight, write credential, human ownership switch and canary.
+- **oracle-1 build preparation (completed):** ARM64, systemd 259, Rust 1.98.1; separate clean detached
   checkout `/home/ubuntu/src/worktrees/agent-coordinator-s6-release` at `1e8aebb`.
   Host-native integrator release build passed; binary SHA256
   `4018b8cee4e1bda30b64da585fc899bb1b35a0b177b50c508d8f1bb46cce01fa`.
   `/home/ubuntu/integrator-shadow.toml` contains the verified production project/App ids and
   runtime credential paths; the native binary parsed it successfully. No secret was copied.
-  **Next owner commands on oracle-1:**
+  **Owner bootstrap commands (completed):**
   ```sh
   cd ~/src/worktrees/agent-coordinator-s6-release
   sudo INTEGRATOR="$PWD/target/release/agentc-integrator" bash deploy/agentc/integrator-host-setup.sh
   sudo install -o root -g root -m 0644 ~/integrator-shadow.toml /etc/agentc/integrator.toml
   ```
-  Then issue a **read-only, integrator-class** credential in the dashboard and save CLI-format
+  Owner issued a **read-only, integrator-class** credential in the dashboard and saved CLI-format
   TOML to `/etc/agentc/integrator-credentials.toml`, `root:root` mode `0400`, without putting
-  its token in chat or Git. Only after that, start `agentc-integrator@shadow.service`.
-  Root host setup, credential issue and rulesets remain user steps per the design.
+  its token in chat or Git. The shadow service is now started.
+  Later write-credential issue, rulesets and ownership switch remain user steps per the design.
   **S6 remains incomplete:** still needs 24-hour production shadow, reviewed live candidate
   test, >=20 required-job attempts on pinned main each <2% non-success, zero drain preflight,
   full rulesets, write credential, human ownership switch and canary. Canonical instructions:
