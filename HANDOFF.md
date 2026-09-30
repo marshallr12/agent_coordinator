@@ -17,9 +17,10 @@ rules are logged before cutover; missing roster mappings fail the shadow pass.
 
 Production remains unchanged. S6 is **not complete**. Required next steps:
 
-- User adds `agent_coordinator` to App `5127380`, installation `166293403`, then
-  removes the test repo. U4 App-only push protection passed in the previous
-  session. The App key stays on oracle-1 at `/etc/agentc/integrator-app.pem`,
+- App repository access completed and browser-verified 2026-09-29: App `5127380`,
+  installation `166293403`, now selects only `marshallr12/agent_coordinator`;
+  the test repo is removed. GitHub displayed the saved-update confirmation.
+  U4 App-only push protection passed in the previous session. The App key stays on oracle-1 at `/etc/agentc/integrator-app.pem`,
   root-owned `0400`; never copy it to the workstation. Connect via the user's
   `oracle` Bash alias; `ssh oracle-1` does not resolve locally.
 - Review/ship/deploy S6 service and build the host-native integrator at the
