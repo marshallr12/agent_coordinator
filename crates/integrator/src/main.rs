@@ -25,6 +25,7 @@ mod revert;
 mod reverts;
 mod roster;
 mod service;
+mod shadow;
 mod state;
 mod watch;
 
@@ -57,6 +58,11 @@ enum Commands {
     /// Integrate the configured projects' queues (forever, or one pass).
     Run {
         /// Run one pass over the projects and exit.
+        #[arg(long)]
+        once: bool,
+    },
+    /// Compute and log results without service writes, reruns or Git pushes.
+    Shadow {
         #[arg(long)]
         once: bool,
     },
@@ -97,26 +103,34 @@ fn run(cli: Cli) -> Result<()> {
     let config = Config::load(cli.config.as_deref())?;
     match cli.command {
         Commands::Config => println!("{config:#?}"),
-        Commands::Run { once } => {
+        Commands::Run { once } | Commands::Shadow { once } => {
+            let shadow = matches!(cli.command, Commands::Shadow { .. });
             if config.has_app() {
                 askpass::install(cli.config.as_deref())?;
             }
-            tokio::runtime::Runtime::new()?.block_on(serve(config, once))?;
+            tokio::runtime::Runtime::new()?.block_on(serve(config, once, shadow))?;
         }
     }
     Ok(())
 }
 
 /// Builds the integrator with the configured checks source and runs it.
-async fn serve(config: Config, once: bool) -> Result<()> {
+async fn serve(config: Config, once: bool, shadow: bool) -> Result<()> {
+    if shadow && config.projects.is_empty() {
+        bail!("shadow needs at least one configured project");
+    }
     let service = Service::from_credential_file(
         &config.credential_file,
         &config.origin,
         config.allow_insecure_loopback,
     )?;
+    let mut config = config;
+    if shadow {
+        config.state_dir = config.state_dir.join("shadow");
+    }
     let state = state::LoopState::load(&config.state_dir.join("state.json"))?;
     if config.checks == ChecksKind::Github {
-        return serve_github(config, service, state, once).await;
+        return serve_github(config, service, state, once, shadow).await;
     }
     let checks = FakeChecks {
         path: config.fake_checks_file.clone(),
@@ -129,6 +143,7 @@ async fn serve(config: Config, once: bool) -> Result<()> {
             state,
         },
         once,
+        shadow,
     )
     .await
 }
@@ -139,6 +154,7 @@ async fn serve_github(
     service: Service,
     state: state::LoopState,
     once: bool,
+    shadow: bool,
 ) -> Result<()> {
     if !config.has_app() {
         bail!("checks = \"github\" needs [github] app_id and installation_id");
@@ -153,16 +169,33 @@ async fn serve_github(
             state,
         },
         once,
+        shadow,
     )
     .await
 }
 
 /// Cycles over the projects, one JSON log line per project per pass.
-async fn run_loop<C: ChecksSource>(mut integrator: Integrator<C>, once: bool) -> Result<()> {
+async fn run_loop<C: ChecksSource>(
+    mut integrator: Integrator<C>,
+    once: bool,
+    shadow: bool,
+) -> Result<()> {
     loop {
         for project in integrator.config.projects.clone() {
-            let outcome = integrator.cycle(&project).await;
-            log(&project, &outcome);
+            if shadow {
+                match integrator.shadow_cycle(&project).await {
+                    Ok(records) => {
+                        for record in records {
+                            println!("{record}");
+                        }
+                    }
+                    Err(error) if once => return Err(error),
+                    Err(error) => log(&project, &Err(error)),
+                }
+            } else {
+                let outcome = integrator.cycle(&project).await;
+                log(&project, &outcome);
+            }
         }
         if once {
             return Ok(());

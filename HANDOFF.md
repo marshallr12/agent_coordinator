@@ -1,3 +1,49 @@
+# P4 S6 implementation resume — 2026-09-29
+
+The user disabled the Agent Coordinator workflow for this session. No service
+work was created, claimed or updated. Continue in branch `autonomy/s6`, worktree
+`~/src/worktrees/agent-coordinator-s6`, based on `main` `4a72018`; keep Cargo
+output in this worktree's `target`. The autonomy planning handoff/design remain
+in `~/src/agent_coordinator` on `autonomy-plan` (`fbce216` at session start).
+
+S6 local implementation adds `agentc-integrator shadow [--once]`, a pre-cutover
+queue view (`?shadow=true`, integrator credential only, no live heartbeat),
+root-owner host bootstrap, a read-only drain preflight, required-check sample
+analysis and the canonical [cutover runbook](docs/integrator-cutover.md).
+Shadow uses separate local state, computes R and reads checks; no service
+publication writes, Git pushes or job reruns occur. `WouldPush` is provisional
+(`authority_verified=false`). Revert computation is still live-only. Missing
+rules are logged before cutover; missing roster mappings fail the shadow pass.
+
+Production remains unchanged. S6 is **not complete**. Required next steps:
+
+- User adds `agent_coordinator` to App `5127380`, installation `166293403`, then
+  removes the test repo. U4 App-only push protection passed in the previous
+  session. The App key stays on oracle-1 at `/etc/agentc/integrator-app.pem`,
+  root-owned `0400`; never copy it to the workstation. Connect via the user's
+  `oracle` Bash alias; `ssh oracle-1` does not resolve locally.
+- Review/ship/deploy S6 service and build the host-native integrator at the
+  reviewed revision. Owner runs `deploy/agentc/integrator-host-setup.sh` with
+  sudo, sets project/config and installs a read-access integrator credential.
+- Land a target roster mapping the exact service identities to the three GitHub
+  job names/paths in the runbook; the current target has no roster file.
+- Run/retain a continuous 24-hour production shadow and a reviewed live candidate
+  test. Collect about 20 all-job attempts per required check on pinned main;
+  each observed non-success rate must be <2%. Then zero drain preflight, owner
+  rulesets, credential replacement, ownership switch and canary. Do not infer
+  any of these from the local regression tests. P3b follows completed S6.
+
+Local verification: 502 workspace tests passed, warnings-denied workspace
+Clippy passed, pinned documentation source/package/local-link checks passed,
+locked dependency audit passed, four cutover-ops regressions passed, shell
+syntax and generated systemd unit validation passed. The rendered runbook was
+inspected in Brave. Full workspace build and smoke exercises follow the local
+candidate commit (the smoke requires clean committed source).
+Local gate logs use `/tmp/agentc-s6-*.log`; cutover credentials/evidence stay
+outside Git. No remote push or production deployment has occurred.
+
+---
+
 # Implementation handoff — 2026-09-14
 
 ## MCP-first bootstrap

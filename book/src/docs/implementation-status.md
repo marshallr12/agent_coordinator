@@ -9,6 +9,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
 
+- The integrator has a pre-cutover shadow command and queue view, with host
+  setup and local evidence gates described in the [cutover runbook](integrator-cutover.md).
+  These are source behavior; the production shadow day, rulesets and ownership
+  cutover remain operator work and are not claimed complete.
+
 - Standalone `agent-coordinator-mcp` stdio adapter with protected, locked, atomic
   mutation journals and exact retry through the service. Native CLI installation
   is not required for coordination. Direct HTTP hosts still need their own

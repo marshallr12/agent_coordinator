@@ -3023,6 +3023,38 @@ async fn integrator_queue_is_owner_switched_and_class_scoped() {
     let (status, refused) = f.call(&i, "GET", &queue, json!({})).await;
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
     assert_eq!(refused["error"]["code"], "integration_owned_by_agents");
+    sqlx::query("UPDATE credentials SET access='read' WHERE id=?")
+        .bind(&i.credential)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, _) = f
+        .call(
+            &i,
+            "GET",
+            "/api/v1/projects/missing/integrator/queue?shadow=true",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let shadow = format!("{queue}?shadow=true");
+    let (status, v) = f.call(&i, "GET", &shadow, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["items"][0]["subject_task_id"], t["id"]);
+    let seen: Option<i64> =
+        sqlx::query_scalar("SELECT integrator_last_seen FROM projects WHERE id=?")
+            .bind(&p)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(seen, None, "shadow must not advertise a live integrator");
+    let (status, _) = f.call(&f.a, "GET", &shadow, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    sqlx::query("UPDATE credentials SET access='write' WHERE id=?")
+        .bind(&i.credential)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
     let (status, v) = set_integration_owner(&f, &f.admin, &p, "agent").await;
     assert_eq!(status, StatusCode::OK, "delegate rule editing only: {v}");
     let (status, v) = patch_owner(&f, &f.a, &p, 3, "integrator").await;

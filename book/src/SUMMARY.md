@@ -14,6 +14,7 @@
 
 - [Linux release installation](docs/linux-installation.md)
 - [Service deployment examples](deploy/README.md)
+- [Integrator cutover](docs/integrator-cutover.md)
 - [Build the release package](docs/build-release-package.md)
 - [Deploy to an Azure virtual machine](docs/deploy-azure.md)
 - [Deploy to a Google Cloud e2-micro](docs/deploy-gcp-e2-micro.md)

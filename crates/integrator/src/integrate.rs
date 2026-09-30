@@ -137,7 +137,7 @@ impl<C: ChecksSource> Integrator<C> {
 
     /// Fetches C into the target's mirror, which the watch already created
     /// and brought up to X.
-    fn open_job(&self, project: &str, item: QueueItem, x: String) -> Result<Job> {
+    pub(crate) fn open_job(&self, project: &str, item: QueueItem, x: String) -> Result<Job> {
         let mirror = git::mirror_dir(&self.config.state_dir, &item.repository_url);
         let candidate = match &item.candidate_ref {
             Some(reference) => format!("+{reference}:{reference}"),
@@ -212,7 +212,7 @@ impl<C: ChecksSource> Integrator<C> {
 
     /// Computes R in a linked worktree through `git_workflow` (deterministic;
     /// idempotent while the intent file exists).
-    fn compute_result(&self, job: &Job, roster: &Roster) -> Result<NewResult> {
+    pub(crate) fn compute_result(&self, job: &Job, roster: &Roster) -> Result<NewResult> {
         let summary = self.prepare(job)?;
         Ok(NewResult {
             submission_id: job.item.submission_id.clone(),

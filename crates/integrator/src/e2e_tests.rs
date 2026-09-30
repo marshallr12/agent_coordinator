@@ -1689,3 +1689,22 @@ async fn s5_review_a_service_failure_still_aborts_the_cycle() {
     );
     assert_eq!(remote_main(&remote), base);
 }
+
+#[tokio::test]
+async fn shadow_computes_without_publication_mutations_or_reruns() {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    let h = Harness::new(item(&remote, &base, &c)).await;
+    h.checks(Some("failure"), &[]);
+    let before = git(&remote.source, &["ls-remote", "origin"]);
+    let records = h.integrator.shadow_cycle("p").await.unwrap();
+    assert!(records.iter().any(|r| r["step"] == "WouldPush"));
+    assert!(!records[0]["missing_rules"].as_array().unwrap().is_empty());
+    assert_eq!(before, git(&remote.source, &["ls-remote", "origin"]));
+    h.peek(|m| {
+        assert!(m.results.is_empty() && m.receipts.is_empty() && m.observations.is_empty());
+        assert!(m.revises.is_empty() && m.reports.is_empty() && m.keys.is_empty());
+        assert!(m.candidates.is_empty() && m.not_mechanical.is_empty());
+    });
+    assert_eq!(h.reruns(), 0);
+}

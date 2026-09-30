@@ -2,7 +2,8 @@
 //! S1): the integration queue (which doubles as the integrator heartbeat),
 //! pinned integration results, and GitHub Actions check receipts.
 //!
-//! Only projects whose `integration_owner` is `integrator` are served, and
+//! Live routes require `integration_owner=integrator`; the shadow queue view
+//! also serves agent-owned projects without a heartbeat. In either mode,
 //! only an integrator-class credential may call these routes (the reverse is
 //! enforced for writes in `Mutation::begin`). Push authority lives in
 //! `integrator_authority`, observations and revises in `integrator_observe`,
@@ -20,7 +21,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::HeaderMap,
     routing::{get, post},
 };
@@ -256,12 +257,34 @@ async fn with_reverted(
 /// `GET …/integrator/queue`: approved, pins-current subjects awaiting
 /// integration, reverts awaiting a mechanical candidate, and the targets the
 /// integrator watches even when nothing is queued. Each call also records the
-/// integrator heartbeat.
-async fn queue(State(s): State<AppState>, auth: Auth, Path(p): Path<String>) -> Reply {
+/// integrator heartbeat, except `?shadow=true` (pre-cutover observation).
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueueOptions {
+    #[serde(default)]
+    shadow: bool,
+}
+
+async fn queue(
+    State(s): State<AppState>,
+    auth: Auth,
+    Path(p): Path<String>,
+    Query(options): Query<QueueOptions>,
+) -> Reply {
     require_integrator(&auth.actor)?;
     let mut c = s.pool.acquire().await?;
-    require_integrator_project(&mut c, &p).await?;
-    heartbeat(&mut c, &p, s.now()).await?;
+    if options.shadow {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?)")
+            .bind(&p)
+            .fetch_one(&mut *c)
+            .await?;
+        if !exists {
+            return Err(AppError::not_found());
+        }
+    } else {
+        require_integrator_project(&mut c, &p).await?;
+        heartbeat(&mut c, &p, s.now()).await?;
+    }
     let (items, skipped) = eligible_items(&mut c, &p).await?;
     let items = with_reverted(&mut c, &p, items).await?;
     let reverts = crate::integrator_reverts::pending_reverts(&mut c, &p).await?;

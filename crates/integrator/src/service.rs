@@ -343,6 +343,17 @@ impl Service {
         decode(response)
     }
 
+    /// Pre-cutover queue view, without recording a live heartbeat.
+    pub async fn shadow_queue(&self, project: &str) -> Result<Reply<Queue>> {
+        let path = format!("/api/v1/projects/{project}/integrator/queue");
+        let response = self
+            .client
+            .get_query(&path, &[("shadow", "true".into())], None)
+            .await
+            .map_err(transport)?;
+        decode(response)
+    }
+
     /// Pins a result; replays of the same (submission, t0) return the stored row.
     pub async fn record_result(
         &self,
