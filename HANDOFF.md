@@ -37,8 +37,10 @@ Local verification: 502 workspace tests passed, warnings-denied workspace
 Clippy passed, pinned documentation source/package/local-link checks passed,
 locked dependency audit passed, four cutover-ops regressions passed, shell
 syntax and generated systemd unit validation passed. The rendered runbook was
-inspected in Brave. Full workspace build and smoke exercises follow the local
-candidate commit (the smoke requires clean committed source).
+inspected in Brave. The full workspace build, service/CLI smoke and backup/restore smoke passed
+on clean committed candidate `14e2fda`; the final focused shadow-queue test also
+passed after adding the missing-project check. This record update changes
+only documentation. Product code remains locally committed, not pushed or deployed.
 Local gate logs use `/tmp/agentc-s6-*.log`; cutover credentials/evidence stay
 outside Git. No remote push or production deployment has occurred.
 
