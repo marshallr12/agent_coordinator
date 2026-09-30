@@ -1,4 +1,4 @@
-# HANDOFF — Full agent autonomy for Agent Coordinator (P4 service deployed; S6 pending)
+# HANDOFF — Full agent autonomy for Agent Coordinator (S6 tooling ready; cutover pending)
 
 Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of a review and
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
@@ -19,7 +19,7 @@ precedence over U14's earlier dogfood approval.
   on `origin/main` `4a72018`. Keep its Cargo target directory inside that worktree.
 - Corrected the planning branch's pre-existing formatting failure in
   `crates/server/build.rs`; formatting checks now pass on both checkouts. The formatting
-  correction is recorded with this handoff update. No product code was changed on S6.
+  correction was recorded in the previous handoff update. S6 had no product changes at that point.
   The pinned mdBook 0.5.4 build and documentation source/package/local-link checks passed.
 - **Next phase: P4 S6**, following `planning/autonomy/p4-design.md` §§4–5: integrator host
   setup on oracle-1, a production shadow day, required-check flip-rate evidence, cutover
@@ -48,13 +48,33 @@ precedence over U14's earlier dogfood approval.
   files were removed, and the local manifest-registration helper was stopped.
   Never request or copy the App private key into this checkout;
   keep it on oracle-1. Host setup and credential installation remain user steps.
-- S6 implementation also remains: the deployed integrator CLI currently exposes `run`
-  and `config`, with no shadow command; the S6 host-setup script and cutover runbook are
-  not present. Prepare these before running the shadow day or changing production ownership.
+- **S6 local tooling implemented this session (2026-09-29):** `autonomy/s6` at `14e2fda`
+  in the existing worktree. Adds `agentc-integrator shadow [--once]`, a read-access integrator
+  queue view before cutover (`?shadow=true`, no live heartbeat), separate local shadow state,
+  owner-run `deploy/agentc/integrator-host-setup.sh`, read-only `integrator-preflight.py`,
+  `integrator-flip-rate.py` and four ops regressions. Canonical runbook:
+  `book/src/docs/integrator-cutover.md` in the S6 worktree. The shadow regression computes R
+  with a real bare remote and proves no publication mutations, pushes or reruns. `WouldPush`
+  is provisional (`authority_verified=false`); reverts are counted but not computed in shadow.
+  The host installer uses systemd LoadCredential (>=247) so the root-owned key stays in place;
+  a shared flock prevents simultaneous live/shadow daemons. It installs but does not start a unit.
+  Local verification: 502 workspace tests, final focused shadow-queue test (read credential,
+  no heartbeat, missing project 404), warnings-denied workspace Clippy, locked dependency audit,
+  pinned documentation checks, four ops regressions, bash syntax and systemd unit verification
+  passed. Rendered runbook inspected in Brave. Full workspace build, service/CLI smoke and backup/restore smoke
+  passed on clean committed candidate `14e2fda`. A documentation-only verification record
+  follows that candidate in the S6 worktree. Logs: `/tmp/agentc-s6-*.log`.
+  No branch push, production deployment, root host setup, credential issue or ruleset change
+  happened. **S6 is not complete.** Next: review/ship/deploy this candidate, land the target roster
+  using exact live service check identities (the current target has no roster file), owner App
+  access/host setup/read credential, 24-hour shadow and live candidate test, >=20 required-job
+  attempts on pinned main each <2% non-success, zero drain preflight, full rulesets, write
+  credential and human ownership switch plus canary. The user confirmed they have changed
+  nothing since the previous handoff; carry forward the verified test-repo-only App installation.
 - The P3a shadow poller is stopped, and the old P2/P3a/P4 worktrees are gone. Historical
   commands below that refer to those worktrees must not be run unchanged.
 
-First local commands for implementation:
+First local commands for the next session:
 ```sh
 cd ~/src/worktrees/agent-coordinator-s6
 export CARGO_TARGET_DIR="$PWD/target"
@@ -62,8 +82,8 @@ git status --short
 cargo fmt --all -- --check
 ```
 Read the design from the planning checkout: `~/src/agent_coordinator/planning/autonomy/p4-design.md`.
-The previous full product gate passed on `4a72018` (see §11); this resume does not claim a
-fresh full workspace gate. Run the full applicable gate when implementing S6.
+The previous deployed product gate passed on `4a72018` (see §11). The S6 candidate verification
+is recorded above; production remains at `4a72018`. Follow the S6 runbook for live prerequisites.
 
 ## 1. What was asked
 
