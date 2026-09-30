@@ -42,8 +42,9 @@ precedence over U14's earlier dogfood approval.
   `/etc/agentc/integrator-app.pem`, verified `root:root`, mode `0400`; no PEM was saved on
   this workstation. The SSH connection is the user's Bash alias `oracle` (`ssh oracle-1`
   itself does not resolve). The user completed the test-only installation in Brave. The App
-  currently has selected-repository access only to `agentc-ruleset-test`: **before the S6 live
-  test/shadow, add `agent_coordinator` and subsequently remove the test repo from the installation**.
+  now has selected-repository access only to `marshallr12/agent_coordinator`: **the user saved
+  this change on 2026-09-29, and browser read-back showed GitHub's update confirmation and
+  exactly one selected repository; `agentc-ruleset-test` is removed**.
   Production rulesets and coordinator ownership have not been changed. Temporary host test
   files were removed, and the local manifest-registration helper was stopped.
   Never request or copy the App private key into this checkout;
@@ -66,11 +67,13 @@ precedence over U14's earlier dogfood approval.
   follows that candidate in the S6 worktree. Logs: `/tmp/agentc-s6-*.log`.
   No branch push, production deployment, root host setup, credential issue or ruleset change
   happened. **S6 is not complete.** Next: review/ship/deploy this candidate, land the target roster
-  using exact live service check identities (the current target has no roster file), owner App
-  access/host setup/read credential, 24-hour shadow and live candidate test, >=20 required-job
+  using exact live service check identities (the current target has no roster file), owner-run
+  host setup and read credential (App access is complete), 24-hour shadow and live candidate test,
+  >=20 required-job
   attempts on pinned main each <2% non-success, zero drain preflight, full rulesets, write
-  credential and human ownership switch plus canary. The user confirmed they have changed
-  nothing since the previous handoff; carry forward the verified test-repo-only App installation.
+  credential and human ownership switch plus canary. App repository selection was completed
+  by the user and browser-verified after the local tooling gate; no host bootstrap or deployment
+  has occurred.
 - The P3a shadow poller is stopped, and the old P2/P3a/P4 worktrees are gone. Historical
   commands below that refer to those worktrees must not be run unchanged.
 

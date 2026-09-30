@@ -133,8 +133,9 @@ results, reconciliations, journal attestations, human authorization, agent `PATC
    **Registered 2026-09-29:** `marshallr12-agentc-integrator`, App id `5127380`, installation id
    `166293403`, permissions as above, private. Manifest-generated key went directly over SSH to
    oracle-1 `/etc/agentc/integrator-app.pem` (`root:root`, `0400`); the runtime's key access must be
-   arranged by host setup. Currently installed only on the test repo: add `agent_coordinator`
-   before live use and subsequently remove the test repo from the selected-repository list.
+   arranged by host setup. **Repository access completed 2026-09-29:** the user saved the
+   installation selection; browser read-back showed GitHub's update confirmation and only
+   `marshallr12/agent_coordinator` selected. The test repo is removed.
 4. **Run the integrator host setup** on the chosen host with sudo (the script will be written in S6;
    the agent does not run root scripts).
 5. **Issue the integrator credential** in the dashboard (class `integrator`, write) and install it on
