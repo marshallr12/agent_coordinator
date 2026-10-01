@@ -121,6 +121,111 @@ Read the design from the planning checkout: `~/src/agent_coordinator/planning/au
 The previous deployed product gate passed on `4a72018` (see §11). The S6 candidate verification
 is recorded above; production is now at `1e8aebb`. Follow the S6 runbook for live prerequisites.
 
+## Wave-set session (2026-10-01)
+
+The user again disabled the Agent Coordinator workflow for this session; do not create or claim
+service tasks. The S6 cutover chain (24-hour shadow check due from 2026-10-01 04:28 UTC, live
+candidate test, stability sample, rulesets, write credential, ownership switch, canary) stays
+serial operations work and is not a lane. This wave-set runs alongside it.
+
+- **Build tree:** a fresh worktree `~/src/worktrees/agent-coordinator-hardening` on new branch
+  `hardening/wave1` from freshly fetched `origin/main` (`1e8aebb`), `CARGO_TARGET_DIR` inside it.
+  Lane paths below are relative to that tree; this living doc stays in the `autonomy-plan` checkout.
+- **Staleness:** six scouts each reported `live` with negative-controlled git-log and tree probes;
+  nothing was struck.
+- **Serialized (not in this wave-set):** R-P3b.2, .3, .4 and R-P3b.5(b)(c) share
+  `deploy/agentc/host-setup.sh`, `containment-suite.sh` and `crates/supervisor` with lane B;
+  R-P3b.5(d) shares `crates/server` with lane A and needs a user ruling on read-only reviewer
+  credentials creating subagent identities. Scout findings worth keeping:
+  - R-P3b.2: the integrator never pushes candidate refs; full rulesets A/B (user step) do not
+    protect `refs/agent-coordinator/candidates/*`, so a separate-uid helper is still required.
+    Decisions: helper credential (not the integrator App), helper uid, ref allow-list.
+  - R-P3b.3: the reviewer's Bash is plain `Bash`, so isolation must be OS-level. Decisions:
+    third uid vs bubblewrap, what counts as candidate code (`scripts/verify_ui.mjs` reads the
+    staging login), clone/target sharing, staging-port access.
+  - R-P3b.4: `meta skuid` matches the sender, not the listener's owner, so no nft-only rule
+    protects listeners; only per-uid network namespaces fully fix it. Decide (a) netns,
+    (b) port slices, (c) accept and document; spike `input`-hook skuid on mxmini first.
+  - R-P3b.5(d): `allowed_for_read_access` admits any `POST /api/v1/sessions`, and
+    `resolve_subagent` creates identities without an access check.
+- **Host facts (2026-10-01):** `host-setup.sh` ran on mxmini during P2 (§11); both
+  `/var/lib/agentc/{impl,rev}/claude-config` are empty: no agent-account Claude login exists yet.
+
+### Wave plan (consumed by /wave-run)
+
+```yaml
+wave_set: TypeSafe hardening ∥ R-P3b.1 Claude-profile write confinement ∥ ship.py hardening
+capabilities: [bin:cargo>=1.98.1, bin:python3>=3.11, bin:mdbook=0.5.4, bin:bash>=5, bin:git, write:worktree-target, disk:>=60G-free]
+build_tree: {path: ~/src/worktrees/agent-coordinator-hardening, branch: hardening/wave1, base: origin/main 1e8aebb}
+workspace_gate: >-
+  cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings &&
+  cargo test --workspace --locked && cargo build --workspace --locked && python3 scripts/smoke.py &&
+  python3 scripts/backup_smoke.py && python3 scripts/check_docs.py --mdbook "$(command -v mdbook)"
+lanes:
+  - lane: A
+    item: TypeSafe hardening (concurrency cap, circuit breaker, main-service-only secret file)
+    paths: [crates/server/src/context_rerank.rs, crates/server/src/context_rerank/tests.rs,
+            crates/server/tests/context_rerank.rs, crates/server/src/main.rs,
+            deploy/agent-coordinator.service, deploy/service.env.example,
+            scripts/linux_install_smoke.py,
+            book/src/docs/knowledge-contract.md, docs/knowledge-contract.md,
+            book/src/docs/linux-installation.md, docs/linux-installation.md,
+            book/src/docs/backup-restore-guide.md, docs/backup-restore-guide.md]
+    out_of_repo: [~/.local/share/agent-coordinator-autonomy/deploy-pre.sh,
+                  ~/.local/share/agent-coordinator-autonomy/release-next/deploy-pre.sh]  # main loop only
+    hot_files: [Cargo.lock]
+    resources: []   # mock TypeSafe servers bind 127.0.0.1:0
+    capabilities: [bin:cargo>=1.98.1, bin:python3>=3.11, bin:mdbook=0.5.4, write:worktree-target]
+    phases:
+      - {id: A-P1, goal: "Concurrency cap: ContextRerankConfig gains max_in_flight (default 4); ContextReranker holds a tokio Semaphore; over-cap calls use try_acquire and return Unchanged::Skipped(\"busy\") without calling TypeSafe", done_when: ["unit test: with the cap held, rerank returns Skipped(\"busy\") and the Mock hit count does not increase", "existing context_rerank unit tests pass unchanged", "struct-literal config sites compile via ..Default::default()"], module_gate: "cargo test -p coordinator-server --lib context_rerank", model: sonnet/medium}
+      - {id: A-P2, goal: "Circuit breaker: failure_threshold (default 3) consecutive failures open the breaker for open_for (default 60 s); while open, Skipped(\"circuit_open\") with no call; after the window one half-open probe; success closes it, failure re-opens it", done_when: ["unit test: 3 failing Mock responses then a 4th call returns Skipped(\"circuit_open\") with no extra hit", "unit test: after the window (injected clock or short config) one probe is sent; success resets the counter", "a success between failures resets the consecutive count"], module_gate: "cargo test -p coordinator-server --lib context_rerank", model: sonnet/high}
+      - {id: A-P3, goal: "End-to-end through AppState: saturation and an open breaker both return context in FTS order and log the skip reason", done_when: ["e2e test: concurrent context requests beyond the cap all succeed, with the over-cap results in FTS order", "e2e test: a failing TypeSafe mock opens the breaker and later requests skip it"], module_gate: "cargo test -p coordinator-server --test context_rerank", model: sonnet/medium}
+      - {id: A-P4, goal: "Secret file: agent-coordinator.service adds EnvironmentFile=-/etc/agent-coordinator/typesafe.env (root:root 0600) after service.env; backup/maintenance units unchanged; no example file shipped; service.env.example, linux-installation and backup-restore-guide (book/src and docs copies) name the file and the cap/breaker behaviour; knowledge-contract states over-cap/open-breaker calls keep FTS order; linux_install_smoke rewrites the new path", done_when: ["grep shows EnvironmentFile=-/etc/agent-coordinator/typesafe.env only in deploy/agent-coordinator.service", "python3 scripts/check_docs.py --mdbook \"$(command -v mdbook)\" exits 0", "scripts/linux_install_smoke.py rewrites /etc/agent-coordinator/typesafe.env alongside service.env"], module_gate: "python3 scripts/check_docs.py --mdbook \"$(command -v mdbook)\"", model: sonnet/low}
+    main_loop_after_A-P4: "Edit both out-of-repo deploy-pre.sh copies: check TYPESAFE_API_KEY in /etc/agent-coordinator/typesafe.env and exit non-zero before stopping anything when it is missing or empty. VM cutover is a user step: install typesafe.env, deploy the new unit, daemon-reload, remove the key line from service.env, restart."
+  - lane: B
+    item: R-P3b.1 Claude-profile write confinement
+    paths: [crates/supervisor/src/profile.rs, crates/supervisor/src/launch.rs,
+            crates/supervisor/src/preflight.rs, crates/supervisor/src/role_settings.rs,
+            crates/supervisor/src/config.rs, crates/supervisor/src/confine.rs,
+            deploy/agentc/host-setup.sh, deploy/agentc/containment-suite.sh,
+            deploy/README.md, book/src/deploy/README.md]
+    hot_files: [crates/supervisor/src/main.rs, Cargo.lock]   # main.rs: mod line and module doc only
+    resources: [mxmini root host: /var/lib/agentc, nft table inet agentc, proxy 3128, staging 18080 (B-P6 only, user-run)]
+    capabilities: [bin:cargo>=1.98.1, bin:bash>=5, write:worktree-target]
+    phases:
+      - {id: B-P1, goal: "Containment-suite write probes (red first): as each agent uid, a planted claude-config/settings.json, $CARGO_HOME/config.toml rustc-wrapper, $HOME dotfile, or write into another launch's clone/run must not reach the next launch", done_when: ["new check functions exist and are called from main()", "bash -n deploy/agentc/containment-suite.sh exits 0"], module_gate: "bash -n deploy/agentc/containment-suite.sh", model: sonnet/high}
+      - {id: B-P2, goal: "Per-launch state: profile::environment points HOME, CARGO_HOME and AGENT_COORDINATOR_HOME at 0700 dirs under $RUN/state; CARGO_HOME holds the root-owned pinned config.toml seed plus symlinks to a persistent per-role registry/git cache (D2); prepare_run creates and seeds them; keep the last 5 runs' state per role and prune older ones at prepare (D3)", done_when: ["unit test: two prepare_run calls yield distinct HOME/CARGO_HOME paths", "unit test: CARGO_HOME/config.toml equals the seed and registry/git resolve to the shared cache", "unit test: a sixth run prunes the oldest state dir"], module_gate: "cargo test -p agentc-supervisor", model: opus/high}
+      - {id: B-P3, goal: "Claude login (D1): CLAUDE_CONFIG_DIR stays the persistent per-role claude-config, holding only the agent-writable credentials file; settings.json and CLAUDE.md there are root-owned seeds; per-launch state never holds a credential copy", done_when: ["unit test: environment() maps CLAUDE_CONFIG_DIR to the per-role dir and HOME to the per-launch dir", "unit test: the rendered user-scope settings equal role_settings::render output"], module_gate: "cargo test -p agentc-supervisor", model: opus/high}
+      - {id: B-P4, goal: "Preflight refuses a launch when claude-config/settings.json or CLAUDE.md is not root-owned or differs from the seed, when the cargo config seed differs, or when per-launch dirs are not 0700; problems are reported, never skipped", done_when: ["unit tests (tempdir, problem-reported direction): edited settings.json, extra CLAUDE.md, edited cargo config and a 0755 per-launch dir each produce a preflight problem", "missing_containment_is_reported_not_skipped extended and passing"], module_gate: "cargo test -p agentc-supervisor preflight", model: opus/high}
+      - {id: B-P5, goal: "host-setup.sh: root-owned seeds (claude settings.json, CLAUDE.md placeholder, cargo config.toml) installed into the persistent dirs, agent-writable only for the credentials file and the cargo cache; create_dirs/next_steps/--uninstall updated; idempotent re-run", done_when: ["bash -n deploy/agentc/host-setup.sh exits 0", "next_steps still prints the per-account claude auth login command with CLAUDE_CONFIG_DIR"], module_gate: "bash -n deploy/agentc/host-setup.sh", model: sonnet/high}
+      - {id: B-P6, goal: "Host proof on mxmini (user runs sudo): re-run host-setup with this tree's release binaries, log in agentc-impl and agentc-rev with claude auth login, run the containment suite with --cargo-test", done_when: ["containment suite reports PASS for every check, including the B-P1 probes", "a credentials file exists in each claude-config and settings.json there is root-owned"], module_gate: "sudo deploy/agentc/containment-suite.sh --cargo-test (user)", model: main-loop+user}
+      - {id: B-P7, goal: "Prose: deploy/README.md and book/src/deploy/README.md, host-setup.sh and containment-suite.sh headers, supervisor module docs (main.rs, profile.rs environment(), role_settings.rs header) describe per-launch state and the root-owned seeds", done_when: ["prose-lint.sh passes on the changed lines", "check_docs.py exits 0"], module_gate: "python3 scripts/check_docs.py --mdbook \"$(command -v mdbook)\"", model: haiku/medium}
+  - lane: C
+    item: ship.py hardening (R-P3b.5a)
+    paths: [scripts/ship.py, scripts/ship_test.py, CONTRIBUTING.md]
+    hot_files: []
+    resources: []
+    capabilities: [bin:python3>=3.11, bin:git]
+    phases:
+      - {id: C-P1, goal: "require_fast_forward ancestor-checks git rev-parse FETCH_HEAD from the fetch it just ran (no separate ls-remote tip); gh run list gets --repo OWNER/NAME derived from the remote URL", done_when: ["ship_test: a tip that moves between fetch and check cannot pass the ancestor check (mocked run)", "ship_test: every gh invocation carries --repo"], module_gate: "python3 -m unittest scripts/ship_test.py", model: sonnet/medium}
+      - {id: C-P2, goal: "wait_for_checks gets an overall deadline (in-code default, overridable flag) covering the completed-wait loop, not only the appear wait; CONTRIBUTING's ship paragraph states it", done_when: ["ship_test: runs that never complete hit the overall deadline and sys.exit with a message naming the SHA", "existing appear-timeout behaviour unchanged"], module_gate: "python3 -m unittest scripts/ship_test.py", model: sonnet/medium}
+serializes:
+  - {item: "R-P3b.2 candidate-push helper", behind: "lane B (host-setup/containment-suite/supervisor) + user decisions (helper credential, uid, ref allow-list)"}
+  - {item: "R-P3b.3 reviewer candidate-code isolation", behind: "lane B + user decisions (third uid vs bwrap, what counts as candidate code)"}
+  - {item: "R-P3b.4 cross-uid loopback", behind: "lane B + design decision (netns vs port slices vs accept) + mxmini skuid spike"}
+  - {item: "R-P3b.5(b)(c) launch no_new_privs/process cleanup, --uninstall", behind: "lane B (launch.rs, profile.rs, host-setup.sh)"}
+  - {item: "R-P3b.5(d) read-only credentials creating subagent identities", behind: "lane A (crates/server) + user ruling on reviewer subagents"}
+decisions:
+  - {q: "Wave-set composition", answer: "TypeSafe ∥ R-P3b.1 ∥ ship.py (2026-10-01, user)"}
+  - {q: "Rerank cap/breaker", answer: "cap 4, over-cap skips; 3 consecutive failures open for 60 s, then one half-open probe"}
+  - {q: "TypeSafe secret file", answer: "/etc/agent-coordinator/typesafe.env root:root 0600, no shipped example, deploy-pre.sh aborts when the key is missing"}
+  - {q: "D1 Claude login location", answer: "persistent per-role claude-config holding only credentials; settings/CLAUDE.md root-owned and preflight-verified"}
+  - {q: "D2 CARGO_HOME", answer: "per-launch CARGO_HOME with root-owned config seed; shared persistent registry/git cache"}
+  - {q: "D3 per-launch state retention", answer: "keep the last 5 per role; prune at prepare"}
+  - {q: "Builder models", answer: "per-phase table above (manual model-select scoring; TypeSafe scoring not run)"}
+preflight: {run: 2026-10-01T04:56:55Z, result: green, method: "manual (repo has no scripts/preflight.sh): cargo/rustc 1.98.1, python3 3.11.2, mdbook 0.5.4, bash 5.2, git 2.39, 124G free, worktrees dir writable, both deploy-pre.sh copies present; shellcheck absent so shell gates use bash -n"}
+```
+
 ## 1. What was asked
 
 The user asked for this work to be done **outside the Agent Coordinator workflow** ("DO NOT create a
@@ -253,7 +358,7 @@ the coordinator after P1 is deployed **only if the user approves U14**.
 
 ## 5. Start here (next session)
 
-**Out-of-band service change on `autonomy-plan` (2026-09-28):** this branch now carries an optional TypeSafe context-reranking prototype, recorded in §11 below. It has not been incorporated into `main` or deployed. Before the next product release, decide whether to cherry-pick the commit onto the current product branch or revert it here. The production VM has a nonempty `TYPESAFE_API_KEY` entry in its protected service environment file, but its installed binary has not been changed by this session. Do not assume the model path has been exercised.
+**TypeSafe prototype on `autonomy-plan` (2026-09-28): superseded.** The prototype commit `b4f4714` is not in `main`'s history, but its code was re-imported, rewritten and shipped as `main` `4a72018` (§11 rows dated 2026-09-29; production reranking is on). Leave `b4f4714` in place; no cherry-pick or revert is needed. The remaining hardening (secret file, concurrency cap, breaker) is lane A of the 2026-10-01 wave plan above.
 
 **Out-of-band PR #3 (2026-09-28): merged and deployed.** [PR #3](https://github.com/marshallr12/agent_coordinator/pull/3) (`CHECKOUT_SYNC_INSTRUCTIONS`: at session start an agent runs `git pull --ff-only` on a clean tracking checkout, else tells the user) is on `main` `6239233` and live in production (binaries only, 2026-09-28; see §11). Branch new work from a freshly fetched `origin/main`.
 
