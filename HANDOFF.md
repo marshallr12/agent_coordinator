@@ -233,6 +233,12 @@ decisions:
   - {q: "D2 CARGO_HOME", answer: "per-launch CARGO_HOME with root-owned config seed; shared persistent registry/git cache"}
   - {q: "D3 per-launch state retention", answer: "keep the last 5 per role; prune at prepare"}
   - {q: "Builder models", answer: "per-phase table above (manual model-select scoring; TypeSafe scoring not run)"}
+user_steps:   # /wave-run pauses and gives the user exact commands at each; agents never run root or production steps
+  - {when: "before B-P6", who: user, what: "on mxmini: sudo re-run deploy/agentc/host-setup.sh with this tree's release binaries; claude auth login for agentc-impl and agentc-rev (command printed by next_steps); sudo deploy/agentc/containment-suite.sh --cargo-test; paste the output"}
+  - {when: "after lane A lands on main and is deployed", who: user, what: "on the production VM: install /etc/agent-coordinator/typesafe.env (root:root 0600) with the key, install the new unit, daemon-reload, remove the TYPESAFE_API_KEY line from service.env, restart; agent then verifies health and the rerank log line"}
+  - {when: "every push to main or production deploy", who: user, what: "explicit go-ahead at that moment (public repo; U9 deploys still need the preflight at 0)"}
+  - {when: "wave-set close", who: user, what: "read the summary; decide R-P3b.2-.4 and R-P3b.5(d) for the next wave-set"}
+deferred_host_work: "oracle-1 supervised-host setup (host-setup.sh) waits for P3b bring-up after R-P3b.1-.4 land, ideally after S6 cutover; checked 2026-10-01: agentc-impl/agentc-rev absent there, only the integrator is installed"
 preflight: {run: 2026-10-01T04:56:55Z, result: green, method: "manual (repo has no scripts/preflight.sh): cargo/rustc 1.98.1, python3 3.11.2, mdbook 0.5.4, bash 5.2, git 2.39, 124G free, worktrees dir writable, both deploy-pre.sh copies present; shellcheck absent so shell gates use bash -n"}
 ```
 
