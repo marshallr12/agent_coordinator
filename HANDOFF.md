@@ -85,6 +85,16 @@ precedence over U14's earlier dogfood approval.
   Startup journal evidence: `~/.local/share/agent-coordinator-autonomy/release-1e8aebb/shadow-start.log`.
   **Earliest 24-hour checkpoint: 2026-10-01 04:28:08 UTC / 00:28:08 EDT.** Verify continuous
   coverage, errors/restarts and any WouldPush records then; elapsed time alone is not a pass.
+  **24-hour checkpoint read 2026-10-01 04:59 UTC: polling PASS.** Unit active since 04:28:08,
+  0 restarts, `Result=success`, memory peak 31 MiB (budget 256 MiB), no kernel OOM lines, `@run`
+  inactive. 2726 records over 24 h 31 min: 2721 `Target` (shadow mode, T0 and main `1e8aebb`,
+  `missing_rules=["required_status_checks"]` as expected, `pending_reverts=0`), poll median 32 s,
+  max gap 47 s. 2720 Target polls listed 11 check runs, all `success`. One poll (13:01:05 UTC) listed
+  zero checks; confirm in the live candidate test that an empty check list fails closed. 5 `Error` records,
+  all `GitHub replied 502 Bad Gateway` (10:12, 13:23, 13:26, 17:25, 20:33 UTC), each followed by a
+  normal poll. **No `WouldPush`:** the queue had no approved candidates, so candidate computation
+  and publication remain unexercised; this proves polling only. Journal copy (outside Git):
+  `~/.local/share/agent-coordinator-autonomy/release-1e8aebb/shadow-day-journal.log`.
   Remaining S6 gates: live candidate test, pinned-main stability sample, full rulesets,
   zero drain preflight, write credential, human ownership switch and canary.
 - **oracle-1 build preparation (completed):** ARM64, systemd 259, Rust 1.98.1; separate clean detached
