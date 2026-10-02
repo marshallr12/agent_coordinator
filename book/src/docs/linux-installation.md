@@ -65,9 +65,20 @@ excerpts of at most 1,800 characters each (task or knowledge title, description
 or body, and acceptance criteria or applicability) to TypeSafe, a third party,
 at `api.typesafe.ai`, as described in the
 [knowledge contract](knowledge-contract.md#bounded-context-search). That key is
-a credential, so supply it through a protected secret mechanism rather than
-`service.env`. Without the key the service logs one warning at startup and keeps
-context results in their search order.
+a credential, so keep it out of `service.env`, which the backup and maintenance
+units also load. Put it in `/etc/agent-coordinator/typesafe.env`, which only the
+main service unit reads, and restart the service:
+
+```sh
+sudo install -o root -g root -m 0600 /dev/null /etc/agent-coordinator/typesafe.env
+sudoedit /etc/agent-coordinator/typesafe.env   # TYPESAFE_API_KEY=...
+sudo systemctl restart agent-coordinator.service
+```
+
+No example of this file is shipped. Without the key the service logs one warning
+at startup and keeps context results in their search order. With it, at most four
+reranking calls run at once and repeated provider failures pause reranking for 60
+seconds; a busy or paused request still succeeds in search order.
 
 Initialize the first administrator at a hidden terminal prompt:
 

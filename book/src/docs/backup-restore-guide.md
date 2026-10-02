@@ -45,7 +45,11 @@ settings follow the official
 for calendar accuracy, randomized delay, and persistent catch-up.
 
 Keep `service.env` limited to the non-secret server settings shown in the deploy
-example. The backup unit has no network access and performs no off-server transfer;
+example. The TypeSafe key belongs in `/etc/agent-coordinator/typesafe.env`
+(root:root 0600), which only the main service unit loads; the backup and
+maintenance units never read it. Back that file up through the same
+operator-selected secret mechanism, not the snapshot repository; without it,
+a restored service runs without reranking and returns context in search order. The backup unit has no network access and performs no off-server transfer;
 configure transfer credentials only in the separate operator-selected mechanism.
 
 Verify the first snapshot as described below. Only after it passes verification,

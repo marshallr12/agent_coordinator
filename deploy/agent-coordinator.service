@@ -8,6 +8,8 @@ User=agent-coordinator
 Group=agent-coordinator
 WorkingDirectory=/var/lib/agent-coordinator
 EnvironmentFile=/etc/agent-coordinator/service.env
+# Optional secret for the main service only; backup and maintenance never load it.
+EnvironmentFile=-/etc/agent-coordinator/typesafe.env
 ExecStart=/usr/local/bin/agent-coordinator-server serve
 Restart=on-failure
 RestartSec=5

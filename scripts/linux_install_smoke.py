@@ -383,6 +383,8 @@ def systemd_acceptance(root: Path, caddy_source: Path) -> None:
                 ("Unit=agent-coordinator-backup.service", f"Unit={backup_unit}"),
                 ("/var/lib/agent-coordinator", str(data)),
                 ("/etc/agent-coordinator/service.env", str(environment)),
+                # Optional and absent here; keep the main unit inside the disposable tree.
+                ("/etc/agent-coordinator/typesafe.env", str(config / "typesafe.env")),
                 ("/usr/local/bin/agent-coordinator-server", str(install / "agent-coordinator-server")),
                 ("StateDirectory=agent-coordinator", f"StateDirectory={name}"),
             ]:
