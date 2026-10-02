@@ -11,11 +11,14 @@ Branch `hardening/core-20261002` in `~/src/worktrees/agent-coordinator-core` now
 adds `09a2b78` (TypeSafe key in main-service-only `typesafe.env`), `8b24b8e`
 (C1 routing blocker resolved: remotes named like a URL snapshot refused, ASCII
 host match), `8c2cdc6` (exact-ref push readback) and `444bc62` (its handoff).
-All independently confirmed; script/docs gate legs green. `release-next/deploy-pre.sh`
+All independently confirmed; script/docs gate legs green. Then `R-P3b.5(d)` (decision U20, read-only
+credentials refused subagent sessions) landed as its own commit after the
+full gate (fmt, Clippy, 546 tests) and an independent CONFIRMED review.
+Decisions U17–U20 (§6) unblock R-P3b.2–.4: next is R-P3b.3 (reviewer bwrap),
+then R-P3b.4 (mxmini netns spike); R-P3b.2 needs the user to create the App. `release-next/deploy-pre.sh`
 now requires the key in `typesafe.env`, so the user's VM step (install
 `typesafe.env` 0600, new unit, daemon-reload, drop the key from `service.env`,
-restart) must precede the next deploy. Next: user ship authorization; owner
-Claude host/auth proof; R-P3b.2–.5 decisions; S6 cutover chain.
+restart) must precede the next deploy. Next: R-P3b.3; user ship authorization; owner Claude host/auth proof; S6 cutover chain.
 
 ## Previous resume point — core overnight wave (2026-10-02)
 
@@ -531,6 +534,10 @@ Record answers here.
 | U14 | After P1 is deployed, may autonomy work run as coordinator tasks (dogfooding), or stay outside the workflow as originally instructed? | Dogfood || 2026-09-25: **dogfood** after P1 deploy |
 | U16 | Integrator host (VM is IPv6-only; GitHub is IPv4-only; see `planning/autonomy/p4-design.md` §0) | oracle-1, uid `agentc-integrator`, integrator attestation + ancestry audit | 2026-09-27: **oracle-1** (supersedes U6's integrator placement) |
 | U15 | Commit `planning/autonomy/` on `autonomy-plan` after a redaction pass, or keep it local (repo is public) | Commit after redaction | 2026-09-25: **commit and push** `autonomy-plan` to origin; redaction pass done (private repo name, home paths) |
+| U17 | R-P3b.2 candidate-push helper credential and uid | Dedicated GitHub App (this repo only, contents:write) held by new uid `agentc-push`; helper writes only `refs/agent-coordinator/candidates/<task>/<launch>` | 2026-10-02: **as recommended** |
+| U18 | R-P3b.3 reviewer candidate-code isolation | Bubblewrap (reuse R-P3b.1 confinement): hide reviewer secrets/logins/config; only clone and target writable; staging via a per-run short-lived login | 2026-10-02: **as recommended** |
+| U19 | R-P3b.4 cross-uid loopback | Per-launch network namespace (bwrap `--unshare-net` + user-mode egress such as pasta); spike on mxmini first | 2026-10-02: **as recommended** |
+| U20 | R-P3b.5(d) read-only credentials creating sessions/subagents | Block subagents only: read-only keeps its own top-level session (MCP, acknowledgments); any registration with a `subagent` block (create or resume) gets 403 | 2026-10-02: **as recommended** (corrected the same day: the first wording would have blocked read-only reviewers' own sessions) |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
