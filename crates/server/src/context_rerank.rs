@@ -6,8 +6,10 @@ use reqwest::redirect::Policy;
 use serde_json::{Map, Value, json};
 use std::{
     fmt,
+    sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::sync::Semaphore;
 
 /// Production TypeSafe scoring endpoint used unless a test overrides it.
 pub const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
@@ -50,17 +52,21 @@ pub struct ContextRerankConfig {
     pub connect_timeout: Duration,
     /// Maximum time for the whole request, including the response body.
     pub timeout: Duration,
+    /// Maximum concurrent scoring requests; excess attempts keep their order.
+    /// With an API key, must be in `1..=Semaphore::MAX_PERMITS`.
+    pub max_in_flight: usize,
 }
 
 impl Default for ContextRerankConfig {
     /// No key (so reranking is off), the production endpoint, 1 s connect
-    /// and 3 s total timeouts.
+    /// and 3 s total timeouts, and at most four concurrent requests.
     fn default() -> Self {
         Self {
             api_key: None,
             endpoint: TYPESAFE_ENDPOINT.into(),
             connect_timeout: Duration::from_secs(1),
             timeout: Duration::from_secs(3),
+            max_in_flight: 4,
         }
     }
 }
@@ -69,7 +75,7 @@ impl Default for ContextRerankConfig {
 #[derive(Debug, PartialEq, Eq)]
 enum Unchanged {
     /// No request is sent: the candidate count is outside
-    /// `MIN_CANDIDATES..=MAX_CANDIDATES`.
+    /// `MIN_CANDIDATES..=MAX_CANDIDATES`, or the client is busy.
     Skipped(&'static str),
     /// The request or its response failed; the value names the failure kind.
     Failed(&'static str),
@@ -80,14 +86,21 @@ pub(crate) struct ContextReranker {
     client: reqwest::Client,
     endpoint: String,
     key: ApiKey,
+    in_flight: Arc<Semaphore>,
 }
 
 impl ContextReranker {
     /// Build the reranker for `config`, or `None` when it has no API key.
+    /// A keyed configuration must have a valid, nonzero concurrency cap.
     pub(crate) fn from_config(config: &ContextRerankConfig) -> anyhow::Result<Option<Self>> {
         let Some(key) = config.api_key.clone() else {
             return Ok(None);
         };
+        anyhow::ensure!(
+            (1..=Semaphore::MAX_PERMITS).contains(&config.max_in_flight),
+            "context rerank max_in_flight must be between 1 and {}",
+            Semaphore::MAX_PERMITS
+        );
         let client = reqwest::Client::builder()
             .connect_timeout(config.connect_timeout)
             .timeout(config.timeout)
@@ -98,6 +111,7 @@ impl ContextReranker {
             client,
             endpoint,
             key,
+            in_flight: Arc::new(Semaphore::new(config.max_in_flight)),
         }))
     }
 
@@ -163,6 +177,11 @@ impl ContextReranker {
 
     /// POST `body` and return the body of a 2xx response within the size cap.
     async fn post(&self, body: &Value) -> Result<Vec<u8>, Unchanged> {
+        let _permit = self
+            .in_flight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Unchanged::Skipped("busy"))?;
         let response = self
             .client
             .post(&self.endpoint)
