@@ -18,8 +18,11 @@ nested sandbox. Full gate green (fmt, Clippy, 554 tests, docs) and an
 independent CONFIRMED review. Still open before the first live launch: U18's
 per-run staging login, and an owner run of the pinned Claude Code confirming
 the `pwd -P >| <TMPDIR file>` suffix (else every reviewer command exits 126).
-**Next: R-P3b.4 per U21** (supervisor port bridge, no pasta), then R-P3b.2 once
-the user creates its App (U17). `release-next/deploy-pre.sh` requires the key
+R-P3b.4 per U21 landed as `52191ce` (Claude launches in their own network
+namespace; supervisor relays only proxy and loopback staging; gate 566 tests;
+red-team CONFIRMED after one repair). **Next:** a root containment-suite leg
+that runs a real relayed launch, U18's per-run staging login, then R-P3b.2 once
+the user creates its App (U17). Codex launches still use the host namespace. `release-next/deploy-pre.sh` requires the key
 in `typesafe.env`, so the user's VM step (install `typesafe.env` 0600, new
 unit, daemon-reload, drop the key from `service.env`, restart) precedes the
 next deploy. Then: user ship authorization; owner Claude host/auth proof; S6
