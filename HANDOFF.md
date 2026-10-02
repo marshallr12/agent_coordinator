@@ -94,7 +94,22 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
   Pre-existing flake `namespace_teardown_kills_detached_descendants...` hit
   once under full parallel load (0/15 both here and at HEAD afterwards).
 
-Remaining: per-run staging login (U18); containment-suite relay leg; R-P3b.2
+- `f1edadd` containment-suite relay leg: per role, a real
+  `agentc-supervisor --config <tmp> launch` through a temporary root-owned
+  `/opt/agentc/suite-bin.*` (copied supervisor + mock `claude`; config = the
+  installed one with `bin_dir` prepended) must reach the proxy via the relay,
+  fail direct egress, and (reviewer) reach the proxy from a candidate
+  command; a stub bin dir (`/bin/false` supervisor) must make preflight
+  report `namespace relay probe failed`. Red-team round 1 DISPUTED (pipefail
+  made the stub check always fail); fixed by capturing preflight output,
+  plus cleanup/error-path fixes; helpers exercised locally with stubs. Docs
+  check passed; no Rust change. **Not run:** needs root and the new
+  supervisor installed on mxmini (installed one predates the relay), so the
+  first `sudo deploy/agentc/containment-suite.sh` after install is the owner
+  step that proves it. Staging relay is not in this leg (no login fixture);
+  `tests/launch_relay.rs` covers it.
+
+Remaining: per-run staging login (U18); R-P3b.2
 push helper once the user creates its App (U17);
 user ship authorization (after the VM `typesafe.env` step); owner Claude
 host/auth/refresh/browser proof; S6 cutover chain.
