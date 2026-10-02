@@ -255,7 +255,12 @@ confirm this against the pinned Claude Code release.
 
 Local tests exercise actual Bubblewrap with a mock Bash harness, including
 cross-run writes, seed replacement, hard links, inherited descriptors, and child
-cleanup. The root containment suite also uses a mock shell. Host installation,
+cleanup. The root containment suite also uses mock harnesses. For each role it
+runs one real `agentc-supervisor launch` from a temporary root-owned bin
+directory whose `claude` is a mock: inside the launch's network namespace it
+must reach the egress proxy through the relay (for the reviewer, also from a
+candidate command) and must not reach the network directly. A second bin
+directory whose supervisor cannot relay must fail preflight. Host installation,
 authenticated Claude runs, nested harness/browser sandbox compatibility, and
 credential refresh remain owner verification work. No authenticated harness or
 native Codex success is claimed by these tests.

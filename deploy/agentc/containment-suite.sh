@@ -14,6 +14,7 @@ PROXY=http://127.0.0.1:${PROXY_PORT:-3128}
 STAGING=http://127.0.0.1:${STAGING_PORT:-18080}
 DISABLED_PUSH=disabled://push-only-via-agent-coordinator
 FAILED=0
+SUITE_BINS=()
 
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAILED=1; }
@@ -172,6 +173,95 @@ subprocess.run([description["program"], *args, "--", "/bin/sh", "-c", script,
 PY
 }
 
+# Writes the mock Claude harness for real launches to $1: no model call and
+# no credential read. `--version` defers to the pinned binary so preflight
+# passes; otherwise, inside the launch's network namespace, it must reach the
+# proxy (possible only through the supervisor's relay), must not reach the
+# network directly, and a reviewer's candidate command must reach the proxy.
+write_mock_claude() {
+  cat > "$1" <<EOF
+#!/bin/sh
+[ "\${1:-}" = --version ] && exec $PREFIX/bin/claude --version
+set -eu
+curl -sSf -o /dev/null --max-time 20 -x "\$HTTPS_PROXY" https://github.com/ || exit 3
+if curl -sS -o /dev/null --max-time 5 --noproxy '*' https://github.com/; then exit 4; fi
+[ -n "\${CLAUDE_CODE_SHELL_PREFIX:-}" ] || exit 0
+"\$CLAUDE_CODE_SHELL_PREFIX" "curl -sSf -o /dev/null --max-time 20 -x \$HTTPS_PROXY https://github.com/ && pwd -P >| \$TMPDIR/suite-relay-cwd" || exit 5
+EOF
+  chmod 0755 "$1"
+}
+
+# Creates a root-owned bin dir under $PREFIX, records it for cleanup and
+# sets SUITE_BIN to it. Not run in a subshell, so the record survives.
+new_suite_bin() {
+  SUITE_BIN=$(mktemp -d "$PREFIX/suite-bin.XXXXXX") || return 1
+  SUITE_BINS+=("$SUITE_BIN")
+  chmod 0755 "$SUITE_BIN"
+}
+
+# Fills bin dir $1 with executable $2 as the relay supervisor and the mock
+# harness, plus a supervisor.toml that is the installed one with bin_dir
+# pointing there.
+fill_suite_bin() {
+  install -m 0755 "$2" "$1/agentc-supervisor" && write_mock_claude "$1/claude" || return 1
+  { printf 'bin_dir = "%s"\n' "$1"
+    grep -v '^[[:space:]]*bin_dir[[:space:]]*=' /etc/agentc/supervisor.toml; } > "$1/supervisor.toml" &&
+    chmod 0644 "$1/supervisor.toml"
+}
+
+# Creates and fills one suite bin dir with relay supervisor $1 (see
+# fill_suite_bin); exits the suite if that fails. Sets SUITE_BIN.
+make_suite_bin() {
+  new_suite_bin && fill_suite_bin "$SUITE_BIN" "$1" && return 0
+  echo "cannot create suite bin dir" >&2; exit 1
+}
+
+# Removes the bin dirs main recorded in SUITE_BINS.
+remove_suite_bins() {
+  local dir
+  for dir in ${SUITE_BINS[@]+"${SUITE_BINS[@]}"}; do rm -rf -- "$dir"; done
+}
+
+# Runs one real Claude launch as $1 with config $2 and run dir $3; on
+# failure, prints the launch's own stderr.log after the supervisor's output.
+launch_logged() {
+  local user=$1 config=$2 run=$3 base=$STATE/${1#agentc-}
+  as "$user" "$SUP" --config "$config" launch --role "$(role_of "$user")" \
+    --harness claude --clone "$base/clones/suite" --run "$run" --model mock --effort low \
+    && return 0
+  local status=$?
+  [ -f "$run/stderr.log" ] && sed 's/^/stderr.log: /' "$run/stderr.log"
+  return "$status"
+}
+
+# A real Claude launch (R-P3b.4) as $1 through relay bin dir $2: `launch`
+# must start the host relay, or the mock harness cannot reach the proxy.
+check_claude_launch() {
+  local user=$1 bin=$2 run=$STATE/${1#agentc-}/runs/suite-launch
+  as "$user" rm -rf "$run"
+  as "$user" mkdir -p "$run"
+  as "$user" sh -c "echo containment-suite > '$run/prompt.md'"
+  expect_ok_logged "$user: real Claude launch reaches the proxy only via the relay" \
+    "/root/agentc-launch-${1#agentc-}.log" launch_logged "$user" "$bin/supervisor.toml" "$run"
+}
+
+# True when preflight as $1 with config $2 reports a failed relay probe.
+# Preflight exits non-zero then, so its output is captured, not piped
+# (the suite runs under pipefail).
+relay_probe_refused() {
+  local base=$STATE/${1#agentc-} report
+  report=$(as "$1" "$SUP" --config "$2" preflight --role "$(role_of "$1")" --harness claude \
+    --clone "$base/clones/suite" --run "$base/runs/suite")
+  [[ $report == *'namespace relay probe failed'* ]]
+}
+
+# Preflight runs the relay once: with a supervisor that cannot relay (stub
+# bin dir $2), it must refuse the launch.
+check_relay_probe() {
+  expect_ok "$1: preflight refuses a supervisor that cannot relay" \
+    relay_probe_refused "$1" "$2/supervisor.toml"
+}
+
 # The reviewer's pinned headless browser renders the staging dashboard under
 # uid + firewall (plan M2), and the implementer cannot read the reviewer's
 # verification logins. Skipped when no staging coordinator is listening.
@@ -201,7 +291,10 @@ check_cargo_test() {
 
 main() {
   [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
-  local cargo_test=${1:-}
+  local cargo_test=${1:-} relay_bin stub_bin
+  trap remove_suite_bins EXIT
+  make_suite_bin "$SUP"; relay_bin=$SUITE_BIN
+  make_suite_bin /bin/false; stub_bin=$SUITE_BIN
   for pair in "agentc-impl agentc-rev" "agentc-rev agentc-impl"; do
     set -- $pair
     prepare_clone "$1"
@@ -212,6 +305,8 @@ main() {
     check_egress "$1"
     check_codex_sandbox "$1"
     check_claude_sandbox "$1"
+    check_claude_launch "$1" "$relay_bin"
+    check_relay_probe "$1" "$stub_bin"
   done
   check_browser
   if [ "$cargo_test" = "--cargo-test" ]; then check_cargo_test; fi
