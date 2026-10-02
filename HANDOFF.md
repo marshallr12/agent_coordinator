@@ -23,6 +23,11 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
 - `8c2cdc6` exact-ref readback: `ls-remote` suffix matching let
   `refs/heads/a/refs/heads/main` be read back as main. Pre-existing on main;
   the user chose to fix it as a separate item. Independently CONFIRMED.
+- `417dbca` R-P3b.5(d), decision U20: read-only credentials keep their own
+  top-level session but any registration naming a subagent is refused (403)
+  before writes. Full gate on it: fmt, warnings-denied Clippy, 546 tests,
+  zero ignored (`r5d-*.log`). Independently CONFIRMED. Untested: replay
+  ordering (no test pins the check above the replay branch).
 - Gate: ship tests (18), routing tests (36), pinned docs check and py_compile
   passed; no Rust/Cargo change since the full gate on `0beabe8`. Logs:
   `~/.local/share/agent-coordinator-autonomy/core-20261002/followup-*.log`.
@@ -33,7 +38,8 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
 
 Remaining: user ship authorization for this branch (do not ship before the
 VM `typesafe.env` step); owner Claude host/authentication/refresh/browser
-proof; supervisor security decisions (R-P3b.2–.5); S6 cutover chain.
+proof; R-P3b.3 reviewer bwrap (U18), R-P3b.4 netns spike (U19), R-P3b.2 push
+helper once the user creates its App (U17); S6 cutover chain.
 
 The user disabled the Agent Coordinator workflow and authorized overnight local
 implementation with subagents. Cutoff: 2026-10-02 08:00 America/New_York
