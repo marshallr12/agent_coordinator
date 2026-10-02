@@ -15,9 +15,17 @@ pub mod launch;
 pub mod network_probe;
 pub mod preflight;
 pub mod profile;
+#[cfg(target_os = "linux")]
+pub mod push_helper;
 pub mod relay;
 pub mod role_settings;
 pub mod sandbox;
 pub mod shadow;
 pub mod staging_login;
 pub mod verification;
+
+/// The root-only directory holding each implementer launch's push-helper
+/// directory, `<state_dir>/push`.
+pub fn push_helper_root(config: &config::Config) -> std::path::PathBuf {
+    config.state_dir.join("push")
+}

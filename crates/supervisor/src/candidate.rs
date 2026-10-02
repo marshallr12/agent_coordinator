@@ -240,6 +240,8 @@ mod tests {
             effort: "low".into(),
             session_id: uuid::Uuid::nil(),
             project: Some("p1".into()),
+            task: None,
+            push_socket: None,
         }
     }
 
@@ -421,6 +423,8 @@ exec "$@"
             effort: "low".into(),
             session_id: uuid::Uuid::nil(),
             project: None,
+            task: None,
+            push_socket: None,
         }
     }
 

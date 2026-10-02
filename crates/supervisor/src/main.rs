@@ -58,6 +58,9 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// As root: run one launch as its role account and, for an implementer,
+    /// the candidate-push helper beside it as the helper account.
+    LaunchRoot(SpecArgs),
     /// Poll `next` read-only and log what would be launched (P3a shadow mode).
     Shadow {
         /// Poll once and exit instead of looping.
@@ -98,10 +101,24 @@ struct SpecArgs {
     /// Coordinator project id; selects the project's verification environment.
     #[arg(long)]
     project: Option<String>,
+    /// Coordinator task id; an implementer's push helper names its candidate
+    /// ref after it and the session id.
+    #[arg(long)]
+    task: Option<String>,
+    /// Session id (default: a fresh one); `launch-root` passes the id it
+    /// gives its push helper as the launch id.
+    #[arg(long)]
+    session_id: Option<uuid::Uuid>,
+    /// The implementer's candidate-push helper socket (set by `launch-root`):
+    /// an absolute path of at most 93 bytes, exported to the harness as
+    /// AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET.
+    #[arg(long)]
+    push_socket: Option<PathBuf>,
 }
 
 impl SpecArgs {
-    /// Converts arguments into a launch spec with a fresh session id.
+    /// Converts arguments into a launch spec; the session id is the given
+    /// one or a fresh one.
     fn spec(&self) -> LaunchSpec {
         LaunchSpec {
             role: self.role,
@@ -110,8 +127,10 @@ impl SpecArgs {
             run: self.run.clone(),
             model: self.model.clone(),
             effort: self.effort.clone(),
-            session_id: uuid::Uuid::new_v4(),
+            session_id: self.session_id.unwrap_or_else(uuid::Uuid::new_v4),
             project: self.project.clone(),
+            task: self.task.clone(),
+            push_socket: self.push_socket.clone(),
         }
     }
 }
@@ -157,6 +176,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Launch { spec, dry_run } => {
             return launch_command(&spec.spec(), &config, dry_run);
         }
+        Commands::LaunchRoot(args) => {
+            return launch_root(&args.spec(), cli.config.as_deref(), &config);
+        }
         Commands::Shadow { once } => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(shadow::run(&config.shadow, once))?
@@ -192,9 +214,31 @@ fn launch_command(spec: &LaunchSpec, config: &config::Config, dry_run: bool) -> 
         return Ok(ExitCode::SUCCESS);
     }
     let code = launch::run(spec, config)?;
-    println!(
-        "{}",
-        serde_json::json!({"exit_code": code, "session_id": spec.session_id})
-    );
+    let mut outcome = serde_json::json!({"exit_code": code, "session_id": spec.session_id});
+    if let Some(task) = &spec.task {
+        outcome["task"] = task.as_str().into();
+    }
+    println!("{outcome}");
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+}
+
+/// Runs a launch through `launch-root`; its exit code is the launch's.
+#[cfg(target_os = "linux")]
+fn launch_root(
+    spec: &LaunchSpec,
+    config_path: Option<&std::path::Path>,
+    config: &config::Config,
+) -> Result<ExitCode> {
+    let code = agentc_supervisor::push_helper::launch_root(spec, config_path, config)?;
+    Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+}
+
+/// `launch-root` needs Linux account switching.
+#[cfg(not(target_os = "linux"))]
+fn launch_root(
+    _spec: &LaunchSpec,
+    _config_path: Option<&std::path::Path>,
+    _config: &config::Config,
+) -> Result<ExitCode> {
+    anyhow::bail!("launch-root requires Linux")
 }

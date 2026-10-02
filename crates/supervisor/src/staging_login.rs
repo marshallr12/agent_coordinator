@@ -327,6 +327,8 @@ mod tests {
             effort: "low".into(),
             session_id: uuid::Uuid::nil(),
             project: Some("p1".into()),
+            task: None,
+            push_socket: None,
         };
         std::fs::create_dir_all(&spec.run).unwrap();
         spec
@@ -386,6 +388,8 @@ mod tests {
         };
         let other = LaunchSpec {
             project: Some("p2".into()),
+            task: None,
+            push_socket: None,
             ..spec
         };
         for spec in [implementer, other] {

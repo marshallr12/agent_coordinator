@@ -10,6 +10,7 @@ use crate::role_settings;
 use crate::verification;
 use anyhow::{Context, Result, ensure};
 use std::fs;
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -30,6 +31,8 @@ pub fn check(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     }
     problems.extend(crate::candidate::unsupported(spec));
     problems.extend(verification_problems(spec, config));
+    #[cfg(target_os = "linux")]
+    problems.extend(push_socket_problem(spec, config));
     problems.extend(network_problems(config));
     match clone::hardening_problems(&spec.clone) {
         Ok(found) => problems.extend(found),
@@ -49,6 +52,35 @@ fn network_problems(config: &Config) -> Vec<String> {
         timeout,
     );
     direct.into_iter().chain(proxy).collect()
+}
+
+/// A candidate-push helper socket is for implementers only and must be an
+/// existing socket at an absolute path short enough for the helper to bind
+/// (see `push_helper::check_socket_path`), canonically spelled without
+/// symlinks, in a launch's `sock/` directory
+/// under `<state_dir>/push`, the directory the sandbox masks.
+#[cfg(target_os = "linux")]
+fn push_socket_problem(spec: &LaunchSpec, config: &Config) -> Option<String> {
+    let socket = spec.push_socket.as_deref()?;
+    let checked = (|| {
+        ensure!(
+            spec.role == Role::Implementer,
+            "only implementer launches get a candidate-push helper"
+        );
+        crate::push_helper::check_socket_path(socket)?;
+        confine::path_without_symlinks(socket, false)?;
+        let in_sock = socket.parent().and_then(Path::file_name) == Some("sock".as_ref());
+        ensure!(
+            in_sock && socket.ancestors().nth(3) == Some(crate::push_helper_root(config).as_path()),
+            "it must be <state_dir>/push/<launch>/sock/<name>"
+        );
+        let metadata = fs::symlink_metadata(socket)?;
+        ensure!(metadata.file_type().is_socket(), "it is not a socket");
+        Ok(())
+    })();
+    checked
+        .err()
+        .map(|error| format!("push socket {}: {error:#}", socket.display()))
 }
 
 /// The pinned version string for a harness.
@@ -395,6 +427,62 @@ mod tests {
         listener.local_addr().unwrap().to_string()
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_push_socket_must_be_an_implementers_short_absolute_socket() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let config = Config {
+            state_dir: dir.path().into(),
+            egress_probe_target: closed_port(),
+            egress_listen: closed_port(),
+            ..Config::default()
+        };
+        let sock = dir.path().join("push/l1/sock");
+        fs::create_dir_all(&sock).unwrap();
+        let socket = sock.join("push.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let elsewhere = dir.path().join("elsewhere.sock");
+        let _other = std::os::unix::net::UnixListener::bind(&elsewhere).unwrap();
+        let mut spec = LaunchSpec {
+            role: Role::Implementer,
+            harness: Harness::Claude,
+            clone: dir.path().join("clone"),
+            run: dir.path().join("run"),
+            model: "m".into(),
+            effort: "low".into(),
+            session_id: Uuid::nil(),
+            project: None,
+            task: None,
+            push_socket: None,
+        };
+        assert_eq!(push_socket_problem(&spec, &config), None);
+        spec.push_socket = Some(socket.clone());
+        assert_eq!(push_socket_problem(&spec, &config), None);
+        let file = sock.join("file");
+        fs::write(&file, "").unwrap();
+        let long = std::path::PathBuf::from(format!("/{}", "a".repeat(93)));
+        let cases = [
+            (file, "not a socket"),
+            ("relative.sock".into(), "absolute"),
+            (long, "93 bytes"),
+            (elsewhere, "<state_dir>/push/<launch>/sock/<name>"),
+            (
+                dir.path().join("push/l1/sock/../sock/push.sock"),
+                "canonical",
+            ),
+            (dir.path().join("push/./l1/sock/push.sock"), "canonical"),
+        ];
+        for (path, expected) in cases {
+            spec.push_socket = Some(path);
+            let problem = push_socket_problem(&spec, &config).unwrap_or_default();
+            assert!(problem.contains(expected), "{expected}: {problem}");
+        }
+        spec.push_socket = Some(socket);
+        spec.role = Role::Reviewer;
+        let problems = check(&spec, &config).join("\n");
+        assert!(problems.contains("only implementer launches"), "{problems}");
+    }
+
     #[test]
     fn missing_containment_is_reported_not_skipped() {
         let dir = tempfile::tempdir().unwrap();
@@ -407,6 +495,8 @@ mod tests {
             effort: "low".into(),
             session_id: Uuid::nil(),
             project: Some("p1".into()),
+            task: None,
+            push_socket: None,
         };
         let mut config: Config =
             toml::from_str("[verification.p1]\nurl = \"http://127.0.0.1:1\"").unwrap();
@@ -484,6 +574,8 @@ mod tests {
             effort: "low".into(),
             session_id: Uuid::nil(),
             project: None,
+            task: None,
+            push_socket: None,
         };
         fs::create_dir_all(&spec.clone).unwrap();
         crate::launch::prepare_run(&spec, &config).unwrap();

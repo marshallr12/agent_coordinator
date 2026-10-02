@@ -49,6 +49,34 @@ pub struct Config {
     pub verification: BTreeMap<String, Verification>,
     /// Shadow mode: read-only `next` polling and the would-launch log (P3a).
     pub shadow: crate::shadow::ShadowConfig,
+    /// The candidate-push helper `launch-root` runs beside each implementer
+    /// launch (decision U25).
+    pub push_helper: PushHelper,
+}
+
+/// Where the candidate-push helper is installed and whom it runs as.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PushHelper {
+    /// Root-owned `agentc-push` binary.
+    pub program: PathBuf,
+    /// The helper's own configuration file, passed to it as `--config`.
+    pub config: PathBuf,
+    /// Unprivileged account the helper runs as; it alone can read the push
+    /// App key.
+    pub user: String,
+}
+
+impl Default for PushHelper {
+    /// The helper in `/usr/local/bin`, its configuration in `/etc/agentc`,
+    /// and the `agentc-push` account.
+    fn default() -> Self {
+        Self {
+            program: PathBuf::from("/usr/local/bin/agentc-push"),
+            config: PathBuf::from("/etc/agentc/push.toml"),
+            user: "agentc-push".into(),
+        }
+    }
 }
 
 /// Exact version strings reported by `--version`; empty means "not pinned".
@@ -81,6 +109,7 @@ impl Default for Config {
             browser: PathBuf::from("/usr/bin/chromium"),
             verification: BTreeMap::new(),
             shadow: crate::shadow::ShadowConfig::default(),
+            push_helper: PushHelper::default(),
         }
     }
 }

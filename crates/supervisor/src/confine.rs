@@ -436,6 +436,8 @@ mod tests {
             effort: "low".into(),
             session_id: Uuid::new_v4(),
             project: None,
+            task: None,
+            push_socket: None,
         }
     }
 

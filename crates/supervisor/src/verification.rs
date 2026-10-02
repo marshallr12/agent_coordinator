@@ -94,6 +94,8 @@ mod tests {
             effort: "low".into(),
             session_id: uuid::Uuid::nil(),
             project: Some("p1".into()),
+            task: None,
+            push_socket: None,
         }
     }
 
@@ -109,6 +111,8 @@ mod tests {
         assert!(describe(&spec(Role::Implementer), &config).is_none());
         let other = LaunchSpec {
             project: Some("p2".into()),
+            task: None,
+            push_socket: None,
             ..spec(Role::Reviewer)
         };
         assert!(environment(&other, &config).is_empty());

@@ -69,6 +69,8 @@ fn reviewer(config: &Config) -> LaunchSpec {
         effort: "low".into(),
         session_id: uuid::Uuid::new_v4(),
         project: Some("p1".into()),
+        task: None,
+        push_socket: None,
     };
     fs::create_dir_all(&spec.clone).unwrap();
     launch::prepare_run(&spec, config).unwrap();

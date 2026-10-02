@@ -44,7 +44,17 @@ pub struct LaunchSpec {
     pub session_id: Uuid,
     /// Coordinator project the launch works on; selects `verification_env`.
     pub project: Option<String>,
+    /// Coordinator task the launch works on; with `session_id`, it names the
+    /// candidate ref an implementer's push helper publishes to.
+    pub task: Option<String>,
+    /// The implementer's candidate-push helper socket, exported to the
+    /// harness as [`PUSH_SOCKET_ENV`] (see `push_helper`).
+    pub push_socket: Option<PathBuf>,
 }
+
+/// The variable through which `agent-coordinator` finds the candidate-push
+/// helper socket.
+pub const PUSH_SOCKET_ENV: &str = "AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET";
 
 /// A fully resolved process to spawn; `stdin` is the prompt file.
 #[derive(Debug, Clone, PartialEq)]
@@ -227,6 +237,9 @@ fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
         Harness::Codex => ("CODEX_HOME".into(), role_dir.join("codex-home").into()),
     });
     env.extend(crate::verification::environment(spec, config));
+    if let Some(socket) = &spec.push_socket {
+        env.push((PUSH_SOCKET_ENV.into(), socket.into()));
+    }
     if crate::candidate::applies(spec) {
         // Every reviewer Bash command runs as candidate code (R-P3b.3).
         env.push((
@@ -267,6 +280,8 @@ mod tests {
             effort: "high".into(),
             session_id: Uuid::nil(),
             project: None,
+            task: None,
+            push_socket: None,
         }
     }
 
@@ -296,6 +311,24 @@ mod tests {
             "--output-schema",
         ] {
             assert!(has(&command, flag), "{flag}");
+        }
+    }
+
+    #[test]
+    fn only_a_launch_given_a_push_socket_exports_it() {
+        let variable = |command: &LaunchCommand| {
+            let found = command.env.iter().find(|(name, _)| name == PUSH_SOCKET_ENV);
+            found.map(|(_, value)| value.clone())
+        };
+        for harness in [Harness::Claude, Harness::Codex] {
+            let mut spec = spec(Role::Implementer, harness);
+            assert_eq!(variable(&command(&spec, &Config::default())), None);
+            spec.push_socket = Some("/var/lib/agentc/push/l/sock/push.sock".into());
+            let exported = variable(&command(&spec, &Config::default()));
+            assert_eq!(
+                exported,
+                Some("/var/lib/agentc/push/l/sock/push.sock".into())
+            );
         }
     }
 

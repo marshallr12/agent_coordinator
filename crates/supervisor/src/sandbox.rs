@@ -91,6 +91,29 @@ fn hide_verification_logins(args: &mut Vec<OsString>, spec: &LaunchSpec, config:
     }
 }
 
+/// An implementer's candidate-push helper socket stays reachable, read-only,
+/// and no other launch's is: an empty tmpfs replaces `<state_dir>/push`, then
+/// only this launch's socket directory is bound back at the same path (Bubblewrap
+/// creates its mount point in the tmpfs), so the harness can connect to its own
+/// socket but never replace it.
+fn bind_push_socket(args: &mut Vec<OsString>, spec: &LaunchSpec, config: &Config) {
+    if let Some(directory) = spec.push_socket.as_deref().and_then(Path::parent) {
+        let root = crate::push_helper_root(config);
+        args.extend([OsString::from("--tmpfs"), root.into()]);
+        mount(args, "--ro-bind", directory, directory);
+    }
+}
+
+/// Other launches of the role stay invisible: an empty tmpfs replaces the
+/// role's `runs/`, then this launch's `$RUN` is bound back read-only before
+/// its writable directories are bound over it. Their `.state-started` files
+/// name their session ids, which also name their push helpers' directories.
+fn hide_other_runs(args: &mut Vec<OsString>, spec: &LaunchSpec, config: &Config) {
+    let runs = config.state_dir.join(spec.role.slug()).join("runs");
+    args.extend([OsString::from("--tmpfs"), runs.into()]);
+    mount(args, "--ro-bind", &spec.run, &spec.run);
+}
+
 fn mount(args: &mut Vec<OsString>, option: &str, source: &Path, destination: &Path) {
     args.extend([OsString::from(option), source.into(), destination.into()]);
 }
@@ -106,6 +129,7 @@ pub fn wrap(
         return Ok(command);
     }
     let mut args = base_args(spec.role);
+    hide_other_runs(&mut args, spec, config);
     for path in writable_directories(spec) {
         mount(&mut args, "--bind", &path, &path);
     }
@@ -128,6 +152,7 @@ pub fn wrap(
     let instructions = persistent.join("CLAUDE.md");
     mount(&mut args, "--ro-bind", &instructions, &instructions);
     hide_verification_logins(&mut args, spec, config);
+    bind_push_socket(&mut args, spec, config);
     args.extend([
         OsString::from("--chdir"),
         spec.clone.clone().into(),
@@ -431,6 +456,8 @@ mod tests {
                 effort: "low".into(),
                 session_id: Uuid::new_v4(),
                 project: None,
+                task: None,
+                push_socket: None,
             };
             fs::create_dir_all(&spec.clone).unwrap();
             fs::write(spec.clone.join("source"), "original").unwrap();
@@ -672,6 +699,102 @@ deny unshare -Ur true
                 "output-through-stdout"
             );
         }
+    }
+
+    #[test]
+    fn a_push_socket_adds_only_its_masked_push_root_directory_and_variable() {
+        let mut fixture = Fixture::new(Role::Implementer);
+        let plain = fixture.command("true");
+        let root = crate::push_helper_root(&fixture.config);
+        let socket = root.join("l1/sock/push.sock");
+        fixture.spec.push_socket = Some(socket.clone());
+        let pushed = fixture.command("true");
+        let directory = socket.parent().unwrap().as_os_str();
+        let mounts = [
+            OsString::from("--tmpfs"),
+            root.into(),
+            OsString::from("--ro-bind"),
+            directory.into(),
+            directory.into(),
+        ];
+        let at = pushed.args.windows(5).position(|window| window == mounts);
+        let at = at.expect("the push root is not masked right before the socket bind");
+        let mut args = pushed.args.clone();
+        args.drain(at..at + 5);
+        assert_eq!(args, plain.args, "the push socket changed other arguments");
+        let mut env = pushed.env.clone();
+        let index = env
+            .iter()
+            .position(|(name, _)| name == profile::PUSH_SOCKET_ENV)
+            .expect("the harness is not told the socket");
+        assert_eq!(env.remove(index).1, socket.as_os_str());
+        assert_eq!(env, plain.env, "the push socket changed other variables");
+    }
+
+    #[test]
+    fn other_runs_are_masked_before_this_runs_mounts() {
+        for role in [Role::Implementer, Role::Reviewer] {
+            let fixture = Fixture::new(role);
+            let args = fixture.command("true").args;
+            let runs = fixture.config.state_dir.join(role.slug()).join("runs");
+            let run = fixture.spec.run.as_os_str();
+            let mask = [
+                OsString::from("--tmpfs"),
+                runs.into(),
+                OsString::from("--ro-bind"),
+                run.into(),
+                run.into(),
+            ];
+            let at = args.windows(5).position(|window| window == mask);
+            let at = at.expect("other runs are not masked");
+            let first_run_mount = args
+                .iter()
+                .position(|arg| Path::new(arg).starts_with(&fixture.spec.run) && arg != run);
+            assert!(
+                first_run_mount.unwrap() > at + 4,
+                "a run mount precedes the mask"
+            );
+        }
+    }
+
+    #[test]
+    fn an_implementer_reaches_its_push_socket_read_only_inside_the_sandbox() {
+        let mut fixture = Fixture::new(Role::Implementer);
+        let directory = fixture.config.state_dir.join("push/l1/sock");
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("push.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let other = fixture.config.state_dir.join("push/l2/sock");
+        fs::create_dir_all(&other).unwrap();
+        let _other = UnixListener::bind(other.join("push.sock")).unwrap();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            for mut stream in listener.incoming().flatten() {
+                let _ = stream.write_all(b"pushed\n");
+            }
+        });
+        fixture.spec.push_socket = Some(socket.clone());
+        let script = format!(
+            r#"
+deny() {{ if "$@" 2>/dev/null; then echo "unexpected success: $*" >&2; exit 31; fi; }}
+test "$AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET" = '{}'
+reply=$(/usr/bin/python3 -c 'import os, socket
+s = socket.socket(socket.AF_UNIX)
+s.connect(os.environ["AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET"])
+print(s.recv(64).decode().strip())')
+test "$reply" = pushed
+deny touch '{}/planted'
+deny rm "$AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET"
+deny test -e '{}'
+deny test -e "$OTHER_RUN"
+test -e "$RUN/prompt.md"
+"#,
+            socket.display(),
+            directory.display(),
+            other.display()
+        );
+        fixture.successful(&script);
+        assert!(socket.exists() && !directory.join("planted").exists());
     }
 
     #[test]

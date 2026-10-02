@@ -162,7 +162,9 @@ ancestors and exercises the required kernel features. Missing user/PID namespace
 nested-userns disabling, or `close_range(CLOSE_RANGE_CLOEXEC)` support blocks the
 launch. The installer does not change kernel policy or grant setuid privileges.
 
-The host root and run directory are read-only. The implementer's current clone
+The host root and run directory are read-only. The role's other runs are hidden:
+an empty tmpfs replaces its `runs/` directory and only the launch's own run is
+bound back. The implementer's current clone
 is writable; the reviewer's clone remains read-only. Each launch separately
 mounts its home, Cargo home, coordinator state, temporary directory, and build
 directory writable. Their parents stay read-only, so an agent cannot rename the
@@ -273,3 +275,86 @@ directory whose supervisor cannot relay must fail preflight. Host installation,
 authenticated Claude runs, nested harness/browser sandbox compatibility, and
 credential refresh remain owner verification work. No authenticated harness or
 native Codex success is claimed by these tests.
+
+## Implementer candidate-push helper
+
+An implementer launch publishes its candidate through `agentc-push`, a helper
+that runs as its own unprivileged account and alone can read the push App key
+(decision U25). Root starts both the helper and the launch with
+`agentc-supervisor launch-root`, which takes the same launch arguments as
+`launch` plus `--task <id>` (required for an implementer):
+
+```sh
+sudo agentc-supervisor launch-root --role implementer --harness claude \
+  --clone <clone> --run <run> --task <task-id>
+```
+
+`launch-root` refuses to run unless it is root, and checks the host first:
+the installed `agentc-supervisor` must be root-owned and not
+group/world-writable and the role account must exist; for an implementer, so
+must the helper binary, its root-owned configuration file and the helper
+account. It then creates a per-launch
+directory, `<state_dir>/push/<session-id>/` (root, mode 0711), which holds
+`sock/` (helper account and implementer group, mode 2750, so the helper's 0660
+socket `sock/push.sock` is reachable only by the helper and implementer
+accounts and root) and `work/`
+(helper account, mode 0700, the helper's home and private repository). Only
+root writes `<state_dir>/push`, so no agent account can rename or replace a
+path root creates or removes there. The run directory must already exist and
+the published socket path may be at most 93 bytes, because the helper first
+binds a slightly longer staging name.
+
+It digests every token in the implementer's coordinator credential files,
+`$RUN/state/coordinator/credentials.toml` and
+`<state_dir>/impl/coordinator/credentials.toml` when present, and passes the
+SHA-256 digests to the helper as `--known-digest`, so a candidate carrying that
+token is refused. These files and the helper's log, `$RUN/push-helper.log`
+(root-owned, mode 0600), are opened one path component at a time without
+following symlinks. The helper runs as the helper account with only `PATH`,
+`LANG` and `HOME` (its `work/` directory) set and `--parent-pid` naming
+`launch-root`, which waits up to 10 seconds for the socket and fails the launch
+if the helper exits first. The launch then runs as the implementer, with only
+`PATH`, `LANG` and the role's home as `HOME`, as `agentc-supervisor launch
+--session-id <id> --task <task-id> --push-socket <socket>`. The session id is
+also the helper's launch id, so the candidate ref is
+`refs/agent-coordinator/candidates/<task-id>/<session-id>`. `launch` checks
+that the socket is an implementer's, absolute, at most 93 bytes long and a
+socket in a launch's `sock/` directory directly under `<state_dir>/push`, and
+exports it as `AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET`. A Claude launch's
+sandbox replaces `<state_dir>/push` with an empty tmpfs and binds back only its
+own socket directory, read-only, so it cannot reach another launch's helper.
+
+Codex launches are not sandboxed this way: they run in the host namespace as
+the implementer account, which is in every implementer socket directory's
+group. A Codex implementer can therefore connect to the helper of any other
+implementer launch running at the same time, if it learns that launch's
+session id (each run's `.state-started` file holds it), and publish its own
+commit to that launch's candidate ref first. Run Codex implementers one at a
+time, or only alongside launches whose candidates may be rejected on that
+ground.
+
+When the launch ends, whatever its outcome, `launch-root` sends the helper
+SIGTERM, kills it if it has not exited within 5 seconds, removes the per-launch
+directory and exits with the launch's exit code; a failure to stop the helper
+or remove the directory is reported as a warning and does not replace that
+code. If `launch-root` itself is killed, the helper ends with it (it asks for a
+parent-death signal). The next implementer `launch-root` removes any
+per-launch directory whose lock no running `launch-root` holds, and any
+half-built `.new-` directory. It sweeps and builds while holding
+`<state_dir>/push/.sweep` locked, so concurrent `launch-root` runs never sweep
+each other's directories. A reviewer launch gets no helper: `launch-root` only runs
+it as the reviewer account.
+
+The `[push_helper]` table in `/etc/agentc/supervisor.toml` overrides the
+defaults:
+
+```toml
+[push_helper]
+# program = "/usr/local/bin/agentc-push"
+# config = "/etc/agentc/push.toml"
+# user = "agentc-push"
+```
+
+Local tests run `launch-root`'s steps as the test's own account against stub
+helper and supervisor programs. Switching accounts needs root, so no local
+test covers it.
