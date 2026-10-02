@@ -260,13 +260,14 @@ fn send_failure<S>(error: &anyhow::Error, stream: &ObservedStream<S>) -> Failure
 }
 
 /// `candidate_push_refused` carrying the helper's message, with
-/// [`printable`] applied, and its refusal code under `details.refusal_code`. A lease conflict is a state conflict
+/// [`printable`] applied, and its refusal code under `details.refusal_code`. A
+/// lease conflict and an already published candidate are state conflicts
 /// (exit 5); push and internal helper failures are temporary and retryable
 /// (exit 7); every other refusal is invalid input (exit 2).
 #[cfg(unix)]
 fn refusal_failure(refusal: &PushRefusal) -> Failure {
     let (exit, retryable) = match refusal.code {
-        RefusalCode::LeaseConflict => (5, false),
+        RefusalCode::LeaseConflict | RefusalCode::CandidateAlreadyPublished => (5, false),
         RefusalCode::PushFailed | RefusalCode::Internal => (7, true),
         RefusalCode::BadRequest
         | RefusalCode::TooLarge

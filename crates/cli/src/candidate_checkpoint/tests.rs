@@ -319,6 +319,29 @@ fn helper_lease_conflict_is_a_non_retryable_refusal() {
 }
 
 #[test]
+fn second_candidate_through_the_same_helper_is_a_non_retryable_refusal() {
+    let fixture = fixture("feature\n");
+    let helper = fixture.helper();
+    let socket = helper.socket.clone();
+    checkpoint(&fixture.request(None), Some(&socket)).unwrap();
+    helper.finish();
+    commit(&fixture.checkout, "file.txt", "revised\n");
+    let helper = fixture.helper();
+    let socket = helper.socket.clone();
+    let failure = checkpoint(&fixture.request(None), Some(&socket)).unwrap_err();
+    assert_eq!(code(&failure), "candidate_push_refused");
+    assert_eq!(
+        failure.output["error"]["details"]["refusal_code"],
+        "candidate_already_published"
+    );
+    assert_eq!(failure.output["error"]["retryable"], false);
+    assert_eq!(failure.exit, 5);
+    helper.finish();
+    let expected = format!("{HELPER_REF} {}", fixture.candidate);
+    assert_eq!(fixture.remote_candidates(), expected);
+}
+
+#[test]
 fn refusal_codes_map_to_stable_cli_failures() {
     let cases = [
         (RefusalCode::BadRequest, "bad_request", 2, false),
@@ -327,6 +350,12 @@ fn refusal_codes_map_to_stable_cli_failures() {
         (RefusalCode::RevisionMismatch, "revision_mismatch", 2, false),
         (RefusalCode::SecretDetected, "secret_detected", 2, false),
         (RefusalCode::LeaseConflict, "lease_conflict", 5, false),
+        (
+            RefusalCode::CandidateAlreadyPublished,
+            "candidate_already_published",
+            5,
+            false,
+        ),
         (RefusalCode::PushFailed, "push_failed", 7, true),
         (RefusalCode::Internal, "internal", 7, true),
     ];

@@ -329,11 +329,11 @@ fn pushes_end_to_end_and_revokes_the_token_after_acceptance_and_refusal() {
     let record = Shared::default();
     let credentials = github_credentials(fixture.directory.path(), record.clone());
     let running = start(&fixture, credentials, IO_TIMEOUT, MINT_BURST);
+    let refused = exchange_raw(&fixture, &junk_bundle_request());
+    assert_eq!(refused_code(refused), RefusalCode::BundleInvalid);
     let candidate = fixture.commit("candidate.txt");
     assert_eq!(fixture.push(&candidate).unwrap(), candidate);
     assert_eq!(fixture.candidate().as_deref(), Some(candidate.as_str()));
-    let refused = exchange_raw(&fixture, &junk_bundle_request());
-    assert_eq!(refused_code(refused), RefusalCode::BundleInvalid);
     running.stop();
     let record = record.lock().unwrap();
     let scope = json!({"repositories": ["repo"], "permissions": {"contents": "write"}});

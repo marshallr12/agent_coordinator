@@ -5,6 +5,9 @@ use std::os::unix::net::UnixStream;
 use tempfile::TempDir;
 
 const REFERENCE: &str = "refs/agent-coordinator/candidates/task-1/launch-1";
+/// The helper's local lease and intent refs for [`REFERENCE`].
+const LEASE: &str = "refs/agent-coordinator/leases/task-1/launch-1";
+const INTENT: &str = "refs/agent-coordinator/intents/task-1/launch-1";
 
 /// A bare "remote" on disk and an implementer clone whose `main` it holds.
 struct Fixture {
@@ -240,20 +243,28 @@ fn round_trip_creates_the_fixed_candidate_ref() {
 }
 
 #[test]
-fn second_push_updates_under_the_helpers_own_lease() {
+fn second_distinct_commit_is_refused_and_the_remote_is_unchanged() {
     let fixture = fixture();
     let spec = fixture.spec();
     let first = fixture.commit("first.txt", "first\n");
     fixture.send(&spec, &first).0.unwrap();
     let second = fixture.commit("second.txt", "second\n");
-    let receipt = fixture.send(&spec, &second).0.unwrap();
-    assert_eq!(receipt.previous.as_deref(), Some(first.as_str()));
-    assert_eq!(fixture.remote_ref(REFERENCE), Some(second.clone()));
+    let refusal = refusal_of(fixture.send(&spec, &second).0);
+    assert_eq!(refusal.code, RefusalCode::CandidateAlreadyPublished);
+    assert_eq!(fixture.remote_ref(REFERENCE), Some(first));
+    let imported = git_ok(&spec.work_dir, ["cat-file", "-e", &second]);
+    assert!(imported.is_err(), "the refused bundle was imported");
+}
 
-    // Replaying the current revision is accepted without moving the ref.
-    let replay = fixture.send(&spec, &second).0.unwrap();
-    assert_eq!(replay.previous.as_deref(), Some(second.as_str()));
-    assert_eq!(fixture.remote_ref(REFERENCE), Some(second));
+#[test]
+fn same_commit_retry_is_accepted_without_moving_the_ref() {
+    let fixture = fixture();
+    let spec = fixture.spec();
+    let first = fixture.commit("first.txt", "first\n");
+    fixture.send(&spec, &first).0.unwrap();
+    let replay = fixture.send(&spec, &first).0.unwrap();
+    assert_eq!(replay.previous.as_deref(), Some(first.as_str()));
+    assert_eq!(fixture.remote_ref(REFERENCE), Some(first));
 }
 
 #[test]
@@ -269,8 +280,7 @@ fn remote_moved_elsewhere_is_a_lease_conflict() {
         ["push", "--quiet", "origin", force.as_str()],
     )
     .unwrap();
-    let next = fixture.commit("next.txt", "next\n");
-    let refusal = refusal_of(fixture.send(&spec, &next).0);
+    let refusal = refusal_of(fixture.send(&spec, &first).0);
     assert_eq!(refusal.code, RefusalCode::LeaseConflict);
     assert_eq!(fixture.remote_ref(REFERENCE), Some(moved));
 }
@@ -532,30 +542,46 @@ fn foreign_ref_naming_the_requested_revision_is_not_adopted() {
     assert_eq!(fixture.remote_ref(REFERENCE), Some(foreign));
 }
 
+/// Pushes a first commit through `spec`, then rewinds the helper's
+/// bookkeeping to what a crash between the push and the lease write leaves:
+/// no lease, and an intent naming the commit the remote now holds. Returns
+/// that commit.
+fn landed_push_without_a_lease(fixture: &Fixture, spec: &HelperSpec) -> String {
+    let first = fixture.commit("first.txt", "first\n");
+    fixture.send(spec, &first).0.unwrap();
+    git_ok(&spec.work_dir, ["update-ref", "-d", LEASE]).unwrap();
+    git_ok(&spec.work_dir, ["update-ref", INTENT, &first]).unwrap();
+    first
+}
+
 #[test]
 fn landed_push_with_unrecorded_lease_recovers_through_the_intent() {
     let fixture = fixture();
     let spec = fixture.spec();
-    let first = fixture.commit("first.txt", "first\n");
-    fixture.send(&spec, &first).0.unwrap();
-    let second = fixture.commit("second.txt", "second\n");
-    fixture.send(&spec, &second).0.unwrap();
-    // Recreate the state a crash between the push and the lease write leaves.
-    let lease = "refs/agent-coordinator/leases/task-1/launch-1";
-    let intent = "refs/agent-coordinator/intents/task-1/launch-1";
-    git_ok(&spec.work_dir, ["update-ref", lease, &first]).unwrap();
-    git_ok(&spec.work_dir, ["update-ref", intent, &second]).unwrap();
+    let first = landed_push_without_a_lease(&fixture, &spec);
 
-    let retry = fixture.send(&spec, &second).0.unwrap();
-    assert_eq!(retry.previous.as_deref(), Some(second.as_str()));
+    let retry = fixture.send(&spec, &first).0.unwrap();
+    assert_eq!(retry.previous.as_deref(), Some(first.as_str()));
     assert_eq!(
-        git_text(&spec.work_dir, ["rev-parse", lease]).unwrap(),
-        second
+        git_text(&spec.work_dir, ["rev-parse", LEASE]).unwrap(),
+        first
     );
-    assert!(git_ok(&spec.work_dir, ["rev-parse", "--verify", "--quiet", intent]).is_err());
-    let third = fixture.commit("third.txt", "third\n");
-    let receipt = fixture.send(&spec, &third).0.unwrap();
-    assert_eq!(receipt.previous.as_deref(), Some(second.as_str()));
+    assert!(git_ok(&spec.work_dir, ["rev-parse", "--verify", "--quiet", INTENT]).is_err());
+    let next = fixture.commit("next.txt", "next\n");
+    let refusal = refusal_of(fixture.send(&spec, &next).0);
+    assert_eq!(refusal.code, RefusalCode::CandidateAlreadyPublished);
+    assert_eq!(fixture.remote_ref(REFERENCE), Some(first));
+}
+
+#[test]
+fn landed_push_with_unrecorded_lease_refuses_another_commit() {
+    let fixture = fixture();
+    let spec = fixture.spec();
+    let first = landed_push_without_a_lease(&fixture, &spec);
+    let next = fixture.commit("next.txt", "next\n");
+    let refusal = refusal_of(fixture.send(&spec, &next).0);
+    assert_eq!(refusal.code, RefusalCode::CandidateAlreadyPublished);
+    assert_eq!(fixture.remote_ref(REFERENCE), Some(first));
 }
 
 #[test]
@@ -725,8 +751,7 @@ fn failed_push_does_not_leave_an_intent_to_adopt() {
     let failed = fixture.commit("failed.txt", "failed\n");
     let refusal = refusal_of(fixture.send(&spec, &failed).0);
     assert_eq!(refusal.code, RefusalCode::PushFailed);
-    let intent = "refs/agent-coordinator/intents/task-1/launch-1";
-    assert!(git_ok(&spec.work_dir, ["rev-parse", "--verify", "--quiet", intent]).is_err());
+    assert!(git_ok(&spec.work_dir, ["rev-parse", "--verify", "--quiet", INTENT]).is_err());
 
     fs::remove_file(&hook).unwrap();
     let foreign = format!("{failed}:{REFERENCE}");

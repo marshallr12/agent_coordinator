@@ -22,6 +22,12 @@
 //! ignored: the helper imports the requested commit by object ID and pushes it
 //! only to [`HelperSpec::reference`]. Reply messages are fixed text or
 //! secret-scan descriptions, never Git output, URLs or credentials.
+//!
+//! A helper publishes at most one commit: it creates the ref and never moves
+//! it. Once its ref names a commit it pushed, a request for that same commit
+//! is accepted again without pushing, and a request for any other commit is
+//! refused with [`RefusalCode::CandidateAlreadyPublished`]; when the helper
+//! has recorded its lease, that refusal comes before any bundle byte is read.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -82,6 +88,9 @@ pub enum RefusalCode {
     SecretDetected,
     /// The candidate ref is not one this helper pushed.
     LeaseConflict,
+    /// This helper already published a different commit to its ref, and it
+    /// publishes only one.
+    CandidateAlreadyPublished,
     /// Git could not observe or push the ref, or the remote did not show the
     /// pushed commit.
     PushFailed,
@@ -491,11 +500,13 @@ fn reply_too_long(refusal: &PushRefusal) -> bool {
     PushReply::Refused(refusal.clone()).to_line().len() > MAX_REPLY_LINE
 }
 
-/// Reads the request and bundle, then imports, scans and publishes it.
+/// Reads the request, refuses a second commit, then reads the bundle and
+/// imports, scans and publishes it.
 fn receive_and_publish<R: Read>(stream: &mut R, spec: &HelperSpec) -> Step<PushReceipt> {
     let request = read_request(stream)?;
     let length = read_length(stream, spec.max_bundle_bytes)?;
     let helper = Helper::open(spec)?;
+    helper.refuse_other_than_leased(&request)?;
     let bundle = helper.receive_bundle(stream, length)?;
     let quarantine = helper.import(&bundle, &request)?;
     helper.scan(&request.revision)?;
@@ -588,6 +599,16 @@ impl<'a> Helper<'a> {
         let remote = git_remote_argument(&spec.work_dir, &spec.remote)
             .refuse(RefusalCode::Internal, FAILED)?;
         Ok(Self { spec, remote })
+    }
+
+    /// Refuses a request for any commit other than this helper's recorded
+    /// lease, the commit it already published. Without a lease (before the
+    /// first confirmed push) every request passes.
+    fn refuse_other_than_leased(&self, request: &PushRequest) -> Step<()> {
+        match self.read_local_ref("leases")? {
+            Some(lease) if lease != request.revision => Err(already_published()),
+            _ => Ok(()),
+        }
     }
 
     /// Copies exactly `length` bundle bytes into a new private file.
@@ -749,9 +770,10 @@ impl<'a> Helper<'a> {
     /// Publishes `request.revision` to the fixed ref. The remote ref must be
     /// one this helper owns (see [`Helper::owns`]), so a ref created or moved
     /// by anyone else is never overwritten, and is adopted only when it names
-    /// the revision this helper intends to push. The intent is recorded
-    /// before pushing and the push leases against the observed value; an
-    /// owned ref already naming the revision is accepted without pushing.
+    /// the revision this helper intends to push. An absent ref is created
+    /// after the intent is recorded; an owned ref naming the requested
+    /// revision is accepted without pushing; an owned ref naming another
+    /// commit is refused as [`RefusalCode::CandidateAlreadyPublished`].
     fn publish(&self, request: &PushRequest) -> Step<PushReceipt> {
         let observed = self.observe()?;
         if !self.owns(observed.as_deref())? {
@@ -760,19 +782,23 @@ impl<'a> Helper<'a> {
                 "the candidate ref is not one this helper pushed",
             ));
         }
-        if observed.as_deref() != Some(request.revision.as_str()) {
-            git_ok(
-                &self.spec.work_dir,
-                ["update-ref", &self.local_ref("intents"), &request.revision],
-            )
-            .refuse(RefusalCode::Internal, "helper could not record its intent")?;
-            self.push(&request.revision, observed.as_deref())?;
+        match observed.as_deref() {
+            None => {
+                git_ok(
+                    &self.spec.work_dir,
+                    ["update-ref", &self.local_ref("intents"), &request.revision],
+                )
+                .refuse(RefusalCode::Internal, "helper could not record its intent")?;
+                self.push(&request.revision)?;
+            }
+            Some(current) if current == request.revision => {}
+            Some(_) => return Err(already_published()),
         }
         self.confirm(request, observed)
     }
 
     /// Whether the remote value `observed` is this helper's: equal to its
-    /// lease (the last confirmed push, or absent before the first), or to its
+    /// lease (its confirmed push, or absent before it), or to its
     /// recorded intent, which covers a push that reaches the remote while the
     /// lease write after it fails.
     fn owns(&self, observed: Option<&str>) -> Step<bool> {
@@ -783,22 +809,19 @@ impl<'a> Helper<'a> {
         Ok(observed.is_some() && observed == intent.as_deref())
     }
 
-    /// Pushes `revision` to the fixed ref with `--force-with-lease` against
-    /// `expected` (empty, meaning absent, when `None`). A failed push whose
-    /// ref now names `revision` counts as pushed; one whose ref moved is a
-    /// lease conflict, and one whose ref still names `expected` failed. Both
-    /// definite failures clear the intent; an observation error keeps it,
-    /// since the push may have landed.
-    fn push(&self, revision: &str, expected: Option<&str>) -> Step<()> {
+    /// Creates the fixed ref at `revision`, with a `--force-with-lease` that
+    /// requires it to be absent. A failed push whose ref now names `revision`
+    /// counts as pushed; one whose ref now names another commit is a lease
+    /// conflict, and one whose ref is still absent failed. Both definite
+    /// failures clear the intent; an observation error keeps it, since the
+    /// push may have landed.
+    fn push(&self, revision: &str) -> Step<()> {
         let reference = self.spec.reference();
         let arguments = [
             OsString::from("push"),
             OsString::from("--no-verify"),
             OsString::from("--no-follow-tags"),
-            OsString::from(format!(
-                "--force-with-lease={reference}:{}",
-                expected.unwrap_or("")
-            )),
+            OsString::from(format!("--force-with-lease={reference}:")),
             self.remote.clone(),
             OsString::from(format!("{revision}:{reference}")),
         ];
@@ -816,7 +839,7 @@ impl<'a> Helper<'a> {
             return Ok(());
         }
         self.clear_intent()?;
-        if now.as_deref() != expected {
+        if now.is_some() {
             return Err(refusal(
                 RefusalCode::LeaseConflict,
                 "the candidate ref moved while this helper pushed it",
@@ -901,6 +924,15 @@ impl<'a> Helper<'a> {
         let suffix = &self.spec.reference[CANDIDATE_REF_PREFIX.len()..];
         format!("refs/agent-coordinator/{namespace}/{suffix}")
     }
+}
+
+/// The refusal for a request naming a commit other than the one this helper
+/// already published.
+fn already_published() -> PushRefusal {
+    refusal(
+        RefusalCode::CandidateAlreadyPublished,
+        "this helper already published a different commit and publishes only one",
+    )
 }
 
 /// `git fetch` arguments that write no tags and no `FETCH_HEAD`, followed by

@@ -664,7 +664,7 @@ Helper failures use these codes:
 
 | Code | Exit | Retryable | Meaning |
 | --- | --- | --- | --- |
-| `candidate_push_refused` | `5` for `lease_conflict`, `7` for `push_failed` and `internal`, `2` otherwise | only `push_failed` and `internal` | The helper refused; `details.refusal_code` holds its code and the message is the helper's, with control and bidirectional formatting characters replaced by spaces. `lease_conflict` means the ref is not one this helper pushed. |
+| `candidate_push_refused` | `5` for `lease_conflict` and `candidate_already_published`, `7` for `push_failed` and `internal`, `2` otherwise | only `push_failed` and `internal` | The helper refused; `details.refusal_code` holds its code and the message is the helper's, with control and bidirectional formatting characters replaced by spaces. `lease_conflict` means the ref is not one this helper pushed. `candidate_already_published` means this helper already published a different commit: each launch's helper publishes one candidate commit. |
 | `candidate_push_unavailable` | `7` | yes | Connecting to the socket fails. |
 | `candidate_push_failed` | `7` | yes | A read from or write to the connected socket fails, or the helper closes the connection without replying. A retry is safe: the helper accepts a ref that already names the same commit. |
 | `candidate_push_protocol_violation` | `5` | no | The helper's reply is malformed or acknowledges another commit, tree or ref. |
