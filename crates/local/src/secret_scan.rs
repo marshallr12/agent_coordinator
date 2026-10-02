@@ -1,11 +1,13 @@
 //! Refuses candidate pushes whose new commits add likely secrets.
 //!
 //! Supervised agents may not run raw `git push`; their only way to publish is
-//! the candidate checkpoint push, which scans every outgoing commit's patch
-//! first (autonomy plan §2.3). Rules are deliberately high-confidence token
+//! the candidate checkpoint push, which first scans every outgoing commit's
+//! patch, file names, and raw commit object (message, identities and other
+//! headers) (autonomy plan §2.3). Rules are deliberately high-confidence token
 //! shapes plus the caller's own coordinator credential (matched by SHA-256
 //! digest, so the raw token is never passed in), keeping false positives rare.
-//! Findings name the rule, commit and path, never the matched text.
+//! Findings name the rule, commit and path (or [`MESSAGE_LOCATION`]), never
+//! the matched text.
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
@@ -32,6 +34,13 @@ const RULES: &[(&str, &str)] = &[
     ("slack_token", r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
     ("google_api_key", r"\bAIza[0-9A-Za-z_-]{35}"),
 ];
+
+/// The location a finding in a commit message or identity reports.
+pub const MESSAGE_LOCATION: &str = "(commit message or identity)";
+
+/// The most characters of one path a refusal shows: room for any realistic
+/// path, while the findings [`describe`] shows still fit a 64 KiB reply line.
+const MAX_DESCRIBED_PATH_CHARS: usize = 256;
 
 /// File names that hold credentials and must never be committed.
 const FORBIDDEN_FILES: &[&str] = &["credentials.toml", "id_rsa", "id_ed25519", ".env"];
@@ -154,6 +163,24 @@ pub fn scan_paths(listing: &[u8]) -> Vec<Finding> {
     findings
 }
 
+/// Scans a listing of raw commit objects, each after a `commit:<oid>` marker
+/// line: every line, marker lines included, is matched against the rules, so
+/// a message line shaped like a marker is still scanned.
+pub fn scan_messages(listing: &str, known_digests: &[&str]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut commit = "";
+    for line in listing.lines() {
+        if let Some(hash) = commit_marker(line) {
+            commit = hash;
+        }
+        if let Some(rule) = matching_rule(line, known_digests) {
+            findings.push(finding(rule, commit, MESSAGE_LOCATION));
+        }
+    }
+    findings.dedup();
+    findings
+}
+
 /// The commit ID when `entry` is exactly a `commit:<full hex id>` marker;
 /// anything else (including a path that merely starts with `commit:`) is a path.
 fn commit_marker(entry: &str) -> Option<&str> {
@@ -211,13 +238,22 @@ pub fn describe(findings: &[Finding]) -> String {
     let shown: Vec<String> = findings
         .iter()
         .take(5)
-        .map(|f| format!("{} in {}:{}", f.rule, short(&f.commit), f.path))
+        .map(|f| format!("{} in {}:{}", f.rule, short(&f.commit), shorten(&f.path)))
         .collect();
     format!(
         "candidate push refused: {} likely secret(s) in outgoing commits ({}); remove them from history and retry",
         findings.len(),
         shown.join(", ")
     )
+}
+
+/// `path` cut to [`MAX_DESCRIBED_PATH_CHARS`] characters, marked with `…`
+/// when cut.
+fn shorten(path: &str) -> String {
+    match path.char_indices().nth(MAX_DESCRIBED_PATH_CHARS) {
+        Some((cut, _)) => format!("{}…", &path[..cut]),
+        None => path.to_owned(),
+    }
 }
 
 /// The first 12 characters of a commit id.
@@ -295,6 +331,38 @@ mod tests {
             fake_key()
         );
         assert_eq!(scan_patch(&patch, &[])[0].path, "t\tq\"");
+    }
+
+    #[test]
+    fn message_listing_flags_secrets_in_messages_and_identities() {
+        let commit = "b".repeat(40);
+        let key = fake_key();
+        let listing = format!(
+            "commit:{commit}\nA U Thor <{key}@example.invalid>\nC O Mitter <c@example.invalid>\nsubject\n\nbody {key}\n"
+        );
+        let found = scan_messages(&listing, &[]);
+        assert_eq!(
+            found,
+            vec![finding("aws_access_key", &commit, MESSAGE_LOCATION)]
+        );
+        assert!(!describe(&found).contains(&key));
+        assert!(
+            scan_messages(&format!("commit:{commit}\nA <a@b>\nC <c@d>\nfine\n"), &[]).is_empty()
+        );
+    }
+
+    #[test]
+    fn descriptions_cap_each_path() {
+        let long = "p".repeat(20_000);
+        let found = vec![finding("credential_file", "c1", &long); 5];
+        let text = describe(&found);
+        assert!(
+            text.len() < 5 * (MAX_DESCRIBED_PATH_CHARS + 64),
+            "{}",
+            text.len()
+        );
+        assert!(text.contains(&format!("{}…", "p".repeat(MAX_DESCRIBED_PATH_CHARS))));
+        assert_eq!(shorten("short/path.pem"), "short/path.pem");
     }
 
     #[test]

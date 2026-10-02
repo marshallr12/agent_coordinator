@@ -1205,7 +1205,7 @@ fn symbolic_branch(checkout: &Path) -> Result<Option<String>> {
     }
 }
 
-fn resolve_exact_commit(checkout: &Path, revision: &str) -> Result<String> {
+pub(crate) fn resolve_exact_commit(checkout: &Path, revision: &str) -> Result<String> {
     validate_full_oid(revision)?;
     let revision = revision.to_ascii_lowercase();
     git_ok(
@@ -1270,24 +1270,16 @@ const SCAN_LOG_OPTIONS: &[&str] = &[
 ];
 
 /// Scans every commit the candidate push would send and refuses likely
-/// secrets: patch content (binary files included, decoded lossily) and
-/// credential file names from a separate NUL-delimited path listing.
+/// secrets: patch content (binary files included, decoded lossily),
+/// credential file names from a separate NUL-delimited path listing, and
+/// each raw commit object (message, identities and other headers).
 fn refuse_outgoing_secrets(
     checkout: &Path,
     remote: OsString,
     revision: &str,
     known_digests: &[&str],
 ) -> Result<()> {
-    let revisions = outgoing_revisions(checkout, remote, revision)?;
-    let patch = scan_log(checkout, &revisions, &["-p", "--text"])?;
-    let paths = scan_log(
-        checkout,
-        &revisions,
-        &["--name-only", "-z", "--diff-filter=AMRC"],
-    )?;
-    let patch = String::from_utf8_lossy(&patch);
-    let mut findings = crate::secret_scan::scan_patch(&patch, known_digests);
-    findings.extend(crate::secret_scan::scan_paths(&paths));
+    let findings = outgoing_secret_findings(checkout, remote, revision, known_digests, &[])?;
     ensure!(
         findings.is_empty(),
         "{}",
@@ -1296,12 +1288,42 @@ fn refuse_outgoing_secrets(
     Ok(())
 }
 
+/// The secret-scan findings for every commit a push of `revision` to `remote`
+/// would send. `environment` is passed to the Git child that lists the
+/// remote's refs, so a caller holding push credentials can supply them.
+pub(crate) fn outgoing_secret_findings(
+    checkout: &Path,
+    remote: OsString,
+    revision: &str,
+    known_digests: &[&str],
+    environment: &[(&str, &str)],
+) -> Result<Vec<crate::secret_scan::Finding>> {
+    let revisions = outgoing_revisions(checkout, remote, revision, environment)?;
+    let patch = scan_log(checkout, &revisions, &["-p", "--text"])?;
+    let paths = scan_log(
+        checkout,
+        &revisions,
+        &["--name-only", "-z", "--diff-filter=AMRC"],
+    )?;
+    let patch = String::from_utf8_lossy(&patch);
+    let messages = raw_commit_listing(checkout, &revisions)?;
+    let mut findings = crate::secret_scan::scan_patch(&patch, known_digests);
+    findings.extend(crate::secret_scan::scan_paths(&paths));
+    findings.extend(crate::secret_scan::scan_messages(&messages, known_digests));
+    Ok(findings)
+}
+
 /// `git log --stdin` input selecting the outgoing commits: `revision` minus
 /// every commit the push destination itself advertises. Local remote-tracking
 /// refs are deliberately not used: an agent can forge them with `update-ref`
 /// to hide commits, and when none exist they would not bound the range.
-fn outgoing_revisions(checkout: &Path, remote: OsString, revision: &str) -> Result<Vec<u8>> {
-    let advertised = advertised_objects(checkout, remote)?;
+fn outgoing_revisions(
+    checkout: &Path,
+    remote: OsString,
+    revision: &str,
+    environment: &[(&str, &str)],
+) -> Result<Vec<u8>> {
+    let advertised = advertised_objects(checkout, remote, environment)?;
     let mut input = format!("{revision}\n");
     for commit in local_commits(checkout, &advertised)? {
         input.push_str(&format!("^{commit}\n"));
@@ -1311,13 +1333,17 @@ fn outgoing_revisions(checkout: &Path, remote: OsString, revision: &str) -> Resu
 
 /// Every object ID the configured remote advertises for its refs. The push
 /// negotiates against exactly these, so they bound what it will send.
-fn advertised_objects(checkout: &Path, remote: OsString) -> Result<Vec<String>> {
+fn advertised_objects(
+    checkout: &Path,
+    remote: OsString,
+    environment: &[(&str, &str)],
+) -> Result<Vec<String>> {
     let arguments = [
         OsString::from("ls-remote"),
         OsString::from("--refs"),
         remote,
     ];
-    let output = git_raw(checkout, arguments, None, &[])?;
+    let output = git_raw(checkout, arguments, None, environment)?;
     ensure!(
         output.status.success(),
         "Git could not list the configured remote's refs for the secret scan"
@@ -1360,6 +1386,60 @@ fn local_commits(checkout: &Path, objects: &[String]) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Every outgoing commit object exactly as stored (headers, identities,
+/// signatures, embedded tags and message), each after a `commit:<oid>`
+/// marker line. Reading raw objects means no `encoding` header can make Git
+/// re-encode what is scanned; NUL bytes are dropped so ASCII text stored as
+/// UTF-16 still reads as text. Replace refs are ignored.
+fn raw_commit_listing(checkout: &Path, revisions: &[u8]) -> Result<String> {
+    let arguments = ["--no-replace-objects", "rev-list", "--stdin"].map(OsString::from);
+    let commits = git_raw(checkout, arguments, Some(revisions), &[])?;
+    ensure!(
+        commits.status.success(),
+        "Git could not list the outgoing commits for the secret scan"
+    );
+    if commits.stdout.is_empty() {
+        return Ok(String::new());
+    }
+    let arguments = ["--no-replace-objects", "cat-file", "--batch"].map(OsString::from);
+    let objects = git_raw(checkout, arguments, Some(&commits.stdout), &[])?;
+    ensure!(
+        objects.status.success(),
+        "Git could not read the outgoing commits for the secret scan"
+    );
+    commit_batch_listing(&objects.stdout)
+}
+
+/// Turns `git cat-file --batch` output (`<oid> <type> <size>` lines, each
+/// followed by that many bytes and a newline) into the marker-and-text
+/// listing [`raw_commit_listing`] returns. Every object must be a commit.
+fn commit_batch_listing(mut batch: &[u8]) -> Result<String> {
+    let mut listing = String::new();
+    while !batch.is_empty() {
+        let end = batch
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .context("truncated object batch")?;
+        let header = std::str::from_utf8(&batch[..end]).context("malformed object batch")?;
+        let Some((oid, "commit", size)) = header.split_once(' ').and_then(|(oid, rest)| {
+            let (kind, size) = rest.split_once(' ')?;
+            Some((oid, kind, size.parse::<usize>().ok()?))
+        }) else {
+            bail!("outgoing object is not a readable commit");
+        };
+        let body = batch
+            .get(end + 1..end + 1 + size)
+            .context("truncated object batch")?;
+        let text: Vec<u8> = body.iter().copied().filter(|byte| *byte != 0).collect();
+        listing.push_str(&format!(
+            "commit:{oid}\n{}\n",
+            String::from_utf8_lossy(&text)
+        ));
+        batch = batch.get(end + 2 + size..).unwrap_or_default();
+    }
+    Ok(listing)
+}
+
 /// Runs `git log` over the outgoing `revisions` with pinned settings and
 /// `extra` options, returning raw bytes (patches may hold non-UTF-8 binary
 /// content). Replace refs are ignored so the scan sees the real objects.
@@ -1377,7 +1457,7 @@ fn scan_log(checkout: &Path, revisions: &[u8], extra: &[&str]) -> Result<Vec<u8>
     Ok(output.stdout)
 }
 
-fn validate_full_oid(value: &str) -> Result<()> {
+pub(crate) fn validate_full_oid(value: &str) -> Result<()> {
     ensure!(
         matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "revision must be a full hexadecimal Git object ID"
@@ -1407,6 +1487,17 @@ fn observe_remote_reference(
     remote: OsString,
     reference: &str,
 ) -> Result<Option<String>> {
+    observe_remote_reference_with(checkout, remote, reference, &[])
+}
+
+/// The commit `remote` advertises for exactly `reference`, or `None` when it
+/// has no such ref. `environment` is passed to the `ls-remote` child.
+pub(crate) fn observe_remote_reference_with(
+    checkout: &Path,
+    remote: OsString,
+    reference: &str,
+    environment: &[(&str, &str)],
+) -> Result<Option<String>> {
     let output = git_raw(
         checkout,
         [
@@ -1417,7 +1508,7 @@ fn observe_remote_reference(
             OsString::from(reference),
         ],
         None,
-        &[],
+        environment,
     )?;
     match output.status.code() {
         Some(0) => {
@@ -1550,7 +1641,7 @@ fn looks_like_windows_drive(value: &str) -> bool {
         && matches!(bytes[2], b'/' | b'\\')
 }
 
-fn git_remote_argument(checkout: &Path, value: &str) -> Result<OsString> {
+pub(crate) fn git_remote_argument(checkout: &Path, value: &str) -> Result<OsString> {
     if value.starts_with("file://") || value.contains("://") {
         return Ok(OsString::from(value));
     }
@@ -1573,7 +1664,7 @@ fn git_remote_argument(checkout: &Path, value: &str) -> Result<OsString> {
     .into_os_string())
 }
 
-fn validate_remote_argument(value: &str) -> Result<()> {
+pub(crate) fn validate_remote_argument(value: &str) -> Result<()> {
     ensure!(
         !value.trim().is_empty(),
         "configured repository URL is empty"
@@ -1594,7 +1685,7 @@ fn validate_branch(checkout: &Path, branch: &str) -> Result<()> {
         .context("target branch is not a valid Git branch name")
 }
 
-fn canonical_git_root(path: &Path) -> Result<PathBuf> {
+pub(crate) fn canonical_git_root(path: &Path) -> Result<PathBuf> {
     let root = git_text(path, ["rev-parse", "--show-toplevel"])?;
     fs::canonicalize(&root).with_context(|| format!("resolve Git checkout {}", path.display()))
 }
@@ -1612,7 +1703,7 @@ fn canonical_common_git_dir(path: &Path) -> Result<PathBuf> {
     fs::canonicalize(&directory).context("resolve Git repository identity")
 }
 
-fn git_text<I, S>(checkout: &Path, arguments: I) -> Result<String>
+pub(crate) fn git_text<I, S>(checkout: &Path, arguments: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -1624,7 +1715,7 @@ where
         .map(|value| value.trim().to_owned())
 }
 
-fn git_ok<I, S>(checkout: &Path, arguments: I) -> Result<()>
+pub(crate) fn git_ok<I, S>(checkout: &Path, arguments: I) -> Result<()>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -1649,12 +1740,57 @@ where
     )
 }
 
-fn git_raw<I>(
+pub(crate) fn git_raw<I>(
     checkout: &Path,
     arguments: I,
     stdin: Option<&[u8]>,
     environment: &[(&str, &str)],
 ) -> Result<Output>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut command = git_command(checkout, arguments, environment)?;
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let mut child = command.spawn().context("run Git")?;
+    let pipe = child.stdin.take();
+    // Feed stdin from a scoped thread so Git can fill its stdout pipe (as
+    // `cat-file --batch-check` does per input line) without deadlocking.
+    std::thread::scope(|scope| {
+        let writer = stdin.map(|input| scope.spawn(move || write_stdin(pipe, input)));
+        let output = child.wait_with_output().context("wait for Git")?;
+        if let Some(writer) = writer {
+            writer
+                .join()
+                .map_err(|_| anyhow::anyhow!("Git standard input writer panicked"))??;
+        }
+        Ok(output)
+    })
+}
+
+/// Runs Git like [`git_raw`], with standard input read from `stdin` so a
+/// large input streams from disk instead of memory.
+pub(crate) fn git_raw_from_file<I>(
+    checkout: &Path,
+    arguments: I,
+    stdin: File,
+    environment: &[(&str, &str)],
+) -> Result<Output>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut command = git_command(checkout, arguments, environment)?;
+    command.stdin(Stdio::from(stdin));
+    command.output().context("run Git")
+}
+
+/// A Git command in `checkout` with captured stdout, discarded stderr, the
+/// coordinator and repository-redirecting variables removed from its
+/// environment, and `environment` added.
+fn git_command<I>(checkout: &Path, arguments: I, environment: &[(&str, &str)]) -> Result<Command>
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -1686,25 +1822,7 @@ where
     for (name, value) in environment {
         command.env(name, value);
     }
-    if stdin.is_some() {
-        command.stdin(Stdio::piped());
-    } else {
-        command.stdin(Stdio::null());
-    }
-    let mut child = command.spawn().context("run Git")?;
-    let pipe = child.stdin.take();
-    // Feed stdin from a scoped thread so Git can fill its stdout pipe (as
-    // `cat-file --batch-check` does per input line) without deadlocking.
-    std::thread::scope(|scope| {
-        let writer = stdin.map(|input| scope.spawn(move || write_stdin(pipe, input)));
-        let output = child.wait_with_output().context("wait for Git")?;
-        if let Some(writer) = writer {
-            writer
-                .join()
-                .map_err(|_| anyhow::anyhow!("Git standard input writer panicked"))??;
-        }
-        Ok(output)
-    })
+    Ok(command)
 }
 
 /// Writes all of `input` to Git's standard input and closes it.
@@ -1863,7 +1981,7 @@ fn protected_open(path: &Path, append: bool) -> Result<File> {
     Ok(file)
 }
 
-fn protected_create_new(path: &Path) -> Result<File> {
+pub(crate) fn protected_create_new(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1877,7 +1995,7 @@ fn protected_create_new(path: &Path) -> Result<File> {
 }
 
 #[cfg(unix)]
-fn protect_directory(path: &Path) -> Result<()> {
+pub(crate) fn protect_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .context("protect integration state directory")
@@ -1891,7 +2009,7 @@ fn protect_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn protect_directory(_path: &Path) -> Result<()> {
+pub(crate) fn protect_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 #[cfg(windows)]
@@ -1899,7 +2017,7 @@ fn protect_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 #[cfg(not(any(unix, windows)))]
-fn protect_directory(_path: &Path) -> Result<()> {
+pub(crate) fn protect_directory(_path: &Path) -> Result<()> {
     bail!("protected local state is unsupported on this platform")
 }
 #[cfg(not(any(unix, windows)))]
@@ -2269,6 +2387,94 @@ mod tests {
         }
         commit_file(&repository, "clean.txt", b"clean\n", "clean");
         assert_eq!(checkpoint_error(&repository, "clean"), "");
+    }
+
+    /// Writes a raw commit on `base` (its tree, no file changes) whose
+    /// message names `key`, with `encoding_header` (if any) after the
+    /// committer line, and checks it out.
+    fn raw_commit(
+        repository: &Repository,
+        encoding_header: Option<&str>,
+        message: &[u8],
+    ) -> String {
+        let tree = git_text(
+            &repository.source,
+            ["rev-parse", &format!("{}^{{tree}}", repository.base)],
+        )
+        .unwrap();
+        let mut object = format!(
+            "tree {tree}\nparent {}\nauthor A <a@example.invalid> 0 +0000\ncommitter A <a@example.invalid> 0 +0000\n",
+            repository.base
+        )
+        .into_bytes();
+        if let Some(encoding) = encoding_header {
+            object.extend_from_slice(format!("encoding {encoding}\n").as_bytes());
+        }
+        object.push(b'\n');
+        object.extend_from_slice(message);
+        let arguments = [
+            "hash-object",
+            "-t",
+            "commit",
+            "--literally",
+            "-w",
+            "--stdin",
+        ]
+        .map(OsString::from);
+        let output = git_raw(&repository.source, arguments, Some(&object), &[]).unwrap();
+        let commit = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        git_ok(
+            &repository.source,
+            ["checkout", "--quiet", "-B", "raw", &commit],
+        )
+        .unwrap();
+        commit
+    }
+
+    #[test]
+    fn secret_scan_reads_raw_commit_objects_whatever_their_encoding() {
+        let repository = repository();
+        let message = format!("rotate {}\n", fake_key());
+        raw_commit(&repository, None, message.as_bytes());
+        assert!(checkpoint_error(&repository, "plain").contains("aws_access_key"));
+        raw_commit(&repository, Some("UTF-16BE"), message.as_bytes());
+        let error = checkpoint_error(&repository, "utf16-header");
+        assert!(error.contains("aws_access_key"), "{error}");
+        let wide: Vec<u8> = message.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        raw_commit(&repository, Some("UTF-16BE"), &wide);
+        let error = checkpoint_error(&repository, "utf16-encoded");
+        assert!(error.contains("aws_access_key"), "{error}");
+    }
+
+    #[test]
+    fn secret_scan_covers_commit_messages_and_identities() {
+        let repository = repository();
+        let key = fake_key();
+        candidate(&repository, "message", "clean\n");
+        let subject = format!("rotate {key}");
+        git_ok(
+            &repository.source,
+            ["commit", "--quiet", "--amend", "-m", &subject],
+        )
+        .unwrap();
+        let error = checkpoint_error(&repository, "message");
+        assert!(error.contains("aws_access_key"), "{error}");
+        assert!(!error.contains(&key), "{error}");
+
+        candidate(&repository, "ident", "clean\n");
+        let author = format!("user.email={key}@example.invalid");
+        let amend = [
+            "-c",
+            &author,
+            "commit",
+            "--quiet",
+            "--amend",
+            "--reset-author",
+            "--no-edit",
+        ];
+        git_ok(&repository.source, amend).unwrap();
+        let error = checkpoint_error(&repository, "ident");
+        assert!(error.contains("aws_access_key"), "{error}");
     }
 
     #[test]
