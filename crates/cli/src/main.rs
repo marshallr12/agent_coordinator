@@ -1,4 +1,5 @@
 mod artifact_transfer;
+mod candidate_checkpoint;
 mod config;
 mod job_state;
 mod lifecycle;
@@ -322,7 +323,8 @@ struct CodeSubmissionArgs {
     #[arg(long)]
     checkout: PathBuf,
     /// Caller-selected ref under refs/agent-coordinator/candidates/.
-    /// Defaults to a stable ref derived from this attempt ID.
+    /// Defaults to a stable ref derived from this attempt ID. Refused while
+    /// AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET is set: the helper fixes the ref.
     #[arg(long)]
     candidate_ref: Option<String>,
     /// JSON evidence without kind or Git identity fields.
@@ -1313,17 +1315,19 @@ async fn submit_code(
         .ok_or_else(|| {
             Failure::temporary("workflow policy omitted canonical repository identity")
         })?;
-    let candidate_ref = args
-        .candidate_ref
-        .clone()
-        .unwrap_or_else(|| format!("refs/agent-coordinator/candidates/{}", args.attempt));
-    let checkpoint = coordinator_local::git_workflow::checkpoint_candidate(
-        &prepared.destination,
-        repository,
-        &candidate_ref,
-        &[context.credential_digest.as_str()],
-    )
-    .map_err(Failure::invalid)?;
+    let default_ref = format!("refs/agent-coordinator/candidates/{}", args.attempt);
+    let checkpoint = candidate_checkpoint::checkpoint(
+        &candidate_checkpoint::CheckpointRequest {
+            checkout: &prepared.destination,
+            repository,
+            base_revision: &prepared.base_revision,
+            explicit_ref: args.candidate_ref.as_deref(),
+            default_ref: &default_ref,
+            credential_digest: &context.credential_digest,
+        },
+        candidate_checkpoint::helper_socket_from_env()?.as_deref(),
+    )?;
+    let candidate_ref = checkpoint.reference.clone();
     if checkpoint.revision != candidate_revision || checkpoint.tree != candidate_tree {
         return Err(Failure::local(
             5,

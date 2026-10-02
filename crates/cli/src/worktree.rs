@@ -404,7 +404,10 @@ where
         .map(|value| value.trim().to_owned())
 }
 
-fn git_ok<I, S>(repository: &Path, args: I) -> Result<()>
+/// Runs Git in `repository` without coordinator or repository-override
+/// environment variables, failing with its trimmed, length-bounded standard
+/// error unless it succeeds.
+pub(crate) fn git_ok<I, S>(repository: &Path, args: I) -> Result<()>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

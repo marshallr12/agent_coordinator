@@ -299,6 +299,53 @@ pub fn checkpoint_candidate(
         }
     }
 
+    read_back_checkpoint(&snapshot, configured_remote, remote, reference)
+}
+
+/// Captures the clean snapshot of `checkout` and runs the outgoing secret scan
+/// [`checkpoint_candidate`] runs before pushing, refusing likely secrets and
+/// tokens matching `known_digests`. For a caller that publishes the candidate
+/// through another route, such as a candidate push helper; it pushes nothing.
+pub fn scan_clean_candidate(
+    checkout: &Path,
+    configured_remote: &str,
+    known_digests: &[&str],
+) -> Result<CleanSnapshot> {
+    let snapshot = capture_clean_snapshot(checkout, configured_remote)?;
+    let remote = git_remote_argument(&snapshot.checkout, configured_remote)?;
+    refuse_outgoing_secrets(
+        &snapshot.checkout,
+        remote,
+        &snapshot.revision,
+        known_digests,
+    )?;
+    Ok(snapshot)
+}
+
+/// Verifies a candidate another route published at `reference` with the
+/// readback [`checkpoint_candidate`] performs: fetches the ref into a private
+/// verification namespace, requires its commit, tree and advertised value to
+/// match `snapshot`, and requires the checkout to still match `snapshot`.
+pub fn verify_published_candidate(
+    snapshot: &CleanSnapshot,
+    configured_remote: &str,
+    reference: &str,
+) -> Result<CandidateCheckpoint> {
+    validate_candidate_reference(&snapshot.checkout, reference)?;
+    let remote = git_remote_argument(&snapshot.checkout, configured_remote)?;
+    read_back_checkpoint(snapshot, configured_remote, remote, reference)
+}
+
+/// Fetches `reference` into a fresh `refs/agent-coordinator/verify/` ref,
+/// requires the fetched commit and tree and the remote's advertised commit to
+/// equal `snapshot`, deletes the verification ref, and rechecks the clean
+/// snapshot before returning the verified checkpoint.
+fn read_back_checkpoint(
+    snapshot: &CleanSnapshot,
+    configured_remote: &str,
+    remote: OsString,
+    reference: &str,
+) -> Result<CandidateCheckpoint> {
     let verification_ref = format!("refs/agent-coordinator/verify/{}", Uuid::new_v4());
     let refspec = format!("+{reference}:{verification_ref}");
     let fetch = git_raw(
@@ -336,12 +383,12 @@ pub fn checkpoint_candidate(
             && remote_revision.as_deref() == Some(snapshot.revision.as_str()),
         "fetched candidate checkpoint does not match the clean local commit and tree"
     );
-    verify_clean_snapshot(&snapshot.checkout, configured_remote, &snapshot)?;
+    verify_clean_snapshot(&snapshot.checkout, configured_remote, snapshot)?;
     Ok(CandidateCheckpoint {
-        remote: snapshot.remote,
+        remote: snapshot.remote.clone(),
         reference: reference.to_owned(),
-        revision: snapshot.revision,
-        tree: snapshot.tree,
+        revision: snapshot.revision.clone(),
+        tree: snapshot.tree.clone(),
     })
 }
 

@@ -644,6 +644,32 @@ commit and path without echoing the secret; remove the secret from history
 (not only from the latest commit) and submit again. Supervised agents cannot run
 `git push` directly, so this scanned push is their only route to the remote.
 
+When `AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET` names a Unix socket, the CLI does
+not push itself: a per-launch candidate push helper listening on that socket
+holds the push credential and writes only its own fixed candidate ref. The value
+is trimmed; an unset, empty or whitespace-only value keeps the direct push, and
+any other value must be an absolute UTF-8 path (exit `2` otherwise). Setting it on a
+platform without Unix sockets is also invalid input. The CLI still captures the
+clean snapshot and runs the secret scan above, including the caller's own
+coordinator token, which the helper cannot recognise, before sending anything;
+the scan lists the remote's refs read-only. The launch's base commit must exist
+in the checkout, since the CLI sends only the commits after it. The CLI then
+sends the candidate commit to the helper, records the ref the helper reports as
+the submission's candidate ref, and fetches that ref back to compare its commit
+and tree with the worktree exactly as a direct push is verified. The helper
+chooses the ref, so `--candidate-ref` is refused with
+`candidate_ref_fixed_by_helper` before anything is sent.
+
+Helper failures use these codes:
+
+| Code | Exit | Retryable | Meaning |
+| --- | --- | --- | --- |
+| `candidate_push_refused` | `5` for `lease_conflict`, `7` for `push_failed` and `internal`, `2` otherwise | only `push_failed` and `internal` | The helper refused; `details.refusal_code` holds its code and the message is the helper's, with control and bidirectional formatting characters replaced by spaces. `lease_conflict` means the ref is not one this helper pushed. |
+| `candidate_push_unavailable` | `7` | yes | Connecting to the socket fails. |
+| `candidate_push_failed` | `7` | yes | A read from or write to the connected socket fails, or the helper closes the connection without replying. A retry is safe: the helper accepts a ref that already names the same commit. |
+| `candidate_push_protocol_violation` | `5` | no | The helper's reply is malformed or acknowledges another commit, tree or ref. |
+| `invalid_client_input` | `2` | no | The checkout cannot be scanned or bundled, it adds a likely secret, or the base commit is missing. |
+
 The immutable submission records the credential-free canonical project remote
 identity and exact candidate ref in addition to commit and tree IDs. The remote
 URL itself comes from project configuration; credentials are never stored in
