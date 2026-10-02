@@ -26,6 +26,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
+use tokio::sync::{Notify, Semaphore};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -35,12 +36,36 @@ use uuid::Uuid;
 struct Mock {
     hits: Arc<AtomicUsize>,
     failure: Option<StatusCode>,
+    arrived: Arc<Notify>,
+    gate: Option<Arc<Semaphore>>,
+}
+
+impl Mock {
+    fn new(failure: Option<StatusCode>) -> Self {
+        Self {
+            hits: Arc::new(AtomicUsize::new(0)),
+            failure,
+            arrived: Arc::new(Notify::new()),
+            gate: None,
+        }
+    }
+
+    async fn wait_for_hits(&self, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while self.hits.load(Ordering::SeqCst) < expected {
+                self.arrived.notified().await;
+            }
+        })
+        .await
+        .expect("context requests must reach the controlled scoring mock");
+    }
 }
 
 /// Score each requested candidate by its index. A failing mock sends the
 /// same well-formed scores under its failure status.
 async fn score_by_index(State(mock): State<Mock>, body: String) -> (StatusCode, String) {
     mock.hits.fetch_add(1, Ordering::SeqCst);
+    mock.arrived.notify_one();
     let request: Value = serde_json::from_str(&body).unwrap();
     let count = request["state"]["candidates"].as_array().unwrap().len();
     let answers: Map<String, Value> = (0..count)
@@ -53,6 +78,9 @@ async fn score_by_index(State(mock): State<Mock>, body: String) -> (StatusCode, 
         })
         .collect();
     let status = mock.failure.unwrap_or(StatusCode::OK);
+    if let Some(gate) = mock.gate {
+        gate.acquire_owned().await.unwrap().forget();
+    }
     (status, json!({"answers": answers}).to_string())
 }
 
@@ -82,7 +110,7 @@ struct Fixture {
     reranked: Router,
     admin: Caller,
     agent: Caller,
-    hits: Arc<AtomicUsize>,
+    mock: Mock,
     _dir: tempfile::TempDir,
 }
 
@@ -93,13 +121,12 @@ impl Fixture {
         failure: Option<StatusCode>,
         configure: impl FnOnce(&mut ContextRerankConfig),
     ) -> Self {
+        Self::with_mock(Mock::new(failure), configure).await
+    }
+
+    async fn with_mock(mock: Mock, configure: impl FnOnce(&mut ContextRerankConfig)) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hits = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_mock(Mock {
-            hits: hits.clone(),
-            failure,
-        })
-        .await;
+        let endpoint = spawn_mock(mock.clone()).await;
         let mut rerank = ContextRerankConfig {
             api_key: ApiKey::new("test-key".into()),
             endpoint,
@@ -113,7 +140,7 @@ impl Fixture {
             agent: seed(&plain, false).await,
             plain: router(plain),
             reranked: router(reranked),
-            hits,
+            mock,
             _dir: dir,
         }
     }
@@ -151,15 +178,25 @@ impl Fixture {
 
     /// Item titles or decision questions from `app`'s context response.
     async fn context(&self, app: &Router, path: &str) -> Vec<String> {
+        let value = self.packet(app, path).await;
+        value["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(label)
+            .collect()
+    }
+
+    /// Complete stable context data, including the item budget and policy.
+    async fn packet(&self, app: &Router, path: &str) -> Value {
         let (status, value) = call(app.clone(), &self.agent, "GET", path, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{value}");
-        let items = value["data"]["items"].as_array().unwrap();
-        items.iter().map(label).collect()
+        value["data"].clone()
     }
 
     /// Requests that reached the mock scoring server.
     fn hits(&self) -> usize {
-        self.hits.load(Ordering::SeqCst)
+        self.mock.hits.load(Ordering::SeqCst)
     }
 }
 
@@ -225,6 +262,57 @@ async fn scoring_failure_keeps_the_search_order() {
     let original = f.context(&f.plain, &path).await;
     assert_eq!(f.context(&f.reranked, &path).await, original);
     assert_eq!(f.hits(), 1);
+}
+
+#[tokio::test]
+async fn saturation_returns_the_complete_fts_packet_without_an_extra_provider_call() {
+    let gate = Arc::new(Semaphore::new(0));
+    let mut mock = Mock::new(None);
+    mock.gate = Some(gate.clone());
+    let f = Arc::new(Fixture::with_mock(mock, |_| {}).await);
+    let path = f.seed_context().await;
+    let original = f.packet(&f.plain, &path).await;
+    assert_eq!(original["items"].as_array().unwrap().len(), 4);
+    let mut pending = Vec::new();
+    for _ in 0..4 {
+        let shared = f.clone();
+        let path = path.clone();
+        pending.push(tokio::spawn(async move {
+            shared.packet(&shared.reranked, &path).await
+        }));
+    }
+    f.mock.wait_for_hits(4).await;
+    assert_eq!(f.packet(&f.reranked, &path).await, original);
+    assert_eq!(f.hits(), 4);
+    gate.add_permits(4);
+    let mut expected = original.clone();
+    expected["items"].as_array_mut().unwrap()[1..].reverse();
+    assert_ne!(expected["items"], original["items"]);
+    for task in pending {
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(f.hits(), 4);
+}
+
+#[tokio::test]
+async fn three_provider_failures_open_the_endpoint_circuit_preserving_items_order_and_budget() {
+    let f = Fixture::new(Some(StatusCode::BAD_GATEWAY), |_| {}).await;
+    let path = f.seed_context().await;
+    let original = f.packet(&f.plain, &path).await;
+    for expected_hits in 1..=3 {
+        assert_eq!(f.packet(&f.reranked, &path).await, original);
+        assert_eq!(f.hits(), expected_hits);
+    }
+    for _ in 0..3 {
+        assert_eq!(f.packet(&f.reranked, &path).await, original);
+    }
+    assert_eq!(f.hits(), 3);
 }
 
 /// The part of the serve-time warning that names the missing key.

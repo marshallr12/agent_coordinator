@@ -4,11 +4,13 @@
 use super::*;
 use axum::{
     Router,
+    body::Body,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, header},
     response::IntoResponse,
     routing::post,
 };
+use http_body_util::BodyExt;
 use std::{
     collections::VecDeque,
     sync::atomic::{AtomicUsize, Ordering},
@@ -17,6 +19,8 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::Notify,
 };
+use tower::ServiceExt;
+use tracing::instrument::WithSubscriber;
 
 /// The `Authorization` header and parsed JSON body of one received request.
 type Received = (Option<String>, Value);
@@ -842,6 +846,263 @@ async fn busy_and_candidate_count_skips_do_not_count_as_failures_or_wedge_a_prob
     );
     assert!(run_attempt(&reranker).await.is_ok());
     assert_eq!(mock.hits(), 4);
+}
+
+/// Capture only this future's tracing dispatch; no global subscriber is installed.
+#[derive(Clone)]
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Real authenticated context routers sharing one SQLite database. The private
+/// clock is installed on AppState's reranker before that state enters its router.
+struct EndpointFixture {
+    plain: Router,
+    reranked: Router,
+    token: String,
+    path: String,
+    clock: ManualClock,
+    _dir: tempfile::TempDir,
+}
+
+impl EndpointFixture {
+    async fn new(endpoint: String) -> Self {
+        use crate::{
+            auth::{digest, secret},
+            state::{AppState, Config},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            database_path: dir.path().join("endpoint.sqlite3"),
+            public_origin: "http://127.0.0.1:8080".into(),
+            allow_insecure_loopback: true,
+            ..Config::default()
+        };
+        let plain_state = AppState::open(config.clone()).await.unwrap();
+        let mut state = AppState::open(Config {
+            context_rerank: ContextRerankConfig {
+                api_key: ApiKey::new("endpoint-key-do-not-log".into()),
+                endpoint,
+                max_in_flight: 1,
+                ..ContextRerankConfig::default()
+            },
+            ..config
+        })
+        .await
+        .unwrap();
+        let clock = ManualClock(Arc::new(Mutex::new(Instant::now())));
+        let now = clock.clone();
+        Arc::get_mut(state.context_reranker.as_mut().unwrap())
+            .unwrap()
+            .breaker
+            .now = Arc::new(move || *now.0.lock().unwrap());
+        let shared_state = state.clone();
+        assert!(Arc::ptr_eq(
+            state.context_reranker.as_ref().unwrap(),
+            shared_state.context_reranker.as_ref().unwrap()
+        ));
+        let token = secret();
+        let principal = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO principals(id,name,kind,role,password_hash,created_at) VALUES(?,?,'human','admin','unused',?)")
+            .bind(&principal)
+            .bind("endpoint-fixture")
+            .bind(plain_state.now())
+            .execute(&plain_state.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO browser_sessions(id,principal_id,token_hash,expires_at) VALUES(?,?,?,?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&principal)
+        .bind(digest(&token))
+        .bind(plain_state.now() + 86_400_000)
+        .execute(&plain_state.pool)
+        .await
+        .unwrap();
+        let plain = crate::router(plain_state);
+        let reranked = crate::router(shared_state);
+        let project = endpoint_call(
+            &plain,
+            &token,
+            "POST",
+            "/api/v1/projects",
+            json!({"name":"endpoint-fixture","repository_url":"https://example.test/endpoint.git","target_branch":"main"}),
+        )
+        .await;
+        let project = project["data"]["id"].as_str().unwrap();
+        let mut first_task = None;
+        for suffix in ["alpha", "beta", "gamma"] {
+            let task = endpoint_call(
+                &plain,
+                &token,
+                "POST",
+                &format!("/api/v1/projects/{project}/tasks"),
+                json!({"title":format!("privacyneedle {suffix}"),"description":"private endpoint task text","acceptance_criteria":["ordered"],"kind":"general"}),
+            )
+            .await;
+            first_task.get_or_insert(task["data"]["id"].as_str().unwrap().to_owned());
+        }
+        endpoint_call(
+            &plain,
+            &token,
+            "POST",
+            &format!("/api/v1/projects/{project}/decisions"),
+            json!({"question":"private endpoint decision","options":["Proceed","Wait"],"rationale":"Keep this decision in its original position.",
+                "required_actor":"human","affected_tasks":[{"task_id":first_task.unwrap(),"task_revision":1}],
+                "policy_revision":1,"environment":"test","conditions":"None.","expires_at":null}),
+        )
+        .await;
+        Self {
+            plain,
+            reranked,
+            token,
+            path: format!(
+                "/api/v1/projects/{project}/context?q=privacyneedle&limit=20&budget=65536"
+            ),
+            clock,
+            _dir: dir,
+        }
+    }
+
+    async fn packet(&self, app: &Router) -> Value {
+        endpoint_call(app, &self.token, "GET", &self.path, json!({})).await["data"].clone()
+    }
+}
+
+async fn endpoint_call(app: &Router, token: &str, method: &str, path: &str, body: Value) -> Value {
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("idempotency-key", uuid::Uuid::new_v4().to_string())
+        .header("cookie", format!("coordinator_local={token}"))
+        .header("origin", "http://127.0.0.1:8080")
+        .header(
+            "x-csrf-token",
+            crate::auth::digest(&format!("coordinator-browser-csrf-v1:{token}")),
+        )
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn endpoint_recovery_reorders_the_same_packet_and_logs_private_safe_skip_reasons() {
+    let gate = Arc::new(Semaphore::new(0));
+    let reverse = scores_body(&[score(0.0), score(1.0), score(2.0)]);
+    let mock = Mock::new(StatusCode::OK, reverse.clone());
+    mock.reply(StatusCode::OK, reverse, Some(gate.clone()));
+    let fixture = Arc::new(EndpointFixture::new(mock.spawn().await).await);
+    let original = fixture.packet(&fixture.plain).await;
+    assert_eq!(original["items"].as_array().unwrap().len(), 4);
+    assert_eq!(original["items"][0]["type"], "decision");
+    let mut expected = original.clone();
+    expected["items"].as_array_mut().unwrap()[1..].reverse();
+    assert_ne!(expected["items"], original["items"]);
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let writer = LogWriter(logs.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let shared = fixture.clone();
+    let pending = tokio::spawn(
+        async move { shared.packet(&shared.reranked).await }.with_subscriber(dispatch.clone()),
+    );
+    mock.wait_for_hits(1).await;
+    assert_eq!(
+        fixture
+            .packet(&fixture.reranked)
+            .with_subscriber(dispatch.clone())
+            .await,
+        original
+    );
+    assert_eq!(mock.hits(), 1);
+    gate.add_permits(1);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap(),
+        expected
+    );
+    queue_failures(&mock, 3);
+    for expected_hits in 2..=4 {
+        assert_eq!(
+            fixture
+                .packet(&fixture.reranked)
+                .with_subscriber(dispatch.clone())
+                .await,
+            original
+        );
+        assert_eq!(mock.hits(), expected_hits);
+    }
+    assert_eq!(
+        fixture
+            .packet(&fixture.reranked)
+            .with_subscriber(dispatch.clone())
+            .await,
+        original
+    );
+    fixture.clock.advance(Duration::from_secs(59));
+    assert_eq!(
+        fixture
+            .packet(&fixture.reranked)
+            .with_subscriber(dispatch.clone())
+            .await,
+        original
+    );
+    assert_eq!(mock.hits(), 4);
+    fixture.clock.advance(Duration::from_secs(1));
+    for expected_hits in 5..=6 {
+        assert_eq!(
+            fixture
+                .packet(&fixture.reranked)
+                .with_subscriber(dispatch.clone())
+                .await,
+            expected
+        );
+        assert_eq!(mock.hits(), expected_hits);
+    }
+    let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("reason=\"busy\""), "missing busy skip log");
+    assert!(
+        logs.contains("reason=\"circuit_open\""),
+        "missing circuit skip log"
+    );
+    assert!(
+        logs.contains("outcome=\"reordered\""),
+        "missing successful reorder log"
+    );
+    for private in [
+        "endpoint-key-do-not-log",
+        "privacyneedle",
+        "private endpoint task text",
+        "private endpoint decision",
+        fixture.token.as_str(),
+    ] {
+        assert!(
+            !logs.contains(private),
+            "private context value appeared in logs"
+        );
+    }
 }
 
 #[test]
