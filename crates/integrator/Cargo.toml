@@ -5,9 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "agentc_integrator"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agentc-integrator"
 path = "src/main.rs"
+
+[[bin]]
+name = "agentc-push"
+path = "src/push/main.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -23,6 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
+libc = "=0.2.189"
 tokio.workspace = true
 toml = "0.9"
 uuid.workspace = true

@@ -1,0 +1,19 @@
+# agentc-push configuration (default path /etc/agentc/push.toml).
+# Commented-out entries show their in-code defaults.
+
+# The push App's id and its installation on the repository (required).
+app_id = 7
+installation_id = 9
+
+# The only repository the helper pushes to (required). Must be
+# https://github.com/<owner>/<repo>.git.
+repository = "https://github.com/owner/repo.git"
+
+# GitHub REST API base; must be https://.
+# api_base = "https://api.github.com"
+
+# PEM private key of the push App, readable by the helper's uid only.
+# private_key = "/etc/agentc/push-app.pem"
+
+# The largest candidate bundle accepted, in bytes (512 MiB).
+# max_bundle_bytes = 536870912

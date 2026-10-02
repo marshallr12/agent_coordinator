@@ -1,8 +1,9 @@
-//! GitHub App authentication and the few REST calls the integrator makes.
-//! The App signs an RS256 JWT with its private key, trades it for a one-hour
-//! installation token and keeps that token in memory only. Git reaches the
-//! token through the `askpass` helper (see `askpass.rs`), never through a URL
-//! or a file.
+//! GitHub App authentication and the few REST calls this crate's binaries
+//! make. The App signs an RS256 JWT with its private key, trades it for a
+//! one-hour installation token and keeps that token in memory only. Git
+//! reaches the token through an askpass helper (`askpass.rs` for the
+//! integrator, `push/askpass.rs` for `agentc-push`), never through a URL or a
+//! file.
 use crate::config::GithubConfig;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use aws_lc_rs::{rand, signature as sig};
@@ -83,18 +84,43 @@ impl GithubApp {
 
     /// Trades a fresh App JWT for an installation token.
     async fn mint_token(&self) -> Result<String> {
+        let jwt = self.app_jwt()?;
+        let reply = self
+            .send(self.http.post(self.access_tokens_url()), &jwt)
+            .await?;
+        token_from(&reply)
+    }
+
+    /// Trades a fresh App JWT for a new installation token narrowed by
+    /// `scope`, an `access_tokens` request body (for example `repositories`
+    /// and `permissions`). The token is not cached: the caller owns it and
+    /// ends it with [`GithubApp::revoke_token`].
+    pub async fn scoped_token(&self, scope: &Value) -> Result<String> {
+        let jwt = self.app_jwt()?;
+        let request = self.http.post(self.access_tokens_url()).json(scope);
+        token_from(&self.send(request, &jwt).await?)
+    }
+
+    /// Revokes `token` before it expires (`DELETE /installation/token`,
+    /// authenticated by the token itself).
+    pub async fn revoke_token(&self, token: &str) -> Result<()> {
+        let url = format!("{}/installation/token", self.config.api_base);
+        self.send(self.http.delete(url), token).await.map(drop)
+    }
+
+    /// Signs an App JWT with the private key, read fresh from disk.
+    fn app_jwt(&self) -> Result<String> {
         let pem = std::fs::read(&self.config.private_key)
             .with_context(|| format!("read {}", self.config.private_key.display()))?;
-        let jwt = sign_app_jwt(&pem, self.config.app_id, unix_now())?;
-        let url = format!(
+        sign_app_jwt(&pem, self.config.app_id, unix_now())
+    }
+
+    /// The installation's `access_tokens` endpoint.
+    fn access_tokens_url(&self) -> String {
+        format!(
             "{}/app/installations/{}/access_tokens",
             self.config.api_base, self.config.installation_id
-        );
-        let reply = self.send(self.http.post(url), &jwt).await?;
-        reply["token"]
-            .as_str()
-            .map(str::to_owned)
-            .context("installation token missing from GitHub reply")
+        )
     }
 
     /// GETs `path` (relative to the API base) with the installation token.
@@ -131,6 +157,14 @@ impl GithubApp {
         }
         Ok(body)
     }
+}
+
+/// The `token` field of an `access_tokens` reply.
+fn token_from(reply: &Value) -> Result<String> {
+    reply["token"]
+        .as_str()
+        .map(str::to_owned)
+        .context("installation token missing from GitHub reply")
 }
 
 /// Seconds since the Unix epoch.

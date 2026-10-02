@@ -6,16 +6,13 @@
 //! authority and a lease on X — attesting every outcome back to the service.
 //! No LLM is involved. See planning/autonomy/p4-design.md.
 mod action_refs;
-mod askpass;
 mod attribution;
 mod checks;
-mod config;
 #[cfg(test)]
 mod e2e_tests;
 mod flake;
 mod gates;
 mod git;
-mod github;
 mod integrate;
 mod landing;
 mod local_actions;
@@ -29,6 +26,7 @@ mod shadow;
 mod state;
 mod watch;
 
+use agentc_integrator::{askpass, config, github};
 use anyhow::{Result, bail};
 use checks::{ChecksSource, FakeChecks, GithubChecks};
 use clap::{Parser, Subcommand};

@@ -15,6 +15,7 @@ dependencies = [
  "coordinator-client",
  "coordinator-local",
  "hex",
+ "libc",
  "reqwest",
  "rustls-pki-types",
  "serde",

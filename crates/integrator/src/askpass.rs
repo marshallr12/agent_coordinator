@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 /// Marker variable; its value is the config path (empty = default lookup).
 pub const MARKER: &str = "AGENTC_INTEGRATOR_ASKPASS_CONFIG";
 /// GitHub's user name for installation tokens.
-const APP_USER: &str = "x-access-token";
+pub const APP_USER: &str = "x-access-token";
 /// The only host the helper hands credentials to.
-const GITHUB_HOST: &str = "github.com";
+pub const GITHUB_HOST: &str = "github.com";
 
 /// Makes Git ask this binary for credentials. Must run before any thread
 /// starts (it mutates the process environment).
@@ -63,7 +63,7 @@ pub fn answer(config_path: Option<&Path>, prompt: &str) -> Result<String> {
 }
 
 /// The exact host of the `'https://[user@]host[/…]'` URL in a Git prompt.
-fn prompt_host(prompt: &str) -> Option<&str> {
+pub fn prompt_host(prompt: &str) -> Option<&str> {
     let url = prompt.split('\'').nth(1)?.strip_prefix("https://")?;
     let authority = url.split('/').next()?;
     Some(
