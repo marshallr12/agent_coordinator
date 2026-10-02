@@ -4,7 +4,20 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — core overnight wave (2026-10-02)
+## Current resume point — follow-up phases (2026-10-02 daytime)
+
+Agent Coordinator workflow disabled again; local commits only, no push/deploy.
+Branch `hardening/core-20261002` in `~/src/worktrees/agent-coordinator-core` now
+adds `09a2b78` (TypeSafe key in main-service-only `typesafe.env`), `8b24b8e`
+(C1 routing blocker resolved: remotes named like a URL snapshot refused, ASCII
+host match), `8c2cdc6` (exact-ref push readback) and `444bc62` (its handoff).
+All independently confirmed; script/docs gate legs green. `release-next/deploy-pre.sh`
+now requires the key in `typesafe.env`, so the user's VM step (install
+`typesafe.env` 0600, new unit, daemon-reload, drop the key from `service.env`,
+restart) must precede the next deploy. Next: user ship authorization; owner
+Claude host/auth proof; R-P3b.2–.5 decisions; S6 cutover chain.
+
+## Previous resume point — core overnight wave (2026-10-02)
 
 The user disabled the Agent Coordinator workflow. No live service tasks were
 created, claimed or updated. Local implementation, review and commits were
@@ -46,8 +59,7 @@ not rechecked during this local hardening wave.
   also passed on Rust 1.98.1. Evidence:
   `~/.local/share/agent-coordinator-autonomy/core-20261002/`. No push or deploy.
 
-Next backlog: resolve the blocked routing phase in a newly authorized phase;
-TypeSafe main-service-only secret-file deployment preparation; owner proof of
+Next backlog (routing and secret file done in the follow-up above): owner proof of
 Claude authentication/refresh and nested sandbox compatibility; then the shared
 supervisor security queue and S6 cutover prerequisites listed below. No live
 candidate proof or production cutover was claimed by this wave.
