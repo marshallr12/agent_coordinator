@@ -297,7 +297,9 @@ EOF
 
 # Agent uids may reach loopback only on the proxy, the staging coordinator
 # and the ephemeral range (tests bind port 0); everything else, including
-# DNS and every non-loopback address, is rejected.
+# DNS and every non-loopback address, is rejected. Claude launches run in
+# their own network namespace and reach only the relayed proxy and staging
+# ports (R-P3b.4); the ephemeral range remains for Codex launches.
 install_firewall() {
   cat > "$ETC/agentc.nft" <<EOF
 table inet agentc

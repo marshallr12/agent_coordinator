@@ -1,6 +1,6 @@
 //! Claude's OS write boundary. The whole host and run start read-only;
 //! individual writable mount roots cannot be renamed around seed overlays.
-//! Networking remains in the host namespace under the existing firewall.
+//! Each launch has its own network namespace; see `relay` for the bridge.
 use crate::config::Config;
 use crate::confine::{self, StatePaths};
 use crate::profile::{Harness, LaunchCommand, LaunchSpec, Role, run_files};
@@ -31,6 +31,7 @@ fn base_args(role: Role) -> Vec<OsString> {
 /// Flags common to every role's outer sandbox.
 fn shared_args() -> Vec<OsString> {
     [
+        "--unshare-net",
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
@@ -84,9 +85,13 @@ fn mount(args: &mut Vec<OsString>, option: &str, source: &Path, destination: &Pa
 
 /// Build the exact executable command, also exposed in `launch --dry-run`.
 /// Codex's existing native profile and authentication layout are unchanged.
-pub fn wrap(mut command: LaunchCommand, spec: &LaunchSpec, config: &Config) -> LaunchCommand {
+pub fn wrap(
+    mut command: LaunchCommand,
+    spec: &LaunchSpec,
+    config: &Config,
+) -> Result<LaunchCommand> {
     if spec.harness != Harness::Claude {
-        return command;
+        return Ok(command);
     }
     let mut args = base_args(spec.role);
     for path in writable_directories(spec) {
@@ -114,12 +119,14 @@ pub fn wrap(mut command: LaunchCommand, spec: &LaunchSpec, config: &Config) -> L
         OsString::from("--chdir"),
         spec.clone.clone().into(),
         OsString::from("--"),
-        command.program.into(),
+        crate::relay::program(config).into(),
     ]);
+    args.extend(crate::relay::namespace_args(spec, config)?);
+    args.push(command.program.into());
     args.append(&mut command.args);
     command.program = config.bubblewrap.clone();
     command.args = args;
-    command
+    Ok(command)
 }
 
 /// Fail before launch for unsafe paths/inodes or an unavailable OS boundary.
@@ -127,9 +134,13 @@ pub fn check(spec: &LaunchSpec, config: &Config) -> Result<()> {
     if spec.harness != Harness::Claude {
         return Ok(());
     }
+    crate::relay::endpoints(spec, config)?;
     trusted_binary(&config.bubblewrap)?;
+    confine::protected_executable(&crate::relay::program(config))
+        .context("supervisor binary for the namespace relay")?;
     check_mounts(spec, config)?;
-    probe(config, spec.role)
+    probe(config, spec.role)?;
+    probe_relay(spec, config)
 }
 
 /// A writable hard link can modify an inode also visible through the read-only
@@ -307,8 +318,27 @@ fn probe(config: &Config, role: Role) -> Result<()> {
             "--",
         ]);
     }
+    command.arg("/bin/true");
+    await_probe(command, "Bubblewrap/kernel confinement")
+}
+
+/// Starts this launch's namespace relay once inside the role's sandbox: the
+/// installed supervisor must support it and every relayed port must bind.
+fn probe_relay(spec: &LaunchSpec, config: &Config) -> Result<()> {
+    let mut command = Command::new(&config.bubblewrap);
     command
-        .arg("/bin/true")
+        .args(base_args(spec.role))
+        .arg("--")
+        .arg(crate::relay::program(config))
+        .args(crate::relay::namespace_args(spec, config)?)
+        .arg("/bin/true");
+    await_probe(command, "namespace relay")
+}
+
+/// Runs a probe with no environment, a sealed empty stdin and fenced
+/// descriptors; it must succeed within five seconds.
+fn await_probe(mut command: Command, what: &str) -> Result<()> {
+    command
         .env_clear()
         .current_dir("/")
         .stdin(sealed_prompt(fs::File::open("/dev/null")?)?)
@@ -317,23 +347,21 @@ fn probe(config: &Config, role: Role) -> Result<()> {
     fence_descriptors(&mut command)?;
     let mut child = command
         .spawn()
-        .context("start required Bubblewrap kernel probe")?;
+        .with_context(|| format!("start required {what} probe"))?;
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    while Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
             ensure!(
                 status.success(),
-                "Bubblewrap/kernel confinement probe failed; owner setup required"
+                "{what} probe failed; owner setup required"
             );
             return Ok(());
         }
-        if Instant::now() >= deadline {
-            child.kill().context("stop timed-out Bubblewrap probe")?;
-            child.wait().context("reap Bubblewrap probe")?;
-            anyhow::bail!("Bubblewrap/kernel confinement probe timed out");
-        }
         std::thread::sleep(Duration::from_millis(10));
     }
+    child.kill().context("stop timed-out probe")?;
+    child.wait().context("reap probe")?;
+    anyhow::bail!("{what} probe timed out")
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -356,15 +384,30 @@ mod tests {
         other_clone: PathBuf,
     }
 
+    /// Stands in for `agentc-supervisor netns-relay`: skips the relay
+    /// arguments and runs the harness (the real relay has its own tests).
+    fn stub_relay(config: &Config) {
+        let program = crate::relay::program(config);
+        fs::create_dir_all(program.parent().unwrap()).unwrap();
+        fs::write(
+            &program,
+            "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     impl Fixture {
         fn new(role: Role) -> Self {
             let root = tempfile::tempdir().unwrap();
             let config = Config {
                 state_dir: root.path().join("roles"),
                 cargo_config_seed: root.path().join("cargo-seed.toml"),
+                bin_dir: root.path().join("bin"),
                 ..Config::default()
             };
             fs::write(&config.cargo_config_seed, confine::CARGO_CONFIG_SEED).unwrap();
+            stub_relay(&config);
             let base = config.state_dir.join(role.slug());
             let spec = LaunchSpec {
                 role,
@@ -429,7 +472,7 @@ mod tests {
             ] {
                 inner.env.push((key.into(), value.into()));
             }
-            wrap(inner, &self.spec, &self.config)
+            wrap(inner, &self.spec, &self.config).unwrap()
         }
 
         fn spawn(&self, script: &str) -> std::process::Child {
@@ -607,6 +650,42 @@ deny unshare -Ur true
     }
 
     #[test]
+    fn preflight_refuses_an_unprotected_relay_binary_and_privileged_relay_ports() {
+        let mut fixture = Fixture::new(Role::Reviewer);
+        let error = format!("{:#}", check(&fixture.spec, &fixture.config).unwrap_err());
+        assert!(error.contains("namespace relay"), "{error}");
+        fixture.config.egress_listen = "127.0.0.1:80".into();
+        let error = format!("{:#}", check(&fixture.spec, &fixture.config).unwrap_err());
+        assert!(error.contains("egress_listen"), "{error}");
+    }
+
+    #[test]
+    fn relay_probe_runs_the_installed_binary_and_refuses_one_without_the_relay() {
+        let fixture = Fixture::new(Role::Reviewer);
+        probe_relay(&fixture.spec, &fixture.config).unwrap();
+        let program = crate::relay::program(&fixture.config);
+        fs::write(
+            &program,
+            "#!/bin/sh\necho 'unrecognized subcommand' >&2\nexit 2\n",
+        )
+        .unwrap();
+        let error = probe_relay(&fixture.spec, &fixture.config).unwrap_err();
+        assert!(error.to_string().contains("namespace relay probe failed"));
+    }
+
+    #[test]
+    fn claude_launches_cannot_reach_host_loopback_listeners() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::net::TcpStream::connect(("127.0.0.1", port)).expect("reachable from the host");
+        for role in [Role::Implementer, Role::Reviewer] {
+            Fixture::new(role).successful(&format!(
+                "if (exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null; then exit 9; fi"
+            ));
+        }
+    }
+
+    #[test]
     fn mount_audit_refuses_preexisting_hardlinks_special_files_and_symlinked_roots() {
         let fixture = Fixture::new(Role::Implementer);
         let linked = fixture.spec.clone.join("hardlink");
@@ -777,7 +856,7 @@ test "$(cat /proc/self/fd/0)" = 'mock prompt'
             ..fixture.spec.clone()
         };
         let native = profile::command(&codex, &config);
-        assert_eq!(wrap(native.clone(), &codex, &config), native);
+        assert_eq!(wrap(native.clone(), &codex, &config).unwrap(), native);
         assert!(check(&codex, &config).is_ok());
     }
 }

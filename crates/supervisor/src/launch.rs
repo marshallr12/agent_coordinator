@@ -50,7 +50,10 @@ pub fn run(spec: &LaunchSpec, config: &Config) -> Result<i32> {
     if !problems.is_empty() {
         bail!("preflight refused the launch:\n- {}", problems.join("\n- "));
     }
-    let command = sandbox::wrap(profile::command(spec, config), spec, config);
+    let command = sandbox::wrap(profile::command(spec, config), spec, config)?;
+    if spec.harness == profile::Harness::Claude {
+        crate::relay::start_host(spec, config).context("start loopback relays")?;
+    }
     state.started(spec)?;
     let mut child = match spawn(&command, spec) {
         Ok(child) => child,
@@ -65,7 +68,7 @@ pub fn run(spec: &LaunchSpec, config: &Config) -> Result<i32> {
 }
 
 /// Spawns the harness with exactly the profile's environment.
-pub(crate) fn spawn(command: &LaunchCommand, spec: &LaunchSpec) -> Result<std::process::Child> {
+pub fn spawn(command: &LaunchCommand, spec: &LaunchSpec) -> Result<std::process::Child> {
     confine::regular_file(&command.stdin).context("inspect prompt")?;
     let prompt = File::open(&command.stdin).context("open prompt")?;
     let prompt = if spec.harness == profile::Harness::Claude {

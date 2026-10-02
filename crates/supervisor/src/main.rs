@@ -1,25 +1,8 @@
-//! `agentc-supervisor`: host-side containment for supervised agent launches.
-//!
-//! P2 scope (autonomy plan §2.3): exact launch profiles, generated role
-//! settings, hardened per-launch clones, a launch preflight and a single
-//! supervised launch. Scheduling, leases and reviews arrive in P3.
-//! Claude launches use a read-only Bubblewrap root with narrow writable mounts.
-//! Codex retains its native workspace-write profile.
-mod candidate;
-mod clone;
-mod config;
-mod confine;
-mod egress;
-mod estimate;
-mod launch;
-mod network_probe;
-mod preflight;
-mod profile;
-mod role_settings;
-mod sandbox;
-mod shadow;
-mod verification;
-
+//! `agentc-supervisor` command line; the containment logic lives in the
+//! library (see `lib.rs`) so integration tests can drive real launches.
+use agentc_supervisor::{
+    clone, config, egress, launch, preflight, profile, relay, role_settings, sandbox, shadow,
+};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use profile::{Harness, LaunchSpec, Role};
@@ -86,6 +69,15 @@ enum Commands {
         #[arg(long)]
         log: Option<PathBuf>,
     },
+    /// Inside a launch's network namespace: relay each loopback `ip:port`
+    /// to its host socket, run the command and return its exit code.
+    #[command(hide = true)]
+    NetnsRelay {
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<std::ffi::OsString>,
+    },
 }
 
 /// Identifies one launch.
@@ -136,6 +128,11 @@ fn main() -> ExitCode {
 
 /// Dispatches one subcommand.
 fn run(cli: Cli) -> Result<ExitCode> {
+    if let Commands::NetnsRelay { relays, command } = &cli.command {
+        // Needs no configuration: everything arrives in its arguments.
+        let code = relay::run_namespace(relays, command)?;
+        return Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)));
+    }
     let config = config::Config::load(cli.config.as_deref())?;
     match cli.command {
         Commands::Settings { role } => print!("{}", role_settings::render(role)),
@@ -164,6 +161,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(shadow::run(&config.shadow, once))?
         }
+        Commands::NetnsRelay { .. } => unreachable!("dispatched before loading config"),
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
             println!("{}", serde_json::to_string_pretty(&shadow::report(&log)?)?);
@@ -186,7 +184,7 @@ fn report(problems: &[String]) -> ExitCode {
 /// Runs or describes a launch.
 fn launch_command(spec: &LaunchSpec, config: &config::Config, dry_run: bool) -> Result<ExitCode> {
     if dry_run {
-        let command = sandbox::wrap(profile::command(spec, config), spec, config);
+        let command = sandbox::wrap(profile::command(spec, config), spec, config)?;
         println!(
             "{}",
             serde_json::to_string_pretty(&launch::describe(&command))?

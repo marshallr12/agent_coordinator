@@ -190,8 +190,24 @@ read-only procfs; reviewer launches keep both available only so they can start
 the candidate sandbox below. Namespace teardown kills detached
 children; only an observed wrapper exit makes the run eligible for retention.
 
-The network namespace is unchanged and still depends on the existing firewall
-and proxy; B3 adds no network isolation. This protects processes launched through
+Each Claude launch also gets its own network namespace (R-P3b.4), so it cannot
+reach any host loopback listener, whether the other agent account's or the owner's.
+It still needs two host services, which the supervisor relays into the namespace
+on their usual loopback ports. One is the egress proxy (`egress_listen`). The
+other is a verifying reviewer's staging coordinator, when its URL is on loopback.
+For each service, the launching supervisor listens on a Unix socket in
+`$RUN/net` and connects only to that service's address, so the host firewall
+still applies. Inside the namespace, `agentc-supervisor netns-relay` listens on
+the same port, forwards to the socket and runs the harness. Nothing else crosses
+into the namespace; a launch's own test servers stay private to it. Relayed ports
+must be IPv4 loopback addresses with a port of at least 1024, because the relay
+binds them unprivileged. A staging URL that names loopback in a form the relay
+cannot carry faithfully is refused rather than silently left unrelayed: userinfo,
+IPv6, shorthand IPv4 such as `127.1`, or a default or privileged port. Preflight
+requires the supervisor binary in `bin_dir` to be root-owned, starts a namespace
+once, and runs that binary's relay with the launch's ports, which refuses an
+older binary without the relay. Codex launches are not wrapped and still use the host
+namespace, so the firewall keeps its loopback ephemeral-range rule for them. This protects processes launched through
 the supervisor. An already running, unconfined process with the same host uid
 must be stopped before adoption; it is not fenced by another process's mounts.
 Codex retains its existing native workspace-write profile and persistent
