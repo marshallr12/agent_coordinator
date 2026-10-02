@@ -13,11 +13,24 @@ use std::time::{Duration, Instant};
 
 /// Required flags: unsupported kernels or Bubblewrap versions fail closed.
 /// No user/network namespace fallback or direct-harness retry is permitted.
-fn base_args() -> Vec<OsString> {
+/// Reviewers keep user namespaces and a writable `/proc` (the nested uid map
+/// is written there) so `candidate-shell` can start its own sandbox, which
+/// forbids further nesting and remounts its `/proc` read-only (R-P3b.3).
+fn base_args(role: Role) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["--unshare-user".into()];
+    if role == Role::Implementer {
+        args.extend(["--disable-userns".into(), "--assert-userns-disabled".into()]);
+    }
+    args.extend(shared_args());
+    if role == Role::Implementer {
+        args.extend(["--remount-ro".into(), "/proc".into()]);
+    }
+    args
+}
+
+/// Flags common to every role's outer sandbox.
+fn shared_args() -> Vec<OsString> {
     [
-        "--unshare-user",
-        "--disable-userns",
-        "--assert-userns-disabled",
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
@@ -29,8 +42,6 @@ fn base_args() -> Vec<OsString> {
         "/",
         "/",
         "--proc",
-        "/proc",
-        "--remount-ro",
         "/proc",
         "--dev",
         "/dev",
@@ -52,6 +63,10 @@ fn writable_directories(spec: &LaunchSpec) -> Vec<PathBuf> {
     if spec.role == Role::Implementer {
         directories.push(spec.clone.clone());
     }
+    if crate::candidate::applies(spec) {
+        // Writable source for the inner sandbox's private candidate home.
+        directories.push(crate::candidate::home(spec));
+    }
     directories
 }
 
@@ -72,7 +87,7 @@ pub fn wrap(mut command: LaunchCommand, spec: &LaunchSpec, config: &Config) -> L
     if spec.harness != Harness::Claude {
         return command;
     }
-    let mut args = base_args();
+    let mut args = base_args(spec.role);
     for path in writable_directories(spec) {
         mount(&mut args, "--bind", &path, &path);
     }
@@ -113,7 +128,7 @@ pub fn check(spec: &LaunchSpec, config: &Config) -> Result<()> {
     }
     trusted_binary(&config.bubblewrap)?;
     check_mounts(spec, config)?;
-    probe(config)
+    probe(config, spec.role)
 }
 
 /// A writable hard link can modify an inode also visible through the read-only
@@ -185,6 +200,14 @@ fn check_mounts(spec: &LaunchSpec, config: &Config) -> Result<()> {
         spec.run.join(run_files::SETTINGS),
     ] {
         confine::regular_file(&path)?;
+    }
+    if crate::candidate::applies(spec) {
+        let expected = crate::candidate::script(spec, config)?;
+        let actual = confine::read_regular(&crate::candidate::shell_path(spec))?;
+        ensure!(
+            actual == expected.as_bytes(),
+            "candidate-shell differs from the generated script"
+        );
     }
     Ok(())
 }
@@ -267,11 +290,24 @@ pub fn fence_descriptors(_command: &mut Command) -> Result<()> {
     anyhow::bail!("Claude write confinement requires Linux")
 }
 
-fn probe(config: &Config) -> Result<()> {
+/// Starts the role's outer sandbox once; for reviewers it must also be able
+/// to start the nested, nesting-free candidate sandbox.
+fn probe(config: &Config, role: Role) -> Result<()> {
     let mut command = Command::new(&config.bubblewrap);
+    command.args(base_args(role)).arg("--");
+    if role == Role::Reviewer {
+        command.arg(&config.bubblewrap).args([
+            "--unshare-user",
+            "--disable-userns",
+            "--assert-userns-disabled",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+        ]);
+    }
     command
-        .args(base_args())
-        .args(["--", "/bin/true"])
+        .arg("/bin/true")
         .env_clear()
         .current_dir("/")
         .stdin(sealed_prompt(fs::File::open("/dev/null")?)?)
@@ -423,6 +459,60 @@ mod tests {
         }
     }
 
+    /// Run by the mock reviewer harness: the harness itself still sees its
+    /// login, but each command through `candidate-shell` sees no secrets,
+    /// cannot write the clone, and cannot nest another user namespace.
+    const REVIEWER_CANDIDATE_CHECKS: &str = r#"
+deny overwrite "$CLONE/source"
+test "$(cat "$CLAUDE_CONFIG_DIR/.credentials.json")" = refreshed
+export HARNESS_IPC="$(readlink /proc/self/ns/ipc)" HARNESS_UTS="$(readlink /proc/self/ns/uts)"
+export MARKER="agentc-harness-marker-$$"
+(exec -a "$MARKER" sleep 30) &
+MARKER_PID=$!
+"$PREFIX" '
+set -eu
+deny() { if "$@" 2>/dev/null; then echo "candidate unexpected success: $*" >&2; exit 41; fi; }
+for cmdline in /proc/[0-9]*/cmdline; do
+ if tr "\0" " " < "$cmdline" 2>/dev/null | grep -q -- "$MARKER"; then
+  echo "candidate unexpected success: sees harness process $cmdline" >&2; exit 43
+ fi
+done
+test "$(awk "\$2 == \"/proc\" { options = \$4 } END { print options }" /proc/self/mounts | cut -d, -f1)" = ro
+test ! -s "$CLAUDE_CONFIG_DIR/.credentials.json"
+test -e "$CLAUDE_CONFIG_DIR/settings.json"
+deny sh -c "printf x >> \"\$CLAUDE_CONFIG_DIR/settings.json\""
+deny sh -c "printf x > \"\$CLAUDE_CONFIG_DIR/planted\""
+deny sh -c "printf x > \"\$RUN/verification.json\""
+test "$(awk "/^CapEff:/ { print \$2 }" /proc/self/status)" = 0000000000000000
+test "$(awk "/^CapBnd:/ { print \$2 }" /proc/self/status)" = 0000000000000000
+test "$(readlink /proc/self/ns/ipc)" != "$HARNESS_IPC"
+test "$(readlink /proc/self/ns/uts)" != "$HARNESS_UTS"
+printf "[filter]" > "$HOME/.gitconfig"
+printf planted > "$HOME/.profile"
+for name in $UNSET_NAMES; do
+ if printenv "$name" > /dev/null; then echo "candidate unexpected success: inherits $name" >&2; exit 44; fi
+done
+deny test -e "$ROLE_HOME"
+deny test -e "$OTHER_RUN"
+deny test -e "$OTHER_CLONE"
+deny test -e "$AGENT_COORDINATOR_HOME"
+deny test -e "$RUN/prompt.md"
+test "$(cat "$CLONE/source")" = original
+deny sh -c "printf x > \"\$CLONE/source\""
+deny unshare -Ur true
+deny unshare -U true
+for path in "$HOME" "$CARGO_HOME/registry" "$TMPDIR" "$CARGO_TARGET_DIR"; do
+ printf candidate > "$path/candidate-write"
+done
+test "$(pwd)" = "$CLONE"
+' || { echo "candidate checks failed: $?" >&2; kill "$MARKER_PID"; exit 42; }
+kill "$MARKER_PID"
+test "$(cat "$CARGO_TARGET_DIR/candidate-write")" = candidate
+test ! -e "$HOME/.gitconfig"
+test ! -e "$HOME/.profile"
+test ! -e "$HOME/candidate-write"
+"#;
+
     #[test]
     fn real_bubblewrap_refuses_cross_run_writes_and_seed_replacement_for_both_roles() {
         for role in [Role::Implementer, Role::Reviewer] {
@@ -444,7 +534,6 @@ deny mv "$CLAUDE_CONFIG_DIR" "$CLAUDE_CONFIG_DIR-replaced"
 deny mv "$RUN/state" "$RUN/state-replaced"
 deny mv "$RUN/role-settings.json" "$RUN/settings-replaced"
 deny touch "$RUN/new-metadata"
-deny unshare -Ur true
 for path in "$HOME" "$CARGO_HOME/registry" "$CARGO_HOME/git" \
  "$AGENT_COORDINATOR_HOME" "$TMPDIR" "$CARGO_TARGET_DIR"; do
  printf allowed > "$path/own-write"
@@ -462,9 +551,23 @@ printf output-through-stderr >&2
                     r#"
 printf allowed > "$CLONE/source"
 deny ln "$OUTSIDE" "$CLONE/new-hardlink"
+deny unshare -Ur true
 "#,
                 ),
-                Role::Reviewer => script.push_str("deny overwrite \"$CLONE/source\"\n"),
+                Role::Reviewer => {
+                    script.push_str("PREFIX=\"$CLAUDE_CODE_SHELL_PREFIX\"\n");
+                    // Every name the candidate must not inherit is set first.
+                    for name in crate::candidate::UNSET {
+                        script.push_str(&format!("export {name}=outer-secret\n"));
+                    }
+                    let names = crate::candidate::UNSET.join(" ");
+                    script.push_str(&format!("export UNSET_NAMES=\"{names}\"\n"));
+                    script.push_str(REVIEWER_CANDIDATE_CHECKS);
+                }
+            }
+            if role == Role::Reviewer {
+                // A verifying reviewer's description, read-only to candidates.
+                fs::write(fixture.spec.run.join(run_files::VERIFICATION), "{}").unwrap();
             }
             fixture.successful(&script);
             for path in [
@@ -648,7 +751,8 @@ test "$(cat /proc/self/fd/0)" = 'mock prompt'
     #[test]
     fn bubblewrap_prerequisites_fail_closed_and_codex_remains_native() {
         let fixture = Fixture::new(Role::Implementer);
-        probe(&fixture.config).unwrap();
+        probe(&fixture.config, Role::Implementer).unwrap();
+        probe(&fixture.config, Role::Reviewer).unwrap();
         let mut config = fixture.config.clone();
         config.bubblewrap = fixture.outside.clone();
         fs::set_permissions(&config.bubblewrap, fs::Permissions::from_mode(0o755)).unwrap();

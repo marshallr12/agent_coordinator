@@ -28,6 +28,7 @@ pub fn check(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     if let Err(error) = crate::sandbox::check(spec, config) {
         problems.push(format!("Claude write confinement: {error:#}"));
     }
+    problems.extend(crate::candidate::unsupported(spec));
     problems.extend(verification_problems(spec, config));
     problems.extend(network_problems(config));
     match clone::hardening_problems(&spec.clone) {

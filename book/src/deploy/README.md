@@ -184,8 +184,10 @@ paths cannot contain symlinks. Repository symlinks are retained, but their targe
 remain subject to the mount boundary. Before exec, the supervisor marks every
 descriptor above stderr close-on-exec so inherited host file or directory handles
 cannot bypass read-only mounts. Claude gets a fresh PID namespace and procfs,
-an isolated `/dev`, no capabilities, no-new-privileges, disabled nested user
-namespaces, and a new terminal session. Namespace teardown kills detached
+an isolated `/dev`, no capabilities, no-new-privileges, and a new terminal
+session. Implementer launches also get disabled nested user namespaces and a
+read-only procfs; reviewer launches keep both available only so they can start
+the candidate sandbox below. Namespace teardown kills detached
 children; only an observed wrapper exit makes the run eligible for retention.
 
 The network namespace is unchanged and still depends on the existing firewall
@@ -194,6 +196,37 @@ the supervisor. An already running, unconfined process with the same host uid
 must be stopped before adoption; it is not fenced by another process's mounts.
 Codex retains its existing native workspace-write profile and persistent
 `CODEX_HOME`; these B3 checks do not establish additional Codex confinement.
+
+## Reviewer candidate-code isolation
+
+A reviewer builds and tests the implementer's candidate, so its Bash commands
+may run hostile `build.rs`, test or UI-script code. Claude reviewer launches set
+`CLAUDE_CODE_SHELL_PREFIX` to a generated `$RUN/candidate-shell`, read-only inside
+the launch, and Claude Code runs every Bash command through it. Each command runs
+in a second, nested Bubblewrap: the whole state directory is replaced by an empty
+tmpfs, and only the current clone (read-only), the run's home, Cargo home,
+temporary and build directories (writable), and `verification.json` return. The
+Claude configuration stays readable for shell snapshots, but its credential file
+reads as empty. Coordinator state, other runs and clones, Codex state and the
+verification login stay hidden; provider, GitHub and TypeSafe key variables are
+unset; procfs is read-only and no further user namespace can be created. Each
+command gets its own PID namespace, so a process it backgrounds ends with it.
+Preflight starts the nested sandbox once and fails closed if the kernel refuses.
+
+Codex has no equivalent per-command hook, so Codex reviewer launches are refused.
+Candidate code can no longer read the long-lived verification login; reviewer UI
+checks that need a staging login wait for a per-run short-lived login handed to
+the candidate (decision U18), which is not implemented yet.
+
+Candidate code gets a private home mounted over the harness's `$HOME`, so planted
+`.gitconfig` or `.profile` files never reach the harness's own git and login
+shells. The temporary, build and Cargo directories remain shared with the
+harness. **Open before the first live launch:** a candidate command can move the
+harness's tracked working directory into one of those shared directories, and a
+git command the harness runs there outside the prefix could apply a
+candidate-written filter with the reviewer's login. Whether Claude Code makes
+such a call in reviewer runs is unverified; the planned fix resets the tracked
+directory to the clone after each command, confirmed by an instrumented owner run.
 
 Local tests exercise actual Bubblewrap with a mock Bash harness, including
 cross-run writes, seed replacement, hard links, inherited descriptors, and child

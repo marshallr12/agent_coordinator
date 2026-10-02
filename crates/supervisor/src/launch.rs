@@ -1,4 +1,5 @@
 //! Prepares a run directory and spawns one supervised launch.
+use crate::candidate;
 use crate::config::Config;
 use crate::confine::{self, RunState};
 use crate::preflight;
@@ -30,6 +31,9 @@ fn prepare(spec: &LaunchSpec, config: &Config) -> Result<RunState> {
     if spec.role == Role::Reviewer {
         let schema = serde_json::to_string_pretty(&profile::review_schema())?;
         confine::generated_file(&spec.run.join(run_files::SCHEMA), schema.as_bytes())?;
+    }
+    if candidate::applies(spec) {
+        candidate::write(spec, config).context("write candidate shell")?;
     }
     if let Some(described) = verification::describe(spec, config) {
         let text = serde_json::to_string_pretty(&described)?;

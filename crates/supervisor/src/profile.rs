@@ -81,6 +81,7 @@ pub mod run_files {
     pub const SCHEMA: &str = "result.schema.json";
     pub const LAST_MESSAGE: &str = "last.md";
     pub const VERIFICATION: &str = "verification.json";
+    pub const CANDIDATE_SHELL: &str = "candidate-shell";
 }
 
 /// Structured verdict every reviewer launch must return (plan §2.3, M5): the
@@ -225,6 +226,13 @@ fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
         Harness::Codex => ("CODEX_HOME".into(), role_dir.join("codex-home").into()),
     });
     env.extend(crate::verification::environment(spec, config));
+    if crate::candidate::applies(spec) {
+        // Every reviewer Bash command runs as candidate code (R-P3b.3).
+        env.push((
+            "CLAUDE_CODE_SHELL_PREFIX".into(),
+            crate::candidate::shell_path(spec).into(),
+        ));
+    }
     env
 }
 

@@ -5,6 +5,7 @@
 //! supervised launch. Scheduling, leases and reviews arrive in P3.
 //! Claude launches use a read-only Bubblewrap root with narrow writable mounts.
 //! Codex retains its native workspace-write profile.
+mod candidate;
 mod clone;
 mod config;
 mod confine;
