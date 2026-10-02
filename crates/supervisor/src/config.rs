@@ -36,6 +36,9 @@ pub struct Config {
     pub egress_probe_blocked_host: String,
     /// Root-owned Rust toolchain: `rustup/` (read-only) and `cargo/bin` proxies.
     pub toolchain_dir: PathBuf,
+    /// Cargo config copied into each fresh launch. A missing seed is allowed
+    /// during layout rollout; installing and validating it is host preflight work.
+    pub cargo_config_seed: PathBuf,
     /// Exact harness versions a launch refuses to run without.
     pub pinned: Pinned,
     /// Root-owned headless browser offered to verifying reviewers.
@@ -70,6 +73,7 @@ impl Default for Config {
             egress_probe_target: "1.1.1.1:443".into(),
             egress_probe_blocked_host: "blocked.invalid".into(),
             toolchain_dir: PathBuf::from("/opt/agentc"),
+            cargo_config_seed: PathBuf::from("/etc/agentc/cargo-config.toml"),
             pinned: Pinned::default(),
             browser: PathBuf::from("/usr/bin/chromium"),
             verification: BTreeMap::new(),

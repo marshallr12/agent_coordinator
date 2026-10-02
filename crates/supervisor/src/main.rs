@@ -3,8 +3,11 @@
 //! P2 scope (autonomy plan §2.3): exact launch profiles, generated role
 //! settings, hardened per-launch clones, a launch preflight and a single
 //! supervised launch. Scheduling, leases and reviews arrive in P3.
+//! Per-launch mutable state and retention coordinate cooperating supervisors;
+//! same-uid write isolation still requires host OS enforcement.
 mod clone;
 mod config;
+mod confine;
 mod egress;
 mod estimate;
 mod launch;

@@ -1,5 +1,6 @@
 //! Prepares a run directory and spawns one supervised launch.
 use crate::config::Config;
+use crate::confine::RunState;
 use crate::preflight;
 use crate::profile::{self, LaunchCommand, LaunchSpec, Role, run_files};
 use crate::role_settings;
@@ -12,6 +13,12 @@ use std::process::{Command, Stdio};
 /// Writes the generated files a launch needs into `$RUN` (the prompt is the
 /// caller's) and creates its private temp and build directories.
 pub fn prepare_run(spec: &LaunchSpec, config: &Config) -> Result<()> {
+    prepare(spec, config).map(|_| ())
+}
+
+/// Retain the lifecycle lock while writing generated files or running a harness.
+fn prepare(spec: &LaunchSpec, config: &Config) -> Result<RunState> {
+    let state = RunState::prepare(spec, config)?;
     for dir in ["tmp", "target"] {
         fs::create_dir_all(spec.run.join(dir)).context("create run directories")?;
     }
@@ -27,19 +34,28 @@ pub fn prepare_run(spec: &LaunchSpec, config: &Config) -> Result<()> {
         let text = serde_json::to_string_pretty(&described)?;
         fs::write(spec.run.join(run_files::VERIFICATION), text)?;
     }
-    Ok(())
+    Ok(state)
 }
 
 /// Prepares, preflights and runs a launch; returns the harness exit code.
 /// Events go to `$RUN/events.jsonl`, diagnostics to `$RUN/stderr.log`.
 pub fn run(spec: &LaunchSpec, config: &Config) -> Result<i32> {
-    prepare_run(spec, config)?;
+    let state = prepare(spec, config)?;
     let problems = preflight::check(spec, config);
     if !problems.is_empty() {
         bail!("preflight refused the launch:\n- {}", problems.join("\n- "));
     }
     let command = profile::command(spec, config);
-    let status = spawn(&command, spec)?.wait().context("wait for harness")?;
+    state.started(spec)?;
+    let mut child = match spawn(&command, spec) {
+        Ok(child) => child,
+        Err(error) => {
+            state.terminal(spec)?;
+            return Err(error);
+        }
+    };
+    let status = child.wait().context("wait for harness")?;
+    state.terminal(spec)?;
     Ok(status.code().unwrap_or(-1))
 }
 

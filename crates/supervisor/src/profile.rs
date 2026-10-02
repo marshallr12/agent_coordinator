@@ -8,6 +8,7 @@
 //! probe under subscription auth) and Codex with `project_doc_max_bytes=0`
 //! (no AGENTS.md; repo `.codex/` is ignored for untrusted directories).
 use crate::config::Config;
+use crate::confine::StatePaths;
 use crate::role_settings;
 use clap::ValueEnum;
 use serde_json::{Value, json};
@@ -186,9 +187,13 @@ fn codex_args(spec: &LaunchSpec) -> Vec<OsString> {
     args
 }
 
-/// The complete environment of a launch; nothing else is inherited.
+/// The complete environment of a launch; nothing else is inherited. Mutable
+/// home, Cargo (including caches), and coordinator state belong to this run.
+/// Claude authentication remains in the persistent role directory. These paths
+/// alone do not prevent another process with the same uid from writing them.
 fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
     let role_dir = config.state_dir.join(spec.role.slug());
+    let state = StatePaths::new(&spec.run);
     let toolchain = &config.toolchain_dir;
     let path = format!(
         "{}:{}:/usr/local/bin:/usr/bin:/bin",
@@ -197,18 +202,15 @@ fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
     );
     let mut env = vec![
         ("PATH".into(), path.into()),
-        ("HOME".into(), role_dir.join("home").into()),
+        ("HOME".into(), state.home.into()),
         ("LANG".into(), "C.UTF-8".into()),
         ("TMPDIR".into(), spec.run.join("tmp").into()),
         ("CARGO_TARGET_DIR".into(), spec.run.join("target").into()),
         ("RUSTUP_HOME".into(), toolchain.join("rustup").into()),
-        ("CARGO_HOME".into(), role_dir.join("cargo").into()),
+        ("CARGO_HOME".into(), state.cargo.into()),
         // Pinned harnesses must never replace themselves (plan §2.3).
         ("DISABLE_AUTOUPDATER".into(), "1".into()),
-        (
-            "AGENT_COORDINATOR_HOME".into(),
-            role_dir.join("coordinator").into(),
-        ),
+        ("AGENT_COORDINATOR_HOME".into(), state.coordinator.into()),
         ("NO_PROXY".into(), "127.0.0.1,localhost".into()),
         ("no_proxy".into(), "127.0.0.1,localhost".into()),
     ];
