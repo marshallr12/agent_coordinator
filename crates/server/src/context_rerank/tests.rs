@@ -9,9 +9,9 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use std::sync::{
-    Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -20,6 +20,7 @@ use tokio::{
 
 /// The `Authorization` header and parsed JSON body of one received request.
 type Received = (Option<String>, Value);
+type Reply = (StatusCode, String, Option<Arc<Semaphore>>);
 
 /// A canned mock response plus a record of what the mock received.
 #[derive(Clone)]
@@ -32,6 +33,7 @@ struct Mock {
     arrived: Arc<Notify>,
     response_gate: Option<Arc<Semaphore>>,
     requests: Arc<Mutex<Vec<Received>>>,
+    replies: Arc<Mutex<VecDeque<Reply>>>,
 }
 
 impl Mock {
@@ -46,6 +48,7 @@ impl Mock {
             arrived: Arc::default(),
             response_gate: None,
             requests: Arc::default(),
+            replies: Arc::default(),
         }
     }
 
@@ -63,6 +66,11 @@ impl Mock {
     /// How many requests reached the mock.
     fn hits(&self) -> usize {
         self.hits.load(Ordering::SeqCst)
+    }
+
+    /// Queue a response whose independent gate can hold an older request open.
+    fn reply(&self, status: StatusCode, body: String, gate: Option<Arc<Semaphore>>) {
+        self.replies.lock().unwrap().push_back((status, body, gate));
     }
 
     /// Wait for a specific number of requests, failing with a bounded deadline.
@@ -86,15 +94,22 @@ async fn respond(State(mock): State<Mock>, headers: HeaderMap, body: String) -> 
         .map(|value| value.to_str().unwrap().to_owned());
     let parsed = serde_json::from_str(&body).unwrap_or(Value::Null);
     mock.requests.lock().unwrap().push((auth, parsed));
-    if let Some(gate) = &mock.response_gate {
-        gate.clone().acquire_owned().await.unwrap().forget();
+    let (status, body, gate) = {
+        mock.replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| (mock.status, mock.body.clone(), mock.response_gate.clone()))
+    };
+    if let Some(gate) = gate {
+        gate.acquire_owned().await.unwrap().forget();
     }
     tokio::time::sleep(mock.delay).await;
     let mut reply = HeaderMap::new();
     if let Some(location) = &mock.location {
         reply.insert(header::LOCATION, location.parse().unwrap());
     }
-    (mock.status, reply, mock.body.clone())
+    (status, reply, body)
 }
 
 /// A keyed reranker aimed at `endpoint` with a short test timeout.
@@ -117,6 +132,46 @@ fn limited_reranker(endpoint: String, max_in_flight: usize) -> ContextReranker {
         ..ContextRerankConfig::default()
     };
     ContextReranker::from_config(&config).unwrap().unwrap()
+}
+
+/// A monotonic clock advanced explicitly; breaker tests never sleep for windows.
+#[derive(Clone)]
+struct ManualClock(Arc<Mutex<Instant>>);
+
+impl ManualClock {
+    fn advance(&self, duration: Duration) {
+        let mut now = self.0.lock().unwrap();
+        *now = now.checked_add(duration).unwrap();
+    }
+}
+
+fn clocked_reranker(endpoint: String) -> (ContextReranker, ManualClock) {
+    let mut reranker = limited_reranker(endpoint, 4);
+    let clock = ManualClock(Arc::new(Mutex::new(Instant::now())));
+    let now = clock.clone();
+    reranker.breaker.now = Arc::new(move || *now.0.lock().unwrap());
+    (reranker, clock)
+}
+
+/// Run a bounded test attempt over the standard candidates.
+async fn run_attempt(reranker: &ContextReranker) -> Result<Vec<Value>, Unchanged> {
+    let items = items();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        reranker.attempt("q", &items, &candidate_positions(&items)),
+    )
+    .await
+    .expect("test attempt must finish within one second")
+}
+
+fn successful_body() -> String {
+    scores_body(&[score(0.0), score(3.0), score(1.0)])
+}
+
+fn queue_failures(mock: &Mock, count: usize) {
+    for _ in 0..count {
+        mock.reply(StatusCode::INTERNAL_SERVER_ERROR, String::new(), None);
+    }
 }
 
 /// A response scoring candidate `index` with `answers[index]`.
@@ -270,6 +325,19 @@ async fn slow_response_times_out_and_keeps_the_original_order() {
         .await;
     assert_eq!(result, Err(Unchanged::Failed("timeout")));
     assert_eq!(reranker.in_flight.available_permits(), 4);
+    assert_eq!(
+        reranker
+            .attempt("q", &items, &candidate_positions(&items))
+            .await,
+        Err(Unchanged::Failed("timeout"))
+    );
+    assert_eq!(
+        reranker
+            .attempt("q", &items, &candidate_positions(&items))
+            .await,
+        Err(Unchanged::Skipped("circuit_open"))
+    );
+    assert_eq!(mock.hits(), 3);
 }
 
 #[tokio::test]
@@ -464,6 +532,318 @@ async fn capacity_is_held_until_the_response_body_finishes() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn three_failed_status_body_or_score_outcomes_open_without_another_http_call() {
+    let mock = Mock::new(StatusCode::OK, successful_body());
+    mock.reply(StatusCode::INTERNAL_SERVER_ERROR, String::new(), None);
+    mock.reply(StatusCode::OK, "x".repeat(MAX_RESPONSE_BYTES + 1), None);
+    mock.reply(StatusCode::OK, "not json".into(), None);
+    let (reranker, _) = clocked_reranker(mock.spawn().await);
+    for reason in ["status", "oversized", "invalid_response"] {
+        assert_eq!(run_attempt(&reranker).await, Err(Unchanged::Failed(reason)));
+    }
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Skipped("circuit_open"))
+    );
+    let original = items();
+    assert_eq!(reranker.rerank("q", original.clone()).await, original);
+    assert_eq!(mock.hits(), 3);
+}
+
+#[tokio::test]
+async fn a_success_resets_the_consecutive_failure_count() {
+    let mock = Mock::new(StatusCode::OK, successful_body());
+    queue_failures(&mock, 2);
+    mock.reply(StatusCode::OK, successful_body(), None);
+    queue_failures(&mock, 3);
+    let (reranker, _) = clocked_reranker(mock.spawn().await);
+    for _ in 0..2 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    assert!(run_attempt(&reranker).await.is_ok());
+    for _ in 0..3 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Skipped("circuit_open"))
+    );
+    assert_eq!(mock.hits(), 6);
+}
+
+#[tokio::test]
+async fn configured_failure_threshold_and_open_window_control_admission() {
+    let mock = Mock::new(StatusCode::OK, successful_body());
+    queue_failures(&mock, 2);
+    let config = ContextRerankConfig {
+        api_key: ApiKey::new("test-key".into()),
+        endpoint: mock.spawn().await,
+        failure_threshold: 2,
+        open_for: Duration::from_millis(250),
+        ..ContextRerankConfig::default()
+    };
+    let mut reranker = ContextReranker::from_config(&config).unwrap().unwrap();
+    let clock = ManualClock(Arc::new(Mutex::new(Instant::now())));
+    let now = clock.clone();
+    reranker.breaker.now = Arc::new(move || *now.0.lock().unwrap());
+    for _ in 0..2 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    clock.advance(Duration::from_millis(249));
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Skipped("circuit_open"))
+    );
+    assert_eq!(mock.hits(), 2);
+    clock.advance(Duration::from_millis(1));
+    assert!(run_attempt(&reranker).await.is_ok());
+    assert_eq!(mock.hits(), 3);
+}
+
+#[tokio::test]
+async fn the_open_window_allows_exactly_one_shared_probe_and_success_closes() {
+    let gate = Arc::new(Semaphore::new(0));
+    let mock = Mock::new(StatusCode::OK, successful_body());
+    queue_failures(&mock, 3);
+    mock.reply(StatusCode::OK, successful_body(), Some(gate.clone()));
+    let (reranker, clock) = clocked_reranker(mock.spawn().await);
+    let reranker = Arc::new(reranker);
+    for _ in 0..3 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    clock.advance(Duration::from_secs(59));
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Skipped("circuit_open"))
+    );
+    clock.advance(Duration::from_secs(1));
+    let shared = reranker.clone();
+    let probe = tokio::spawn(async move { run_attempt(&shared).await });
+    mock.wait_for_hits(4).await;
+    let mut rejected = Vec::new();
+    for _ in 0..8 {
+        let shared = reranker.clone();
+        rejected.push(tokio::spawn(async move { run_attempt(&shared).await }));
+    }
+    for task in rejected {
+        assert_eq!(task.await.unwrap(), Err(Unchanged::Skipped("circuit_open")));
+    }
+    assert_eq!(mock.hits(), 4);
+    gate.add_permits(1);
+    assert!(probe.await.unwrap().is_ok());
+    // Closing resets the count: two failures still permit another request.
+    queue_failures(&mock, 2);
+    for _ in 0..2 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    assert!(run_attempt(&reranker).await.is_ok());
+    assert_eq!(mock.hits(), 7);
+}
+
+#[tokio::test]
+async fn a_failed_half_open_probe_reopens_for_a_full_window() {
+    let mock = Mock::new(StatusCode::INTERNAL_SERVER_ERROR, String::new());
+    let (reranker, clock) = clocked_reranker(mock.spawn().await);
+    for _ in 0..3 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    clock.advance(Duration::from_secs(60));
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Failed("status"))
+    );
+    clock.advance(Duration::from_secs(59));
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Skipped("circuit_open"))
+    );
+    assert_eq!(mock.hits(), 4);
+    clock.advance(Duration::from_secs(1));
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Failed("status"))
+    );
+    assert_eq!(mock.hits(), 5);
+}
+
+#[tokio::test]
+async fn an_old_success_cannot_close_a_newly_opened_circuit() {
+    let gate = Arc::new(Semaphore::new(0));
+    let mock = Mock::new(StatusCode::OK, successful_body());
+    mock.reply(StatusCode::OK, successful_body(), Some(gate.clone()));
+    queue_failures(&mock, 3);
+    let (reranker, clock) = clocked_reranker(mock.spawn().await);
+    let reranker = Arc::new(reranker);
+    let shared = reranker.clone();
+    let old = tokio::spawn(async move { run_attempt(&shared).await });
+    mock.wait_for_hits(1).await;
+    for _ in 0..3 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    gate.add_permits(1);
+    assert!(old.await.unwrap().is_ok());
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Skipped("circuit_open"))
+    );
+    assert_eq!(mock.hits(), 4);
+    clock.advance(Duration::from_secs(60));
+    assert!(run_attempt(&reranker).await.is_ok());
+    assert_eq!(mock.hits(), 5);
+}
+
+#[tokio::test]
+async fn old_failures_cannot_reopen_a_circuit_after_a_successful_probe() {
+    let gate = Arc::new(Semaphore::new(0));
+    let mock = Mock::new(StatusCode::OK, successful_body());
+    for _ in 0..3 {
+        mock.reply(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            String::new(),
+            Some(gate.clone()),
+        );
+    }
+    queue_failures(&mock, 3);
+    let (reranker, clock) = clocked_reranker(mock.spawn().await);
+    let reranker = Arc::new(reranker);
+    let mut old = Vec::new();
+    for _ in 0..3 {
+        let shared = reranker.clone();
+        old.push(tokio::spawn(async move { run_attempt(&shared).await }));
+    }
+    mock.wait_for_hits(3).await;
+    for _ in 0..3 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    clock.advance(Duration::from_secs(60));
+    assert!(run_attempt(&reranker).await.is_ok());
+    gate.add_permits(3);
+    for task in old {
+        assert_eq!(task.await.unwrap(), Err(Unchanged::Failed("status")));
+    }
+    assert!(run_attempt(&reranker).await.is_ok());
+    assert_eq!(mock.hits(), 8);
+}
+
+#[tokio::test]
+async fn cancelling_the_half_open_probe_releases_its_reservation_and_retries_later() {
+    let gate = Arc::new(Semaphore::new(0));
+    let mock = Mock::new(StatusCode::OK, successful_body());
+    queue_failures(&mock, 3);
+    mock.reply(StatusCode::OK, successful_body(), Some(gate.clone()));
+    let (reranker, clock) = clocked_reranker(mock.spawn().await);
+    let reranker = Arc::new(reranker);
+    for _ in 0..3 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    clock.advance(Duration::from_secs(60));
+    let shared = reranker.clone();
+    let probe = tokio::spawn(async move { run_attempt(&shared).await });
+    mock.wait_for_hits(4).await;
+    probe.abort();
+    assert!(probe.await.unwrap_err().is_cancelled());
+    assert_eq!(reranker.in_flight.available_permits(), 4);
+    gate.add_permits(1);
+    clock.advance(Duration::from_secs(59));
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Skipped("circuit_open"))
+    );
+    clock.advance(Duration::from_secs(1));
+    assert!(run_attempt(&reranker).await.is_ok());
+    assert!(run_attempt(&reranker).await.is_ok());
+    assert_eq!(mock.hits(), 6);
+}
+
+#[tokio::test]
+async fn busy_and_candidate_count_skips_do_not_count_as_failures_or_wedge_a_probe() {
+    let mock = Mock::new(StatusCode::OK, successful_body());
+    queue_failures(&mock, 3);
+    let (reranker, clock) = clocked_reranker(mock.spawn().await);
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Failed("status"))
+    );
+    let mut permits = Vec::new();
+    for _ in 0..4 {
+        permits.push(reranker.in_flight.clone().try_acquire_owned().unwrap());
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Skipped("busy"))
+        );
+    }
+    let one = vec![items().remove(0)];
+    assert_eq!(
+        reranker.attempt("q", &one, &[0]).await,
+        Err(Unchanged::Skipped("too_few_candidates"))
+    );
+    let many: Vec<_> = (0..=MAX_CANDIDATES).map(|_| items().remove(0)).collect();
+    assert_eq!(
+        reranker
+            .attempt("q", &many, &candidate_positions(&many))
+            .await,
+        Err(Unchanged::Skipped("too_many_candidates"))
+    );
+    drop(permits);
+    for _ in 0..2 {
+        assert_eq!(
+            run_attempt(&reranker).await,
+            Err(Unchanged::Failed("status"))
+        );
+    }
+    clock.advance(Duration::from_secs(60));
+    let permits: Vec<_> = (0..4)
+        .map(|_| reranker.in_flight.clone().try_acquire_owned().unwrap())
+        .collect();
+    // An eligible probe that cannot acquire capacity must release its reservation.
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Skipped("busy"))
+    );
+    assert_eq!(
+        run_attempt(&reranker).await,
+        Err(Unchanged::Skipped("busy"))
+    );
+    assert_eq!(mock.hits(), 3);
+    drop(permits);
+    assert_eq!(
+        reranker.attempt("q", &one, &[0]).await,
+        Err(Unchanged::Skipped("too_few_candidates"))
+    );
+    assert!(run_attempt(&reranker).await.is_ok());
+    assert_eq!(mock.hits(), 4);
+}
+
 #[test]
 fn only_keyed_configurations_build_a_reranker() {
     let keyed = ContextRerankConfig {
@@ -520,10 +900,51 @@ fn keyless_configurations_ignore_invalid_capacity() {
             let config = ContextRerankConfig {
                 api_key,
                 max_in_flight,
+                failure_threshold: 0,
+                open_for: Duration::ZERO,
                 ..ContextRerankConfig::default()
             };
             assert!(ContextReranker::from_config(&config).unwrap().is_none());
         }
+    }
+}
+
+#[test]
+fn keyed_breaker_configurations_require_a_positive_threshold_and_window() {
+    for (failure_threshold, open_for, field) in [
+        (0, Duration::from_secs(60), "failure_threshold"),
+        (3, Duration::ZERO, "open_for"),
+    ] {
+        let config = ContextRerankConfig {
+            api_key: ApiKey::new("test-key".into()),
+            failure_threshold,
+            open_for,
+            ..ContextRerankConfig::default()
+        };
+        let error = ContextReranker::from_config(&config)
+            .err()
+            .expect("zero breaker limits must return an error");
+        assert!(error.to_string().contains(field));
+    }
+    let large = ContextRerankConfig {
+        api_key: ApiKey::new("test-key".into()),
+        failure_threshold: usize::MAX,
+        open_for: Duration::MAX,
+        ..ContextRerankConfig::default()
+    };
+    assert!(ContextReranker::from_config(&large).unwrap().is_some());
+}
+
+#[test]
+fn keyless_configurations_ignore_zero_breaker_limits() {
+    for api_key in [None, ApiKey::new(" \n ".into())] {
+        let config = ContextRerankConfig {
+            api_key,
+            failure_threshold: 0,
+            open_for: Duration::ZERO,
+            ..ContextRerankConfig::default()
+        };
+        assert!(ContextReranker::from_config(&config).unwrap().is_none());
     }
 }
 
@@ -541,6 +962,8 @@ fn defaults_have_no_key_the_production_endpoint_and_a_redacted_key() {
     assert_eq!(config.connect_timeout, Duration::from_secs(1));
     assert_eq!(config.timeout, Duration::from_secs(3));
     assert_eq!(config.max_in_flight, 4);
+    assert_eq!(config.failure_threshold, 3);
+    assert_eq!(config.open_for, Duration::from_secs(60));
     let key = ApiKey::new("secret-value".into()).unwrap();
     assert!(!format!("{key:?}").contains("secret-value"));
 }

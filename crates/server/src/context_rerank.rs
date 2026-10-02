@@ -6,7 +6,7 @@ use reqwest::redirect::Policy;
 use serde_json::{Map, Value, json};
 use std::{
     fmt,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
@@ -55,11 +55,16 @@ pub struct ContextRerankConfig {
     /// Maximum concurrent scoring requests; excess attempts keep their order.
     /// With an API key, must be in `1..=Semaphore::MAX_PERMITS`.
     pub max_in_flight: usize,
+    /// Consecutive completed failures that open the circuit; must be nonzero.
+    pub failure_threshold: usize,
+    /// Time to wait before allowing one recovery probe; must be nonzero.
+    pub open_for: Duration,
 }
 
 impl Default for ContextRerankConfig {
     /// No key (so reranking is off), the production endpoint, 1 s connect
-    /// and 3 s total timeouts, and at most four concurrent requests.
+    /// and 3 s total timeouts, at most four concurrent requests, and a circuit
+    /// that opens for 60 s after three consecutive failures.
     fn default() -> Self {
         Self {
             api_key: None,
@@ -67,6 +72,8 @@ impl Default for ContextRerankConfig {
             connect_timeout: Duration::from_secs(1),
             timeout: Duration::from_secs(3),
             max_in_flight: 4,
+            failure_threshold: 3,
+            open_for: Duration::from_secs(60),
         }
     }
 }
@@ -75,7 +82,7 @@ impl Default for ContextRerankConfig {
 #[derive(Debug, PartialEq, Eq)]
 enum Unchanged {
     /// No request is sent: the candidate count is outside
-    /// `MIN_CANDIDATES..=MAX_CANDIDATES`, or the client is busy.
+    /// `MIN_CANDIDATES..=MAX_CANDIDATES`, the client is busy, or its circuit is open.
     Skipped(&'static str),
     /// The request or its response failed; the value names the failure kind.
     Failed(&'static str),
@@ -87,11 +94,12 @@ pub(crate) struct ContextReranker {
     endpoint: String,
     key: ApiKey,
     in_flight: Arc<Semaphore>,
+    breaker: CircuitBreaker,
 }
 
 impl ContextReranker {
     /// Build the reranker for `config`, or `None` when it has no API key.
-    /// A keyed configuration must have a valid, nonzero concurrency cap.
+    /// A keyed configuration must have valid, nonzero concurrency and breaker limits.
     pub(crate) fn from_config(config: &ContextRerankConfig) -> anyhow::Result<Option<Self>> {
         let Some(key) = config.api_key.clone() else {
             return Ok(None);
@@ -100,6 +108,14 @@ impl ContextReranker {
             (1..=Semaphore::MAX_PERMITS).contains(&config.max_in_flight),
             "context rerank max_in_flight must be between 1 and {}",
             Semaphore::MAX_PERMITS
+        );
+        anyhow::ensure!(
+            config.failure_threshold > 0,
+            "context rerank failure_threshold must be nonzero"
+        );
+        anyhow::ensure!(
+            !config.open_for.is_zero(),
+            "context rerank open_for must be nonzero"
         );
         let client = reqwest::Client::builder()
             .connect_timeout(config.connect_timeout)
@@ -112,6 +128,7 @@ impl ContextReranker {
             endpoint,
             key,
             in_flight: Arc::new(Semaphore::new(config.max_in_flight)),
+            breaker: CircuitBreaker::new(config.failure_threshold, config.open_for),
         }))
     }
 
@@ -169,10 +186,16 @@ impl ContextReranker {
         if positions.len() > MAX_CANDIDATES {
             return Err(Unchanged::Skipped("too_many_candidates"));
         }
-        let body = request_body(query, items, positions);
-        let bytes = self.post(&body).await?;
-        let scores = parse_scores(&bytes, positions.len())?;
-        Ok(reorder(items, positions, &scores))
+        let attempt = self.breaker.begin()?;
+        let result = async {
+            let body = request_body(query, items, positions);
+            let bytes = self.post(&body).await?;
+            let scores = parse_scores(&bytes, positions.len())?;
+            Ok(reorder(items, positions, &scores))
+        }
+        .await;
+        attempt.finish(&result);
+        result
     }
 
     /// POST `body` and return the body of a 2xx response within the size cap.
@@ -194,6 +217,140 @@ impl ContextReranker {
             return Err(Unchanged::Failed("status"));
         }
         read_capped(response).await
+    }
+}
+
+/// Shared breaker state. Locks cover admission and completion only, never HTTP.
+struct CircuitBreaker {
+    failure_threshold: usize,
+    open_for: Duration,
+    now: Arc<dyn Fn() -> Instant + Send + Sync>,
+    state: Mutex<BreakerState>,
+}
+
+struct BreakerState {
+    // Fresh Arc identities cannot wrap or match old, still-live generations.
+    generation: Arc<()>,
+    mode: BreakerMode,
+}
+
+#[derive(Clone, Copy)]
+enum BreakerMode {
+    Closed { failures: usize },
+    Open { opened_at: Instant },
+    HalfOpen { opened_at: Instant },
+}
+
+impl BreakerState {
+    /// Invalidate completions admitted before this state transition.
+    fn transition(&mut self, mode: BreakerMode) {
+        self.generation = Arc::new(());
+        self.mode = mode;
+    }
+}
+
+impl CircuitBreaker {
+    fn new(failure_threshold: usize, open_for: Duration) -> Self {
+        Self {
+            failure_threshold,
+            open_for,
+            now: Arc::new(Instant::now),
+            state: Mutex::new(BreakerState {
+                generation: Arc::new(()),
+                mode: BreakerMode::Closed { failures: 0 },
+            }),
+        }
+    }
+
+    /// Admit a closed request or reserve the only probe after the open window.
+    fn begin(&self) -> Result<BreakerAttempt<'_>, Unchanged> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let probe = match state.mode {
+            BreakerMode::Closed { .. } => false,
+            BreakerMode::Open { opened_at }
+                if (self.now)().saturating_duration_since(opened_at) >= self.open_for =>
+            {
+                state.transition(BreakerMode::HalfOpen { opened_at });
+                true
+            }
+            _ => return Err(Unchanged::Skipped("circuit_open")),
+        };
+        Ok(BreakerAttempt {
+            breaker: self,
+            generation: state.generation.clone(),
+            probe,
+            completed: false,
+        })
+    }
+}
+
+/// A half-open reservation reopens conservatively if its future is cancelled.
+struct BreakerAttempt<'a> {
+    breaker: &'a CircuitBreaker,
+    generation: Arc<()>,
+    probe: bool,
+    completed: bool,
+}
+
+impl BreakerAttempt<'_> {
+    fn finish(mut self, result: &Result<Vec<Value>, Unchanged>) {
+        self.completed = true;
+        let mut state = self
+            .breaker
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !Arc::ptr_eq(&state.generation, &self.generation) {
+            return;
+        }
+        match (state.mode, result) {
+            (BreakerMode::Closed { .. }, Ok(_)) => {
+                state.mode = BreakerMode::Closed { failures: 0 };
+            }
+            (BreakerMode::Closed { failures }, Err(Unchanged::Failed(_))) => {
+                let failures = failures + 1;
+                if failures >= self.breaker.failure_threshold {
+                    state.transition(BreakerMode::Open {
+                        opened_at: (self.breaker.now)(),
+                    });
+                } else {
+                    state.mode = BreakerMode::Closed { failures };
+                }
+            }
+            (BreakerMode::HalfOpen { .. }, Ok(_)) => {
+                state.transition(BreakerMode::Closed { failures: 0 });
+            }
+            (BreakerMode::HalfOpen { .. }, Err(Unchanged::Failed(_))) => {
+                state.transition(BreakerMode::Open {
+                    opened_at: (self.breaker.now)(),
+                });
+            }
+            (BreakerMode::HalfOpen { opened_at }, Err(Unchanged::Skipped(_))) => {
+                // A busy skip sent no request and may retry as soon as capacity frees.
+                state.transition(BreakerMode::Open { opened_at });
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for BreakerAttempt<'_> {
+    fn drop(&mut self) {
+        if self.completed || !self.probe {
+            return;
+        }
+        let mut state = self
+            .breaker
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if Arc::ptr_eq(&state.generation, &self.generation)
+            && matches!(state.mode, BreakerMode::HalfOpen { .. })
+        {
+            state.transition(BreakerMode::Open {
+                opened_at: (self.breaker.now)(),
+            });
+        }
     }
 }
 
