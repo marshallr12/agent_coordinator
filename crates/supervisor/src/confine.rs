@@ -11,7 +11,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOCK: &str = ".state-lock";
@@ -19,6 +19,10 @@ const PREPARED: &str = ".state-prepared";
 const STARTED: &str = ".state-started";
 const TERMINAL: &str = ".state-terminal.json";
 const KEEP_TERMINAL: usize = 5;
+
+/// Host-installed baseline; keep the installer in sync. Per-launch copies
+/// remain role-writable until OS enforcement is applied at launch.
+pub const CARGO_CONFIG_SEED: &[u8] = b"[net]\ngit-fetch-with-cli = false\n";
 
 /// Shared layout contract for launch profiles and later host preflight checks.
 pub struct StatePaths {
@@ -69,6 +73,10 @@ struct Terminal {
 
 impl RunState {
     pub fn prepare(spec: &LaunchSpec, config: &Config) -> Result<Self> {
+        // Public `prepare` runs before launch preflight: reject escaping paths
+        // before creating, pruning, or writing anything.
+        managed_paths(spec, config, true)?;
+        let seed = cargo_seed(config)?;
         // Callers may have already created the run to write its prompt. The
         // state subtree, rather than the caller's existing run, must be 0700.
         fs::create_dir_all(&spec.run)?;
@@ -93,11 +101,11 @@ impl RunState {
         // Reclaim only known terminal state before allocating new caches. Disk
         // errors fail the launch; there is no shared-writable-cache fallback.
         prune_terminal(config, spec.role, &spec.run)?;
-        guard.prepare_layout(config)?;
+        guard.prepare_layout(&seed)?;
         Ok(guard)
     }
 
-    fn prepare_layout(&self, config: &Config) -> Result<()> {
+    fn prepare_layout(&self, seed: &[u8]) -> Result<()> {
         let state = StatePaths::new(&self.run);
         let prepared = self.run.join(PREPARED);
         if fs::symlink_metadata(&prepared).is_ok() {
@@ -108,6 +116,10 @@ impl RunState {
             for dir in state.directories() {
                 check_private_dir(&dir)?;
             }
+            ensure!(
+                read_regular(&state.cargo.join("config.toml"))? == seed,
+                "per-launch Cargo config differs from the protected seed"
+            );
             return Ok(());
         }
         ensure!(
@@ -117,14 +129,7 @@ impl RunState {
         for dir in state.directories() {
             private_dir(&dir)?;
         }
-        match read_regular(&config.cargo_config_seed) {
-            Ok(seed) => write_new(&state.cargo.join("config.toml"), &seed)?,
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|e| e.kind() == ErrorKind::NotFound) => {}
-            Err(error) => return Err(error).context("read Cargo config seed"),
-        }
+        write_new(&state.cargo.join("config.toml"), seed)?;
         // Credentials are never copied into per-launch state.
         write_new(&prepared, self.role.slug().as_bytes())
     }
@@ -205,19 +210,37 @@ fn terminal_record(run: &Path, role: Role) -> Option<Terminal> {
     (record.role == role.slug() && record.session_id.as_bytes() == started).then_some(record)
 }
 
-fn read_regular(path: &Path) -> Result<Vec<u8>> {
+pub fn regular_file(path: &Path) -> Result<fs::Metadata> {
+    path_without_symlinks(path, false)?;
+    let metadata = fs::symlink_metadata(path)?;
     ensure!(
-        fs::symlink_metadata(path)?.is_file(),
+        metadata.is_file(),
         "{} must be a regular file",
         path.display()
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        ensure!(
+            metadata.nlink() == 1,
+            "{} must not be hard-linked",
+            path.display()
+        );
+    }
+    Ok(metadata)
+}
+
+pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
+    regular_file(path)?;
     Ok(fs::read(path)?)
 }
 
 fn open_lock(run: &Path, create: bool) -> Result<File> {
     let path = run.join(LOCK);
     match fs::symlink_metadata(&path) {
-        Ok(metadata) => ensure!(metadata.is_file(), "run lock must be a regular file"),
+        Ok(_) => {
+            regular_file(&path)?;
+        }
         Err(error) if create && error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
@@ -251,7 +274,8 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn private_dir(path: &Path) -> Result<()> {
+pub fn private_dir(path: &Path) -> Result<()> {
+    path_without_symlinks(path, true)?;
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -263,7 +287,8 @@ fn private_dir(path: &Path) -> Result<()> {
     check_private_dir(path)
 }
 
-fn check_private_dir(path: &Path) -> Result<()> {
+pub fn check_private_dir(path: &Path) -> Result<()> {
+    path_without_symlinks(path, false)?;
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_dir(),
@@ -274,10 +299,85 @@ fn check_private_dir(path: &Path) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         ensure!(
-            metadata.permissions().mode() & 0o777 == 0o700,
+            metadata.permissions().mode() & 0o7777 == 0o700,
             "{} must be mode 0700",
             path.display()
         );
+    }
+    Ok(())
+}
+
+/// Require absolute, canonical spelling and reject every symlink component.
+/// A missing suffix is allowed only during preparation, after checking all
+/// existing ancestors. This is a precondition check, not same-uid race fencing.
+pub fn path_without_symlinks(path: &Path, allow_missing: bool) -> Result<()> {
+    ensure!(path.is_absolute(), "{} must be absolute", path.display());
+    let mut walked = PathBuf::new();
+    for component in path.components() {
+        ensure!(
+            matches!(component, Component::RootDir | Component::Normal(_)),
+            "{} must be canonical without dot components",
+            path.display()
+        );
+        walked.push(component.as_os_str());
+        match fs::symlink_metadata(&walked) {
+            Ok(metadata) => ensure!(
+                !metadata.is_symlink(),
+                "{} must not contain a symlink",
+                path.display()
+            ),
+            Err(error) if allow_missing && error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect {}", walked.display()));
+            }
+        }
+    }
+    ensure!(
+        walked.as_os_str() == path.as_os_str(),
+        "{} must use canonical spelling",
+        path.display()
+    );
+    Ok(())
+}
+
+pub fn managed_paths(spec: &LaunchSpec, config: &Config, allow_missing: bool) -> Result<()> {
+    path_without_symlinks(&config.state_dir, allow_missing)?;
+    for (path, directory) in [(&spec.run, "runs"), (&spec.clone, "clones")] {
+        path_without_symlinks(path, allow_missing)?;
+        let parent = config.state_dir.join(spec.role.slug()).join(directory);
+        ensure!(
+            path.starts_with(&parent) && path != &parent,
+            "{} must be below {}",
+            path.display(),
+            parent.display()
+        );
+    }
+    Ok(())
+}
+
+pub fn cargo_seed(config: &Config) -> Result<Vec<u8>> {
+    let seed =
+        read_regular(&config.cargo_config_seed).context("read required Cargo config seed")?;
+    ensure!(
+        seed == CARGO_CONFIG_SEED,
+        "Cargo config seed differs from the required baseline"
+    );
+    Ok(seed)
+}
+
+/// Never truncate an existing output: a symlink or hard link must not turn
+/// preparation into an arbitrary write. Repeated preparation requires the
+/// same generated bytes, otherwise the caller must choose a fresh run.
+pub fn generated_file(path: &Path, contents: &[u8]) -> Result<()> {
+    path_without_symlinks(path, true)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => ensure!(
+            read_regular(path)? == contents,
+            "{} differs from generated contents",
+            path.display()
+        ),
+        Err(error) if error.kind() == ErrorKind::NotFound => write_new(path, contents)?,
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
@@ -290,6 +390,7 @@ mod tests {
     use uuid::Uuid;
 
     fn config(root: &Path) -> Config {
+        fs::write(root.join("cargo-config.toml"), CARGO_CONFIG_SEED).unwrap();
         Config {
             state_dir: root.join("roles"),
             cargo_config_seed: root.join("cargo-config.toml"),
@@ -405,22 +506,23 @@ mod tests {
     }
 
     #[test]
-    fn missing_seed_is_allowed_but_invalid_seed_fails_without_shared_cache_fallback() {
+    fn missing_or_invalid_seed_fails_before_state_writes() {
         let root = tempfile::tempdir().unwrap();
         let config = config(root.path());
-        let no_seed = spec(&config, Role::Implementer, "missing");
-        prepare_run(&no_seed, &config).unwrap();
-        assert!(
-            !StatePaths::new(&no_seed.run)
-                .cargo
-                .join("config.toml")
-                .exists()
-        );
+        fs::remove_file(&config.cargo_config_seed).unwrap();
+        let launch = spec(&config, Role::Implementer, "missing");
+        assert!(prepare_run(&launch, &config).is_err());
+        assert!(!launch.run.exists());
         fs::create_dir(&config.cargo_config_seed).unwrap();
-        let invalid = spec(&config, Role::Implementer, "invalid");
-        assert!(prepare_run(&invalid, &config).is_err());
-        // Partial preparation cannot silently become a fresh launch.
-        assert!(prepare_run(&invalid, &config).is_err());
+        assert!(prepare_run(&launch, &config).is_err());
+        fs::remove_dir(&config.cargo_config_seed).unwrap();
+        fs::write(
+            &config.cargo_config_seed,
+            "[net]\ngit-fetch-with-cli=true\n",
+        )
+        .unwrap();
+        assert!(prepare_run(&launch, &config).is_err());
+        assert!(!launch.run.exists());
         assert!(!config.state_dir.join("impl/cargo").exists());
     }
 
@@ -573,8 +675,97 @@ mod tests {
         fs::set_permissions(&state.home, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(prepare_run(&spec, &config).is_err());
         fs::set_permissions(&state.home, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::remove_dir(&state.cargo.join("registry")).unwrap();
+        fs::remove_dir(state.cargo.join("registry")).unwrap();
         symlink(root.path(), state.cargo.join("registry")).unwrap();
         assert!(prepare_run(&spec, &config).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn public_preparation_rejects_paths_outside_managed_roots_and_symlink_ancestors() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let original = spec(&config, Role::Implementer, "one");
+        for path in [
+            PathBuf::from("relative/run"),
+            root.path().join("outside"),
+            config.state_dir.join("rev/runs/wrong-role"),
+            config.state_dir.join("impl/runs/../escaped"),
+            config.state_dir.join("impl/runs/./dot"),
+        ] {
+            let launch = LaunchSpec {
+                run: path,
+                ..original.clone()
+            };
+            assert!(
+                prepare_run(&launch, &config).is_err(),
+                "{}",
+                launch.run.display()
+            );
+        }
+        let launch = LaunchSpec {
+            clone: root.path().join("outside"),
+            ..original.clone()
+        };
+        assert!(prepare_run(&launch, &config).is_err());
+        assert!(!config.state_dir.exists());
+        let outside = root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::create_dir_all(config.state_dir.join("impl")).unwrap();
+        symlink(&outside, config.state_dir.join("impl/runs")).unwrap();
+        assert!(prepare_run(&original, &config).is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preparation_never_overwrites_linked_generated_files_or_follows_temp_dirs() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let sentinel = root.path().join("sentinel");
+        fs::write(&sentinel, b"untouched").unwrap();
+        for (name, file) in [
+            ("settings", "role-settings.json"),
+            ("schema", "result.schema.json"),
+        ] {
+            let launch = spec(&config, Role::Reviewer, name);
+            fs::create_dir_all(&launch.run).unwrap();
+            symlink(&sentinel, launch.run.join(file)).unwrap();
+            assert!(prepare_run(&launch, &config).is_err());
+            assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
+        }
+        let linked = spec(&config, Role::Implementer, "hardlink");
+        fs::create_dir_all(&linked.run).unwrap();
+        fs::hard_link(&sentinel, linked.run.join("role-settings.json")).unwrap();
+        assert!(prepare_run(&linked, &config).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
+        let temporary = spec(&config, Role::Implementer, "temp");
+        fs::create_dir_all(&temporary.run).unwrap();
+        symlink(root.path(), temporary.run.join("tmp")).unwrap();
+        assert!(prepare_run(&temporary, &config).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seed_links_and_modified_prepared_cargo_fail_closed() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let launch = spec(&config, Role::Implementer, "one");
+        prepare_run(&launch, &config).unwrap();
+        fs::write(
+            StatePaths::new(&launch.run).cargo.join("config.toml"),
+            b"changed",
+        )
+        .unwrap();
+        assert!(prepare_run(&launch, &config).is_err());
+        let target = root.path().join("seed-target");
+        fs::rename(&config.cargo_config_seed, &target).unwrap();
+        symlink(&target, &config.cargo_config_seed).unwrap();
+        let fresh = spec(&config, Role::Implementer, "fresh");
+        assert!(prepare_run(&fresh, &config).is_err());
+        assert!(!fresh.run.exists());
     }
 }

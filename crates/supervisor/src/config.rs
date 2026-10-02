@@ -36,8 +36,8 @@ pub struct Config {
     pub egress_probe_blocked_host: String,
     /// Root-owned Rust toolchain: `rustup/` (read-only) and `cargo/bin` proxies.
     pub toolchain_dir: PathBuf,
-    /// Cargo config copied into each fresh launch. A missing seed is allowed
-    /// during layout rollout; installing and validating it is host preflight work.
+    /// Required root-owned, read-only Cargo baseline copied into each launch.
+    /// Preflight checks its contents and the protected parent directory chain.
     pub cargo_config_seed: PathBuf,
     /// Exact harness versions a launch refuses to run without.
     pub pinned: Pinned,

@@ -107,3 +107,55 @@ systemd uses umask 0077. The installed backup repository is local protection onl
 Do not claim host-loss protection until a complete destination copy has passed
 destination-side verification, and do not claim the one-hour restore target until
 the documented recovery exercise has measured it end to end.
+
+
+## Supervised launch seed layout
+
+`deploy/agentc/host-setup.sh` installs the B2 protected seed layout. The state
+root and each role parent are root-owned. Role parents and `claude-config/`
+are mode 0750 with the role group; their ancestors must be root-owned and
+not group/world-writable. Each mutable child (`runs/`, `clones/`, `home/`,
+`codex-home/`, `coordinator/`, `verification/`, `downloads/`) is separately
+role-owned mode 0700. A role cannot replace the protected config directory.
+
+The persistent Claude directory contains only root-owned, mode 0444 generated
+`settings.json`, an empty root-owned mode 0444 `CLAUDE.md`, and the role-owned
+mode 0600 `.credentials.json`. The root-owned mode 0444 Cargo seed at
+`/etc/agentc/cargo-config.toml` contains exactly:
+
+```toml
+[net]
+git-fetch-with-cli = false
+```
+
+Preparation requires that baseline and copies it to each run's private
+`state/cargo/config.toml`. Each run gets separate mode 0700 home, coordinator
+state, and Cargo registry/git caches; there is no writable shared-cache fallback.
+Launch preflight checks seed contents, ownership, all protected ancestors,
+private state permissions, and absolute canonical paths below the selected
+role's `runs/` and `clones/`. Public preparation rejects symlink escapes and
+linked generated outputs before writing them. Only the five most recent known
+terminal state directories are retained; interrupted or unknown runs remain.
+
+The installer seals an existing real role parent without recursively changing
+ownership. It rejects symlinks, unexpected Claude config entries, and unsafe
+credential files with an owner-repair instruction. Protected seeds are replaced
+with fresh root-owned inodes. Existing shared role Cargo caches are unused and
+are left for owner cleanup. Run the installer only after stopping role processes;
+this phase does not fence an already running agent.
+
+Claude authentication is an owner bootstrap step in a separate private directory.
+Import only the credential file with its required owner and mode; never copy
+other harness state or make the protected directory writable for login. The
+supervisor does not read or copy credential bytes. **Pinned-harness credential
+refresh remains unverified:** this layout permits in-place file updates, but
+rejects refresh implementations that create a temporary file and rename it.
+The containment suite checks file write permission, not successful authentication
+or refresh. That live proof is required before using this layout for launches.
+
+B2 protects persistent seeds using filesystem ownership. Per-launch Cargo config
+and mutable state remain writable by the role account; same-uid process isolation
+and a read-only root filesystem with explicit writable mounts are B3 work.
+Neither this layout nor a passing preflight establishes that OS boundary. Host
+installation, authenticated launches, and the root containment suite remain
+operator checks; local validation uses supervisor tests and shell syntax checks.

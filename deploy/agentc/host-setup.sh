@@ -38,23 +38,114 @@ create_users() {
   done
 }
 
-# Private 0700 state per role; the mirror and prefix are root-owned, readable.
-# Root creates only $STATE/<role> (its parent is root-owned); everything inside
-# is created by the agent itself, because root following a symlink the agent
-# planted there would hand the agent any directory on the host.
-create_dirs() {
-  install -d -o root -g root -m 0755 "$PREFIX" "$PREFIX/bin" "$STATE" "$ETC"
-  for user in "${AGENTS[@]}"; do
-    local role=${user#agentc-}
-    refuse_symlink "$STATE/$role"
-    install -d -o "$user" -g "$user" -m 0700 "$STATE/$role"
-    runuser -u "$user" -- sh -c 'umask 077 && cd "$1" && mkdir -p home claude-config codex-home coordinator cargo clones runs verification' _ "$STATE/$role"
+# Validate root's destination chain before writing. Never follow an agent's
+# symlink or recursively chown an existing role tree during migration.
+protected_chain() {
+  local path=$1 mode
+  while :; do
+    if [ -L "$path" ] || [ ! -d "$path" ] || [ "$(stat -c %u -- "$path")" != 0 ]; then
+      echo "refusing unsafe root directory: $path; owner repair required" >&2; exit 1
+    fi
+    mode=$(stat -c %a -- "$path")
+    if (( (8#$mode & 0022) != 0 )); then
+      echo "refusing writable root directory: $path; owner repair required" >&2; exit 1
+    fi
+    [ "$path" != / ] || break
+    path=${path%/*}; [ -n "$path" ] || path=/
   done
 }
 
-# Aborts when a path root is about to write is a symlink.
 refuse_symlink() {
-  if [ -L "$1" ]; then echo "refusing: $1 is a symlink" >&2; exit 1; fi
+  if [ -L "$1" ]; then echo "refusing: $1 is a symlink; owner repair required" >&2; exit 1; fi
+}
+
+# Root-owned parents make protected children irreplaceable. Each writable
+# child belongs to its role separately. Existing real role directories can be
+# sealed without descending into their agent-controlled contents.
+create_dirs() {
+  local path user role child
+  for path in "$PREFIX" "$PREFIX/bin" "$STATE" "$ETC"; do
+    refuse_symlink "$path"
+    protected_chain "${path%/*}"
+    if [ -e "$path" ]; then protected_chain "$path"; fi
+    install -d -o root -g root -m 0755 "$path"
+  done
+  for user in "${AGENTS[@]}"; do
+    role=$STATE/${user#agentc-}
+    refuse_symlink "$role"
+    if [ -e "$role" ]; then
+      [ -d "$role" ] || { echo "refusing non-directory: $role" >&2; exit 1; }
+      case $(stat -c %u -- "$role") in
+        0|"$(id -u "$user")") ;;
+        *) echo "refusing unexpected owner: $role; owner repair required" >&2; exit 1 ;;
+      esac
+    fi
+    install -d -o root -g "$user" -m 0750 "$role"
+    protected_chain "$role"
+    for child in home codex-home coordinator clones runs verification downloads; do
+      path=$role/$child
+      refuse_symlink "$path"
+      if [ -e "$path" ]; then
+        [ -d "$path" ] && [ "$(stat -c %u -- "$path")" = "$(id -u "$user")" ] || {
+          echo "refusing unexpected writable directory: $path; owner repair required" >&2; exit 1;
+        }
+      fi
+      install -d -o "$user" -g "$user" -m 0700 "$path"
+    done
+    path=$role/claude-config
+    refuse_symlink "$path"
+    [ ! -e "$path" ] || [ -d "$path" ] || { echo "refusing non-directory: $path" >&2; exit 1; }
+    install -d -o root -g "$user" -m 0750 "$path"
+    protected_chain "$path"
+    # Do not guess what to preserve from arbitrary old harness state.
+    local entry
+    while IFS= read -r -d '' entry; do
+      case ${entry##*/} in
+        settings.json|CLAUDE.md|.credentials.json)
+          refuse_symlink "$entry"
+          [ -f "$entry" ] && [ "$(stat -c %h -- "$entry")" = 1 ] || {
+            echo "refusing non-regular or linked Claude file; owner repair required: $path" >&2; exit 1;
+          }
+          ;;
+        *) echo "refusing unexpected Claude config entry; owner cleanup required: $path" >&2; exit 1 ;;
+      esac
+    done < <(find "$path" -mindepth 1 -maxdepth 1 -print0)
+    entry=$path/.credentials.json
+    refuse_symlink "$entry"
+    if [ -e "$entry" ]; then
+      [ -f "$entry" ] && [ "$(stat -c %h -- "$entry")" = 1 ] &&
+        [ "$(stat -c %u -- "$entry")" = "$(id -u "$user")" ] &&
+        [ "$(stat -c %a -- "$entry")" = 600 ] || {
+          echo "refusing unsafe credential file; owner repair required: $entry" >&2; exit 1;
+        }
+    else
+      install -o "$user" -g "$user" -m 0600 /dev/null "$entry"
+    fi
+  done
+}
+
+# All destinations now have sealed parents. Rename fresh seed inodes rather
+# than truncating old files an agent might still have open or hard-linked.
+install_seeds() {
+  local user role name temp path
+  for user in "${AGENTS[@]}"; do
+    role=${user#agentc-}
+    [ "$role" = impl ] && name=implementer || name=reviewer
+    path=$STATE/$role/claude-config
+    protected_chain "$path"
+    temp=$(mktemp "$path/.seed.XXXXXXXX")
+    "$PREFIX/bin/agentc-supervisor" settings --role "$name" > "$temp"
+    chown root:root "$temp"; chmod 0444 "$temp"
+    mv -fT -- "$temp" "$path/settings.json"
+    temp=$(mktemp "$path/.seed.XXXXXXXX")
+    chown root:root "$temp"; chmod 0444 "$temp"
+    mv -fT -- "$temp" "$path/CLAUDE.md"
+  done
+  protected_chain "$ETC"
+  temp=$(mktemp "$ETC/.cargo-seed.XXXXXXXX")
+  printf '[net]\ngit-fetch-with-cli = false\n' > "$temp"
+  chown root:root "$temp"; chmod 0444 "$temp"
+  mv -fT -- "$temp" "$ETC/cargo-config.toml"
 }
 
 # Copies the owner's current harness binaries and our binaries, root-owned.
@@ -135,6 +226,7 @@ write_config() {
 # implementer_user = "agentc-impl"
 # reviewer_user = "agentc-rev"
 # toolchain_dir = "/opt/agentc"
+# cargo_config_seed = "/etc/agentc/cargo-config.toml"
 # browser = "/usr/bin/chromium"
 browser = "$(detect_browser)"
 egress_listen = "127.0.0.1:$PROXY_PORT"
@@ -311,9 +403,12 @@ uninstall() {
 # Prints the manual steps that remain (reserved bootstrap).
 next_steps() {
   cat <<EOF
-Host ready. Manual steps (reserved bootstrap, once per role):
-  sudo -u agentc-impl -H env HOME=$STATE/impl/home CLAUDE_CONFIG_DIR=$STATE/impl/claude-config \\
-    HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT $PREFIX/bin/claude auth login
+Host seeds installed. Manual steps (reserved bootstrap, once per role):
+  Authenticate Claude in a separate private owner-controlled bootstrap directory.
+  As the owner, install only the resulting .credentials.json (agentc-impl, 0600)
+  at $STATE/impl/claude-config/.credentials.json. Do not copy other harness state
+  or make claude-config writable to enable login. Credential refresh must update
+  this file in place; verify that behavior with the pinned harness.
   sudo -u agentc-impl -H env HOME=$STATE/impl/home CODEX_HOME=$STATE/impl/codex-home \\
     HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT $PREFIX/bin/codex login
   (repeat for agentc-rev with rev/ paths)
@@ -332,6 +427,7 @@ main() {
   create_users
   create_dirs
   install_binaries
+  install_seeds
   install_toolchain
   refresh_mirror
   write_config

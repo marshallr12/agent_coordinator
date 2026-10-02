@@ -87,6 +87,20 @@ check_writes() {
   expect_fail "$user: cannot read ${other}'s clones" as "$user" ls "$STATE/${other#agentc-}/clones"
 }
 
+# Persistent seed parents must deny replacement as well as content writes.
+# Probe create permission with harmless names; never unlink real auth or seeds.
+check_seeds() {
+  local user=$1 base=$STATE/${1#agentc-} path
+  for path in "$base" "$base/claude-config" /etc/agentc; do
+    expect_fail "$user: cannot create entries in protected $path" as "$user" touch "$path/.suite-seed-write"
+  done
+  for path in "$base/claude-config/settings.json" "$base/claude-config/CLAUDE.md" /etc/agentc/cargo-config.toml; do
+    expect_fail "$user: protected seed is not writable: $path" as "$user" test -w "$path"
+  done
+  expect_ok "$user: credential file supports in-place writes" as "$user" test -w "$base/claude-config/.credentials.json"
+  expect_ok "$user: per-launch Cargo baseline is seeded" cmp /etc/agentc/cargo-config.toml "$base/runs/suite/state/cargo/config.toml"
+}
+
 # Direct egress and DNS fail; the proxy allows only allowlisted hosts.
 check_egress() {
   local user=$1
@@ -123,10 +137,10 @@ check_browser() {
 # plainly (Claude: uid + firewall) and inside the Codex sandbox.
 check_cargo_test() {
   local base=$STATE/impl clone=$STATE/impl/clones/suite run=$STATE/impl/runs/suite
-  local env="PATH=$PREFIX/bin:$PREFIX/cargo/bin:/usr/bin:/bin RUSTUP_HOME=$PREFIX/rustup CARGO_HOME=$base/cargo CARGO_TARGET_DIR=$run/target HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=127.0.0.1,localhost"
+  local env="PATH=$PREFIX/bin:$PREFIX/cargo/bin:/usr/bin:/bin RUSTUP_HOME=$PREFIX/rustup CARGO_HOME=$run/state/cargo CARGO_TARGET_DIR=$run/target HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=127.0.0.1,localhost"
   expect_ok_logged "impl: cargo test (uid + firewall)" /root/agentc-cargo-test.log \
     as agentc-impl sh -c "cd $clone && env $env cargo test --workspace --locked --no-fail-fast"
-  local roots="sandbox_workspace_write.writable_roots=[\"$run\",\"$base/cargo\"]"
+  local roots="sandbox_workspace_write.writable_roots=[\"$run\",\"$run/state/cargo\"]"
   expect_ok_logged "impl: cargo test inside codex sandbox" /root/agentc-cargo-test-codex.log as agentc-impl sh -c \
     "cd $clone && env $env CODEX_HOME=$base/codex-home $PREFIX/bin/codex sandbox -c sandbox_mode=workspace-write -c sandbox_workspace_write.network_access=true -c '$roots' -- cargo test --workspace --locked --no-fail-fast"
 }
@@ -140,6 +154,7 @@ main() {
     check_profiles "$1"
     check_git "$1"
     check_writes "$1" "$2"
+    check_seeds "$1"
     check_egress "$1"
     check_codex_sandbox "$1"
   done

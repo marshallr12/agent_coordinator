@@ -3,10 +3,13 @@
 //! human-readable problem instead of failing fast, so one run lists them all.
 use crate::clone;
 use crate::config::Config;
+use crate::confine::{self, StatePaths};
 use crate::network_probe;
 use crate::profile::{self, Harness, LaunchSpec, Role, run_files};
 use crate::role_settings;
 use crate::verification;
+use anyhow::{Context, Result, ensure};
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -20,6 +23,7 @@ pub fn check(spec: &LaunchSpec, config: &Config) -> Vec<String> {
         pinned(spec.harness, config),
     ));
     problems.extend(layout_problems(spec));
+    problems.extend(state_problems(spec, config));
     problems.extend(settings_problem(spec));
     problems.extend(verification_problems(spec, config));
     problems.extend(network_problems(config));
@@ -53,8 +57,12 @@ fn pinned(harness: Harness, config: &Config) -> &str {
 
 /// The launch must run as the role's dedicated account, never the owner's.
 fn account_problem(role: Role, config: &Config) -> Option<String> {
-    let current = Command::new("id").arg("-un").output().ok()?;
-    let current = String::from_utf8_lossy(&current.stdout).trim().to_owned();
+    let current = match Command::new("id").arg("-un").output() {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+        _ => return Some("cannot determine current role account".into()),
+    };
     let expected = role.user(config);
     (current != expected)
         .then(|| format!("running as {current:?}; {role:?} launches run as {expected:?}"))
@@ -110,14 +118,17 @@ fn layout_problems(spec: &LaunchSpec) -> Vec<String> {
     if profile::is_within(&spec.run, &spec.clone) || profile::is_within(&spec.clone, &spec.run) {
         problems.push("the run directory and the clone must not contain each other".into());
     }
-    if !spec.run.join(run_files::PROMPT).is_file() {
+    if let Err(error) = confine::regular_file(&spec.run.join(run_files::PROMPT)) {
         problems.push(format!(
-            "{} is missing",
-            spec.run.join(run_files::PROMPT).display()
+            "prompt.md must be a regular unlinked file: {error:#}"
         ));
     }
-    if spec.role == Role::Reviewer && !spec.run.join(run_files::SCHEMA).is_file() {
-        problems.push("reviewer launches need result.schema.json in the run directory".into());
+    if spec.role == Role::Reviewer
+        && let Err(error) = confine::regular_file(&spec.run.join(run_files::SCHEMA))
+    {
+        problems.push(format!(
+            "reviewer launches need regular result.schema.json: {error:#}"
+        ));
     }
     problems
 }
@@ -128,7 +139,10 @@ fn settings_problem(spec: &LaunchSpec) -> Option<String> {
         return None;
     }
     let path = spec.run.join(run_files::SETTINGS);
-    let installed = std::fs::read_to_string(&path).unwrap_or_default();
+    let installed = confine::read_regular(&path)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default();
     (!role_settings::matches(spec.role, &installed)).then(|| {
         format!(
             "{} differs from the generated {:?} settings",
@@ -136,6 +150,195 @@ fn settings_problem(spec: &LaunchSpec) -> Option<String> {
             spec.role
         )
     })
+}
+
+/// Host seeds must survive an agent trying to rename their parent. Every
+/// ancestor is root-owned and closed to group/world writes, including role
+/// roots; writable work lives in individually owned child directories.
+fn state_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut record = |result: Result<()>| {
+        if let Err(error) = result {
+            problems.push(format!("{error:#}"));
+        }
+    };
+    record(confine::managed_paths(spec, config, false));
+    record(protected_directory(
+        &config.state_dir.join(spec.role.slug()),
+    ));
+    record(protected_file(&config.cargo_config_seed));
+    record(confine::cargo_seed(config).map(|_| ()));
+    for directory in ["runs", "clones"] {
+        let path = config.state_dir.join(spec.role.slug()).join(directory);
+        record(confine::check_private_dir(&path));
+        record(role_owned(&path, spec.role, config, false));
+    }
+    if spec.harness == Harness::Codex {
+        let path = config.state_dir.join(spec.role.slug()).join("codex-home");
+        record(confine::check_private_dir(&path));
+        record(role_owned(&path, spec.role, config, false));
+    }
+    let state = StatePaths::new(&spec.run);
+    for dir in state
+        .directories()
+        .into_iter()
+        .chain([spec.run.join("tmp"), spec.run.join("target")])
+    {
+        record(confine::check_private_dir(&dir));
+        record(role_owned(&dir, spec.role, config, false));
+    }
+    let cargo = state.cargo.join("config.toml");
+    record(role_owned(&cargo, spec.role, config, true));
+    record((|| {
+        ensure!(
+            confine::read_regular(&cargo)? == confine::CARGO_CONFIG_SEED,
+            "per-launch Cargo config differs from the required baseline"
+        );
+        Ok(())
+    })());
+    if spec.harness == Harness::Claude {
+        let persistent = config
+            .state_dir
+            .join(spec.role.slug())
+            .join("claude-config");
+        record(protected_directory(&persistent));
+        for file in ["settings.json", "CLAUDE.md"] {
+            record(protected_file(&persistent.join(file)));
+        }
+        record((|| {
+            let settings = confine::read_regular(&persistent.join("settings.json"))?;
+            ensure!(
+                std::str::from_utf8(&settings)
+                    .is_ok_and(|text| role_settings::matches(spec.role, text)),
+                "persistent Claude settings differ from the generated role settings"
+            );
+            ensure!(
+                confine::read_regular(&persistent.join("CLAUDE.md"))?.is_empty(),
+                "persistent CLAUDE.md must be the empty seed"
+            );
+            Ok(())
+        })());
+        record(role_owned(
+            &persistent.join(".credentials.json"),
+            spec.role,
+            config,
+            true,
+        ));
+        record((|| {
+            for entry in fs::read_dir(&persistent)? {
+                let entry = entry?;
+                ensure!(
+                    ["settings.json", "CLAUDE.md", ".credentials.json"]
+                        .iter()
+                        .any(|name| entry.file_name() == *name),
+                    "persistent Claude config contains an unexpected entry; owner cleanup required"
+                );
+            }
+            Ok(())
+        })());
+    }
+    problems
+}
+
+fn protected_directory(path: &Path) -> Result<()> {
+    confine::path_without_symlinks(path, false)?;
+    for ancestor in path.ancestors() {
+        let metadata = fs::symlink_metadata(ancestor)?;
+        ensure!(
+            metadata.is_dir(),
+            "{} must be a directory",
+            ancestor.display()
+        );
+        protected_metadata(ancestor, &metadata, false)?;
+    }
+    Ok(())
+}
+
+fn protected_file(path: &Path) -> Result<()> {
+    confine::path_without_symlinks(path, false)?;
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.is_file(),
+        "{} must be a regular file",
+        path.display()
+    );
+    protected_metadata(path, &metadata, true)?;
+    protected_directory(path.parent().context("protected seed has no parent")?)
+}
+
+#[cfg(unix)]
+fn protected_metadata(path: &Path, metadata: &fs::Metadata, file: bool) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    protection_facts(
+        path,
+        metadata.uid(),
+        metadata.mode(),
+        metadata.nlink(),
+        file,
+    )
+}
+
+/// Kept independent of the test runner's uid so hostile ownership/mode cases
+/// are exercised without privileges, rather than skipping root seed checks.
+#[cfg(unix)]
+fn protection_facts(path: &Path, uid: u32, mode: u32, links: u64, file: bool) -> Result<()> {
+    ensure!(uid == 0, "{} must be root-owned", path.display());
+    ensure!(
+        mode & if file { 0o222 } else { 0o022 } == 0,
+        "{} must be {}",
+        path.display(),
+        if file {
+            "read-only"
+        } else {
+            "not group/world-writable"
+        }
+    );
+    ensure!(
+        !file || links == 1,
+        "{} must not be hard-linked",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn protected_metadata(_path: &Path, _metadata: &fs::Metadata, _file: bool) -> Result<()> {
+    anyhow::bail!("protected host seeds require Unix ownership checks")
+}
+
+/// Metadata only: never read, copy, or print an authentication file's bytes.
+#[cfg(unix)]
+fn role_owned(path: &Path, role: Role, config: &Config, file: bool) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    confine::path_without_symlinks(path, false)?;
+    let output = Command::new("id")
+        .args(["-u", role.user(config)])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "cannot resolve role account {}",
+        role.user(config)
+    );
+    let uid: u32 = std::str::from_utf8(&output.stdout)?.trim().parse()?;
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.uid() == uid,
+        "{} must be owned by its role account",
+        path.display()
+    );
+    if file {
+        ensure!(
+            metadata.is_file() && metadata.nlink() == 1 && metadata.mode() & 0o7777 == 0o600,
+            "{} must be a regular, single-link mode 0600 file",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn role_owned(_path: &Path, _role: Role, _config: &Config, _file: bool) -> Result<()> {
+    anyhow::bail!("private role state requires Unix ownership checks")
 }
 
 /// A verifying reviewer needs its project's test login (private to the
@@ -147,6 +350,13 @@ fn verification_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     let project = spec.project.as_deref().unwrap_or_default();
     let login = verification::credential_file(config, project);
     let mut problems = private_file_problem(&login).into_iter().collect::<Vec<_>>();
+    let directory = config
+        .state_dir
+        .join(Role::Reviewer.slug())
+        .join("verification");
+    if !login.starts_with(directory) {
+        problems.push("verification login must remain below the managed reviewer directory".into());
+    }
     if entry.browser {
         problems.extend(match config.browser.exists() {
             true => writable_problem(&config.browser),
@@ -163,9 +373,10 @@ fn verification_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
 #[cfg(unix)]
 fn private_file_problem(path: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
-    let readable = std::fs::File::open(path).is_ok();
-    let mode = std::fs::metadata(path).map(|m| m.mode()).unwrap_or(0);
-    (!readable || mode & 0o077 != 0).then(|| {
+    let metadata = confine::regular_file(path);
+    let readable = metadata.is_ok() && std::fs::File::open(path).is_ok();
+    let private = metadata.is_ok_and(|metadata| metadata.mode() & 0o7777 == 0o600);
+    (!readable || !private).then(|| {
         format!(
             "verification login {} must exist, be readable by this account and be mode 0600",
             path.display()
@@ -226,5 +437,114 @@ mod tests {
         ] {
             assert!(problems.contains(expected), "{expected}: {problems}");
         }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn seed_protection_requires_root_and_unreplaceable_parents_without_privileged_tests() {
+        let path = Path::new("/seed");
+        assert!(protection_facts(path, 0, 0o444, 1, true).is_ok());
+        assert!(protection_facts(path, 1000, 0o444, 1, true).is_err());
+        for mode in [0o644, 0o464, 0o446] {
+            assert!(protection_facts(path, 0, mode, 1, true).is_err());
+        }
+        assert!(protection_facts(path, 0, 0o444, 2, true).is_err());
+        assert!(protection_facts(path, 0, 0o750, 2, false).is_ok());
+        assert!(protection_facts(path, 1000, 0o750, 2, false).is_err());
+        for mode in [0o770, 0o752, 0o1777] {
+            assert!(protection_facts(path, 0, mode, 2, false).is_err());
+        }
+        // Even a read-only seed is untrusted under a writable/non-root
+        // ancestor. This real-filesystem check fails under either test uid.
+        let root = tempfile::tempdir().unwrap();
+        let seed = root.path().join("seed");
+        fs::write(&seed, confine::CARGO_CONFIG_SEED).unwrap();
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        fs::set_permissions(&seed, fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(protected_file(&seed).is_err());
+        let link = root.path().join("linked");
+        symlink(&seed, &link).unwrap();
+        assert!(protected_file(&link).is_err());
+        assert!(protected_file(&root.path().join("missing")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_reports_altered_cargo_claude_seeds_modes_and_credential_links() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let current = Command::new("id").arg("-un").output().unwrap();
+        let mut config = Config {
+            state_dir: root.path().join("roles"),
+            cargo_config_seed: root.path().join("seed"),
+            implementer_user: String::from_utf8(current.stdout).unwrap().trim().into(),
+            ..Config::default()
+        };
+        fs::write(&config.cargo_config_seed, confine::CARGO_CONFIG_SEED).unwrap();
+        let spec = LaunchSpec {
+            role: Role::Implementer,
+            harness: Harness::Claude,
+            clone: config.state_dir.join("impl/clones/one"),
+            run: config.state_dir.join("impl/runs/one"),
+            model: "test".into(),
+            effort: "low".into(),
+            session_id: Uuid::nil(),
+            project: None,
+        };
+        fs::create_dir_all(&spec.clone).unwrap();
+        crate::launch::prepare_run(&spec, &config).unwrap();
+        let persistent = config.state_dir.join("impl/claude-config");
+        fs::create_dir(&persistent).unwrap();
+        fs::write(
+            persistent.join("settings.json"),
+            crate::role_settings::render(Role::Reviewer),
+        )
+        .unwrap();
+        fs::write(persistent.join("CLAUDE.md"), "unexpected instructions").unwrap();
+        symlink(
+            &config.cargo_config_seed,
+            persistent.join(".credentials.json"),
+        )
+        .unwrap();
+        fs::write(persistent.join("extra.json"), "unexpected").unwrap();
+        let state = StatePaths::new(&spec.run);
+        fs::set_permissions(&state.home, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(state.cargo.join("config.toml"), "altered").unwrap();
+        let problems = state_problems(&spec, &config).join("\n");
+        for expected in [
+            "0700",
+            "per-launch Cargo config differs",
+            "persistent Claude settings differ",
+            "symlink",
+            "unexpected entry",
+        ] {
+            assert!(problems.contains(expected), "{expected}: {problems}");
+        }
+        fs::write(
+            persistent.join("settings.json"),
+            crate::role_settings::render(spec.role),
+        )
+        .unwrap();
+        assert!(
+            state_problems(&spec, &config)
+                .join("\n")
+                .contains("CLAUDE.md must be the empty seed")
+        );
+        let codex_home = config.state_dir.join("impl/codex-home");
+        symlink(root.path(), &codex_home).unwrap();
+        let codex = LaunchSpec {
+            harness: Harness::Codex,
+            ..spec.clone()
+        };
+        assert!(
+            state_problems(&codex, &config)
+                .iter()
+                .any(|problem| problem.contains("codex-home") && problem.contains("symlink"))
+        );
+        config.cargo_config_seed = root.path().join("missing-seed");
+        assert!(
+            state_problems(&spec, &config)
+                .join("\n")
+                .contains("required Cargo config seed")
+        );
     }
 }
