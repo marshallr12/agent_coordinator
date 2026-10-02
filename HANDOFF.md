@@ -1,5 +1,40 @@
 # Core hardening wave — 2026-10-02
 
+## Follow-up session — 2026-10-02 (daytime)
+
+The user again disabled the Agent Coordinator workflow and asked for the next
+backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
+
+- `09a2b78` TypeSafe main-service-only secret file (wave-plan A-P4): the main
+  unit adds `EnvironmentFile=-/etc/agent-coordinator/typesafe.env` after
+  `service.env`; backup/maintenance units unchanged; install and backup guides,
+  `service.env.example` and the install smoke updated. Independently CONFIRMED.
+  The out-of-repo `release-next/deploy-pre.sh` now aborts before stopping
+  anything unless `typesafe.env` holds a nonempty key and warns if `service.env`
+  still has a key line (previous copy `deploy-pre.sh.pre-typesafe-env`). **The
+  next deploy therefore needs the user's VM step first:** install
+  `typesafe.env` (root:root 0600) with the key, install the new unit,
+  daemon-reload, remove the key line from `service.env`, restart.
+- `8b24b8e` C1 routing resolved as a new phase: literal URL snapshots, rewrite
+  refusal, plus refusal of a configured remote named like a snapshot (the old
+  blocker), ASCII-only host match and exact `.git` suffix. Two repairs, after
+  which the final verifier found no routing bypass. Tests in
+  `scripts/ship_routing_test.py` (real local Git, mocked transport).
+- `8c2cdc6` exact-ref readback: `ls-remote` suffix matching let
+  `refs/heads/a/refs/heads/main` be read back as main. Pre-existing on main;
+  the user chose to fix it as a separate item. Independently CONFIRMED.
+- Gate: ship tests (18), routing tests (36), pinned docs check and py_compile
+  passed; no Rust/Cargo change since the full gate on `0beabe8`. Logs:
+  `~/.local/share/agent-coordinator-autonomy/core-20261002/followup-*.log`.
+- One verifier accidentally ran an https `git fetch` to github.com; it stopped
+  at the credential prompt. Nothing was pushed.
+- Known false refusals by design: https URLs with userinfo (token insteadOf)
+  and ssh→https insteadOf with pushInsteadOf back.
+
+Remaining: user ship authorization for this branch (do not ship before the
+VM `typesafe.env` step); owner Claude host/authentication/refresh/browser
+proof; supervisor security decisions (R-P3b.2–.5); S6 cutover chain.
+
 The user disabled the Agent Coordinator workflow and authorized overnight local
 implementation with subagents. Cutoff: 2026-10-02 08:00 America/New_York
 (12:00 UTC). No production changes, credential issuance, rulesets, ownership
