@@ -132,10 +132,26 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
   via CDP untested; trailing-dot Origin vs the server's origin check
   untested.
 
-Remaining: R-P3b.2
-push helper once the user creates its App (U17);
-user ship authorization (after the VM `typesafe.env` step); owner Claude
-host/auth/refresh/browser proof; S6 cutover chain.
+- `598c77a` R-P3b.2 phase 1 (U17/U23/U24): `coordinator_local::candidate_push`,
+  both sides of the per-launch helper protocol (JSON request line + u64
+  length-prefixed bundle; one JSON reply line with stable refusal codes).
+  The helper checks the pack with `index-pack --strict` (git 2.39.5 applies
+  neither `fetch.fsckObjects` nor `transfer.fsckObjects` to bundle fetches),
+  imports by OID only, re-scans, and pushes only
+  `refs/agent-coordinator/candidates/<task>/<launch>` under an intent + lease
+  guard (foreign refs never adopted; intent cleared on definite failure).
+  The outgoing secret scan now also reads raw commit objects (messages,
+  idents, signatures, any `encoding` header) — **behaviour change on
+  `checkpoint_candidate` too**, accepted by the main loop. Gate: fmt, Clippy,
+  598 tests, docs (`p2c-*.log`). Red team: DISPUTED twice (foreign-ref
+  adoption, reply size, unscanned messages; then encoding-header bypass,
+  stale intent), round 3 CONFIRMED. Residuals: helper repo disk growth
+  (pack stored twice, refused packs kept); first push fetches full
+  prerequisite history; EBCDIC-style re-encoding is obfuscation, not caught.
+
+Remaining: R-P3b.2 phases 2 (`agentc-push` binary), 3 (CLI via the helper
+socket), 4 (supervisor spawn/bind), 5 (host setup, containment suite, docs);
+owner Claude host/auth/refresh/browser proof; S6 cutover chain.
 
 The user disabled the Agent Coordinator workflow and authorized overnight local
 implementation with subagents. Cutoff: 2026-10-02 08:00 America/New_York
