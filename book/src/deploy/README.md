@@ -204,8 +204,9 @@ may run hostile `build.rs`, test or UI-script code. Claude reviewer launches set
 `CLAUDE_CODE_SHELL_PREFIX` to a generated `$RUN/candidate-shell`, read-only inside
 the launch, and Claude Code runs every Bash command through it. Each command runs
 in a second, nested Bubblewrap: the whole state directory is replaced by an empty
-tmpfs, and only the current clone (read-only), the run's home, Cargo home,
-temporary and build directories (writable), and `verification.json` return. The
+tmpfs, and only the current clone (read-only), the candidate's own home and
+temporary directory, the run's Cargo home and build directory (writable), and
+`verification.json` return. The
 Claude configuration stays readable for shell snapshots, but its credential file
 reads as empty. Coordinator state, other runs and clones, Codex state and the
 verification login stay hidden; provider, GitHub and TypeSafe key variables are
@@ -220,13 +221,21 @@ the candidate (decision U18), which is not implemented yet.
 
 Candidate code gets a private home mounted over the harness's `$HOME`, so planted
 `.gitconfig` or `.profile` files never reach the harness's own git and login
-shells. The temporary, build and Cargo directories remain shared with the
-harness. **Open before the first live launch:** a candidate command can move the
-harness's tracked working directory into one of those shared directories, and a
-git command the harness runs there outside the prefix could apply a
-candidate-written filter with the reviewer's login. Whether Claude Code makes
-such a call in reviewer runs is unverified; the planned fix resets the tracked
-directory to the clone after each command, confirmed by an instrumented owner run.
+shells. The build and Cargo directories remain shared with the harness, so a
+candidate command could move the harness's tracked working directory into one of
+them, where a git command the harness runs outside the prefix might apply a
+candidate-written filter with the reviewer's login. To prevent that,
+`candidate-shell` resets the tracked directory to the clone after every command.
+It runs a command only if the command ends with Claude Code's
+`pwd -P >| <file>` step naming a file directly inside the harness's `$RUN/tmp`,
+and otherwise refuses it with exit status 126. Once the nested sandbox has
+exited and none of its processes remain, it writes the clone's path to that
+file. Candidate commands get their own `$RUN/candidate-tmp` as `TMPDIR`, and the
+harness's `$RUN/tmp` is an empty, throwaway tmpfs inside the nested sandbox, so no
+candidate process, including a concurrent background command, can rewrite the
+file. As a result, `cd` does not persist between reviewer Bash commands. An
+instrumented owner run (a git shim logging its working directory) must still
+confirm this against the pinned Claude Code release.
 
 Local tests exercise actual Bubblewrap with a mock Bash harness, including
 cross-run writes, seed replacement, hard links, inherited descriptors, and child

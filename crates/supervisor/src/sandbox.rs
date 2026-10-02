@@ -64,8 +64,9 @@ fn writable_directories(spec: &LaunchSpec) -> Vec<PathBuf> {
         directories.push(spec.clone.clone());
     }
     if crate::candidate::applies(spec) {
-        // Writable source for the inner sandbox's private candidate home.
+        // Writable sources for the inner sandbox's private home and temp.
         directories.push(crate::candidate::home(spec));
+        directories.push(crate::candidate::temp(spec));
     }
     directories
 }
@@ -461,7 +462,8 @@ mod tests {
 
     /// Run by the mock reviewer harness: the harness itself still sees its
     /// login, but each command through `candidate-shell` sees no secrets,
-    /// cannot write the clone, and cannot nest another user namespace.
+    /// cannot write the clone or the harness's temp, cannot nest another user
+    /// namespace, and leaves the harness's tracked directory in the clone.
     const REVIEWER_CANDIDATE_CHECKS: &str = r#"
 deny overwrite "$CLONE/source"
 test "$(cat "$CLAUDE_CONFIG_DIR/.credentials.json")" = refreshed
@@ -469,8 +471,11 @@ export HARNESS_IPC="$(readlink /proc/self/ns/ipc)" HARNESS_UTS="$(readlink /proc
 export MARKER="agentc-harness-marker-$$"
 (exec -a "$MARKER" sleep 30) &
 MARKER_PID=$!
-"$PREFIX" '
+printf harness > "$TMPDIR/harness-only"
+CHECKS='
 set -eu
+test "$TMPDIR" = "$RUN/candidate-tmp"
+test ! -e "$RUN/tmp/harness-only"
 deny() { if "$@" 2>/dev/null; then echo "candidate unexpected success: $*" >&2; exit 41; fi; }
 for cmdline in /proc/[0-9]*/cmdline; do
  if tr "\0" " " < "$cmdline" 2>/dev/null | grep -q -- "$MARKER"; then
@@ -505,8 +510,16 @@ for path in "$HOME" "$CARGO_HOME/registry" "$TMPDIR" "$CARGO_TARGET_DIR"; do
  printf candidate > "$path/candidate-write"
 done
 test "$(pwd)" = "$CLONE"
-' || { echo "candidate checks failed: $?" >&2; kill "$MARKER_PID"; exit 42; }
+'
+# Shaped like Claude Code's command: the candidate moves the tracked cwd.
+"$PREFIX" "$CHECKS
+cd \"\$CARGO_TARGET_DIR\" && pwd -P >| '$TMPDIR/claude-mock-cwd'" \
+ || { echo "candidate checks failed: $?" >&2; kill "$MARKER_PID"; exit 42; }
 kill "$MARKER_PID"
+test "$(cat "$TMPDIR/claude-mock-cwd")" = "$CLONE"
+test "$(cat "$TMPDIR/harness-only")" = harness
+test ! -e "$TMPDIR/candidate-write"
+test "$(cat "$RUN/candidate-tmp/candidate-write")" = candidate
 test "$(cat "$CARGO_TARGET_DIR/candidate-write")" = candidate
 test ! -e "$HOME/.gitconfig"
 test ! -e "$HOME/.profile"
