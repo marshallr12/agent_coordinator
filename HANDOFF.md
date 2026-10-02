@@ -20,8 +20,10 @@ per-run staging login, and an owner run of the pinned Claude Code confirming
 the `pwd -P >| <TMPDIR file>` suffix (else every reviewer command exits 126).
 R-P3b.4 per U21 landed as `52191ce` (Claude launches in their own network
 namespace; supervisor relays only proxy and loopback staging; gate 566 tests;
-red-team CONFIRMED after one repair). **Next:** a root containment-suite leg
-that runs a real relayed launch, U18's per-run staging login, then R-P3b.2 once
+red-team CONFIRMED after one repair). The containment-suite relay leg landed
+as `f1edadd` (real mock-harness launch per role + broken-relay preflight
+check; red-team fix for pipefail; not yet run: needs root and the new
+supervisor installed on mxmini). **Next:** U18's per-run staging login, then R-P3b.2 once
 the user creates its App (U17). Codex launches still use the host namespace. `release-next/deploy-pre.sh` requires the key
 in `typesafe.env`, so the user's VM step (install `typesafe.env` 0600, new
 unit, daemon-reload, drop the key from `service.env`, restart) precedes the
