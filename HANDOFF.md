@@ -15,16 +15,18 @@ its cwd residual `6f19eb4`: candidate-shell resets the harness's tracked cwd
 to the clone after each command, and candidates get their own
 `$RUN/candidate-tmp` while the harness's `$RUN/tmp` is a tmpfs inside the
 nested sandbox. Full gate green (fmt, Clippy, 554 tests, docs) and an
-independent CONFIRMED review. Still open before the first live launch: U18's
-per-run staging login, and an owner run of the pinned Claude Code confirming
+independent CONFIRMED review. Still open before the first live launch: an
+owner run of the pinned Claude Code confirming
 the `pwd -P >| <TMPDIR file>` suffix (else every reviewer command exits 126).
 R-P3b.4 per U21 landed as `52191ce` (Claude launches in their own network
 namespace; supervisor relays only proxy and loopback staging; gate 566 tests;
 red-team CONFIRMED after one repair). The containment-suite relay leg landed
 as `f1edadd` (real mock-harness launch per role + broken-relay preflight
 check; red-team fix for pipefail; not yet run: needs root and the new
-supervisor installed on mxmini). **Next:** U18's per-run staging login, then R-P3b.2 once
-the user creates its App (U17). Codex launches still use the host namespace. `release-next/deploy-pre.sh` requires the key
+supervisor installed on mxmini). U18's per-run staging login landed per U22
+as `e47c46f` (supervisor signs in, candidates get only the session cookie,
+signed out at launch end; gate 573 tests; red-team CONFIRMED after one
+repair). **Next:** R-P3b.2 once the user creates its App (U17). Codex launches still use the host namespace. `release-next/deploy-pre.sh` requires the key
 in `typesafe.env`, so the user's VM step (install `typesafe.env` 0600, new
 unit, daemon-reload, drop the key from `service.env`, restart) precedes the
 next deploy. Then: user ship authorization; owner Claude host/auth proof; S6
@@ -549,6 +551,7 @@ Record answers here.
 | U19 | R-P3b.4 cross-uid loopback | Per-launch network namespace (bwrap `--unshare-net` + user-mode egress such as pasta); spike on mxmini first | 2026-10-02: **as recommended** |
 | U20 | R-P3b.5(d) read-only credentials creating sessions/subagents | Block subagents only: read-only keeps its own top-level session (MCP, acknowledgments); any registration with a `subagent` block (create or resume) gets 403 | 2026-10-02: **as recommended** (corrected the same day: the first wording would have blocked read-only reviewers' own sessions) |
 | U21 | R-P3b.4 egress from the per-launch netns (refines U19) | Supervisor port bridge: bwrap `--unshare-net`; the supervisor relays only the proxy (3128) and staging (18080) ports into the namespace over per-launch Unix sockets; no pasta/passt install (absent on mxmini); the 32768-60999 cross-uid loopback rule can then go | 2026-10-02: **as recommended** |
+| U22 | U18 per-run staging login | Session handoff: before launch the supervisor (outside the candidate sandbox) signs in with the persistent operator login and hands candidate code only that run's session cookie in a run file; it signs the session out at terminal. No server change; a missed sign-out is bounded by the fixed 12h session lifetime. Coordinator-specific (the staging coordinator's login API) | 2026-10-02: **as recommended** |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
