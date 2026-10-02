@@ -15,6 +15,7 @@ SPEC = importlib.util.spec_from_file_location("ship", Path(__file__).with_name("
 SHIP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SHIP)
 SHA = "1234567890abcdef" * 2 + "12345678"
+REPO = "Owner/Repo"
 
 
 def actions(status="in_progress", conclusion=None):
@@ -66,6 +67,7 @@ class ShipDeadlineTests(unittest.TestCase):
         # Even an unexpected test path cannot launch Git, gh, or a real process.
         self.assertEqual(args[:3], ("gh", "run", "list"))
         self.assertEqual(args[args.index("--commit") + 1], SHA)
+        self.assertEqual(args[args.index("--repo") + 1], f"github.com/{REPO}")
         self.assertTrue(kwargs["text"])
         self.assertTrue(kwargs["capture_output"])
         self.assertGreater(kwargs["timeout"], 0)
@@ -89,7 +91,7 @@ class ShipDeadlineTests(unittest.TestCase):
 
     def assert_exit(self, message, timeout=SHIP.CHECKS_TIMEOUT_SECONDS):
         with self.assertRaises(SystemExit) as error:
-            SHIP.wait_for_checks(SHA, checks_timeout=timeout)
+            SHIP.wait_for_checks(SHA, REPO, checks_timeout=timeout)
         self.assertIn(message, str(error.exception))
         self.assertIn(SHA, str(error.exception))
 
@@ -145,7 +147,7 @@ class ShipDeadlineTests(unittest.TestCase):
                 self.calls.clear()
                 self.responses.clear()
                 self.responses.extend([actions()] * 21 + [actions("completed", "success")])
-                SHIP.wait_for_checks(SHA, checks_timeout=budget)
+                SHIP.wait_for_checks(SHA, REPO, checks_timeout=budget)
                 self.assertEqual(self.clock.now, self.clock.started + 315)
                 self.assertEqual(len(self.calls), 22)
                 self.assertTrue(all(timeout == 300 for _, timeout in self.calls))
@@ -198,7 +200,7 @@ class ShipDeadlineTests(unittest.TestCase):
 
     def test_completed_success_returns_without_polling(self):
         self.default_runs = actions("completed", "success")
-        SHIP.wait_for_checks(SHA)
+        SHIP.wait_for_checks(SHA, REPO)
         self.assertEqual(self.calls, [(1000.0, 300.0)])
         self.assertEqual(self.clock.sleeps, [])
 
@@ -207,7 +209,7 @@ class ShipDeadlineTests(unittest.TestCase):
             self.delayed(2, actions()),
             self.delayed(1, actions("completed", "success")),
         ])
-        SHIP.wait_for_checks(SHA, checks_timeout=20)
+        SHIP.wait_for_checks(SHA, REPO, checks_timeout=20)
         self.assertEqual(self.calls, [(1000.0, 20.0), (1017.0, 3.0)])
         self.assertEqual(self.clock.now, self.clock.started + 18)
         self.assertEqual(self.clock.sleeps, [(1002.0, 15)])
@@ -249,13 +251,14 @@ class ShipDeadlineTests(unittest.TestCase):
                     argv.extend(["--checks-timeout", value])
                 with mock.patch.object(SHIP, "run", return_value="topic"), \
                      mock.patch.object(SHIP, "clean_head", return_value=SHA), \
+                     mock.patch.object(SHIP, "validated_remote", return_value=("f", "p", REPO)), \
                      mock.patch.object(SHIP, "require_fast_forward"), \
                      mock.patch.object(SHIP, "remote_tip", return_value=SHA), \
                      mock.patch.object(SHIP, "wait_for_checks") as wait, \
                      mock.patch.object(SHIP.sys, "argv", argv), \
                      mock.patch.object(SHIP.sys, "stdout", new_callable=io.StringIO):
                     SHIP.main()
-                    wait.assert_called_once_with(SHA, checks_timeout=expected)
+                    wait.assert_called_once_with(SHA, REPO, checks_timeout=expected)
         self.process.assert_not_called()
 
 
