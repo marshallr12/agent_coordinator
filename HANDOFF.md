@@ -28,6 +28,25 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
   before writes. Full gate on it: fmt, warnings-denied Clippy, 546 tests,
   zero ignored (`r5d-*.log`). Independently CONFIRMED. Untested: replay
   ordering (no test pins the check above the replay branch).
+- `709d277` R-P3b.3, decision U18: Claude reviewer Bash commands run through
+  `CLAUDE_CODE_SHELL_PREFIX` = generated `$RUN/candidate-shell` in a nested
+  bwrap (state dir tmpfs; clone ro; tmp/target/Cargo rw; private
+  `$RUN/candidate-home` over `$HOME`; Claude config ro with login masked; env
+  credentials unset; own pid/ipc/uts/user ns; no nested userns; ro /proc).
+  Reviewer outer keeps userns + rw /proc for nesting; Codex reviewers refused.
+  Two repairs (unpinned inner flags; shared `$HOME` let planted
+  `.gitconfig`/`.profile` reach Claude Code's out-of-prefix git/login shell).
+  Final review INCONCLUSIVE; user chose commit and track. Full gate: fmt,
+  Clippy, 550 tests, docs (`r3-*.log`). One unrelated flake seen once:
+  `namespace_teardown_kills_detached_descendants_on_exit_and_wrapper_kill`.
+  **Open, blocks first live launch (own repair budget):** candidate can move
+  the harness's tracked cwd into shared tmp/target/Cargo dirs; an out-of-prefix
+  `git status` there could run a candidate filter with the reviewer login
+  (trigger unconfirmed; site gated by CLAUDE_CODE_AUTO_MODE_GIT_STATUS). Fix:
+  candidate-shell resets the cwd file to the clone, plus an instrumented owner
+  run (git shim logging cwd). Also unverified on a real host: prefix applies to
+  background Bash, fd inheritance into the prefix, shell snapshots, UI checks
+  (need U18's per-run short-lived staging login, not built).
 - Gate: ship tests (18), routing tests (36), pinned docs check and py_compile
   passed; no Rust/Cargo change since the full gate on `0beabe8`. Logs:
   `~/.local/share/agent-coordinator-autonomy/core-20261002/followup-*.log`.
@@ -36,10 +55,10 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
 - Known false refusals by design: https URLs with userinfo (token insteadOf)
   and ssh→https insteadOf with pushInsteadOf back.
 
-Remaining: user ship authorization for this branch (do not ship before the
-VM `typesafe.env` step); owner Claude host/authentication/refresh/browser
-proof; R-P3b.3 reviewer bwrap (U18), R-P3b.4 netns spike (U19), R-P3b.2 push
-helper once the user creates its App (U17); S6 cutover chain.
+Remaining: R-P3b.3 residual (cwd reset) and per-run staging login; R-P3b.4
+netns spike (U19); R-P3b.2 push helper once the user creates its App (U17);
+user ship authorization (after the VM `typesafe.env` step); owner Claude
+host/auth/refresh/browser proof; S6 cutover chain.
 
 The user disabled the Agent Coordinator workflow and authorized overnight local
 implementation with subagents. Cutoff: 2026-10-02 08:00 America/New_York
