@@ -115,8 +115,9 @@ and kept by rotation:
   be measured from the log.
 - `access`: `write` (default) or `read`. A read-only credential may read any
   state its principal can see and may open, acknowledge instructions for, and
-  close its own agent session. Every other change is refused with
-  `operation_not_permitted`. Reviewer launches and shadow host principals use
+  close its own top-level agent session. A session registration that names a
+  subagent, and every other change, is refused with `operation_not_permitted`,
+  so a read-only credential never creates or resumes a subagent identity. Reviewer launches and shadow host principals use
   read-only credentials; their verdicts are posted by a separate write
   credential.
 

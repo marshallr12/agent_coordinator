@@ -980,6 +980,43 @@ async fn host_cli_initializes_once_from_stdin_without_printing_password() {
     assert_eq!(count, 1);
 }
 
+#[tokio::test]
+async fn read_only_credentials_cannot_register_subagent_sessions() {
+    let fixture = Fixture::new().await;
+    let browser = fixture.login().await;
+    sqlx::query("INSERT INTO projects(id,name,repository_url,target_branch,created_at) VALUES('p1','P','https://example.test/p.git','main',1)")
+        .execute(&fixture.state.pool).await.unwrap();
+    let (token, _) = issue_with(&fixture, &browser, "reviewer", "supervised", "read").await;
+    let proof = secret();
+    // The read-only credential still manages its own top-level session.
+    fixture
+        .register(&token, "parent", &proof, "parent-key")
+        .await
+        .ok();
+    let child_proof = secret();
+    let body = json!({"session_id":"child","workstation_id":"workstation-1","harness":"test-harness","capabilities":["code"],
+        "subagent":{"project_id":"p1","name":"helper","parent_session_id":"parent"}});
+    let headers = [
+        ("authorization", format!("Bearer {token}")),
+        ("x-coordinator-session-proof", child_proof),
+        ("idempotency-key", "child-key".into()),
+    ];
+    let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    fixture
+        .call("POST", "/api/v1/sessions", &headers, Some(body))
+        .await
+        .error(StatusCode::FORBIDDEN, "operation_not_permitted");
+    let identities: i64 = sqlx::query_scalar("SELECT count(*) FROM subagent_identities")
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    let child: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_sessions WHERE id='child'")
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!((identities, child), (0, 0));
+}
+
 /// Issues an agent credential with explicit attributes and returns its token
 /// and credential id (autonomy plan §2.2 6b).
 async fn issue_with(

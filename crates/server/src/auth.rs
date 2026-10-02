@@ -16,7 +16,7 @@ use sqlx::{Row, SqliteConnection};
 use subtle::ConstantTimeEq;
 
 use crate::{
-    credential_attributes::{CredentialAccess, CredentialAttributes, CredentialClass},
+    credential_attributes::{self, CredentialAccess, CredentialAttributes, CredentialClass},
     error::AppError,
     mutation::Mutation,
     response,
@@ -784,6 +784,9 @@ async fn create_session(
     )
     .await?;
     agent(&mutation.actor)?;
+    if input.subagent.is_some() {
+        credential_attributes::require_subagent_access(&mutation.actor)?;
+    }
     if let Some(replay) = &mutation.replay {
         return Ok(response(replay.clone()));
     }

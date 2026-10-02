@@ -98,15 +98,32 @@ fn allowed_for_read_access(operation: &str) -> bool {
                 || operation.ends_with("/instruction-acknowledgments")))
 }
 
+/// True when the caller holds a read-only agent credential. Browser sessions
+/// and reporters carry no attributes and are never read-only here.
+fn is_read_only(actor: &Actor) -> bool {
+    actor
+        .credential_attributes
+        .is_some_and(|a| a.access == CredentialAccess::Read)
+}
+
 /// Refuses a mutation from a read-only credential unless it only manages the
 /// caller's own session. Browser sessions and reporters carry no attributes.
 pub fn require_write_access(actor: &Actor, operation: &str) -> Result<(), AppError> {
-    let read_only = actor
-        .credential_attributes
-        .is_some_and(|a| a.access == CredentialAccess::Read);
-    if read_only && !allowed_for_read_access(operation) {
+    if is_read_only(actor) && !allowed_for_read_access(operation) {
         return Err(AppError::forbidden(
             "This credential is read-only; it may inspect state and manage its own session only.",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses subagent identities to read-only credentials (R-P3b.5(d), U20):
+/// they may register their own top-level session but never create or resume
+/// a subagent identity, which would extend agent identity from a read key.
+pub fn require_subagent_access(actor: &Actor) -> Result<(), AppError> {
+    if is_read_only(actor) {
+        return Err(AppError::forbidden(
+            "This credential is read-only; it cannot register subagent sessions.",
         ));
     }
     Ok(())
