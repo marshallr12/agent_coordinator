@@ -149,8 +149,37 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
   (pack stored twice, refused packs kept); first push fetches full
   prerequisite history; EBCDIC-style re-encoding is obfuscation, not caught.
 
-Remaining: R-P3b.2 phases 2 (`agentc-push` binary), 3 (CLI via the helper
-socket), 4 (supervisor spawn/bind), 5 (host setup, containment suite, docs);
+- `bb5294b` R-P3b.2 phase 3: with `AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET`
+  (absolute path; blank = unset) a code submission refuses `--candidate-ref`,
+  checks the base commit, pre-scans with the caller's credential digest
+  (the helper cannot know it), sends, then reads the helper's ref back
+  (exact commit + tree). Codes: refused (per RefusalCode), connection
+  failure incl. EOF-before-reply → 7 retryable (helper retry is
+  idempotent), pre-send local error → 2, protocol violation → 5. Red team
+  DISPUTED twice (classification, Windows dead code, escapes, env parsing;
+  then EOF-before-reply), round 3 CONFIRMED. Residual: the CLI records any
+  prefixed ref already holding the exact commit (no launch identity
+  client-side; bind server-side if needed); no socket timeout on the client.
+- `2132b4c` R-P3b.2 phase 2: `agentc-push serve [--config /etc/agentc/push.toml]
+  --socket --task --launch --work-dir [--known-digest]... [--parent-pid]`
+  (integrator crate, now lib + 2 bins; example `crates/integrator/push.example.toml`;
+  `app_id`, `installation_id`, `repository` required). Mints only after a
+  valid preamble, budget burst 3 / 1 per 20 s, token scoped to the repo +
+  contents:write, askpass via self with `GIT_CONFIG_PARAMETERS`/global/system
+  neutralised and env cleared to PATH/HOME/LANG/LC_ALL, revoked always;
+  refuses root; PDEATHSIG (follows the spawning *thread*); socket 0660 via a
+  0700 staging dir + hard link. Red team DISPUTED once (mint per empty
+  connection, inherited Git env, chmod window), round 2 CONFIRMED.
+  **Phase 4 must:** spawn from a launch-lived thread with `env_clear()`,
+  pass `--parent-pid`, keep socket paths < 108 bytes, remove a stale socket
+  after SIGKILL, and settle one-submission-per-launch (the helper moves its
+  single ref on resubmission). Full gate on the combined tree: fmt, Clippy,
+  641 tests, 0 ignored, docs (`p2f-*.log`); one ETXTBSY flake in
+  `candidate::shell_tests` once, 3/3 reruns green.
+
+Remaining: R-P3b.2 phases 4 (supervisor spawn/bind/env) and 5 (host setup:
+`agentc-push` uid, key ownership, `/etc/agentc/push.toml`; containment suite;
+docs);
 owner Claude host/auth/refresh/browser proof; S6 cutover chain.
 
 The user disabled the Agent Coordinator workflow and authorized overnight local
