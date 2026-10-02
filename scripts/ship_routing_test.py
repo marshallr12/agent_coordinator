@@ -128,6 +128,55 @@ class FastForwardTests(unittest.TestCase):
                         ship.require_fast_forward("publish", "main", SHA)
 
 
+
+class RemoteTipTests(unittest.TestCase):
+    """Readback must name the exact ref, never a suffix-matching decoy."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                        GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                        GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        self.work = os.path.join(directory.name, "work")
+        self.bare = os.path.join(directory.name, "remote.git")
+        self.git("init", "--quiet", self.work, cwd=directory.name)
+        self.git("init", "--quiet", "--bare", self.bare, cwd=directory.name)
+        self.real, self.decoy = self.commit("real"), self.commit("decoy")
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(("git",) + args, cwd=cwd or self.work, env=self.env,
+                              text=True, capture_output=True, check=True).stdout.strip()
+
+    def commit(self, message):
+        self.git("commit", "--quiet", "--allow-empty", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def tip(self, branch):
+        previous = os.getcwd()
+        os.chdir(self.work)
+        try:
+            with patch.dict(os.environ, self.env, clear=True):
+                return ship.remote_tip(self.bare, branch)
+        finally:
+            os.chdir(previous)
+
+    def test_decoy_suffix_ref_is_ignored(self):
+        self.git("push", "--quiet", self.bare, f"{self.decoy}:refs/heads/a/refs/heads/main",
+                 f"{self.real}:refs/heads/main")
+        self.assertEqual(self.tip("main"), self.real)
+
+    def test_only_a_decoy_reads_as_absent(self):
+        self.git("push", "--quiet", self.bare, f"{self.decoy}:refs/heads/x/refs/heads/main",
+                 f"{self.decoy}:refs/heads/x/refs/heads/ac/human/topic")
+        self.assertEqual(self.tip("main"), "")
+        self.assertEqual(self.tip("ac/human/topic"), "")
+
+    def test_exact_nested_branch_is_found(self):
+        self.git("push", "--quiet", self.bare, f"{self.real}:refs/heads/ac/human/topic")
+        self.assertEqual(self.tip("ac/human/topic"), self.real)
+
 class ShipTestCase(unittest.TestCase):
     def invoke(self, fetch_url="https://github.com/Owner/Repo.git",
                push_url="git@github.com:Owner/Repo.git", human_tip=SHA,

@@ -48,9 +48,17 @@ def clean_head():
 
 
 def remote_tip(remote, branch):
-    """Reads the remote branch's current commit id ('' when absent)."""
-    line = run("git", "ls-remote", "--refs", remote, f"refs/heads/{branch}")
-    return line.split()[0] if line else ""
+    """Reads the remote branch's current commit id ('' when absent).
+
+    ls-remote patterns match any ref ending in the pattern, so a decoy such
+    as refs/heads/a/refs/heads/main is also listed; only the exact ref counts.
+    """
+    ref = f"refs/heads/{branch}"
+    for line in run("git", "ls-remote", "--refs", remote, ref).splitlines():
+        sha, separator, name = line.partition("\t")
+        if separator and name == ref:
+            return sha
+    return ""
 
 
 def require_fast_forward(remote, target, sha):
