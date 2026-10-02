@@ -177,9 +177,41 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
   641 tests, 0 ignored, docs (`p2f-*.log`); one ETXTBSY flake in
   `candidate::shell_tests` once, 3/3 reruns green.
 
-Remaining: R-P3b.2 phases 4 (supervisor spawn/bind/env) and 5 (host setup:
-`agentc-push` uid, key ownership, `/etc/agentc/push.toml`; containment suite;
-docs);
+- `f55cdbc` R-P3b.2 phase 4a, U26 (narrows U24): the helper creates its ref
+  only when absent and never moves it; same-commit retry (incl. intent
+  recovery) accepted; any other commit → `candidate_already_published`
+  (early, before the bundle, once a lease exists); CLI exit 5. Red team
+  CONFIRMED first round. Lows: a crash after the push but before the lease, plus a foreign
+  deletion, lets a second commit through (X was never acknowledged); corrupt
+  lease reads as absent (fails closed as bundle_invalid); the refusal does not
+  name the published commit. A refused second commit still costs one mint.
+- `d8a9b80` R-P3b.2 phase 4b, U25: `agentc-supervisor launch-root` (root).
+  Per-launch dir `<state_dir>/push/<session>/` (push root 0711 root-only;
+  `sock/` agentc-push:<impl primary gid> 2750; `work/` agentc-push 0700) —
+  not under `$RUN` because `runs/` is 0700 agentc-impl. Helper as agentc-push
+  via setgroups/setgid/setuid in pre_exec (verifies setuid(0) fails), env
+  PATH/LANG/HOME=work, `--parent-pid`, digests of implementer-owned
+  `credentials.toml` tokens; ≤10 s socket wait; launch child as agentc-impl
+  with `--push-socket --task --session-id`; SIGTERM→5 s→SIGKILL; dir removed;
+  teardown failures warn and keep the launch's exit code. Sweep of stale
+  dirs (incl. abandoned `.new-*`) under `push/.sweep` flock. Claude sandbox
+  now masks `<state_dir>/push` and `<state_dir>/<role>/runs` (tmpfs) and binds
+  back only its own socket dir and `$RUN`. Ref = `.../candidates/<task>/<session-id>`.
+  Red team: DISPUTED (cross-launch socket reach via leaked session ids;
+  sweep race), then N1 lexical socket path + first-run `push/` race; all
+  repaired; full gate fmt, Clippy, 669 tests, 0 ignored, docs (`p4bf-*.log`).
+  **Known gap (documented):** Codex implementers run in the host namespace as
+  agentc-impl and can reach concurrent launches' sockets — run Codex
+  implementers one at a time. Unverified without root: the real uid switch,
+  setgid inheritance onto the socket, agentc-rev refused, `host_problems`
+  inside `launch_root`. A SIGKILLed launch-root leaves the launch child running
+  without its helper (next run sweeps the dir).
+
+Remaining: R-P3b.2 phase 5 (host-setup: `agentc-push` account, binary
+`/usr/local/bin/agentc-push`, `/etc/agentc/push.toml` root 0644-ish readable
+by agentc-push, key `/etc/agentc/push-app.pem` readable only by agentc-push,
+`/var/lib/agentc` traversable by agentc-impl; containment-suite leg proving
+the root-only items above; docs);
 owner Claude host/auth/refresh/browser proof; S6 cutover chain.
 
 The user disabled the Agent Coordinator workflow and authorized overnight local
