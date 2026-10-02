@@ -109,7 +109,30 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
   step that proves it. Staging relay is not in this leg (no login fixture);
   `tests/launch_relay.rs` covers it.
 
-Remaining: per-run staging login (U18); R-P3b.2
+- `e47c46f` U22 per-run staging session (refines U18): new
+  `staging_login.rs`. After `state.started`, a verifying Claude reviewer
+  launch signs in to staging from the supervisor (login file never enters a
+  sandbox), writes only `{url, cookie}` to `$RUN/verification-session.json`
+  (create_new 0600; ro-bind into the candidate sandbox), signs out after the
+  harness (also on spawn/wait failure, and if writing the file fails).
+  Sign-in failure fails the launch. Loopback per `relay::staging_address`
+  (direct, `.resolve` to the relay address); otherwise https via the egress
+  proxy. Reviewer harness gets a tmpfs over `rev/verification`.
+  `verification.json` names `session_file` (not `credential_file`);
+  `verify_ui.mjs` sets the cookie via CDP (form login kept for hand-written
+  descriptions). Gate: fmt, Clippy, 573 tests, 0 ignored, docs (`u22r-*.log`).
+  Two mutations red (candidate bind, harness hide). Local e2e against a real
+  staging server + Chrome: `/me` 200 with the cookie, `verify_ui` OK, 401
+  after sign-out (temporary test, not committed). Red-team round 1 DISPUTED
+  (`.localhost` mismatch with relay, harness could read logins, http
+  off-host, long functions); repaired; round 2 CONFIRMED. Residuals: no
+  sign-out on panic/SIGKILL (12h session bound); a cookie holder has operator
+  power on staging during the run; staging login rate limit 5/min/user and
+  10-session cap may bite bursts of reviewer launches; https `__Host-` cookie
+  via CDP untested; trailing-dot Origin vs the server's origin check
+  untested.
+
+Remaining: R-P3b.2
 push helper once the user creates its App (U17);
 user ship authorization (after the VM `typesafe.env` step); owner Claude
 host/auth/refresh/browser proof; S6 cutover chain.
