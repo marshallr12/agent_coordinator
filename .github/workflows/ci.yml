@@ -33,6 +33,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Install Bubblewrap for the supervisor sandbox tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          # Ubuntu 24.04's AppArmor default blocks the unprivileged user namespaces bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Run workspace tests
         run: cargo test --workspace --locked
       - name: Build service and native CLI
