@@ -72,8 +72,30 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
   (`--unshare-net`, relay only proxy 3128 and staging 18080 over per-launch
   Unix sockets); pasta/passt is not installed on mxmini.
 
-Remaining: per-run staging login (U18); R-P3b.4 bridge (U21); R-P3b.2 push
-helper once the user creates its App (U17);
+- `52191ce` R-P3b.4 per U21: Claude launches run with `--unshare-net`; the
+  supervisor relays only the proxy and a verifying reviewer's loopback
+  staging port (host half: Unix sockets in `$RUN/net` -> that TCP address,
+  under the firewall; namespace half: hidden `netns-relay` listens on the
+  same ports and runs the harness). Ports must be IPv4 loopback >= 1024;
+  unfaithful loopback staging URLs are refused. Preflight requires a
+  root-owned supervisor binary and runs its relay once. Supervisor is now
+  lib + bin; `tests/launch_relay.rs` drives a real wrapped reviewer launch
+  through both halves. Full gate: fmt, Clippy, 566 tests, docs
+  (`r4b-*.log`). Red-team round 1 DISPUTED (host half untested, silent
+  staging forms, ports < 1024 unbindable); one repair, round 2 CONFIRMED.
+  Residuals: mutants "launch::run skips start_host" and "check skips
+  probe_relay" survive (paths need root-owned binaries) -> add a root
+  containment-suite leg running a real `launch` whose mock harness reaches
+  the proxy via the relay (`check_claude_sandbox` currently cuts args at the
+  first `--`, so it never runs the relay). Codex launches keep the host
+  namespace and the firewall ephemeral range. Silent fail-closed staging
+  forms remain (percent-encoded hosts, `0.0.0.0`, `0x`). Owner-run: host
+  relay under the real nft rule; Claude Code and Chromium behind the relay.
+  Pre-existing flake `namespace_teardown_kills_detached_descendants...` hit
+  once under full parallel load (0/15 both here and at HEAD afterwards).
+
+Remaining: per-run staging login (U18); containment-suite relay leg; R-P3b.2
+push helper once the user creates its App (U17);
 user ship authorization (after the VM `typesafe.env` step); owner Claude
 host/auth/refresh/browser proof; S6 cutover chain.
 
