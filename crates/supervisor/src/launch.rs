@@ -4,6 +4,7 @@ use crate::confine::{self, RunState};
 use crate::preflight;
 use crate::profile::{self, LaunchCommand, LaunchSpec, Role, run_files};
 use crate::role_settings;
+use crate::sandbox;
 use crate::verification;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -45,7 +46,7 @@ pub fn run(spec: &LaunchSpec, config: &Config) -> Result<i32> {
     if !problems.is_empty() {
         bail!("preflight refused the launch:\n- {}", problems.join("\n- "));
     }
-    let command = profile::command(spec, config);
+    let command = sandbox::wrap(profile::command(spec, config), spec, config);
     state.started(spec)?;
     let mut child = match spawn(&command, spec) {
         Ok(child) => child,
@@ -60,16 +61,26 @@ pub fn run(spec: &LaunchSpec, config: &Config) -> Result<i32> {
 }
 
 /// Spawns the harness with exactly the profile's environment.
-fn spawn(command: &LaunchCommand, spec: &LaunchSpec) -> Result<std::process::Child> {
+pub(crate) fn spawn(command: &LaunchCommand, spec: &LaunchSpec) -> Result<std::process::Child> {
     confine::regular_file(&command.stdin).context("inspect prompt")?;
+    let prompt = File::open(&command.stdin).context("open prompt")?;
+    let prompt = if spec.harness == profile::Harness::Claude {
+        sandbox::sealed_prompt(prompt)?
+    } else {
+        prompt
+    };
     let stdout = new_log(&spec.run.join("events.jsonl"))?;
     let stderr = new_log(&spec.run.join("stderr.log"))?;
-    Command::new(&command.program)
+    let mut process = Command::new(&command.program);
+    if spec.harness == profile::Harness::Claude {
+        sandbox::fence_descriptors(&mut process)?;
+    }
+    process
         .args(&command.args)
         .env_clear()
         .envs(command.env.iter().map(|(k, v)| (k, v)))
         .current_dir(&command.cwd)
-        .stdin(File::open(&command.stdin).context("open prompt")?)
+        .stdin(prompt)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()

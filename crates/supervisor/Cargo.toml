@@ -19,5 +19,8 @@ tokio.workspace = true
 toml = "0.9"
 uuid.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.189"
+
 [dev-dependencies]
 tempfile.workspace = true

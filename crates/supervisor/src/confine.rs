@@ -230,6 +230,33 @@ pub fn regular_file(path: &Path) -> Result<fs::Metadata> {
     Ok(metadata)
 }
 
+/// Executables run by the supervisor must not be replaceable through any
+/// ancestor. This check happens before invoking even a version/probe command.
+#[cfg(unix)]
+pub fn protected_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = regular_file(path)?;
+    ensure!(
+        metadata.uid() == 0 && metadata.mode() & 0o6022 == 0 && metadata.mode() & 0o111 != 0,
+        "{} must be root-owned, executable, non-setuid and not group/world-writable",
+        path.display()
+    );
+    for parent in path.ancestors().skip(1) {
+        let metadata = fs::symlink_metadata(parent)?;
+        ensure!(
+            metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
+            "executable parent {} must be protected by root ownership",
+            parent.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn protected_executable(_path: &Path) -> Result<()> {
+    anyhow::bail!("protected executables require Unix ownership checks")
+}
+
 pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
     regular_file(path)?;
     Ok(fs::read(path)?)

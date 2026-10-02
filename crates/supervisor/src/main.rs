@@ -3,8 +3,8 @@
 //! P2 scope (autonomy plan §2.3): exact launch profiles, generated role
 //! settings, hardened per-launch clones, a launch preflight and a single
 //! supervised launch. Scheduling, leases and reviews arrive in P3.
-//! Per-launch mutable state and retention coordinate cooperating supervisors;
-//! same-uid write isolation still requires host OS enforcement.
+//! Claude launches use a read-only Bubblewrap root with narrow writable mounts.
+//! Codex retains its native workspace-write profile.
 mod clone;
 mod config;
 mod confine;
@@ -15,6 +15,7 @@ mod network_probe;
 mod preflight;
 mod profile;
 mod role_settings;
+mod sandbox;
 mod shadow;
 mod verification;
 
@@ -184,7 +185,7 @@ fn report(problems: &[String]) -> ExitCode {
 /// Runs or describes a launch.
 fn launch_command(spec: &LaunchSpec, config: &config::Config, dry_run: bool) -> Result<ExitCode> {
     if dry_run {
-        let command = profile::command(spec, config);
+        let command = sandbox::wrap(profile::command(spec, config), spec, config);
         println!(
             "{}",
             serde_json::to_string_pretty(&launch::describe(&command))?

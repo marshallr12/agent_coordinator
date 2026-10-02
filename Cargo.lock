@@ -33,6 +33,7 @@ dependencies = [
  "anyhow",
  "clap",
  "coordinator-client",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

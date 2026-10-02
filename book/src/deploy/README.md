@@ -153,9 +153,51 @@ rejects refresh implementations that create a temporary file and rename it.
 The containment suite checks file write permission, not successful authentication
 or refresh. That live proof is required before using this layout for launches.
 
-B2 protects persistent seeds using filesystem ownership. Per-launch Cargo config
-and mutable state remain writable by the role account; same-uid process isolation
-and a read-only root filesystem with explicit writable mounts are B3 work.
-Neither this layout nor a passing preflight establishes that OS boundary. Host
-installation, authenticated launches, and the root containment suite remain
-operator checks; local validation uses supervisor tests and shell syntax checks.
+## Claude runtime write confinement
+
+B3 wraps Claude launches in root-owned, non-setuid Bubblewrap. The default
+binary is `/usr/bin/bwrap`; the owner installs a compatible distribution package
+(Bubblewrap 0.8 or newer). Launch preflight checks the binary and its protected
+ancestors and exercises the required kernel features. Missing user/PID namespace,
+nested-userns disabling, or `close_range(CLOSE_RANGE_CLOEXEC)` support blocks the
+launch. The installer does not change kernel policy or grant setuid privileges.
+
+The host root and run directory are read-only. The implementer's current clone
+is writable; the reviewer's clone remains read-only. Each launch separately
+mounts its home, Cargo home, coordinator state, temporary directory, and build
+directory writable. Their parents stay read-only, so an agent cannot rename the
+Cargo directory around its read-only config overlay. The root Cargo seed and
+persistent Claude settings are mounted over the per-launch Cargo config and
+both persistent and generated Claude settings. `CLAUDE.md` remains read-only.
+Only the persistent credential file is writable, retaining the in-place refresh
+limitation above. Stdout and stderr use private files opened by the supervisor;
+run metadata, prompt, lifecycle markers, and output paths remain read-only to
+filesystem writes from the sandbox. Claude's stdin is a sealed Linux memory
+snapshot of at most 16 MiB, with writing, growth, shrinking, and seal changes
+disabled. The host prompt file descriptor is closed before spawn, so reopening
+fd 0 through procfs cannot modify the original prompt. Oversized prompts or
+unavailable memfd sealing fail closed; Codex's stdin behavior is unchanged.
+
+New local clones use `--no-hardlinks`. Preflight refuses multiply-linked files,
+special files, or cross-device descendants inside writable trees. Mount roots and seed
+paths cannot contain symlinks. Repository symlinks are retained, but their targets
+remain subject to the mount boundary. Before exec, the supervisor marks every
+descriptor above stderr close-on-exec so inherited host file or directory handles
+cannot bypass read-only mounts. Claude gets a fresh PID namespace and procfs,
+an isolated `/dev`, no capabilities, no-new-privileges, disabled nested user
+namespaces, and a new terminal session. Namespace teardown kills detached
+children; only an observed wrapper exit makes the run eligible for retention.
+
+The network namespace is unchanged and still depends on the existing firewall
+and proxy; B3 adds no network isolation. This protects processes launched through
+the supervisor. An already running, unconfined process with the same host uid
+must be stopped before adoption; it is not fenced by another process's mounts.
+Codex retains its existing native workspace-write profile and persistent
+`CODEX_HOME`; these B3 checks do not establish additional Codex confinement.
+
+Local tests exercise actual Bubblewrap with a mock Bash harness, including
+cross-run writes, seed replacement, hard links, inherited descriptors, and child
+cleanup. The root containment suite also uses a mock shell. Host installation,
+authenticated Claude runs, nested harness/browser sandbox compatibility, and
+credential refresh remain owner verification work. No authenticated harness or
+native Codex success is claimed by these tests.

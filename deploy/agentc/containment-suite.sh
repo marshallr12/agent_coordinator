@@ -118,6 +118,60 @@ check_codex_sandbox() {
   expect_fail "$user: codex sandbox cannot write the role home" as "$user" sh -c "$sandbox touch $base/home/sandbox-escape"
 }
 
+# Exercise the exact Claude dry-run wrapper with a mock shell, without a model
+# call or reading credentials. Python closes inherited descriptors as the Rust
+# launcher does; module tests additionally exercise the native close_range hook.
+check_claude_sandbox() {
+  local user=$1 base=$STATE/${1#agentc-} role
+  role=$(role_of "$user")
+  as "$user" mkdir -p "$base/runs/suite-other" "$base/clones/suite-other"
+  expect_ok_logged "$user: Claude OS write boundary (mock harness)" "/root/agentc-claude-${1#agentc-}.log" \
+    as "$user" /usr/bin/python3 - "$SUP" "$base" "$role" <<'PY'
+import json
+import subprocess
+import sys
+
+supervisor, base, role = sys.argv[1:]
+run = base + "/runs/suite"
+clone = base + "/clones/suite"
+spec = ["--role", role, "--harness", "claude", "--clone", clone, "--run", run]
+description = json.loads(subprocess.check_output([supervisor, "launch", *spec, "--dry-run"]))
+args = description["args"]
+assert "--ro-bind" in args and "--die-with-parent" in args
+args = args[:args.index("--")]
+script = r'''
+set -eu
+base=$1
+role=$2
+run=$base/runs/suite
+clone=$base/clones/suite
+deny() { if "$@" 2>/dev/null; then echo "unexpected success: $*" >&2; exit 1; fi; }
+overwrite() { printf corrupted > "$1"; }
+for path in "$base/home/suite-escape" "$base/runs/suite-other/escape" \
+ "$base/clones/suite-other/escape" "$run/prompt.md" "$run/role-settings.json" \
+ "$CARGO_HOME/config.toml" "$CLAUDE_CONFIG_DIR/settings.json" \
+ "$CLAUDE_CONFIG_DIR/CLAUDE.md"; do
+ deny overwrite "$path"
+done
+deny mv "$CARGO_HOME" "$CARGO_HOME-replaced"
+deny touch "$run/unexpected-metadata"
+for path in "$HOME" "$CARGO_HOME/registry" "$AGENT_COORDINATOR_HOME" \
+ "$TMPDIR" "$CARGO_TARGET_DIR"; do
+ printf allowed > "$path/suite-own-write"
+done
+if [ "$role" = implementer ]; then
+ printf allowed > "$clone/suite-own-write"
+else
+ deny overwrite "$clone/suite-own-write"
+fi
+'''
+environment = dict(entry.split("=", 1) for entry in description["env"])
+subprocess.run([description["program"], *args, "--", "/bin/sh", "-c", script,
+                "mock-harness", base, role], env=environment, cwd=clone,
+               stdin=subprocess.DEVNULL, close_fds=True, check=True, timeout=30)
+PY
+}
+
 # The reviewer's pinned headless browser renders the staging dashboard under
 # uid + firewall (plan M2), and the implementer cannot read the reviewer's
 # verification logins. Skipped when no staging coordinator is listening.
@@ -157,6 +211,7 @@ main() {
     check_seeds "$1"
     check_egress "$1"
     check_codex_sandbox "$1"
+    check_claude_sandbox "$1"
   done
   check_browser
   if [ "$cargo_test" = "--cargo-test" ]; then check_cargo_test; fi

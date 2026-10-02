@@ -59,6 +59,20 @@ refuse_symlink() {
   if [ -L "$1" ]; then echo "refusing: $1 is a symlink; owner repair required" >&2; exit 1; fi
 }
 
+# The owner installs Bubblewrap with distribution packages. Never grant it
+# setuid privileges or relax kernel policy automatically to make a probe pass.
+require_bubblewrap() {
+  local path=/usr/bin/bwrap mode
+  if [ ! -f "$path" ] || [ -L "$path" ] || [ ! -x "$path" ] || [ "$(stat -c %u -- "$path")" != 0 ]; then
+    echo "install root-owned, non-setuid /usr/bin/bwrap (Bubblewrap 0.8 or newer) before setup" >&2; exit 1
+  fi
+  protected_chain /usr/bin
+  mode=$(stat -c %a -- "$path")
+  if (( (8#$mode & 06022) != 0 )); then
+    echo "Bubblewrap must be non-setuid and not group/world-writable; owner repair required" >&2; exit 1
+  fi
+}
+
 # Root-owned parents make protected children irreplaceable. Each writable
 # child belongs to its role separately. Existing real role directories can be
 # sealed without descending into their agent-controlled contents.
@@ -227,6 +241,7 @@ write_config() {
 # reviewer_user = "agentc-rev"
 # toolchain_dir = "/opt/agentc"
 # cargo_config_seed = "/etc/agentc/cargo-config.toml"
+# bubblewrap = "/usr/bin/bwrap"
 # browser = "/usr/bin/chromium"
 browser = "$(detect_browser)"
 egress_listen = "127.0.0.1:$PROXY_PORT"
@@ -417,13 +432,19 @@ dashboard and save each credentials.toml as $STATE/<role>/coordinator/credential
 Staging: deploy/agentc/staging.py up (as the owner), then run the commands
 "deploy/agentc/staging.py credentials" prints and add its [verification.<project-id>]
 entry below the KEEP line in $ETC/supervisor.toml.
+Claude requires unprivileged user/PID namespaces, nested-userns disabling and
+close_range(CLOSE_RANGE_CLOEXEC) kernel support. Preflight fails closed if these
+are unavailable. No kernel policy changes or unsandboxed fallback are automatic.
 Then run: sudo deploy/agentc/containment-suite.sh
+That suite uses a mock shell; authenticated Claude/browser compatibility and
+credential refresh still require separate owner verification.
 EOF
 }
 
 main() {
   require_root
   if [ "${1:-}" = "--uninstall" ]; then uninstall; return; fi
+  require_bubblewrap
   create_users
   create_dirs
   install_binaries

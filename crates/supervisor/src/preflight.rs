@@ -25,6 +25,9 @@ pub fn check(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     problems.extend(layout_problems(spec));
     problems.extend(state_problems(spec, config));
     problems.extend(settings_problem(spec));
+    if let Err(error) = crate::sandbox::check(spec, config) {
+        problems.push(format!("Claude write confinement: {error:#}"));
+    }
     problems.extend(verification_problems(spec, config));
     problems.extend(network_problems(config));
     match clone::hardening_problems(&spec.clone) {
@@ -75,6 +78,9 @@ fn binary_problems(program: &Path, pinned: &str) -> Vec<String> {
         return vec![format!("{} is not installed", program.display())];
     }
     let mut problems = writable_problem(program).into_iter().collect::<Vec<_>>();
+    if !problems.is_empty() {
+        return problems;
+    }
     if pinned.is_empty() {
         problems.push(format!(
             "no pinned version configured for {}",
@@ -93,23 +99,11 @@ fn binary_problems(program: &Path, pinned: &str) -> Vec<String> {
     problems
 }
 
-/// Binaries must be root-owned and not group- or world-writable.
-#[cfg(unix)]
+/// Never execute an untrusted binary, including its version command.
 fn writable_problem(program: &Path) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = std::fs::metadata(program).ok()?;
-    let unsafe_mode = metadata.mode() & 0o022 != 0;
-    (metadata.uid() != 0 || unsafe_mode).then(|| {
-        format!(
-            "{} must be root-owned and not group/world-writable",
-            program.display()
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn writable_problem(_program: &Path) -> Option<String> {
-    None
+    confine::protected_executable(program)
+        .err()
+        .map(|error| format!("{error:#}"))
 }
 
 /// `$RUN` and the clone must be disjoint, and the prompt must exist.
@@ -546,5 +540,16 @@ mod tests {
                 .join("\n")
                 .contains("required Cargo config seed")
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_binary_is_refused_without_executing_its_version_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("claude");
+        fs::write(&program, "#!/bin/sh\n: > \"$0.ran\"\nprintf pinned\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!binary_problems(&program, "pinned").is_empty());
+        assert!(!root.path().join("claude.ran").exists());
     }
 }

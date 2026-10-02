@@ -30,7 +30,7 @@ pub fn create(url: &str, mirror: Option<&Path>, revision: &str, dest: &Path) -> 
         !url.starts_with('-'),
         "repository URL cannot begin with a dash"
     );
-    let mut args = vec!["clone", "--no-checkout", "--quiet"];
+    let mut args = vec!["clone", "--no-hardlinks", "--no-checkout", "--quiet"];
     let mirror_text = mirror.map(|m| m.display().to_string());
     if let Some(mirror) = &mirror_text {
         args.extend(["--reference-if-able", mirror]);

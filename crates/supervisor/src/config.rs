@@ -39,6 +39,8 @@ pub struct Config {
     /// Required root-owned, read-only Cargo baseline copied into each launch.
     /// Preflight checks its contents and the protected parent directory chain.
     pub cargo_config_seed: PathBuf,
+    /// Root-owned, non-setuid Bubblewrap binary required for Claude launches.
+    pub bubblewrap: PathBuf,
     /// Exact harness versions a launch refuses to run without.
     pub pinned: Pinned,
     /// Root-owned headless browser offered to verifying reviewers.
@@ -74,6 +76,7 @@ impl Default for Config {
             egress_probe_blocked_host: "blocked.invalid".into(),
             toolchain_dir: PathBuf::from("/opt/agentc"),
             cargo_config_seed: PathBuf::from("/etc/agentc/cargo-config.toml"),
+            bubblewrap: PathBuf::from("/usr/bin/bwrap"),
             pinned: Pinned::default(),
             browser: PathBuf::from("/usr/bin/chromium"),
             verification: BTreeMap::new(),
