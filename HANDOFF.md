@@ -1,10 +1,58 @@
-# HANDOFF — Full agent autonomy for Agent Coordinator (S6 shipped; host bootstrap next)
+# HANDOFF — Agent Coordinator autonomy and core hardening
 
 Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of a review and
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point (2026-09-29 evening; 2026-09-30 UTC)
+## Current resume point — core overnight wave (2026-10-02)
+
+The user disabled the Agent Coordinator workflow. No live service tasks were
+created, claimed or updated. Local implementation, review and commits were
+approved until 08:00 Eastern on October 2 (12:00 UTC); no Git pushes, production
+changes, root host changes, credential issuance, rulesets or ownership switch.
+
+Resume the implementation in `~/src/worktrees/agent-coordinator-core`, branch
+`hardening/core-20261002`, based on freshly fetched `origin/main` `1e8aebb`.
+Read that tree's `HANDOFF.md` for the current phase evidence and exact next steps.
+The existing `autonomy/s6` tree was preserved. Historical live state below was
+not rechecked during this local hardening wave.
+
+- TypeSafe cap/breaker/context fallback tests: independently verified and locally
+  committed. Default cap 4; breaker opens for 60 seconds after three consecutive
+  failures and allows one recovery probe. Secret-file separation remains future
+  work; no TypeSafe key or host configuration was changed.
+- Claude confinement: per-launch state with isolated writable Cargo caches,
+  terminal-only last-five retention, protected root seeds and fail-closed path
+  validation, followed by Claude-only Bubblewrap mounts, descriptor fencing,
+  sealed prompt stdin and process cleanup. Independently verified locally;
+  owner host installation, authenticated credential refresh and nested browser
+  compatibility remain unverified. Codex native sandbox/auth behavior preserved.
+- `ship.py` overall deadline: independently verified and committed from the
+  clean `hardening/ship-deadline-20261002` lane. Default 1800 seconds; query cap
+  300 seconds; full-SHA failures cannot authorize a final push.
+- `ship.py` exact repository routing phase: **BLOCKED after two repairs**. Preserve
+  uncommitted `agent-coordinator-core-ship` work; do not integrate it. A Git remote
+  whose name is the approved URL can redirect literal URL operations to another
+  repository. Existing 26 tests pass but this independent counterexample fails.
+  The user chose to record the blocker and finish other lanes at this limit.
+- Builders used Sol/high and Astra/xhigh, with Astra/xhigh independent security
+  review. User's cache answer supersedes the older shared-cache D2 plan below:
+  each launch has writable isolated caches; efficient disk-pressure fallbacks
+  must preserve confinement. Disk pressure did not require a fallback.
+- Full integration gate passed on product commit `0beabe8`, Rust 1.99.0: format,
+  warnings-denied all-target Clippy, all 545 workspace tests (zero ignored), build,
+  local service/CLI smoke, backup/restore smoke, 18 shipping deadline tests, pinned
+  mdBook/source/package/link checks and dependency audit. Focused phase checks
+  also passed on Rust 1.98.1. Evidence:
+  `~/.local/share/agent-coordinator-autonomy/core-20261002/`. No push or deploy.
+
+Next backlog: resolve the blocked routing phase in a newly authorized phase;
+TypeSafe main-service-only secret-file deployment preparation; owner proof of
+Claude authentication/refresh and nested sandbox compatibility; then the shared
+supervisor security queue and S6 cutover prerequisites listed below. No live
+candidate proof or production cutover was claimed by this wave.
+
+## Historical resume point (2026-09-29 evening; 2026-09-30 UTC)
 
 The user explicitly disabled the Agent Coordinator workflow for this session. Do not create,
 claim or update service tasks; use this handoff for progress. This session override takes
@@ -161,7 +209,7 @@ serial operations work and is not a lane. This wave-set runs alongside it.
 - **Host facts (2026-10-01):** `host-setup.sh` ran on mxmini during P2 (§11); both
   `/var/lib/agentc/{impl,rev}/claude-config` are empty: no agent-account Claude login exists yet.
 
-### Wave plan (consumed by /wave-run)
+### Historical full wave plan (superseded for the core wave above)
 
 ```yaml
 wave_set: TypeSafe hardening ∥ R-P3b.1 Claude-profile write confinement ∥ ship.py hardening
