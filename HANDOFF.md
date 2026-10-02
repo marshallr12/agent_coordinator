@@ -7,21 +7,23 @@ execution, and links everything else.
 ## Current resume point — follow-up phases (2026-10-02 daytime)
 
 Agent Coordinator workflow disabled again; local commits only, no push/deploy.
-Branch `hardening/core-20261002` in `~/src/worktrees/agent-coordinator-core` now
-adds `09a2b78` (TypeSafe key in main-service-only `typesafe.env`), `8b24b8e`
-(C1 routing blocker resolved: remotes named like a URL snapshot refused, ASCII
-host match), `8c2cdc6` (exact-ref push readback) and `444bc62` (its handoff).
-All independently confirmed; script/docs gate legs green. Then `R-P3b.5(d)` (decision U20, read-only
-credentials refused subagent sessions) landed as its own commit after the
-full gate (fmt, Clippy, 546 tests) and an independent CONFIRMED review.
-Decisions U17–U20 (§6) unblock R-P3b.2–.4. R-P3b.3 landed as `709d277`
-(nested candidate sandbox via CLAUDE_CODE_SHELL_PREFIX; Codex reviewers refused);
-its residual cwd/out-of-prefix-git path and U18's per-run staging login stay open
-and block the first live launch. Next: that residual, then R-P3b.4 (mxmini netns
-spike); R-P3b.2 needs the user to create the App. `release-next/deploy-pre.sh`
-now requires the key in `typesafe.env`, so the user's VM step (install
-`typesafe.env` 0600, new unit, daemon-reload, drop the key from `service.env`,
-restart) must precede the next deploy. Next: R-P3b.3; user ship authorization; owner Claude host/auth proof; S6 cutover chain.
+Branch `hardening/core-20261002` in `~/src/worktrees/agent-coordinator-core`
+(read its `HANDOFF.md` for phase evidence) now holds the TypeSafe
+`typesafe.env` secret file (`09a2b78`), C1 routing (`8b24b8e`), exact-ref
+readback (`8c2cdc6`), R-P3b.5(d)/U20 (`417dbca`), R-P3b.3/U18 (`709d277`) and
+its cwd residual `6f19eb4`: candidate-shell resets the harness's tracked cwd
+to the clone after each command, and candidates get their own
+`$RUN/candidate-tmp` while the harness's `$RUN/tmp` is a tmpfs inside the
+nested sandbox. Full gate green (fmt, Clippy, 554 tests, docs) and an
+independent CONFIRMED review. Still open before the first live launch: U18's
+per-run staging login, and an owner run of the pinned Claude Code confirming
+the `pwd -P >| <TMPDIR file>` suffix (else every reviewer command exits 126).
+**Next: R-P3b.4 per U21** (supervisor port bridge, no pasta), then R-P3b.2 once
+the user creates its App (U17). `release-next/deploy-pre.sh` requires the key
+in `typesafe.env`, so the user's VM step (install `typesafe.env` 0600, new
+unit, daemon-reload, drop the key from `service.env`, restart) precedes the
+next deploy. Then: user ship authorization; owner Claude host/auth proof; S6
+cutover chain.
 
 ## Previous resume point — core overnight wave (2026-10-02)
 
@@ -541,6 +543,7 @@ Record answers here.
 | U18 | R-P3b.3 reviewer candidate-code isolation | Bubblewrap (reuse R-P3b.1 confinement): hide reviewer secrets/logins/config; only clone and target writable; staging via a per-run short-lived login | 2026-10-02: **as recommended** |
 | U19 | R-P3b.4 cross-uid loopback | Per-launch network namespace (bwrap `--unshare-net` + user-mode egress such as pasta); spike on mxmini first | 2026-10-02: **as recommended** |
 | U20 | R-P3b.5(d) read-only credentials creating sessions/subagents | Block subagents only: read-only keeps its own top-level session (MCP, acknowledgments); any registration with a `subagent` block (create or resume) gets 403 | 2026-10-02: **as recommended** (corrected the same day: the first wording would have blocked read-only reviewers' own sessions) |
+| U21 | R-P3b.4 egress from the per-launch netns (refines U19) | Supervisor port bridge: bwrap `--unshare-net`; the supervisor relays only the proxy (3128) and staging (18080) ports into the namespace over per-launch Unix sockets; no pasta/passt install (absent on mxmini); the 32768-60999 cross-uid loopback rule can then go | 2026-10-02: **as recommended** |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
