@@ -40,5 +40,10 @@ Human changes reach `main` only as fast-forwards to commits whose required
 checks are already green. Run `python3 scripts/ship.py` from a clean,
 committed branch: it pushes HEAD to `ac/human/<branch>`, waits for
 *Coordination checks* and *Documentation checks* to succeed on that exact
-commit, then fast-forwards `main` and confirms the remote tip. It never
+commit, then fast-forwards `main` and confirms the remote tip. The Actions wait
+has a monotonic 1,800-second overall deadline, including each `gh` query and
+polling delay; `--checks-timeout SECONDS` accepts a positive, finite override.
+Each query is capped at 300 seconds within that overall budget. Required
+workflows must still appear within 300 seconds. Completed success
+observed after a deadline cannot authorize publication. It never
 force-pushes; if `main` moved, rebase and ship again.
