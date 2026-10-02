@@ -14,8 +14,11 @@ host match), `8c2cdc6` (exact-ref push readback) and `444bc62` (its handoff).
 All independently confirmed; script/docs gate legs green. Then `R-P3b.5(d)` (decision U20, read-only
 credentials refused subagent sessions) landed as its own commit after the
 full gate (fmt, Clippy, 546 tests) and an independent CONFIRMED review.
-Decisions U17–U20 (§6) unblock R-P3b.2–.4: next is R-P3b.3 (reviewer bwrap),
-then R-P3b.4 (mxmini netns spike); R-P3b.2 needs the user to create the App. `release-next/deploy-pre.sh`
+Decisions U17–U20 (§6) unblock R-P3b.2–.4. R-P3b.3 landed as `709d277`
+(nested candidate sandbox via CLAUDE_CODE_SHELL_PREFIX; Codex reviewers refused);
+its residual cwd/out-of-prefix-git path and U18's per-run staging login stay open
+and block the first live launch. Next: that residual, then R-P3b.4 (mxmini netns
+spike); R-P3b.2 needs the user to create the App. `release-next/deploy-pre.sh`
 now requires the key in `typesafe.env`, so the user's VM step (install
 `typesafe.env` 0600, new unit, daemon-reload, drop the key from `service.env`,
 restart) must precede the next deploy. Next: R-P3b.3; user ship authorization; owner Claude host/auth proof; S6 cutover chain.
