@@ -1,4 +1,101 @@
-# P4 S6 implementation resume — 2026-09-29
+# Core hardening wave — 2026-10-02
+
+The user disabled the Agent Coordinator workflow and authorized overnight local
+implementation with subagents. Cutoff: 2026-10-02 08:00 America/New_York
+(12:00 UTC). No production changes, credential issuance, rulesets, ownership
+switch, host root changes or Git pushes are part of this wave.
+
+Integration tree: `~/src/worktrees/agent-coordinator-core`, branch
+`hardening/core-20261002`, based on freshly fetched `origin/main` `1e8aebb`.
+Each builder has its own `agent-coordinator-core-{typesafe,confinement,ship}`
+worktree, branch and Cargo target directory. The primary owns integration,
+checkpoint commits, gates and this handoff. Preserve the planning checkout
+`~/src/agent_coordinator` and existing `autonomy/s6` worktree.
+
+User decisions:
+
+- Isolated writable Cargo caches per launch. Under disk pressure, prune expired
+  terminal launch state first; any more efficient fallback must preserve write
+  isolation. Shared writable download caches are not authorized.
+- After two evidence-led repair attempts on a disputed phase, record its blocker
+  and continue independent lanes.
+- At most three concurrent subagents. Builders: TypeSafe `gpt-6.1-sol/high`,
+  Claude confinement `gpt-6-astra/xhigh`, ship.py `gpt-6.1-sol/medium`. Fresh
+  verifiers are at least as capable; security verification uses `gpt-6-astra/xhigh`.
+  The deadline repair reused the idle Astra/xhigh builder; A3 uses Sol/high.
+
+Current phase state:
+
+- A1 concurrency cap (default 4) independently verified after one bounds repair;
+  `249ea62` here (`d8155bb` in its lane). A2 circuit breaker independently
+  verified: three consecutive completed failures open it for 60 seconds, followed
+  by one half-open probe; stale completions cannot alter newer generations.
+  `60af14a` here (`f20a47d` in its lane). A3 application-context fallback/order,
+  deterministic recovery and redacted-log tests independently verified and
+  integrated as `0beabe8` (`7649f6a` in its lane): 30 library tests, seven
+  integration tests, warnings-denied scoped Clippy, format and pinned docs passed.
+- B1 per-launch state and terminal-only retention independently verified:
+  `1f8e96a` here (`487e2c5` in its lane). B2 protected seeds and validation before
+  writes independently verified: `1f9063a` here (`e44a701` in its lane).
+  B3 Claude-only OS write confinement independently verified after one repair:
+  `1383e0c` here (`69a3c75` in its lane). It uses bubblewrap, narrow writable
+  mounts, protected seeds, descriptor fencing, a bounded sealed prompt snapshot
+  and descendant cleanup. Codex keeps its existing native sandbox/auth behavior.
+  Supervisor focused gate: 55 tests, warnings-denied Clippy, format, shell syntax
+  and pinned docs passed on Rust 1.98.1. Actual owner-run host containment,
+  authenticated Claude credential refresh and nested browser compatibility remain
+  unverified. Root-owned Claude config parents prohibit temp-file/rename refresh;
+  owner bootstrap must import only the credential file from a separate login dir.
+  Do not treat local mock proofs as operational readiness.
+- C1 fetched-tip ancestry and exact GitHub repository routing is **BLOCKED**
+  after two repair attempts. Do not integrate its uncommitted changes from
+  `agent-coordinator-core-ship`. Its 26 tests pass, but an independent real Git
+  resolution probe found that a remote whose name is a saved URL can redirect
+  fetch/push/readback to an unchecked repository without any `url.*` rewrite.
+  Example: `remote.publish.url=https://github.com/Checked/Repo.git` and
+  `remote.https://github.com/Checked/Repo.git.url=https://github.com/Unchecked/Repo.git`.
+  `validated_remote("publish")` approves Checked while literal URL operations
+  resolve to Unchecked. No actual transport was used in the probe. Earlier
+  repairs fixed GH_HOST, mutable aliases and chained URL rewrites; respect the
+  user retry limit and retain this disputed work for a future phase.
+- C2 independently verified after one repair and integrated as `70c7c55`
+  (`06736bb` in its clean lane). Default overall Actions deadline is 1800 seconds,
+  appearance window remains 300 seconds, individual queries are capped at 300
+  seconds and bounded by remaining deadlines. Positive finite huge overrides do
+  not overflow subprocess polling; timeouts name the full SHA and stop final
+  push. Eighteen unit tests and four independent full-flow checks passed.
+  Tree `agent-coordinator-core-ship-deadline`, branch
+  `hardening/ship-deadline-20261002`, contains no disputed C1 changes.
+
+Final integration gate on product commit `0beabe8` passed on stable Rust 1.99.0:
+format, warnings-denied workspace/all-target Clippy, all 545 workspace tests
+(33 suites, zero ignored), locked workspace build, disposable loopback service/CLI
+smoke, backup/restore smoke, all 18 shipping deadline tests, pinned mdBook 0.5.4
+source/package/local-link checks, and dependency audit (372 dependencies).
+The focused phase gates also passed on Rust 1.98.1. No dependency version changed;
+Cargo.lock adds the already-resolved libc dependency to the supervisor only.
+The gate cleared ambient coordinator configuration and the TypeSafe key; no paid
+provider call or production service mutation occurred. Baseline had 502 tests.
+
+Evidence is outside Git under
+`~/.local/share/agent-coordinator-autonomy/core-20261002/`: see
+`integrated-gate-results.json` and `integrated-{fmt,clippy,tests,build,smoke,backup-smoke,ship-tests,docs,audit}.log`.
+The accepted lane worktrees are clean; the disputed routing tree is intentionally
+uncommitted. The original S6 tree was preserved. No branches were pushed and no
+production deployment or root host change was attempted.
+
+Next session: start with this handoff and `git status --short` in this integration
+worktree. Review `git log --oneline origin/main..HEAD` and the source diff before
+requesting authorization to ship. Do not ship through the disputed routing phase.
+Future work needs a new routing phase, TypeSafe main-service-only secret-file
+preparation, owner Claude host/authentication/refresh/browser proof, and the
+remaining supervisor security decisions. The two-repair cutoff applied to C1;
+do not silently resume a third repair in the completed core wave.
+
+S6 cutover and the later supervisor security queue remain separate work. The
+planning handoff records the 24-hour polling pass but no live candidate evidence.
+
+## Historical S6 implementation checkpoint — 2026-09-29
 
 The user disabled the Agent Coordinator workflow for this session. No service
 work was created, claimed or updated. Continue in branch `autonomy/s6`, worktree
