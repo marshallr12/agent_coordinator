@@ -55,8 +55,25 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
 - Known false refusals by design: https URLs with userinfo (token insteadOf)
   and ssh→https insteadOf with pushInsteadOf back.
 
-Remaining: R-P3b.3 residual (cwd reset) and per-run staging login; R-P3b.4
-netns spike (U19); R-P3b.2 push helper once the user creates its App (U17);
+- `6f19eb4` R-P3b.3 cwd residual: candidate-shell refuses (126, before
+  running) a command not ending in `pwd -P >| <plain file in $RUN/tmp>`;
+  after the nested sandbox exits it writes the clone path to that file and
+  returns the command's status. Candidates get `$RUN/candidate-tmp` as
+  TMPDIR; the harness's `$RUN/tmp` is a throwaway tmpfs inside, so no
+  candidate (incl. background) can rewrite the file. `cd` no longer persists.
+  Full gate: fmt, Clippy, 554 tests, docs (`r3cwd-*.log`); two mutations red.
+  Independent red-team CONFIRMED (real-bwrap probe with delayed and setsid
+  writers, dash/bash parsing table, four mutations). Owner-run checks: the
+  pinned CLI's cwd file is directly in TMPDIR with that suffix, background
+  and snapshot invocations carry it, and no harness file under `$RUN/tmp` is
+  handed to Bash. Hardening note: the final write follows a symlink, but only
+  the harness can create entries in `$RUN/tmp`.
+- Decision U21 (refines U19): R-P3b.4 uses a supervisor port bridge
+  (`--unshare-net`, relay only proxy 3128 and staging 18080 over per-launch
+  Unix sockets); pasta/passt is not installed on mxmini.
+
+Remaining: per-run staging login (U18); R-P3b.4 bridge (U21); R-P3b.2 push
+helper once the user creates its App (U17);
 user ship authorization (after the VM `typesafe.env` step); owner Claude
 host/auth/refresh/browser proof; S6 cutover chain.
 
