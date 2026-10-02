@@ -61,10 +61,14 @@ url = "http://127.0.0.1:18080"
 ```
 
 The supervisor writes `$RUN/verification.json` (URL, browser and the path of
-the reviewer-only login at `/var/lib/agentc/rev/verification/<project-id>.json`)
-and sets `AGENTC_VERIFICATION` and `CHROME_BIN`. For this project,
-`node scripts/verify_ui.mjs --path / --expect "text" --out "$RUN/ui"` signs in
-and saves `screenshot.png` and `dom.html` as review evidence. Implementer
+the run's session file) and sets `AGENTC_VERIFICATION` and `CHROME_BIN`. Just
+before the harness starts, the supervisor signs in to staging with the
+reviewer-only login at `/var/lib/agentc/rev/verification/<project-id>.json`
+and writes only that session's cookie to `$RUN/verification-session.json`; it
+signs the session out when the launch ends (decision U22). If sign-in fails,
+the launch fails. For this project,
+`node scripts/verify_ui.mjs --path / --expect "text" --out "$RUN/ui"` uses
+that session and saves `screenshot.png` and `dom.html` as review evidence. Implementer
 launches get no verification environment.
 
 ### Integrator staging soak

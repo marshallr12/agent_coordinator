@@ -1,13 +1,16 @@
 // UI verification against a supervised reviewer's verification environment
-// (autonomy plan §2.3, M2). Signs in to the dashboard with the environment's
-// test login, opens a path, optionally asserts visible text, and saves a
-// screenshot and the rendered DOM as review evidence.
+// (autonomy plan §2.3, M2). Signs in to the dashboard with the run's staging
+// session (or a test login), opens a path, optionally asserts visible text,
+// and saves a screenshot and the rendered DOM as review evidence.
 //
 //   node scripts/verify_ui.mjs [--path /] [--expect "text"]... [--out DIR]
 //
 // Reads $AGENTC_VERIFICATION (written by agentc-supervisor into $RUN) and runs
-// $CHROME_BIN headless. The password is read from the credential file named
-// there and is never printed. Only Node's standard library is used.
+// $CHROME_BIN headless. Supervised launches name a session_file: a browser
+// session the supervisor signed in for this run (decision U22), so no password
+// is visible here. A hand-written description may instead name a
+// credential_file with a username and password. Neither is ever printed.
+// Only Node's standard library is used.
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,12 +28,15 @@ function options() {
   return values;
 }
 
-/** Loads the verification description and its private test login. */
+/** Loads the verification description and how to sign in: the run's
+ * session ({ session }) or a test login ({ username, password }). */
 async function environment() {
   const described = process.env.AGENTC_VERIFICATION;
   if (!described) throw new Error('AGENTC_VERIFICATION is not set; this launch has no verification environment');
   const verification = JSON.parse(await readFile(described, 'utf8'));
-  const login = JSON.parse(await readFile(verification.credential_file, 'utf8'));
+  const login = verification.session_file
+    ? { session: JSON.parse(await readFile(verification.session_file, 'utf8')) }
+    : JSON.parse(await readFile(verification.credential_file, 'utf8'));
   const browser = process.env.CHROME_BIN || verification.browser;
   if (!browser) throw new Error('no browser is offered for this verification environment');
   return { url: verification.url.replace(/\/$/, ''), login, browser };
@@ -110,12 +116,21 @@ async function waitFor(page, expression, label) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
-/** Signs in through the dashboard's own login form. */
+/** Installs a handed-over session cookie, as the coordinator set it. */
+async function useSession(page, session) {
+  const { name, value } = session.cookie;
+  await page.send('Network.setCookie', { name, value, url: `${session.url}/`, path: '/',
+    httpOnly: true, secure: session.url.startsWith('https:'), sameSite: 'Strict' });
+}
+
+/** Signs in with the run's session, or through the dashboard's login form. */
 async function signIn(page, url, login) {
+  if (login.session) await useSession(page, login.session);
   await page.send('Page.navigate', { url: `${url}/` });
   await waitFor(page, "!document.querySelector('#login-view')?.hidden || !document.querySelector('#dashboard-view')?.hidden", 'the dashboard or login view');
   const fill = (selector, value) => `(() => { const input = document.querySelector('${selector}'); input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); })()`;
   if (await evaluate(page, "!document.querySelector('#login-view').hidden")) {
+    if (login.session) throw new Error('the staging session was not accepted; it may have ended');
     await evaluate(page, fill('#username', login.username));
     await evaluate(page, fill('#password', login.password));
     await evaluate(page, "document.querySelector('#login-form').requestSubmit()");

@@ -134,6 +134,12 @@ pub fn inner_args(spec: &LaunchSpec, config: &Config) -> Vec<OsString> {
         "--ro-bind-try",
         &spec.run.join(run_files::VERIFICATION),
     );
+    // The per-run staging session (decision U22), never the login itself.
+    same(
+        &mut args,
+        "--ro-bind-try",
+        &spec.run.join(run_files::VERIFICATION_SESSION),
+    );
     // Claude Code's shell snapshots live here; only the login is withheld.
     same(&mut args, "--ro-bind", &claude_config(spec, config));
     args.extend([

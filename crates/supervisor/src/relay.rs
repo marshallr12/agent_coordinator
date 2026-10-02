@@ -90,7 +90,7 @@ fn loopback(text: &str) -> Result<SocketAddr> {
 /// when it names another host (reached through the proxy). Loopback forms
 /// the relay cannot carry faithfully (userinfo, IPv6, shorthand IPv4) and
 /// privileged ports are refused rather than silently left unrelayed.
-fn staging_address(url: &str) -> Result<Option<SocketAddr>> {
+pub(crate) fn staging_address(url: &str) -> Result<Option<SocketAddr>> {
     let (scheme, rest) = url
         .split_once("://")
         .with_context(|| format!("staging URL {url:?} is not absolute"))?;

@@ -19,4 +19,5 @@ pub mod relay;
 pub mod role_settings;
 pub mod sandbox;
 pub mod shadow;
+pub mod staging_login;
 pub mod verification;

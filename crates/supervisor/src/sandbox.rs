@@ -79,6 +79,18 @@ fn claude_directory(spec: &LaunchSpec, config: &Config) -> PathBuf {
         .join("claude-config")
 }
 
+/// The supervisor signs in with the reviewer's staging logins itself
+/// (decision U22), so the harness never needs them: an empty tmpfs hides them.
+fn hide_verification_logins(args: &mut Vec<OsString>, spec: &LaunchSpec, config: &Config) {
+    let logins = config
+        .state_dir
+        .join(Role::Reviewer.slug())
+        .join("verification");
+    if spec.role == Role::Reviewer && logins.is_dir() {
+        args.extend([OsString::from("--tmpfs"), logins.into()]);
+    }
+}
+
 fn mount(args: &mut Vec<OsString>, option: &str, source: &Path, destination: &Path) {
     args.extend([OsString::from(option), source.into(), destination.into()]);
 }
@@ -115,6 +127,7 @@ pub fn wrap(
     }
     let instructions = persistent.join("CLAUDE.md");
     mount(&mut args, "--ro-bind", &instructions, &instructions);
+    hide_verification_logins(&mut args, spec, config);
     args.extend([
         OsString::from("--chdir"),
         spec.clone.clone().into(),
@@ -435,6 +448,9 @@ mod tests {
             .unwrap();
             fs::write(persistent.join("CLAUDE.md"), "").unwrap();
             fs::write(persistent.join(".credentials.json"), "dummy fixture auth").unwrap();
+            let login = config.state_dir.join("rev/verification/p1.json");
+            fs::create_dir_all(login.parent().unwrap()).unwrap();
+            fs::write(&login, "operator password").unwrap();
             // These fixtures deliberately remain writable to the test uid.
             // Refusal must come from the actual mount boundary, not DAC.
             let outside = root.path().join("outside");
@@ -463,6 +479,10 @@ mod tests {
             inner.args = ["-euc", script].into_iter().map(OsString::from).collect();
             for (key, value) in [
                 ("RUN", self.spec.run.clone()),
+                (
+                    "VERIFICATION_LOGIN",
+                    self.config.state_dir.join("rev/verification/p1.json"),
+                ),
                 ("CLONE", self.spec.clone.clone()),
                 ("OUTSIDE", self.outside.clone()),
                 ("ROLE_HOME", self.role_home.clone()),
@@ -509,6 +529,7 @@ mod tests {
     /// namespace, and leaves the harness's tracked directory in the clone.
     const REVIEWER_CANDIDATE_CHECKS: &str = r#"
 deny overwrite "$CLONE/source"
+deny cat "$VERIFICATION_LOGIN"
 test "$(cat "$CLAUDE_CONFIG_DIR/.credentials.json")" = refreshed
 export HARNESS_IPC="$(readlink /proc/self/ns/ipc)" HARNESS_UTS="$(readlink /proc/self/ns/uts)"
 export MARKER="agentc-harness-marker-$$"
@@ -531,6 +552,8 @@ test -e "$CLAUDE_CONFIG_DIR/settings.json"
 deny sh -c "printf x >> \"\$CLAUDE_CONFIG_DIR/settings.json\""
 deny sh -c "printf x > \"\$CLAUDE_CONFIG_DIR/planted\""
 deny sh -c "printf x > \"\$RUN/verification.json\""
+test "$(cat "$RUN/verification-session.json")" = session
+deny sh -c "printf x > \"\$RUN/verification-session.json\""
 test "$(awk "/^CapEff:/ { print \$2 }" /proc/self/status)" = 0000000000000000
 test "$(awk "/^CapBnd:/ { print \$2 }" /proc/self/status)" = 0000000000000000
 test "$(readlink /proc/self/ns/ipc)" != "$HARNESS_IPC"
@@ -624,6 +647,8 @@ deny unshare -Ur true
             if role == Role::Reviewer {
                 // A verifying reviewer's description, read-only to candidates.
                 fs::write(fixture.spec.run.join(run_files::VERIFICATION), "{}").unwrap();
+                let session = fixture.spec.run.join(run_files::VERIFICATION_SESSION);
+                fs::write(session, "session").unwrap();
             }
             fixture.successful(&script);
             for path in [

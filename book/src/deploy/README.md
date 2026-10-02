@@ -231,9 +231,18 @@ command gets its own PID namespace, so a process it backgrounds ends with it.
 Preflight starts the nested sandbox once and fails closed if the kernel refuses.
 
 Codex has no equivalent per-command hook, so Codex reviewer launches are refused.
-Candidate code can no longer read the long-lived verification login; reviewer UI
-checks that need a staging login wait for a per-run short-lived login handed to
-the candidate (decision U18), which is not implemented yet.
+Candidate code can no longer read the long-lived verification login. Instead,
+per run (decisions U18 and U22), the supervisor signs in to the staging
+coordinator with that login before the harness starts. It hands candidate
+commands only the new browser session's cookie, in a read-only
+`$RUN/verification-session.json`, and signs the session out when the launch
+ends. A missed sign-out, such as a supervisor crash, is bounded by the
+coordinator's fixed 12-hour session lifetime. If sign-in fails, the launch
+fails. The reviewer harness itself no longer sees the logins either: its
+sandbox mounts an empty tmpfs over the reviewer's `verification` directory.
+Loopback staging is reached directly; any other staging host must use https
+and is reached through the egress proxy. This uses the Agent Coordinator's
+own login API, so it serves coordinator staging only.
 
 Candidate code gets a private home mounted over the harness's `$HOME`, so planted
 `.gitconfig` or `.profile` files never reach the harness's own git and login

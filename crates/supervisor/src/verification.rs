@@ -5,7 +5,9 @@
 //! the host's headless browser is offered. The environment's test login is a
 //! host-owned secret only the reviewer account can read, at
 //! `<state_dir>/rev/verification/<project>.json`; the supervisor never copies
-//! it, it only points `$RUN/verification.json` at it. Implementer launches
+//! it. Candidate code cannot read it either: per run, the supervisor signs in
+//! with it and hands over only a session (`staging_login`, decision U22), and
+//! `$RUN/verification.json` points at that session file. Implementer launches
 //! and projects without an entry get nothing.
 use crate::config::Config;
 use crate::profile::{LaunchSpec, Role, run_files};
@@ -55,7 +57,7 @@ pub fn describe(spec: &LaunchSpec, config: &Config) -> Option<Value> {
     Some(json!({
         "project_id": project,
         "url": verification.url,
-        "credential_file": credential_file(config, project),
+        "session_file": spec.run.join(run_files::VERIFICATION_SESSION),
         "browser": verification.browser.then_some(&config.browser),
     }))
 }
@@ -113,12 +115,13 @@ mod tests {
     }
 
     #[test]
-    fn description_points_at_the_login_without_copying_it() {
+    fn description_points_at_the_run_session_not_the_login() {
         let described = describe(&spec(Role::Reviewer), &config()).unwrap();
         assert_eq!(
-            described["credential_file"],
-            "/var/lib/agentc/rev/verification/p1.json"
+            described["session_file"],
+            "/w/run/verification-session.json"
         );
+        assert!(described.get("credential_file").is_none());
         assert_eq!(described["browser"], "/usr/bin/chromium");
         let names: Vec<_> = environment(&spec(Role::Reviewer), &config())
             .into_iter()

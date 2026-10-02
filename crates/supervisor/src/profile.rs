@@ -81,6 +81,7 @@ pub mod run_files {
     pub const SCHEMA: &str = "result.schema.json";
     pub const LAST_MESSAGE: &str = "last.md";
     pub const VERIFICATION: &str = "verification.json";
+    pub const VERIFICATION_SESSION: &str = "verification-session.json";
     pub const CANDIDATE_SHELL: &str = "candidate-shell";
 }
 

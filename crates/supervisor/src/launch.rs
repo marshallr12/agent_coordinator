@@ -6,6 +6,7 @@ use crate::preflight;
 use crate::profile::{self, LaunchCommand, LaunchSpec, Role, run_files};
 use crate::role_settings;
 use crate::sandbox;
+use crate::staging_login;
 use crate::verification;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -55,16 +56,31 @@ pub fn run(spec: &LaunchSpec, config: &Config) -> Result<i32> {
         crate::relay::start_host(spec, config).context("start loopback relays")?;
     }
     state.started(spec)?;
-    let mut child = match spawn(&command, spec) {
-        Ok(child) => child,
-        Err(error) => {
-            state.terminal(spec)?;
-            return Err(error);
-        }
-    };
-    let status = child.wait().context("wait for harness")?;
+    let result = run_signed_in(&command, spec, config);
     state.terminal(spec)?;
-    Ok(status.code().unwrap_or(-1))
+    Ok(result?.code().unwrap_or(-1))
+}
+
+/// Runs the harness inside a verifying reviewer's staging session (none for
+/// other launches), signing it out whether or not the harness ran.
+fn run_signed_in(
+    command: &LaunchCommand,
+    spec: &LaunchSpec,
+    config: &Config,
+) -> Result<std::process::ExitStatus> {
+    let session = staging_login::open(spec, config)?;
+    let status =
+        spawn(command, spec).and_then(|mut child| child.wait().context("wait for harness"));
+    close_session(session);
+    status
+}
+
+/// Signs a launch's staging session out; a failure only warns, since the
+/// coordinator's session lifetime still bounds the handed-over cookie.
+fn close_session(session: Option<staging_login::StagingSession>) {
+    if let Some(Err(error)) = session.map(staging_login::StagingSession::close) {
+        eprintln!("agentc-supervisor: warning: {error:#}");
+    }
 }
 
 /// Spawns the harness with exactly the profile's environment.
