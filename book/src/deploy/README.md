@@ -162,6 +162,32 @@ ancestors and exercises the required kernel features. Missing user/PID namespace
 nested-userns disabling, or `close_range(CLOSE_RANGE_CLOEXEC)` support blocks the
 launch. The installer does not change kernel policy or grant setuid privileges.
 
+Ubuntu 24.04 and newer set `kernel.apparmor_restrict_unprivileged_userns=1`.
+Its `bwrap-userns-restrict` profile strips capabilities from everything
+`/usr/bin/bwrap` starts, so the reviewer's nested candidate sandbox fails
+preflight (`unpriv_bwrap` denies `sys_admin`). A local override cannot lift that
+deny. Run host-setup with `APPARMOR_BWRAP=1` to opt in to an agentc-only
+Bubblewrap instead:
+
+- it copies `/usr/bin/bwrap` to `/opt/agentc/bin/bwrap` as `root:agentc-bwrap`
+  with mode `0750`, and adds only `agentc-impl` and `agentc-rev` to that group;
+- it loads `/etc/apparmor.d/agentc-bwrap`, whose children inherit it;
+- it sets `bubblewrap` in `supervisor.toml` to the copy.
+
+The host-wide restriction stays on for every other account. The copy does not
+follow distribution updates, so re-run host-setup after a Bubblewrap upgrade.
+The containment suite fails while the copy differs from `/usr/bin/bwrap`, or
+while the group holds anyone but the two role accounts. A setup run without
+`APPARMOR_BWRAP=1` removes the copy, the profile and the group, as does
+`--uninstall`.
+
+The opt-in gives the role accounts what an unrestricted host (such as Debian)
+already allows: a user namespace with capabilities inside it. Claude launches
+stay fenced: the implementer sandbox and the reviewer's nested candidate
+sandbox both disable further user namespaces, and Codex reviewers are
+refused. Codex implementers, which run without Bubblewrap, can reach the copy
+like any program on a Debian host can reach `/usr/bin/bwrap`.
+
 The host root and run directory are read-only. The role's other runs are hidden:
 an empty tmpfs replaces its `runs/` directory and only the launch's own run is
 bound back. The implementer's current clone

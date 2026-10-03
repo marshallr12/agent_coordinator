@@ -54,6 +54,14 @@ prepare_clone() {
   as "$user" sh -c "echo containment-suite > '$base/runs/suite/prompt.md'"
 }
 
+# Codex cannot isolate candidate code from reviewer secrets (R-P3b.3), so
+# preflight must refuse a Codex reviewer for exactly that reason.
+codex_reviewer_refused() {
+  local user=$1; shift
+  expect_ok "$user/codex: preflight refuses Codex reviewers (R-P3b.3)" sh -c \
+    "sudo -u $user $SUP preflight $* --harness codex 2>&1 | grep -q 'Codex reviewer launches cannot isolate'"
+}
+
 # Preflight and the candidate-instruction flags, per harness.
 check_profiles() {
   local user=$1 base=$STATE/${1#agentc-} role
@@ -61,6 +69,7 @@ check_profiles() {
   local spec=(--role "$role" --clone "$base/clones/suite" --run "$base/runs/suite")
   for harness in claude codex; do
     as "$user" "$SUP" prepare "${spec[@]}" --harness "$harness" >/dev/null 2>&1
+    if [ "$role/$harness" = reviewer/codex ]; then codex_reviewer_refused "$user" "${spec[@]}"; continue; fi
     expect_ok "$user/$harness: preflight clean" as "$user" "$SUP" preflight "${spec[@]}" --harness "$harness"
   done
   expect_ok "$user/claude: --safe-mode (no candidate CLAUDE.md or hooks)" \
@@ -469,6 +478,33 @@ check_push_launch() {
     pgrep -f -- "--launch=$session"
 }
 
+# Whenever host-setup's APPARMOR_BWRAP=1 copy or profile exists: the
+# supervisor uses it, only the role accounts may run it, it is still the
+# distribution binary, and its profile enforces.
+check_apparmor_bwrap() {
+  local copy=$PREFIX/bin/bwrap
+  [ -e "$copy" ] || [ -e /etc/apparmor.d/agentc-bwrap ] || return 0
+  expect_ok "supervisor.toml uses the agentc bwrap" \
+    grep -qx "bubblewrap = \"$copy\"" /etc/agentc/supervisor.toml
+  expect_ok "agentc bwrap is 750 root:agentc-bwrap" has_mode "$copy" "750 root agentc-bwrap"
+  expect_ok "agentc bwrap matches /usr/bin/bwrap (re-run host-setup after bwrap updates)" \
+    cmp -s /usr/bin/bwrap "$copy"
+  expect_ok "agentc-bwrap AppArmor profile is enforced" \
+    grep -qx 'agentc-bwrap (enforce)' /sys/kernel/security/apparmor/profiles
+  expect_ok "agentc-bwrap group is exactly agentc-impl,agentc-rev" bwrap_group_exact
+  expect_fail "agentc-egress: cannot run the agentc bwrap" as agentc-egress "$copy" --version
+  expect_fail "$PUSH_USER: cannot run the agentc bwrap" as "$PUSH_USER" "$copy" --version
+}
+
+# The agentc-bwrap group lists only the role accounts and is nobody's primary group.
+bwrap_group_exact() {
+  local entry gid
+  entry=$(getent group agentc-bwrap) || return 1
+  gid=$(echo "$entry" | cut -d: -f3)
+  [ "$(echo "$entry" | cut -d: -f4 | tr ',' '\n' | sort | paste -sd,)" = agentc-impl,agentc-rev ] &&
+    ! getent passwd | cut -d: -f4 | grep -qx "$gid"
+}
+
 # Only the helper account can read the push App key; skipped without one.
 check_push_key() {
   if [ ! -e "$PUSH_KEY" ]; then echo "SKIP push App key checks (no $PUSH_KEY on this host)"; return; fi
@@ -513,6 +549,7 @@ main() {
   make_suite_bin /bin/false; stub_bin=$SUITE_BIN
   make_suite_bin "$SUP"; push_bin=$SUITE_BIN
   fill_push_bin "$push_bin" || { echo "cannot create the push suite bin dir" >&2; exit 1; }
+  check_apparmor_bwrap
   for pair in "agentc-impl agentc-rev" "agentc-rev agentc-impl"; do
     set -- $pair
     prepare_clone "$1"

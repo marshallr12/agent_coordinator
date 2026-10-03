@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepares this Linux host for supervised agent launches (autonomy plan P2).
 #
-#   sudo SUPERVISOR=<path> CLI=<path> [PUSH=<path>] deploy/agentc/host-setup.sh
+#   sudo SUPERVISOR=<path> CLI=<path> [PUSH=<path>] [APPARMOR_BWRAP=1] deploy/agentc/host-setup.sh
 #   sudo deploy/agentc/host-setup.sh --uninstall
 #
 # Creates the agentc-impl / agentc-rev / agentc-egress / agentc-push accounts,
@@ -30,6 +30,12 @@ PUSH_INSTALLATION_ID=${PUSH_INSTALLATION_ID:-167333814}
 PUSH_REPOSITORY=${PUSH_REPOSITORY:-$REPO_URL}
 PUSH_USER=agentc-push
 PUSH_KEY=$ETC/push-app.pem
+# Opt-in (Ubuntu's AppArmor userns restriction): an agentc-only Bubblewrap
+# copy whose own profile lets the reviewer's nested sandbox start.
+APPARMOR_BWRAP=${APPARMOR_BWRAP:-0}
+BWRAP_GROUP=agentc-bwrap
+BWRAP_COPY=$PREFIX/bin/bwrap
+BWRAP_PROFILE=/etc/apparmor.d/agentc-bwrap
 # Shared temp directories --uninstall clears of agent-owned files.
 TEMP_DIRS=(/tmp /var/tmp /dev/shm)
 KEEP="# --- entries below this line are kept when host-setup.sh re-runs ---"
@@ -229,6 +235,80 @@ install_node() {
   install -o root -g root -m 0755 "$(readlink -f "$node")" "$PREFIX/bin/node"
 }
 
+# With APPARMOR_BWRAP=1, copies the distribution Bubblewrap to an executable
+# only the role accounts may run and confines it with its own AppArmor
+# profile; otherwise only notes when the host restriction will refuse the
+# reviewer's nested sandbox. Never changes the host-wide policy.
+install_apparmor_bwrap() {
+  local user
+  if [ "$APPARMOR_BWRAP" != 1 ]; then remove_apparmor_bwrap; userns_restriction_note; return; fi
+  command -v apparmor_parser >/dev/null && [ -d /etc/apparmor.d ] ||
+    { echo "APPARMOR_BWRAP=1 needs AppArmor (apparmor_parser, /etc/apparmor.d)" >&2; exit 1; }
+  getent group "$BWRAP_GROUP" >/dev/null || groupadd --system "$BWRAP_GROUP"
+  for user in "${AGENTS[@]}"; do usermod -a -G "$BWRAP_GROUP" "$user"; done
+  check_bwrap_group
+  refuse_symlink "$BWRAP_COPY"
+  install -o root -g "$BWRAP_GROUP" -m 0750 /usr/bin/bwrap "$BWRAP_COPY"
+  refuse_symlink "$BWRAP_PROFILE"
+  bwrap_profile > "$BWRAP_PROFILE"
+  chmod 0644 "$BWRAP_PROFILE"
+  apparmor_parser -r "$BWRAP_PROFILE"
+}
+
+# Refuses a $BWRAP_GROUP with members other than the role accounts, or one
+# that is any account's primary group: whoever is in it may run the copy.
+check_bwrap_group() {
+  local gid members
+  gid=$(getent group "$BWRAP_GROUP" | cut -d: -f3)
+  members=$(getent group "$BWRAP_GROUP" | cut -d: -f4 | tr ',' '\n' | sort | paste -sd,)
+  if [ "$members" != "$(printf '%s\n' "${AGENTS[@]}" | sort | paste -sd,)" ] ||
+     getent passwd | cut -d: -f4 | grep -qx "$gid"; then
+    echo "refusing: group $BWRAP_GROUP has members '$members' or is a primary group; owner repair required" >&2; exit 1
+  fi
+}
+
+# Warns when Ubuntu's AppArmor userns restriction is on without the opt-in.
+userns_restriction_note() {
+  [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] || return 0
+  echo "note: AppArmor restricts unprivileged user namespaces here, so reviewer preflight" >&2
+  echo "      will refuse launches; re-run with APPARMOR_BWRAP=1 to allow agentc's sandbox" >&2
+}
+
+# The agentc Bubblewrap profile. Unlike Ubuntu's bwrap-userns-restrict, which
+# strips capabilities from everything bwrap starts, children inherit this
+# profile, so the reviewer's nested (userns-disabled) candidate sandbox can
+# mount. Only $BWRAP_GROUP members can execute the copy it attaches to.
+bwrap_profile() {
+  cat <<EOF
+# Written by deploy/agentc/host-setup.sh (APPARMOR_BWRAP=1); removed by --uninstall.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile agentc-bwrap $BWRAP_COPY flags=(attach_disconnected,mediate_deleted) {
+  allow capability,
+  allow file rwlkm /{**,},
+  allow ix /**,
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+}
+EOF
+}
+
+# The Bubblewrap the supervisor runs: the agentc copy when opted in.
+bubblewrap_setting() {
+  if [ "$APPARMOR_BWRAP" = 1 ]; then echo "bubblewrap = \"$BWRAP_COPY\""
+  else echo '# bubblewrap = "/usr/bin/bwrap"'; fi
+}
+
 # The system headless browser offered to verifying reviewers (plan M2).
 detect_browser() {
   local candidate
@@ -288,7 +368,7 @@ write_config() {
 # reviewer_user = "agentc-rev"
 # toolchain_dir = "/opt/agentc"
 # cargo_config_seed = "/etc/agentc/cargo-config.toml"
-# bubblewrap = "/usr/bin/bwrap"
+$(bubblewrap_setting)
 # browser = "/usr/bin/chromium"
 browser = "$(detect_browser)"
 egress_listen = "127.0.0.1:$PROXY_PORT"
@@ -526,6 +606,7 @@ uninstall() {
   for user in "${AGENTS[@]}" "$PUSH_USER"; do retire_account "$user"; done
   remove_service agentc-egress
   retire_account agentc-egress
+  remove_apparmor_bwrap
   remove_service agentc-firewall
   nft delete table inet agentc 2>/dev/null || true
   git config --system --unset-all safe.directory "^$STATE/mirror.git\$" 2>/dev/null || true
@@ -534,6 +615,19 @@ uninstall() {
   rmdir "$PREFIX/bin" "$PREFIX" "$STATE" "$ETC" 2>/dev/null || true
   [ -z "$KEY_NOTE" ] || echo "$KEY_NOTE"
   echo "agentc host setup removed"
+}
+
+# Unloads and deletes the agentc Bubblewrap profile, copy and group (whose
+# deletion drops the role accounts' membership). Used by --uninstall after
+# the role accounts are retired, and by setup runs without APPARMOR_BWRAP=1,
+# so an opted-out host never keeps a stale, permissive copy.
+remove_apparmor_bwrap() {
+  if [ -f "$BWRAP_PROFILE" ] && [ ! -L "$BWRAP_PROFILE" ]; then
+    apparmor_parser -R "$BWRAP_PROFILE" 2>/dev/null || true
+    rm -f -- "$BWRAP_PROFILE"
+  fi
+  rm -f -- "$BWRAP_COPY"
+  groupdel "$BWRAP_GROUP" 2>/dev/null || true
 }
 
 # Ends an account's processes, removes its crontab, at jobs, lingering user
@@ -613,7 +707,7 @@ remove_temp_files() {
 # suite's leftover bin directories, without following symlinks.
 remove_own_paths() {
   local name
-  for name in agentc-supervisor agent-coordinator agentc-push claude codex node; do
+  for name in agentc-supervisor agent-coordinator agentc-push claude codex node bwrap; do
     rm -f -- "$PREFIX/bin/$name"
   done
   rm -rf -- "$PREFIX/rustup" "$PREFIX/cargo" "$PREFIX/rustup-init.sh" "$PREFIX"/suite-bin.*
@@ -696,6 +790,7 @@ main() {
   create_users
   create_dirs
   install_binaries
+  install_apparmor_bwrap
   install_seeds
   install_toolchain
   refresh_mirror
