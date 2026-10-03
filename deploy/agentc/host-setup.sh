@@ -255,6 +255,12 @@ install_apparmor_bwrap() {
   apparmor_parser -r "$BWRAP_PROFILE"
 }
 
+# Succeeds when gid $1 is some account's primary group. awk reads all of
+# getent's output, so pipefail never sees a SIGPIPE from an early grep -q exit.
+primary_group() {
+  getent passwd | awk -F: -v gid="$1" '$4 == gid { found = 1 } END { exit !found }'
+}
+
 # Refuses a $BWRAP_GROUP with members other than the role accounts, or one
 # that is any account's primary group: whoever is in it may run the copy.
 check_bwrap_group() {
@@ -262,7 +268,7 @@ check_bwrap_group() {
   gid=$(getent group "$BWRAP_GROUP" | cut -d: -f3)
   members=$(getent group "$BWRAP_GROUP" | cut -d: -f4 | tr ',' '\n' | sort | paste -sd,)
   if [ "$members" != "$(printf '%s\n' "${AGENTS[@]}" | sort | paste -sd,)" ] ||
-     getent passwd | cut -d: -f4 | grep -qx "$gid"; then
+     primary_group "$gid"; then
     echo "refusing: group $BWRAP_GROUP has members '$members' or is a primary group; owner repair required" >&2; exit 1
   fi
 }

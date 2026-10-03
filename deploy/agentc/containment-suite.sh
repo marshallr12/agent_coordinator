@@ -496,13 +496,19 @@ check_apparmor_bwrap() {
   expect_fail "$PUSH_USER: cannot run the agentc bwrap" as "$PUSH_USER" "$copy" --version
 }
 
+# Succeeds when gid $1 is some account's primary group. awk reads all of
+# getent's output, so pipefail never sees a SIGPIPE from an early grep -q exit.
+primary_group() {
+  getent passwd | awk -F: -v gid="$1" '$4 == gid { found = 1 } END { exit !found }'
+}
+
 # The agentc-bwrap group lists only the role accounts and is nobody's primary group.
 bwrap_group_exact() {
   local entry gid
   entry=$(getent group agentc-bwrap) || return 1
   gid=$(echo "$entry" | cut -d: -f3)
   [ "$(echo "$entry" | cut -d: -f4 | tr ',' '\n' | sort | paste -sd,)" = agentc-impl,agentc-rev ] &&
-    ! getent passwd | cut -d: -f4 | grep -qx "$gid"
+    ! primary_group "$gid"
 }
 
 # Only the helper account can read the push App key; skipped without one.
