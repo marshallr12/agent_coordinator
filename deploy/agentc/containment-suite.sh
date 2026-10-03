@@ -13,8 +13,12 @@ SUP=$PREFIX/bin/agentc-supervisor
 PROXY=http://127.0.0.1:${PROXY_PORT:-3128}
 STAGING=http://127.0.0.1:${STAGING_PORT:-18080}
 DISABLED_PUSH=disabled://push-only-via-agent-coordinator
+PUSH_USER=agentc-push
+PUSH_KEY=/etc/agentc/push-app.pem
 FAILED=0
 SUITE_BINS=()
+PUSH_PID=
+PUSH_RUN=
 
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAILED=1; }
@@ -262,6 +266,218 @@ check_relay_probe() {
     relay_probe_refused "$1" "$2/supervisor.toml"
 }
 
+# Writes the mock Claude harness for launch-root's push leg to $1. Inside the
+# sandbox it requires AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET, a socket it can
+# connect to, and a push root showing only its own launch's `sock/`. It then
+# writes the socket path to $TMPDIR/push-ready and waits up to 120 s for the
+# suite's $TMPDIR/push-release, so the suite can inspect the live helper.
+write_push_mock() {
+  cat > "$1" <<EOF
+#!/bin/sh
+[ "\${1:-}" = --version ] && exec $PREFIX/bin/claude --version
+set -eu
+sock=\${AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET:-}
+[ -S "\$sock" ] || exit 3
+dir=\${sock%/sock/push.sock}
+[ "\$(ls -A $STATE/push)" = "\${dir##*/}" ] && [ "\$(ls -A "\$dir")" = sock ] || exit 4
+/usr/bin/python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "\$sock" || exit 5
+printf '%s\n' "\$sock" > "\$TMPDIR/push-ready"
+i=0
+until [ -e "\$TMPDIR/push-release" ]; do i=\$((i + 1)); [ "\$i" -le 600 ] || exit 6; sleep 0.2; done
+EOF
+  chmod 0755 "$1"
+}
+
+# Prints supervisor config $1 with `[push_helper] config` set to $2, adding
+# the table when $1 has none.
+with_push_config() {
+  awk -v line="config = \"$2\"" '
+    /^[[:space:]]*\[/ { table = $0; gsub(/[[:space:]]/, "", table) }
+    table == "[push_helper]" && /^[[:space:]]*config[[:space:]]*=/ { next }
+    { print }
+    /^[[:space:]]*\[push_helper\][[:space:]]*$/ { print line; seen = 1 }
+    END { if (!seen) { print "[push_helper]"; print line } }' "$1"
+}
+
+# Turns suite bin dir $1 into the push leg's: the push mock harness and a
+# helper configuration that cannot mint (no key file, unreachable https API),
+# so no candidate ever reaches GitHub.
+fill_push_bin() {
+  write_push_mock "$1/claude" &&
+    printf '%s\n' 'app_id = 1' 'installation_id = 1' \
+      'repository = "https://github.com/agentc-suite/unreachable.git"' \
+      'api_base = "https://127.0.0.1:9"' \
+      'private_key = "/nonexistent/agentc-suite-push-key.pem"' > "$1/push.toml" &&
+    chmod 0644 "$1/push.toml" &&
+    with_push_config "$1/supervisor.toml" "$1/push.toml" > "$1/supervisor.push" &&
+    mv -f "$1/supervisor.push" "$1/supervisor.toml" && chmod 0644 "$1/supervisor.toml"
+}
+
+# Recreates implementer run directory $1 with a prompt.
+fresh_impl_run() {
+  as agentc-impl rm -rf "$1"
+  as agentc-impl mkdir -p "$1"
+  as agentc-impl sh -c "echo containment-suite > '$1/prompt.md'"
+}
+
+# Starts an implementer `launch-root` in the background through push bin $1
+# with session $2 and run $3, logging to $4; sets PUSH_PID.
+start_push_launch() {
+  "$SUP" --config "$1/supervisor.toml" launch-root --role implementer --harness claude \
+    --clone "$STATE/impl/clones/suite" --run "$3" --model mock --effort low \
+    --task suite-push --session-id "$2" >"$4" 2>&1 &
+  PUSH_PID=$! PUSH_RUN=$3
+}
+
+# On exit: releases a still-running push launch's mock harness, then stops
+# its launch-root with SIGTERM and, after 5 s, SIGKILL.
+stop_push_launch() {
+  [ -n "${PUSH_PID:-}" ] || return 0
+  as agentc-impl touch "$PUSH_RUN/tmp/push-release" 2>/dev/null
+  kill -TERM "$PUSH_PID" 2>/dev/null || return 0
+  local i
+  for i in $(seq 25); do kill -0 "$PUSH_PID" 2>/dev/null || return 0; sleep 0.2; done
+  kill -KILL "$PUSH_PID" 2>/dev/null
+}
+
+# The EXIT trap: no launch-root left running, no suite bin dir left behind.
+suite_cleanup() {
+  stop_push_launch
+  remove_suite_bins
+}
+
+# Waits up to $2 seconds for file $1 while process $3 lives.
+await_file() {
+  local deadline=$((SECONDS + $2))
+  until [ -e "$1" ]; do
+    kill -0 "$3" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.2
+  done
+}
+
+# True once no process matches full-command-line pattern $1 (up to $2 s).
+await_no_process() {
+  local deadline=$((SECONDS + $2))
+  while pgrep -f -- "$1" >/dev/null; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.2
+  done
+}
+
+# The first process whose command line holds --launch=$1: only the helper
+# serving session $1 is started with that argument.
+helper_pid() { pgrep -f -- "--launch=$1" | head -n 1; }
+
+# True when process $1 has account $2's user and group ids in every slot and
+# exactly that account's groups.
+runs_as_account() {
+  local status=/proc/$1/status uid gid want have
+  uid=$(id -u "$2") gid=$(id -g "$2")
+  want=$(id -G "$2" | tr ' ' '\n' | sort -n | tr '\n' ' ')
+  have=$(awk '$1 == "Groups:" { for (i = 2; i <= NF; i++) print $i }' "$status" | sort -n | tr '\n' ' ')
+  [ "$(awk '$1 == "Uid:" { print $2, $3, $4, $5 }' "$status")" = "$uid $uid $uid $uid" ] &&
+    [ "$(awk '$1 == "Gid:" { print $2, $3, $4, $5 }' "$status")" = "$gid $gid $gid $gid" ] &&
+    [ -n "$have" ] && [ "$have" = "$want" ]
+}
+
+# True when account $1 can connect to Unix socket $2. It closes at once,
+# sending nothing, so the helper mints nothing.
+connects_as() {
+  as "$1" /usr/bin/python3 -c \
+    'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "$2"
+}
+
+# True when `stat -c '%a %U %G'` of $1 is $2.
+has_mode() { [ "$(stat -c '%a %U %G' -- "$1")" = "$2" ]; }
+
+# Releases the push mock in run $1 and waits up to 30 s for launch-root
+# $2 to exit; kills it if it does not. Returns its exit status.
+finish_push_launch() {
+  as agentc-impl touch "$1/tmp/push-release" 2>/dev/null
+  local deadline=$((SECONDS + 30))
+  while kill -0 "$2" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.2; done
+  kill -0 "$2" 2>/dev/null && kill -TERM "$2"
+  wait "$2"
+  local status=$?
+  PUSH_PID=
+  return "$status"
+}
+
+# A launch-root killed with SIGKILL: its helper must exit with it, and its
+# per-launch directory stays behind for the next launch-root to sweep. Sets
+# STALE_SESSION to that launch's session id.
+check_push_kill() {
+  local bin=$1 run=$STATE/impl/runs/suite-push-killed helper log=/root/agentc-push-killed.log
+  STALE_SESSION=$(cat /proc/sys/kernel/random/uuid)
+  fresh_impl_run "$run"
+  start_push_launch "$bin" "$STALE_SESSION" "$run" "$log"
+  if ! await_file "$run/tmp/push-ready" 60 "$PUSH_PID"; then
+    fail "agentc-impl: launch-root (to be killed) reached its harness (log: $log)"
+    finish_push_launch "$run" "$PUSH_PID"; return
+  fi
+  helper=$(helper_pid "$STALE_SESSION")
+  expect_ok "agentc-push: helper serves the launch-root to be killed" test -n "$helper"
+  kill -KILL "$PUSH_PID"; wait "$PUSH_PID" 2>/dev/null; PUSH_PID=
+  expect_ok "agentc-push: helper exits when its launch-root is SIGKILLed" \
+    await_no_process "--launch=$STALE_SESSION" 10
+  as agentc-impl touch "$run/tmp/push-release"
+  expect_ok "agentc-impl: orphaned launch ends once released" \
+    await_no_process "--session-id=$STALE_SESSION" 30
+  expect_ok "SIGKILLed launch-root leaves its push directory (sweep precondition)" \
+    test -d "$STATE/push/$STALE_SESSION"
+}
+
+# Checks made while the helper of session $1 (launch dir $2, run $3) serves:
+# account and groups, socket and directory modes, who can connect, the
+# harness's socket path, and that this launch-root swept the stale directory.
+check_live_helper() {
+  local session=$1 dir=$2 run=$3 helper
+  helper=$(helper_pid "$session")
+  expect_ok "agentc-push: helper runs as $PUSH_USER with only its own groups" \
+    runs_as_account "${helper:-0}" "$PUSH_USER"
+  expect_ok "agentc-push: socket is 0660 $PUSH_USER:agentc-impl" \
+    has_mode "$dir/sock/push.sock" "660 $PUSH_USER agentc-impl"
+  expect_ok "agentc-push: socket directory is 2750 $PUSH_USER:agentc-impl" \
+    has_mode "$dir/sock" "2750 $PUSH_USER agentc-impl"
+  expect_ok "agentc-push: launch directory is 711 root:root" has_mode "$dir" "711 root root"
+  expect_ok "agentc-impl: can connect to its launch's push socket" connects_as agentc-impl "$dir/sock/push.sock"
+  expect_fail "agentc-rev: cannot connect to the push socket" connects_as agentc-rev "$dir/sock/push.sock"
+  expect_ok "agentc-impl/claude: harness sees only its own push socket" \
+    test "$(cat "$run/tmp/push-ready")" = "$dir/sock/push.sock"
+  expect_fail "next launch-root swept the SIGKILLed launch's directory" \
+    test -e "$STATE/push/${STALE_SESSION:-none}"
+}
+
+# A real implementer launch-root (R-P3b.2) through push bin $1: the helper
+# runs as its own account beside the launch, and both are gone afterwards.
+check_push_launch() {
+  local bin=$1 run=$STATE/impl/runs/suite-push session dir log=/root/agentc-push.log status
+  session=$(cat /proc/sys/kernel/random/uuid) dir=$STATE/push/$session
+  fresh_impl_run "$run"
+  start_push_launch "$bin" "$session" "$run" "$log"
+  if await_file "$run/tmp/push-ready" 60 "$PUSH_PID"; then
+    pass "agentc-impl/claude: launch-root started the helper and the harness checks passed"
+    check_live_helper "$session" "$dir" "$run"
+  else
+    fail "agentc-impl/claude: launch-root started the helper and the harness checks passed (log: $log)"
+    tail -n 40 "$log" | sed 's/^/    /'
+  fi
+  finish_push_launch "$run" "$PUSH_PID"; status=$?
+  expect_ok "agentc-impl: launch-root exits 0 with the launch" test "$status" -eq 0
+  expect_fail "agentc-push: per-launch directory removed after the launch" test -e "$dir"
+  expect_fail "agentc-push: helper exited after the launch" \
+    pgrep -f -- "--launch=$session"
+}
+
+# Only the helper account can read the push App key; skipped without one.
+check_push_key() {
+  if [ ! -e "$PUSH_KEY" ]; then echo "SKIP push App key checks (no $PUSH_KEY on this host)"; return; fi
+  expect_ok "push App key is 400 $PUSH_USER:$PUSH_USER" has_mode "$PUSH_KEY" "400 $PUSH_USER $PUSH_USER"
+  expect_ok "$PUSH_USER: can read the push App key" as "$PUSH_USER" test -r "$PUSH_KEY"
+  expect_fail "agentc-impl: cannot read the push App key" as agentc-impl test -r "$PUSH_KEY"
+  expect_fail "agentc-rev: cannot read the push App key" as agentc-rev test -r "$PUSH_KEY"
+}
+
 # The reviewer's pinned headless browser renders the staging dashboard under
 # uid + firewall (plan M2), and the implementer cannot read the reviewer's
 # verification logins. Skipped when no staging coordinator is listening.
@@ -291,10 +507,12 @@ check_cargo_test() {
 
 main() {
   [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
-  local cargo_test=${1:-} relay_bin stub_bin
-  trap remove_suite_bins EXIT
+  local cargo_test=${1:-} relay_bin stub_bin push_bin
+  trap suite_cleanup EXIT
   make_suite_bin "$SUP"; relay_bin=$SUITE_BIN
   make_suite_bin /bin/false; stub_bin=$SUITE_BIN
+  make_suite_bin "$SUP"; push_bin=$SUITE_BIN
+  fill_push_bin "$push_bin" || { echo "cannot create the push suite bin dir" >&2; exit 1; }
   for pair in "agentc-impl agentc-rev" "agentc-rev agentc-impl"; do
     set -- $pair
     prepare_clone "$1"
@@ -308,6 +526,9 @@ main() {
     check_claude_launch "$1" "$relay_bin"
     check_relay_probe "$1" "$stub_bin"
   done
+  check_push_kill "$push_bin"
+  check_push_launch "$push_bin"
+  check_push_key
   check_browser
   if [ "$cargo_test" = "--cargo-test" ]; then check_cargo_test; fi
   [ "$FAILED" -eq 0 ] && echo "containment suite: all checks passed" || echo "containment suite: FAILURES above"

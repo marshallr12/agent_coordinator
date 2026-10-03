@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Prepares this Linux host for supervised agent launches (autonomy plan P2).
 #
-#   sudo SUPERVISOR=<path> CLI=<path> deploy/agentc/host-setup.sh
+#   sudo SUPERVISOR=<path> CLI=<path> [PUSH=<path>] deploy/agentc/host-setup.sh
 #   sudo deploy/agentc/host-setup.sh --uninstall
 #
-# Creates the agentc-impl / agentc-rev / agentc-egress accounts, root-owned
-# pinned binaries and Rust toolchain under /opt/agentc, private per-role state
-# under /var/lib/agentc, a read-only Git mirror, the egress proxy service and
-# an nftables table that filters ONLY the two agent uids. Nothing else on the
-# host changes. Idempotent: re-running re-pins binaries and reloads the rules.
-# Harness logins and coordinator credentials stay manual (printed at the end).
+# Creates the agentc-impl / agentc-rev / agentc-egress / agentc-push accounts,
+# root-owned pinned binaries and Rust toolchain under /opt/agentc, private
+# per-role state under /var/lib/agentc, a read-only Git mirror, the egress
+# proxy service and an nftables table that filters ONLY the two agent uids.
+# For the candidate-push helper it also writes /etc/agentc/push.toml when
+# absent and hands an existing push App key to agentc-push; it never creates,
+# prints or copies that key. Nothing else on the host changes. Idempotent:
+# re-running re-pins binaries and reloads the rules. Harness logins,
+# coordinator credentials and the push App key stay manual (printed at the end).
 set -euo pipefail
 
 PREFIX=/opt/agentc
@@ -20,6 +23,13 @@ PROXY_PORT=${PROXY_PORT:-3128}
 STAGING_PORT=${STAGING_PORT:-18080}
 REPO_URL=${REPO_URL:-https://github.com/marshallr12/agent_coordinator.git}
 EXTRA_EGRESS=${EXTRA_EGRESS:-agents.sithbit.com}
+# The candidate-push App (decision U17) and the one repository it writes;
+# only a missing /etc/agentc/push.toml is written from these.
+PUSH_APP_ID=${PUSH_APP_ID:-5168037}
+PUSH_INSTALLATION_ID=${PUSH_INSTALLATION_ID:-167333814}
+PUSH_REPOSITORY=${PUSH_REPOSITORY:-$REPO_URL}
+PUSH_USER=agentc-push
+PUSH_KEY=$ETC/push-app.pem
 KEEP="# --- entries below this line are kept when host-setup.sh re-runs ---"
 
 # Refuses to run without root and the invoking owner account.
@@ -36,6 +46,32 @@ create_users() {
       --home-dir "$STATE/${user#agentc-}/home" --no-create-home \
       --shell /usr/sbin/nologin "$user"
   done
+  create_push_user
+}
+
+# The push helper's account: its own group, no home, no login shell (it
+# alone may read the push App key). An existing account must already be so.
+create_push_user() {
+  id "$PUSH_USER" >/dev/null 2>&1 || useradd --system --user-group \
+    --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin "$PUSH_USER"
+  local problem
+  problem=$(push_user_problem)
+  [ -z "$problem" ] ||
+    { echo "refusing: $PUSH_USER $problem; owner repair required (or userdel it and re-run)" >&2; exit 1; }
+}
+
+# Prints why the push account is unsafe, or nothing: root's uid, a uid shared
+# with another agentc account, a login shell, or any group but its own.
+push_user_problem() {
+  local uid shell other groups
+  uid=$(id -u "$PUSH_USER") shell=$(getent passwd "$PUSH_USER" | cut -d: -f7)
+  groups=$(id -nG "$PUSH_USER")
+  [ "$uid" != 0 ] || { echo "has uid 0"; return; }
+  for other in agentc-impl agentc-rev agentc-egress; do
+    [ "$(id -u "$other" 2>/dev/null)" != "$uid" ] || { echo "shares uid $uid with $other"; return; }
+  done
+  case $shell in */nologin|*/false) ;; *) echo "has login shell '$shell'"; return ;; esac
+  [ "$groups" = "$PUSH_USER" ] || echo "is in groups '$groups', not only its own"
 }
 
 # Validate root's destination chain before writing. Never follow an agent's
@@ -84,6 +120,10 @@ create_dirs() {
     if [ -e "$path" ]; then protected_chain "$path"; fi
     install -d -o root -g root -m 0755 "$path"
   done
+  # launch-root's per-launch helper directories: root-only writes, traversable
+  # by the implementer and helper accounts.
+  refuse_symlink "$STATE/push"
+  install -d -o root -g root -m 0711 "$STATE/push"
   for user in "${AGENTS[@]}"; do
     role=$STATE/${user#agentc-}
     refuse_symlink "$role"
@@ -166,8 +206,13 @@ install_seeds() {
 install_binaries() {
   : "${SUPERVISOR:?set SUPERVISOR to a built agentc-supervisor}"
   : "${CLI:?set CLI to a built agent-coordinator}"
+  local push=${PUSH:-${SUPERVISOR%/*}/agentc-push}
+  [ -f "$push" ] && [ -x "$push" ] || {
+    echo "set PUSH to a built agentc-push (default: beside SUPERVISOR)" >&2; exit 1;
+  }
   install -o root -g root -m 0755 "$SUPERVISOR" "$PREFIX/bin/agentc-supervisor"
   install -o root -g root -m 0755 "$CLI" "$PREFIX/bin/agent-coordinator"
+  install -o root -g root -m 0755 "$push" "$PREFIX/bin/agentc-push"
   install -o root -g root -m 0755 "$(readlink -f "$OWNER_HOME/.local/bin/claude")" "$PREFIX/bin/claude"
   install -o root -g root -m 0755 "$(readlink -f "$OWNER_HOME/.local/bin/codex")" "$PREFIX/bin/codex"
   install_node
@@ -253,6 +298,12 @@ egress_allow_extra = ["$EXTRA_EGRESS"]
 claude = "$claude"
 codex = "$codex"
 
+# The candidate-push helper launch-root runs beside implementer launches.
+[push_helper]
+program = "$PREFIX/bin/agentc-push"
+# config = "$ETC/push.toml"
+# user = "$PUSH_USER"
+
 $KEEP
 EOF
   if [ -n "$kept" ]; then
@@ -293,6 +344,63 @@ EOF
 EOF
   fi
   chmod 0644 "$ETC/supervisor.toml"
+}
+
+# Writes the push helper's configuration unless one exists: root-owned, mode
+# 0640, group agentc-push (launch-root refuses a configuration that is not
+# root-owned or is group/world-writable). An existing file is checked, never
+# rewritten.
+write_push_config() {
+  local path=$ETC/push.toml temp
+  refuse_symlink "$path"
+  if [ -e "$path" ]; then check_push_config "$path"; return; fi
+  temp=$(mktemp "$ETC/.push.XXXXXXXX")
+  if ! push_config_file "$temp" || ! mv -nT -- "$temp" "$path"; then
+    rm -f -- "$temp"; echo "cannot write $path" >&2; exit 1
+  fi
+  # Left only when mv -n found a file already at the path.
+  rm -f -- "$temp"
+}
+
+# Fills $1 with the push configuration, root:agentc-push 0640. Each step is
+# chained, so a failure returns non-zero even where `set -e` is suspended.
+push_config_file() {
+  cat > "$1" <<EOF &&
+# agentc-push configuration. Written by deploy/agentc/host-setup.sh when
+# absent; never overwritten. See crates/integrator/push.example.toml.
+app_id = $PUSH_APP_ID
+installation_id = $PUSH_INSTALLATION_ID
+repository = "$PUSH_REPOSITORY"
+# api_base = "https://api.github.com"
+# private_key = "$PUSH_KEY"
+# max_bundle_bytes = 536870912
+EOF
+    chown "root:$PUSH_USER" "$1" && chmod 0640 "$1"
+}
+
+# Refuses an existing push configuration the helper could not use safely:
+# not a single-link regular file, not root-owned, group/world-writable, or
+# unreadable by the helper account.
+check_push_config() {
+  local path=$1
+  [ -f "$path" ] && [ "$(stat -c %h -- "$path")" = 1 ] && [ "$(stat -c %u -- "$path")" = 0 ] &&
+    (( (8#$(stat -c %a -- "$path") & 0022) == 0 )) &&
+    sudo -u "$PUSH_USER" test -r "$path" || {
+      echo "refusing $path: needs a root-owned, single-link file that is not group/world-writable and that $PUSH_USER can read; owner repair required" >&2; exit 1;
+    }
+}
+
+# Hands an existing push App key to the helper account alone (mode 0400, set
+# before the owner changes). The key's bytes are never read, printed or
+# copied; a missing key is left for the owner (see next_steps).
+secure_push_key() {
+  refuse_symlink "$PUSH_KEY"
+  [ -e "$PUSH_KEY" ] || return 0
+  [ -f "$PUSH_KEY" ] && [ "$(stat -c %h -- "$PUSH_KEY")" = 1 ] || {
+    echo "refusing non-regular or linked $PUSH_KEY; owner repair required" >&2; exit 1;
+  }
+  chmod 0400 -- "$PUSH_KEY"
+  chown "$PUSH_USER:$PUSH_USER" -- "$PUSH_KEY"
 }
 
 # Agent uids may reach loopback only on the proxy, the staging coordinator
@@ -406,15 +514,53 @@ remove_service() {
   fi
 }
 
-# Removes everything this script created.
+# Removes what this script installs, by explicit path, so files other
+# installers keep under the same directories (the integrator's binary, state,
+# configuration and keys) survive. The push App key is the owner's: it is
+# kept, handed back to root (0400). Each shared parent goes only once empty.
 uninstall() {
   remove_service agentc-egress
   remove_service agentc-firewall
   nft delete table inet agentc 2>/dev/null || true
   git config --system --unset-all safe.directory "^$STATE/mirror.git\$" 2>/dev/null || true
-  for user in "${AGENTS[@]}" agentc-egress; do userdel "$user" 2>/dev/null || true; done
-  rm -rf "$PREFIX" "$STATE" "$ETC"
+  keep_push_key
+  for user in "${AGENTS[@]}" agentc-egress "$PUSH_USER"; do userdel "$user" 2>/dev/null || true; done
+  remove_own_paths
+  rmdir "$PREFIX/bin" "$PREFIX" "$STATE" "$ETC" 2>/dev/null || true
+  [ -z "$KEY_NOTE" ] || echo "$KEY_NOTE"
   echo "agentc host setup removed"
+}
+
+# Deletes this script's own files and directories, and the containment
+# suite's leftover bin directories, without following symlinks.
+remove_own_paths() {
+  local name
+  for name in agentc-supervisor agent-coordinator agentc-push claude codex node; do
+    rm -f -- "$PREFIX/bin/$name"
+  done
+  rm -rf -- "$PREFIX/rustup" "$PREFIX/cargo" "$PREFIX/rustup-init.sh" "$PREFIX"/suite-bin.*
+  for name in impl rev push mirror.git shadow; do rm -rf -- "${STATE:?}/$name"; done
+  for name in supervisor.toml cargo-config.toml agentc.nft push.toml; do
+    rm -f -- "$ETC/$name"
+  done
+}
+
+# Returns an existing push App key to root before its account is deleted,
+# once $ETC's whole chain is root-owned and not group/world-writable. A key
+# that is a symlink or not a single-link regular file is left untouched.
+# Sets KEY_NOTE to what uninstall reports about the key.
+keep_push_key() {
+  KEY_NOTE=
+  [ -e "$ETC" ] || [ -L "$ETC" ] || return 0
+  protected_chain "$ETC"
+  if [ -L "$PUSH_KEY" ]; then
+    KEY_NOTE="left $PUSH_KEY untouched: it is a symlink; owner repair required"
+  elif [ -f "$PUSH_KEY" ] && [ "$(stat -c %h -- "$PUSH_KEY")" = 1 ]; then
+    chown -h root:root -- "$PUSH_KEY"; chmod 0400 -- "$PUSH_KEY"
+    KEY_NOTE="kept $PUSH_KEY (root:root 0400); delete it yourself to retire the key"
+  elif [ -e "$PUSH_KEY" ]; then
+    KEY_NOTE="left $PUSH_KEY untouched: not a single-link regular file; owner repair required"
+  fi
 }
 
 # Prints the manual steps that remain (reserved bootstrap).
@@ -441,6 +587,28 @@ Then run: sudo deploy/agentc/containment-suite.sh
 That suite uses a mock shell; authenticated Claude/browser compatibility and
 credential refresh still require separate owner verification.
 EOF
+  push_steps
+}
+
+# Prints the candidate-push helper's remaining step and the implementer
+# launch command.
+push_steps() {
+  if [ -e "$PUSH_KEY" ]; then
+    echo "Push App key: $PUSH_KEY is now $PUSH_USER-only (0400)."
+  else
+    cat <<EOF
+Push App key: none at $PUSH_KEY. Implementer launches can start, but every
+candidate push fails until the owner places the push App's private key there
+(root, 0400; never in the repository) and re-runs this script, which hands it
+to $PUSH_USER.
+EOF
+  fi
+  cat <<EOF
+Push helper configuration: $ETC/push.toml (written only when absent).
+Run implementer launches as root through launch-root, which starts the helper:
+  sudo $PREFIX/bin/agentc-supervisor launch-root --role implementer --harness claude \\
+    --clone <clone> --run <run> --task <task-id>
+EOF
 }
 
 main() {
@@ -454,6 +622,8 @@ main() {
   install_toolchain
   refresh_mirror
   write_config
+  write_push_config
+  secure_push_key
   install_firewall
   install_egress_service
   next_steps

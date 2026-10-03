@@ -285,7 +285,7 @@ that runs as its own unprivileged account and alone can read the push App key
 `launch` plus `--task <id>` (required for an implementer):
 
 ```sh
-sudo agentc-supervisor launch-root --role implementer --harness claude \
+sudo /opt/agentc/bin/agentc-supervisor launch-root --role implementer --harness claude \
   --clone <clone> --run <run> --task <task-id>
 ```
 
@@ -346,15 +346,93 @@ each other's directories. A reviewer launch gets no helper: `launch-root` only r
 it as the reviewer account.
 
 The `[push_helper]` table in `/etc/agentc/supervisor.toml` overrides the
-defaults:
+in-code defaults shown below. The helper binary must be root-owned with
+root-owned, non-group-writable parents; on Debian `/usr/local/bin` is often
+group `staff` and group-writable, so the default is beside the other pinned
+binaries. `deploy/agentc/host-setup.sh` installs it there and writes this table
+above the `KEEP` line, where each re-run replaces it:
 
 ```toml
 [push_helper]
-# program = "/usr/local/bin/agentc-push"
+program = "/opt/agentc/bin/agentc-push"
 # config = "/etc/agentc/push.toml"
 # user = "agentc-push"
 ```
 
+### Setting up the helper host
+
+`deploy/agentc/host-setup.sh` prepares everything except the App key:
+
+- the `agentc-push` system account, with its own group, no home and no login
+  shell. If the account already exists, the script stops with an
+  owner-repair message unless its uid is not 0 and not that of `agentc-impl`,
+  `agentc-rev` or `agentc-egress`, its shell is `nologin` or `false`, and its
+  only group is `agentc-push`;
+- `/opt/agentc/bin/agentc-push` (root, mode 0755), copied from `PUSH`, which
+  defaults to `agentc-push` beside `SUPERVISOR`;
+- `<state_dir>/push` (root, mode 0711);
+- `/etc/agentc/push.toml` (root, group `agentc-push`, mode 0640), written only
+  when absent, from `PUSH_APP_ID` (default 5168037), `PUSH_INSTALLATION_ID`
+  (default 167333814) and `PUSH_REPOSITORY` (default `REPO_URL`, this
+  repository); `private_key` keeps its default, `/etc/agentc/push-app.pem`. An
+  existing file is never rewritten; the script stops unless it is a root-owned,
+  single-link regular file that is not group/world-writable and `agentc-push`
+  can read;
+- if `/etc/agentc/push-app.pem` exists, mode 0400 and then owner
+  `agentc-push:agentc-push`, so only the helper account can read it. The script
+  never reads, prints, copies, creates or fetches the key; it refuses a symlink
+  or a hard-linked key.
+
+The helper account is not in the agent firewall's uid set: it reaches
+`api.github.com` and `github.com` directly, not through the egress proxy.
+
+The owner's one-time steps on the helper host:
+
+1. Build the binaries, including the helper (part of the `agentc-integrator`
+   package):
+
+   ```sh
+   cargo build --release --locked -p agentc-supervisor -p agentc-integrator -p coordinator-cli
+   ```
+
+2. Place the push App's private key at `/etc/agentc/push-app.pem` (root, mode
+   0400), never in the repository. Each host gets its own key generated in the
+   App's settings.
+3. Run `sudo SUPERVISOR=target/release/agentc-supervisor
+   CLI=target/release/agent-coordinator deploy/agentc/host-setup.sh` (or re-run
+   it after placing the key, which hands the key to `agentc-push`). Without a
+   key it prints that step instead; launches still start, but every candidate
+   push fails.
+4. Run `sudo deploy/agentc/containment-suite.sh`.
+
+`host-setup.sh --uninstall` deletes the `agentc-push` account and, by explicit
+path, the files and directories the script installs. It keeps
+`/etc/agentc/push-app.pem` for the owner to delete: once `/etc/agentc` and its
+parents are root-owned and not group/world-writable, a single-link regular key
+is returned to root (mode 0400), and a symlinked or hard-linked one is left
+untouched and reported. It also leaves anything else in `/opt/agentc`,
+`/var/lib/agentc` and `/etc/agentc`, such as the integrator's binary, state, configuration and keys,
+or an owner-placed `shadow-credentials.toml`. Each of those directories is
+removed only once empty.
+
 Local tests run `launch-root`'s steps as the test's own account against stub
-helper and supervisor programs. Switching accounts needs root, so no local
-test covers it.
+helper and supervisor programs. Switching accounts needs root, so the root
+containment suite covers it. Its push leg runs real implementer `launch-root`s
+from a temporary bin directory whose `claude` is a mock and whose helper
+configuration cannot mint a token (no key file, an unreachable https API), so
+nothing reaches GitHub. With the helper serving, it checks:
+
+- the helper process runs as `agentc-push` with exactly that account's groups;
+- the socket is mode 0660 `agentc-push:agentc-impl`, in a mode 2750
+  `sock/` directory of a mode 0711 root launch directory;
+- `agentc-impl` can connect to the socket and `agentc-rev` cannot;
+- inside the sandbox, the mock harness gets
+  `AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET`, can connect to it, and sees no
+  launch directory under `<state_dir>/push` but its own, holding only `sock/`.
+
+After the launch it checks that `launch-root` exited 0, the launch directory is
+gone and the helper exited. A first `launch-root`, killed with SIGKILL while its
+harness waits, must take its helper with it and leave its directory, which the
+next `launch-root` must sweep. When `/etc/agentc/push-app.pem` exists, it must be
+mode 0400 `agentc-push:agentc-push`, readable by `agentc-push` and by neither
+agent account; without it those checks are skipped.

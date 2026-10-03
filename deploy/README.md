@@ -6,23 +6,35 @@ The maintained deployment guide is in the [Agent Coordinator book source](../boo
 
 `agentc/host-setup.sh` prepares a Linux host for unattended, supervised agent
 launches: the `agentc-impl` and `agentc-rev` accounts (plus `agentc-egress` for
-the proxy), root-owned pinned `claude`, `codex`, `agent-coordinator` and
-`agentc-supervisor` binaries and a Rust toolchain under `/opt/agentc`, private
+the proxy and `agentc-push` for the candidate-push helper), root-owned pinned
+`claude`, `codex`, `agent-coordinator`, `agentc-supervisor` and `agentc-push`
+binaries and a Rust toolchain under `/opt/agentc`, private
 0700 per-role state under `/var/lib/agentc`, a read-only Git mirror, the
 `agentc-egress` allowlist proxy and an nftables table that filters only the
 agent accounts (loopback proxy, staging port and ephemeral test ports only; no
-DNS, no direct internet). Build the two binaries first, then:
+DNS, no direct internet). It also writes `/etc/agentc/push.toml` when absent and
+hands an existing push App key, `/etc/agentc/push-app.pem`, to `agentc-push`
+(mode 0400). Build the binaries first (`agentc-push` belongs to the
+`agentc-integrator` package; set `PUSH=<path>` if it is not beside
+`SUPERVISOR`), then:
 
 ```sh
-cargo build --release --locked -p agentc-supervisor -p coordinator-cli
+cargo build --release --locked -p agentc-supervisor -p agentc-integrator -p coordinator-cli
 sudo SUPERVISOR=target/release/agentc-supervisor CLI=target/release/agent-coordinator \
   deploy/agentc/host-setup.sh
 ```
 
 Log each role's harnesses in and install its supervised coordinator credential
-as the script prints, then verify with `sudo deploy/agentc/containment-suite.sh`
+as the script prints. On the host that runs implementer launches, place the push
+App key as the script prints and re-run it. Then verify with
+`sudo deploy/agentc/containment-suite.sh`
 (add `--cargo-test` to also run the workspace tests under each profile).
-`sudo deploy/agentc/host-setup.sh --uninstall` removes everything it created.
+Implementer launches run as root through
+`sudo /opt/agentc/bin/agentc-supervisor launch-root`; see
+[the candidate-push helper](../book/src/deploy/README.md#implementer-candidate-push-helper).
+`sudo deploy/agentc/host-setup.sh --uninstall` removes what it installed, by
+explicit path; it keeps the push App key (returned to root) and other
+installers' files, such as the integrator's, under the same directories.
 The two services are systemd units where systemd is the init system and LSB
 `/etc/init.d` scripts otherwise (for example MX Linux with sysvinit), where the
 proxy logs to `/var/log/agentc-egress.log`.

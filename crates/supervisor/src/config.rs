@@ -68,11 +68,13 @@ pub struct PushHelper {
 }
 
 impl Default for PushHelper {
-    /// The helper in `/usr/local/bin`, its configuration in `/etc/agentc`,
-    /// and the `agentc-push` account.
+    /// The helper beside the other pinned binaries in `/opt/agentc/bin`
+    /// (`/usr/local/bin` is group-writable on some distributions, which
+    /// `launch-root` refuses), its configuration in `/etc/agentc`, and the
+    /// `agentc-push` account.
     fn default() -> Self {
         Self {
-            program: PathBuf::from("/usr/local/bin/agentc-push"),
+            program: PathBuf::from("/opt/agentc/bin/agentc-push"),
             config: PathBuf::from("/etc/agentc/push.toml"),
             user: "agentc-push".into(),
         }
@@ -148,6 +150,20 @@ mod tests {
     #[test]
     fn empty_file_equals_defaults() {
         assert_eq!(toml::from_str::<Config>("").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn push_helper_defaults_to_the_pinned_binary_dir() {
+        let config = Config::default();
+        assert_eq!(
+            config.push_helper.program,
+            config.bin_dir.join("agentc-push")
+        );
+        assert_eq!(
+            config.push_helper.config,
+            Path::new("/etc/agentc/push.toml")
+        );
+        assert_eq!(config.push_helper.user, "agentc-push");
     }
 
     #[test]
