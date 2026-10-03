@@ -246,6 +246,25 @@ host/auth/refresh/browser proof (incl. the `pwd -P` suffix), S6 cutover chain.
   once: `coordinator-cli` `launcher_lock_excludes_another_launcher_but_allows_native_journal_lock`
   (passed 6 reruns; untouched crate).
 
+- **Root runs, 2026-10-02 night (owner-guided, workflow off; branch pushed).**
+  Both hosts: `containment-suite.sh` all checks passed (only SKIP: browser,
+  no staging). mxmini (Debian 12) also ran the `f1edadd` relay leg; push-key
+  legs SKIP there (no key). oracle-1 (Ubuntu 26.04, kernel 7.0, AppArmor
+  5.0.2) passed the push-key legs. Fixes found by the runs:
+  `0ae9877` install_node exited silently under pipefail without nvm;
+  `a72f402` opt-in `APPARMOR_BWRAP=1` (Ubuntu's `unpriv_bwrap` denies the
+  reviewer's nested sandbox `sys_admin`; a `priority=` local override does
+  not lift it): agentc-only `/opt/agentc/bin/bwrap` (root:agentc-bwrap 0750,
+  members exactly impl+rev) with its own `agentc-bwrap` profile, plus the
+  suite now expects preflight to refuse Codex reviewers; `4ce6b93` SIGPIPE-
+  safe primary-group check. Red team: DISPUTED twice, all findings fixed.
+  oracle-1 runs with `APPARMOR_BWRAP=1`; re-run host-setup with it after any
+  Bubblewrap upgrade (suite fails on a stale copy). Accepted scope: Codex
+  implementers (unwrapped) can reach the copy, as on Debian. Still
+  unverified: the `--uninstall` path as root; cross-uid kills beyond the
+  suite's legs. Next: owner Claude host/auth proof (incl. `pwd -P` suffix),
+  S6 cutover chain.
+
 The user disabled the Agent Coordinator workflow and authorized overnight local
 implementation with subagents. Cutoff: 2026-10-02 08:00 America/New_York
 (12:00 UTC). No production changes, credential issuance, rulesets, ownership
