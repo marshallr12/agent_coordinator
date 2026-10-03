@@ -24,21 +24,20 @@ root-owned claude-config denies. Decision U27: agent accounts use `claude setup-
 - Red team: both lanes DISPUTED in round 0 (low severity: an oversized file passed through
   the read bound, an untested read bound, the first-entry-only report, an lstat/open race; a
   stale or partial dummy, a non-root token adopted, a vacuous grep probe), all fixed, then
-  CONFIRMED in round 1. Not run as root yet. Flake seen under mutation load:
+  CONFIRMED in round 1. Flake seen under mutation load:
   `push_helper::tests::stale_launch_directories_are_swept_only_when_owned_unlocked_directories`
   (6/6 passes alone).
 - oracle-1 root run (2026-10-03, owner-approved): host-setup `APPARMOR_BWRAP=1` rc 0 removed
   both retired logins; pin moved 2.1.287 -> 2.1.288 (host-setup copies the owner's claude);
   claude-config holds only the two root seeds. Containment suite rc 0, 101 PASS, no FAIL,
   NOTE x2 (dummy token), SKIP browser (no staging); dummies removed afterwards.
-- Unverified: real Claude 2.1.288 with a real setup-token (no refresh-lock attempt, nothing
-  logged to `stderr.log`/`events.jsonl`). That needs the owner's `claude setup-token` on oracle-1.
-
-## Follow-up session — 2026-10-02 (daytime)
-
-The user again disabled the Agent Coordinator workflow and asked for the next
-backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
-
+- Real-token proof on oracle-1 (2026-10-03, Claude 2.1.288): two distinct setup-tokens at
+  root:agentc-<role> 0440 (1 link, 108 B). Suite rc 0, 101 PASS, no NOTE. Auth smoke per role
+  with the token via env: `ok`, no auth/refresh stderr, claude-config unchanged (seeds only).
+  `pwd -P` suffix PASS on 2.1.288 (plain, cd, background; file directly in TMPDIR). Preflight
+  lists no token/claude-config problem (only the missing proof clone/run). Still owed: mxmini
+  host-setup re-run + its own tokens before it runs Claude launches; owner revokes the two
+  retired `claude auth login` sessions; merge to main needs the owner's go-ahead.
 - `09a2b78` TypeSafe main-service-only secret file (wave-plan A-P4): the main
   unit adds `EnvironmentFile=-/etc/agent-coordinator/typesafe.env` after
   `service.env`; backup/maintenance units unchanged; install and backup guides,
