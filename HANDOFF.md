@@ -30,11 +30,11 @@ repair). **R-P3b.2 code-complete (2026-10-02 evening, U23-U26):** `598c77a` prot
 `2132b4c` `agentc-push` binary, `bb5294b` CLI via helper socket, `f55cdbc` one commit
 per launch, `d8a9b80` root `launch-root` wrapper, `08fd595` host setup + containment
 leg (+ handoff commits up to `70393d3`); every phase red-teamed to CONFIRMED; full
-gate 670 tests. Nothing pushed, deployed or run as root. **Next (user, root):** on
-oracle-1 build release binaries from `hardening/core-20261002`, run
-`deploy/agentc/host-setup.sh` then `deploy/agentc/containment-suite.sh` (exact
-commands in the core tree's `HANDOFF.md`); repeat on mxmini (also owes the relay
-leg; the root runs now also cover `7b8d3a1`'s uninstall). R-P3b.5(b)(c) landed
+gate 670 tests. Nothing pushed, deployed or run as root. **Root runs done (2026-10-02 night):**
+branch pushed to origin; containment suite all-pass on mxmini (incl. relay leg)
+and oracle-1 (incl. push-key legs; Ubuntu needs host-setup `APPARMOR_BWRAP=1`,
+`a72f402`/`4ce6b93`; details in the core tree's `HANDOFF.md`). `--uninstall`
+still not run as root. R-P3b.5(b)(c) landed
 as `7b8d3a1` (no_new_privs + subreaper leftover kill; uninstall retires agent
 accounts before the firewall; red-teamed twice, all findings fixed; gate 674
 tests). Then: owner Claude host/auth proof (incl. `pwd -P` suffix), S6 cutover chain. Known gap: Codex implementers can reach
