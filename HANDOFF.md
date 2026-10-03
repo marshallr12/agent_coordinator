@@ -225,9 +225,26 @@ R-P3b.2 is code-complete. **User steps (root):** on oracle-1 from this branch:
 `cargo build --release --locked -p agentc-supervisor -p agentc-integrator -p coordinator-cli`,
 `sudo SUPERVISOR=target/release/agentc-supervisor CLI=target/release/agent-coordinator deploy/agentc/host-setup.sh`,
 `sudo deploy/agentc/containment-suite.sh`; same on mxmini (key checks SKIP;
-also owes the f1edadd relay leg). Remaining backlog: R-P3b.5(b)(c) (confirm
-what landed), owner Claude host/auth/refresh/browser proof (incl. the
-`pwd -P` suffix), S6 cutover chain.
+also owes the f1edadd relay leg). Remaining backlog: owner Claude
+host/auth/refresh/browser proof (incl. the `pwd -P` suffix), S6 cutover chain.
+
+- `7b8d3a1` R-P3b.5(b)(c) (2026-10-02 late; coordinator workflow still off,
+  local commit only). (b) `no_new_privs` on every harness, preflight
+  `--version` and sandbox probe; `reaper::reaped` makes `launch` and
+  `launch-root` child subreapers that SIGKILL every descendant (pidfd,
+  parent re-checked, whole tree per round) after the harness and before
+  `.state-terminal.json`, and again if the launch errors. (c) `--uninstall`
+  retires impl/rev/push accounts first (linger off, `pkill -u`/`-U` with a
+  final re-check, crontab, `at` jobs, own files in /tmp, /var/tmp, /dev/shm,
+  userdel), then stops `agentc-egress` (Restart=always) before retiring its
+  account, then drops the firewall. Gate: fmt, Clippy, 674 tests, docs,
+  `bash -n`; mutation controls m1-m5 red. Red team: two DISPUTED rounds, all
+  findings fixed (last one, the egress restart race, fixed after round 2 and
+  verified with shell stubs only). Residual LOW: the `reaped` call sites in
+  `main.rs`/`push_helper.rs` are untested wiring. **Unverified without root:**
+  the whole uninstall path, cross-uid kills from `launch-root`. Flake seen
+  once: `coordinator-cli` `launcher_lock_excludes_another_launcher_but_allows_native_journal_lock`
+  (passed 6 reruns; untouched crate).
 
 The user disabled the Agent Coordinator workflow and authorized overnight local
 implementation with subagents. Cutoff: 2026-10-02 08:00 America/New_York
