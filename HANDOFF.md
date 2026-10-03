@@ -207,12 +207,27 @@ backlog items. Local commits only; nothing pushed, deployed or changed on hosts.
   inside `launch_root`. A SIGKILLed launch-root leaves the launch child running
   without its helper (next run sweeps the dir).
 
-Remaining: R-P3b.2 phase 5 (host-setup: `agentc-push` account, binary
-`/usr/local/bin/agentc-push`, `/etc/agentc/push.toml` root 0644-ish readable
-by agentc-push, key `/etc/agentc/push-app.pem` readable only by agentc-push,
-`/var/lib/agentc` traversable by agentc-impl; containment-suite leg proving
-the root-only items above; docs);
-owner Claude host/auth/refresh/browser proof; S6 cutover chain.
+- (phase 5, this commit's parent) host-setup/containment-suite/docs:
+  `agentc-push` account strictly checked (uid≠0, not shared with
+  impl/rev/egress, nologin/false, only its own group); binary at
+  `/opt/agentc/bin/agentc-push` (new default; `/usr/local/bin` is root:staff
+  2775 on Debian and fails `protected_executable`); `/var/lib/agentc/push`
+  root 0711; `/etc/agentc/push.toml` root:agentc-push 0640 written only when
+  absent (App 5168037 / installation 167333814); key chowned to agentc-push
+  0400 if present (symlink/hardlink refused). `--uninstall` now removes only
+  host-setup's own paths (the integrator survives — previously it
+  `rm -rf`'d `/opt/agentc`, `/var/lib/agentc`, `/etc/agentc`). Suite push leg
+  uses a non-minting sentinel config. Red team CONFIRMED + L1-L4 hardening.
+  **Nothing here has run as root.** `agentc-push` has no egress firewall
+  (direct to GitHub).
+
+R-P3b.2 is code-complete. **User steps (root):** on oracle-1 from this branch:
+`cargo build --release --locked -p agentc-supervisor -p agentc-integrator -p coordinator-cli`,
+`sudo SUPERVISOR=target/release/agentc-supervisor CLI=target/release/agent-coordinator deploy/agentc/host-setup.sh`,
+`sudo deploy/agentc/containment-suite.sh`; same on mxmini (key checks SKIP;
+also owes the f1edadd relay leg). Remaining backlog: R-P3b.5(b)(c) (confirm
+what landed), owner Claude host/auth/refresh/browser proof (incl. the
+`pwd -P` suffix), S6 cutover chain.
 
 The user disabled the Agent Coordinator workflow and authorized overnight local
 implementation with subagents. Cutoff: 2026-10-02 08:00 America/New_York
