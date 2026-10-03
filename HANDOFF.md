@@ -43,6 +43,32 @@ service deploy; workstation CLI not upgraded. Then: owner Claude host/auth proof
 suffix), S6 cutover chain (stability sample now pins `c89e94b`). Known gap: Codex implementers can reach
 concurrent launches' push sockets (run them one at a time).
 
+## Owner Claude auth proof on oracle-1 (2026-10-03, workflow off)
+
+Run by an owner Claude session on oracle-1 (directed from mxmini over Remote Control) plus
+one owner-run strace. Pinned agent copy is **2.1.287** (`supervisor.toml` `claude = "2.1.287"`;
+host-setup copies the owner's binary at setup time, so re-prove after every host-setup re-run).
+- Install of two separate `claude auth login` credentials in place (same inode, 0600): PASS.
+- Auth smoke as each uid via the egress proxy: PASS (no egress denials).
+- `pwd -P` suffix (agentc-rev, logging `CLAUDE_CODE_SHELL_PREFIX`): **PASS**. Plain, `cd` and
+  background commands all end `&& pwd -P >| $TMPDIR/claude-XXXX-cwd`, file directly in TMPDIR;
+  no snapshot invocation under `env -i`.
+- Refresh in place: **FAIL by design.** strace: `mkdirat(claude-config/.oauth_refresh.lock)
+  = EACCES` (x5); no credential write. Root-owned claude-config forbids the refresh lock, so
+  login credentials die ~8h after login. ⇒ **U27** (`claude setup-token` via
+  `CLAUDE_CODE_OAUTH_TOKEN`), committed as `f257ea8` on `hardening/claude-token-20261003`
+  (core worktree; pushed; gate 684 tests; red-team CONFIRMED after one repair round each). Also seen, harmless: `.claude.json` temp+rename, `debug/`,
+  `projects/`, `sessions/` all EACCES.
+- **New backlog item:** role settings set `"sandbox": {"enabled": true}`, but oracle-1 lacks
+  `socat` (mxmini has it), so a direct run warns "Sandbox disabled… dependencies missing". In
+  launches the supervisor's outer bwrap is the boundary (implementers `--disable-userns`, so
+  Claude's native sandbox can't nest anyway). Decide after a real supervised launch per host:
+  drop the setting, or require socat on every host and fail closed.
+- Cleanup done: `~/agentc-bootstrap` and both proof scratch dirs shredded/removed. Still
+  present: the installed `claude-config/.credentials.json` files (retired by U27; the U27
+  host-setup re-run removes them). After U27 tokens work, owner revokes those two
+  `claude auth login` sessions at claude.ai.
+
 ## Previous resume point — core overnight wave (2026-10-02)
 
 The user disabled the Agent Coordinator workflow. No live service tasks were
@@ -567,6 +593,7 @@ Record answers here.
 | U24 | R-P3b.2 updates the helper may make to its own candidate ref | Lease-guarded: create, or update with `--force-with-lease` against the helper's last pushed value; never delete; any other ref refused | 2026-10-02: **as recommended** |
 | U25 | R-P3b.2 how a launch starts the `agentc-push` helper (the supervisor runs as the role uid and cannot switch users) | Root launch wrapper `agentc-supervisor launch-root`: as root it creates the socket dir (`agentc-push:agentc-impl` 2750), starts the helper as `agentc-push` from a launch-lived thread (env cleared, `--parent-pid`, `--known-digest`), runs today's launch as `agentc-impl`, then tears the helper down. No sudo rights for `agentc-impl`; matches plan-final §2.3 | 2026-10-02: **as recommended** |
 | U26 | R-P3b.2 narrows U24: in-launch resubmission is refused by the server (409 `submission_current`) after the helper's ref has already moved | One commit per launch: after its first accepted push the helper refuses any other commit with a new refusal code; an idempotent same-commit retry still succeeds | 2026-10-02: **as recommended** |
+| U27 | Agent-account Claude auth (owner proof 2026-10-03 on oracle-1: Claude 2.1.287 refreshes only after `mkdir claude-config/.oauth_refresh.lock`, which the root-owned claude-config denies, so `claude auth login` credentials die after ~8h) | `claude setup-token` per role (long-lived, inference-only); the supervisor reads root:agentc-<role> 0440 `<state>/<role>/claude-token` at spawn and passes `CLAUDE_CODE_OAUTH_TOKEN` (never in the described/audited env); `.credentials.json` retired; claude-config stays read-only | 2026-10-03: **as recommended** |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
