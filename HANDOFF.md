@@ -27,7 +27,11 @@ root-owned claude-config denies. Decision U27: agent accounts use `claude setup-
   CONFIRMED in round 1. Not run as root yet. Flake seen under mutation load:
   `push_helper::tests::stale_launch_directories_are_swept_only_when_owned_unlocked_directories`
   (6/6 passes alone).
-- Unverified: real Claude 2.1.287 with a real setup-token (no refresh-lock attempt, nothing
+- oracle-1 root run (2026-10-03, owner-approved): host-setup `APPARMOR_BWRAP=1` rc 0 removed
+  both retired logins; pin moved 2.1.287 -> 2.1.288 (host-setup copies the owner's claude);
+  claude-config holds only the two root seeds. Containment suite rc 0, 101 PASS, no FAIL,
+  NOTE x2 (dummy token), SKIP browser (no staging); dummies removed afterwards.
+- Unverified: real Claude 2.1.288 with a real setup-token (no refresh-lock attempt, nothing
   logged to `stderr.log`/`events.jsonl`). That needs the owner's `claude setup-token` on oracle-1.
 
 ## Follow-up session — 2026-10-02 (daytime)
