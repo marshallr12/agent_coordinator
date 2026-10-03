@@ -609,11 +609,14 @@ fn long_credential_paths_still_fit_the_reply() {
     let fixture = fixture();
     let spec = fixture.spec();
     let blob = fixture.blob(b"not a key\n");
-    let entries: Vec<_> = (0..5)
+    // Names stay under Git's 4096-byte fsck `largePathname` limit (an error
+    // under `index-pack --strict` on newer Git), so the many entries rather
+    // than any one name push the reply past `MAX_REPLY_LINE`.
+    let entries: Vec<_> = (0..20)
         .map(|index| {
             (
                 "100644",
-                format!("{}{index}.pem", "p".repeat(20_000)),
+                format!("{}{index:02}.pem", "p".repeat(4_000)),
                 blob.clone(),
             )
         })
