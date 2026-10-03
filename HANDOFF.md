@@ -34,8 +34,10 @@ gate 670 tests. Nothing pushed, deployed or run as root. **Next (user, root):** 
 oracle-1 build release binaries from `hardening/core-20261002`, run
 `deploy/agentc/host-setup.sh` then `deploy/agentc/containment-suite.sh` (exact
 commands in the core tree's `HANDOFF.md`); repeat on mxmini (also owes the relay
-leg). Then: R-P3b.5(b)(c) (confirm what landed), owner Claude host/auth proof
-(incl. `pwd -P` suffix), S6 cutover chain. Known gap: Codex implementers can reach
+leg; the root runs now also cover `7b8d3a1`'s uninstall). R-P3b.5(b)(c) landed
+as `7b8d3a1` (no_new_privs + subreaper leftover kill; uninstall retires agent
+accounts before the firewall; red-teamed twice, all findings fixed; gate 674
+tests). Then: owner Claude host/auth proof (incl. `pwd -P` suffix), S6 cutover chain. Known gap: Codex implementers can reach
 concurrent launches' push sockets (run them one at a time).
 
 ## Previous resume point — core overnight wave (2026-10-02)
