@@ -24,8 +24,14 @@ sudo SUPERVISOR=target/release/agentc-supervisor CLI=target/release/agent-coordi
   deploy/agentc/host-setup.sh
 ```
 
-Log each role's harnesses in and install its supervised coordinator credential
-as the script prints. On the host that runs implementer launches, place the push
+For each role, install a Claude token from `claude setup-token` as
+`/var/lib/agentc/<role>/claude-token` (`root:agentc-<role>`, mode 0440), log
+Codex in, and install its supervised coordinator credential, as the script
+prints. Agent accounts never use `claude auth login`: its refresh needs a
+writable `claude-config`, which would reopen the persistence hole the
+protected seed layout closes; see
+[Claude token for agent accounts](../book/src/deploy/README.md#claude-token-for-agent-accounts)
+for renewal and revocation. On the host that runs implementer launches, place the push
 App key as the script prints and re-run it. Then verify with
 `sudo deploy/agentc/containment-suite.sh`
 (add `--cargo-test` to also run the workspace tests under each profile).
@@ -33,7 +39,8 @@ Implementer launches run as root through
 `sudo /opt/agentc/bin/agentc-supervisor launch-root`; see
 [the candidate-push helper](../book/src/deploy/README.md#implementer-candidate-push-helper).
 `sudo deploy/agentc/host-setup.sh --uninstall` removes what it installed, by
-explicit path; it keeps the push App key (returned to root) and other
+explicit path; it zeroes and deletes each role's `claude-token`, and keeps the
+push App key (returned to root) and other
 installers' files, such as the integrator's, under the same directories.
 The two services are systemd units where systemd is the init system and LSB
 `/etc/init.d` scripts otherwise (for example MX Linux with sysvinit), where the

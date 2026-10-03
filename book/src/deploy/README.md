@@ -119,8 +119,8 @@ not group/world-writable. Each mutable child (`runs/`, `clones/`, `home/`,
 role-owned mode 0700. A role cannot replace the protected config directory.
 
 The persistent Claude directory contains only root-owned, mode 0444 generated
-`settings.json`, an empty root-owned mode 0444 `CLAUDE.md`, and the role-owned
-mode 0600 `.credentials.json`. The root-owned mode 0444 Cargo seed at
+`settings.json` and an empty root-owned mode 0444 `CLAUDE.md`; it holds no
+login. The root-owned mode 0444 Cargo seed at
 `/etc/agentc/cargo-config.toml` contains exactly:
 
 ```toml
@@ -138,20 +138,55 @@ linked generated outputs before writing them. Only the five most recent known
 terminal state directories are retained; interrupted or unknown runs remain.
 
 The installer seals an existing real role parent without recursively changing
-ownership. It rejects symlinks, unexpected Claude config entries, and unsafe
-credential files with an owner-repair instruction. Protected seeds are replaced
+ownership. It rejects symlinks, unexpected Claude config entries, and linked or
+non-regular Claude files with an owner-repair instruction. A leftover
+`claude-config/.credentials.json` from the retired `claude auth login` flow is
+overwritten with zeros (`shred`, where installed) and deleted, and the
+installer logs the removal. Protected seeds are replaced
 with fresh root-owned inodes. Existing shared role Cargo caches are unused and
 are left for owner cleanup. Run the installer only after stopping role processes;
 this phase does not fence an already running agent.
 
-Claude authentication is an owner bootstrap step in a separate private directory.
-Import only the credential file with its required owner and mode; never copy
-other harness state or make the protected directory writable for login. The
-supervisor does not read or copy credential bytes. **Pinned-harness credential
-refresh remains unverified:** this layout permits in-place file updates, but
-rejects refresh implementations that create a temporary file and rename it.
-The containment suite checks file write permission, not successful authentication
-or refresh. That live proof is required before using this layout for launches.
+### Claude token for agent accounts
+
+Agent accounts authenticate Claude with a long-lived token from
+`claude setup-token` (decision U27), never with `claude auth login`. Claude
+refreshes a `claude auth login` credential only after creating the lock
+directory `.oauth_refresh.lock` in its configuration directory. `claude-config`
+is root-owned and read-only to the role, so the lock fails and that login
+expires within hours. Making `claude-config` writable would reopen the
+persistence hole the protected seed layout closes (R-P3b.1): a role could then
+plant settings or instructions that later launches load.
+
+As the owner, run the pinned binary once per role, so each role has its own
+token that can be revoked alone:
+
+```sh
+/opt/agentc/bin/claude setup-token
+sudo install -o root -g agentc-impl -m 0440 /dev/stdin /var/lib/agentc/impl/claude-token
+```
+
+`install` waits on standard input without a prompt: paste the token, then
+press Ctrl-D twice without pressing Enter, which stores the token alone.
+Repeat with `agentc-rev` and `/var/lib/agentc/rev/claude-token`. The file sits in the role parent, outside
+`claude-config`, as `root:agentc-<role>` mode 0440: the role can read it but not
+change or replace it. At spawn the supervisor reads it and passes it to Claude
+as `CLAUDE_CODE_OAUTH_TOKEN`; no credential file is mounted into the sandbox.
+The supervisor refuses a launch whose token file is missing, is not owned by
+root and the role's agent group with mode 0440, or, once trailing whitespace is
+dropped, is empty, longer than 4096 bytes, or holds any whitespace, control or
+non-ASCII byte. Preflight also reports a leftover
+`claude-config/.credentials.json` as a problem.
+
+The token is inference-only and long-lived. Renew it with `claude setup-token`
+and the same `install` command before it expires. If it is ever exposed, revoke
+it at claude.ai and install a new one. `host-setup.sh`
+never creates or prints a token. On each run it holds an existing root-owned
+one at `root:agentc-<role>` 0440, and refuses a symlink, a multiply-linked file
+or a token with any other owner with an owner-repair instruction. It warns when
+the token is the containment suite's leftover dummy, comparing only a file of
+exactly the dummy's size. `--uninstall` overwrites each token with zeros and
+deletes it.
 
 ## Claude runtime write confinement
 
@@ -197,8 +232,8 @@ directory writable. Their parents stay read-only, so an agent cannot rename the
 Cargo directory around its read-only config overlay. The root Cargo seed and
 persistent Claude settings are mounted over the per-launch Cargo config and
 both persistent and generated Claude settings. `CLAUDE.md` remains read-only.
-Only the persistent credential file is writable, retaining the in-place refresh
-limitation above. Stdout and stderr use private files opened by the supervisor;
+Nothing in the persistent Claude directory is writable, and the launch gets
+its login only as `CLAUDE_CODE_OAUTH_TOKEN`. Stdout and stderr use private files opened by the supervisor;
 run metadata, prompt, lifecycle markers, and output paths remain read-only to
 filesystem writes from the sandbox. Claude's stdin is a sealed Linux memory
 snapshot of at most 16 MiB, with writing, growth, shrinking, and seal changes
@@ -251,8 +286,9 @@ in a second, nested Bubblewrap: the whole state directory is replaced by an empt
 tmpfs, and only the current clone (read-only), the candidate's own home and
 temporary directory, the run's Cargo home and build directory (writable), and
 `verification.json` return. The
-Claude configuration stays readable for shell snapshots, but its credential file
-reads as empty. Coordinator state, other runs and clones, Codex state and the
+Claude configuration stays readable for shell snapshots and holds no login; the
+role's `claude-token` lies under the hidden state directory, and
+`CLAUDE_CODE_OAUTH_TOKEN` is unset. Coordinator state, other runs and clones, Codex state and the
 verification login stay hidden; provider, GitHub and TypeSafe key variables are
 unset; procfs is read-only and no further user namespace can be created. Each
 command gets its own PID namespace, so a process it backgrounds ends with it.
@@ -297,9 +333,23 @@ runs one real `agentc-supervisor launch` from a temporary root-owned bin
 directory whose `claude` is a mock: inside the launch's network namespace it
 must reach the egress proxy through the relay (for the reviewer, also from a
 candidate command) and must not reach the network directly. A second bin
-directory whose supervisor cannot relay must fail preflight. Host installation,
-authenticated Claude runs, nested harness/browser sandbox compatibility, and
-credential refresh remain owner verification work. No authenticated harness or
+directory whose supervisor cannot relay must fail preflight. A role with no
+`claude-token` gets a dummy one (`root:agentc-<role>` mode 0440) for the run,
+so these mock legs pass preflight before the owner installs real tokens. On
+exit the suite removes only the dummies it created, and only while they still
+hold the dummy text. If that cleanup never ran (SIGKILL, power loss), the next
+run reports the leftover dummy as a `FAIL` with the command that removes it. The
+suite never prints a token and compares an existing one with the dummy only
+when its size matches. If installing a dummy fails, the suite removes its
+partial file and stops. For each role the
+suite checks the token's owner and mode, that only that role can read it and
+nobody can write it, that the launch received `CLAUDE_CODE_OAUTH_TOKEN`, and
+that a reviewer candidate command can neither read the token file nor see that
+variable. With a dummy it prints a `NOTE` that real-token authentication is not
+exercised. For every role it checks that `claude-config` refuses new entries,
+including the `.oauth_refresh.lock` directory. Host installation,
+authenticated Claude runs, and nested harness/browser sandbox compatibility
+remain owner verification work. No authenticated harness or
 native Codex success is claimed by these tests.
 
 ## Implementer candidate-push helper

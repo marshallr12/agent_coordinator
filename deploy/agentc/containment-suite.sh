@@ -5,6 +5,11 @@
 #   sudo deploy/agentc/containment-suite.sh [--cargo-test]
 #
 # Prints one PASS/FAIL line per check and exits non-zero if any check fails.
+# A role with no claude-token gets a dummy one for the run (removed on exit),
+# so the mock-harness Claude legs pass preflight before the owner installs
+# real tokens. A dummy left by a run whose EXIT trap never ran is a FAIL. The
+# suite never prints a token, and compares an existing one with the dummy only
+# when its size matches the dummy's.
 set -uo pipefail
 
 PREFIX=/opt/agentc
@@ -19,6 +24,9 @@ FAILED=0
 SUITE_BINS=()
 PUSH_PID=
 PUSH_RUN=
+DUMMY_TOKEN=agentc-suite-dummy-token
+DUMMY_TOKENS=()
+STALE_TOKENS=()
 
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAILED=1; }
@@ -102,7 +110,9 @@ check_writes() {
 }
 
 # Persistent seed parents must deny replacement as well as content writes.
-# Probe create permission with harmless names; never unlink real auth or seeds.
+# Probe create permission with harmless names; never unlink real seeds.
+# claude-config holds no login, and the role cannot take Claude's OAuth
+# refresh lock there.
 check_seeds() {
   local user=$1 base=$STATE/${1#agentc-} path
   for path in "$base" "$base/claude-config" /etc/agentc; do
@@ -111,7 +121,10 @@ check_seeds() {
   for path in "$base/claude-config/settings.json" "$base/claude-config/CLAUDE.md" /etc/agentc/cargo-config.toml; do
     expect_fail "$user: protected seed is not writable: $path" as "$user" test -w "$path"
   done
-  expect_ok "$user: credential file supports in-place writes" as "$user" test -w "$base/claude-config/.credentials.json"
+  expect_fail "$user: cannot mkdir claude-config/.oauth_refresh.lock" \
+    as "$user" mkdir "$base/claude-config/.oauth_refresh.lock"
+  expect_fail "$user: no retired claude-config/.credentials.json" \
+    test -e "$base/claude-config/.credentials.json" -o -L "$base/claude-config/.credentials.json"
   expect_ok "$user: per-launch Cargo baseline is seeded" cmp /etc/agentc/cargo-config.toml "$base/runs/suite/state/cargo/config.toml"
 }
 
@@ -168,6 +181,7 @@ for path in "$base/home/suite-escape" "$base/runs/suite-other/escape" \
  deny overwrite "$path"
 done
 deny mv "$CARGO_HOME" "$CARGO_HOME-replaced"
+deny mkdir "$CLAUDE_CONFIG_DIR/.oauth_refresh.lock"
 deny touch "$run/unexpected-metadata"
 for path in "$HOME" "$CARGO_HOME/registry" "$AGENT_COORDINATOR_HOME" \
  "$TMPDIR" "$CARGO_TARGET_DIR"; do
@@ -191,6 +205,9 @@ PY
 # passes; otherwise, inside the launch's network namespace, it must reach the
 # proxy (possible only through the supervisor's relay), must not reach the
 # network directly, and a reviewer's candidate command must reach the proxy.
+# It leaves $TMPDIR/suite-harness-token when CLAUDE_CODE_OAUTH_TOKEN is set,
+# and $TMPDIR/suite-token-hidden when a reviewer's candidate command can
+# neither read rev/claude-token nor see that variable.
 write_mock_claude() {
   cat > "$1" <<EOF
 #!/bin/sh
@@ -198,8 +215,12 @@ write_mock_claude() {
 set -eu
 curl -sSf -o /dev/null --max-time 20 -x "\$HTTPS_PROXY" https://github.com/ || exit 3
 if curl -sS -o /dev/null --max-time 5 --noproxy '*' https://github.com/; then exit 4; fi
+[ -z "\${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || : > "\$TMPDIR/suite-harness-token"
 [ -n "\${CLAUDE_CODE_SHELL_PREFIX:-}" ] || exit 0
 "\$CLAUDE_CODE_SHELL_PREFIX" "curl -sSf -o /dev/null --max-time 20 -x \$HTTPS_PROXY https://github.com/ && pwd -P >| \$TMPDIR/suite-relay-cwd" || exit 5
+if "\$CLAUDE_CODE_SHELL_PREFIX" "test ! -r $STATE/rev/claude-token && [ -z \"\\\${CLAUDE_CODE_OAUTH_TOKEN+x}\" ] && pwd -P >| \$TMPDIR/suite-token-cwd"; then
+  : > "\$TMPDIR/suite-token-hidden"
+fi
 EOF
   chmod 0755 "$1"
 }
@@ -349,10 +370,82 @@ stop_push_launch() {
   kill -KILL "$PUSH_PID" 2>/dev/null
 }
 
-# The EXIT trap: no launch-root left running, no suite bin dir left behind.
+# The EXIT trap: no launch-root left running, no suite bin dir or dummy
+# token left behind.
 suite_cleanup() {
   stop_push_launch
   remove_suite_bins
+  remove_dummy_tokens
+}
+
+# Installs a dummy claude-token (root:<role> 0440) for each role that has
+# none (see install_dummy) and checks an existing one with flag_stale_dummy.
+# Exits when a token path is a symlink or not a regular file.
+install_dummy_tokens() {
+  local user token
+  for user in agentc-impl agentc-rev; do
+    token=$STATE/${user#agentc-}/claude-token
+    if [ -L "$token" ] || { [ -e "$token" ] && [ ! -f "$token" ]; }; then
+      echo "refusing: $token is a symlink or not a regular file; owner repair required" >&2; exit 1
+    fi
+    if [ -e "$token" ]; then flag_stale_dummy "$token"; else install_dummy "$user" "$token"; fi
+  done
+}
+
+# Installs the dummy token for role account $1 at absent path $2 and records
+# it for remove_dummy_tokens. On failure it removes the single-link regular
+# file the install left there, owned by the suite's own uid (root), then
+# exits; install_dummy_tokens calls it only for an absent path, so that file
+# is never a real token.
+install_dummy() {
+  if printf '%s' "$DUMMY_TOKEN" | install -o root -g "$1" -m 0440 /dev/stdin "$2"; then
+    DUMMY_TOKENS+=("$2"); return 0
+  fi
+  if [ -f "$2" ] && [ ! -L "$2" ] && [ "$(stat -c '%h %u' -- "$2")" = "1 $(id -u)" ]; then
+    rm -f -- "$2"
+  fi
+  echo "cannot install a dummy $2" >&2; exit 1
+}
+
+# FAILs when existing token $1 is a dummy left by an earlier run whose EXIT
+# trap never ran (SIGKILL, power loss), and records it so its checks carry
+# the dummy NOTE. Only a file of exactly the dummy's size is compared, so a
+# real token is read only at that size and never printed.
+flag_stale_dummy() {
+  [ "$(stat -c %s -- "$1")" = "${#DUMMY_TOKEN}" ] && holds_dummy_token "$1" || return 0
+  fail "stale suite dummy token at $1; remove it (sudo rm $1) or install the real setup-token"
+  STALE_TOKENS+=("$1")
+}
+
+# Removes each recorded dummy token while it is still the suite's own file;
+# anything else now at a recorded path is left in place with a warning.
+remove_dummy_tokens() {
+  local token
+  for token in ${DUMMY_TOKENS[@]+"${DUMMY_TOKENS[@]}"}; do
+    if holds_dummy_token "$token"; then
+      rm -f -- "$token"
+    elif [ -e "$token" ] || [ -L "$token" ]; then
+      echo "warning: left $token in place: it is no longer the suite's dummy token" >&2
+    fi
+  done
+}
+
+# True when $1 is a single-link regular file, not a symlink, holding exactly
+# the dummy token. Called on the suite's recorded dummies and, after a size
+# check, by flag_stale_dummy.
+holds_dummy_token() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %h -- "$1")" = 1 ] &&
+    printf '%s' "$DUMMY_TOKEN" | cmp -s - "$1"
+}
+
+# True when the suite installed $1 as a dummy token or flagged it as a stale
+# one. Decided from those records alone, so no token's bytes are read.
+is_dummy_token() {
+  local token
+  for token in ${DUMMY_TOKENS[@]+"${DUMMY_TOKENS[@]}"} ${STALE_TOKENS[@]+"${STALE_TOKENS[@]}"}; do
+    [ "$token" = "$1" ] && return 0
+  done
+  return 1
 }
 
 # Waits up to $2 seconds for file $1 while process $3 lives.
@@ -511,6 +604,37 @@ bwrap_group_exact() {
     ! primary_group "$gid"
 }
 
+# Role $1's Claude token, read at spawn by the supervisor running as $1: a
+# root-owned 0440 file $1 can read but not write and role $2 cannot read,
+# which the real launch (check_claude_launch) received as
+# CLAUDE_CODE_OAUTH_TOKEN. With the suite's dummy the layout checks still
+# hold, and a NOTE says real-token authentication is not exercised. Never
+# reads the token's bytes (is_dummy_token consults the suite's records).
+check_claude_token() {
+  local user=$1 other=$2 token=$STATE/${1#agentc-}/claude-token
+  if [ ! -e "$token" ]; then fail "$user: claude-token exists at $token"; return; fi
+  if is_dummy_token "$token"; then
+    echo "NOTE $user: claude-token checks use the suite's dummy token; real-token authentication is not exercised"
+  fi
+  expect_ok "$user: claude-token is 440 root:$user" has_mode "$token" "440 root $user"
+  expect_ok "$user: can read its claude-token" as "$user" test -r "$token"
+  expect_fail "$user: cannot write its claude-token" as "$user" test -w "$token"
+  expect_fail "$other: cannot read ${user}'s claude-token" as "$other" test -r "$token"
+  expect_ok "$user/claude: real launch received CLAUDE_CODE_OAUTH_TOKEN" \
+    test -e "$STATE/${1#agentc-}/runs/suite-launch/tmp/suite-harness-token"
+}
+
+# The reviewer's candidate sandbox (R-P3b.3) can neither read rev/claude-token
+# nor see CLAUDE_CODE_OAUTH_TOKEN; the mock harness's candidate probe in the
+# real launch records that. A real or dummy token must exist, or the probe
+# proves nothing.
+check_candidate_token() {
+  local token=$STATE/rev/claude-token
+  if [ ! -e "$token" ]; then fail "agentc-rev: claude-token exists at $token"; return; fi
+  expect_ok "agentc-rev: candidate sandbox cannot read claude-token or CLAUDE_CODE_OAUTH_TOKEN" \
+    test -e "$STATE/rev/runs/suite-launch/tmp/suite-token-hidden"
+}
+
 # Only the helper account can read the push App key; skipped without one.
 check_push_key() {
   if [ ! -e "$PUSH_KEY" ]; then echo "SKIP push App key checks (no $PUSH_KEY on this host)"; return; fi
@@ -551,6 +675,7 @@ main() {
   [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
   local cargo_test=${1:-} relay_bin stub_bin push_bin
   trap suite_cleanup EXIT
+  install_dummy_tokens
   make_suite_bin "$SUP"; relay_bin=$SUITE_BIN
   make_suite_bin /bin/false; stub_bin=$SUITE_BIN
   make_suite_bin "$SUP"; push_bin=$SUITE_BIN
@@ -567,8 +692,10 @@ main() {
     check_codex_sandbox "$1"
     check_claude_sandbox "$1"
     check_claude_launch "$1" "$relay_bin"
+    check_claude_token "$1" "$2"
     check_relay_probe "$1" "$stub_bin"
   done
+  check_candidate_token
   check_push_kill "$push_bin"
   check_push_launch "$push_bin"
   check_push_key

@@ -226,47 +226,130 @@ fn state_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
         Ok(())
     })());
     if spec.harness == Harness::Claude {
-        let persistent = config
-            .state_dir
-            .join(spec.role.slug())
-            .join("claude-config");
-        record(protected_directory(&persistent));
-        for file in ["settings.json", "CLAUDE.md"] {
-            record(protected_file(&persistent.join(file)));
-        }
-        record((|| {
-            let settings = confine::read_regular(&persistent.join("settings.json"))?;
-            ensure!(
-                std::str::from_utf8(&settings)
-                    .is_ok_and(|text| role_settings::matches(spec.role, text)),
-                "persistent Claude settings differ from the generated role settings"
-            );
-            ensure!(
-                confine::read_regular(&persistent.join("CLAUDE.md"))?.is_empty(),
-                "persistent CLAUDE.md must be the empty seed"
-            );
-            Ok(())
-        })());
-        record(role_owned(
-            &persistent.join(".credentials.json"),
-            spec.role,
-            config,
-            true,
-        ));
-        record((|| {
-            for entry in fs::read_dir(&persistent)? {
-                let entry = entry?;
-                ensure!(
-                    ["settings.json", "CLAUDE.md", ".credentials.json"]
-                        .iter()
-                        .any(|name| entry.file_name() == *name),
-                    "persistent Claude config contains an unexpected entry; owner cleanup required"
-                );
-            }
-            Ok(())
-        })());
+        problems.extend(claude_problems(spec, config));
     }
     problems
+}
+
+/// A Claude launch needs its protected `claude-config` holding exactly the
+/// generated settings and the empty CLAUDE.md, and the role's token file.
+fn claude_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
+    let persistent = config
+        .state_dir
+        .join(spec.role.slug())
+        .join("claude-config");
+    let mut results = vec![protected_directory(&persistent)];
+    for file in CLAUDE_CONFIG_ENTRIES {
+        results.push(protected_file(&persistent.join(file)));
+    }
+    results.push(claude_seeds(spec.role, &persistent));
+    results.push(token_file(spec.role, config));
+    let errors = results.into_iter().filter_map(Result::err);
+    let mut problems: Vec<String> = errors.map(|error| format!("{error:#}")).collect();
+    match claude_entries(&persistent) {
+        Ok(found) => problems.extend(found),
+        Err(error) => problems.push(format!("{error:#}")),
+    }
+    problems
+}
+
+/// The only entries a persistent `claude-config` may hold.
+const CLAUDE_CONFIG_ENTRIES: [&str; 2] = ["settings.json", "CLAUDE.md"];
+
+/// The persistent settings match the role's generated settings and the
+/// persistent CLAUDE.md is empty.
+fn claude_seeds(role: Role, persistent: &Path) -> Result<()> {
+    let settings = confine::read_regular(&persistent.join("settings.json"))?;
+    ensure!(
+        std::str::from_utf8(&settings).is_ok_and(|text| role_settings::matches(role, text)),
+        "persistent Claude settings differ from the generated role settings"
+    );
+    ensure!(
+        confine::read_regular(&persistent.join("CLAUDE.md"))?.is_empty(),
+        "persistent CLAUDE.md must be the empty seed"
+    );
+    Ok(())
+}
+
+/// One problem for every `claude-config` entry beyond
+/// [`CLAUDE_CONFIG_ENTRIES`], whatever order the directory lists them in.
+fn claude_entries(persistent: &Path) -> Result<Vec<String>> {
+    let mut problems = Vec::new();
+    for entry in fs::read_dir(persistent)? {
+        problems.extend(entry_problem(persistent, &entry?.file_name()));
+    }
+    problems.sort();
+    Ok(problems)
+}
+
+/// Why `name` may not sit in `claude-config`, if it may not; a retired
+/// `.credentials.json` gets its own removal instruction.
+fn entry_problem(persistent: &Path, name: &std::ffi::OsStr) -> Option<String> {
+    if name == ".credentials.json" {
+        return Some(format!(
+            "{} holds a retired .credentials.json; remove it (host-setup removes it): \
+             agent accounts authenticate with their claude-token file",
+            persistent.display()
+        ));
+    }
+    (!CLAUDE_CONFIG_ENTRIES.iter().any(|allowed| name == *allowed)).then(|| {
+        format!(
+            "persistent Claude config contains an unexpected entry {name:?}; owner cleanup required"
+        )
+    })
+}
+
+/// The role's Claude token file (`profile::claude_token`), from its metadata
+/// alone: the token itself is never read here.
+#[cfg(unix)]
+fn token_file(role: Role, config: &Config) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let path = profile::claude_token(role, config);
+    confine::path_without_symlinks(&path, false)?;
+    let metadata = fs::symlink_metadata(&path)?;
+    let facts = FileFacts {
+        regular: metadata.is_file(),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        mode: metadata.mode(),
+        links: metadata.nlink(),
+        len: metadata.len(),
+    };
+    token_facts(&path, &facts, role_id(role, config, "-g")?)
+}
+
+#[cfg(not(unix))]
+fn token_file(_role: Role, _config: &Config) -> Result<()> {
+    anyhow::bail!("the Claude token file requires Unix ownership checks")
+}
+
+/// The metadata `token_facts` judges.
+struct FileFacts {
+    regular: bool,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    links: u64,
+    len: u64,
+}
+
+/// A token file is a non-empty, regular, single-link file owned by root,
+/// in the role account's group `role_gid`, with mode exactly 0440. Kept
+/// independent of the test runner's ids, like `protection_facts`.
+fn token_facts(path: &Path, facts: &FileFacts, role_gid: u32) -> Result<()> {
+    let path = path.display();
+    ensure!(
+        facts.regular && facts.links == 1,
+        "{path} must be a regular, single-link file"
+    );
+    ensure!(facts.uid == 0, "{path} must be root-owned");
+    ensure!(
+        facts.gid == role_gid,
+        "{path} must belong to the role account's group"
+    );
+    ensure!(facts.mode & 0o7777 == 0o440, "{path} must be mode 0440");
+    ensure!(facts.len > 0, "{path} must not be empty");
+    Ok(())
 }
 
 fn protected_directory(path: &Path) -> Result<()> {
@@ -335,20 +418,13 @@ fn protected_metadata(_path: &Path, _metadata: &fs::Metadata, _file: bool) -> Re
     anyhow::bail!("protected host seeds require Unix ownership checks")
 }
 
-/// Metadata only: never read, copy, or print an authentication file's bytes.
+/// `path`, reached without symlinks, is owned by the role account; a `file`
+/// must also be a regular, single-link, mode 0600 file. Metadata only.
 #[cfg(unix)]
 fn role_owned(path: &Path, role: Role, config: &Config, file: bool) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     confine::path_without_symlinks(path, false)?;
-    let output = Command::new("id")
-        .args(["-u", role.user(config)])
-        .output()?;
-    ensure!(
-        output.status.success(),
-        "cannot resolve role account {}",
-        role.user(config)
-    );
-    let uid: u32 = std::str::from_utf8(&output.stdout)?.trim().parse()?;
+    let uid = role_id(role, config, "-u")?;
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
         metadata.uid() == uid,
@@ -363,6 +439,19 @@ fn role_owned(path: &Path, role: Role, config: &Config, file: bool) -> Result<()
         );
     }
     Ok(())
+}
+
+/// The role account's uid (`flag` `-u`) or primary gid (`-g`), from `id`.
+fn role_id(role: Role, config: &Config, flag: &str) -> Result<u32> {
+    let output = Command::new("id")
+        .args([flag, role.user(config)])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "cannot resolve role account {}",
+        role.user(config)
+    );
+    Ok(std::str::from_utf8(&output.stdout)?.trim().parse()?)
 }
 
 #[cfg(not(unix))]
@@ -556,7 +645,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn preflight_reports_altered_cargo_claude_seeds_modes_and_credential_links() {
+    fn preflight_reports_altered_seeds_modes_token_files_and_retired_logins() {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let root = tempfile::tempdir().unwrap();
         let current = Command::new("id").arg("-un").output().unwrap();
@@ -589,11 +678,8 @@ mod tests {
         )
         .unwrap();
         fs::write(persistent.join("CLAUDE.md"), "unexpected instructions").unwrap();
-        symlink(
-            &config.cargo_config_seed,
-            persistent.join(".credentials.json"),
-        )
-        .unwrap();
+        let token = profile::claude_token(spec.role, &config);
+        symlink(&config.cargo_config_seed, &token).unwrap();
         fs::write(persistent.join("extra.json"), "unexpected").unwrap();
         let state = StatePaths::new(&spec.run);
         fs::set_permissions(&state.home, fs::Permissions::from_mode(0o755)).unwrap();
@@ -618,6 +704,19 @@ mod tests {
                 .join("\n")
                 .contains("CLAUDE.md must be the empty seed")
         );
+        fs::remove_file(persistent.join("extra.json")).unwrap();
+        fs::write(persistent.join(".credentials.json"), "retired login").unwrap();
+        fs::remove_file(&token).unwrap();
+        fs::write(&token, "token").unwrap();
+        fs::set_permissions(&token, fs::Permissions::from_mode(0o440)).unwrap();
+        let problems = state_problems(&spec, &config).join("\n");
+        for expected in [
+            "retired .credentials.json; remove it",
+            "claude-token must be root-owned",
+        ] {
+            assert!(problems.contains(expected), "{expected}: {problems}");
+        }
+        assert!(!problems.contains("unexpected entry"), "{problems}");
         let codex_home = config.state_dir.join("impl/codex-home");
         symlink(root.path(), &codex_home).unwrap();
         let codex = LaunchSpec {
@@ -636,6 +735,81 @@ mod tests {
                 .contains("required Cargo config seed")
         );
     }
+    #[test]
+    fn every_disallowed_claude_config_entry_is_reported() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["CLAUDE.md", ".aaa-extra", ".credentials.json", "zzz-extra"] {
+            fs::write(root.path().join(name), "").unwrap();
+        }
+        let problems = claude_entries(root.path()).unwrap().join("\n");
+        for expected in [
+            "retired .credentials.json; remove it",
+            "unexpected entry \".aaa-extra\"",
+            "unexpected entry \"zzz-extra\"",
+        ] {
+            assert!(problems.contains(expected), "{expected}: {problems}");
+        }
+        assert!(!problems.contains("CLAUDE.md"), "{problems}");
+    }
+
+    #[test]
+    fn a_token_file_must_be_root_owned_role_group_0440_and_non_empty() {
+        let path = Path::new("/state/rev/claude-token");
+        let good = || FileFacts {
+            regular: true,
+            uid: 0,
+            gid: 900,
+            mode: 0o100440,
+            links: 1,
+            len: 108,
+        };
+        assert!(token_facts(path, &good(), 900).is_ok());
+        let cases: [(&str, FileFacts); 8] = [
+            (
+                "root-owned",
+                FileFacts {
+                    uid: 1000,
+                    ..good()
+                },
+            ),
+            ("role account's group", FileFacts { gid: 0, ..good() }),
+            (
+                "0440",
+                FileFacts {
+                    mode: 0o100640,
+                    ..good()
+                },
+            ),
+            (
+                "0440",
+                FileFacts {
+                    mode: 0o100400,
+                    ..good()
+                },
+            ),
+            (
+                "0440",
+                FileFacts {
+                    mode: 0o100444,
+                    ..good()
+                },
+            ),
+            ("not be empty", FileFacts { len: 0, ..good() }),
+            ("single-link", FileFacts { links: 2, ..good() }),
+            (
+                "regular",
+                FileFacts {
+                    regular: false,
+                    ..good()
+                },
+            ),
+        ];
+        for (expected, facts) in cases {
+            let error = token_facts(path, &facts, 900).unwrap_err().to_string();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn unsafe_binary_is_refused_without_executing_its_version_command() {

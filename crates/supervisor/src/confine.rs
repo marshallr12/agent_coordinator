@@ -469,9 +469,10 @@ mod tests {
         for role in [Role::Implementer, Role::Reviewer] {
             let first = spec(&config, role, "first");
             let second = spec(&config, role, "second");
-            let credentials = config.state_dir.join(role.slug()).join("claude-config");
-            fs::create_dir_all(&credentials).unwrap();
-            fs::write(credentials.join(".credentials.json"), "test sentinel").unwrap();
+            let claude_config = config.state_dir.join(role.slug()).join("claude-config");
+            fs::create_dir_all(&claude_config).unwrap();
+            let token = profile::claude_token(role, &config);
+            fs::write(&token, "test sentinel").unwrap();
             prepare_run(&first, &config).unwrap();
             let first_state = StatePaths::new(&first.run);
             fs::write(first_state.home.join(".profile"), "first launch only").unwrap();
@@ -503,7 +504,7 @@ mod tests {
                         .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
                         .unwrap()
                         .1,
-                    credentials.as_os_str()
+                    claude_config.as_os_str()
                 );
             }
             assert_eq!(
@@ -524,13 +525,10 @@ mod tests {
             for paths in [first_state, second_state] {
                 for dir in paths.directories() {
                     check_private_dir(&dir).unwrap();
-                    assert!(!dir.join(".credentials.json").exists());
+                    assert!(!dir.join("claude-token").exists());
                 }
             }
-            assert_eq!(
-                fs::read(credentials.join(".credentials.json")).unwrap(),
-                b"test sentinel"
-            );
+            assert_eq!(fs::read(&token).unwrap(), b"test sentinel");
         }
     }
 

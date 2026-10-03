@@ -6,13 +6,14 @@
 //! the executable named by `CLAUDE_CODE_SHELL_PREFIX`. The supervisor points
 //! that at a generated, read-only `$RUN/candidate-shell`, which runs the
 //! command in an inner Bubblewrap: the whole state directory is replaced by an
-//! empty tmpfs, only this launch's clone (read-only) and build/home/Cargo
-//! directories (writable) return, the Claude login is masked by `/dev/null`,
-//! coordinator state stays hidden, credential variables are unset, and no
-//! further user namespace can be created. After each command the harness's
-//! tracked working directory is reset to the clone, so its own git calls
-//! never run in a candidate-writable directory. Codex has no equivalent hook, so
-//! Codex reviewer launches are refused until it does.
+//! empty tmpfs, only this launch's clone (read-only), build/home/Cargo
+//! directories (writable) and the token-free `claude-config` (read-only)
+//! return, so the role's Claude token file stays hidden, as does coordinator
+//! state; credential variables are unset, and no further user namespace can
+//! be created. After each command the harness's tracked working directory is
+//! reset to the clone, so its own git calls never run in a candidate-writable
+//! directory. Codex has no equivalent hook, so Codex reviewer launches are
+//! refused until it does.
 use crate::config::Config;
 use crate::confine::{self, StatePaths};
 use crate::profile::{Harness, LaunchSpec, Role, run_files};
@@ -67,11 +68,6 @@ pub fn unsupported(spec: &LaunchSpec) -> Option<String> {
          (R-P3b.3); use a Claude reviewer"
             .into()
     })
-}
-
-/// The Claude login file the candidate must never read.
-fn credential_file(spec: &LaunchSpec, config: &Config) -> PathBuf {
-    claude_config(spec, config).join(".credentials.json")
 }
 
 /// The persistent Claude configuration directory of the launch's role.
@@ -140,13 +136,9 @@ pub fn inner_args(spec: &LaunchSpec, config: &Config) -> Vec<OsString> {
         "--ro-bind-try",
         &spec.run.join(run_files::VERIFICATION_SESSION),
     );
-    // Claude Code's shell snapshots live here; only the login is withheld.
+    // Holds only settings.json and CLAUDE.md (see `preflight`); the token
+    // file beside it stays under the tmpfs.
     same(&mut args, "--ro-bind", &claude_config(spec, config));
-    args.extend([
-        "--ro-bind".into(),
-        "/dev/null".into(),
-        credential_file(spec, config).into_os_string(),
-    ]);
     for name in UNSET {
         args.extend(["--unsetenv".into(), (*name).into()]);
     }
@@ -259,8 +251,9 @@ mod tests {
     }
 
     #[test]
-    fn state_is_hidden_before_the_launch_paths_return_and_the_login_is_masked() {
-        let args: Vec<String> = inner_args(&spec(Harness::Claude), &Config::default())
+    fn state_is_hidden_before_the_launch_paths_return_and_the_token_stays_hidden() {
+        let config = Config::default();
+        let args: Vec<String> = inner_args(&spec(Harness::Claude), &config)
             .into_iter()
             .map(|a| a.into_string().unwrap())
             .collect();
@@ -272,12 +265,13 @@ mod tests {
             args[position("/var/lib/agentc/rev/clones/c1") - 1],
             "--ro-bind"
         );
-        let mask = position("/dev/null");
-        assert_eq!(
-            args[mask + 1],
-            "/var/lib/agentc/rev/claude-config/.credentials.json"
-        );
-        assert!(mask > position("/var/lib/agentc/rev/claude-config"));
+        let token = crate::profile::claude_token(Role::Reviewer, &config);
+        assert!(token.starts_with(&args[tmpfs + 1]));
+        let uncovering = args[tmpfs + 2..]
+            .iter()
+            .filter(|a| token.starts_with(a.as_str()));
+        assert_eq!(uncovering.count(), 0, "a mount re-attaches the token");
+        assert!(!args.iter().any(|a| a == "/dev/null"));
         assert!(!args.iter().any(|a| a.ends_with("/state/coordinator")));
         assert!(args.contains(&"--disable-userns".to_string()));
         assert!(args.contains(&"TYPESAFE_API_KEY".to_string()));

@@ -56,6 +56,17 @@ pub struct LaunchSpec {
 /// helper socket.
 pub const PUSH_SOCKET_ENV: &str = "AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET";
 
+/// The variable through which Claude Code receives the role's long-lived
+/// `claude setup-token` token. `launch::spawn` adds it to the child process
+/// only, so it is never part of a [`LaunchCommand`].
+pub const CLAUDE_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// The role's Claude token file, `<state_dir>/<role slug>/claude-token`: in
+/// the role directory, outside the read-only `claude-config`.
+pub fn claude_token(role: Role, config: &Config) -> PathBuf {
+    config.state_dir.join(role.slug()).join("claude-token")
+}
+
 /// A fully resolved process to spawn; `stdin` is the prompt file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaunchCommand {
@@ -201,8 +212,9 @@ fn codex_args(spec: &LaunchSpec) -> Vec<OsString> {
 
 /// The complete environment of a launch; nothing else is inherited. Mutable
 /// home, Cargo (including caches), and coordinator state belong to this run.
-/// Claude authentication remains in the persistent role directory. These paths
-/// alone do not prevent another process with the same uid from writing them.
+/// Claude's token is not here: `launch::spawn` reads it from [`claude_token`]
+/// and passes it to the child only. These paths alone do not prevent another
+/// process with the same uid from writing them.
 fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
     let role_dir = config.state_dir.join(spec.role.slug());
     let state = StatePaths::new(&spec.run);
@@ -334,13 +346,23 @@ mod tests {
 
     #[test]
     fn environment_is_replaced_and_never_carries_coordinator_tokens() {
-        let command = command(&spec(Role::Implementer, Harness::Codex), &Config::default());
-        assert!(command.env.iter().all(|(name, _)| !name.contains("TOKEN")));
-        assert!(
-            command
-                .env
-                .iter()
-                .any(|(name, value)| name == "HTTPS_PROXY" && value == "http://127.0.0.1:3128")
-        );
+        for harness in [Harness::Claude, Harness::Codex] {
+            let command = command(&spec(Role::Implementer, harness), &Config::default());
+            assert!(command.env.iter().all(|(name, _)| !name.contains("TOKEN")));
+            assert!(
+                command
+                    .env
+                    .iter()
+                    .any(|(name, value)| name == "HTTPS_PROXY" && value == "http://127.0.0.1:3128")
+            );
+        }
+    }
+
+    #[test]
+    fn the_claude_token_sits_in_the_role_directory_outside_claude_config() {
+        let config = Config::default();
+        let token = claude_token(Role::Reviewer, &config);
+        assert_eq!(token, config.state_dir.join("rev/claude-token"));
+        assert!(!token.starts_with(config.state_dir.join("rev/claude-config")));
     }
 }

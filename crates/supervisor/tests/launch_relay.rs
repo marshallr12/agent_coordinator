@@ -57,7 +57,8 @@ fn config(root: &Path, proxy: SocketAddr, staging: SocketAddr) -> Config {
     config
 }
 
-/// A prepared reviewer run with its persistent Claude configuration.
+/// A prepared reviewer run with its persistent Claude configuration and
+/// token file.
 fn reviewer(config: &Config) -> LaunchSpec {
     let base = config.state_dir.join(Role::Reviewer.slug());
     let spec = LaunchSpec {
@@ -83,7 +84,11 @@ fn reviewer(config: &Config) -> LaunchSpec {
     )
     .unwrap();
     fs::write(persistent.join("CLAUDE.md"), "").unwrap();
-    fs::write(persistent.join(".credentials.json"), "fixture").unwrap();
+    fs::write(
+        profile::claude_token(Role::Reviewer, config),
+        "fixture-token",
+    )
+    .unwrap();
     spec
 }
 
@@ -155,7 +160,7 @@ fn a_wrapped_reviewer_reaches_only_the_relayed_host_services() {
     command.args = vec![OsString::from("-euc"), text.into()];
     command.env.push(("RUN".into(), spec.run.clone().into()));
     let wrapped = sandbox::wrap(command, &spec, &config).unwrap();
-    let code = wait(launch::spawn(&wrapped, &spec).unwrap());
+    let code = wait(launch::spawn(&wrapped, &spec, &config).unwrap());
     let stderr = fs::read_to_string(spec.run.join("stderr.log")).unwrap();
     assert_eq!(code, Some(0), "launch failed: {stderr}");
 }

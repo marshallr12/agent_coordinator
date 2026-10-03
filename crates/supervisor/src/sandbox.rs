@@ -133,9 +133,8 @@ pub fn wrap(
     for path in writable_directories(spec) {
         mount(&mut args, "--bind", &path, &path);
     }
+    // `claude-config` and the role's token stay under the read-only root.
     let persistent = claude_directory(spec, config);
-    let credential = persistent.join(".credentials.json");
-    mount(&mut args, "--bind", &credential, &credential);
     let cargo = StatePaths::new(&spec.run).cargo.join("config.toml");
     mount(&mut args, "--ro-bind", &config.cargo_config_seed, &cargo);
     for destination in [
@@ -240,13 +239,12 @@ fn check_mounts(spec: &LaunchSpec, config: &Config) -> Result<()> {
         check_tree(&path)?;
     }
     let persistent = claude_directory(spec, config);
-    // Validate source and destination mountpoints; never read auth bytes.
+    // Validate source and destination mountpoints.
     for path in [
         config.cargo_config_seed.clone(),
         StatePaths::new(&spec.run).cargo.join("config.toml"),
         persistent.join("settings.json"),
         persistent.join("CLAUDE.md"),
-        persistent.join(".credentials.json"),
         spec.run.join(run_files::SETTINGS),
     ] {
         confine::regular_file(&path)?;
@@ -476,7 +474,11 @@ mod tests {
             )
             .unwrap();
             fs::write(persistent.join("CLAUDE.md"), "").unwrap();
-            fs::write(persistent.join(".credentials.json"), "dummy fixture auth").unwrap();
+            fs::write(
+                profile::claude_token(role, &config),
+                "dummy-fixture-token\n",
+            )
+            .unwrap();
             let login = config.state_dir.join("rev/verification/p1.json");
             fs::create_dir_all(login.parent().unwrap()).unwrap();
             fs::write(&login, "operator password").unwrap();
@@ -518,6 +520,10 @@ mod tests {
                 ("OTHER_RUN", self.other_run.clone()),
                 ("OTHER_CLONE", self.other_clone.clone()),
                 ("SEED", self.config.cargo_config_seed.clone()),
+                (
+                    "TOKEN_FILE",
+                    profile::claude_token(self.spec.role, &self.config),
+                ),
             ] {
                 inner.env.push((key.into(), value.into()));
             }
@@ -527,7 +533,7 @@ mod tests {
         fn spawn(&self, script: &str) -> std::process::Child {
             trusted_binary(&self.config.bubblewrap).unwrap();
             check_mounts(&self.spec, &self.config).unwrap();
-            launch::spawn(&self.command(script), &self.spec).unwrap()
+            launch::spawn(&self.command(script), &self.spec, &self.config).unwrap()
         }
 
         fn successful(&self, script: &str) {
@@ -552,14 +558,14 @@ mod tests {
         }
     }
 
-    /// Run by the mock reviewer harness: the harness itself still sees its
-    /// login, but each command through `candidate-shell` sees no secrets,
-    /// cannot write the clone or the harness's temp, cannot nest another user
-    /// namespace, and leaves the harness's tracked directory in the clone.
+    /// Run by the mock reviewer harness: each command through
+    /// `candidate-shell` sees no secrets (neither the token file nor a
+    /// credential variable), cannot write the clone or the harness's temp,
+    /// cannot nest another user namespace, and leaves the harness's tracked
+    /// directory in the clone.
     const REVIEWER_CANDIDATE_CHECKS: &str = r#"
 deny overwrite "$CLONE/source"
 deny cat "$VERIFICATION_LOGIN"
-test "$(cat "$CLAUDE_CONFIG_DIR/.credentials.json")" = refreshed
 export HARNESS_IPC="$(readlink /proc/self/ns/ipc)" HARNESS_UTS="$(readlink /proc/self/ns/uts)"
 export MARKER="agentc-harness-marker-$$"
 (exec -a "$MARKER" sleep 30) &
@@ -576,7 +582,8 @@ for cmdline in /proc/[0-9]*/cmdline; do
  fi
 done
 test "$(awk "\$2 == \"/proc\" { options = \$4 } END { print options }" /proc/self/mounts | cut -d, -f1)" = ro
-test ! -s "$CLAUDE_CONFIG_DIR/.credentials.json"
+test ! -e "$TOKEN_FILE"
+deny cat "$TOKEN_FILE"
 test -e "$CLAUDE_CONFIG_DIR/settings.json"
 deny sh -c "printf x >> \"\$CLAUDE_CONFIG_DIR/settings.json\""
 deny sh -c "printf x > \"\$CLAUDE_CONFIG_DIR/planted\""
@@ -646,7 +653,11 @@ for path in "$HOME" "$CARGO_HOME/registry" "$CARGO_HOME/git" \
  "$AGENT_COORDINATOR_HOME" "$TMPDIR" "$CARGO_TARGET_DIR"; do
  printf allowed > "$path/own-write"
 done
-printf refreshed > "$CLAUDE_CONFIG_DIR/.credentials.json"
+test "$CLAUDE_CODE_OAUTH_TOKEN" = dummy-fixture-token
+for file in "$CLAUDE_CONFIG_DIR/.credentials.json" "$CLAUDE_CONFIG_DIR/planted" "$TOKEN_FILE"; do
+ deny overwrite "$file"
+done
+deny mkdir "$CLAUDE_CONFIG_DIR/.oauth_refresh.lock"
 test "$(awk '/^CapEff:/ {print $2}' /proc/self/status)" = 0000000000000000
 test "$(awk '/^CapBnd:/ {print $2}' /proc/self/status)" = 0000000000000000
 test "$(awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)" = 1

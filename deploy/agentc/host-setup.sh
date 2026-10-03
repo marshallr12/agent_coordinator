@@ -11,8 +11,9 @@
 # For the candidate-push helper it also writes /etc/agentc/push.toml when
 # absent and hands an existing push App key to agentc-push; it never creates,
 # prints or copies that key. Nothing else on the host changes. Idempotent:
-# re-running re-pins binaries and reloads the rules. Harness logins,
-# coordinator credentials and the push App key stay manual (printed at the end).
+# re-running re-pins binaries and reloads the rules. Claude tokens, Codex
+# logins, coordinator credentials and the push App key stay manual (printed at
+# the end); an installed Claude token is held at root:<role> 0440.
 set -euo pipefail
 
 PREFIX=/opt/agentc
@@ -38,6 +39,9 @@ BWRAP_COPY=$PREFIX/bin/bwrap
 BWRAP_PROFILE=/etc/apparmor.d/agentc-bwrap
 # Shared temp directories --uninstall clears of agent-owned files.
 TEMP_DIRS=(/tmp /var/tmp /dev/shm)
+# The placeholder token containment-suite.sh installs for a run (its
+# DUMMY_TOKEN); one left behind is warned about, never adopted silently.
+SUITE_DUMMY_TOKEN=agentc-suite-dummy-token
 KEEP="# --- entries below this line are kept when host-setup.sh re-runs ---"
 
 # Refuses to run without root and the invoking owner account.
@@ -154,36 +158,82 @@ create_dirs() {
       fi
       install -d -o "$user" -g "$user" -m 0700 "$path"
     done
-    path=$role/claude-config
-    refuse_symlink "$path"
-    [ ! -e "$path" ] || [ -d "$path" ] || { echo "refusing non-directory: $path" >&2; exit 1; }
-    install -d -o root -g "$user" -m 0750 "$path"
-    protected_chain "$path"
-    # Do not guess what to preserve from arbitrary old harness state.
-    local entry
-    while IFS= read -r -d '' entry; do
-      case ${entry##*/} in
-        settings.json|CLAUDE.md|.credentials.json)
-          refuse_symlink "$entry"
-          [ -f "$entry" ] && [ "$(stat -c %h -- "$entry")" = 1 ] || {
-            echo "refusing non-regular or linked Claude file; owner repair required: $path" >&2; exit 1;
-          }
-          ;;
-        *) echo "refusing unexpected Claude config entry; owner cleanup required: $path" >&2; exit 1 ;;
-      esac
-    done < <(find "$path" -mindepth 1 -maxdepth 1 -print0)
-    entry=$path/.credentials.json
-    refuse_symlink "$entry"
-    if [ -e "$entry" ]; then
-      [ -f "$entry" ] && [ "$(stat -c %h -- "$entry")" = 1 ] &&
-        [ "$(stat -c %u -- "$entry")" = "$(id -u "$user")" ] &&
-        [ "$(stat -c %a -- "$entry")" = 600 ] || {
-          echo "refusing unsafe credential file; owner repair required: $entry" >&2; exit 1;
-        }
-    else
-      install -o "$user" -g "$user" -m 0600 /dev/null "$entry"
-    fi
+    seal_claude_config "$user" "$role/claude-config"
+    secure_claude_token "$user" "$role/claude-token"
   done
+}
+
+# Seals role account $1's Claude configuration directory $2 (root:<role>
+# 0750) and admits only the root-owned seeds, plus the retired login file,
+# which it removes. Never guesses what to preserve from other harness state.
+seal_claude_config() {
+  local user=$1 path=$2 entry
+  refuse_symlink "$path"
+  [ ! -e "$path" ] || [ -d "$path" ] || { echo "refusing non-directory: $path" >&2; exit 1; }
+  install -d -o root -g "$user" -m 0750 "$path"
+  protected_chain "$path"
+  while IFS= read -r -d '' entry; do
+    case ${entry##*/} in
+      settings.json|CLAUDE.md|.credentials.json) require_single_file "$entry" ;;
+      *) echo "refusing unexpected Claude config entry; owner cleanup required: $path" >&2; exit 1 ;;
+    esac
+  done < <(find "$path" -mindepth 1 -maxdepth 1 -print0)
+  remove_retired_login "$path/.credentials.json"
+}
+
+# Exits unless $1 is a single-link regular file and not a symlink, so root
+# never writes through an entry an agent could have redirected.
+require_single_file() {
+  refuse_symlink "$1"
+  [ -f "$1" ] && [ "$(stat -c %h -- "$1")" = 1 ] || {
+    echo "refusing non-regular or linked file; owner repair required: $1" >&2; exit 1;
+  }
+}
+
+# Removes a leftover `claude auth login` file (decision U27): Claude cannot
+# refresh it, because its refresh lock needs a writable claude-config. Agent
+# accounts use the owner-installed claude-token instead.
+remove_retired_login() {
+  [ -e "$1" ] || [ -L "$1" ] || return 0
+  require_single_file "$1"
+  zero_and_remove "$1"
+  echo "removed retired Claude login $1; agent accounts now use claude-token" >&2
+}
+
+# Overwrites single-link regular file $1 with zeros and deletes it; where
+# shred is missing, only deletes it.
+zero_and_remove() {
+  if command -v shred >/dev/null; then shred -n 0 -z -u -- "$1"; else rm -f -- "$1"; fi
+}
+
+# Holds role account $1's owner-installed Claude token $2 at root:<role>
+# 0440, which the supervisor requires: the role can read it, never change
+# it. Only a root-owned token is adopted, since the owner installs it with
+# `sudo install -o root`; any other owner gets an owner-repair refusal. A
+# missing token is left for the owner (see next_steps).
+secure_claude_token() {
+  local user=$1 path=$2
+  refuse_symlink "$path"
+  [ -e "$path" ] || return 0
+  require_single_file "$path"
+  owned_by_root "$path" ||
+    { echo "refusing $path: not root-owned (install it with sudo install -o root); owner repair required" >&2; exit 1; }
+  warn_suite_dummy "$path"
+  chmod 0400 -- "$path"
+  chown "root:$user" -- "$path"
+  chmod 0440 -- "$path"
+}
+
+# True when $1 is owned by uid 0.
+owned_by_root() { [ "$(stat -c %u -- "$1")" = 0 ]; }
+
+# Warns when token $1 is the containment suite's leftover placeholder. Only
+# a file of exactly the placeholder's size is compared, so a real token is
+# read only at that size and never printed.
+warn_suite_dummy() {
+  [ "$(stat -c %s -- "$1")" = "${#SUITE_DUMMY_TOKEN}" ] &&
+    printf '%s' "$SUITE_DUMMY_TOKEN" | cmp -s - "$1" || return 0
+  echo "warning: $1 is the containment suite's leftover dummy token; Claude launches cannot authenticate until you replace it with a real setup-token" >&2
 }
 
 # All destinations now have sealed parents. Rename fresh seed inodes rather
@@ -605,7 +655,8 @@ remove_service() {
 # Removes what this script installs, by explicit path, so files other
 # installers keep under the same directories (the integrator's binary, state,
 # configuration and keys) survive. The push App key is the owner's: it is
-# kept, handed back to root (0400). Each shared parent goes only once empty.
+# kept, handed back to root (0400). Each role's Claude token is zeroed and
+# deleted. Each shared parent goes only once empty.
 # Agent accounts are retired first, so nothing they run outlives the firewall;
 # the egress account only once its unit (Restart=always) is stopped.
 uninstall() {
@@ -617,6 +668,7 @@ uninstall() {
   nft delete table inet agentc 2>/dev/null || true
   git config --system --unset-all safe.directory "^$STATE/mirror.git\$" 2>/dev/null || true
   keep_push_key
+  remove_claude_tokens
   remove_own_paths
   rmdir "$PREFIX/bin" "$PREFIX" "$STATE" "$ETC" 2>/dev/null || true
   [ -z "$KEY_NOTE" ] || echo "$KEY_NOTE"
@@ -709,6 +761,19 @@ remove_temp_files() {
   done
 }
 
+# Zeroes and deletes each role's single-link regular claude-token before its
+# state directory goes; any other entry at that path is left to
+# remove_own_paths, whose rm never follows a symlink.
+remove_claude_tokens() {
+  local user path
+  for user in "${AGENTS[@]}"; do
+    path=$STATE/${user#agentc-}/claude-token
+    if [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %h -- "$path")" = 1 ]; then
+      zero_and_remove "$path"
+    fi
+  done
+}
+
 # Deletes this script's own files and directories, and the containment
 # suite's leftover bin directories, without following symlinks.
 remove_own_paths() {
@@ -745,11 +810,15 @@ keep_push_key() {
 next_steps() {
   cat <<EOF
 Host seeds installed. Manual steps (reserved bootstrap, once per role):
-  Authenticate Claude in a separate private owner-controlled bootstrap directory.
-  As the owner, install only the resulting .credentials.json (agentc-impl, 0600)
-  at $STATE/impl/claude-config/.credentials.json. Do not copy other harness state
-  or make claude-config writable to enable login. Credential refresh must update
-  this file in place; verify that behavior with the pinned harness.
+  Claude: as the owner, run $PREFIX/bin/claude setup-token, so each role has
+  its own revocable token, then install it (paste the token, then press
+  Ctrl-D twice without Enter, so no newline is stored):
+  sudo install -o root -g agentc-impl -m 0440 /dev/stdin $STATE/impl/claude-token
+  (repeat for agentc-rev with rev/ paths). The token is long-lived and
+  inference-only: renew it before it expires and revoke it at claude.ai if it
+  is ever exposed. Agent accounts never use claude auth login: its refresh
+  needs a writable claude-config, which stays root-owned.
+  Codex:
   sudo -u agentc-impl -H env HOME=$STATE/impl/home CODEX_HOME=$STATE/impl/codex-home \\
     HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT $PREFIX/bin/codex login
   (repeat for agentc-rev with rev/ paths)
@@ -762,8 +831,8 @@ Claude requires unprivileged user/PID namespaces, nested-userns disabling and
 close_range(CLOSE_RANGE_CLOEXEC) kernel support. Preflight fails closed if these
 are unavailable. No kernel policy changes or unsandboxed fallback are automatic.
 Then run: sudo deploy/agentc/containment-suite.sh
-That suite uses a mock shell; authenticated Claude/browser compatibility and
-credential refresh still require separate owner verification.
+That suite uses a mock shell; authenticated Claude/browser compatibility
+still requires separate owner verification.
 EOF
   push_steps
 }

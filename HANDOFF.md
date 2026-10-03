@@ -1,5 +1,35 @@
 # Core hardening wave — 2026-10-02
 
+## U27 Claude setup-token auth — 2026-10-03 (branch `hardening/claude-token-20261003`)
+
+Workflow off. The owner proof on oracle-1 (see the planning `HANDOFF.md`) showed that Claude
+2.1.287 refreshes OAuth only after `mkdir claude-config/.oauth_refresh.lock`, which the
+root-owned claude-config denies. Decision U27: agent accounts use `claude setup-token`.
+- Supervisor: `launch::spawn` reads `<state>/<role>/claude-token` and passes
+  `CLAUDE_CODE_OAUTH_TOKEN` to the child only, never into `LaunchCommand.env` or `describe`.
+  The read is `path_without_symlinks`, then an `O_NOFOLLOW|O_NONBLOCK` open, then fstat checks
+  (regular file, 1 link, at most 4098 bytes) and a bounded read. The token must be printable
+  non-space ASCII, at most 4096 bytes, and trailing whitespace is trimmed. Nothing binds
+  `.credentials.json`, and claude-config has no writable path. Preflight requires a
+  root:<role primary gid> 0440 non-empty token, reports every disallowed claude-config entry,
+  and gives a retired `.credentials.json` its own removal instruction.
+- host-setup: shreds a leftover single-link `.credentials.json`. It holds an existing token
+  at root:agentc-<role> 0440, but only if it is already root-owned; it refuses links and
+  never reads the token (beyond a same-size dummy check). `--uninstall` zeroes the tokens.
+  `next_steps` prints the `claude setup-token` plus `sudo install -m 0440 /dev/stdin` flow.
+- containment-suite: installs a dummy token for a role that has none (root:role 0440) and
+  removes only its own unchanged dummies on exit. A stale dummy left by a killed run is a FAIL.
+  New legs: claude-config write and `mkdir .oauth_refresh.lock` denied, token not writable,
+  no cross-role read, and neither the candidate token file nor the env var is visible.
+- Red team: both lanes DISPUTED in round 0 (low severity: an oversized file passed through
+  the read bound, an untested read bound, the first-entry-only report, an lstat/open race; a
+  stale or partial dummy, a non-root token adopted, a vacuous grep probe), all fixed, then
+  CONFIRMED in round 1. Not run as root yet. Flake seen under mutation load:
+  `push_helper::tests::stale_launch_directories_are_swept_only_when_owned_unlocked_directories`
+  (6/6 passes alone).
+- Unverified: real Claude 2.1.287 with a real setup-token (no refresh-lock attempt, nothing
+  logged to `stderr.log`/`events.jsonl`). That needs the owner's `claude setup-token` on oracle-1.
+
 ## Follow-up session — 2026-10-02 (daytime)
 
 The user again disabled the Agent Coordinator workflow and asked for the next
