@@ -181,7 +181,27 @@ mod tests {
         let native = state::lock(&path).unwrap();
         drop(native);
         drop(launcher);
-        assert!(state::lock(&launcher_path).is_ok());
+        assert!(relocks_within(
+            &launcher_path,
+            std::time::Duration::from_secs(2)
+        ));
+    }
+
+    /// True once `path` can be locked again before `limit` passes. Other tests
+    /// in this binary spawn processes concurrently; a child forked while the
+    /// lock file was open briefly shares its open file description (until its
+    /// exec closes it), so `flock` can stay held for an instant after `drop`.
+    fn relocks_within(path: &std::path::Path, limit: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if state::lock(path).is_ok() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]
