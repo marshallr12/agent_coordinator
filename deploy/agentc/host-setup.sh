@@ -224,7 +224,7 @@ install_binaries() {
 # the owner's newest nvm install; skipped with a note when neither exists.
 install_node() {
   local node=${NODE:-}
-  [ -n "$node" ] || node=$(ls -d "$OWNER_HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -n 1)
+  [ -n "$node" ] || node=$(ls -d "$OWNER_HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -n 1 || true)
   if [ -z "$node" ]; then echo "note: no node found; set NODE=<path> for UI verification" >&2; return; fi
   install -o root -g root -m 0755 "$(readlink -f "$node")" "$PREFIX/bin/node"
 }
