@@ -45,7 +45,9 @@ fn prepare(spec: &LaunchSpec, config: &Config) -> Result<RunState> {
 
 /// Prepares, preflights and runs a launch; returns the harness exit code.
 /// Events go to `$RUN/events.jsonl`, diagnostics to `$RUN/stderr.log`.
-pub fn run(spec: &LaunchSpec, config: &Config) -> Result<i32> {
+/// `after_harness` runs once the harness has exited (or failed to start) and
+/// before the run is marked terminal, so leftovers die while it is locked.
+pub fn run(spec: &LaunchSpec, config: &Config, after_harness: impl FnOnce()) -> Result<i32> {
     let state = prepare(spec, config)?;
     let problems = preflight::check(spec, config);
     if !problems.is_empty() {
@@ -55,8 +57,21 @@ pub fn run(spec: &LaunchSpec, config: &Config) -> Result<i32> {
     if spec.harness == profile::Harness::Claude {
         crate::relay::start_host(spec, config).context("start loopback relays")?;
     }
+    run_harness(&state, &command, spec, config, after_harness)
+}
+
+/// Marks the run started, runs the harness, runs `after_harness` once it has
+/// exited (or failed to start) and only then marks the run terminal.
+fn run_harness(
+    state: &RunState,
+    command: &LaunchCommand,
+    spec: &LaunchSpec,
+    config: &Config,
+    after_harness: impl FnOnce(),
+) -> Result<i32> {
     state.started(spec)?;
-    let result = run_signed_in(&command, spec, config);
+    let result = run_signed_in(command, spec, config);
+    after_harness();
     state.terminal(spec)?;
     Ok(result?.code().unwrap_or(-1))
 }
@@ -83,7 +98,8 @@ fn close_session(session: Option<staging_login::StagingSession>) {
     }
 }
 
-/// Spawns the harness with exactly the profile's environment.
+/// Spawns the harness with exactly the profile's environment and
+/// `no_new_privs`.
 pub fn spawn(command: &LaunchCommand, spec: &LaunchSpec) -> Result<std::process::Child> {
     confine::regular_file(&command.stdin).context("inspect prompt")?;
     let prompt = File::open(&command.stdin).context("open prompt")?;
@@ -98,6 +114,7 @@ pub fn spawn(command: &LaunchCommand, spec: &LaunchSpec) -> Result<std::process:
     if spec.harness == profile::Harness::Claude {
         sandbox::fence_descriptors(&mut process)?;
     }
+    crate::reaper::forbid_new_privileges(&mut process);
     process
         .args(&command.args)
         .env_clear()
@@ -160,5 +177,54 @@ mod tests {
         fs::hard_link(&sentinel, &hardlinked).unwrap();
         assert!(new_log(&hardlinked).is_err());
         assert_eq!(fs::read_to_string(&sentinel).unwrap(), "untouched");
+    }
+
+    /// A Codex reviewer run in a fresh state directory, with its prompt.
+    fn codex_run(root: &std::path::Path) -> (Config, LaunchSpec, RunState) {
+        let config = Config {
+            state_dir: root.join("roles"),
+            cargo_config_seed: root.join("cargo-seed.toml"),
+            ..Config::default()
+        };
+        fs::write(&config.cargo_config_seed, confine::CARGO_CONFIG_SEED).unwrap();
+        let base = config.state_dir.join(Role::Reviewer.slug());
+        let spec = LaunchSpec {
+            role: Role::Reviewer,
+            harness: profile::Harness::Codex,
+            clone: base.join("clones/current"),
+            run: base.join("runs/current"),
+            model: "mock".into(),
+            effort: "low".into(),
+            session_id: uuid::Uuid::new_v4(),
+            project: None,
+            task: None,
+            push_socket: None,
+        };
+        fs::create_dir_all(&spec.clone).unwrap();
+        let state = prepare(&spec, &config).unwrap();
+        fs::write(spec.run.join(run_files::PROMPT), "prompt").unwrap();
+        (config, spec, state)
+    }
+
+    #[test]
+    fn harness_runs_without_new_privileges_and_cleanup_precedes_terminal() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, spec, state) = codex_run(root.path());
+        let command = LaunchCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "grep NoNewPrivs: /proc/self/status".into()],
+            env: Vec::new(),
+            cwd: spec.clone.clone(),
+            stdin: spec.run.join(run_files::PROMPT),
+        };
+        let terminal = spec.run.join(".state-terminal.json");
+        let mut terminal_at_cleanup = None;
+        let cleanup = || terminal_at_cleanup = Some(terminal.exists());
+        let code = run_harness(&state, &command, &spec, &config, cleanup).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(terminal_at_cleanup, Some(false), "cleanup missing or late");
+        assert!(terminal.exists());
+        let events = fs::read_to_string(spec.run.join("events.jsonl")).unwrap();
+        assert_eq!(events.split_whitespace().nth(1), Some("1"), "{events}");
     }
 }

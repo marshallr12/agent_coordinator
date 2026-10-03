@@ -1,7 +1,8 @@
 //! `agentc-supervisor` command line; the containment logic lives in the
 //! library (see `lib.rs`) so integration tests can drive real launches.
 use agentc_supervisor::{
-    clone, config, egress, launch, preflight, profile, relay, role_settings, sandbox, shadow,
+    clone, config, egress, launch, preflight, profile, reaper, relay, role_settings, sandbox,
+    shadow,
 };
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -213,13 +214,20 @@ fn launch_command(spec: &LaunchSpec, config: &config::Config, dry_run: bool) -> 
         );
         return Ok(ExitCode::SUCCESS);
     }
-    let code = launch::run(spec, config)?;
+    let code = run_reaped(spec, config)?;
     let mut outcome = serde_json::json!({"exit_code": code, "session_id": spec.session_id});
     if let Some(task) = &spec.task {
         outcome["task"] = task.as_str().into();
     }
     println!("{outcome}");
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+}
+
+/// Runs a launch as the subreaper of its harness and kills whatever the
+/// harness left running (R-P3b.5(b)) before the run is marked terminal, or
+/// whatever a refused launch had already started.
+fn run_reaped(spec: &LaunchSpec, config: &config::Config) -> Result<i32> {
+    reaper::reaped(|cleanup| launch::run(spec, config, cleanup))
 }
 
 /// Runs a launch through `launch-root`; its exit code is the launch's.

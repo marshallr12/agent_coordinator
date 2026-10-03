@@ -121,7 +121,9 @@ fn binary_problems(program: &Path, pinned: &str) -> Vec<String> {
         ));
         return problems;
     }
-    let reported = Command::new(program).arg("--version").output();
+    let mut version = Command::new(program);
+    crate::reaper::forbid_new_privileges(&mut version);
+    let reported = version.arg("--version").output();
     let reported = reported.map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
     if !reported.as_deref().is_ok_and(|text| text.contains(pinned)) {
         problems.push(format!(

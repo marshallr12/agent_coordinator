@@ -30,6 +30,8 @@ PUSH_INSTALLATION_ID=${PUSH_INSTALLATION_ID:-167333814}
 PUSH_REPOSITORY=${PUSH_REPOSITORY:-$REPO_URL}
 PUSH_USER=agentc-push
 PUSH_KEY=$ETC/push-app.pem
+# Shared temp directories --uninstall clears of agent-owned files.
+TEMP_DIRS=(/tmp /var/tmp /dev/shm)
 KEEP="# --- entries below this line are kept when host-setup.sh re-runs ---"
 
 # Refuses to run without root and the invoking owner account.
@@ -518,17 +520,93 @@ remove_service() {
 # installers keep under the same directories (the integrator's binary, state,
 # configuration and keys) survive. The push App key is the owner's: it is
 # kept, handed back to root (0400). Each shared parent goes only once empty.
+# Agent accounts are retired first, so nothing they run outlives the firewall;
+# the egress account only once its unit (Restart=always) is stopped.
 uninstall() {
+  for user in "${AGENTS[@]}" "$PUSH_USER"; do retire_account "$user"; done
   remove_service agentc-egress
+  retire_account agentc-egress
   remove_service agentc-firewall
   nft delete table inet agentc 2>/dev/null || true
   git config --system --unset-all safe.directory "^$STATE/mirror.git\$" 2>/dev/null || true
   keep_push_key
-  for user in "${AGENTS[@]}" agentc-egress "$PUSH_USER"; do userdel "$user" 2>/dev/null || true; done
   remove_own_paths
   rmdir "$PREFIX/bin" "$PREFIX" "$STATE" "$ETC" 2>/dev/null || true
   [ -z "$KEY_NOTE" ] || echo "$KEY_NOTE"
   echo "agentc host setup removed"
+}
+
+# Ends an account's processes, removes its crontab, at jobs, lingering user
+# manager and its files in the shared temp directories, then deletes it, so
+# nothing it started or scheduled outlives the account. Absent accounts are
+# skipped; failures are reported.
+retire_account() {
+  local user=$1
+  id -u "$user" >/dev/null 2>&1 || return 0
+  command -v loginctl >/dev/null && loginctl disable-linger "$user" 2>/dev/null || true
+  stop_processes "$user"
+  crontab -r -u "$user" 2>/dev/null || true
+  rm -f -- "/var/spool/cron/crontabs/$user"
+  remove_at_jobs "$user"
+  remove_temp_files "$user"
+  userdel "$user" 2>/dev/null || echo "warning: could not delete account $user" >&2
+}
+
+# SIGKILLs every process whose real or effective uid is $1 until none is
+# left (a dying parent can still fork), giving up with a warning after five
+# kill rounds or if pgrep cannot tell.
+stop_processes() {
+  local round
+  for round in 1 2 3 4 5 6; do
+    case $(processes_left "$1") in
+      none) return 0 ;;
+      unknown) return 0 ;;
+    esac
+    [ "$round" -lt 6 ] || break
+    pkill -KILL -u "$1" || true
+    pkill -KILL -U "$1" || true
+    sleep 1
+  done
+  echo "warning: $1 still has processes after 5 kill rounds" >&2
+}
+
+# Prints "some", "none" or (with a warning) "unknown": whether any process
+# has $1 as its real or effective uid.
+processes_left() {
+  local flag status
+  for flag in -u -U; do
+    status=0; pgrep "$flag" "$1" >/dev/null || status=$?
+    case $status in
+      0) echo some; return 0 ;;
+      1) ;;
+      *) echo "warning: cannot list $1's processes (pgrep exit $status)" >&2; echo unknown; return 0 ;;
+    esac
+  done
+  echo none
+}
+
+# Removes $1's queued at jobs when at is installed (root's atq lists every
+# user's jobs, owner last).
+remove_at_jobs() {
+  command -v atq >/dev/null || return 0
+  local job
+  for job in $(atq 2>/dev/null | awk -v u="$1" '$NF == u {print $1}'); do
+    atrm "$job" 2>/dev/null || true
+  done
+}
+
+# Deletes the files, symlinks (never their targets) and emptied directories
+# $1 owns in the shared temp directories; reports what other owners' files
+# kept in place.
+remove_temp_files() {
+  local dir
+  for dir in "${TEMP_DIRS[@]}"; do
+    [ -d "$dir" ] || continue
+    find "$dir" -xdev -mindepth 1 -user "$1" -delete 2>/dev/null || true
+    if [ -n "$(find "$dir" -xdev -mindepth 1 -user "$1" -print -quit 2>/dev/null)" ]; then
+      echo "warning: files owned by $1 remain under $dir" >&2
+    fi
+  done
 }
 
 # Deletes this script's own files and directories, and the containment

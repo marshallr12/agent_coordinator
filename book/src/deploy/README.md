@@ -333,6 +333,19 @@ commit to that launch's candidate ref first. Run Codex implementers one at a
 time, or only alongside launches whose candidates may be rejected on that
 ground.
 
+Every harness, Codex included, starts with `no_new_privs`, so no setuid,
+setgid or file-capability binary can raise its privileges. The `launch`
+command is the child subreaper of its harness: processes the harness leaves
+running, even detached with `setsid` or a double fork, are re-parented to it
+and killed, whole tree at once, once the harness exits and before the run is
+marked finished, or as soon as a launch is refused (a preflight probe's
+leftovers included); the supervisor reports how many it killed on standard
+error. Preflight version checks and sandbox probes also run with
+`no_new_privs`, so a probe passes only if the launch itself can run.
+`launch-root` is a subreaper too, so a Codex harness that kills its own
+`launch` process (they share an account) still has its leftovers killed when
+`launch-root` finishes.
+
 When the launch ends, whatever its outcome, `launch-root` sends the helper
 SIGTERM, kills it if it has not exited within 5 seconds, removes the per-launch
 directory and exits with the launch's exit code; a failure to stop the helper
@@ -405,8 +418,14 @@ The owner's one-time steps on the helper host:
    push fails.
 4. Run `sudo deploy/agentc/containment-suite.sh`.
 
-`host-setup.sh --uninstall` deletes the `agentc-push` account and, by explicit
-path, the files and directories the script installs. It keeps
+`host-setup.sh --uninstall` first, while the agent firewall is still in
+place, retires the agent and `agentc-push` accounts: it disables their
+lingering, kills every process running under them (real or effective uid),
+and removes their crontabs, `at` jobs and the files they own in `/tmp`,
+`/var/tmp` and `/dev/shm` (symlinks themselves, never their targets), then
+deletes them. It then stops the egress service, retires the egress account
+the same way, removes the firewall and, by explicit path, the files and
+directories the script installs. It warns about anything it could not remove. It keeps
 `/etc/agentc/push-app.pem` for the owner to delete: once `/etc/agentc` and its
 parents are root-owned and not group/world-writable, a single-link regular key
 is returned to root (mode 0400), and a symlinked or hard-linked one is left

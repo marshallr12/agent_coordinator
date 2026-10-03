@@ -383,6 +383,8 @@ fn await_probe(mut command: Command, what: &str) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     fence_descriptors(&mut command)?;
+    // Probe exactly as the launch will run: without new privileges.
+    crate::reaper::forbid_new_privileges(&mut command);
     let mut child = command
         .spawn()
         .with_context(|| format!("start required {what} probe"))?;

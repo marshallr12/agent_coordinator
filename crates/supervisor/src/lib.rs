@@ -4,7 +4,8 @@
 //! settings, hardened per-launch clones, a launch preflight and a single
 //! supervised launch. Scheduling, leases and reviews arrive in P3.
 //! Claude launches use a read-only Bubblewrap root with narrow writable mounts.
-//! Codex retains its native workspace-write profile.
+//! Codex retains its native workspace-write profile; every harness runs with
+//! `no_new_privs` and its leftover processes are killed when it exits.
 pub mod candidate;
 pub mod clone;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod preflight;
 pub mod profile;
 #[cfg(target_os = "linux")]
 pub mod push_helper;
+pub mod reaper;
 pub mod relay;
 pub mod role_settings;
 pub mod sandbox;

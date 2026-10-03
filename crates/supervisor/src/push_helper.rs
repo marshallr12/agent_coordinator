@@ -84,7 +84,13 @@ pub fn launch_root(spec: &LaunchSpec, config_path: Option<&Path>, config: &Confi
         start_timeout: START_TIMEOUT,
         stop_timeout: STOP_TIMEOUT,
     };
-    run(&plan)
+    // A Codex harness shares the launcher's uid and PID namespace, so it can
+    // kill `launch`; as subreaper, launch-root still kills what it left.
+    crate::reaper::reaped(|cleanup| {
+        let result = run(&plan);
+        cleanup();
+        result
+    })
 }
 
 /// The helper's and the launch's accounts. A reviewer gets no helper, so
