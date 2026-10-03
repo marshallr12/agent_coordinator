@@ -45,6 +45,12 @@ concurrent launches' push sockets (run them one at a time).
 
 ## Owner Claude auth proof on oracle-1 (2026-10-03, workflow off)
 
+**Status (2026-10-03 day): U27 proven on oracle-1.** Branch `hardening/claude-token-20261003`
+(`f257ea8` + handoff commits, pushed) passed host-setup, the suite (101 PASS) and a real-token
+auth/`pwd -P` proof on Claude 2.1.288. Next: owner go-ahead to ship it to `main` via `ship.py`;
+owner revokes the two retired `claude auth login` sessions; mxmini host-setup re-run + tokens
+before it runs Claude launches; then the S6 cutover chain. Details in the core tree's `HANDOFF.md`.
+
 Run by an owner Claude session on oracle-1 (directed from mxmini over Remote Control) plus
 one owner-run strace. Pinned agent copy is **2.1.287** (`supervisor.toml` `claude = "2.1.287"`;
 host-setup copies the owner's binary at setup time, so re-prove after every host-setup re-run).
