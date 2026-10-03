@@ -26,11 +26,17 @@ check; red-team fix for pipefail; not yet run: needs root and the new
 supervisor installed on mxmini). U18's per-run staging login landed per U22
 as `e47c46f` (supervisor signs in, candidates get only the session cookie,
 signed out at launch end; gate 573 tests; red-team CONFIRMED after one
-repair). **Next:** R-P3b.2: its App (U17) now exists (`marshallr12-agentc-push`, id 5168037, installation 167333814, `agent_coordinator` only; key on oracle-1 per §11 2026-10-02). Codex launches still use the host namespace. `release-next/deploy-pre.sh` requires the key
-in `typesafe.env`, and the user's VM step for it
-(`typesafe.env` 0600, new unit, daemon-reload, key dropped from `service.env`,
-restart) is **done** (2026-10-02 18:13 UTC; reranking confirmed live; §11). Shipped and deployed as `main` `2f3c347` (2026-10-02 20:24 UTC; §11). Then: owner Claude
-host/auth proof; S6 cutover chain.
+repair). **R-P3b.2 code-complete (2026-10-02 evening, U23-U26):** `598c77a` protocol,
+`2132b4c` `agentc-push` binary, `bb5294b` CLI via helper socket, `f55cdbc` one commit
+per launch, `d8a9b80` root `launch-root` wrapper, `08fd595` host setup + containment
+leg (+ handoff commits up to `70393d3`); every phase red-teamed to CONFIRMED; full
+gate 670 tests. Nothing pushed, deployed or run as root. **Next (user, root):** on
+oracle-1 build release binaries from `hardening/core-20261002`, run
+`deploy/agentc/host-setup.sh` then `deploy/agentc/containment-suite.sh` (exact
+commands in the core tree's `HANDOFF.md`); repeat on mxmini (also owes the relay
+leg). Then: R-P3b.5(b)(c) (confirm what landed), owner Claude host/auth proof
+(incl. `pwd -P` suffix), S6 cutover chain. Known gap: Codex implementers can reach
+concurrent launches' push sockets (run them one at a time).
 
 ## Previous resume point — core overnight wave (2026-10-02)
 
