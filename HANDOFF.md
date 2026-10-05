@@ -76,7 +76,7 @@ was reopened (submission superseded, integration activity cancelled) and then **
 untouched (`3882ba4`). The owner's journal re-check since 18:30:30 UTC showed no non-Target records (queue empty).
 All four activities are final: both integrations `canceled`, both reviews `completed`. The
 dashboard task list showed a stale "Waiting Review" badge until a manual refresh (minor UX). The task was
-then **archived** (rev 3); the project's task queue is empty. **Next S6 step: cutover preflight, then rulesets** (`integrator-cutover.md`).
+then **archived** (rev 3); the project's task queue is empty. Cutover preflight and rulesets followed; see the next section.
 
 **New backlog item (dashboard UX, 2026-10-05): human review decision defaults to "Changes
 requested".** `web/app.js:1302` builds the Decision select with `changes_requested` first and no
@@ -92,6 +92,36 @@ has create/get/close only). Add a human-visible list of active sessions per proj
 principal, agent kind, start time, last activity and held attempts. That lets an owner quiesce
 work before a test, preflight or cutover, which step 1 above had to approximate by checking
 local processes.
+
+## S6 cutover preflight and full rulesets — 2026-10-05 (workflow off): DONE
+
+**Preflight PASS:** `integrator-preflight.py` (sha256 `7805364e…76b3`, matches `main`) was scp'd to
+the service VM `agent-coordinator` (us-east1-b, IAP); the owner ran it as root against
+`/var/lib/agent-coordinator/coordinator.sqlite3`: `active_integrations`, `current_attempts`,
+`holds`, `jobs`, `publication_intents`, `recovery` and `reservations` were all 0, exit 0. This is
+a snapshot, not a lock. Keep new work paused and repeat it before the ownership switch.
+
+**Rulesets (owner-approved one at a time, applied by the agent via `gh api`, version header
+`2026-03-10`):** owner actor `10648043`, integrator App `5127380`, Actions `15368` (all three
+required contexts green on `3882ba4`).
+- A `integrator-writers` **`24525086`**: update/creation/deletion on `main` and `ac/results/**`;
+  bypass App + owner (`always`). Stored == reviewed.
+- B `integrator-checks` **`24525112`**: `non_fast_forward` + strict required checks (3 contexts,
+  `integration_id 15368`), no bypass. Stored == reviewed plus the server default
+  `do_not_enforce_on_create:false`.
+- Tags `owner-release-tags` **`24525127`**: `v*` creation/update/deletion, owner bypass only.
+  Stored == reviewed.
+- **`day0-main` `24031302` kept, not superseded (owner decision 2026-10-05).** It is the only
+  no-bypass ban on deleting the default branch; its `non_fast_forward` duplicates B.
+- Effective `rules/branches/main` read-back lists A, B and day0. `main` is unchanged at `3882ba4`.
+  JSON, responses and read-backs are in `~/.local/share/agent-coordinator-autonomy/s6-rulesets/`.
+
+Not yet demonstrated on this repo (it needs the write credential): an App publication to an
+`ac/results/**` branch succeeds and an ordinary collaborator update is refused. Prove both
+during the canary. **Next S6 step:** `integrator-cutover.md` "Change ownership and verify": stop and
+disable the shadow, install the integrator **write** credential, switch both credential paths to
+`@run.service`, repeat the preflight and confirm `main`, set `integration_owner=integrator`
+(human), start `@run.service`, then run the canary.
 
 ## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
 
