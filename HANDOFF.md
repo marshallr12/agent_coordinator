@@ -4,6 +4,51 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
+## Next: S6 reviewed live candidate test — owner runbook (written 2026-10-05, workflow off)
+
+The user chose a guided test: the owner runs every step; this session only wrote the steps
+(its read of the oracle-1 journal was blocked as a production read). Goal: one approved code
+candidate sits in `phase='integration'` long enough for `agentc-integrator@shadow.service` on
+oracle-1 to log `WouldPush`. Facts (core tree `42466e0`, verified): the shadow queue needs
+`ws.phase='integration'`, a current non-superseded `kind='code'` submission, an unchanged task
+digest and satisfied approvals; a human approval satisfies any review kind
+(`crates/server/src/integrator.rs:58-128`, `autonomy.rs:111-166`). No automatic publisher
+exists today, but any connected agent session may claim the integration activity and land it,
+removing it from the queue. `WouldPush` = `{result:{t0,c,r,landing_range,roster},
+privilege_findings, checks, authority_verified:false}` (`crates/integrator/src/shadow.rs:62`).
+
+1. **Quiesce:** no other agent sessions connected to the production project for the test.
+2. **Confirm the shadow is alive** (on oracle-1): `systemctl show agentc-integrator@shadow.service
+   -p ActiveState -p ActiveEnterTimestamp -p NRestarts`; `systemctl is-active
+   agentc-integrator@run.service` must say `inactive`.
+3. **Create the task in the dashboard** with `review_mode = human`. Make it a trivial,
+   harmless docs edit, for example a one-line wording fix in `book/src`. Never touch `.github/`:
+   that trips the privilege gate. Note the task id and revision.
+4. **Implement it from the workstation** with `~/.local/bin/agent-coordinator`:
+   `claim --task ID --revision N`; `worktree prepare --attempt A --generation G --source .
+   --path P --branch B --base <origin/main>`; make the one commit in P; release any
+   reservations; then `submissions code --attempt A --generation G --task-revision N
+   --project-policy-revision X --workflow-policy-revision Y --checkout P --input submission.json`.
+   Omit `--candidate-ref`, so it pushes `refs/agent-coordinator/candidates/<attempt>`.
+5. **Approve it as a human in the dashboard**, on the human review activity. Do **not** claim
+   the integration activity.
+6. **Watch** for at least 2 polls, about 30 s each: `sudo journalctl -u
+   agentc-integrator@shadow.service --since "-10min" -o cat | grep -E 'WouldPush|WouldRevise|Error'`.
+   Pass: a `WouldPush` for this submission whose `t0` is the current main, `privilege_findings`
+   are empty, and `authority_verified:false`. Save the journal outside Git under
+   `~/.local/share/agent-coordinator-autonomy/s6-live-candidate/`.
+7. **Clean up:** cancel the task in the dashboard with a rationale ("S6 shadow live-candidate
+   test"), so it never lands. The candidate ref may stay. Read back that the shadow queue is
+   empty again: there are no further `WouldPush` lines.
+
+**Empty-check fail-closed (open note from the shadow day):** the shadow cannot prove this. It
+computes R locally and never pushes it, so `checks` on R are always `[]` and shadow never
+evaluates them. It is a live-path property, covered by tests: integrator `ChecksPending`
+(`crates/integrator/src/flake.rs:157-172`, `publish.rs:56-61`, e2e `e2e_tests.rs:629`) and
+server `checks_not_passed` (`integrator_authority.rs:210-235`, `tests/workflow.rs:3473`).
+Prove it in the post-cutover canary instead. Uncertain: U5 `distinct_launch` is not enforced
+server-side; reviewer independence is per principal/session only (`workflow.rs:2074-2122`).
+
 ## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
 
 Per `book/src/docs/integrator-cutover.md` "Required-check stability evidence". Pinned
