@@ -136,8 +136,10 @@ Tags, owner only:
 
 Read `/repos/marshallr12/agent_coordinator/rules/branches/main` and the stored
 rulesets back. Verify contexts, Actions app id, enforcement, ref patterns and
-bypass actors. Supersede `day0-main` only after B is active and verified. Never
-verify protections by force-pushing main. App publication to an ephemeral
+bypass actors. Keep the day-0 ruleset `day0-main` after B is active: it is the
+only no-bypass ban on deleting the default branch (A lets the App and the owner
+bypass deletion), and its `non_fast_forward` rule duplicates B. Never verify
+protections by force-pushing main. App publication to an ephemeral
 result branch must succeed; ordinary collaborator updates must be refused as
 already demonstrated in the throwaway U4 test.
 
