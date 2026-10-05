@@ -47,7 +47,12 @@ root-owned claude-config denies. Decision U27: agent accounts use `claude setup-
   (not in the docs): claude.ai web Settings > Claude Code > Authorization tokens; setup-tokens
   are the rows whose only scope is `user:inference` (no device or role shown, so revoke by
   creation time; trash icon on hover). The retired `claude auth login` refresh tokens lived
-  only in the shredded files. Still owed: `pwd -P` suffix re-proof on 2.1.289.
+  only in the shredded files. `pwd -P` suffix re-proof on 2.1.289 (2026-10-05): **PASS**. Pinned
+  claude run as agentc-rev (setpriv, rev token via env, proxy, throwaway HOME/TMPDIR, logging
+  `CLAUDE_CODE_SHELL_PREFIX`): plain, `cd` and background commands each reached the prefix as
+  one arg ending `&& pwd -P >| $TMPDIR/claude-XXXX-cwd` (directly in TMPDIR); no `env -i`
+  snapshot call through the prefix. Gotcha: `--allowedTools` is variadic, so put the `-p`
+  prompt before it.
 - `09a2b78` TypeSafe main-service-only secret file (wave-plan A-P4): the main
   unit adds `EnvironmentFile=-/etc/agent-coordinator/typesafe.env` after
   `service.env`; backup/maintenance units unchanged; install and backup guides,
