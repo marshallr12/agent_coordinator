@@ -51,8 +51,8 @@ auth/`pwd -P` proof on Claude 2.1.288. **Shipped:** `main` `c89e94b..3882ba4` vi
 `3882ba4`, a retry in the flaky CLI launcher-lock test that failed CI twice; no server change,
 so no service deploy). **mxmini done 2026-10-05:** host-setup re-run, pin 2.1.289, two tokens (auth `ok`), suite rc 0
 (90 PASS, no NOTE); exposed impl token revoked and both tokens replaced (revoke setup-tokens at
-claude.ai Settings > Claude Code > Authorization tokens, `user:inference` rows). Owed: `pwd -P`
-re-proof on 2.1.289; then the S6 cutover chain. Details in the core tree's `HANDOFF.md`.
+claude.ai Settings > Claude Code > Authorization tokens, `user:inference` rows); `pwd -P` suffix
+re-proof on 2.1.289 PASS. Next: the S6 cutover chain (stability sample pins `main` `3882ba4`). Details in the core tree's `HANDOFF.md`.
 
 Run by an owner Claude session on oracle-1 (directed from mxmini over Remote Control) plus
 one owner-run strace. Pinned agent copy is **2.1.287** (`supervisor.toml` `claude = "2.1.287"`;
