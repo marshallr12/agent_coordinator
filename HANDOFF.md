@@ -41,12 +41,13 @@ root-owned claude-config denies. Decision U27: agent accounts use `claude setup-
   old ones predated U27): host-setup rc 0 removed both retired logins; pin 2.1.288 -> 2.1.289
   (owner's claude). Two distinct setup-tokens at root:agentc-<role> 0440, 1 link, no newline;
   auth smoke per role (throwaway `CLAUDE_CONFIG_DIR`, token via env) `ok` rc 0. Suite rc 0,
-  90 PASS, no FAIL/NOTE, SKIP push-key (no key) and browser (no staging). **Owed:** the impl
-  token was pasted into the session transcript: replace it and re-run its auth smoke. No
-  self-service revocation of setup-tokens is documented (GitHub claude-code #48373, #57400);
-  try claude.ai web Settings > Claude Code, else support@anthropic.com. The retired
-  `claude auth login` refresh tokens lived only in the shredded files. Also owed: `pwd -P`
-  suffix re-proof on 2.1.289.
+  90 PASS, no FAIL/NOTE, SKIP push-key (no key) and browser (no staging). The impl token was
+  then pasted into a session transcript, so the owner revoked both new tokens and installed
+  two fresh ones (108 B each, distinct, auth smoke `ok` rc 0 per role). **Revocation path**
+  (not in the docs): claude.ai web Settings > Claude Code > Authorization tokens; setup-tokens
+  are the rows whose only scope is `user:inference` (no device or role shown, so revoke by
+  creation time; trash icon on hover). The retired `claude auth login` refresh tokens lived
+  only in the shredded files. Still owed: `pwd -P` suffix re-proof on 2.1.289.
 - `09a2b78` TypeSafe main-service-only secret file (wave-plan A-P4): the main
   unit adds `EnvironmentFile=-/etc/agent-coordinator/typesafe.env` after
   `service.env`; backup/maintenance units unchanged; install and backup guides,
