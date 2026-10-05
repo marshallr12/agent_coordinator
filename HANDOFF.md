@@ -49,6 +49,18 @@ server `checks_not_passed` (`integrator_authority.rs:210-235`, `tests/workflow.r
 Prove it in the post-cutover canary instead. Uncertain: U5 `distinct_launch` is not enforced
 server-side; reviewer independence is per principal/session only (`workflow.rs:2074-2122`).
 
+**Live-test progress (2026-10-05, walked through one step at a time):** step 1 done. The owner
+confirmed no agent sessions running or scheduled; mxmini had no crontab and no launching
+supervisor (only the egress proxy).
+
+**New backlog item (user, 2026-10-05): list connected sessions.** Today there is no way to see
+which agent sessions are connected to a project. Sessions register via `POST /api/v1/sessions`,
+but no list route, CLI command or dashboard view exists (`crates/server/src/auth.rs:438-440`
+has create/get/close only). Add a human-visible list of active sessions per project, showing
+principal, agent kind, start time, last activity and held attempts. That lets an owner quiesce
+work before a test, preflight or cutover, which step 1 above had to approximate by checking
+local processes.
+
 ## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
 
 Per `book/src/docs/integrator-cutover.md` "Required-check stability evidence". Pinned
