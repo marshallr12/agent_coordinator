@@ -140,8 +140,26 @@ during the canary. **Ownership switch progress (2026-10-05, walked through one s
    `9c22b7d9…`); every other field preserved; provenance recorded. Rollback is the same PATCH
    with `integration_owner:"agent"` against rev 7.
 
-**Next:** start `@run.service`, check heartbeat/watchdog/privilege gates, revoke the read
-credential, then the reviewed canary (prove App publication to `ac/results/**`, collaborator
+6. `@run` started 19:24:15 UTC (active/running, NRestarts 0, `Idle` every ~30 s); shadow inactive.
+7. The old read-only `oracle-1-integrator` credential was **revoked** (agent clicked, owner-approved).
+
+**Canary (in progress, 2026-10-05):** task `f92bf97d-ab91-436f-ab93-009cc4b41376` (dashboard),
+session `s6-canary`, attempt `bc7ffdf0…`, worktree `~/src/worktrees/s6-canary` (branch
+`s6/canary`), commit `a7418bd` (keeps day0-main in `integrator-cutover.md`), submission
+`b35147b8-e952-4d44-931b-5dd3c35044c3`. The owner approved the human review. The integrator pushed R =
+`a7418bd` to `ac/results/a8514051-e6ca-4319-946b-664b7900d12b` **as
+`marshallr12-agentc-integrator[bot]`** (proves App publication under ruleset A). Audit + mdBook
+passed on R; the Linux job got **no runner** (GitHub Actions incident from 19:11 UTC, a major
+outage by 20:47), so run `37364065124` attempts 1–3 were each cancelled after ~15 min. The
+integrator auto-reran twice (`MAX_RERUNS=2`) and is now `Blocked("no_result: … after 2 reruns")`
+every poll, with a `no_result` flaky report; nothing is held and `main` is still `3882ba4`. **Resume:** once
+Actions recovers, run `gh run rerun 37364065124 --failed --repo marshallr12/agent_coordinator`
+(manual reruns are not budgeted; the latest attempt decides and cancelled counts as no result).
+A pass lets the integrator take authority and publish `a7418bd` to `main`. Then read back the main
+tip and pusher, the check receipts, the task's completion and the service report, and resolve the
+`no_result` report.
+
+**Remaining after the canary:** read back the remote main tip (prove App publication to `ac/results/**`, collaborator
 refusal and check receipts; read back the remote main tip). Keep new work paused until it passes.
 
 ## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
