@@ -65,7 +65,7 @@ publication. `WouldPush` is a proposal with `authority_verified=false`; it does
 not claim approval of checks, privilege decisions or service push authority.
 No result, receipt, report, revision, observation, candidate push, rerun or
 publication is sent. Local mirrors/intents live under `state_dir/shadow`.
-Missing full rulesets are expected before cutover; a missing roster is an error.
+Missing full rulesets are expected before cutover; a missing roster is an error. A reviewed live-candidate shadow test was run on 2026-10-05.
 
 ## Required-check stability evidence
 
