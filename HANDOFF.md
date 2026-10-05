@@ -1,5 +1,24 @@
 # Core hardening wave — 2026-10-02
 
+## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
+
+Per `book/src/docs/integrator-cutover.md` "Required-check stability evidence". Pinned
+`main` `3882ba4b6f121f4cad35f99d2737fb6398d3b26d` (re-checked before every rerun and at the
+end; unchanged). Push runs: Coordination checks `37117852141`, Documentation checks
+`37117852080`. 20 sequential "rerun all jobs" attempts each (14:49-17:28 UTC; no
+failed-job-only reruns, no dispatches) on top of attempt 1 ⇒ **21 attempts per required check,
+0 non-success, rate 0.0**: `Linux format, Clippy, and workspace tests` 21/21,
+`Audit locked dependencies` 21/21, `Pinned mdBook build and local-link validation` 21/21
+(non-required `Native Windows client, CLI, and local runner tests` also 21/21; the
+launcher-lock test did not fail). `integrator-flip-rate.py` rc 0, all `passed: true`.
+Evidence outside Git in `~/.local/share/agent-coordinator-autonomy/s6-stability/`:
+`ci-jobs.json`, `docs-jobs.json` (`filter=all`), `flip-rate-report.json`, per-attempt
+`ci-loop.log`/`docs-loop.log`, driver `rerun-loop.sh`. Note: the docs log's attempt-19 line
+says `null` because the jobs API lagged the completed run attempt; the run attempt and the job
+later read `completed`/`success`. Remaining S6 chain: production shadow, live candidate test,
+cutover preflight, rulesets, write credential, `integration_owner` switch, canary (all owner
+steps; nothing changed here).
+
 ## U27 Claude setup-token auth — 2026-10-03 (branch `hardening/claude-token-20261003`)
 
 Workflow off. The owner proof on oracle-1 (see the planning `HANDOFF.md`) showed that Claude
