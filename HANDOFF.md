@@ -60,6 +60,22 @@ workflow policy 3), attempt `c3d619de…`, session `s6-live-test`, worktree
 recorded **`changes_requested`** by accident (18:23 UTC): the dialog pre-selects that value.
 The task went back to `ready` (`revision_needed`); a fresh attempt and resubmission are needed.
 
+**Attempt 2 and result (2026-10-05): S6 live-candidate shadow test PASS.** Attempt
+`3d698958…` (gen 2), worktree `s6-live-test-2`, cherry-picked commit `0842ddf`, submission
+`3ede636f-28fb-4e7e-8025-7a841551c96e`, ref `refs/agent-coordinator/candidates/3d698958…`. The owner
+approved at 18:27:24 UTC; the shadow logged `WouldPush` at **18:27:46** and again at 18:28:21 UTC.
+Each record had `c=r=0842ddf` (a fast-forward onto t0 `3882ba4`, r_tree `2b6bad77…` matching the
+worktree), `landing_range=[0842ddf]`, roster rev 3 with all three required checks and workflow
+blobs, `privilege_findings=[]`, `authority_verified=false`, and `checks=[]` (as expected: R is never
+pushed). There were no Error or WouldRevise records. Evidence:
+`~/.local/share/agent-coordinator-autonomy/s6-live-candidate/wouldpush.jsonl`. Cleanup: the task
+was reopened (submission superseded, integration activity cancelled) and then **canceled**
+(rev 2), because cancel refuses while the subject is in review/integration
+(`coordination.rs:773-780`). Both worktrees were removed. Kept: local branches `s6/live-test` and
+`s6/live-test-2` (unmerged; `-d` refuses), and both candidate refs on GitHub. `main` was
+untouched (`3882ba4`). Still open: the owner's journal re-check showing no `WouldPush` after
+18:30 UTC. **Next S6 step: cutover preflight, then rulesets** (`integrator-cutover.md`).
+
 **New backlog item (dashboard UX, 2026-10-05): human review decision defaults to "Changes
 requested".** `web/app.js:1302` builds the Decision select with `changes_requested` first and no
 empty placeholder, so a reviewer who types only a summary records a rejection. Add a required
