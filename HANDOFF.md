@@ -53,6 +53,20 @@ server-side; reviewer independence is per principal/session only (`workflow.rs:2
 confirmed no agent sessions running or scheduled; mxmini had no crontab and no launching
 supervisor (only the egress proxy).
 
+**Attempt 1 (2026-10-05):** task `510fa3fe-faef-4106-bc6e-a4b9894380b0` (rev 1, policy 6,
+workflow policy 3), attempt `c3d619de…`, session `s6-live-test`, worktree
+`~/src/worktrees/s6-live-test` (branch `s6/live-test`), commit `1f03f63`, submission
+`0382743c…` (ref `refs/agent-coordinator/candidates/c3d619de…`). The owner's human review
+recorded **`changes_requested`** by accident (18:23 UTC): the dialog pre-selects that value.
+The task went back to `ready` (`revision_needed`); a fresh attempt and resubmission are needed.
+
+**New backlog item (dashboard UX, 2026-10-05): human review decision defaults to "Changes
+requested".** `web/app.js:1302` builds the Decision select with `changes_requested` first and no
+empty placeholder, so a reviewer who types only a summary records a rejection. Add a required
+"Choose…" placeholder, or confirm before recording. Also: "Claim human review" claims
+immediately (it takes a 1 h lease) and then opens the decision dialog. Closing the dialog keeps
+the claim, which isn't obvious from the UI.
+
 **New backlog item (user, 2026-10-05): list connected sessions.** Today there is no way to see
 which agent sessions are connected to a project. Sessions register via `POST /api/v1/sessions`,
 but no list route, CLI command or dashboard view exists (`crates/server/src/auth.rs:438-440`
