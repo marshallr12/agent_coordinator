@@ -85,6 +85,12 @@ empty placeholder, so a reviewer who types only a summary records a rejection. A
 immediately (it takes a 1 h lease) and then opens the decision dialog. Closing the dialog keeps
 the claim, which isn't obvious from the UI.
 
+**New backlog item (user, 2026-10-05): dashboard control for `integration_owner`.** The
+dashboard's policy dialogs omit `integration_owner` (omission preserves it), so the S6 switch
+needed a hand-built `PATCH …/policy` from DevTools. Add a human-only "Integration owner" setting to
+the project policy UI: show the current owner, confirm the change, take a provenance note, and
+surface `policy_hold_conflict`. Rollback to `agent` needs the same control.
+
 **New backlog item (user, 2026-10-05): list connected sessions.** Today there is no way to see
 which agent sessions are connected to a project. Sessions register via `POST /api/v1/sessions`,
 but no list route, CLI command or dashboard view exists (`crates/server/src/auth.rs:438-440`
@@ -118,10 +124,25 @@ required contexts green on `3882ba4`).
 
 Not yet demonstrated on this repo (it needs the write credential): an App publication to an
 `ac/results/**` branch succeeds and an ordinary collaborator update is refused. Prove both
-during the canary. **Next S6 step:** `integrator-cutover.md` "Change ownership and verify": stop and
-disable the shadow, install the integrator **write** credential, switch both credential paths to
-`@run.service`, repeat the preflight and confirm `main`, set `integration_owner=integrator`
-(human), start `@run.service`, then run the canary.
+during the canary. **Ownership switch progress (2026-10-05, walked through one step at a time):**
+1. The owner stopped and disabled `agentc-integrator@shadow.service`; `@run` was inactive and disabled.
+2. The owner issued the dashboard credential `oracle-1-integrator-write` (class integrator, access
+   write; the classifier blocked the agent from setting the Class/Access selects). It was scp'd to
+   oracle-1 as ubuntu (use `-i ~/gdrive/Development/oracle-1-key-2026-09-16.key
+   ubuntu@oracle.sithbit.com`; there is no `oracle-1` SSH alias), installed over
+   `/etc/agentc/integrator-credentials.toml` as `root:root 0400`, and every copy shredded. The old
+   read-only `oracle-1-integrator` credential is **still active**: revoke it once `@run` is healthy.
+3. The `/etc/agentc/integrator.toml` credential paths now point at `@run.service`. Backup:
+   `/etc/agentc/integrator.toml.shadow-20261005T191353Z`.
+4. Preflight repeated: all 0, exit 0. `main` was still `3882ba4`.
+5. **Policy rev 6 → 7, `integration_owner=integrator`** (human `PATCH` from a dashboard DevTools
+   snippet at 19:17:18 UTC, Idempotency-Key `s6-integration-owner-flip-20261005`, request
+   `9c22b7d9…`); every other field preserved; provenance recorded. Rollback is the same PATCH
+   with `integration_owner:"agent"` against rev 7.
+
+**Next:** start `@run.service`, check heartbeat/watchdog/privilege gates, revoke the read
+credential, then the reviewed canary (prove App publication to `ac/results/**`, collaborator
+refusal and check receipts; read back the remote main tip). Keep new work paused until it passes.
 
 ## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
 
