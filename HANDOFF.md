@@ -73,8 +73,9 @@ was reopened (submission superseded, integration activity cancelled) and then **
 (rev 2), because cancel refuses while the subject is in review/integration
 (`coordination.rs:773-780`). Both worktrees were removed. Kept: local branches `s6/live-test` and
 `s6/live-test-2` (unmerged; `-d` refuses), and both candidate refs on GitHub. `main` was
-untouched (`3882ba4`). Still open: the owner's journal re-check showing no `WouldPush` after
-18:30 UTC. **Next S6 step: cutover preflight, then rulesets** (`integrator-cutover.md`).
+untouched (`3882ba4`). The owner's journal re-check since 18:30:30 UTC showed no non-Target records (queue empty).
+All four activities are final: both integrations `canceled`, both reviews `completed`. The
+dashboard task list showed a stale "Waiting Review" badge until a manual refresh (minor UX). **Next S6 step: cutover preflight, then rulesets** (`integrator-cutover.md`).
 
 **New backlog item (dashboard UX, 2026-10-05): human review decision defaults to "Changes
 requested".** `web/app.js:1302` builds the Decision select with `changes_requested` first and no
