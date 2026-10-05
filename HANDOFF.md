@@ -4,6 +4,25 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
+## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
+
+Per `book/src/docs/integrator-cutover.md` "Required-check stability evidence". Pinned
+`main` `3882ba4b6f121f4cad35f99d2737fb6398d3b26d` (re-checked before every rerun and at the
+end; unchanged). Push runs: Coordination checks `37117852141`, Documentation checks
+`37117852080`. 20 sequential "rerun all jobs" attempts each (14:49-17:28 UTC; no
+failed-job-only reruns, no dispatches) on top of attempt 1 ⇒ **21 attempts per required check,
+0 non-success, rate 0.0**: `Linux format, Clippy, and workspace tests` 21/21,
+`Audit locked dependencies` 21/21, `Pinned mdBook build and local-link validation` 21/21
+(non-required `Native Windows client, CLI, and local runner tests` also 21/21; the
+launcher-lock test did not fail). `integrator-flip-rate.py` rc 0, all `passed: true`.
+Evidence outside Git in `~/.local/share/agent-coordinator-autonomy/s6-stability/`:
+`ci-jobs.json`, `docs-jobs.json` (`filter=all`), `flip-rate-report.json`, per-attempt
+`ci-loop.log`/`docs-loop.log`, driver `rerun-loop.sh`. Note: the docs log's attempt-19 line
+says `null` because the jobs API lagged the completed run attempt; the run attempt and the job
+later read `completed`/`success`. Remaining S6 chain: production shadow, live candidate test,
+cutover preflight, rulesets, write credential, `integration_owner` switch, canary (all owner
+steps; nothing changed here).
+
 ## Current resume point — follow-up phases (2026-10-02 daytime)
 
 Agent Coordinator workflow disabled again; local commits only, no push/deploy.
@@ -52,7 +71,7 @@ auth/`pwd -P` proof on Claude 2.1.288. **Shipped:** `main` `c89e94b..3882ba4` vi
 so no service deploy). **mxmini done 2026-10-05:** host-setup re-run, pin 2.1.289, two tokens (auth `ok`), suite rc 0
 (90 PASS, no NOTE); exposed impl token revoked and both tokens replaced (revoke setup-tokens at
 claude.ai Settings > Claude Code > Authorization tokens, `user:inference` rows); `pwd -P` suffix
-re-proof on 2.1.289 PASS. Next: the S6 cutover chain (stability sample pins `main` `3882ba4`). Details in the core tree's `HANDOFF.md`.
+re-proof on 2.1.289 PASS. Next: the S6 cutover chain; stability sample on `main` `3882ba4` PASSED 2026-10-05 (see the S6 section above). Details in the core tree's `HANDOFF.md`.
 
 Run by an owner Claude session on oracle-1 (directed from mxmini over Remote Control) plus
 one owner-run strace. Pinned agent copy is **2.1.287** (`supervisor.toml` `claude = "2.1.287"`;
