@@ -626,3 +626,48 @@ async fn lapsed_active_attempts_stay_listed_and_flagged() {
     assert_eq!(held["attempt_id"], attempt["id"]);
     assert_eq!(held["lease_expired"], true);
 }
+
+/// At most 500 sessions are listed, newest activity first, with `truncated`
+/// set only when more matched.
+#[tokio::test]
+async fn the_list_is_capped_at_500_and_flags_truncation() {
+    let f = Fixture::new().await;
+    let p = f.project("capped").await;
+    seed_bound_sessions(&f, &p, 501).await;
+    let (s, v) = f.list(&f.admin, &p, "").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(items(&v).len(), 500);
+    assert_eq!(v["data"]["truncated"], true);
+    assert_eq!(items(&v)[0]["session_id"], "cap-0001");
+    assert_eq!(items(&v)[499]["session_id"], "cap-0500");
+    f.exec(
+        "UPDATE agent_sessions SET closed_at=?2 WHERE id=?1",
+        &["cap-0501"],
+        &[f.now()],
+    )
+    .await;
+    let (_, v) = f.list(&f.admin, &p, "").await;
+    assert_eq!(items(&v).len(), 500);
+    assert_eq!(v["data"]["truncated"], false);
+}
+
+/// Seeds `count` open sessions named `cap-0001`… that acknowledged project
+/// `p`, each one second older than the last, under one agent credential.
+async fn seed_bound_sessions(f: &Fixture, p: &str, count: i64) {
+    let agent = f.agent("cap-agent").await;
+    f.exec(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?4)
+         INSERT INTO agent_sessions(id,principal_id,credential_id,workstation_id,proof_hash,created_at,capabilities,harness)
+         SELECT printf('cap-%04d', i), ?1, ?2, 'cap-ws', 'unused', ?3 - i*1000, '[]', 'test' FROM n",
+        &[&agent.principal, &agent.credential],
+        &[f.now(), count],
+    )
+    .await;
+    f.exec(
+        "INSERT INTO instruction_acknowledgments(session_id,project_id,policy_revision,instruction_version,created_at)
+         SELECT id, ?1, 1, '9', created_at FROM agent_sessions WHERE id LIKE 'cap-%'",
+        &[p],
+        &[],
+    )
+    .await;
+}

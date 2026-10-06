@@ -1757,7 +1757,7 @@
     try {
       const page = (await request(`${projectPath(projectId)}/sessions?${query}`)).data;
       if (seq === state.agentSessionsSeq && projectId === state.projectId) renderAgentSessions(page);
-    } catch (error) { if (seq === state.agentSessionsSeq) setState($('agent-sessions-state'), errorMessage(error), false, true); }
+    } catch (error) { if (seq === state.agentSessionsSeq && projectId === state.projectId) setState($('agent-sessions-state'), errorMessage(error), false, true); }
   }
   // Renders one card per session, the empty-window message, or a truncation note.
   function renderAgentSessions(page) {

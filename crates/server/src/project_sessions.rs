@@ -33,32 +33,40 @@ const HOUR_MS: i64 = 3_600_000;
 /// Open, live-credential sessions bound to project `?1`, with their last
 /// activity, filtered by the window (since `?5`; `?3` = 0 lists all) unless
 /// they hold an active attempt in the project (even one whose lease lapsed).
+///
+/// It starts from the open sessions (`agent_sessions_open`) and reads each
+/// one's own acknowledgment, attempts and checkpoints in the project through
+/// indexed lookups (`instruction_acknowledgments` key, `attempts_session`,
+/// `checkpoints_attempt_history`), so its cost follows the open sessions and
+/// their own history, never the project's whole attempt or checkpoint history.
 const SESSIONS_SQL: &str = "\
-WITH touches(session_id, at) AS (
-  SELECT session_id, created_at FROM instruction_acknowledgments WHERE project_id=?1
-  UNION ALL
-  SELECT session_id, max(created_at, last_heartbeat_at, last_progress_at, COALESCE(ended_at, 0))
-    FROM attempts WHERE project_id=?1
-  UNION ALL
-  SELECT a.session_id, k.created_at FROM checkpoints k
-    JOIN attempts a ON a.project_id=k.project_id AND a.id=k.attempt_id WHERE k.project_id=?1
+WITH open AS MATERIALIZED (
+  SELECT s.id, s.created_at,
+    (SELECT i.created_at FROM instruction_acknowledgments i
+      WHERE i.session_id=s.id AND i.project_id=?1) AS ack_at,
+    (SELECT max(max(a.created_at, a.last_heartbeat_at, a.last_progress_at,
+        COALESCE(a.ended_at, 0),
+        COALESCE((SELECT max(k.created_at) FROM checkpoints k
+          WHERE k.project_id=a.project_id AND k.attempt_id=a.id), 0)))
+      FROM attempts a WHERE a.session_id=s.id AND a.project_id=?1) AS attempt_at,
+    EXISTS(SELECT 1 FROM attempts a WHERE a.session_id=s.id AND a.project_id=?1
+      AND a.state='active') AS held
+  FROM agent_sessions s WHERE s.closed_at IS NULL
 ),
-activity AS (SELECT session_id, max(at) AS at FROM touches GROUP BY session_id),
-held AS (SELECT DISTINCT session_id FROM attempts
-  WHERE project_id=?1 AND state='active')
+bound AS (
+  SELECT id, held, max(created_at, COALESCE(ack_at, 0), COALESCE(attempt_at, 0)) AS at
+  FROM open WHERE ack_at IS NOT NULL OR attempt_at IS NOT NULL
+)
 SELECT s.id, s.principal_id, p.name AS principal_name, p.kind AS principal_kind,
   s.harness, s.workstation_id, s.capabilities, s.credential_id, s.created_at,
-  s.parent_session_id, sub.name AS subagent_name,
-  max(s.created_at, act.at) AS last_activity_at
-FROM activity act
-JOIN agent_sessions s ON s.id=act.session_id
+  s.parent_session_id, sub.name AS subagent_name, b.at AS last_activity_at
+FROM bound b
+JOIN agent_sessions s ON s.id=b.id
 JOIN credentials c ON c.id=s.credential_id
 JOIN principals p ON p.id=s.principal_id
 LEFT JOIN subagent_identities sub ON sub.id=s.subagent_identity_id
-WHERE s.closed_at IS NULL AND c.revoked_at IS NULL
-  AND (c.expires_at IS NULL OR c.expires_at>?2) AND p.disabled_at IS NULL
-  AND (?3=0 OR max(s.created_at, act.at)>=?5
-       OR s.id IN (SELECT session_id FROM held))
+WHERE c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>?2)
+  AND p.disabled_at IS NULL AND (?3=0 OR b.at>=?5 OR b.held)
 ORDER BY last_activity_at DESC, s.id
 LIMIT ?4";
 
@@ -240,4 +248,52 @@ async fn list_sessions(
         "project_id": p, "active_within_hours": hours, "generated_at": timestamp(now),
         "items": items, "truncated": truncated,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Config;
+
+    /// The `detail` lines of SQLite's plan for `SESSIONS_SQL` on a freshly
+    /// migrated database.
+    async fn sessions_plan() -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::open(Config {
+            database_path: dir.path().join("plan.sqlite3"),
+            ..Config::default()
+        })
+        .await
+        .unwrap();
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN {SESSIONS_SQL}"
+        )))
+        .bind("p")
+        .bind(0_i64)
+        .bind(24_i64)
+        .bind(501_i64)
+        .bind(0_i64)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap();
+        rows.iter().map(|r| r.get::<String, _>("detail")).collect()
+    }
+
+    /// Every attempt and checkpoint read is an indexed search, and open
+    /// sessions come from the partial index, so a call never scans the
+    /// project's history.
+    #[tokio::test]
+    async fn sessions_query_never_scans_history() {
+        let plan = sessions_plan().await;
+        let scans: Vec<&String> = plan.iter().filter(|d| d.starts_with("SCAN ")).collect();
+        assert_eq!(
+            scans,
+            ["SCAN s USING INDEX agent_sessions_open", "SCAN open"],
+            "{plan:#?}"
+        );
+        assert!(
+            plan.iter().any(|d| d.contains("attempts_session")),
+            "{plan:#?}"
+        );
+    }
 }

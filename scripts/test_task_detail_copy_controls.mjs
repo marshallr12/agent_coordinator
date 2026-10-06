@@ -53,6 +53,8 @@ const reports = [
 ];
 const reportQueries = [];
 let failNextReportPage = false;
+// While set, the project list waits on this promise (a slow load after a reload).
+let projectsGate = null;
 const reportResolutions = [];
 // Connected agent sessions: a subagent reviewer, a plain CLI worker and an idle session.
 const agentSessions = [
@@ -146,6 +148,7 @@ async function fixtureServer() {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://fixture.invalid');
     if (url.pathname === '/api/v1/me') return json(response, { actor: fixtureActor, csrf_token: 'fixture-csrf' });
+    if (url.pathname === '/api/v1/projects' && projectsGate) await projectsGate;
     if (url.pathname === '/api/v1/projects') return json(response, { items: [{ id: 'fixture-project', name: 'Fixture project', target_branch: 'main' }] });
     if (url.pathname === '/api/v1/projects/fixture-project/orientation') return json(response, { project: policyProject, policy_revision: policyProject.policy_revision });
     if (url.pathname === '/api/v1/projects/fixture-project/policy' && request.method === 'PATCH') return policyRoute(request, response);
@@ -407,6 +410,26 @@ async function checkAgentSessionStates({ evaluate, waitPage }) {
   agentSessionsMode = 'normal';
   await evaluate("document.querySelector('#refresh-agent-sessions').click()");
   await waitPage("document.querySelectorAll('#agent-sessions-list .agent-session-card').length === 2 && document.querySelector('#agent-sessions-state').hidden", 'sessions recover after a failure');
+}
+
+// A report resolution left pending by a reload: retrying it opens the reports
+// page before the project list arrives, and the header names the project once it does.
+async function checkReloadedResolutionLabel(page, serverPort) {
+  const { evaluate, waitPage, send } = page;
+  reports.push(fixtureReport('reload-report', 'flaky'));
+  const pending = { actor_id: fixtureActor.id, operation: 'resolve_integrator_report', path: '/api/v1/projects/fixture-project/integrator/reports/reload-report/resolve', method: 'POST', key: 'reload-resolution-key', body: { note: 'Resolved across a reload' }, context: { projectId: 'fixture-project' } };
+  await evaluate(`sessionStorage.setItem('agent-coordinator.pending-mutation', ${JSON.stringify(JSON.stringify(pending))})`);
+  let releaseProjects;
+  projectsGate = new Promise((resolveGate) => { releaseProjects = resolveGate; });
+  try {
+    await send('Page.navigate', { url: `http://127.0.0.1:${serverPort}/` });
+    const retry = "[...document.querySelectorAll('#global-alert button')].find((button) => button.textContent === 'Retry request')";
+    await waitPage(`Boolean(${retry})`, 'retained report resolution after a reload');
+    await evaluate(`${retry}.click()`);
+    await waitPage("!document.querySelector('#reports-view').hidden && document.querySelector('#reports-project-label').textContent === 'Project'", 'reports opened before the projects load');
+    assert(reportResolutions.at(-1).id === 'reload-report' && reportResolutions.at(-1).body.note === 'Resolved across a reload', 'The retained resolution was not retried.');
+  } finally { projectsGate = null; releaseProjects(); }
+  await waitPage("document.querySelector('#reports-project-label').textContent === 'Fixture project'", 'reports label names the project once projects load');
 }
 
 // A non-human actor sees neither the owner control nor report resolution.
@@ -738,7 +761,8 @@ async function main() {
     await waitPage("document.querySelector('#issue-feedback').textContent.includes('Clipboard access was unavailable')", 'token manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
-    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny and already-resolved refusal), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
+    await checkReloadedResolutionLabel(ui, serverPort);
+    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
