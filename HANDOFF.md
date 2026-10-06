@@ -144,7 +144,7 @@ sessions", 8 server tests, browser test, smoke check, book (api-contract, CLI, o
 694 tests. Subagent review `sessions-review-1` approved (3 advisories → task `33a3a8dd`, priority 3,
 unclaimed, plus the reload-label browser-test advisory); integrator pushed **`main` `ace034c →
 7fdb18b` at 04:20:45 UTC**. Both tasks `done`; both worktrees removed; local branch
-`dash/polish-cfda9952` kept (`-d` refuses from `autonomy-plan`). Note: reviewers' `reviews claim`
+`dash/polish-cfda9952` force-deleted at the owner's request (tip `ace034c` is on `main`). Note: reviewers' `reviews claim`
 needs `--candidate-checkout` whose origin matches the repo URL; the classifier flagged a scratch
 clone's `remote set-url` as "Remote Repoint".
 
@@ -159,7 +159,7 @@ complete; timers re-armed; 0 keyless-rerank warnings. Downtime 05:07:09–05:07:
 `upgrade_client.py` from detached worktree `~/src/worktrees/ac-release-7fdb18b` (rollback
 `~/.local/bin/agent-coordinator.rollback`); `sessions list --active-within-hours 0` against
 production lists ~100 open, never-closed sessions since 2026-09-14, none holding attempts (clients
-rarely close sessions; consider auto-closing idle sessions as a backlog item).
+rarely close sessions). Backlog: task `601d1601` "Auto-close idle agent sessions" (priority 3).
 
 ## S6 cutover preflight and full rulesets — 2026-10-05 (workflow off): DONE
 
