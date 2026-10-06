@@ -130,6 +130,29 @@ keyless-rerank warnings. Downtime 03:12:11–03:13:07 UTC. `/api/v1/info` `8bf99
 worktree `~/src/worktrees/ac-release-8bf99e8` (rollback `~/.local/bin/agent-coordinator.rollback`).
 Not checked: the oracle-1 integrator journal across the downtime.
 
+**DONE (2026-10-06, not deployed): sessions polish 33a3a8dd + idle-session auto-close 601d1601.**
+Session `backlog-1006` (CLI, parent `5b189927…`). 33a3a8dd: `55786eb` — SESSIONS_SQL starts from open
+sessions with per-session indexed lookups (migration **0025**: `attempts(session_id,project_id)`,
+partial `agent_sessions(created_at) WHERE closed_at IS NULL`), EXPLAIN-plan unit test, 500-cap/
+truncated test, `loadAgentSessions` error branch checks project, browser test for the reports label
+after a reload with a pending resolution. Subagent review `sessions-polish-review-1` approved
+(advisories: plan test asserts exact SCAN strings; still visits every open session). 601d1601:
+`eafa93e`,`997f04a`,`8820f08` — `maintenance --session-idle-days` (env `COORDINATOR_SESSION_IDLE_DAYS`,
+default 7, 0 disables) closes idle sessions (activity across all projects) except those holding an
+active attempt, live reporter, held reservation, unreconciled job or open subagent child; event
+`agent_session_closed` data `reason:"idle"`; migration **0026** (`maintenance_runs.sessions_closed`,
+`reporters(session_id)`). CLI `connect`/`mcp-client` replace a closed saved session
+(`replaced_closed_session_id`); standalone MCP adapter reports `session_state` (owner decision: report
++ reconfigure, adapter never generates secrets). Subagent review `session-idle-review-1` approved
+(advisories: `replace_closed_session` saves state before registering; transport_status may wait the
+30 s HTTP timeout when upstream is down; idle-close event has no credential class). Integrator pushed
+**`main` `7fdb18b → 55786eb → 8820f08`**. Gate 699 tests, smoke, docs. Both tasks `done`; worktrees
+removed; local branches `dash/sessions-polish-33a3a8dd`, `dash/session-idle-601d1601` kept (`-d`
+refuses from `autonomy-plan`). **Next deploy carries migrations 0025+0026**; the first daily
+maintenance after it will close the ~100 stale sessions. Trap: a repo guard blocks `git reset`, so
+WIP commits cannot be squashed; core `build.rs` watches the worktree HEAD file, so provenance goes
+stale after a branch commit (touch `crates/core/build.rs` before smoke).
+
 **DONE (2026-10-06): review polish cfda9952 + list connected sessions (027aeac3); deployed.**
 Session `sessions-list` (CLI, `4e0c7a21…`). cfda9952: `ace034c` (failed load-more keeps cursor and
 control; reports label refreshes when projects load; helper comments; browser check fails on old
@@ -159,7 +182,7 @@ complete; timers re-armed; 0 keyless-rerank warnings. Downtime 05:07:09–05:07:
 `upgrade_client.py` from detached worktree `~/src/worktrees/ac-release-7fdb18b` (rollback
 `~/.local/bin/agent-coordinator.rollback`); `sessions list --active-within-hours 0` against
 production lists ~100 open, never-closed sessions since 2026-09-14, none holding attempts (clients
-rarely close sessions). Backlog: task `601d1601` "Auto-close idle agent sessions" (priority 3).
+rarely close sessions). Backlog task `601d1601` "Auto-close idle agent sessions": done 2026-10-06 (`8820f08`).
 
 ## S6 cutover preflight and full rulesets — 2026-10-05 (workflow off): DONE
 
