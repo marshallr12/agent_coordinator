@@ -78,12 +78,28 @@ All four activities are final: both integrations `canceled`, both reviews `compl
 dashboard task list showed a stale "Waiting Review" badge until a manual refresh (minor UX). The task was
 then **archived** (rev 3); the project's task queue is empty. Cutover preflight and rulesets followed; see the next section.
 
-**New backlog item (dashboard UX, 2026-10-05): human review decision defaults to "Changes
-requested".** `web/app.js:1302` builds the Decision select with `changes_requested` first and no
-empty placeholder, so a reviewer who types only a summary records a rejection. Add a required
-"Choose…" placeholder, or confirm before recording. Also: "Claim human review" claims
-immediately (it takes a 1 h lease) and then opens the decision dialog. Closing the dialog keeps
-the claim, which isn't obvious from the UI.
+**DONE (2026-10-06): human review decision default.** Task `a020fa33-b532-4e86-a204-885cab87ec02`,
+the first real task through the live integrator: `6fea647` brings the stale dashboard browser
+test up to date with the current UI (nine drift points since ~2026-09-24; the test is not in CI) and
+`13d4e4a` gives the Decision select an empty required "Choose a decision…" placeholder (the test
+fails on the old dialog with `Review decision is preselected.`). Submission `5f6660c4…`;
+owner-approved human review (it should have been a review subagent: `allow_subagent_reviews` is
+true). The integrator pushed R to `ac/results/c3592296…`, waited for its own runs, and pushed
+**`main` `a7418bd → 13d4e4a` at 01:21:19 UTC** as the App; task `done`. Still open from that note:
+"Claim human review" takes a 1 h lease before the dialog, and closing the dialog keeps it.
+
+**Production deploy 13d4e4a (2026-10-06, binaries-only since 2f3c347, owner-run root steps).**
+The owner dispatched release run `37399956468` (the classifier blocked the agent's `gh workflow
+run`); it went green (3 jobs). The archive was sha256-checked, embeds `13d4e4a`, and was staged in
+`release-next` (RELEASE previous `2f3c347`; the old archive stays in `release-2f3c347`). Preflight 0 before
+pre and again after the stop. Old-binary snapshot `20261006T015258.587Z-f5db7a53…` (rollback =
+restore it + binaries `*-0.1.1-2f3c347`); new-binary snapshot `20261006T015414.653Z-0badbb8a…`
+verified; maintenance complete; timers restarted; 0 keyless-rerank warnings. Downtime
+01:53:05–01:54:14 UTC. `/api/v1/info` `source_commit` `13d4e4a`, not dirty; the live `app.js` has the
+placeholder. **The service requires an exact client:** the workstation CLI reported
+`client_upgrade_required` until it was upgraded with `upgrade_client.py` from a clean detached worktree
+`~/src/worktrees/ac-release-13d4e4a` (rollback `~/.local/bin/agent-coordinator.rollback`). The
+oracle-1 integrator (`1e8aebb` build) logged two 502s during the downtime, then `Idle`; it was still accepted.
 
 **New backlog item (user, 2026-10-05): dashboard control for `integration_owner`.** The
 dashboard's policy dialogs omit `integration_owner` (omission preserves it), so the S6 switch
