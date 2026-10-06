@@ -696,11 +696,13 @@ remove_service() {
 # configuration and keys) survive. The push App key is the owner's: it is
 # kept, handed back to root (0400). Each role's Claude token is zeroed and
 # deleted. Each shared parent goes only once empty.
-# Agent accounts are retired first, so nothing they run outlives the firewall;
-# the egress account only once its unit (Restart=always) is stopped.
+# The agentc-run loop stops first, then agent accounts are retired, so nothing
+# they run outlives the firewall; the egress account only once its unit
+# (Restart=always) is stopped.
 uninstall() {
-  for user in "${AGENTS[@]}" "$PUSH_USER"; do retire_account "$user"; done
+  # The loop runs launches as the agent accounts; stop it before retiring them.
   remove_service agentc-run
+  for user in "${AGENTS[@]}" "$PUSH_USER"; do retire_account "$user"; done
   remove_service agentc-egress
   retire_account agentc-egress
   remove_apparmor_bwrap

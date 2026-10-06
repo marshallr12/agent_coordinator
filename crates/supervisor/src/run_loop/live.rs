@@ -1,8 +1,10 @@
 //! The live [`Driver`]: runs as root, reads `next` with the implementer's
 //! coordinator credential, refreshes the host mirror, and runs every step
 //! that touches the role's files (`clone`, `prepare`, the coordinator CLI) as
-//! the role account. `launch-root` itself runs as root, as by hand.
-use super::{Driver, Launch};
+//! the role account. `launch-root` itself runs as root, as by hand. Root's
+//! own reads and writes below the role's directories go through `rooted`;
+//! instruction files come from the root-owned mirror, never the clone.
+use super::{Driver, Launch, rooted};
 use crate::clone;
 use crate::config::Config;
 use crate::profile::Role;
@@ -11,7 +13,6 @@ use anyhow::{Context, Result, ensure};
 use coordinator_client::CoordinatorClient;
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -31,6 +32,8 @@ pub struct LiveDriver {
     client: CoordinatorClient,
     project: String,
     account: Account,
+    /// The mirror revision the current launch was cloned at.
+    revision: String,
 }
 
 /// Runs the live loop as root until stopped (or once).
@@ -47,8 +50,11 @@ impl LiveDriver {
         let spec = format!("{}:.agent-coordinator.toml", config.run.branch);
         let text = clone::git_output(&mirror(config), &["show", &spec])?;
         let binding: Binding = toml::from_str(&text).context("parse the mirror's binding")?;
-        let credentials = credential_file(config);
+        let account = Account::lookup(Role::Implementer.user(config))?;
+        let credentials = read_credentials(config, &account)?;
+        let shown = role_dir(config).join(CREDENTIALS);
         let insecure = config.run.allow_insecure_loopback;
+        let text = String::from_utf8(credentials).context("credentials are not UTF-8")?;
         Ok(Self {
             config: config.clone(),
             config_arg: config_path
@@ -56,15 +62,22 @@ impl LiveDriver {
                 .into_iter()
                 .collect(),
             runtime: tokio::runtime::Runtime::new()?,
-            client: crate::shadow::client(&credentials, &binding.service_url, insecure)?,
+            client: crate::shadow::client_from(&text, &shown, &binding.service_url, insecure)?,
             project: binding.project_id,
-            account: Account::lookup(Role::Implementer.user(config))?,
+            account,
+            revision: String::new(),
         })
     }
 
-    /// Runs `program args` as the implementer in `cwd`; fails with its
-    /// stderr on a non-zero exit.
-    fn as_role(&self, program: &Path, args: &[String], cwd: &Path, launch: &Launch) -> Result<()> {
+    /// Runs `program args` as the implementer in `cwd` and returns its
+    /// stdout; fails with its stderr on a non-zero exit.
+    fn as_role(
+        &self,
+        program: &Path,
+        args: &[String],
+        cwd: &Path,
+        launch: &Launch,
+    ) -> Result<Vec<u8>> {
         let mut command = Command::new(program);
         command
             .args(args)
@@ -83,7 +96,7 @@ impl LiveDriver {
             args.join(" "),
             stderr.trim()
         );
-        Ok(())
+        Ok(output.stdout)
     }
 
     /// `agentc-supervisor` arguments: `--config`, `subcommand`, then `rest`.
@@ -94,18 +107,29 @@ impl LiveDriver {
         args
     }
 
-    /// Writes `contents` to a new role-owned mode 0600 file at `path`.
-    fn write_owned(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true).mode(0o600);
-        let mut file = options
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
-            .with_context(|| format!("create {}", path.display()))?;
-        file.write_all(contents)?;
-        std::os::unix::fs::fchown(&file, Some(self.account.uid), Some(self.account.gid))?;
-        Ok(file.sync_all()?)
+    /// Writes `contents` to a new role-owned mode 0600 file at `name` in
+    /// the launch's `$RUN`, refusing symlinks on the way.
+    fn write_run_file(&self, launch: &Launch, name: &str, contents: &[u8]) -> Result<()> {
+        let base = role_dir(&self.config);
+        let relative = launch.run.strip_prefix(&base)?.join(name);
+        let (uid, gid) = (self.account.uid, self.account.gid);
+        rooted::write(&base, &relative, contents, uid, gid)
+    }
+
+    /// One instruction file at the cloned revision, read from the mirror as
+    /// a blob of bounded size and truncated for the prompt.
+    fn instruction(&self, name: &str) -> Option<String> {
+        let object = format!("{}:{name}", self.revision);
+        let mirror = mirror(&self.config);
+        let size: usize = clone::git_output(&mirror, &["cat-file", "-s", &object])
+            .ok()?
+            .parse()
+            .ok()?;
+        if size > MAX_BLOB {
+            return None;
+        }
+        let text = clone::git_output(&mirror, &["cat-file", "blob", &object]).ok()?;
+        Some(truncate(text, super::MAX_INSTRUCTION_BYTES))
     }
 }
 
@@ -131,6 +155,7 @@ impl Driver for LiveDriver {
         clone::git_output(&mirror, &["fetch", "--prune", "--quiet"])?;
         let head = format!("refs/heads/{}", self.config.run.branch);
         let sha = clone::git_output(&mirror, &["rev-parse", "--verify", &head])?;
+        self.revision = sha.clone();
         let origin = clone::git_output(&mirror, &["config", "--get", "remote.origin.url"])?;
         let program = crate::relay::program(&self.config);
         let clone = vec![
@@ -148,21 +173,25 @@ impl Driver for LiveDriver {
         )?;
         let prepare = self.supervisor_args("prepare", spec_flags(&self.config, launch));
         self.as_role(&program, &prepare, root, launch)?;
-        let credential = std::fs::read(credential_file(&self.config))?;
-        self.write_owned(
-            &coordinator_home(launch).join("credentials.toml"),
-            &credential,
-        )
+        let credential = read_credentials(&self.config, &self.account)?;
+        self.write_run_file(launch, "state/coordinator/credentials.toml", &credential)
+    }
+
+    fn instructions(&mut self, _launch: &Launch) -> Vec<(String, String)> {
+        let found = super::INSTRUCTION_FILES.iter();
+        found
+            .filter_map(|name| Some(((*name).to_owned(), self.instruction(name)?)))
+            .collect()
     }
 
     fn install_prompt(&mut self, launch: &Launch, prompt: &str) -> Result<()> {
-        let path = launch.run.join(crate::profile::run_files::PROMPT);
-        self.write_owned(&path, prompt.as_bytes())
+        let name = crate::profile::run_files::PROMPT;
+        self.write_run_file(launch, name, prompt.as_bytes())
     }
 
     /// Connects the launch's session and claims the task with the pinned CLI,
     /// which acknowledges the current orientation first.
-    fn claim(&mut self, launch: &Launch) -> Result<()> {
+    fn claim(&mut self, launch: &Launch) -> Result<String> {
         let cli = self.config.bin_dir.join("agent-coordinator");
         let harness = format!("--harness=agentc-supervisor-{:?}", self.config.run.harness);
         let connect = ["--json".into(), "connect".into(), harness.to_lowercase()];
@@ -170,12 +199,9 @@ impl Driver for LiveDriver {
         let s = &launch.suggestion;
         let claim = ["--json", "claim", &format!("--task={}", s.task)].map(String::from);
         let revision = format!("--revision={}", s.revision);
-        self.as_role(
-            &cli,
-            &[&claim[..], &[revision]].concat(),
-            &launch.clone,
-            launch,
-        )
+        let args = [&claim[..], &[revision]].concat();
+        let stdout = self.as_role(&cli, &args, &launch.clone, launch)?;
+        Ok(attempt_id(&stdout))
     }
 
     /// Runs `launch-root` as root and returns its exit code.
@@ -195,10 +221,45 @@ fn mirror(config: &Config) -> PathBuf {
     config.state_dir.join("mirror.git")
 }
 
-/// The implementer's coordinator credential file.
-fn credential_file(config: &Config) -> PathBuf {
-    let role = config.state_dir.join(Role::Implementer.slug());
-    role.join("coordinator/credentials.toml")
+/// The implementer's coordinator credential file, relative to its role
+/// directory.
+const CREDENTIALS: &str = "coordinator/credentials.toml";
+/// The largest instruction blob read from the mirror.
+const MAX_BLOB: usize = 1024 * 1024;
+
+/// `<state_dir>/impl`, root-owned.
+fn role_dir(config: &Config) -> PathBuf {
+    config.state_dir.join(Role::Implementer.slug())
+}
+
+/// The implementer's credential file, read without following symlinks.
+fn read_credentials(config: &Config, account: &Account) -> Result<Vec<u8>> {
+    let relative = Path::new(CREDENTIALS);
+    rooted::read(
+        &role_dir(config),
+        relative,
+        account.uid,
+        rooted::MAX_CREDENTIALS,
+    )
+}
+
+/// The attempt id in the CLI's claim response, or `unknown`.
+fn attempt_id(stdout: &[u8]) -> String {
+    let body: Value = serde_json::from_slice(stdout).unwrap_or_default();
+    let id = ["/data/claim/attempt/id", "/claim/attempt/id"]
+        .iter()
+        .find_map(|pointer| body.pointer(pointer)?.as_str());
+    id.unwrap_or("unknown").to_owned()
+}
+
+/// `text` cut to at most `max` bytes on a character boundary.
+fn truncate(mut text: String, max: usize) -> String {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
 }
 
 /// The launch's coordinator state, `$RUN/state/coordinator`.
@@ -296,6 +357,19 @@ mod tests {
         assert!(env.contains(&("AGENT_COORDINATOR_SESSION", session)));
         assert!(env.contains(&("HTTPS_PROXY", "http://127.0.0.1:3128".into())));
         assert!(env.iter().all(|(name, _)| !name.contains("TOKEN")));
+    }
+
+    #[test]
+    fn attempt_ids_come_from_the_claim_response() {
+        let body = br#"{"data":{"claim":{"attempt":{"id":"a1"}}}}"#;
+        assert_eq!(attempt_id(body), "a1");
+        assert_eq!(attempt_id(b"not json"), "unknown");
+    }
+
+    #[test]
+    fn truncation_keeps_whole_characters() {
+        assert_eq!(truncate("a\u{e9}b".into(), 2), "a");
+        assert_eq!(truncate("ab".into(), 5), "ab");
     }
 
     #[test]

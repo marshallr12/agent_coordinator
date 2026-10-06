@@ -10,6 +10,8 @@
 //! [`finish`] (lease release on a failed launch, recovery evidence).
 #[cfg(target_os = "linux")]
 pub mod live;
+#[cfg(target_os = "linux")]
+mod rooted;
 
 use crate::config::Config;
 use crate::profile::{Harness, Role};
@@ -23,9 +25,9 @@ use uuid::Uuid;
 /// The implementer role contract; `render_prompt` fills its placeholders.
 pub const IMPLEMENTER_CONTRACT: &str = include_str!("../contracts/implementer.md");
 /// Repository files copied into the prompt as delimited data.
-const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CONTRIBUTING.md"];
+pub const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CONTRIBUTING.md"];
 /// The most bytes of one instruction file copied into the prompt.
-const MAX_INSTRUCTION_BYTES: usize = 32 * 1024;
+pub const MAX_INSTRUCTION_BYTES: usize = 32 * 1024;
 
 /// `[run]` settings; every entry has a default.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -110,10 +112,14 @@ pub trait Driver {
     fn free_bytes(&self) -> Result<u64>;
     /// Creates the clone and the prepared `$RUN`, owned by the role.
     fn create(&mut self, launch: &Launch) -> Result<()>;
+    /// The repository's instruction files (name, text) at the cloned
+    /// revision, read from a source the role cannot change.
+    fn instructions(&mut self, launch: &Launch) -> Vec<(String, String)>;
     /// Writes the rendered prompt into `$RUN`, readable by the role.
     fn install_prompt(&mut self, launch: &Launch, prompt: &str) -> Result<()>;
-    /// Claims the task in the launch's own coordinator session.
-    fn claim(&mut self, launch: &Launch) -> Result<()>;
+    /// Claims the task in the launch's own coordinator session; returns the
+    /// attempt id.
+    fn claim(&mut self, launch: &Launch) -> Result<String>;
     /// Runs the launch through `launch-root`; returns its exit code.
     fn launch(&mut self, launch: &Launch) -> Result<i32>;
 }
@@ -226,10 +232,16 @@ pub fn suggestion(next: &Value) -> Option<Suggestion> {
 /// Creates, prompts, claims and launches, stopping at the first failure.
 fn work(driver: &mut impl Driver, launch: &Launch) -> Result<i32> {
     driver.create(launch).context("create clone and run")?;
-    let prompt = render_prompt(launch, &instruction_files(&launch.clone));
+    let prompt = render_prompt(launch, &driver.instructions(launch));
     driver.install_prompt(launch, &prompt).context("prompt")?;
-    driver.claim(launch).context("claim")?;
-    driver.launch(launch).context("launch")
+    let attempt = driver.claim(launch).context("claim")?;
+    driver.launch(launch).context("launch").inspect_err(|_| {
+        // The lease stays until it expires; releasing it is task 5c9f15eb.
+        let task = &launch.suggestion.task;
+        eprintln!(
+            "agentc-supervisor run: launch failed after claiming task {task} attempt {attempt}"
+        );
+    })
 }
 
 /// Removes the launch's clone and run directory when it is safe, and turns
@@ -267,36 +279,46 @@ pub fn remove_finished(clone: &Path, run: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// The repository's instruction files present in `clone`, truncated.
-fn instruction_files(clone: &Path) -> Vec<(String, String)> {
-    INSTRUCTION_FILES
-        .iter()
-        .filter_map(|name| {
-            let bytes = std::fs::read(clone.join(name)).ok()?;
-            let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_INSTRUCTION_BYTES)]);
-            Some(((*name).to_owned(), text.into_owned()))
-        })
-        .collect()
-}
-
-/// The prompt: the implementer contract with the launch filled in, then each
-/// repository file inside `<repository-instructions>` tags. A closing tag in
-/// a file is defused so the data cannot end its own block.
+/// The prompt: the implementer contract with the launch filled in (the title
+/// inside `<task-title>` tags), then each repository file inside
+/// `<repository-instructions>` tags. Closing tags in the data are defused,
+/// whatever their case, so the data cannot end its own block.
 pub fn render_prompt(launch: &Launch, files: &[(String, String)]) -> String {
     let s = &launch.suggestion;
     let mut prompt = IMPLEMENTER_CONTRACT
         .replace("{{project}}", &launch.project)
         .replace("{{task_id}}", &s.task)
         .replace("{{task_revision}}", &s.revision.to_string())
-        .replace("{{task_title}}", &s.title.replace(['\n', '\r'], " "))
+        .replace(
+            "{{task_title}}",
+            &defuse(&s.title.replace(['\n', '\r'], " ")),
+        )
         .replace("{{session}}", &launch.session_id.to_string());
     for (name, text) in files {
-        let text = text.replace("</repository-instructions", "<\\/repository-instructions");
+        let text = defuse(text);
         prompt.push_str(&format!(
             "\n<repository-instructions file=\"{name}\">\n{text}\n</repository-instructions>\n"
         ));
     }
     prompt
+}
+
+/// `text` with every `</` that opens a closing tag (any case) turned into
+/// `<\/`, so neither data delimiter can be closed from inside the data.
+pub fn defuse(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (at, _) in lower.match_indices("</") {
+        let rest = &lower[at..];
+        if rest.starts_with("</repository-instructions") || rest.starts_with("</task-title") {
+            out.push_str(&text[last..at]);
+            out.push_str("<\\/");
+            last = at + 2;
+        }
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 /// Rewrites the heartbeat atomically: poll count, time and last outcome.

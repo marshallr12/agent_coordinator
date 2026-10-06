@@ -19,7 +19,7 @@
 //! the implementer account, the group of every launch's socket directory, so
 //! it can reach a concurrent implementer launch's helper.
 pub(crate) mod accounts;
-mod files;
+pub(crate) mod files;
 mod layout;
 
 pub use layout::{MAX_SOCKET_PATH, check_socket_path};

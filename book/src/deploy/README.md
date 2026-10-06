@@ -616,8 +616,9 @@ Each poll it:
    prepares `impl/runs/<session>`; it copies the credential into the run's
    coordinator state and writes the prompt: the implementer contract
    (`crates/supervisor/contracts/implementer.md`, at most 1,500 words) with
-   the repository's `AGENTS.md` and `CONTRIBUTING.md` appended inside
-   `<repository-instructions>` tags as data;
+   the task title inside `<task-title>` tags and the repository's `AGENTS.md`
+   and `CONTRIBUTING.md` appended inside `<repository-instructions>` tags as
+   data. Closing tags inside the data are defused, whatever their case;
 4. as `agentc-impl`, connects a coordinator session named after the launch
    and claims the task with `agent-coordinator claim`; the launch gets the
    same session through `AGENT_COORDINATOR_SESSION`;
@@ -625,6 +626,16 @@ Each poll it:
 6. removes the clone and the run directory once the run is terminal (or never
    started); a started run without a terminal record is kept for recovery;
 7. rewrites `/var/lib/agentc/heartbeat.json` (poll count, time, outcome).
+
+`agentc-impl` owns `coordinator/` and `runs/`, so root never follows a
+symlink there. The credential is read, and the run's credential copy and
+prompt are created, one path component at a time from the root-owned
+`/var/lib/agentc/impl` without following a symlink. The file read must be a
+regular, single-link file owned by `agentc-impl` of at most 64 KiB; a FIFO
+is refused without blocking. Errors name the path, never the contents. The
+instruction files are read as size-bounded blobs from the root-owned mirror
+at the cloned revision, never from the clone. When a launch fails after its
+claim, the loop logs the task and attempt ids; the lease is left to expire.
 
 `--once` polls a single time. Recovery claims, reviewer launches, lease
 renewal and release, and the kill switch are not part of this loop yet.
