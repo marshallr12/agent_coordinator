@@ -532,61 +532,15 @@ publication, retention and historical backfill requirements.
 
 ### Remove completed task worktrees
 
-After a fresh task read confirms the subject task is `done`, the completing agent
-removes its task-specific implementation and integration worktrees. Submission,
-review approval, or publication alone does not authorize removal. Always preserve
-the main parent checkout and any main target checkout, even when they were used
-for the task; preserve unrelated worktrees and branches unless separately authorized.
-
-Save commits, handoff, and required logs/artifacts outside the worktrees first.
-Match each exact resolved path and Git worktree identity against the task's
-registered checkout and `git worktree list --porcelain`; never infer ownership
-from a directory name. Confirm no agent or live/uncertain job still uses the tree.
-Inspect tracked changes, untracked files, and meaningful ignored files before
-removal; a clean tracked-file status alone is insufficient. Retain the tree if
-work or evidence is unsaved, ownership is unclear, or inspection fails.
-
-From outside the worktree, run `git worktree remove` with its verified absolute
-path, without `--force` or recursive filesystem deletion. Verify removal and
-report the removed path, or the retained path and concrete blocker, in the final
-handoff. Cleanup is local agent work; the service does not delete worktrees.
-
-After successful worktree removal, delete its exact local and remote task branches
-when the following checks pass. Record their full refs and commit IDs before
-removing the tree. Preserve main, parent, default, configured target, and host-protected branches,
-branches used by any remaining worktree, and unrelated or shared branches. Verify
-the branches belong only to this completed task from its registered checkout and
-saved publication evidence; names alone do not establish ownership.
-
-Fetch the exact task and intended target refs from the verified project remote.
-Confirm both local and remote task tips are fully merged into that target, and
-recheck worktree use and ref identities immediately before deletion. If ownership,
-merge status, or concurrent use is uncertain, retain the branches. Use
-`git branch -d -- TASK_BRANCH` for the local branch; never override a refusal with
-`-D`. Delete only the exact remote task ref with its freshly observed commit ID as
-an explicit lease, for example:
-
-```text
-git push --force-with-lease=refs/heads/TASK_BRANCH:EXPECTED_OID REMOTE :refs/heads/TASK_BRANCH
-```
-
-Replace these placeholders with verified values. The explicit expected-ref lease
-rejects a remote branch that changed after inspection; never replace it with an
-unguarded force, implicit lease, wildcard, mirror, or prune operation. Verify both
-deletions and report each removed or retained ref. On failure or uncertainty,
-inspect and report the blocker; do not guess a new expected commit or retry a
-destructive effect blindly.
-
-A ref conclusively verified absent in the intended repository is already removed;
-report it and apply all remaining guards independently to refs that still exist.
-Never recreate an absent ref. A failed or uncertain lookup is not proof of absence.
-
-Also page through existing completed tasks in the authorized project and inspect
-their registered worktrees on this workstation for the same cleanup. Apply every
-gate above to each task individually, including fresh `done` confirmation and
-verified worktree removal before branch deletion. Preserve dirty, unmerged,
-shared, live, or uncertain work and evidence. Report per-task paths, refs, and
-retention reasons; do not run bulk filesystem or branch deletion commands.
+Every agent cleans up after its own completed tasks, in every project, so
+finished work does not waste or clutter workstation disk. The procedure has one
+source of truth: the service's worktree and branch cleanup instruction
+(`WORKTREE_CLEANUP_INSTRUCTIONS` in `crates/server/src/discovery.rs`). It is the
+same for every project and is served in the orientation `instructions` that each
+agent acknowledges before claiming, as step 8 of the orientation's
+`completion_workflow`, and in the MCP server instructions (also published
+anonymously in `/api/v1/info` under `data.agent_startup.mcp.instructions`).
+Follow that served text; this book deliberately does not restate it.
 
 Use live `context`, `knowledge`, `decisions`, task history, and artifact records
 for shared facts and progress. No local BACKLOG.md or HANDOFF.md is required to

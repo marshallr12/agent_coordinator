@@ -297,28 +297,15 @@ hold, and makes dependencies eligible. There is no generic completion endpoint.
 
 ## Local worktree cleanup after completion
 
-After a fresh task read confirms the subject is `done`, the completing agent
-removes its task-specific implementation and integration worktrees following
-[the startup cleanup procedure](agent-startup.md#remove-completed-task-worktrees).
-Submission, review approval, and publication alone do not trigger removal. Preserve
-the main parent checkout, any main target checkout, unrelated worktrees and branches,
-and any tree with unsaved evidence or live/uncertain work. Save evidence first,
-verify exact resolved paths and registered Git identities, then use
-`git worktree remove` from outside the tree without forcing deletion. Report
-removed paths or retained paths and blockers honestly. This is local guidance;
-the service never deletes workstation files or bypasses completion requirements.
-
-After successful worktree removal, delete only that completed task's local and
-remote branches using the same linked procedure. Verify exact ownership and refs,
-full merge into the intended target, and no remaining worktree use. Preserve
-main, parent, default, configured target, host-protected, shared, and unrelated branches. Local
-deletion uses `git branch -d`; remote deletion requires an explicit expected-ref
-lease against the freshly observed remote commit. A refusal or uncertain result
-requires inspection and truthful retention reporting, never forced or bulk cleanup.
-Conclusive absence means a ref is already removed; report it without recreating
-it and apply the guards to remaining refs. Lookup failure does not prove absence.
-Inspect existing completed tasks in the authorized project with these same gates;
-record each removed or retained worktree and branch separately.
+Every agent cleans up after its own completed tasks, in every project, so
+finished work does not waste or clutter workstation disk. The procedure has one
+source of truth: the service's worktree and branch cleanup instruction
+(`WORKTREE_CLEANUP_INSTRUCTIONS` in `crates/server/src/discovery.rs`). It is the
+same for every project and is served in the orientation `instructions` that each
+agent acknowledges before claiming, as step 8 of the orientation's
+`completion_workflow`, and in the MCP server instructions (also published
+anonymously in `/api/v1/info` under `data.agent_startup.mcp.instructions`).
+Follow that served text; this book deliberately does not restate it.
 
 ## Coordination hooks
 

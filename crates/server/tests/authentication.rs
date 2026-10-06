@@ -298,18 +298,35 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
             .unwrap()
             .contains("automatically re-prompt")
     );
-    let guide = guide.replace('`', "");
-    let guide = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+    // The served instruction is the single source of truth for cleanup; the
+    // guide points to it instead of restating the procedure.
+    let cleanup = coordinator_server::discovery::WORKTREE_CLEANUP_INSTRUCTIONS;
     for required in [
         "fresh task read confirms the subject task is done",
         "Always preserve the main parent checkout",
         "without --force or recursive filesystem deletion",
         "After successful worktree removal, delete its exact local and remote task branches",
         "Preserve main, parent, default, configured target, and host-protected branches",
+        "git merge-base --is-ancestor EXPECTED_OID REMOTE/TARGET",
+        "git update-ref -d refs/heads/TASK_BRANCH EXPECTED_OID",
+        "never use git branch -D",
         "--force-with-lease=refs/heads/TASK_BRANCH:EXPECTED_OID",
         "page through existing completed tasks in the authorized project",
     ] {
-        assert!(guide.contains(required), "missing cleanup gate: {required}");
+        assert!(
+            cleanup.contains(required),
+            "missing cleanup gate: {required}"
+        );
+    }
+    assert!(!cleanup.contains("Use git branch -d"));
+    let guide = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(guide.contains("WORKTREE_CLEANUP_INSTRUCTIONS"));
+    assert!(guide.contains("this book deliberately does not restate it"));
+    for restated in ["git worktree remove", "force-with-lease", "update-ref"] {
+        assert!(
+            !guide.contains(restated),
+            "guide restates cleanup: {restated}"
+        );
     }
     for private in [
         token.as_str(),
