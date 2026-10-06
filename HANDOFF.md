@@ -143,24 +143,28 @@ during the canary. **Ownership switch progress (2026-10-05, walked through one s
 6. `@run` started 19:24:15 UTC (active/running, NRestarts 0, `Idle` every ~30 s); shadow inactive.
 7. The old read-only `oracle-1-integrator` credential was **revoked** (agent clicked, owner-approved).
 
-**Canary (in progress, 2026-10-05):** task `f92bf97d-ab91-436f-ab93-009cc4b41376` (dashboard),
-session `s6-canary`, attempt `bc7ffdf0…`, worktree `~/src/worktrees/s6-canary` (branch
-`s6/canary`), commit `a7418bd` (keeps day0-main in `integrator-cutover.md`), submission
-`b35147b8-e952-4d44-931b-5dd3c35044c3`. The owner approved the human review. The integrator pushed R =
-`a7418bd` to `ac/results/a8514051-e6ca-4319-946b-664b7900d12b` **as
-`marshallr12-agentc-integrator[bot]`** (proves App publication under ruleset A). Audit + mdBook
-passed on R; the Linux job got **no runner** (GitHub Actions incident from 19:11 UTC, a major
-outage by 20:47), so run `37364065124` attempts 1–3 were each cancelled after ~15 min. The
-integrator auto-reran twice (`MAX_RERUNS=2`) and is now `Blocked("no_result: … after 2 reruns")`
-every poll, with a `no_result` flaky report; nothing is held and `main` is still `3882ba4`. **Resume:** once
-Actions recovers, run `gh run rerun 37364065124 --failed --repo marshallr12/agent_coordinator`
-(manual reruns are not budgeted; the latest attempt decides and cancelled counts as no result).
-A pass lets the integrator take authority and publish `a7418bd` to `main`. Then read back the main
-tip and pusher, the check receipts, the task's completion and the service report, and resolve the
-`no_result` report.
+**Canary PASS (2026-10-05/06) — S6 COMPLETE.** Task `f92bf97d-ab91-436f-ab93-009cc4b41376`
+(dashboard), session `s6-canary`, attempt `bc7ffdf0…`, commit `a7418bd` (keeps day0-main in
+`integrator-cutover.md`), submission `b35147b8-e952-4d44-931b-5dd3c35044c3`, owner-approved human
+review. The integrator pushed R = `a7418bd` to `ac/results/a8514051-e6ca-4319-946b-664b7900d12b` as
+`marshallr12-agentc-integrator[bot]` (App publication to a result branch works under ruleset A). A
+GitHub Actions runner outage (incident 19:11–22:51 UTC, major outage at its peak) left the Linux job
+with no runner: run `37364065124` attempts 1–3 were cancelled. The integrator auto-reran twice
+(`MAX_RERUNS=2`), then reported `Blocked(no_result … after 2 reruns)` with flaky report
+`b0f90f8b…`; nothing was held. After recovery the agent ran one manual `gh run rerun --failed`
+(attempt 4, success 22:59). The integrator logged `Published` and then `Observed("published")` at 22:59:30, and
+**`main` `3882ba4 → a7418bd` was pushed by the App at 22:59:29 UTC** (fast-forward; ruleset B's strict
+checks satisfied). Task `done` by service completion; push CI on `main` green. The owner resolved
+report `b0f90f8b…` (human, 00:35:14 UTC, DevTools POST, key `s6-canary-resolve-no-result-20261005`).
+Canary worktree and local branch removed. Collaborator refusal on protected refs relies on the U4
+throwaway-repo proof (`GH013`), as the runbook allows. Evidence: GitHub activity API (pusher), the
+`@run` journal, check runs on `a7418bd`. **Next:** the owner un-pauses new agent work; then P3b
+prerequisites (R-P3b items, oracle-1 supervised-host setup).
 
-**Remaining after the canary:** read back the remote main tip (prove App publication to `ac/results/**`, collaborator
-refusal and check receipts; read back the remote main tip). Keep new work paused until it passes.
+**Backlog (2026-10-06): dashboard view for integrator reports.** There is no dashboard screen to
+list or resolve integrator reports (`integrator_reports.rs` has the list and human-only resolve
+routes), so the canary's `no_result` report needed a DevTools POST. Add a per-project reports list
+with resolve (note, plus allow/deny for `privilege_gate`).
 
 ## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
 
