@@ -101,11 +101,34 @@ placeholder. **The service requires an exact client:** the workstation CLI repor
 `~/src/worktrees/ac-release-13d4e4a` (rollback `~/.local/bin/agent-coordinator.rollback`). The
 oracle-1 integrator (`1e8aebb` build) logged two 502s during the downtime, then `Idle`; it was still accepted.
 
-**New backlog item (user, 2026-10-05): dashboard control for `integration_owner`.** The
-dashboard's policy dialogs omit `integration_owner` (omission preserves it), so the S6 switch
-needed a hand-built `PATCH …/policy` from DevTools. Add a human-only "Integration owner" setting to
-the project policy UI: show the current owner, confirm the change, take a provenance note, and
-surface `policy_hold_conflict`. Rollback to `agent` needs the same control.
+**DONE (2026-10-06): dashboard integration owner setting + integrator reports view.** Task
+`c71cd8b0-67ec-476b-8e6c-7c25876afa8a` (agent-created; session `dash-owner-reports`), commit
+`8bf99e8` (web/ only + browser test + 2 book lines). Project settings: human-only "Integration owner"
+card (current owner + policy revision; change needs a different owner, provenance and a confirmation
+naming the switch; other policy fields preserved; `policy_hold_conflict`/`revision_conflict`
+explained). Project settings → "Integrator reports" page: open/all, paged by `before`, human resolve
+(note; `privilege_gate` needs allow/deny with no preselection, allow needs an inspection checkbox;
+`report_already_resolved` explained). Gate on the clean commit: fmt, Clippy, 684 tests, smoke, backup
+smoke, docs; browser test PASS (fails on the old web files); a disposable real-server run switched the
+owner and resolved both report kinds. **Independent review by a subagent** (session `dash-review-1`,
+subagent `reviewer`, parent `a74d5332…`): approved, no required fixes; its 3 advisory findings are task
+`cfda9952-e2d1-4ce9-b137-2d6d7c7c3707` (priority 3). The integrator App pushed **`main` `13d4e4a →
+8bf99e8` at 02:47:00 UTC**; task `done`. Worktree and local branch removed; candidate ref and
+`ac/results/fcc99b68…` kept. Traps: the browser test needs `CHROME_BIN=google-chrome` here; smoke
+needs `COORDINATOR_BUILD_COMMIT=$(git rev-parse HEAD)` in a worktree (core build.rs caches "dirty").
+
+**Production deploy 8bf99e8 (2026-10-06, binaries-only since 13d4e4a, agent-run except the dispatch).**
+The owner dispatched release run `37405976958` (classifier blocked the agent's `gh workflow run`;
+it then also blocked a `git diff 13d4e4a 8bf99e8`); 3 jobs green. Archive sha256 OK, server embeds
+`8bf99e8`, MCP binary unchanged (`15868f11…`). Old archive kept in `release-13d4e4a`; `release-next`
+RELEASE = `8bf99e8… … 13d4e4a`. **The classifier allowed the agent's exact-rule scp/preflight/pre/
+swap this time.** Preflight 0 before pre and after stop. Old-binary snapshot
+`20261006T031205.115Z-395ea76f…` (rollback = binaries `*-0.1.1-13d4e4a`; no schema change); new-binary
+snapshot `20261006T031308.039Z-95d25e98…` verified; maintenance complete; timers re-armed; 0
+keyless-rerank warnings. Downtime 03:12:11–03:13:07 UTC. `/api/v1/info` `8bf99e8`, not dirty; live
+`app.js` has the new UI. Workstation CLI upgraded via `upgrade_client.py` from clean detached
+worktree `~/src/worktrees/ac-release-8bf99e8` (rollback `~/.local/bin/agent-coordinator.rollback`).
+Not checked: the oracle-1 integrator journal across the downtime.
 
 **New backlog item (user, 2026-10-05): list connected sessions.** Today there is no way to see
 which agent sessions are connected to a project. Sessions register via `POST /api/v1/sessions`,
@@ -177,10 +200,7 @@ throwaway-repo proof (`GH013`), as the runbook allows. Evidence: GitHub activity
 `@run` journal, check runs on `a7418bd`. **Next:** the owner un-pauses new agent work; then P3b
 prerequisites (R-P3b items, oracle-1 supervised-host setup).
 
-**Backlog (2026-10-06): dashboard view for integrator reports.** There is no dashboard screen to
-list or resolve integrator reports (`integrator_reports.rs` has the list and human-only resolve
-routes), so the canary's `no_result` report needed a DevTools POST. Add a per-project reports list
-with resolve (note, plus allow/deny for `privilege_gate`).
+**Backlog (2026-10-06): dashboard view for integrator reports.** DONE in `8bf99e8` (see the top section).
 
 ## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
 
