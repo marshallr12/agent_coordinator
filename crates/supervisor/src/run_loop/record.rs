@@ -5,7 +5,15 @@
 //! The record goes once the attempt is released and the run removed. Each
 //! poll settles leftover records: a launch that may still run on this boot
 //! is never respawned and blocks new claims; any other has its attempt
-//! released and its clone and run removed.
+//! released and its clone and run removed. After [`MAX_RELEASE_TRIES`]
+//! failed releases a record is left alone until the loop restarts.
+//!
+//! A record without a pid (the loop died between writing it and spawning,
+//! or the spawn failed and so did the release) counts as alive only for
+//! [`NO_PID_GRACE_MS`]. A record that stays stuck can be cleared by hand:
+//! check that no `launch-root` for its session runs, release the attempt (or
+//! let its lease lapse), then remove the record and the session's
+//! `impl/clones/` and `impl/runs/` directories.
 use super::lease::Lease;
 use super::{Driver, Launch, Suggestion};
 use crate::config::Config;
@@ -15,6 +23,12 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+/// How long a record without a pid may still belong to a launch being
+/// spawned.
+pub const NO_PID_GRACE_MS: i64 = 2 * 60 * 1000;
+/// Failed releases of one record before the loop stops retrying it.
+pub const MAX_RELEASE_TRIES: u32 = 5;
 
 /// The handoff a recovered launch's attempt is released with.
 const RECOVERED: &str = "agentc-supervisor released the attempt: its launch ended while no \
@@ -33,6 +47,12 @@ pub struct LaunchRecord {
     /// The pid's start time in clock ticks since boot (`/proc/<pid>/stat`).
     pub start_ticks: Option<u64>,
     pub released: bool,
+    /// When the record was first written (ms since the epoch).
+    #[serde(default)]
+    pub recorded_ms: i64,
+    /// Failed releases since the loop started.
+    #[serde(default)]
+    pub release_failures: u32,
 }
 
 /// The root-owned directory of launch records, `<state_dir>/launches`.
@@ -41,8 +61,9 @@ pub fn dir(config: &Config) -> PathBuf {
 }
 
 impl LaunchRecord {
-    /// The record of a just-claimed launch on boot `boot_id`, not spawned yet.
-    pub fn new(launch: &Launch, lease: &Lease, boot_id: String) -> Self {
+    /// The record of a launch claimed at `now` on boot `boot_id`, not
+    /// spawned yet.
+    pub fn new(launch: &Launch, lease: &Lease, boot_id: String, now: i64) -> Self {
         Self {
             session_id: launch.session_id,
             task: launch.suggestion.task.clone(),
@@ -52,6 +73,8 @@ impl LaunchRecord {
             pid: None,
             start_ticks: None,
             released: false,
+            recorded_ms: now,
+            release_failures: 0,
         }
     }
 
@@ -140,10 +163,16 @@ pub fn start_ticks(pid: u32) -> Option<u64> {
     fields.split_whitespace().nth(19)?.parse().ok()
 }
 
-/// Whether a recorded launch may still run: it was recorded on this boot
-/// and its pid lives with the recorded start time. A record without a pid,
-/// or an unknown boot, may be alive, so it is never respawned.
-pub fn may_be_alive(record: &LaunchRecord, boot: &str, ticks: impl Fn(u32) -> Option<u64>) -> bool {
+/// Whether a recorded launch may still run at `now`: it was recorded on
+/// this boot and its pid lives with the recorded start time. An unknown boot
+/// or start time may be alive, and so may a record without a pid within
+/// [`NO_PID_GRACE_MS`]; such launches are never respawned.
+pub fn may_be_alive(
+    record: &LaunchRecord,
+    boot: &str,
+    ticks: impl Fn(u32) -> Option<u64>,
+    now: i64,
+) -> bool {
     if boot.is_empty() || record.boot_id.is_empty() {
         return true;
     }
@@ -152,12 +181,14 @@ pub fn may_be_alive(record: &LaunchRecord, boot: &str, ticks: impl Fn(u32) -> Op
     }
     match (record.pid, record.start_ticks) {
         (Some(pid), Some(started)) => ticks(pid) == Some(started),
-        _ => true,
+        (Some(_), None) => true,
+        (None, _) => now.saturating_sub(record.recorded_ms) <= NO_PID_GRACE_MS,
     }
 }
 
 /// Releases the recorded attempt with `summary` and marks the record
-/// released; on failure the record stays for the next poll to retry.
+/// released; a failure is counted on the record for the next poll to retry,
+/// up to [`MAX_RELEASE_TRIES`].
 pub fn release(
     driver: &mut impl Driver,
     config: &Config,
@@ -165,18 +196,37 @@ pub fn release(
     record: &mut LaunchRecord,
     summary: &str,
 ) -> bool {
-    if let Err(error) = driver.release(launch, &record.lease(), summary) {
+    let released = driver.release(launch, &record.lease(), summary);
+    if let Err(error) = &released {
         eprintln!(
             "agentc-supervisor run: release {}: {error:#}",
             record.attempt
         );
-        return false;
+        record.release_failures += 1;
+        if record.release_failures == MAX_RELEASE_TRIES {
+            eprintln!(
+                "agentc-supervisor run: ERROR: gave up releasing attempt {} of launch {} after {MAX_RELEASE_TRIES} tries; it is retried after a restart, or clear it by hand",
+                record.attempt, record.session_id
+            );
+        }
     }
-    record.released = true;
+    record.released = released.is_ok();
     if let Err(error) = record.save(config) {
         eprintln!("agentc-supervisor run: {error:#}");
     }
-    true
+    record.released
+}
+
+/// Lets every record's release be retried again (the loop is starting).
+pub fn reset_retries(config: &Config) {
+    for mut record in LaunchRecord::load_all(config) {
+        if record.release_failures > 0 {
+            record.release_failures = 0;
+            if let Err(error) = record.save(config) {
+                eprintln!("agentc-supervisor run: {error:#}");
+            }
+        }
+    }
 }
 
 /// Settles every launch an earlier poll or loop left recorded; returns why
@@ -186,7 +236,7 @@ pub fn recover(driver: &mut impl Driver, config: &Config) -> Option<String> {
     for mut record in LaunchRecord::load_all(config) {
         if driver.may_be_alive(&record) {
             running.push(record.session_id.to_string());
-        } else {
+        } else if record.release_failures < MAX_RELEASE_TRIES {
             settle(driver, config, &mut record);
         }
     }

@@ -77,6 +77,7 @@ impl LiveDriver {
         let spec = format!("{}:.agent-coordinator.toml", config.run.branch);
         let text = clone::git_output(&mirror(config), &["show", &spec])?;
         let binding: Binding = toml::from_str(&text).context("parse the mirror's binding")?;
+        install_binding(config, &text)?;
         let account = Account::lookup(Role::Implementer.user(config))?;
         let credentials = read_credentials(config, &account)?;
         let shown = role_dir(config).join(CREDENTIALS);
@@ -348,7 +349,14 @@ impl Driver for LiveDriver {
     }
 
     fn may_be_alive(&self, launch: &LaunchRecord) -> bool {
-        record::may_be_alive(launch, &record::boot_id(), record::start_ticks)
+        let now = self.now_ms();
+        record::may_be_alive(launch, &record::boot_id(), record::start_ticks, now)
+    }
+
+    fn has_marker(&self, launch: &Launch, name: &str) -> bool {
+        let base = role_dir(&self.config);
+        let relative = self.below_role(&launch.run).map(|run| run.join(name));
+        relative.is_ok_and(|relative| rooted::is_regular(&base, &relative))
     }
 
     /// Removes the clone and `$RUN` without following a role-owned symlink.
@@ -376,6 +384,31 @@ impl Driver for LiveDriver {
 /// The host mirror clones come from, `<state_dir>/mirror.git`.
 fn mirror(config: &Config) -> PathBuf {
     config.state_dir.join("mirror.git")
+}
+
+/// The root-owned copy of the mirror's repository binding that every role
+/// CLI command uses, `<state_dir>/coordinator-binding.toml`.
+fn binding_path(config: &Config) -> PathBuf {
+    config.state_dir.join("coordinator-binding.toml")
+}
+
+/// Writes the mirror's binding to [`binding_path`] (root-owned, mode 0644 so
+/// the role can read it), replacing it atomically. Renewals and releases
+/// then never read the clone's role-writable `.agent-coordinator.toml`.
+fn install_binding(config: &Config, text: &str) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let path = binding_path(config);
+    let temp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&temp);
+    let mut options = std::fs::OpenOptions::new();
+    let mut file = options
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&temp)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    file.write_all(text.as_bytes())?;
+    std::fs::rename(&temp, &path).with_context(|| format!("replace {}", path.display()))
 }
 
 /// The implementer's coordinator credential file, relative to its role
@@ -435,6 +468,10 @@ fn role_env(config: &Config, launch: &Launch) -> Vec<(&'static str, String)> {
             coordinator_home(launch).display().to_string(),
         ),
         ("AGENT_COORDINATOR_SESSION", launch.session_id.to_string()),
+        (
+            "AGENT_COORDINATOR_REPO_CONFIG",
+            binding_path(config).display().to_string(),
+        ),
     ];
     if config.run.allow_insecure_loopback {
         env.push(("AGENT_COORDINATOR_ALLOW_INSECURE_LOOPBACK", "true".into()));
@@ -505,6 +542,8 @@ mod tests {
         assert!(env.contains(&("AGENT_COORDINATOR_SESSION", session)));
         assert!(env.contains(&("HTTPS_PROXY", "http://127.0.0.1:3128".into())));
         assert!(env.iter().all(|(name, _)| !name.contains("TOKEN")));
+        let binding = "/var/lib/agentc/coordinator-binding.toml".to_owned();
+        assert!(env.contains(&("AGENT_COORDINATOR_REPO_CONFIG", binding)));
     }
 
     #[test]
@@ -565,6 +604,25 @@ mod tests {
             "Run the gate."
         );
         assert_eq!(instruction(&mirror, &head, "MISSING.md"), None);
+    }
+
+    #[test]
+    fn the_binding_copy_is_world_readable_and_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            state_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        install_binding(&config, "old").unwrap();
+        install_binding(&config, "project_id = \"p\"").unwrap();
+        let path = binding_path(&config);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "project_id = \"p\""
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
     }
 
     #[test]

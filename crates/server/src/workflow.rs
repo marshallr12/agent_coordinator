@@ -1484,6 +1484,8 @@ struct ActivityContext {
     automatic_integration: bool,
     recovery_mode: String,
     lease_seconds: i64,
+    /// The project's maximum attempt duration in seconds; 0 is no limit.
+    max_attempt_seconds: i64,
     canonical_repository_key: Option<String>,
     target_branch: Option<String>,
     /// Judged-field digest pinned by the submission (NULL only before backfill).
@@ -1529,7 +1531,7 @@ async fn activity_context(
     project: &str,
     id: &str,
 ) -> Result<ActivityContext, AppError> {
-    let r=sqlx::query("SELECT wa.id,wa.kind,wa.subject_task_id,wa.submission_id,wa.activity_task_id,wa.state,ws.current_submission_id,ws.phase,s.superseded_at,s.task_revision,s.project_policy_revision,s.workflow_policy_revision,s.canonical_repository_key,s.target_branch,s.task_digest,p.policy_revision,p.review_mode,p.automatic_integration,p.recovery_mode,p.lease_seconds,p.integration_owner,wp.revision AS current_workflow_revision,st.title,st.description,st.acceptance_json,st.kind AS subject_kind, \
+    let r=sqlx::query("SELECT wa.id,wa.kind,wa.subject_task_id,wa.submission_id,wa.activity_task_id,wa.state,ws.current_submission_id,ws.phase,s.superseded_at,s.task_revision,s.project_policy_revision,s.workflow_policy_revision,s.canonical_repository_key,s.target_branch,s.task_digest,p.policy_revision,p.review_mode,p.automatic_integration,p.recovery_mode,p.lease_seconds,p.max_attempt_seconds,p.integration_owner,wp.revision AS current_workflow_revision,st.title,st.description,st.acceptance_json,st.kind AS subject_kind, \
         CASE WHEN s.kind='code' THEN COALESCE((SELECT COALESCE(pi.roster_revision,s.workflow_policy_revision) FROM publication_intents pi WHERE pi.activity_id=wa.id),wp.revision,s.workflow_policy_revision) ELSE 0 END AS roster_revision \
         FROM workflow_activities wa JOIN workflow_subjects ws ON ws.task_id=wa.subject_task_id JOIN submissions s ON s.id=wa.submission_id JOIN projects p ON p.id=wa.project_id JOIN tasks st ON st.id=wa.subject_task_id LEFT JOIN workflow_policies wp ON wp.project_id=wa.project_id WHERE wa.project_id=? AND wa.id=?")
         .bind(project).bind(id).fetch_optional(&mut *c).await?.ok_or_else(AppError::not_found)?;
@@ -1549,6 +1551,7 @@ async fn activity_context(
         automatic_integration: r.get("automatic_integration"),
         recovery_mode: r.get("recovery_mode"),
         lease_seconds: r.get("lease_seconds"),
+        max_attempt_seconds: r.get("max_attempt_seconds"),
         canonical_repository_key: r.get("canonical_repository_key"),
         target_branch: r.get("target_branch"),
         pinned_digest: r.get("task_digest"),
@@ -1871,7 +1874,8 @@ async fn claim_activity(
     }
     let attempt = Uuid::new_v4().to_string();
     let generation = task.get::<i64, _>("generation") + 1;
-    let expires = m.now + ctx.lease_seconds * 1000;
+    let limit = crate::coordination::attempt_limit(ctx.max_attempt_seconds, m.now);
+    let expires = (m.now + ctx.lease_seconds * 1000).min(limit);
     sqlx::query("INSERT INTO attempts(id,project_id,task_id,owner_id,session_id,credential_id,generation,state,mode,expires_at,last_heartbeat_at,last_progress_at,created_at,task_revision,policy_revision) VALUES(?,?,?,?,?,?,?,'active','work',?,?,?,?,1,?)")
         .bind(&attempt).bind(&project).bind(&ctx.activity_task).bind(&m.actor.id).bind(&owner_session).bind(&m.actor.credential_id).bind(generation)
         .bind(expires).bind(m.now).bind(m.now).bind(m.now).bind(ctx.project_current_policy).execute(&mut *m.tx).await?;
@@ -1887,7 +1891,7 @@ async fn claim_activity(
         .await?;
     let value = json!({"activity":activity_value(&mut m.tx,&project,&ctx.id,m.now).await?,
         "attempt":{"id":attempt,"task_id":ctx.activity_task,"generation":generation,"expires_at":timestamp(expires),"state":"active","mode":"work"},
-        "lease_remaining_ms":ctx.lease_seconds*1000,"renew_after_seconds":(ctx.lease_seconds/3).min(60),"current_authority":{"valid":true}});
+        "lease_remaining_ms":expires-m.now,"renew_after_seconds":((expires-m.now)/3000).clamp(1,60),"current_authority":{"valid":true}});
     Ok(response(
         m.finish(value, Some(&project), "workflow_activity.claimed", &ctx.id)
             .await?,

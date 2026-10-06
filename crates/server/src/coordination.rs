@@ -1759,7 +1759,8 @@ async fn claim(
     }
     let id = Uuid::new_v4().to_string();
     let generation = t.generation + 1;
-    let expires = m.now + proj.lease_seconds * 1000;
+    let expires =
+        (m.now + proj.lease_seconds * 1000).min(attempt_limit(proj.max_attempt_seconds, m.now));
     sqlx::query("INSERT INTO attempts(id,project_id,task_id,owner_id,session_id,credential_id,generation,state,mode,expires_at,last_heartbeat_at,last_progress_at,created_at,task_revision,policy_revision) VALUES(?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?)")
         .bind(&id).bind(&p).bind(&t.id).bind(&m.actor.id).bind(&owner_session).bind(&m.actor.credential_id).bind(generation).bind(&input.mode).bind(expires).bind(m.now).bind(m.now).bind(m.now).bind(t.revision).bind(proj.policy_revision).execute(&mut *m.tx).await?;
     sqlx::query("UPDATE tasks SET current_attempt_id=?,generation=? WHERE id=?")
@@ -1772,7 +1773,8 @@ async fn claim(
         .await?;
     let a = attempt(&mut m.tx, &p, &id).await?;
     let updated = task(&mut m.tx, &p, &t.id, m.now).await?;
-    let value = json!({"claim":{"task":updated.value(m.now),"attempt":a.value(),"lease_remaining_ms":proj.lease_seconds*1000},"renew_after_seconds":(proj.lease_seconds / 3).min(60),"next_actions":if input.mode=="recovery"{vec!["Inspect saved work and running jobs; record a recovery resolution before editing."]}else{vec!["Prepare/register a separate worktree before code changes; checkpoint and renew ownership."]}});
+    let remaining = expires - m.now;
+    let value = json!({"claim":{"task":updated.value(m.now),"attempt":a.value(),"lease_remaining_ms":remaining},"renew_after_seconds":(remaining / 3000).clamp(1, 60),"next_actions":if input.mode=="recovery"{vec!["Inspect saved work and running jobs; record a recovery resolution before editing."]}else{vec!["Prepare/register a separate worktree before code changes; checkpoint and renew ownership."]}});
     Ok(response(
         m.finish(value, Some(&p), "attempt.claimed", &id).await?,
     ))
@@ -1815,7 +1817,7 @@ async fn renew(
     let remaining = expires - m.now;
     Ok(response(
         m.finish(
-            json!({"attempt":a.value(),"lease_remaining_ms":remaining,"renew_after_seconds":(remaining / 3000).min(60)}),
+            json!({"attempt":a.value(),"lease_remaining_ms":remaining,"renew_after_seconds":(remaining / 3000).clamp(1, 60)}),
             Some(&p),
             "attempt.renewed",
             &id,
@@ -1823,23 +1825,38 @@ async fn renew(
         .await?,
     ))
 }
-/// The deadline a renewal grants: one lease from now, capped at the project's
-/// maximum attempt duration. Once the lease already reaches that cap the
-/// renewal is refused, so the lease lapses and long work continues in a new
-/// attempt.
-fn renewed_expiry(proj: &Project, a: &Attempt, now: i64) -> Result<i64, AppError> {
-    let lease = now + proj.lease_seconds * 1000;
-    if proj.max_attempt_seconds == 0 {
-        return Ok(lease);
+/// The latest an attempt created at `created_at` may hold its lease: its
+/// creation plus the project's `max_attempt_seconds` (0 is no limit). Every
+/// write of `attempts.expires_at` (claims, activity claims, renewals and
+/// reporter renewals) is capped by it.
+pub(crate) fn attempt_limit(max_attempt_seconds: i64, created_at: i64) -> i64 {
+    if max_attempt_seconds == 0 {
+        return i64::MAX;
     }
-    let limit = a.created_at + proj.max_attempt_seconds * 1000;
+    created_at.saturating_add(max_attempt_seconds.saturating_mul(1000))
+}
+
+/// The deadline a renewal to `extension` grants `a`, capped at its limit.
+/// Once the lease already reaches the limit the renewal is refused, so the
+/// lease lapses and long work continues in a new attempt.
+pub(crate) fn capped_renewal(
+    extension: i64,
+    max_attempt_seconds: i64,
+    a: &Attempt,
+) -> Result<i64, AppError> {
+    let limit = attempt_limit(max_attempt_seconds, a.created_at);
     if a.expires_at >= limit {
         return Err(AppError::conflict(
             "attempt_duration_exceeded",
             "This attempt reached the project's max_attempt_seconds and cannot be renewed. Record a checkpoint and release the task with a handoff.",
         ));
     }
-    Ok(lease.min(limit))
+    Ok(extension.min(limit))
+}
+
+/// The deadline an ordinary renewal grants: one lease from now, capped.
+fn renewed_expiry(proj: &Project, a: &Attempt, now: i64) -> Result<i64, AppError> {
+    capped_renewal(now + proj.lease_seconds * 1000, proj.max_attempt_seconds, a)
 }
 async fn add_checkpoint(
     m: &mut Mutation,

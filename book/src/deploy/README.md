@@ -668,22 +668,32 @@ attempt's last checkpoint is under 60 minutes old, and the launch is within
 `[run] budget_minutes` (default 240). The checkpoint age comes from the
 service's own claim and renew responses (`last_progress_at` against
 `expires_at` less `lease_remaining_ms`), so it needs no extra call and no
-local clock. Once a gate fails, the loop logs why and stops renewing; the
-lease lapses one lease period after the last renewal. A project can also cap
-attempts on the service with the policy's `max_attempt_seconds`.
+local clock. Once a gate fails, the loop logs why, stops renewing and
+drains the launch: SIGTERM to its process group, SIGKILL after `[run]
+drain_seconds` (default 30), then a release whose handoff names the reason.
+A hung harness therefore cannot hold the loop. A host suspend counts as
+elapsed time: after a suspend longer than 15 minutes the launch is drained
+on resume (its lease has usually lapsed during the suspend anyway). A project
+can also cap attempts on the service with the policy's `max_attempt_seconds`.
 
 Before each poll the loop settles the records an earlier poll or loop left.
 A launch recorded on this boot whose pid still runs with the recorded start
-time (or whose pid was never recorded) may be alive: it is never respawned,
-and the loop claims nothing while it lives. Any other recorded launch has its
-attempt released (unless that was done) and its clone, run and record
-removed.
+time may be alive: it is never respawned, and the loop claims nothing while
+it lives. A record without a pid (the loop died between writing the record
+and spawning) counts as alive for two minutes. Any other recorded launch has
+its attempt released (unless that was done) and its clone, run and record
+removed. After five failed releases the loop logs an error and leaves that
+record alone until it restarts. To clear a stuck record by hand, check that
+no `launch-root` for its session runs, release the attempt with
+`agent-coordinator release` (or let the lease lapse), then remove
+`/var/lib/agentc/launches/<session>.json`,
+`/var/lib/agentc/impl/clones/<session>` and
+`/var/lib/agentc/impl/runs/<session>`.
 
-SIGTERM or SIGINT drains the loop: it claims nothing new, sends SIGTERM to the
-running launch's process group, sends SIGKILL after `[run] drain_seconds`
-(default 30), releases the attempt with a handoff checkpoint and exits. The
-unit uses `KillMode=mixed`, so systemd signals only the loop and kills what
-is left only after it exits.
+SIGTERM or SIGINT drains the loop the same way: it claims nothing new, drains
+the running launch, releases the attempt with a handoff checkpoint and exits.
+The unit uses `KillMode=mixed`, so systemd signals only the loop and kills
+what is left only after it exits.
 
 `agentc-impl` owns `coordinator/` and `runs/`, so root never follows a
 symlink there. The credential is read, and the run's credential copy and
@@ -693,9 +703,14 @@ regular, single-link file owned by `agentc-impl` of at most 64 KiB; a FIFO
 is refused without blocking. Errors name the path, never the contents. The
 instruction files are read as size-bounded blobs from the root-owned mirror
 at the cloned revision, never from the clone. The event stream's modification
-time is read the same way, from a regular file owned by `agentc-impl`. The clone and run are
-removed through a directory opened without following symlinks. Launch
-records live in the root-owned state directory.
+time is read the same way, from a regular file owned by `agentc-impl`, and
+so are the run's `.state-started` and `.state-terminal.json` markers. The
+clone and run are removed through a directory opened without following
+symlinks. Launch records live in the root-owned state directory. Every
+coordinator command run as `agentc-impl` (connect, claim, renew, release)
+reads the repository binding from `/var/lib/agentc/coordinator-binding.toml`
+(`AGENT_COORDINATOR_REPO_CONFIG`), a root-owned copy of the mirror's
+`.agent-coordinator.toml`, never the clone's role-writable copy.
 
 `--once` polls a single time. Recovery claims, reviewer launches, continuation
 claims for work longer than `max_attempt_seconds`, and the kill switch are not

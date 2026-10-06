@@ -31,6 +31,10 @@ use uuid::Uuid;
 pub const IMPLEMENTER_CONTRACT: &str = include_str!("../contracts/implementer.md");
 /// Repository files copied into the prompt as delimited data.
 pub const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CONTRIBUTING.md"];
+/// The marker `launch` writes in `$RUN` before spawning the harness.
+pub const STARTED_MARKER: &str = ".state-started";
+/// The marker `launch` writes in `$RUN` once the harness has exited.
+pub const TERMINAL_MARKER: &str = ".state-terminal.json";
 /// The most bytes of one instruction file copied into the prompt.
 pub const MAX_INSTRUCTION_BYTES: usize = 32 * 1024;
 
@@ -154,6 +158,9 @@ pub trait Driver {
     fn boot_id(&self) -> String;
     /// Whether a recorded launch may still be running.
     fn may_be_alive(&self, record: &LaunchRecord) -> bool;
+    /// Whether the launch's `$RUN` holds the regular file `name` (a state
+    /// marker), never following a symlink.
+    fn has_marker(&self, launch: &Launch, name: &str) -> bool;
     /// Removes the launch's clone and run directory.
     fn discard(&mut self, launch: &Launch) -> Result<()>;
     /// Milliseconds since the epoch.
@@ -176,6 +183,7 @@ pub enum Outcome {
 /// Polls until stopped (or once), writing the heartbeat after every poll.
 pub fn run(driver: &mut impl Driver, config: &Config, once: bool) -> Result<()> {
     sweep_terminal(driver, config);
+    record::reset_retries(config);
     for iteration in 1_u64.. {
         let outcome = iterate(driver, config);
         if outcome != Outcome::Idle {
@@ -219,7 +227,7 @@ pub fn sweep_terminal(driver: &mut impl Driver, config: &Config) {
         };
         let launch = Launch::at(config, driver.project(), unknown, session);
         if LaunchRecord::load(config, &session).is_none()
-            && launch.run.join(".state-terminal.json").exists()
+            && driver.has_marker(&launch, TERMINAL_MARKER)
             && let Err(error) = driver.discard(&launch)
         {
             eprintln!("agentc-supervisor run: sweep: {error:#}");
@@ -296,12 +304,12 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
     driver.install_prompt(launch, &prompt).context("prompt")?;
     ensure!(!driver.stopping(), "the loop is stopping; no new claims");
     let lease = driver.claim(launch).context("claim")?;
-    let mut record = LaunchRecord::new(launch, &lease, driver.boot_id());
+    let mut record = LaunchRecord::new(launch, &lease, driver.boot_id(), driver.now_ms());
     let result = (record.save(config).context("record the launch"))
         .and_then(|()| run_claimed(driver, config, launch, &mut record, lease));
-    let summary = handoff(&result, driver.stopping());
+    let summary = handoff(&result);
     record::release(driver, config, launch, &mut record, &summary);
-    result
+    result.map(|ended| ended.code)
 }
 
 /// Spawns the claimed launch, adds its identity to the record and
@@ -312,7 +320,7 @@ fn run_claimed(
     launch: &Launch,
     record: &mut LaunchRecord,
     lease: Lease,
-) -> Result<i32> {
+) -> Result<lease::Ended> {
     let (pid, ticks) = driver.start(launch).context("launch")?;
     (record.pid, record.start_ticks) = (Some(pid), ticks);
     if let Err(error) = record.save(config) {
@@ -322,15 +330,13 @@ fn run_claimed(
 }
 
 /// The handoff summary a launch's attempt is released with.
-fn handoff(result: &Result<i32>, stopping: bool) -> String {
-    let how = match result {
-        Ok(code) => format!("the launch exited with code {code}"),
-        Err(error) => format!("the launch failed: {error:#}"),
-    };
-    let why = if stopping {
-        " while the host supervisor stopped (drain)"
-    } else {
-        ""
+fn handoff(result: &Result<lease::Ended>) -> String {
+    let (how, why) = match result {
+        Ok(ended) => (
+            format!("the launch exited with code {}", ended.code),
+            (ended.drained.as_ref()).map_or(String::new(), |why| format!(" after a drain ({why})")),
+        ),
+        Err(error) => (format!("the launch failed: {error:#}"), String::new()),
     };
     let text = format!(
         "agentc-supervisor released the attempt: {how}{why}. Read the last checkpoint before resuming."
@@ -368,8 +374,7 @@ fn finish(
 /// started. A started run without a terminal record may still have a live
 /// harness, so both are kept for recovery.
 pub fn remove_finished(driver: &mut impl Driver, launch: &Launch) -> Result<bool> {
-    let run = &launch.run;
-    if run.join(".state-started").exists() && !run.join(".state-terminal.json").exists() {
+    if driver.has_marker(launch, STARTED_MARKER) && !driver.has_marker(launch, TERMINAL_MARKER) {
         return Ok(false);
     }
     driver.discard(launch)?;

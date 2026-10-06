@@ -1362,3 +1362,27 @@ async fn renewal_past_the_maximum_attempt_duration_is_refused() {
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
     assert_eq!(refused["error"]["code"], "attempt_duration_exceeded");
 }
+
+#[tokio::test]
+async fn a_claim_never_outlasts_the_maximum_attempt_duration() {
+    let f = Fixture::new().await;
+    let p = f.project("capped-claim").await;
+    let t = f.task(&p, "task", vec![]).await;
+    sqlx::query("UPDATE projects SET lease_seconds=3600,max_attempt_seconds=900 WHERE id=?")
+        .bind(&p)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    f.ack(&f.a, &p).await;
+    let (status, v) = f.claim(&f.a, &p, &t, "claim", "work").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["claim"]["lease_remaining_ms"], 900_000);
+    assert_eq!(v["data"]["renew_after_seconds"], 60);
+    let (id, g) = attempt(&v);
+    let path = format!("/api/v1/projects/{p}/attempts/{id}/renew");
+    let (status, refused) = f
+        .call(&f.a, "POST", &path, "renew", json!({"generation":g}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "attempt_duration_exceeded");
+}

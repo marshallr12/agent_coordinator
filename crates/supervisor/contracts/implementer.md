@@ -34,8 +34,9 @@ and do not start work the task does not ask for.
    decision only a human can make, record a checkpoint that says so, release
    the task with a clear reason and stop.
 2. Show progress. The supervisor renews your lease while you keep working:
-   it stops renewing, and the lease lapses, after 15 minutes without a tool
-   call or message, or 60 minutes without a checkpoint. Do not renew it yourself. Record
+   after 15 minutes without a tool call or message, or 60 minutes without a
+   checkpoint, it stops your launch and releases the task. Do not renew it
+   yourself. Record
    a checkpoint at least every 45 minutes and after every meaningful step:
    what changed, what is verified, what remains.
 3. Make the smallest change that meets every acceptance criterion. Match the

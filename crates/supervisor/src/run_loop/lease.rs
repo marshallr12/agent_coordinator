@@ -3,9 +3,11 @@
 //! only while the launch is alive, its harness wrote an event to
 //! `$RUN/events.jsonl` in the last 15 minutes, the attempt recorded a
 //! checkpoint in the last 60 minutes, and the launch is within `[run]
-//! budget_minutes`. Once a gate fails it stops renewing, logs why, and the
-//! lease lapses. A stop request drains the launch: SIGTERM, then SIGKILL
-//! after `[run] drain_seconds`.
+//! budget_minutes`. Once a gate fails it stops renewing, logs why, and
+//! drains the launch, as it does on a stop request: SIGTERM to its process
+//! group, then SIGKILL after `[run] drain_seconds`; the caller then releases
+//! the attempt. A host suspend counts as wall-clock time, so a suspend longer
+//! than the event window drains the launch on resume.
 use super::{Driver, Launch, RunConfig};
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -95,8 +97,18 @@ struct Watch {
     seen: i64,
     /// When to renew next; `None` once renewal has stopped.
     renew_at: Option<i64>,
-    /// When a draining launch is killed; `None` until a stop request.
+    /// When a draining launch is killed; `None` until it drains.
     kill_at: Option<i64>,
+    /// Why the launch is draining, once it is.
+    drain_reason: Option<String>,
+}
+
+/// How a supervised launch ended.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ended {
+    pub code: i32,
+    /// Why the loop drained it, if it did.
+    pub drained: Option<String>,
 }
 
 impl Watch {
@@ -107,6 +119,7 @@ impl Watch {
             seen: now,
             renew_at: Some(now.saturating_add(cadence(lease))),
             kill_at: None,
+            drain_reason: None,
         }
     }
 
@@ -128,18 +141,19 @@ fn millis_of(count: u64, unit: i64) -> i64 {
         .saturating_mul(unit)
 }
 
-/// Waits for the running launch to exit and returns its exit code,
-/// renewing `lease` while every gate holds and draining on a stop request.
+/// Waits for the running launch to exit, renewing `lease` while every gate
+/// holds and draining the launch on a failed gate or a stop request.
 pub fn supervise(
     driver: &mut impl Driver,
     launch: &Launch,
     mut lease: Lease,
     settings: &RunConfig,
-) -> i32 {
+) -> Ended {
     let mut watch = Watch::new(driver.now_ms(), &lease);
     loop {
         if let Some(code) = driver.exited() {
-            return code;
+            let drained = watch.drain_reason;
+            return Ended { code, drained };
         }
         let now = driver.now_ms();
         drain(driver, &mut watch, settings, now);
@@ -155,15 +169,18 @@ fn cadence(lease: &Lease) -> i64 {
     millis_of(lease.renew_after_seconds, 1000)
 }
 
-/// On a stop request, asks the launch to end (SIGTERM) and kills it once
-/// `drain_seconds` have passed.
+/// Once the launch must drain (a failed gate or a stop request), asks it to
+/// end (SIGTERM) and kills it once `drain_seconds` have passed.
 fn drain(driver: &mut impl Driver, watch: &mut Watch, settings: &RunConfig, now: i64) {
-    if !driver.stopping() {
-        return;
+    if watch.drain_reason.is_none() && driver.stopping() {
+        watch.drain_reason = Some("the host supervisor stopped".into());
     }
+    let Some(reason) = &watch.drain_reason else {
+        return;
+    };
     match watch.kill_at {
         None => {
-            eprintln!("agentc-supervisor run: stopping; draining the launch");
+            eprintln!("agentc-supervisor run: draining the launch: {reason}");
             driver.signal(false);
             let grace = millis_of(settings.drain_seconds, 1000);
             watch.kill_at = Some(now.saturating_add(grace));
@@ -176,8 +193,9 @@ fn drain(driver: &mut impl Driver, watch: &mut Watch, settings: &RunConfig, now:
     }
 }
 
-/// Renews the lease if every gate holds; otherwise stops renewing and says
-/// why. A failed renewal is retried at the next cadence.
+/// Renews the lease if every gate holds; otherwise stops renewing and
+/// drains the launch, saying why. A failed renewal is retried at the next
+/// cadence.
 fn renew(
     driver: &mut impl Driver,
     launch: &Launch,
@@ -191,7 +209,7 @@ fn renew(
     if let Some(reason) = gates.refusal() {
         let attempt = &lease.attempt;
         eprintln!("agentc-supervisor run: stopped renewing attempt {attempt}: {reason}");
-        watch.renew_at = None;
+        (watch.renew_at, watch.drain_reason) = (None, Some(reason));
         return;
     }
     match driver.renew(launch, lease) {

@@ -68,6 +68,14 @@ pub fn modified(base: &Path, relative: &Path, owner: u32) -> Result<SystemTime> 
     Ok(metadata.modified()?)
 }
 
+/// Whether `relative` below `base` is a regular file, opened `O_PATH`
+/// without following a symlink at any component.
+pub fn is_regular(base: &Path, relative: &Path) -> bool {
+    let file = open_beneath(base, relative, libc::O_PATH, 0);
+    file.and_then(|file| file.metadata())
+        .is_ok_and(|metadata| metadata.is_file())
+}
+
 /// Removes the tree at `relative` below `base` (if any) without following a
 /// symlink at any component: its parent is opened beneath `base`, and the
 /// tree is removed through `/proc/self/fd/<parent>`, which names that open
@@ -157,6 +165,17 @@ mod tests {
         assert!(modified(&base, Path::new("real/file.toml"), me() + 1).is_err());
         assert!(modified(&base, Path::new("dir/file.toml"), me()).is_err());
         assert!(modified(&base, Path::new("real"), me()).is_err());
+    }
+
+    #[test]
+    fn markers_are_regular_files_reached_without_symlinks() {
+        let (_dir, base) = base();
+        std::os::unix::fs::symlink(base.join("real"), base.join("dir")).unwrap();
+        std::os::unix::fs::symlink(base.join("real/file.toml"), base.join("link")).unwrap();
+        assert!(is_regular(&base, Path::new("real/file.toml")));
+        for name in ["dir/file.toml", "link", "real", "real/missing"] {
+            assert!(!is_regular(&base, Path::new(name)), "{name}");
+        }
     }
 
     #[test]

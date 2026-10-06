@@ -156,7 +156,12 @@ impl Driver for Fake {
     }
 
     fn may_be_alive(&self, launch: &LaunchRecord) -> bool {
-        record::may_be_alive(launch, "boot-1", |pid| self.pids.get(&pid).copied())
+        let ticks = |pid| self.pids.get(&pid).copied();
+        record::may_be_alive(launch, "boot-1", ticks, self.now)
+    }
+
+    fn has_marker(&self, launch: &Launch, name: &str) -> bool {
+        launch.run.join(name).is_file()
     }
 
     fn discard(&mut self, launch: &Launch) -> Result<()> {
@@ -407,7 +412,13 @@ fn a_harness_without_events_stops_being_renewed_after_15_minutes() {
     let last = *fake.renewals.last().unwrap();
     assert!(fake.renewals.len() >= 14, "{:?}", fake.renewals);
     assert!(last <= minutes(15) && last > minutes(14), "{last}");
-    assert_eq!(fake.steps.last().unwrap(), "release");
+    assert_eq!(fake.steps[5..], ["signal:term", "release"]);
+    assert!(
+        fake.releases[0].contains("after a drain (no harness event for 16 min)"),
+        "{}",
+        fake.releases[0]
+    );
+    assert!(fake.now < minutes(17), "the stale launch was not drained");
 }
 
 #[test]
@@ -470,7 +481,7 @@ fn crashed(dir: &Path, boot: &str) -> LaunchRecord {
     fs::create_dir_all(&launch.clone).unwrap();
     fs::create_dir_all(&launch.run).unwrap();
     fs::write(launch.run.join(".state-started"), "s").unwrap();
-    let mut record = LaunchRecord::new(&launch, &Fake::lease(), boot.into());
+    let mut record = LaunchRecord::new(&launch, &Fake::lease(), boot.into(), 0);
     (record.pid, record.start_ticks) = (Some(4242), Some(77));
     record.save(&config(dir)).unwrap();
     record
@@ -509,33 +520,54 @@ fn a_launch_from_an_earlier_boot_is_released() {
 
 #[test]
 fn liveness_needs_this_boot_and_the_same_process_start() {
-    let pid = std::process::id();
-    let mut record =
-        LaunchRecord::new(&planned(Path::new("/x")), &Fake::lease(), record::boot_id());
-    assert!(record::may_be_alive(
-        &record,
-        &record::boot_id(),
-        record::start_ticks
-    ));
+    let (pid, boot) = (std::process::id(), record::boot_id());
+    let alive =
+        |record: &LaunchRecord, now| record::may_be_alive(record, &boot, record::start_ticks, now);
+    let mut record = LaunchRecord::new(&planned(Path::new("/x")), &Fake::lease(), boot.clone(), 0);
+    assert!(alive(&record, record::NO_PID_GRACE_MS));
+    assert!(!alive(&record, record::NO_PID_GRACE_MS + 1));
     (record.pid, record.start_ticks) = (Some(pid), record::start_ticks(pid));
     assert!(record.start_ticks.is_some());
-    assert!(record::may_be_alive(
-        &record,
-        &record::boot_id(),
-        record::start_ticks
-    ));
+    assert!(alive(&record, i64::MAX));
     record.start_ticks = record.start_ticks.map(|t| t + 1);
-    assert!(!record::may_be_alive(
-        &record,
-        &record::boot_id(),
-        record::start_ticks
-    ));
+    assert!(!alive(&record, 0));
     record.boot_id = "another-boot".into();
-    assert!(!record::may_be_alive(
-        &record,
-        &record::boot_id(),
-        record::start_ticks
-    ));
+    assert!(!alive(&record, 0));
+}
+
+#[test]
+fn a_record_without_a_pid_is_released_after_the_grace_period() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    let mut record = crashed(dir.path(), "boot-1");
+    (record.pid, record.start_ticks) = (None, None);
+    record.save(&settings).unwrap();
+    let mut fake = Fake::new();
+    fake.next = json!({"action": null});
+    let outcome = iterate(&mut fake, &settings);
+    assert!(matches!(outcome, Outcome::Refused(reason) if reason.contains("may still run")));
+    fake.now = record::NO_PID_GRACE_MS + 1;
+    assert_eq!(iterate(&mut fake, &settings), Outcome::Idle);
+    assert_eq!(fake.steps, ["release", "next:impl"]);
+    assert!(LaunchRecord::load_all(&settings).is_empty());
+}
+
+#[test]
+fn releases_are_retried_a_bounded_number_of_times_until_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    crashed(dir.path(), "boot-0");
+    let mut fake = Fake::new();
+    (fake.fail_release, fake.next) = (true, json!({"action": null}));
+    for _ in 0..8 {
+        assert_eq!(iterate(&mut fake, &settings), Outcome::Idle);
+    }
+    let tries = fake.steps.iter().filter(|step| *step == "release").count();
+    assert_eq!(tries, record::MAX_RELEASE_TRIES as usize);
+    assert_eq!(LaunchRecord::load_all(&settings).len(), 1);
+    fake.fail_release = false;
+    run(&mut fake, &settings, true).unwrap();
+    assert!(LaunchRecord::load_all(&settings).is_empty());
 }
 
 #[test]
@@ -546,7 +578,7 @@ fn sigterm_drains_the_launch_releases_and_ends_the_loop() {
     fake.stop_at = Some(minutes(5));
     run(&mut fake, &config(dir.path()), false).unwrap();
     assert_eq!(fake.steps[4..], ["start", "signal:term", "release"]);
-    assert!(fake.releases[0].contains("stopped (drain)"));
+    assert!(fake.releases[0].contains("after a drain (the host supervisor stopped)"));
     assert_eq!(
         fake.steps.iter().filter(|s| s.starts_with("next")).count(),
         1
