@@ -2018,8 +2018,10 @@
     }
     const base = 'refs/agent-coordinator/candidates/wip/', note = el('div', 'recorded-revision'); note.id = 'recovery-recorded-revision';
     add(note, el('p', '', 'The expired attempt recorded this work-in-progress commit:')); add(note, el('code', '', recorded.revision));
-    add(note, el('p', '', 'Fetch its WIP ref (CLI push, then supervised-launch push) and paste the commit it names:'));
-    for (const ref of [`${base}${recorded.prior.id}/${recorded.revision}`, `${base}${task.id}/${recorded.prior.session_id}/${recorded.revision}`]) add(note, el('code', '', ref));
+    // A supervised launch's WIP ref names the supervisor's launch id, which the service never sees,
+    // so it is shown as an ls-remote pattern rather than a guessed exact ref.
+    add(note, el('p', '', 'Find its WIP ref (a CLI push, or a supervised-launch push under any launch id) and paste the commit it names:'));
+    for (const ref of [`git ls-remote origin '${base}${recorded.prior.id}/${recorded.revision}'`, `git ls-remote origin '${base}${task.id}/*/${recorded.revision}'`]) add(note, el('code', '', ref));
     add(note, el('p', 'muted', 'The service cannot read Git. It only checks that the SHA you enter equals the recorded one, so confirm the fetched ref names it first.'));
     add(view.form, note);
     const input = view.field('fetched_revision','Fetched commit SHA (40 lowercase hex characters)','','input'); input.pattern = '[0-9a-f]{40}'; input.maxLength = 40; input.autocomplete = 'off'; input.spellcheck = false;

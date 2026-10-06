@@ -482,7 +482,7 @@ async function checkVerifiedRecovery({ evaluate, waitPage }, openFixtureTask) {
   await evaluate(`${button}.click()`);
   await waitPage("document.querySelector('dialog[open] #workflow-fetched_revision')", 'verified recovery dialog');
   const note = await evaluate("document.querySelector('#recovery-recorded-revision').textContent");
-  assert(note.includes(RECORDED_SHA) && note.includes(`refs/agent-coordinator/candidates/wip/fixture-expired/${RECORDED_SHA}`) && note.includes(`refs/agent-coordinator/candidates/wip/${task.id}/launch-1/${RECORDED_SHA}`), 'Recovery dialog does not show the recorded SHA and WIP refs.');
+  assert(note.includes(RECORDED_SHA) && note.includes(`refs/agent-coordinator/candidates/wip/fixture-expired/${RECORDED_SHA}`) && note.includes(`git ls-remote origin 'refs/agent-coordinator/candidates/wip/fixture-expired/${RECORDED_SHA}'`) && note.includes(`git ls-remote origin 'refs/agent-coordinator/candidates/wip/${task.id}/*/${RECORDED_SHA}'`) && !note.includes('launch-1'), 'Recovery dialog does not show the recorded SHA and WIP refs.');
   assert(note.includes('only checks that the SHA you enter equals the recorded one'), 'Recovery dialog overclaims what the service verifies.');
   assert(await evaluate("!document.querySelector('#workflow-saved_work_checked') && !document.querySelector('#workflow-running_jobs_checked')"), 'Verified recovery still asks for local attestations.');
   await evaluate("document.querySelector('#workflow-summary').value = 'Fetched the WIP ref'; document.querySelector('#workflow-fetched_revision').value = 'not-a-sha'; document.querySelector('dialog[open] form').requestSubmit()");
@@ -785,6 +785,8 @@ async function main() {
     await checkVerifiedRecovery({ evaluate, waitPage }, openFixtureTask);
     task.work_status = 'blocked'; task.workflow = { activities: [] };
     await openFixtureTask();
+    // The recovery step's mutation may still be in flight; the dashboard runs one mutation at a time.
+    await waitPage("Array.from(document.querySelectorAll('#task-operator-actions button')).find(button => (button.getAttribute('aria-label') || button.textContent) === 'Resolve blocker')?.disabled === false", 'idle blocker action');
     await evaluate("Array.from(document.querySelectorAll('#task-operator-actions button')).find(button => (button.getAttribute('aria-label') || button.textContent) === 'Resolve blocker').click()");
     await waitPage("document.querySelector('dialog[open] .saved-blocker')", 'saved blocker dialog');
     assert(await evaluate("document.querySelector('.saved-blocker').textContent") === task.blocked_reason, 'Saved blocker reason was lost.');
