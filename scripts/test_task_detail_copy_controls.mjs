@@ -30,6 +30,10 @@ const tasks = Array.from({ length: 30 }, (_, index) => ({
 const uploadedAttachments = new Map();
 // Workflow activity POSTs (claim/review), so the review test can prove a dismissed form claims nothing.
 const workflowPosts = [];
+// When true, the next review POST is refused once, to exercise the form's failure path.
+let failNextReview = false;
+// Milliseconds to hold task-detail reads, to widen the gap between a review claim and its decision.
+let detailDelay = 0;
 const attachmentReservations = new Map();
 const attachmentBytes = new Map();
 let failFirstAttachmentPut = true;
@@ -169,9 +173,10 @@ async function fixtureServer() {
     if (url.pathname === '/api/v1/projects/fixture-project/policy' && request.method === 'PATCH') return policyRoute(request, response);
     if (url.pathname === '/api/v1/projects/fixture-project/integrator/reports') return reportListRoute(url, response);
     if (url.pathname === '/api/v1/projects/fixture-project/sessions') return agentSessionsRoute(url, response);
-    const workflowMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/workflow-activities\/([^/]+)\/(claim|review)$/);
+    const workflowMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/workflow-activities\/([^/]+)\/(claim|review|release)$/);
     if (workflowMatch && request.method === 'POST') {
       workflowPosts.push({ activity: decodeURIComponent(workflowMatch[1]), action: workflowMatch[2], body: await readJson(request) });
+      if (workflowMatch[2] === 'review' && failNextReview) { failNextReview = false; return refuse(response, 409, 'submission_stale', 'The submission changed.'); }
       return json(response, workflowMatch[2] === 'claim' ? { attempt: { id: 'fixture-claimed', generation: 3 } } : { recorded: true });
     }
     if (url.pathname.startsWith(`/api/v1/projects/fixture-project/attempts/${recoveryAttempt.id}`)) return recoveryRoute(url.pathname, request, response);
@@ -228,7 +233,10 @@ async function fixtureServer() {
       return;
     }
     if (url.pathname === '/api/v1/projects/fixture-project/tasks/archived') return json(response, { items: [archivedTask], next_cursor: null });
-    if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}`) return json(response, task);
+    if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}`) {
+      if (detailDelay) await new Promise((resolveDelay) => setTimeout(resolveDelay, detailDelay));
+      return json(response, task);
+    }
     if (url.pathname === `/api/v1/projects/fixture-project/tasks/${archivedTask.id}`) return json(response, archivedTask);
     if (url.pathname === '/api/v1/admin/credentials') return json(response, { items: [] });
     if (url.pathname === '/api/v1/admin/agents' && request.method === 'POST') return json(response, { token: 'synthetic-token-for-clipboard-test', name: 'Synthetic agent' });
@@ -577,7 +585,7 @@ async function main() {
         if (await evaluate(expression)) return;
         await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
       }
-      throw new Error(`Timed out waiting for ${label}`);
+      throw new Error(`Timed out waiting for ${label} (alert: ${await evaluate("document.querySelector('#global-alert')?.textContent || ''")})`);
     };
     await waitPage("document.querySelector('.project-open')", 'project list');
     const press = async (key, code, virtualKey) => {
@@ -761,12 +769,35 @@ async function main() {
         assert(workflowPosts.length === 0, 'Opening or dismissing the review form claimed the review.');
         await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review').click()");
         await waitPage("document.querySelector('dialog[open] #workflow-decision')", 'reopened human review dialog');
-        await evaluate("document.querySelector('#workflow-decision').value = 'approved'; document.querySelector('#workflow-summary').value = 'Synthetic review'; document.querySelector('dialog[open] form').requestSubmit()");
-        const posted = Date.now() + 10000;
-        while (workflowPosts.length < 2 && Date.now() < posted) await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
-        assert(workflowPosts.map((post) => post.action).join() === 'claim,review', `Recording did not claim then review: ${JSON.stringify(workflowPosts.map((post) => post.action))}`);
+        const awaitPosts = async (count) => { const until = Date.now() + 10000; while (workflowPosts.length < count && Date.now() < until) await new Promise((resolveDelay) => setTimeout(resolveDelay, 50)); };
+        const actions = () => workflowPosts.map((post) => post.action).join();
+        // The dashboard silently ignores a submit while an earlier step's request is still in flight; resubmit until one starts.
+        const submitUntilPosted = async () => { const before = workflowPosts.length; for (let tries = 0; tries < 20 && workflowPosts.length === before; tries += 1) { await evaluate("document.querySelector('dialog[open] form').requestSubmit()"); const until = Date.now() + 500; while (workflowPosts.length === before && Date.now() < until) await new Promise((resolveDelay) => setTimeout(resolveDelay, 50)); } };
+        failNextReview = true;
+        // Scope to the open dialog: the dismissed one may not have been removed yet and shares the field ids.
+        await evaluate("document.querySelector('dialog[open] #workflow-decision').value = 'approved'; document.querySelector('dialog[open] #workflow-summary').value = 'Synthetic review'");
+        await submitUntilPosted();
+        await awaitPosts(3);
+        assert(actions() === 'claim,review,release', `A failed decision did not give its claim back: ${actions()} (alert: ${await evaluate("document.querySelector('#global-alert')?.textContent || ''")}; form: ${await evaluate("JSON.stringify({open: Boolean(document.querySelector('dialog[open]')), valid: document.querySelector('dialog[open] form')?.checkValidity(), recording: document.querySelector('dialog[open] form')?.dataset.recording})")})`);
+        assert(workflowPosts[2].body.generation === 3, 'Release did not name the claimed attempt.');
+        await waitPage("document.querySelector('dialog[open] .dialog-error')?.textContent.includes('The submission changed.')", 'review failure shown in the form');
+        assert(await evaluate("document.querySelector('dialog[open] #workflow-decision').value === 'approved' && document.querySelector('dialog[open] #workflow-summary').value === 'Synthetic review'"), 'The failed form lost the entered decision.');
+        // Let the release's own detail reload finish, so the retry's claim reload is the one held open.
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 800));
+        detailDelay = 1500;
+        await submitUntilPosted();
+        await awaitPosts(4);
+        // Resubmit while the claim's detail reload is held: the form must not start a second claim-then-review chain.
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
+        assert(await evaluate("!document.querySelector('dialog[open] .dialog-error')"), 'The previous failure note stayed during the retry.');
+        await evaluate("document.querySelector('dialog[open] form').requestSubmit()");
+        await awaitPosts(5);
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 1500));
+        detailDelay = 0;
+        assert(actions() === 'claim,review,release,claim,review', `Retry did not claim then review: ${actions()}`);
         assert(workflowPosts[0].body.expected_submission_id === 'fixture-submission', 'Claim did not pin the submission.');
-        assert(workflowPosts[1].body.generation === 3 && workflowPosts[1].body.decision === 'approved', 'Review did not use the claimed attempt generation.');
+        assert(workflowPosts[4].body.generation === 3 && workflowPosts[4].body.decision === 'approved', 'Review did not use the claimed attempt generation.');
+        await waitPage("!document.querySelector('dialog[open] #workflow-decision')", 'review form closed after recording');
       }
     }
     task.lifecycle = 'open'; task.work_status = 'waiting_review';
