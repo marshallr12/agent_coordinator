@@ -84,6 +84,7 @@
                 <article class="card"><h3>Required checks</h3><p class="muted">Configure the validation checks required before code can be integrated.</p><button id="workflow-settings" class="button subtle" type="button">Required check settings</button></article>
                 <article class="card"><h3>Integration owner</h3><p id="integration-owner-summary" class="muted">Who publishes approved code to the target branch.</p><button id="integration-owner-button" class="button subtle" data-mutation="true" type="button">Change integration owner</button></article>
                 <article class="card"><h3>Integrator reports</h3><p class="muted">Findings the integrator recorded, such as privilege gates and flaky checks. Resolve the ones that need a person.</p><button id="integrator-reports-button" class="button subtle" type="button">Integrator reports</button></article>
+                <article class="card"><h3>Connected sessions</h3><p class="muted">Agent sessions still working in this project. Check them before a test, preflight or cutover.</p><button id="agent-sessions-button" class="button subtle" type="button">Connected sessions</button></article>
               </div>
               <article class="card project-binding-card"><h2>Repository binding</h2><p class="muted">Download this non-secret file, then place <code>.agent-coordinator.toml</code> in the root of your repository so agents connect to this project.</p><div id="project-binding-content" class="binding-content"></div></article>
             </section>
@@ -95,6 +96,14 @@
               <div id="reports-state" class="state-panel" role="status"></div>
               <div id="reports-list" class="report-list"></div>
               <button id="load-more-reports" class="button subtle" type="button" hidden>Load more reports</button>
+            </section>
+
+            <section id="agent-sessions-view" class="page-view" aria-labelledby="agent-sessions-heading" hidden>
+              <div class="detail-back-row"><button id="agent-sessions-back" class="button text-button" type="button">← Project settings</button></div>
+              <div class="page-heading"><div><p id="agent-sessions-project-label" class="eyebrow"></p><h1 id="agent-sessions-heading" tabindex="-1">Connected sessions</h1><p class="muted">Open agent sessions bound to this project, most recently active first. Use this list to quiesce agents before a test, preflight or cutover.</p><p class="muted">Last activity comes from instruction acknowledgments, claims, heartbeats and checkpoints in this project; reads don't count. A session holding an active attempt is always listed, even after its lease lapses.</p></div></div>
+              <div class="toolbar"><label class="select-label" for="agent-sessions-window">Show<select id="agent-sessions-window"><option value="24">Active in the last 24 hours</option><option value="1">Active in the last hour</option><option value="0">All open sessions</option></select></label><button id="refresh-agent-sessions" class="button subtle" type="button">Refresh</button></div>
+              <div id="agent-sessions-state" class="state-panel" role="status"></div>
+              <div id="agent-sessions-list" class="report-list"></div>
             </section>
 
             <nav id="task-view-tabs" class="task-view-tabs" role="tablist" aria-label="Task views" hidden>

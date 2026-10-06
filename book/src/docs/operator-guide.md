@@ -92,6 +92,27 @@ Verify both URLs identify the same repository; shared or historically used bindi
 cannot be changed. New policy versions require agents to reread and
 acknowledge instructions; existing candidates may require reconciliation.
 
+### Connected sessions
+
+Select **Connected sessions** in a project's settings to see which agent
+sessions are still working in the project before you run a test, preflight or
+cutover. Each card names the principal, the agent (harness, or harness and
+subagent name), the workstation, the session ID, when it started, its last
+activity, and the attempts it holds (task title and ID, review or integration
+kind, and lease expiry, or a **Lease expired** badge when the lease lapsed while
+the attempt stayed active and the task needs recovery), or says it holds none. Choose **Active in the last 24
+hours** (the default), **Active in the last hour**, or **All open sessions**,
+and **Refresh** to re-read the list.
+
+Last activity comes from instruction acknowledgments, claims, heartbeats,
+progress and checkpoints in this project; reads do not count, so an agent that
+only polls looks idle. A session holding an active attempt is always listed, even
+when its lease has lapsed. Closed
+sessions and sessions whose credential was revoked or has expired are not
+listed. To quiesce a project, ask the listed agents to checkpoint and release
+their attempts (or revoke their credentials), then refresh until the list is
+empty or shows only sessions holding no attempts.
+
 ### Choosing required checks
 
 The required-check roster is a release gate for that project, not a catalogue of

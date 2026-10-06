@@ -6,6 +6,7 @@ mod lifecycle;
 mod mcp_client;
 mod operator;
 mod session_adoption;
+mod sessions;
 mod shared;
 mod state;
 mod worktree;
@@ -60,6 +61,11 @@ enum Command {
     Session {
         #[command(subcommand)]
         command: session_adoption::SessionCommand,
+    },
+    /// List open agent sessions connected to the bound project (who is still working).
+    Sessions {
+        #[command(subcommand)]
+        command: sessions::SessionsCommand,
     },
     /// Launch a trusted MCP client with this connected harness's credentials in its environment.
     McpClient(mcp_client::LaunchArgs),
@@ -799,6 +805,7 @@ fn print_human(command: &Command, value: &Value) {
         Command::Tasks {
             command: TasksCommand::List(_),
         } => print_task_table(value),
+        Command::Sessions { .. } => sessions::print_table(value),
         Command::Connect(_) => print_connection(value),
         Command::Claim(_) => print_claim(value),
         Command::Export(_) => {
@@ -1000,6 +1007,7 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
     let context = build_context(cli).await?;
     match &cli.command {
         Command::Session { command } => session_adoption::run(cli, &context, command).await,
+        Command::Sessions { command } => sessions::run(cli, &context, command).await,
         Command::McpClient(args) => mcp_client::launch(cli, &context, args).await,
         Command::Objectives { command } => operator::objectives(cli, &context, command).await,
         Command::Policy { command } => operator::policy(cli, &context, command).await,

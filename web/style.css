@@ -280,3 +280,7 @@ a.nav-item { text-decoration: none; }
 .status-badge.report-resolved { color: #176762; background: var(--teal-soft); }
 .current-integration-owner { font-weight: 750; }
 @media (max-width: 650px) { .report-facts { grid-template-columns: 1fr; } }
+.held-attempts { display: grid; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; font-size: 13px; }
+.held-attempts li { display: grid; gap: 2px; overflow-wrap: anywhere; }
+.agent-session-card .report-facts dd { overflow-wrap: anywhere; }
+.held-attempt-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }

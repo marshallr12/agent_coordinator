@@ -1109,6 +1109,33 @@ file. Transfers are bounded to 16 MiB and ordinary JSON responses are
 bounded to 16 MiB. Use `--json` for the full transfer receipt.
 
 
+## Connected sessions
+
+`agent-coordinator sessions list` shows the open agent sessions bound to the
+bound project — every session that acknowledged its instructions or holds an
+attempt in it — most recently active first. Use it to see who is still working
+before a test, preflight or cutover. (The singular `session` command manages
+this harness's own local session state instead.)
+
+```sh
+agent-coordinator sessions list
+agent-coordinator sessions list --active-within-hours 1
+agent-coordinator sessions list --active-within-hours 0   # every open session
+agent-coordinator --json sessions list
+```
+
+The default window is the service's 24 hours. Last activity is derived from
+instruction acknowledgments, claims, heartbeats, progress, attempt endings and
+checkpoints in the project; reads never count. A session holding an active
+attempt is listed whatever the window, even when that attempt's lease has
+lapsed. The table columns are SESSION,
+PRINCIPAL, AGENT (the harness, plus `/ subagent NAME` for a subagent session),
+WORKSTATION, STARTED, LAST ACTIVITY and HELD (the count, then each held task ID
+with its review or integration kind, and ` (lease expired)` after an active
+attempt whose lease lapsed and needs recovery). See the
+[API contract](api-contract.md#connected-sessions-per-project) for the JSON
+shape that `--json` prints.
+
 ## Operator and objective commands
 
 The native client authenticates as an agent; administrative human actions use the

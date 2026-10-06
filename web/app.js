@@ -8,7 +8,7 @@
     try { return localStorage.getItem(TASK_AUTO_REFRESH_KEY) === 'true'; } catch { return false; }
   }
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0, reportsCursor: null, reportsSeq: 0,
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0, reportsCursor: null, reportsSeq: 0, agentSessionsSeq: 0,
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null, credentialDownloadUrl: null,
     taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedTasks: [], archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
@@ -258,6 +258,7 @@
     state.mutation = null; state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
     ++state.sharedSeq; state.sharedCursor = null; clear($('shared-list')); setText($('shared-freshness'), '');
     ++state.reportsSeq; state.reportsCursor = null; clear($('reports-list'));
+    ++state.agentSessionsSeq; clear($('agent-sessions-list'));
     $('context-search').reset();
     state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
@@ -277,10 +278,10 @@
 
   function showView(view) {
     state.currentView = view;
-    ['overview', 'project', 'reports', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
+    ['overview', 'project', 'reports', 'agent-sessions', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
     show($('task-view-tabs'), view === 'tasks' || view === 'archived');
     updateTaskViewTabs();
-    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
+    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports', 'agent-sessions'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
     if (view === 'tasks') { fillProjectSelect(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
   }
 
@@ -345,7 +346,7 @@
       const changed = JSON.stringify(projects) !== JSON.stringify(state.projects);
       state.projects = projects;
       if (!silent || changed) { renderProjects(); fillProjectSelect(); }
-      renderSummary(); if (state.currentView === 'reports') setReportsProjectLabel();
+      renderSummary(); if (state.currentView === 'reports') setReportsProjectLabel(); if (state.currentView === 'agent-sessions') setAgentSessionsProjectLabel();
     }
     catch (error) { if (!silent) { setState($('projects-state'), errorMessage(error), false, true); } }
     finally { state.fetching.delete('projects'); }
@@ -430,6 +431,10 @@
   $('reports-filter').addEventListener('change', () => loadReports());
   $('refresh-reports').addEventListener('click', () => loadReports());
   $('load-more-reports').addEventListener('click', () => loadReports(true));
+  $('agent-sessions-button').addEventListener('click', openAgentSessions);
+  $('agent-sessions-back').addEventListener('click', () => openProjectSettings(state.projectId));
+  $('agent-sessions-window').addEventListener('change', () => loadAgentSessions());
+  $('refresh-agent-sessions').addEventListener('click', () => loadAgentSessions());
   $('project-review-button').addEventListener('click', async () => {
     const projectId = state.projectId;
     try {
@@ -1732,6 +1737,66 @@
     return errorMessage(error);
   }
 
+  // Connected sessions: open agent sessions bound to the project, so an owner can quiesce work.
+  const NO_AGENT_SESSIONS = 'No agent sessions are connected to this project in this window.';
+  // Opens the connected-sessions page for the current project.
+  function openAgentSessions() {
+    if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    setAgentSessionsProjectLabel(); showView('agent-sessions'); $('agent-sessions-heading').focus(); loadAgentSessions();
+  }
+  // Names the project in the sessions header; reruns once projects load after a reload.
+  function setAgentSessionsProjectLabel() {
+    const project = state.projects.find(item => text(item.id) === state.projectId);
+    setText($('agent-sessions-project-label'), project?.name || 'Project');
+  }
+  // Loads the sessions active in the chosen window; a superseded response is dropped.
+  async function loadAgentSessions() {
+    const projectId = state.projectId, seq = ++state.agentSessionsSeq;
+    clear($('agent-sessions-list')); setState($('agent-sessions-state'), 'Loading sessions…', true);
+    const query = new URLSearchParams({active_within_hours: $('agent-sessions-window').value});
+    try {
+      const page = (await request(`${projectPath(projectId)}/sessions?${query}`)).data;
+      if (seq === state.agentSessionsSeq && projectId === state.projectId) renderAgentSessions(page);
+    } catch (error) { if (seq === state.agentSessionsSeq) setState($('agent-sessions-state'), errorMessage(error), false, true); }
+  }
+  // Renders one card per session, the empty-window message, or a truncation note.
+  function renderAgentSessions(page) {
+    const items = page.items || [];
+    items.forEach(session => add($('agent-sessions-list'), agentSessionCard(session)));
+    if (!items.length) setState($('agent-sessions-state'), NO_AGENT_SESSIONS);
+    else if (page.truncated) setState($('agent-sessions-state'), `Showing the ${items.length} most recently active sessions; narrow the window to see fewer.`);
+    else show($('agent-sessions-state'), false);
+  }
+  // One session: who and where, when it started and last acted, and what it holds.
+  function agentSessionCard(session) {
+    const card = el('article', 'card report-card agent-session-card'); card.dataset.sessionId = session.session_id;
+    const header = add(card, el('div', 'card-header')), held = session.held_attempts || [];
+    add(header, el('h2', '', session.principal?.name || session.principal?.id || 'Agent'));
+    add(header, el('span', `status-badge ${held.length ? 'report-open' : 'report-resolved'}`, held.length ? `Holds ${held.length} attempt${held.length === 1 ? '' : 's'}` : 'Idle'));
+    add(card, factList([['Agent', agentKind(session)], ['Workstation', session.workstation_id], ['Session', session.session_id], ['Started', formatDate(session.started_at)], ['Last activity', formatDate(session.last_activity_at)]]));
+    add(card, heldAttemptList(held));
+    return card;
+  }
+  // The agent kind: the harness, plus the subagent name for a subagent session.
+  const agentKind = session => session.subagent ? `${text(session.harness)} / subagent ${text(session.subagent.name)}` : text(session.harness);
+  // The attempts a session holds (task title and id, kind, expiry), or a note that it holds none.
+  function heldAttemptList(held) {
+    if (!held.length) return el('p', 'muted', 'Holds no attempts');
+    const list = el('ul', 'held-attempts');
+    held.forEach(attempt => add(list, heldAttemptItem(attempt)));
+    return list;
+  }
+  // One held attempt: task title, a lease-expired badge when its lease lapsed, and its details.
+  function heldAttemptItem(attempt) {
+    const item = el('li'), title = add(item, el('div', 'held-attempt-title'));
+    add(title, el('strong', '', attempt.task_title || attempt.task_id));
+    if (attempt.lease_expired) add(title, el('span', 'status-badge report-needs-human', 'Lease expired'));
+    add(item, el('span', 'muted', heldAttemptMeta(attempt)));
+    return item;
+  }
+  // A held attempt's task id, kind of work (review, integration or work), and lease expiry unless it already lapsed.
+  const heldAttemptMeta = attempt => [attempt.task_id, displayStatus(attempt.activity_kind || attempt.mode), attempt.lease_expired ? 'needs recovery' : `expires ${formatDate(attempt.expires_at)}`].join(' · ');
+
   // Integrator reports: findings the integrator records; humans resolve them.
   const REPORT_KINDS = {privilege_gate:'Privilege gate', flaky:'Flaky check', fix_target:'Target needs a fix', unreviewed_landing:'Unreviewed landing', target_rewritten:'Target rewritten', ruleset_missing:'Ruleset missing'};
   // The display name for a report kind; unknown kinds get a readable form.
@@ -1793,9 +1858,12 @@
   }
   // The report's identities and any resolution as a definition list.
   function reportFacts(report) {
+    return factList([['Report', report.id], ['Recorded', formatDate(report.created_at)], ['Task', report.task_id], ['Submission', report.submission_id], ['Result', report.result_id], ['Resolved', report.resolved_at && formatDate(report.resolved_at)], ['Resolved by', report.resolved_by], ['Resolution note', report.resolution_note]]);
+  }
+  // A definition list of the [label, value] pairs that have a value.
+  function factList(pairs) {
     const facts = el('dl', 'report-facts');
-    [['Report', report.id], ['Recorded', formatDate(report.created_at)], ['Task', report.task_id], ['Submission', report.submission_id], ['Result', report.result_id], ['Resolved', report.resolved_at && formatDate(report.resolved_at)], ['Resolved by', report.resolved_by], ['Resolution note', report.resolution_note]]
-      .filter(([, value]) => value).forEach(([label, value]) => { add(facts, el('dt', 'muted', label)); add(facts, el('dd', '', value)); });
+    pairs.filter(([, value]) => value).forEach(([label, value]) => { add(facts, el('dt', 'muted', label)); add(facts, el('dd', '', value)); });
     return facts;
   }
   // Opens the human resolve form; a privilege gate also needs allow or deny.

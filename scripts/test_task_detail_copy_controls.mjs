@@ -54,6 +54,16 @@ const reports = [
 const reportQueries = [];
 let failNextReportPage = false;
 const reportResolutions = [];
+// Connected agent sessions: a subagent reviewer, a plain CLI worker and an idle session.
+const agentSessions = [
+  { session_id: 'session-reviewer', principal: { id: 'p-builder', name: 'builder-agent', kind: 'agent' }, harness: 'claude-code', workstation_id: 'ws-laptop', capabilities: [], subagent: { name: 'reviewer-1', parent_session_id: 'session-parent' }, credential_id: 'cred-1', started_at: '2026-10-05T08:00:00Z', last_activity_at: '2026-10-05T10:00:00Z',
+    held_attempts: [{ attempt_id: 'attempt-review', task_id: 'review-task-id', task_title: 'Review the fixture change', generation: 1, mode: 'work', activity_kind: 'agent_review', subject_task_id: task.id, expires_at: '2026-10-05T11:00:00Z', last_heartbeat_at: '2026-10-05T10:00:00Z', lease_expired: false }] },
+  { session_id: 'session-worker', principal: { id: 'p-cli', name: 'cli-agent', kind: 'agent' }, harness: 'agent-coordinator-cli', workstation_id: 'ws-build-server-with-a-very-long-identifier-that-must-wrap', capabilities: [], subagent: null, credential_id: 'cred-2', started_at: '2026-10-05T07:00:00Z', last_activity_at: '2026-10-05T09:30:00Z',
+    held_attempts: [{ attempt_id: 'attempt-work', task_id: task.id, task_title: task.title, generation: 2, mode: 'work', activity_kind: null, subject_task_id: null, expires_at: '2026-10-05T10:30:00Z', last_heartbeat_at: '2026-10-05T09:30:00Z', lease_expired: true }] },
+  { session_id: 'session-idle', principal: { id: 'p-idle', name: 'idle-agent', kind: 'agent' }, harness: 'agent-coordinator-cli', workstation_id: 'ws-idle', capabilities: [], subagent: null, credential_id: 'cred-3', started_at: '2026-10-04T07:00:00Z', last_activity_at: '2026-10-04T08:00:00Z', held_attempts: [] },
+];
+const agentSessionQueries = [];
+let agentSessionsMode = 'normal';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -106,6 +116,15 @@ function reportListRoute(url, response) {
   return json(response, { project_id: 'fixture-project', items, next_before: items.length === limit ? items.at(-1).id : null });
 }
 
+// Lists connected sessions: the idle one only in the all-sessions window; or empty, or a failure, on demand.
+function agentSessionsRoute(url, response) {
+  agentSessionQueries.push(Object.fromEntries(url.searchParams));
+  if (agentSessionsMode === 'fail') return refuse(response, 503, 'unavailable', 'Sessions are temporarily unavailable.');
+  const hours = url.searchParams.get('active_within_hours');
+  const items = agentSessionsMode === 'empty' ? [] : agentSessions.filter((session) => hours === '0' || session.held_attempts.length);
+  return json(response, { project_id: 'fixture-project', active_within_hours: Number(hours), generated_at: '2026-10-05T10:05:00Z', items, truncated: false });
+}
+
 // Resolves one open report; a resolved one is refused as the service does.
 async function reportResolveRoute(id, request, response) {
   assert(request.headers['x-csrf-token'] === 'fixture-csrf', 'Report resolution omitted the browser CSRF token.');
@@ -131,6 +150,7 @@ async function fixtureServer() {
     if (url.pathname === '/api/v1/projects/fixture-project/orientation') return json(response, { project: policyProject, policy_revision: policyProject.policy_revision });
     if (url.pathname === '/api/v1/projects/fixture-project/policy' && request.method === 'PATCH') return policyRoute(request, response);
     if (url.pathname === '/api/v1/projects/fixture-project/integrator/reports') return reportListRoute(url, response);
+    if (url.pathname === '/api/v1/projects/fixture-project/sessions') return agentSessionsRoute(url, response);
     const resolveMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/integrator\/reports\/([^/]+)\/resolve$/);
     if (resolveMatch && request.method === 'POST') return reportResolveRoute(decodeURIComponent(resolveMatch[1]), request, response);
     if (url.pathname === '/api/v1/projects/fixture-project/tasks') {
@@ -341,6 +361,54 @@ async function checkIntegratorReports(page) {
   await waitPage("!document.querySelector('#project-view').hidden", 'return to project settings');
 }
 
+// Selects a connected-sessions window and waits for its query.
+async function chooseSessionWindow({ evaluate, waitPage }, hours) {
+  const before = agentSessionQueries.length;
+  await evaluate(`(() => { const select = document.querySelector('#agent-sessions-window'); select.value = ${JSON.stringify(hours)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await waitPage(`document.querySelectorAll('#agent-sessions-list .agent-session-card').length === ${hours === '0' ? 3 : 2} || document.querySelector('#agent-sessions-state').textContent.includes('No agent sessions')`, `sessions window ${hours}`);
+  assert(agentSessionQueries.length > before && agentSessionQueries.at(-1).active_within_hours === hours, `Window ${hours} sent the wrong query.`);
+}
+
+// Connected sessions: cards with held work, window switching, refresh, empty and error states, phone width, return.
+async function checkAgentSessions(page) {
+  const { evaluate, waitPage } = page;
+  await evaluate("document.querySelector('#agent-sessions-button').click()");
+  await waitPage("!document.querySelector('#agent-sessions-view').hidden && document.querySelectorAll('#agent-sessions-list .agent-session-card').length === 2", 'connected sessions');
+  assert(agentSessionQueries.at(-1).active_within_hours === '24', 'Connected sessions did not default to 24 hours.');
+  assert(await evaluate("document.querySelector('#agent-sessions-project-label').textContent") === 'Fixture project', 'Connected sessions did not name the project.');
+  const reviewer = await evaluate("document.querySelector('[data-session-id=\"session-reviewer\"]').textContent");
+  assert(reviewer.includes('builder-agent') && reviewer.includes('claude-code / subagent reviewer-1') && reviewer.includes('Review the fixture change') && reviewer.includes('Agent Review') && reviewer.includes('ws-laptop'), 'Reviewer session card is incomplete.');
+  assert((await evaluate("document.querySelector('[data-session-id=\"session-worker\"]').textContent")).includes(task.title), 'Worker session card omits its held task.');
+  assert(await evaluate("document.querySelector('[data-session-id=\"session-worker\"] .held-attempts .status-badge')?.textContent === 'Lease expired' && document.querySelector('[data-session-id=\"session-worker\"]').textContent.includes('needs recovery')"), 'Lapsed lease is not marked on the worker card.');
+  assert(await evaluate("!document.querySelector('[data-session-id=\"session-reviewer\"] .held-attempts .status-badge') && document.querySelector('[data-session-id=\"session-reviewer\"]').textContent.includes('expires ')"), 'A live lease was marked expired or lost its expiry.');
+  await chooseSessionWindow(page, '0');
+  assert((await evaluate("document.querySelector('[data-session-id=\"session-idle\"]').textContent")).includes('Holds no attempts'), 'Idle session does not say it holds nothing.');
+  await chooseSessionWindow(page, '1');
+  const before = agentSessionQueries.length;
+  await evaluate("document.querySelector('#refresh-agent-sessions').click()");
+  await waitPage(`document.querySelectorAll('#agent-sessions-list .agent-session-card').length === 2`, 'refreshed sessions');
+  assert(agentSessionQueries.length > before && agentSessionQueries.at(-1).active_within_hours === '1', 'Refresh did not re-query the chosen window.');
+  await checkAgentSessionStates(page);
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), 'Connected sessions overflow at phone width.');
+  await page.send('Emulation.clearDeviceMetricsOverride');
+  await evaluate("document.querySelector('#agent-sessions-back').click()");
+  await waitPage("!document.querySelector('#project-view').hidden", 'return from connected sessions');
+}
+
+// The empty-window message and a server error both show in the state line.
+async function checkAgentSessionStates({ evaluate, waitPage }) {
+  agentSessionsMode = 'empty';
+  await evaluate("document.querySelector('#refresh-agent-sessions').click()");
+  await waitPage("document.querySelector('#agent-sessions-state').textContent === 'No agent sessions are connected to this project in this window.' && !document.querySelector('#agent-sessions-list').childElementCount", 'empty sessions window');
+  agentSessionsMode = 'fail';
+  await evaluate("document.querySelector('#refresh-agent-sessions').click()");
+  await waitPage("document.querySelector('#agent-sessions-state').textContent.includes('temporarily unavailable')", 'sessions load failure');
+  agentSessionsMode = 'normal';
+  await evaluate("document.querySelector('#refresh-agent-sessions').click()");
+  await waitPage("document.querySelectorAll('#agent-sessions-list .agent-session-card').length === 2 && document.querySelector('#agent-sessions-state').hidden", 'sessions recover after a failure');
+}
+
 // A non-human actor sees neither the owner control nor report resolution.
 async function checkAgentActorControls(page, serverPort) {
   const { evaluate, waitPage, send } = page;
@@ -485,6 +553,7 @@ async function main() {
     const ui = { evaluate, waitPage, send };
     await checkIntegrationOwner(ui);
     await checkIntegratorReports(ui);
+    await checkAgentSessions(ui);
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), 'Settings page overflows at phone width.');
     await evaluate("document.querySelector('#back-to-projects').click()");
@@ -669,7 +738,7 @@ async function main() {
     await waitPage("document.querySelector('#issue-feedback').textContent.includes('Clipboard access was unavailable')", 'token manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
-    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny and already-resolved refusal), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny and already-resolved refusal), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {

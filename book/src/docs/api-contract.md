@@ -116,6 +116,54 @@ revocation invalidates its authority. `GET /api/v1/sessions/{id}` reconciles it;
 `POST /api/v1/sessions/{id}/close` closes it explicitly. Compaction and ordinary
 turn completion do not close it or create another session automatically.
 
+### Connected sessions per project
+
+`GET /api/v1/projects/{project_id}/sessions?active_within_hours=24` lists the
+open agent sessions bound to a project so an owner can see who is still working
+and quiesce them before a test, preflight or cutover. Any authenticated
+principal may read it, including read-only agent credentials and human browser
+sessions; an unknown project is `404`. It is derived from existing records:
+
+- A session is **bound** to the project when it acknowledged the project's
+  instructions or holds any attempt (work, recovery, review or integration) in
+  it. Only sessions that are not closed, whose credential is neither revoked
+  nor expired, and whose principal is enabled are listed.
+- `last_activity_at` is the newest of the session's registration, its
+  instruction acknowledgment for this project, and, for its attempts in this
+  project, their claim, heartbeat, progress and end times and their
+  checkpoints. Reads never count as activity.
+- `active_within_hours` (integer `0`–`8760`, default `24`) keeps sessions whose
+  last activity falls inside the window; `0` lists every open bound session. A
+  session that holds an active attempt in the project is always listed, even
+  when that attempt's lease has lapsed. Other values are `400`.
+
+Items are ordered by `last_activity_at` (newest first), then session ID, and
+capped at 500 with `truncated: true` when more match. Session proofs and token
+verifiers are never returned.
+
+```json
+{"project_id": "…", "active_within_hours": 24, "generated_at": "…",
+ "truncated": false,
+ "items": [{"session_id": "…",
+   "principal": {"id": "…", "name": "builder", "kind": "agent"},
+   "harness": "agent-coordinator-cli", "workstation_id": "…",
+   "capabilities": ["git"], "subagent": null, "credential_id": "…",
+   "started_at": "…", "last_activity_at": "…",
+   "held_attempts": [{"attempt_id": "…", "task_id": "…", "task_title": "…",
+     "generation": 1, "mode": "work", "activity_kind": "agent_review",
+     "subject_task_id": "…", "expires_at": "…", "last_heartbeat_at": "…",
+     "lease_expired": false}]}]}
+```
+
+`subagent` is `{"name", "parent_session_id"}` for a subagent session.
+`activity_kind` and `subject_task_id` name the workflow activity (review or
+integration) a held attempt claims, and are `null` for ordinary task work.
+`held_attempts` lists every attempt still in state `active`, including one
+whose lease lapsed before it was expired or recovered: `lease_expired` is
+`true` when `expires_at` is not after the service time. The session may still
+be running and the task needs recovery, so it matters when quiescing. The CLI
+exposes the list as `agent-coordinator sessions list`.
+
 The CLI implements this as `agent-coordinator connect`, returning orientation
 and current ownership. It reads repository binding and protected local session
 state. First connection creates a session; resume reconciles the saved one. The

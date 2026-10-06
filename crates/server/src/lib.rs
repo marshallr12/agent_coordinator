@@ -24,6 +24,7 @@ pub mod mutation;
 pub mod next;
 pub mod objectives;
 pub mod operator_access;
+pub mod project_sessions;
 pub mod restore;
 mod revert_rules;
 pub mod reverts;
@@ -73,6 +74,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(state_wait::routes())
         .merge(objectives::routes())
         .merge(operator_access::routes())
+        .merge(project_sessions::routes())
         .merge(restore::routes())
         .route(
             "/healthz",

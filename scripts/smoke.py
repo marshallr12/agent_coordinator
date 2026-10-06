@@ -175,6 +175,11 @@ def run():
             detail = api(f"/api/v1/projects/{project}/tasks/{task['id']}")
             assert detail["work_status"] == "in_progress" and detail["checkpoints"][0]["summary"] == "Saved the shared handoff."
             assert api(f"/api/v1/projects/{second}/tasks")["items"] == []
+            connected_sessions = cli(1 - owner, "sessions", "list")["data"]["items"]
+            holders = [s for s in connected_sessions if s["held_attempts"]]
+            assert len(connected_sessions) == 2 and len(holders) == 1, "sessions list did not show both harnesses and one holder."
+            assert holders[0]["held_attempts"][0]["attempt_id"] == attempt["id"], "sessions list named the wrong held attempt."
+            assert "proof_hash" not in json.dumps(connected_sessions), "sessions list exposed a proof verifier."
             exercise_mcp_launcher(cli, api, project, owner, attempt, CLI)
             exercise_mcp_adoption(temporary, api, project, credentials[owner]["token"], CLI, owner, attempt)
             cli(owner, "release", *own_args, body={"summary": "Paused safely with a handoff."})
@@ -201,7 +206,7 @@ def run():
             rejected = cli(owner, "tasks", "list", expected=3)
             assert "error" in rejected
             print("PASS: service startup, operator login, two-project visibility, two native harness sessions,")
-            print("      atomic competing claims, renewal, checkpoint visibility, safe release, and revocation.")
+            print("      atomic competing claims, renewal, checkpoint visibility, connected-session listing, safe release, and revocation.")
         finally:
             process.terminate()
             try:
