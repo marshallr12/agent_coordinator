@@ -1320,6 +1320,15 @@
   // decision is recorded, so dismissing the form never leaves the review leased.
   // The service's byte limit for a review summary (crates/server/src/workflow.rs).
   const SUMMARY_BYTES = 16384;
+  // The service's byte limit for a finding's evidence, which the form fills from the summary.
+  const EVIDENCE_BYTES = 8192;
+  // The longest prefix of `value` that fits in `limit` UTF-8 bytes, never splitting a character.
+  function truncateBytes(value, limit) {
+    const encoder = new TextEncoder(); if (encoder.encode(value).length <= limit) return value;
+    let kept = '', used = 0;
+    for (const character of value) { const size = encoder.encode(character).length; if (used + size > limit) break; kept += character; used += size; }
+    return kept;
+  }
   function openHumanReview(activity, submission, attempt) {
     const view = workflowDialog('Review this candidate', `This decision applies only to submission ${submission.id}, source ${submission.candidate_revision || 'general task evidence'}. Inspect its acceptance evidence and checks before deciding.`);
     // An empty first option is the required select's placeholder: no decision is preselected, so the form refuses to record until the reviewer picks one.
@@ -1339,15 +1348,17 @@
       // One claim-then-review chain at a time: the global mutation lock clears between the two requests.
       if (view.form.dataset.recording === 'true') return;
       view.form.dataset.recording = 'true'; clearDialogError(view);
-      const review = {submission_id: submission.id, decision: values.get('decision'), summary: values.get('summary'), findings: remedies.map(remedy => ({severity:'required',remedy,evidence:text(values.get('summary'))}))};
+      const review = {submission_id: submission.id, decision: values.get('decision'), summary: values.get('summary'), findings: remedies.map(remedy => ({severity:'required',remedy,evidence:truncateBytes(text(values.get('summary')), EVIDENCE_BYTES)}))};
       const done = () => { delete view.form.dataset.recording; dialog.close(); };
       const failed = error => { delete view.form.dataset.recording; showDialogError(view, error); };
       // A request that could not start runs neither callback, so it is reported like a failure.
       const notStarted = () => new ApiError('The request could not start: another request may still be running, or this browser could not save it. Try again.', 0, 'mutation_not_started', null, false);
       if (attempt) { if (!recordHumanReview(activity, attempt, review, done, failed)) failed(notStarted()); }
       else if (!claimHumanReview(activity, submission, held => {
+        // A claim this form could not give back is kept and reused by the next retry instead of claiming again.
+        const keep = () => { attempt = held; };
         // A decision that failed after this form's own claim gives the claim back, unless the outcome is uncertain or the session ended.
-        const settle = error => { if (!error?.uncertain && error?.status !== 401 && error?.code !== 'authentication_required') releaseHumanReview(activity, held); failed(error); };
+        const settle = error => { if (!error?.uncertain && error?.status !== 401 && error?.code !== 'authentication_required') { if (!releaseHumanReview(activity, held)) keep(); } else keep(); failed(error); };
         if (!recordHumanReview(activity, held, review, done, settle)) settle(notStarted());
       }, failed)) failed(notStarted());
     });
@@ -1371,9 +1382,9 @@
   function recordHumanReview(activity, attempt, review, done, onError) {
     return workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/review`, {generation: attempt.generation, ...review}, 'human review', done, onError);
   }
-  // Gives back a review claim this form took when its decision could not be recorded.
+  // Gives back a review claim this form took when its decision could not be recorded; returns whether the release started.
   function releaseHumanReview(activity, attempt) {
-    workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/release`, {generation: attempt.generation, summary: 'Released: the human review decision could not be recorded.'}, 'review release');
+    return workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/release`, {generation: attempt.generation, summary: 'Released: the human review decision could not be recorded.'}, 'review release');
   }
   function openIntegrationAuthorization(activity, submission) {
     const view = workflowDialog('Authorize this integration', `Permit agents to integrate submission ${submission.id} after required review and checks. This does not publish source or mark the task done.`);

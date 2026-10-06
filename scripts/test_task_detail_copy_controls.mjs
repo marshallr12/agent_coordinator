@@ -820,7 +820,16 @@ async function main() {
         await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review').click()");
         await waitPage("document.querySelector('dialog[open] #workflow-summary')", 'review dialog for the byte limit');
         assert(await evaluate("(() => { const summary = document.querySelector('dialog[open] #workflow-summary'); summary.value = '\u20ac'.repeat(6000); summary.dispatchEvent(new Event('input')); return !summary.validity.valid && summary.maxLength === 16384; })()"), 'An over-limit summary in bytes was accepted.');
-        await evaluate("document.querySelector('dialog[open]').close()");
+        // A summary within its own limit but over the 8192-byte evidence limit is still recordable with a remedy:
+        // the evidence copied from it is cut to 8192 bytes, never mid-character.
+        const evidenceAt = workflowPosts.length;
+        await evaluate("(() => { const form = document.querySelector('dialog[open]'); form.querySelector('#workflow-decision').value = 'changes_requested'; const summary = form.querySelector('#workflow-summary'); summary.value = 'a'.repeat(8191) + '\u20ac' + 'b'.repeat(900); summary.dispatchEvent(new Event('input')); form.querySelector('#workflow-findings').value = 'Fix the thing'; })()");
+        await submitUntilPosted();
+        await awaitPosts(evidenceAt + 2);
+        const recorded = workflowPosts[evidenceAt + 1].body;
+        assert(workflowPosts.slice(evidenceAt).map((post) => post.action).join() === 'claim,review', 'The long-summary decision was not claimed then recorded.');
+        assert(recorded.summary.length === 9092 && recorded.findings[0].evidence === 'a'.repeat(8191), 'Finding evidence was not cut to 8192 bytes at a character boundary.');
+        await waitPage("!document.querySelector('dialog[open] #workflow-decision')", 'review form closed after the long-summary decision');
       }
     }
     task.lifecycle = 'open'; task.work_status = 'waiting_review';
