@@ -409,6 +409,9 @@ async function main() {
     await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Record human review').click()");
     await waitPage("document.querySelector('dialog[open] #workflow-decision')", 'human review dialog');
     assert(await evaluate("document.querySelector('dialog[open]').textContent.includes('fixture-submission')"), 'Review does not identify the saved submission.');
+    assert(await evaluate("document.querySelector('#workflow-decision').value") === '', 'Review decision is preselected.');
+    await evaluate("document.querySelector('#workflow-summary').value = 'Summary only'; document.querySelector('dialog[open] form').requestSubmit()");
+    assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && document.querySelector('#workflow-decision').validity.valueMissing"), 'Review recorded without a chosen decision.');
     await evaluate("document.querySelector('#workflow-decision').value = 'approved'; document.querySelector('#workflow-summary').value = 'Synthetic review'; document.querySelector('#workflow-findings').value = 'Still needs a fix'; document.querySelector('dialog[open] form').requestSubmit()");
     assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && !document.querySelector('#workflow-findings').validity.valid"), 'Required remedies allowed approval.');
     await evaluate("document.querySelector('dialog[open]').close()");

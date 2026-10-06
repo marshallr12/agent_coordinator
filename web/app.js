@@ -1299,8 +1299,10 @@
   function openHumanReview(activity, submission, attempt) {
     if (!attempt) { setGlobalAlert('Refresh the activity to inspect its current ownership.', 'error'); return; }
     const view = workflowDialog('Review this candidate', `This decision applies only to submission ${submission.id}, source ${submission.candidate_revision || 'general task evidence'}. Inspect its acceptance evidence and checks before deciding.`);
-    const decision = view.field('decision', 'Decision', '', 'select'); for (const [value,label] of [['changes_requested','Changes requested'],['approved','Approved']]) { const option = el('option', '', label); option.value = value; add(decision, option); }
-    view.help(decision, 'Decision', 'Choose Approved when the submitted evidence satisfies the acceptance criteria. Choose Changes requested when more work is needed; a revised submission will need fresh review. Approval completes a general task after all required reviews; code must also pass integration.');
+    // An empty first option is the required select's placeholder: no decision is preselected, so the form refuses to record until the reviewer picks one.
+    const decision = view.field('decision', 'Decision', '', 'select'); for (const [value,label] of [['','Choose a decision…'],['approved','Approved'],['changes_requested','Changes requested']]) { const option = el('option', '', label); option.value = value; add(decision, option); }
+    decision.value = '';
+    view.help(decision, 'Decision', 'Nothing is selected until you choose. Choose Approved when the submitted evidence satisfies the acceptance criteria. Choose Changes requested when more work is needed; a revised submission will need fresh review. Approval completes a general task after all required reviews; code must also pass integration.');
     const summary = view.field('summary', 'Review summary');
     view.help(summary, 'Review summary', 'Describe what you inspected and why you approve or request changes. Refer to acceptance criteria, results, or evidence links. For example: Checked the reported test results; the keyboard interaction still needs verification.');
     const findings = view.field('findings', 'Required remedies — one per line'); findings.required = false;
