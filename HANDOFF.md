@@ -147,8 +147,8 @@ active attempt, live reporter, held reservation, unreconciled job or open subage
 (advisories: `replace_closed_session` saves state before registering; transport_status may wait the
 30 s HTTP timeout when upstream is down; idle-close event has no credential class). Integrator pushed
 **`main` `7fdb18b → 55786eb → 8820f08`**. Gate 699 tests, smoke, docs. Both tasks `done`; worktrees
-removed; local branches `dash/sessions-polish-33a3a8dd`, `dash/session-idle-601d1601` kept (`-d`
-refuses from `autonomy-plan`). **Next deploy carries migrations 0025+0026**; the first daily
+removed; local branches `dash/sessions-polish-33a3a8dd`, `dash/session-idle-601d1601` deleted at the
+owner's request (verified on `origin/main`, `git update-ref -d` with expected OID). **Next deploy carries migrations 0025+0026**; the first daily
 maintenance after it will close the ~100 stale sessions. Trap: a repo guard blocks `git reset`, so
 WIP commits cannot be squashed; core `build.rs` watches the worktree HEAD file, so provenance goes
 stale after a branch commit (touch `crates/core/build.rs` before smoke).
