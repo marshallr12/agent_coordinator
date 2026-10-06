@@ -116,6 +116,22 @@ revocation invalidates its authority. `GET /api/v1/sessions/{id}` reconciles it;
 `POST /api/v1/sessions/{id}/close` closes it explicitly. Compaction and ordinary
 turn completion do not close it or create another session automatically.
 
+Host storage maintenance also closes **idle** sessions, by default after 7 days
+without recorded activity in any project (see the
+[retention contract](retention-contract.md#idle-agent-sessions)). A session that
+holds an active attempt (even one whose lease lapsed), a live job reporter, a held
+reservation, an unreconciled job or an open subagent session is never closed this
+way. Each closure records an `agent_session_closed` event (no project) whose data
+names `reason: "idle"`, the session's last activity and the idle period.
+
+A closed session, however it was closed, can never be reopened. `GET
+/api/v1/sessions/{id}` still answers it with `closed_at` set; registering its ID
+again returns `409 session_closed`; every other request that authenticates with
+it is refused as `401 authentication_required`. The client registers a fresh
+session identity and proof. `agent-coordinator connect` (and its `mcp-client`
+launcher) does this automatically for a closed saved session; a standalone MCP
+adapter reports `session_state: "closed"` and its host provisions a new session.
+
 ### Connected sessions per project
 
 `GET /api/v1/projects/{project_id}/sessions?active_within_hours=24` lists the

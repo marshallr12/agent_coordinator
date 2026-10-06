@@ -1111,6 +1111,16 @@ bounded to 16 MiB. Use `--json` for the full transfer receipt.
 
 ## Connected sessions
 
+Host storage maintenance closes sessions idle for 7 days by default (see the
+[retention contract](retention-contract.md#idle-agent-sessions)). When `connect`
+finds its saved session closed, it registers a fresh session identity and proof
+under the same local session name, keeping the workstation, harness,
+capabilities and subagent identity, and reports the old ID as
+`replaced_closed_session_id`. The `mcp-client` launcher does the same before
+launching. Other commands on a closed saved session fail with
+`authentication_required`; run `connect` again. A saved session with an
+unresolved mutation is never replaced; run `retry` first.
+
 `agent-coordinator sessions list` shows the open agent sessions bound to the
 bound project — every session that acknowledged its instructions or holds an
 attempt in it — most recently active first. Use it to see who is still working

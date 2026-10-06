@@ -106,7 +106,9 @@ and **Refresh** to re-read the list.
 
 Last activity comes from instruction acknowledgments, claims, heartbeats,
 progress and checkpoints in this project; reads do not count, so an agent that
-only polls looks idle. A session holding an active attempt is always listed, even
+only polls looks idle. Daily maintenance closes sessions idle in every project
+for longer than 7 days (`COORDINATOR_SESSION_IDLE_DAYS`, 0 disables) unless they
+still hold work, so long-gone agents drop off this list. A session holding an active attempt is always listed, even
 when its lease has lapsed. Closed
 sessions and sessions whose credential was revoked or has expired are not
 listed. To quiesce a project, ask the listed agents to checkpoint and release

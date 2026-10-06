@@ -179,6 +179,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 - Bounded host maintenance compacts expired receipt results and redundant old
   running-observation summaries. Permanent request identities and semantic
   history remain intact. Daily systemd units provide scheduled maintenance.
+  Maintenance also closes agent sessions idle for longer than 7 days (configurable,
+  0 disables) that hold no attempt, job, reporter, reservation or open subagent,
+  recording an event for each; the native CLI reconnects with a fresh session.
 - Known-prefix version-1 snapshots from schema 12 onward verify without source
   changes and migrate only inside a private restore copy. Native release tooling
   verifies package checksums, offline links, systemd/HTTPS installation, and

@@ -9,7 +9,7 @@ The explicit host command is:
 
 ```text
 agent-coordinator-server ... maintenance \
-  --batch-size 500 --max-batches 20
+  --batch-size 500 --max-batches 20 --session-idle-days 7
 ```
 
 It calls:
@@ -49,6 +49,29 @@ Each invocation and its aggregate effects are recorded in `maintenance_runs`.
 The run record is updated in the same short transactions as its compaction
 effects; a process interruption can therefore leave an inspectable `running`
 record without misreporting completed batches.
+
+## Idle agent sessions
+
+Clients rarely close their sessions, so after compaction each run closes open
+agent sessions that have been idle longer than `--session-idle-days` (environment
+`COORDINATOR_SESSION_IDLE_DAYS`; default 7, limited to 0–366, and 0 disables
+closing). A session's last activity is the newest of its registration and, in any
+project, its instruction acknowledgments and its attempts' claims, heartbeats,
+progress, endings and checkpoints; reads never count. This is the same
+derivation as the connected-sessions list. A session is never closed while it
+holds an active attempt (including one whose lease lapsed and awaits recovery),
+a job reporter whose lease has not expired, a held resource reservation, a job
+that is not terminal and not reconciled, or an open subagent session whose
+parent it is. Such a parent becomes eligible once its subagent sessions close.
+
+Closing runs in up to `max_batches` short `BEGIN IMMEDIATE` transactions of
+`batch_size` sessions, each guarded by the same clock checks as compaction. Each
+closure sets `closed_at` and records an `agent_session_closed` event attributed
+to the session's own principal, with data `{"reason":"idle","last_activity_at",
+"idle_days"}`. The run adds `sessions_closed` to `maintenance_runs` and reports
+`idle_sessions_closed`, `remaining.idle_sessions` and
+`limits.session_idle_days`. Clients recover by registering a fresh session; see
+the [API contract](api-contract.md#public-help-credentials-and-sessions) for the client-visible effect.
 
 ## Permanent receipt tombstones
 

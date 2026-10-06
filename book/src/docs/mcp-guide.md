@@ -205,7 +205,11 @@ registration response is known. An identical retry retrieves the same session;
 different parameters for an existing session are rejected. Registration stores
 only the proof verifier. If a credential is rotated, a session is closed, or a
 database restore invalidates authority, configure a new session ID and proof
-instead of trying to attach the old session to a new credential.
+instead of trying to attach the old session to a new credential. Host storage
+maintenance closes sessions idle for 7 days by default; the standalone adapter's
+`coordinator_transport_status` then reports `session_state: "closed"` with a
+`session_action`, and the host must provision a new session ID, proof and adapter
+state directory. The adapter never generates session secrets itself.
 
 Then follow this sequence:
 
