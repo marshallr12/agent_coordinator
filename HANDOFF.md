@@ -130,6 +130,17 @@ keyless-rerank warnings. Downtime 03:12:11–03:13:07 UTC. `/api/v1/info` `8bf99
 worktree `~/src/worktrees/ac-release-8bf99e8` (rollback `~/.local/bin/agent-coordinator.rollback`).
 Not checked: the oracle-1 integrator journal across the downtime.
 
+**DONE (2026-10-06, not deployed): cleanup-rule wording and test polish (d7021e5d).** Session `backlog-1006`
+(CLI, parent `5b189927…`). `90a6000`: the served `git branch -d` rationale now covers branches with an upstream
+(judged against the upstream, else HEAD, never the fetched target); `agent-startup.md` says "this guide" and leads
+with the served locations; `assert_points_to_served_cleanup` in `tests/authentication.rs` forbids 8 cleanup phrases
+in both the guide and `completion-contract.md`. Gate 699 tests, smoke, docs. Subagent review
+`cleanup-polish-review-1` (subagent `reviewer`) approved (advisories: one-phrase upstream assertion;
+completion-contract keeps "this book", fine as book-only). Integrator pushed **`main` `b8eaf4d → 90a6000`**.
+Worktree removed; local branch deleted with `update-ref -d` (no remote task branch). Queue now empty.
+Trap: CLI submission input needs `summary` and `artifact_ids` besides `acceptance_evidence`/`handoff`;
+`request --path` rejects query strings, so poll `tasks show` instead of `/state-wait`.
+
 **DONE (2026-10-06, not deployed): cleanup rule single-sourced, guarded local branch deletion (4da7ffa0).**
 Owner direction: the served `WORKTREE_CLEANUP_INSTRUCTIONS` (orientation instructions, completion_workflow
 step 8, MCP instructions; same for every project) is the only statement of the cleanup procedure;
