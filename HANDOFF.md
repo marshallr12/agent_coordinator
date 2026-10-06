@@ -4,7 +4,22 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Next: S6 reviewed live candidate test — owner runbook (written 2026-10-05, workflow off)
+## Current resume point — P3b and P6 (2026-10-06, workflow on)
+
+S6 is complete (canary `f92bf97d` done; live policy `integration_owner=integrator`), and the
+`hardening/claude-token-20261003` and `autonomy/s6` records were reconciled onto `main`. The rest of
+the plan (plan-final §3: **P3b pilot, go/no-go, then P6 dogfood**) is tracked as live
+coordinator tasks in project `fe95a6c5…`. Read them from the service, not from here:
+- ready now: ship.py leftovers (`a0c621fb`), cross-launch push-socket isolation (`308d4766`),
+  review-dialog lease (`7ebdafe0`), U5 `distinct_launch` enforcement (`aecb01d7`), oracle-1
+  supervised-host runbook (`2cd084ae`), P3b pilot-core gap audit (`2a84ec3d`);
+- planned (admit when ready): owner `--uninstall` root run on mxmini (`acaea18b`), owner oracle-1
+  bring-up (`740cc14a`, after the runbook), P3b 5-task pilot + go/no-go (`1a3e8b2d`), P6
+  readiness + dogfood (`b5eb26e1`), optional shadow cost run (`c744c495`).
+New agent work is un-paused: these run through the normal coordinator workflow, with review
+subagents and the integrator.
+
+## S6 reviewed live candidate test — owner runbook (2026-10-05): PASS, historical
 
 The user chose a guided test: the owner runs every step; this session only wrote the steps
 (its read of the oracle-1 journal was blocked as a production read). Goal: one approved code
