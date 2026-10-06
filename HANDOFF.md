@@ -10,12 +10,14 @@ S6 is complete (canary `f92bf97d` done; live policy `integration_owner=integrato
 `hardening/claude-token-20261003` and `autonomy/s6` records were reconciled onto `main`. The rest of
 the plan (plan-final §3: **P3b pilot, go/no-go, then P6 dogfood**) is tracked as live
 coordinator tasks in project `fe95a6c5…`. Read them from the service, not from here:
-- ready now: ship.py leftovers (`a0c621fb`), cross-launch push-socket isolation (`308d4766`),
-  review-dialog lease (`7ebdafe0`), U5 `distinct_launch` enforcement (`aecb01d7`), oracle-1
-  supervised-host runbook (`2cd084ae`), P3b pilot-core gap audit (`2a84ec3d`);
-- planned (admit when ready): owner `--uninstall` root run on mxmini (`acaea18b`), owner oracle-1
-  bring-up (`740cc14a`, after the runbook), P3b 5-task pilot + go/no-go (`1a3e8b2d`), P6
-  readiness + dogfood (`b5eb26e1`), optional shadow cost run (`c744c495`).
+- P3b core per U28 (ready): run loop `b2c4fab1`; then lease lifecycle `5c9f15eb`, reviewer verdict
+  `6cf630c0`, health/cost/kill switch `393f1680` (each depends on the run loop); recovery evidence
+  `9181e1e3`. Also ready: push-socket isolation `308d4766`, review-dialog lease `7ebdafe0`, U5
+  `distinct_launch` `aecb01d7`.
+- planned: owner `--uninstall` on mxmini `acaea18b`; owner oracle-1 bring-up `740cc14a` (runbook in
+  `book/src/deploy/README.md` "Bringing up a supervised host"); P3b 5-task pilot + go/no-go
+  `47d4403d`; attention budget (deferred to P6 by U28) `c6b33a77`; P6 readiness + dogfood `d513bc21`;
+  optional shadow cost run `c744c495`.
 New agent work is un-paused: these run through the normal coordinator workflow, with review
 subagents and the integrator.
 
@@ -902,6 +904,7 @@ Record answers here.
 | U25 | R-P3b.2 how a launch starts the `agentc-push` helper (the supervisor runs as the role uid and cannot switch users) | Root launch wrapper `agentc-supervisor launch-root`: as root it creates the socket dir (`agentc-push:agentc-impl` 2750), starts the helper as `agentc-push` from a launch-lived thread (env cleared, `--parent-pid`, `--known-digest`), runs today's launch as `agentc-impl`, then tears the helper down. No sudo rights for `agentc-impl`; matches plan-final §2.3 | 2026-10-02: **as recommended** |
 | U26 | R-P3b.2 narrows U24: in-launch resubmission is refused by the server (409 `submission_current`) after the helper's ref has already moved | One commit per launch: after its first accepted push the helper refuses any other commit with a new refusal code; an idempotent same-commit retry still succeeds | 2026-10-02: **as recommended** |
 | U27 | Agent-account Claude auth (owner proof 2026-10-03 on oracle-1: Claude 2.1.287 refreshes only after `mkdir claude-config/.oauth_refresh.lock`, which the root-owned claude-config denies, so `claude auth login` credentials die after ~8h) | `claude setup-token` per role (long-lived, inference-only); the supervisor reads root:agentc-<role> 0440 `<state>/<role>/claude-token` at spawn and passes `CLAUDE_CODE_OAUTH_TOKEN` (never in the described/audited env); `.credentials.json` retired; claude-config stays read-only | 2026-10-03: **as recommended** |
+| U28 | P3b pilot-core scope (gap audit `2a84ec3d`: ~2.5-2.7k lines remaining vs the 1.5k budget; plan-final §2.1 stop-and-re-scope) | Trim to essentials: run loop, lease lifecycle, recovery evidence, reviewer verdict, health/cost/kill switch (~1.8-2.0k); attention-budget items (digest, M1 timeouts, canary paging, stall-as-HRI, path overlap, audit sample) become scripts or move to P6 | 2026-10-06: **as recommended** |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
