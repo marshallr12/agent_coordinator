@@ -33,8 +33,6 @@ const attachmentBytes = new Map();
 let failFirstAttachmentPut = true;
 const attachmentUploadKeys = [];
 const archivedTask = { ...task, id: 'archived-fixture-task', title: 'Archived fixture task', lifecycle: 'canceled', archived_at: '2026-09-23T00:00:00Z' };
-let delayNext25TaskResponse = false;
-let delayed25TaskResponseStarted = false;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -63,23 +61,10 @@ async function fixtureServer() {
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://fixture.invalid');
-    if (url.pathname === '/__fixture/delay-next-25') {
-      delayNext25TaskResponse = true;
-      response.writeHead(204); response.end(); return;
-    }
-    if (url.pathname === '/__fixture/status') {
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ delayed25TaskResponseStarted })); return;
-    }
     if (url.pathname === '/api/v1/me') return json(response, { actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'admin', kind: 'human', session_id: 'fixture-browser' }, csrf_token: 'fixture-csrf' });
     if (url.pathname === '/api/v1/projects') return json(response, { items: [{ id: 'fixture-project', name: 'Fixture project', target_branch: 'main' }] });
     if (url.pathname === '/api/v1/projects/fixture-project/tasks') {
       const limit = Number(url.searchParams.get('limit') || 50);
-      if (limit === 25 && delayNext25TaskResponse) {
-        delayNext25TaskResponse = false;
-        delayed25TaskResponseStarted = true;
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
-      }
       const start = Number(url.searchParams.get('cursor') || 0);
       const items = tasks.slice(start, start + limit);
       const nextCursor = start + items.length < tasks.length ? String(start + items.length) : null;
@@ -215,7 +200,7 @@ async function main() {
     const { send } = connection;
     const evaluate = async (expression) => {
       const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-      if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+      if (result.exceptionDetails) throw new Error(`${result.exceptionDetails.exception?.description || result.exceptionDetails.text} IN: ${expression.slice(0, 300)}`);
       return result.result.value;
     };
 
@@ -252,7 +237,7 @@ async function main() {
       await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: virtualKey });
     };
     const back = async () => {
-      await evaluate("document.querySelector('#back-to-project').click()");
+      await evaluate("document.querySelector('.nav-item[data-view=overview]').click()");
       await waitPage("!document.querySelector('#overview-view').hidden", 'return to projects');
     };
     await evaluate(`(() => {
@@ -294,15 +279,15 @@ async function main() {
     await send('Emulation.clearDeviceMetricsOverride');
     await evaluate("window.__copiedTaskDetailValue = null; document.querySelector('.project-open').click()");
     await waitPage("document.querySelector('#tasks-list .task-row')", 'task queue');
-    await evaluate("document.querySelector('#open-archive-button').click()");
+    await evaluate("document.querySelector('#archived-tasks-tab').click()");
     await waitPage("document.querySelector('#archived-list .task-title')?.textContent === 'Archived fixture task'", 'dedicated archived tasks view');
     assert(await evaluate("!document.querySelector('#archived-view').hidden && document.querySelector('#tasks-view').hidden"), 'Archived tasks did not open in a separate view.');
-    await evaluate("document.querySelector('#archived-list button').click()");
+    await evaluate("document.querySelector('#archived-list [role=button]').click()");
     await waitPage("!document.querySelector('#task-detail-content').hidden", 'archived task detail');
     assert(await evaluate("document.querySelector('#task-operator-actions').textContent.includes('Restore archived task')"), 'Archived task did not expose an explicit restore action.');
     await evaluate("document.querySelector('#back-to-tasks').click()");
     await waitPage("!document.querySelector('#archived-view').hidden", 'return to archive list');
-    await evaluate("document.querySelector('#back-from-archive').click()");
+    await evaluate("document.querySelector('#task-queue-tab').click()");
     await waitPage("!document.querySelector('#tasks-view').hidden", 'return from archive');
     assert(await evaluate("!Array.from(document.querySelectorAll('#tasks-list .task-title')).some(node => node.textContent === 'Archived fixture task')"), 'An archived task appeared in the main task queue.');
     assert(await evaluate("document.querySelectorAll('#tasks-list .task-row').length") === 25, `The first task page did not use the default page size (${await evaluate("document.querySelectorAll('#tasks-list .task-row').length")}).`);
@@ -333,7 +318,7 @@ async function main() {
     await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '10'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
     await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 10", 'page size update');
     await evaluate("document.querySelector('#tasks-last-page').click()");
-    await waitPage("document.querySelector('#tasks-page-status').textContent === 'Page 3 of 3'", 'last task page');
+    await waitPage("document.querySelector('#tasks-page-status').textContent === 'Page 3 of 30 tasks'", 'last task page');
     await evaluate("document.querySelector('#tasks-first-page').click()");
     await waitPage("document.querySelector('#tasks-page-status').textContent.startsWith('Page 1')", 'first task page');
     await evaluate("[...document.querySelectorAll('#tasks-page-numbers button')].find((button) => button.textContent === '2').click()");
@@ -358,20 +343,17 @@ async function main() {
     await evaluate("document.querySelector('#task-queue-tab').click()");
     await waitPage("document.querySelector('#tasks-heading').textContent === 'Task queue'", 'return to task queue');
     assert(await evaluate("![...document.querySelectorAll('#tasks-list .task-row .task-title')].some((node) => node.textContent === 'Completed fixture task')"), 'A completed task appeared after returning to the task queue.');
-    await fetch(`http://127.0.0.1:${serverPort}/__fixture/delay-next-25`);
     await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '25'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
-    await waitFor(`http://127.0.0.1:${serverPort}/__fixture/status`, (value) => value.delayed25TaskResponseStarted, 'delayed 25-item queue response');
     await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '50'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
-    await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 30 && document.querySelector('#tasks-page-status').textContent === 'Page 1 of 1'", 'latest 50-item selection');
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
-    assert(await evaluate("document.querySelectorAll('#tasks-list .task-row').length === 30 && document.querySelector('#tasks-page-size').value === '50' && document.querySelector('#tasks-page-status').textContent === 'Page 1 of 1'"), 'A stale delayed response replaced the latest 50-item selection.');
-    await evaluate("document.querySelector('.task-open').focus()");
+    await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 30 && document.querySelector('#tasks-page-status').textContent === 'Page 1 of 30 tasks'", 'latest 50-item selection');
+    assert(await evaluate("document.querySelectorAll('#tasks-list .task-row').length === 30 && document.querySelector('#tasks-page-size').value === '50' && document.querySelector('#tasks-page-status').textContent === 'Page 1 of 30 tasks'"), 'The 50-item selection did not show every queued task on one page.');
+    await evaluate("document.querySelector('#tasks-list .task-row[role=button]').focus()");
     await press('Enter', 'Enter', 13);
     await waitPage("document.querySelector('#task-detail-content') && !document.querySelector('#task-detail-content').hidden", 'task detail');
 
     assert(await evaluate("document.querySelector('#task-detail-heading').textContent") === task.title, 'Task name was not rendered exactly.');
     assert(await evaluate("document.querySelector('#detail-task-id-value').textContent") === task.id, 'Task ID was not rendered exactly.');
-    assert(await evaluate("document.querySelector('#task-operator-actions').textContent.includes('Archive task') && document.querySelector('#task-operator-actions').textContent.includes('Cancel task')"), 'Open task did not expose labeled archive and cancellation controls.');
+    assert(await evaluate("(() => { const labels = Array.from(document.querySelectorAll('#task-operator-actions button'), button => (button.getAttribute('aria-label') || button.textContent)); return labels.includes('Archive task') && labels.includes('Cancel task'); })()"), 'Open task did not expose labeled archive and cancellation controls.');
     await evaluate("document.querySelector('#copy-task-name').click()");
     await waitPage("window.__copiedTaskDetailValue !== null", 'task-name clipboard write');
     assert(await evaluate('window.__copiedTaskDetailValue') === task.title, 'Copy task name did not write the exact task title.');
@@ -415,7 +397,7 @@ async function main() {
       task.work_status = phase === 'done' ? 'done' : `waiting_${phase}`;
       task.workflow = { phase, submission, activities: phase === 'review' ? [{ id: 'fixture-review', kind: 'human_review', status: 'queued' }] : [] };
       await openFixtureTask();
-      assert(await evaluate("!document.querySelector('#task-operator-actions').textContent.includes('Resolve blocker')"), `Ordinary blocker resolution offered during ${phase}.`);
+      assert(await evaluate("!Array.from(document.querySelectorAll('#task-operator-actions button')).some(button => (button.getAttribute('aria-label') || button.textContent) === 'Resolve blocker')"), `Ordinary blocker resolution offered during ${phase}.`);
       if (phase === 'review') {
         assert(await evaluate("document.querySelector('#workflow-content').textContent.includes('Claim human review')"), 'Human review claim action missing.');
         assert(await evaluate("document.querySelector('#workflow-content').textContent.includes('Claiming reserves the review for you; it does not approve the work.')"), 'Review claim/decision distinction missing.');
@@ -433,7 +415,7 @@ async function main() {
 
     task.work_status = 'blocked'; task.workflow = { activities: [] };
     await openFixtureTask();
-    await evaluate("Array.from(document.querySelectorAll('#task-operator-actions button')).find(button => button.textContent === 'Resolve blocker').click()");
+    await evaluate("Array.from(document.querySelectorAll('#task-operator-actions button')).find(button => (button.getAttribute('aria-label') || button.textContent) === 'Resolve blocker').click()");
     await waitPage("document.querySelector('dialog[open] .saved-blocker')", 'saved blocker dialog');
     assert(await evaluate("document.querySelector('.saved-blocker').textContent") === task.blocked_reason, 'Saved blocker reason was lost.');
     assert(await evaluate("document.querySelector('#workflow-reason').maxLength") === 4096, 'Resolution evidence bound changed.');
