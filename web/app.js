@@ -345,7 +345,7 @@
       const changed = JSON.stringify(projects) !== JSON.stringify(state.projects);
       state.projects = projects;
       if (!silent || changed) { renderProjects(); fillProjectSelect(); }
-      renderSummary();
+      renderSummary(); if (state.currentView === 'reports') setReportsProjectLabel();
     }
     catch (error) { if (!silent) { setState($('projects-state'), errorMessage(error), false, true); } }
     finally { state.fetching.delete('projects'); }
@@ -1666,7 +1666,9 @@
   // Integration owner: a human-only policy setting that the general policy
   // dialogs preserve by omission, so it has its own confirmed control.
   const OWNER_LABELS = {agent:'Agents', integrator:'Integrator service'};
+  // The display name for an owner value; unknown values pass through.
   const ownerLabel = owner => OWNER_LABELS[owner] || text(owner) || 'Unknown';
+  // One sentence naming the current owner and its policy revision.
   const ownerLine = project => `Current owner: ${ownerLabel(project.integration_owner)} (policy revision ${project.policy_revision}).`;
   // Shows the current owner on the settings page; only humans get the control.
   async function loadIntegrationOwner(projectId) {
@@ -1732,13 +1734,17 @@
 
   // Integrator reports: findings the integrator records; humans resolve them.
   const REPORT_KINDS = {privilege_gate:'Privilege gate', flaky:'Flaky check', fix_target:'Target needs a fix', unreviewed_landing:'Unreviewed landing', target_rewritten:'Target rewritten', ruleset_missing:'Ruleset missing'};
+  // The display name for a report kind; unknown kinds get a readable form.
   const reportKind = report => REPORT_KINDS[report.kind] || displayStatus(report.kind);
   // Opens the reports page for the current project.
   function openReports() {
     if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    setReportsProjectLabel(); showView('reports'); $('reports-heading').focus(); loadReports();
+  }
+  // Names the project in the reports header; reruns once projects load after a reload.
+  function setReportsProjectLabel() {
     const project = state.projects.find(item => text(item.id) === state.projectId);
     setText($('reports-project-label'), project?.name || 'Project');
-    showView('reports'); $('reports-heading').focus(); loadReports();
   }
   // Loads one page of reports, newest first, replacing or extending the list.
   async function loadReports(append = false) {
@@ -1751,7 +1757,12 @@
     try {
       const page = (await request(`${projectPath(projectId)}/integrator/reports?${query}`)).data;
       if (seq === state.reportsSeq && projectId === state.projectId) renderReports(page);
-    } catch (error) { if (seq === state.reportsSeq) setState($('reports-state'), errorMessage(error), false, true); }
+    } catch (error) { if (seq === state.reportsSeq) reportsLoadFailed(error, append); }
+  }
+  // Shows a load error; a failed next page keeps its cursor so Load more can retry.
+  function reportsLoadFailed(error, append) {
+    setState($('reports-state'), errorMessage(error), false, true);
+    show($('load-more-reports'), Boolean(append && state.reportsCursor));
   }
   // Appends a page of report cards and shows the next-page control.
   function renderReports(page) {
@@ -1772,6 +1783,7 @@
     if (!report.resolved_at && state.actor?.kind === 'human') add(card, actionButton('Resolve report', () => openResolveReport(report)));
     return card;
   }
+  // The badge state class: resolved, waiting for a person, or open.
   const reportState = report => report.resolved_at ? 'resolved' : report.requires_human ? 'needs-human' : 'open';
   // A short state label, including a privilege gate's recorded decision.
   function reportStatus(report) {

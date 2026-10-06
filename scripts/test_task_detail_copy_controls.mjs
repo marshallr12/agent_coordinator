@@ -52,6 +52,7 @@ const reports = [
   fixtureReport('privilege-report', 'privilege_gate', { requires_human: true, details: { paths: ['.github/workflows/ci.yml'] } }),
 ];
 const reportQueries = [];
+let failNextReportPage = false;
 const reportResolutions = [];
 
 function assert(condition, message) {
@@ -97,6 +98,7 @@ async function policyRoute(request, response) {
 // Lists reports newest first after the `before` cursor, like the service.
 function reportListRoute(url, response) {
   reportQueries.push(Object.fromEntries(url.searchParams));
+  if (failNextReportPage && url.searchParams.has('before')) { failNextReportPage = false; return refuse(response, 503, 'unavailable', 'Reports are temporarily unavailable.'); }
   const open = url.searchParams.get('open') === 'true', limit = Number(url.searchParams.get('limit') || 200);
   const newest = [...reports].reverse(), before = url.searchParams.get('before');
   const start = before ? newest.findIndex((report) => report.id === before) + 1 : 0;
@@ -305,9 +307,20 @@ async function checkReportPaging(page) {
   await waitPage("document.querySelectorAll('#reports-list .report-card').length === 50 && !document.querySelector('#load-more-reports').hidden", 'first page of all reports');
   assert(!('open' in reportQueries.at(-1)) && reportQueries.at(-1).limit === '50', 'All-report listing sent the wrong query.');
   assert(await evaluate("document.querySelector('[data-report-id=\"privilege-report\"]').textContent.includes('Resolved: allowed')"), 'Resolved privilege gate did not show its decision.');
+  await checkLoadMoreFailure(page);
   await evaluate("document.querySelector('#load-more-reports').click()");
   await waitPage("document.querySelectorAll('#reports-list .report-card').length === 53 && document.querySelector('#load-more-reports').hidden", 'second page of all reports');
   assert(reportQueries.at(-1).before === reports[3].id, `Next page used the wrong cursor (${reportQueries.at(-1).before}).`);
+}
+
+// A failed next page keeps its cards and cursor and offers Load more again.
+async function checkLoadMoreFailure(page) {
+  const { evaluate, waitPage } = page;
+  failNextReportPage = true;
+  await evaluate("document.querySelector('#load-more-reports').click()");
+  await waitPage("document.querySelector('#reports-state').textContent.includes('temporarily unavailable') && !document.querySelector('#load-more-reports').hidden", 'load-more failure keeps the control');
+  assert(await evaluate("document.querySelectorAll('#reports-list .report-card').length") === 50, 'A failed next page dropped the loaded reports.');
+  assert(reportQueries.at(-1).before === reports[3].id, 'The failed next page used the wrong cursor.');
 }
 
 // Integrator reports: open list, resolves, a raced resolve, paging, return.
@@ -656,7 +669,7 @@ async function main() {
     await waitPage("document.querySelector('#issue-feedback').textContent.includes('Clipboard access was unavailable')", 'token manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
-    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging and resolution (privilege allow/deny and already-resolved refusal), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny and already-resolved refusal), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
