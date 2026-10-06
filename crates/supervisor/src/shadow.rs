@@ -102,15 +102,23 @@ pub async fn run(config: &ShadowConfig, once: bool) -> Result<()> {
 /// Builds a client from the configured credential file entry.
 fn connect(config: &ShadowConfig) -> Result<CoordinatorClient> {
     let path = &config.credential_file;
+    client(path, &config.origin, config.allow_insecure_loopback)
+}
+
+/// A client for the entry of the CLI-format credentials file at `path`
+/// whose origin is `origin` (normalized), or its first entry when `origin`
+/// is empty.
+pub(crate) fn client(path: &Path, origin: &str, insecure: bool) -> Result<CoordinatorClient> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let file: CredentialFile =
         toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let normal = |o: &str| coordinator_client::normalize_origin(o, insecure).ok();
     let entry = file
         .credentials
         .into_iter()
-        .find(|c| config.origin.is_empty() || c.origin == config.origin)
+        .find(|c| origin.is_empty() || normal(&c.origin) == normal(origin))
         .with_context(|| format!("no matching credential in {}", path.display()))?;
-    CoordinatorClient::new(&entry.origin, entry.token, config.allow_insecure_loopback)
+    CoordinatorClient::new(&entry.origin, entry.token, insecure)
         .map_err(|error| anyhow::anyhow!("coordinator client: {error}"))
 }
 
@@ -152,7 +160,11 @@ async fn project_ids(client: &CoordinatorClient, config: &ShadowConfig) -> Resul
 }
 
 /// `GET next` for one project and role.
-async fn fetch_next(client: &CoordinatorClient, project: &str, role: &str) -> Result<Value> {
+pub(crate) async fn fetch_next(
+    client: &CoordinatorClient,
+    project: &str,
+    role: &str,
+) -> Result<Value> {
     let path = format!("/api/v1/projects/{project}/next");
     get_data(client, &path, &[("role", role.to_owned())]).await
 }
@@ -262,7 +274,7 @@ fn append(path: &Path, record: &Value) -> Result<()> {
 }
 
 /// Milliseconds since the Unix epoch (0 if the clock is before it).
-fn now_ms() -> u128 {
+pub(crate) fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis())

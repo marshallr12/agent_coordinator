@@ -24,7 +24,8 @@ pub enum Role {
 }
 
 /// Which vendor harness runs the launch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Harness {
     Claude,
     Codex,
@@ -251,6 +252,11 @@ fn environment(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
     env.extend(crate::verification::environment(spec, config));
     if let Some(socket) = &spec.push_socket {
         env.push((PUSH_SOCKET_ENV.into(), socket.into()));
+    }
+    if spec.role == Role::Implementer && spec.task.is_some() {
+        // The session `run` claimed the task in; its state is in this run.
+        let session = spec.session_id.to_string();
+        env.push(("AGENT_COORDINATOR_SESSION".into(), session.into()));
     }
     if crate::candidate::applies(spec) {
         // Every reviewer Bash command runs as candidate code (R-P3b.3).

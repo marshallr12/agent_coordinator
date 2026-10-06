@@ -18,7 +18,7 @@
 //! `sandbox::bind_push_socket`). A Codex launch runs in the host namespace as
 //! the implementer account, the group of every launch's socket directory, so
 //! it can reach a concurrent implementer launch's helper.
-mod accounts;
+pub(crate) mod accounts;
 mod files;
 mod layout;
 

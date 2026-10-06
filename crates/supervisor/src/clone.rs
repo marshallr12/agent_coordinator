@@ -70,6 +70,12 @@ pub fn hardening_problems(clone: &Path) -> Result<Vec<String>> {
     Ok(problems)
 }
 
+/// Runs hardened Git in `cwd` and returns its trimmed stdout; `run` uses it
+/// on the root-owned mirror.
+pub fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
+    text(run(Some(cwd), args)?)
+}
+
 /// Runs Git with hooks and fsmonitor disabled for this invocation too.
 fn git(cwd: Option<&Path>, args: &[&str]) -> Result<Output> {
     let mut command = Command::new("git");
