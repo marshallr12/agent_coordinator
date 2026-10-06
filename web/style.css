@@ -269,3 +269,14 @@ a.nav-item { text-decoration: none; }
 .check-help-panel { grid-column: 1 / -1; margin: 0; }
 .check-row > div { min-width: 0; }
 .contextual-help button { min-height: 32px; }
+.report-list { display: grid; gap: 14px; }
+.report-card .card-header h2 { font-size: 16px; }
+.report-facts { display: grid; grid-template-columns: minmax(7rem, auto) 1fr; gap: .4rem 1rem; margin: 12px 0; font-size: 13px; }
+.report-facts dd { margin: 0; overflow-wrap: anywhere; }
+.report-card pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 26rem; overflow: auto; font-size: 12px; }
+.report-card > .button { margin-top: 12px; }
+.status-badge.report-needs-human { color: #963d4b; background: var(--red-soft); }
+.status-badge.report-open { color: #795218; background: var(--amber-soft); }
+.status-badge.report-resolved { color: #176762; background: var(--teal-soft); }
+.current-integration-owner { font-weight: 750; }
+@media (max-width: 650px) { .report-facts { grid-template-columns: 1fr; } }

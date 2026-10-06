@@ -149,8 +149,9 @@ Stop/disable the shadow unit. Replace the read credential with an integrator
 **write** credential in the protected host file. Edit both runtime credential
 paths in the configuration from `@shadow.service` to `@run.service`.
 Repeat preflight and confirm main still matches the measured SHA. The human
-sets `integration_owner=integrator` in project policy, preserving the current
-policy revision and all other fields. Enable/start
+sets `integration_owner=integrator` in project policy (dashboard project settings,
+**Change integration owner**), preserving the current policy revision and all
+other fields. Enable/start
 `agentc-integrator@run.service` and check the live heartbeat, watchdog,
 privilege gates and a reviewed canary's check receipts, lease publication and
 service completion. Read the remote main tip back; push exit status alone is

@@ -82,8 +82,19 @@
                 <article class="card"><h3>Policy & instructions</h3><p class="muted">Set project-wide instructions, ownership leases, and recovery rules.</p><button id="project-policy-button" class="button subtle" type="button">Project policy</button></article>
                 <article class="card"><h3>Review & integration</h3><p class="muted">Choose who reviews submitted work and whether integration needs human authorization.</p><button id="project-review-button" class="button subtle" type="button">Review & integration rules</button></article>
                 <article class="card"><h3>Required checks</h3><p class="muted">Configure the validation checks required before code can be integrated.</p><button id="workflow-settings" class="button subtle" type="button">Required check settings</button></article>
+                <article class="card"><h3>Integration owner</h3><p id="integration-owner-summary" class="muted">Who publishes approved code to the target branch.</p><button id="integration-owner-button" class="button subtle" data-mutation="true" type="button">Change integration owner</button></article>
+                <article class="card"><h3>Integrator reports</h3><p class="muted">Findings the integrator recorded, such as privilege gates and flaky checks. Resolve the ones that need a person.</p><button id="integrator-reports-button" class="button subtle" type="button">Integrator reports</button></article>
               </div>
               <article class="card project-binding-card"><h2>Repository binding</h2><p class="muted">Download this non-secret file, then place <code>.agent-coordinator.toml</code> in the root of your repository so agents connect to this project.</p><div id="project-binding-content" class="binding-content"></div></article>
+            </section>
+
+            <section id="reports-view" class="page-view" aria-labelledby="reports-heading" hidden>
+              <div class="detail-back-row"><button id="back-to-project-settings" class="button text-button" type="button">← Project settings</button></div>
+              <div class="page-heading"><div><p id="reports-project-label" class="eyebrow"></p><h1 id="reports-heading" tabindex="-1">Integrator reports</h1><p class="muted">Findings the integrator recorded for this project, newest first. A report that needs a person stops the integrator until a human resolves it.</p></div></div>
+              <div class="toolbar"><label class="select-label" for="reports-filter">Show<select id="reports-filter"><option value="open">Open reports</option><option value="all">All reports</option></select></label><button id="refresh-reports" class="button subtle" type="button">Refresh</button></div>
+              <div id="reports-state" class="state-panel" role="status"></div>
+              <div id="reports-list" class="report-list"></div>
+              <button id="load-more-reports" class="button subtle" type="button" hidden>Load more reports</button>
             </section>
 
             <nav id="task-view-tabs" class="task-view-tabs" role="tablist" aria-label="Task views" hidden>

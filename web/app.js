@@ -8,7 +8,7 @@
     try { return localStorage.getItem(TASK_AUTO_REFRESH_KEY) === 'true'; } catch { return false; }
   }
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0,
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0, reportsCursor: null, reportsSeq: 0,
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null, credentialDownloadUrl: null,
     taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedTasks: [], archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
@@ -128,6 +128,7 @@
     if (method === 'POST' && /\/admin\/agents\/[^/]+\/credentials$/.test(path)) return 'rotate_credential';
     if (method === 'POST' && path === '/api/v1/resources') return 'create_resource';
     if (method === 'POST' && /\/projects\/[^/]+\/reservations\/[^/]+\/resolve$/.test(path)) return 'resolve_resource';
+    if (method === 'POST' && /\/projects\/[^/]+\/integrator\/reports\/[^/]+\/resolve$/.test(path)) return 'resolve_integrator_report';
     if (method === 'POST' && path === '/api/v1/projects') return 'create_project';
     if (method === 'POST' && /\/projects\/[^/]+\/tasks$/.test(path)) return 'create_task';
     if (method === 'POST' && path === '/api/v1/admin/agents') return 'issue_credential';
@@ -256,6 +257,7 @@
     document.querySelectorAll('dialog').forEach(dialog => dialog.close());
     state.mutation = null; state.actor = null; state.csrfToken = null; state.projects = []; state.tasks = []; state.detail = null;
     ++state.sharedSeq; state.sharedCursor = null; clear($('shared-list')); setText($('shared-freshness'), '');
+    ++state.reportsSeq; state.reportsCursor = null; clear($('reports-list'));
     $('context-search').reset();
     state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
@@ -275,10 +277,10 @@
 
   function showView(view) {
     state.currentView = view;
-    ['overview', 'project', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
+    ['overview', 'project', 'reports', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
     show($('task-view-tabs'), view === 'tasks' || view === 'archived');
     updateTaskViewTabs();
-    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (view === 'project' && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
+    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
     if (view === 'tasks') { fillProjectSelect(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
   }
 
@@ -302,6 +304,7 @@
     if (operation === 'workflow_change') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; if (state.selectedTaskId) { showView('task-detail'); await loadTaskDetail(); } else await loadTasks(); setGlobalAlert('Workflow update recorded. Inspect the current candidate and next actions.', 'success'); };
     if (operation === 'create_resource') return async () => { await loadResources(); setGlobalAlert('Resource created.', 'success'); };
     if (operation === 'resolve_resource') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || state.selectedTaskId; showView('task-detail'); await loadTaskDetail(); setGlobalAlert('Resolution recorded. Review the updated job and hold evidence.', 'success'); };
+    if (operation === 'resolve_integrator_report') return async () => { state.projectId = context.projectId || state.projectId; openReports(); setGlobalAlert('Report resolution recorded. Review the current reports.', 'success'); };
     if (operation === 'create_project') return async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); };
     if (operation === 'create_task') return async () => { state.projectId = context.projectId || state.projectId; await loadTasks(); setGlobalAlert('Task created.', 'success'); };
     if (operation === 'archive_completed_task') return async () => { removeCompletedTask(context.projectId, context.taskId); };
@@ -418,8 +421,15 @@
     });
     add(binding, download);
     showView('project'); $('project-heading').focus();
+    loadIntegrationOwner(state.projectId);
   }
   $('back-to-projects').addEventListener('click', () => showView('overview'));
+  $('integration-owner-button').addEventListener('click', openIntegrationOwner);
+  $('integrator-reports-button').addEventListener('click', openReports);
+  $('back-to-project-settings').addEventListener('click', () => openProjectSettings(state.projectId));
+  $('reports-filter').addEventListener('change', () => loadReports());
+  $('refresh-reports').addEventListener('click', () => loadReports());
+  $('load-more-reports').addEventListener('click', () => loadReports(true));
   $('project-review-button').addEventListener('click', async () => {
     const projectId = state.projectId;
     try {
@@ -1158,7 +1168,10 @@
     agent_rule_editing: 'Allow agents to change the binding rules text for this project. Humans still control review, integration, recovery and lease settings. Leave this off when rule changes need an operator.',
     lease_seconds: 'How long task ownership lasts without renewal, from 30 to 3600 seconds. Example only: 600 means ten minutes. Agents must renew before expiry; reading a task or saving a checkpoint does not renew ownership.',
     rules: 'Instructions every agent working on this project must follow, such as required validation and repository conventions. Saving a change creates a new policy revision that agents must read and acknowledge.',
-    provenance: 'Explain why the policy is changing and cite the request, decision or other supporting source so later workers can understand it. Use your actual reason and source.'
+    provenance: 'Explain why the policy is changing and cite the request, decision or other supporting source so later workers can understand it. Use your actual reason and source.',
+    integration_owner: 'Agents: a connected agent claims each approved candidate’s integration and publishes it. Integrator service: the integrator computes, checks and pushes approved results itself, and agents cannot claim integration. Only a human may change this. Switching back to agents is the rollback.',
+    report_decision: 'Allow lets the integrator push this exact result, including its privileged changes. Deny keeps the result off the target branch. Inspect the changed paths in the report details first.',
+    resolution_note: 'Record what you checked or did about this finding, such as a rerun, a fix, or why it is safe. The note is kept with the report for later workers.'
   };
   const helpDismissals = new WeakMap();
   function setupHelpDismissal(dialog) {
@@ -1648,6 +1661,170 @@
         dialog.close(); startMutation(`${projectPath(projectId)}/policy`, body, 'project policy', async () => { await loadProjects(); setGlobalAlert('Project policy saved.', 'success'); }, 'PATCH', null, {projectId});
       });
     } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+
+  // Integration owner: a human-only policy setting that the general policy
+  // dialogs preserve by omission, so it has its own confirmed control.
+  const OWNER_LABELS = {agent:'Agents', integrator:'Integrator service'};
+  const ownerLabel = owner => OWNER_LABELS[owner] || text(owner) || 'Unknown';
+  const ownerLine = project => `Current owner: ${ownerLabel(project.integration_owner)} (policy revision ${project.policy_revision}).`;
+  // Shows the current owner on the settings page; only humans get the control.
+  async function loadIntegrationOwner(projectId) {
+    const summary = $('integration-owner-summary');
+    show($('integration-owner-button'), state.actor?.kind === 'human');
+    setText(summary, 'Reading the current integration owner…');
+    try {
+      const project = (await request(`${projectPath(projectId)}/orientation`)).data.project;
+      if (projectId === state.projectId) setText(summary, ownerLine(project));
+    } catch (error) { if (projectId === state.projectId) setText(summary, `The current integration owner could not be read: ${errorMessage(error)}`); }
+  }
+  // Reads the live policy, then opens the owner dialog for a human operator.
+  async function openIntegrationOwner() {
+    if (state.actor?.kind !== 'human') { setGlobalAlert('Only a human operator can change the integration owner.'); return; }
+    const projectId = state.projectId, currentActor = actorId();
+    try {
+      const project = (await request(`${projectPath(projectId)}/orientation`)).data.project;
+      if (projectId === state.projectId && actorId() === currentActor) integrationOwnerDialog(projectId, project);
+    } catch (error) { setGlobalAlert(errorMessage(error)); }
+  }
+  // Builds the dialog: current owner, new owner, provenance and confirmation.
+  function integrationOwnerDialog(projectId, project) {
+    const view = workflowDialog('Integration owner', 'The integration owner publishes approved code to the target branch. Changing it creates a new policy revision that agents must acknowledge. The service refuses the change while an integration holds the target.');
+    add(view.form, el('p', 'current-integration-owner', ownerLine(project)));
+    const owner = selectField(view, 'integration_owner', 'New integration owner', project.integration_owner, [['agent','Agents integrate approved candidates'],['integrator','The integrator service integrates approved candidates']]);
+    view.field('provenance', 'Reason and supporting source').maxLength = 4096;
+    ownerConfirmation(view.form, project.integration_owner, owner);
+    setupFieldHelp(view.form);
+    view.finish('Change integration owner', (values, dialog) => { dialog.close(); saveIntegrationOwner(projectId, project, values); });
+  }
+  // Adds a required checkbox and returns it with its caption element.
+  function confirmationBox(form, name) {
+    const label = el('label', 'checkbox-label confirmation'), box = el('input'), caption = el('span');
+    box.type = 'checkbox'; box.name = name; box.id = `workflow-${name}`; box.required = true;
+    add(label, box); add(label, caption); add(form, label);
+    return { label, box, caption };
+  }
+  // Requires a different owner and a confirmation naming the exact switch.
+  function ownerConfirmation(form, current, select) {
+    const { box, caption } = confirmationBox(form, 'confirm_owner');
+    const sync = () => {
+      select.setCustomValidity(select.value === current ? 'Choose a different owner to change it.' : '');
+      setText(caption, `I confirm switching the integration owner from ${ownerLabel(current)} to ${ownerLabel(select.value)}.`);
+      box.checked = false;
+    };
+    select.addEventListener('change', sync); sync();
+  }
+  // PATCHes the policy with every other current value preserved.
+  function saveIntegrationOwner(projectId, project, values) {
+    const owner = values.get('integration_owner');
+    const body = {expected_revision:project.policy_revision, review_mode:project.review_mode, recovery_mode:project.recovery_mode, lease_seconds:project.lease_seconds, rules:project.rules, agent_rule_editing:project.agent_rule_editing, automatic_integration:project.automatic_integration, allow_subagent_reviews:project.allow_subagent_reviews, integration_owner:owner, provenance:values.get('provenance')};
+    startMutation(`${projectPath(projectId)}/policy`, body, 'integration owner', async data => {
+      await loadProjects(); if (projectId === state.projectId && state.currentView === 'project') await loadIntegrationOwner(projectId);
+      setGlobalAlert(`Integration owner is now ${ownerLabel(data?.integration_owner || owner)}. Agents must read and acknowledge the new policy.`, 'success');
+    }, 'PATCH', error => { if (!error.uncertain) setGlobalAlert(ownerChangeError(error)); }, {projectId});
+  }
+  // Explains a refused owner change; a held integration gets its own message.
+  function ownerChangeError(error) {
+    if (error.code === 'policy_hold_conflict') return 'The integration owner was not changed: an integration currently holds the target, and publication may already be in progress. Let it finish or reconcile it, then try again.';
+    if (error.code === 'revision_conflict') return 'The integration owner was not changed: the project policy changed after you opened the form. Open Change integration owner again to see the current policy.';
+    return errorMessage(error);
+  }
+
+  // Integrator reports: findings the integrator records; humans resolve them.
+  const REPORT_KINDS = {privilege_gate:'Privilege gate', flaky:'Flaky check', fix_target:'Target needs a fix', unreviewed_landing:'Unreviewed landing', target_rewritten:'Target rewritten', ruleset_missing:'Ruleset missing'};
+  const reportKind = report => REPORT_KINDS[report.kind] || displayStatus(report.kind);
+  // Opens the reports page for the current project.
+  function openReports() {
+    if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    const project = state.projects.find(item => text(item.id) === state.projectId);
+    setText($('reports-project-label'), project?.name || 'Project');
+    showView('reports'); $('reports-heading').focus(); loadReports();
+  }
+  // Loads one page of reports, newest first, replacing or extending the list.
+  async function loadReports(append = false) {
+    const projectId = state.projectId, seq = ++state.reportsSeq;
+    if (!append) { state.reportsCursor = null; clear($('reports-list')); }
+    show($('load-more-reports'), false); setState($('reports-state'), 'Loading reports…', true);
+    const query = new URLSearchParams({limit:'50'});
+    if ($('reports-filter').value === 'open') query.set('open', 'true');
+    if (append && state.reportsCursor) query.set('before', state.reportsCursor);
+    try {
+      const page = (await request(`${projectPath(projectId)}/integrator/reports?${query}`)).data;
+      if (seq === state.reportsSeq && projectId === state.projectId) renderReports(page);
+    } catch (error) { if (seq === state.reportsSeq) setState($('reports-state'), errorMessage(error), false, true); }
+  }
+  // Appends a page of report cards and shows the next-page control.
+  function renderReports(page) {
+    const list = $('reports-list'); (page.items || []).forEach(report => add(list, reportCard(report)));
+    state.reportsCursor = page.next_before || null; show($('load-more-reports'), Boolean(state.reportsCursor));
+    if (list.childElementCount) { show($('reports-state'), false); return; }
+    setState($('reports-state'), $('reports-filter').value === 'open' ? 'No open reports. Nothing from the integrator is waiting for a person.' : 'The integrator has not recorded any reports for this project.');
+  }
+  // One report: kind, state, identities, raw details and the resolve action.
+  function reportCard(report) {
+    const card = el('article', 'card report-card'); card.dataset.reportId = report.id;
+    const header = add(card, el('div', 'card-header'));
+    add(header, el('h2', '', reportKind(report)));
+    add(header, el('span', `status-badge report-${reportState(report)}`, reportStatus(report)));
+    add(card, reportFacts(report));
+    const details = add(card, el('details')); add(details, el('summary', '', 'Report details'));
+    add(details, el('pre', '', JSON.stringify(report.details ?? {}, null, 2)));
+    if (!report.resolved_at && state.actor?.kind === 'human') add(card, actionButton('Resolve report', () => openResolveReport(report)));
+    return card;
+  }
+  const reportState = report => report.resolved_at ? 'resolved' : report.requires_human ? 'needs-human' : 'open';
+  // A short state label, including a privilege gate's recorded decision.
+  function reportStatus(report) {
+    if (!report.resolved_at) return report.requires_human ? 'Needs a person' : 'Open';
+    if (report.decision) return report.decision === 'allow' ? 'Resolved: allowed' : 'Resolved: denied';
+    return 'Resolved';
+  }
+  // The report's identities and any resolution as a definition list.
+  function reportFacts(report) {
+    const facts = el('dl', 'report-facts');
+    [['Report', report.id], ['Recorded', formatDate(report.created_at)], ['Task', report.task_id], ['Submission', report.submission_id], ['Result', report.result_id], ['Resolved', report.resolved_at && formatDate(report.resolved_at)], ['Resolved by', report.resolved_by], ['Resolution note', report.resolution_note]]
+      .filter(([, value]) => value).forEach(([label, value]) => { add(facts, el('dt', 'muted', label)); add(facts, el('dd', '', value)); });
+    return facts;
+  }
+  // Opens the human resolve form; a privilege gate also needs allow or deny.
+  function openResolveReport(report) {
+    const projectId = state.projectId;
+    const view = workflowDialog(`Resolve ${reportKind(report).toLowerCase()} report`, resolveDescription(report));
+    add(view.form, el('p', 'muted', `Report ${report.id}`));
+    if (report.kind === 'privilege_gate') privilegeDecisionField(view);
+    view.field('resolution_note', 'Resolution note').maxLength = 2000;
+    setupFieldHelp(view.form);
+    view.finish('Resolve report', (values, dialog) => { dialog.close(); resolveReport(projectId, report, values); });
+  }
+  // Explains what resolving this kind of report does.
+  function resolveDescription(report) {
+    if (report.kind === 'privilege_gate') return 'This result changes privileged repository paths, such as workflows or code owners. Allow lets the integrator push it; deny keeps it off the target branch. Inspect the result before deciding.';
+    return 'Record what you did about this finding. Resolving closes the report; it does not change the task or the target branch.';
+  }
+  // Adds the allow/deny select with no preselected value; allow also needs a
+  // confirmation that the privileged changes were inspected.
+  function privilegeDecisionField(view) {
+    const decision = selectField(view, 'report_decision', 'Decision', '', [['', 'Choose a decision…'], ['deny', 'Deny: keep this result off the target branch'], ['allow', 'Allow: the integrator may push this result']]);
+    decision.required = true;
+    const { label, box, caption } = confirmationBox(view.form, 'confirm_allow');
+    setText(caption, 'I inspected the privileged changes in this result and allow the integrator to push them.');
+    const sync = () => { const allow = decision.value === 'allow'; show(label, allow); box.required = allow; if (!allow) box.checked = false; };
+    decision.addEventListener('change', sync); sync();
+  }
+  // POSTs the resolution; an already resolved report refreshes the list.
+  function resolveReport(projectId, report, values) {
+    const body = {note: values.get('resolution_note')};
+    if (report.kind === 'privilege_gate') body.decision = values.get('report_decision');
+    startMutation(`${projectPath(projectId)}/integrator/reports/${encodeURIComponent(report.id)}/resolve`, body, 'report resolution', async () => {
+      if (projectId === state.projectId && state.currentView === 'reports') await loadReports();
+      setGlobalAlert(`${reportKind(report)} report resolved.`, 'success');
+    }, 'POST', error => reportResolveFailed(projectId, error), {projectId});
+  }
+  // Explains a refused resolution and reloads the list when it is stale.
+  function reportResolveFailed(projectId, error) {
+    if (error.uncertain) return;
+    setGlobalAlert(error.code === 'report_already_resolved' ? 'This report was already resolved. The list now shows its current state.' : errorMessage(error));
+    if (error.code === 'report_already_resolved' && projectId === state.projectId && state.currentView === 'reports') loadReports();
   }
   function renderTaskActions(data, task) {
     const target = $('task-operator-actions'); clear(target);

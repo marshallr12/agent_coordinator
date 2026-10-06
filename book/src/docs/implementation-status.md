@@ -13,6 +13,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   setup and local evidence gates described in the [cutover runbook](integrator-cutover.md).
   These are source behavior; the production shadow day, rulesets and ownership
   cutover remain operator work and are not claimed complete.
+- Dashboard project settings show the current integration owner and let a human
+  change it after an explicit confirmation with a recorded reason; a held
+  integration refuses the change. A per-project integrator reports page lists
+  reports (open or all, paged) and lets a human resolve one with a note, plus
+  allow or deny for a privilege gate.
 
 - Standalone `agent-coordinator-mcp` stdio adapter with protected, locked, atomic
   mutation journals and exact retry through the service. Native CLI installation

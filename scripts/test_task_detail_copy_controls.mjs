@@ -33,6 +33,26 @@ const attachmentBytes = new Map();
 let failFirstAttachmentPut = true;
 const attachmentUploadKeys = [];
 const archivedTask = { ...task, id: 'archived-fixture-task', title: 'Archived fixture task', lifecycle: 'canceled', archived_at: '2026-09-23T00:00:00Z' };
+const fixtureActor = { id: 'fixture-operator', name: 'Fixture operator', role: 'admin', kind: 'human', session_id: 'fixture-browser' };
+const policyProject = {
+  id: 'fixture-project', name: 'Fixture project', target_branch: 'main', policy_revision: 7, review_mode: 'either', recovery_mode: 'agent',
+  lease_seconds: 3600, rules: 'Run the gate.', agent_rule_editing: true, automatic_integration: true, allow_subagent_reviews: true, integration_owner: 'integrator',
+};
+const policyPatches = [];
+let integrationHeld = true;
+const fixtureReport = (id, kind, extra = {}) => ({
+  id, project_id: 'fixture-project', kind, task_id: task.id, submission_id: 'fixture-submission', result_id: `result-${id}`, dedupe_key: id,
+  details: { reason: `Synthetic ${kind}` }, requires_human: false, created_at: '2026-10-06T00:00:00Z', resolved_at: null, resolved_by: null,
+  resolution_note: null, decision: null, allowed: false, ...extra,
+});
+// Stored oldest first, like rowid order; the list route serves newest first.
+const reports = [
+  ...Array.from({ length: 50 }, (_, index) => fixtureReport(`old-report-${index}`, 'fix_target', { resolved_at: '2026-10-01T00:00:00Z', resolved_by: 'fixture-operator', resolution_note: 'Fixed earlier.' })),
+  fixtureReport('flaky-report', 'flaky'),
+  fixtureReport('privilege-report', 'privilege_gate', { requires_human: true, details: { paths: ['.github/workflows/ci.yml'] } }),
+];
+const reportQueries = [];
+const reportResolutions = [];
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -52,6 +72,49 @@ function json(response, data) {
   response.end(JSON.stringify({ data }));
 }
 
+function refuse(response, status, code, message) {
+  response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  response.end(JSON.stringify({ error: { code, message } }));
+}
+
+async function readJson(request) {
+  let body = '';
+  for await (const chunk of request) body += chunk;
+  return JSON.parse(body);
+}
+
+// Serves the project policy routes: the first PATCH meets a held integration.
+async function policyRoute(request, response) {
+  assert(request.headers['x-csrf-token'] === 'fixture-csrf', 'Policy change omitted the browser CSRF token.');
+  const body = await readJson(request);
+  policyPatches.push(body);
+  if (integrationHeld) { integrationHeld = false; return refuse(response, 409, 'policy_hold_conflict', 'Finish or reconcile the held integration before changing its policy.'); }
+  if (body.expected_revision !== policyProject.policy_revision) return refuse(response, 409, 'revision_conflict', 'Read the current project policy before editing it.');
+  Object.assign(policyProject, { integration_owner: body.integration_owner ?? policyProject.integration_owner, policy_revision: policyProject.policy_revision + 1 });
+  return json(response, policyProject);
+}
+
+// Lists reports newest first after the `before` cursor, like the service.
+function reportListRoute(url, response) {
+  reportQueries.push(Object.fromEntries(url.searchParams));
+  const open = url.searchParams.get('open') === 'true', limit = Number(url.searchParams.get('limit') || 200);
+  const newest = [...reports].reverse(), before = url.searchParams.get('before');
+  const start = before ? newest.findIndex((report) => report.id === before) + 1 : 0;
+  const items = newest.slice(start).filter((report) => !open || !report.resolved_at).slice(0, limit);
+  return json(response, { project_id: 'fixture-project', items, next_before: items.length === limit ? items.at(-1).id : null });
+}
+
+// Resolves one open report; a resolved one is refused as the service does.
+async function reportResolveRoute(id, request, response) {
+  assert(request.headers['x-csrf-token'] === 'fixture-csrf', 'Report resolution omitted the browser CSRF token.');
+  const body = await readJson(request), report = reports.find((item) => item.id === id);
+  reportResolutions.push({ id, body });
+  if (!report) return refuse(response, 404, 'not_found', 'Not found.');
+  if (report.resolved_at) return refuse(response, 409, 'report_already_resolved', 'This report was already resolved.');
+  Object.assign(report, { resolved_at: '2026-10-06T01:00:00Z', resolved_by: fixtureActor.id, resolution_note: body.note, decision: body.decision ?? null, allowed: body.decision === 'allow' });
+  return json(response, report);
+}
+
 async function fixtureServer() {
   const files = {
     '/': ['web/index.html', 'text/html; charset=utf-8'],
@@ -61,8 +124,13 @@ async function fixtureServer() {
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://fixture.invalid');
-    if (url.pathname === '/api/v1/me') return json(response, { actor: { id: 'fixture-operator', name: 'Fixture operator', role: 'admin', kind: 'human', session_id: 'fixture-browser' }, csrf_token: 'fixture-csrf' });
+    if (url.pathname === '/api/v1/me') return json(response, { actor: fixtureActor, csrf_token: 'fixture-csrf' });
     if (url.pathname === '/api/v1/projects') return json(response, { items: [{ id: 'fixture-project', name: 'Fixture project', target_branch: 'main' }] });
+    if (url.pathname === '/api/v1/projects/fixture-project/orientation') return json(response, { project: policyProject, policy_revision: policyProject.policy_revision });
+    if (url.pathname === '/api/v1/projects/fixture-project/policy' && request.method === 'PATCH') return policyRoute(request, response);
+    if (url.pathname === '/api/v1/projects/fixture-project/integrator/reports') return reportListRoute(url, response);
+    const resolveMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/integrator\/reports\/([^/]+)\/resolve$/);
+    if (resolveMatch && request.method === 'POST') return reportResolveRoute(decodeURIComponent(resolveMatch[1]), request, response);
     if (url.pathname === '/api/v1/projects/fixture-project/tasks') {
       const limit = Number(url.searchParams.get('limit') || 50);
       const start = Number(url.searchParams.get('cursor') || 0);
@@ -145,6 +213,136 @@ async function waitFor(fetchUrl, predicate, description) {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }
   throw new Error(`Timed out waiting for ${description}`);
+}
+
+const OPEN_DIALOG_FORM = "document.querySelector('dialog[open] form')";
+const ALERT_TEXT = "document.querySelector('#global-alert').textContent";
+
+// Opens the integration owner dialog and waits for its owner select.
+async function openOwnerDialog({ evaluate, waitPage }) {
+  await evaluate("document.querySelector('#integration-owner-button').click()");
+  await waitPage("document.querySelector('dialog[open] #workflow-integration_owner')", 'integration owner dialog');
+}
+
+// Chooses the new owner, fills provenance, optionally confirms, and submits.
+async function submitOwner({ evaluate }, owner, confirm) {
+  await evaluate(`(() => { const select = document.querySelector('#workflow-integration_owner'); select.value = ${JSON.stringify(owner)}; select.dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('#workflow-provenance').value = 'S6 rollback drill'; document.querySelector('#workflow-confirm_owner').checked = ${confirm}; ${OPEN_DIALOG_FORM}.requestSubmit(); })()`);
+}
+
+// Integration owner: current owner shown, same owner and missing confirmation
+// refused, a held integration explained, then a confirmed switch saved.
+async function checkIntegrationOwner(page) {
+  const { evaluate, waitPage } = page;
+  await waitPage("document.querySelector('#integration-owner-summary').textContent.includes('Integrator service (policy revision 7)')", 'current integration owner');
+  await openOwnerDialog(page);
+  assert(await evaluate("document.querySelector('#workflow-integration_owner').value") === 'integrator', 'Owner dialog did not start on the current owner.');
+  await submitOwner(page, 'integrator', true);
+  assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && !document.querySelector('#workflow-integration_owner').validity.valid") && policyPatches.length === 0, 'Owner dialog saved the unchanged owner.');
+  await submitOwner(page, 'agent', false);
+  assert(await evaluate("document.querySelector('dialog[open]').textContent.includes('from Integrator service to Agents')"), 'Owner confirmation does not name the exact switch.');
+  assert(await evaluate("document.querySelector('#workflow-confirm_owner').validity.valueMissing") && policyPatches.length === 0, 'Owner changed without an explicit confirmation.');
+  await submitOwner(page, 'agent', true);
+  await waitPage(`${ALERT_TEXT}.includes('an integration currently holds the target')`, 'held-integration refusal');
+  const [held] = policyPatches;
+  assert(held.integration_owner === 'agent' && held.provenance === 'S6 rollback drill' && held.expected_revision === 7, 'Owner change sent the wrong owner, note or revision.');
+  assert(held.rules === 'Run the gate.' && held.allow_subagent_reviews === true && held.review_mode === 'either' && held.automatic_integration === true, 'Owner change did not preserve the other policy values.');
+  assert(await evaluate("document.querySelector('#integration-owner-summary').textContent.includes('Integrator service')"), 'Refused owner change altered the displayed owner.');
+  await openOwnerDialog(page);
+  await submitOwner(page, 'agent', true);
+  await waitPage(`${ALERT_TEXT}.includes('Integration owner is now Agents') && document.querySelector('#integration-owner-summary').textContent.includes('Agents (policy revision 8)')`, 'saved integration owner');
+}
+
+// Opens the resolve dialog of the report card with this id.
+async function openResolve({ evaluate, waitPage }, id) {
+  await evaluate(`[...document.querySelector('[data-report-id=${JSON.stringify(id)}]').querySelectorAll('button')].find((button) => button.textContent === 'Resolve report').click()`);
+  await waitPage("document.querySelector('dialog[open] #workflow-resolution_note')", `resolve dialog for ${id}`);
+}
+
+// Resolves the privilege gate: no preselected decision, allow needs a confirmation.
+async function checkPrivilegeResolve(page) {
+  const { evaluate, waitPage } = page;
+  await openResolve(page, 'privilege-report');
+  assert(await evaluate("document.querySelector('#workflow-report_decision').value") === '', 'Privilege decision is preselected.');
+  assert(await evaluate("document.querySelector('#workflow-confirm_allow').closest('label').hidden"), 'Allow confirmation shown before allow was chosen.');
+  await evaluate(`document.querySelector('#workflow-resolution_note').value = 'Workflow change reviewed'; ${OPEN_DIALOG_FORM}.requestSubmit()`);
+  assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && document.querySelector('#workflow-report_decision').validity.valueMissing"), 'Privilege gate resolved without a decision.');
+  await evaluate(`(() => { const select = document.querySelector('#workflow-report_decision'); select.value = 'allow'; select.dispatchEvent(new Event('change', { bubbles: true })); ${OPEN_DIALOG_FORM}.requestSubmit(); })()`);
+  assert(await evaluate("!document.querySelector('#workflow-confirm_allow').closest('label').hidden && document.querySelector('#workflow-confirm_allow').validity.valueMissing"), 'Allow did not require its confirmation.');
+  assert(reportResolutions.length === 0, 'An incomplete privilege resolution was sent.');
+  await evaluate(`document.querySelector('#workflow-confirm_allow').checked = true; ${OPEN_DIALOG_FORM}.requestSubmit()`);
+  await waitPage("!document.querySelector('[data-report-id=\"privilege-report\"]') && document.querySelectorAll('#reports-list .report-card').length === 1", 'resolved privilege gate leaves the open list');
+  const [resolution] = reportResolutions;
+  assert(resolution.id === 'privilege-report' && resolution.body.decision === 'allow' && resolution.body.note === 'Workflow change reviewed', 'Privilege resolution sent the wrong body.');
+}
+
+// Resolves an ordinary report with a note only.
+async function checkNoteResolve(page) {
+  const { evaluate, waitPage } = page;
+  await openResolve(page, 'flaky-report');
+  assert(await evaluate("!document.querySelector('#workflow-report_decision')"), 'A non-privilege report offered allow or deny.');
+  await evaluate(`document.querySelector('#workflow-resolution_note').value = 'Reran after the runner outage'; ${OPEN_DIALOG_FORM}.requestSubmit()`);
+  await waitPage("document.querySelector('#reports-state').textContent.includes('No open reports')", 'empty open-report list');
+  assert(!('decision' in reportResolutions[1].body) && reportResolutions[1].body.note === 'Reran after the runner outage', 'Ordinary resolution sent a decision or lost its note.');
+}
+
+// A report resolved elsewhere meanwhile: the refusal is explained and the list refreshed.
+async function checkAlreadyResolved(page) {
+  const { evaluate, waitPage } = page;
+  reports.push(fixtureReport('raced-report', 'ruleset_missing', { requires_human: true }));
+  await evaluate("document.querySelector('#refresh-reports').click()");
+  await waitPage("document.querySelector('[data-report-id=\"raced-report\"]')", 'newly recorded report');
+  Object.assign(reports.at(-1), { resolved_at: '2026-10-06T02:00:00Z', resolved_by: 'other-operator', resolution_note: 'Handled elsewhere.' });
+  await openResolve(page, 'raced-report');
+  await evaluate(`document.querySelector('#workflow-resolution_note').value = 'Late resolution'; ${OPEN_DIALOG_FORM}.requestSubmit()`);
+  await waitPage(`${ALERT_TEXT}.includes('already resolved') && !document.querySelector('[data-report-id="raced-report"]')`, 'already-resolved refusal');
+}
+
+// All reports with paging; resolved cards show their decision and note.
+async function checkReportPaging(page) {
+  const { evaluate, waitPage } = page;
+  await evaluate("(() => { const filter = document.querySelector('#reports-filter'); filter.value = 'all'; filter.dispatchEvent(new Event('change', { bubbles: true })); })()");
+  await waitPage("document.querySelectorAll('#reports-list .report-card').length === 50 && !document.querySelector('#load-more-reports').hidden", 'first page of all reports');
+  assert(!('open' in reportQueries.at(-1)) && reportQueries.at(-1).limit === '50', 'All-report listing sent the wrong query.');
+  assert(await evaluate("document.querySelector('[data-report-id=\"privilege-report\"]').textContent.includes('Resolved: allowed')"), 'Resolved privilege gate did not show its decision.');
+  await evaluate("document.querySelector('#load-more-reports').click()");
+  await waitPage("document.querySelectorAll('#reports-list .report-card').length === 53 && document.querySelector('#load-more-reports').hidden", 'second page of all reports');
+  assert(reportQueries.at(-1).before === reports[3].id, `Next page used the wrong cursor (${reportQueries.at(-1).before}).`);
+}
+
+// Integrator reports: open list, resolves, a raced resolve, paging, return.
+async function checkIntegratorReports(page) {
+  const { evaluate, waitPage } = page;
+  await evaluate("document.querySelector('#integrator-reports-button').click()");
+  await waitPage("!document.querySelector('#reports-view').hidden && document.querySelectorAll('#reports-list .report-card').length === 2", 'open integrator reports');
+  assert(reportQueries.at(-1).open === 'true' && reportQueries.at(-1).limit === '50', 'Open-report listing sent the wrong query.');
+  assert(await evaluate("document.querySelector('#reports-list .report-card').textContent.includes('Privilege gate') && document.querySelector('#reports-list .report-card').textContent.includes('Needs a person')"), 'Newest privilege gate is not first or not marked for a person.');
+  await checkPrivilegeResolve(page);
+  await checkNoteResolve(page);
+  await checkAlreadyResolved(page);
+  await checkReportPaging(page);
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), 'Integrator reports overflow at phone width.');
+  await page.send('Emulation.clearDeviceMetricsOverride');
+  await evaluate("document.querySelector('#back-to-project-settings').click()");
+  await waitPage("!document.querySelector('#project-view').hidden", 'return to project settings');
+}
+
+// A non-human actor sees neither the owner control nor report resolution.
+async function checkAgentActorControls(page, serverPort) {
+  const { evaluate, waitPage, send } = page;
+  fixtureActor.kind = 'agent';
+  try {
+    await send('Page.navigate', { url: `http://127.0.0.1:${serverPort}/` });
+    await waitPage("document.querySelector('.project-settings-button')", 'agent-actor project list');
+    await evaluate("document.querySelector('.project-settings-button').click()");
+    await waitPage("!document.querySelector('#project-view').hidden && document.querySelector('#integration-owner-summary').textContent.includes('Current owner')", 'agent-actor settings');
+    assert(await evaluate("document.querySelector('#integration-owner-button').hidden"), 'A non-human actor was offered the integration owner control.');
+    reports.push(fixtureReport('agent-view-report', 'flaky'));
+    await evaluate("document.querySelector('#integrator-reports-button').click()");
+    await waitPage("document.querySelector('[data-report-id=\"agent-view-report\"]')", 'agent-actor reports');
+    assert(await evaluate("![...document.querySelectorAll('#reports-list button')].some((button) => button.textContent === 'Resolve report')"), 'A non-human actor was offered report resolution.');
+  } finally { fixtureActor.kind = 'human'; }
 }
 
 async function removeProfile(profile) {
@@ -271,6 +469,9 @@ async function main() {
     await waitPage("document.querySelector('#project-binding-content button').textContent === 'Downloaded'", 'binding download');
     assert(await evaluate("document.querySelector('#project-binding-content code').textContent.includes('project_id = \"fixture-project\"')"), 'Binding omitted the current project.');
     assert(await evaluate("!document.querySelector('#project-view').hidden"), 'Binding download navigated away.');
+    const ui = { evaluate, waitPage, send };
+    await checkIntegrationOwner(ui);
+    await checkIntegratorReports(ui);
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     assert(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), 'Settings page overflows at phone width.');
     await evaluate("document.querySelector('#back-to-projects').click()");
@@ -454,7 +655,8 @@ async function main() {
     await evaluate("window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = true; document.querySelector('#copy-token').click()");
     await waitPage("document.querySelector('#issue-feedback').textContent.includes('Clipboard access was unavailable')", 'token manual-copy fallback');
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
-    console.log('PASS: headless Chrome verified project navigation, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
+    await checkAgentActorControls(ui, serverPort);
+    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging and resolution (privilege allow/deny and already-resolved refusal), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
