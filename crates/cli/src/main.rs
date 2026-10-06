@@ -9,6 +9,7 @@ mod session_adoption;
 mod sessions;
 mod shared;
 mod state;
+mod wip_checkpoint;
 mod worktree;
 
 use std::env;
@@ -129,7 +130,7 @@ enum Command {
     /// Renew an active attempt lease.
     Renew(AttemptGenerationArgs),
     /// Save a checkpoint without implicitly renewing the lease.
-    Checkpoint(AttemptInputArgs),
+    Checkpoint(CheckpointArgs),
     /// Release an attempt without marking its task complete.
     Release(AttemptInputArgs),
     /// Prepare and register a separate clean Git worktree.
@@ -638,6 +639,17 @@ struct AttemptInputArgs {
     input: PathBuf,
 }
 
+/// `checkpoint` arguments: the attempt input plus the optional WIP push.
+#[derive(Args)]
+struct CheckpointArgs {
+    #[command(flatten)]
+    attempt: AttemptInputArgs,
+    /// Push the prepared worktree's clean commit to a durable WIP ref and
+    /// record its full SHA as the checkpoint `revision`.
+    #[arg(long)]
+    push_wip: bool,
+}
+
 #[derive(Copy, Clone, ValueEnum)]
 enum RequestMethod {
     Get,
@@ -1067,13 +1079,7 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
             )
             .await
         }
-        Command::Checkpoint(args) => {
-            let body =
-                input_with_generation(&args.input, args.generation).map_err(Failure::invalid)?;
-            let path =
-                attempt_path(&context, &args.attempt, "checkpoints").map_err(Failure::invalid)?;
-            mutate(cli, &context, &path, body, true).await
-        }
+        Command::Checkpoint(args) => checkpoint(cli, &context, args).await,
         Command::Release(args) => {
             let body =
                 input_with_generation(&args.input, args.generation).map_err(Failure::invalid)?;
@@ -1164,6 +1170,24 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
         Command::Retry => retry(cli, &context).await,
         Command::JobGuardian(_) => unreachable!("guardian handled before loading credentials"),
     }
+}
+
+/// Records a checkpoint; with `--push-wip`, first pushes the WIP commit and
+/// adds its SHA as `revision`.
+async fn checkpoint(
+    cli: &Cli,
+    context: &ContextData,
+    args: &CheckpointArgs,
+) -> std::result::Result<Value, Failure> {
+    let input = &args.attempt;
+    let mut body =
+        input_with_generation(&input.input, input.generation).map_err(Failure::invalid)?;
+    let path = attempt_path(context, &input.attempt, "checkpoints").map_err(Failure::invalid)?;
+    if args.push_wip {
+        let revision = wip_checkpoint::push(context, &input.attempt, input.generation)?;
+        insert_fields(&mut body, [("revision", json!(revision))]).map_err(Failure::invalid)?;
+    }
+    mutate(cli, context, &path, body, true).await
 }
 
 async fn release_reservation(
