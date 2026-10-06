@@ -310,6 +310,18 @@ accessible, and whether prior jobs can still interfere. It records a disposition
 resume saved work, reconcile already-delivered work, restart with a reason, or
 remain blocked awaiting an observation or operator decision.
 
+A checkpoint may record `revision`, the full 40-hex SHA of a work-in-progress
+commit already pushed to a durable ref. The recorded SHA is authoritative; the
+ref is only transport. When the expired attempt's latest checkpoint recorded a
+revision, the service verifies the recovery itself: the old attempt is expired
+or revoked, the recovery claim bumped the generation, no nonterminal jobs
+remain, and the recoverer's `fetched_revision` equals the recorded SHA. It then
+does not require the local `saved_work_checked`/`running_jobs_checked`
+attestations. A missing SHA is refused with `recovery_revision_required`, a
+different one with `recovery_revision_mismatch`. A legacy checkpoint without a
+revision keeps the attestations, and `recovery_mode=manual` still requires a
+human recovery claim in both cases.
+
 Recovery inspection is distinct from permission to start conflicting work. An
 unreachable workstation or a missing heartbeat does not prove its jobs stopped.
 An unresolved external job keeps its conflicting resource reserved. A recovery

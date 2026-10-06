@@ -1141,3 +1141,190 @@ async fn task_definition_grants_are_scoped_revocable_and_preserve_contributor_sa
     assert_eq!(renewed["data"]["agent_principal_id"], f.b.principal);
     assert_eq!(f.call(&f.b, "PATCH", &other_path, "contributor-deny", json!({"expected_revision":1,"title":"nope","description":"changed","acceptance_criteria":["weaker"],"priority":2,"depends_on":[],"planned":false})).await.0, StatusCode::FORBIDDEN);
 }
+
+const RECORDED: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// Agent A claims and checkpoints (with `revision`, if any); its lease then
+/// expires and agent B takes a recovery claim. Returns the project, the old
+/// generation, and B's recovery attempt and generation.
+async fn expired_with_checkpoint(
+    f: &Fixture,
+    name: &str,
+    revision: Option<&str>,
+) -> (String, i64, String, i64) {
+    let p = f.project(name).await;
+    let t = f.task(&p, "task", vec![]).await;
+    f.ack(&f.a, &p).await;
+    f.ack(&f.b, &p).await;
+    let (_, v) = f.claim(&f.a, &p, &t, "initial", "work").await;
+    let (old, generation) = attempt(&v);
+    let mut body = json!({"generation":generation,"summary":"WIP pushed"});
+    if let Some(r) = revision {
+        body["revision"] = json!(r);
+    }
+    let path = format!("/api/v1/projects/{p}/attempts/{old}/checkpoints");
+    let (status, v) = f.call(&f.a, "POST", &path, "wip", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["revision"], json!(revision));
+    f.clock.0.fetch_add(600_000, Ordering::SeqCst);
+    let (status, v) = f.claim(&f.b, &p, &t, "takeover", "recovery").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (new, new_generation) = attempt(&v);
+    (p, generation, new, new_generation)
+}
+
+/// Posts one recovery resolution by agent B with the given extra fields.
+async fn resolve(
+    f: &Fixture,
+    p: &str,
+    id: &str,
+    g: i64,
+    key: &str,
+    extra: Value,
+) -> (StatusCode, Value) {
+    let mut body = json!({"generation":g,"disposition":"resume","summary":"Fetched the WIP ref."});
+    body.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let path = format!("/api/v1/projects/{p}/attempts/{id}/recovery-resolution");
+    f.call(&f.b, "POST", &path, key, body).await
+}
+
+#[tokio::test]
+async fn checkpoint_revision_must_be_a_full_lowercase_sha() {
+    let f = Fixture::new().await;
+    let p = f.project("revision-format").await;
+    let t = f.task(&p, "task", vec![]).await;
+    f.ack(&f.a, &p).await;
+    let (_, v) = f.claim(&f.a, &p, &t, "claim", "work").await;
+    let (id, g) = attempt(&v);
+    let path = format!("/api/v1/projects/{p}/attempts/{id}/checkpoints");
+    for (key, bad) in [("short", "abc123"), ("upper", &RECORDED.to_uppercase()[..])] {
+        let body = json!({"generation":g,"summary":"WIP","revision":bad});
+        let (status, v) = f.call(&f.a, "POST", &path, key, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    }
+}
+
+#[tokio::test]
+async fn recovery_with_a_recorded_revision_is_verified_by_the_service() {
+    let f = Fixture::new().await;
+    let (p, old_g, new, g) = expired_with_checkpoint(&f, "verified", Some(RECORDED)).await;
+    assert_eq!(g, old_g + 1, "the recovery claim bumps the generation");
+    let (status, v) = resolve(&f, &p, &new, g, "none", json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "recovery_revision_required");
+    let wrong = json!({"fetched_revision":"f".repeat(40),"saved_work_checked":true,"running_jobs_checked":true});
+    let (status, v) = resolve(&f, &p, &new, g, "wrong", wrong).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "recovery_revision_mismatch");
+    assert_eq!(v["error"]["details"]["recorded_revision"], RECORDED);
+    let (status, v) = resolve(
+        &f,
+        &p,
+        &new,
+        g,
+        "match",
+        json!({"fetched_revision":RECORDED}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "booleans are not required: {v}");
+    assert_eq!(v["data"]["evidence"], "service_verified");
+    assert_eq!(v["data"]["attempt"]["mode"], "work");
+}
+
+#[tokio::test]
+async fn legacy_null_revision_recovery_keeps_local_attestations() {
+    let f = Fixture::new().await;
+    let (p, _, new, g) = expired_with_checkpoint(&f, "legacy", None).await;
+    let fetched = json!({"fetched_revision":RECORDED});
+    let (status, v) = resolve(&f, &p, &new, g, "fetched-only", fetched).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a SHA cannot replace attestations: {v}"
+    );
+    let attested = json!({"saved_work_checked":true,"running_jobs_checked":true});
+    let (status, v) = resolve(&f, &p, &new, g, "attested", attested).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["evidence"], "local_attestation");
+}
+
+#[tokio::test]
+async fn legacy_recovery_under_manual_mode_keeps_the_human_gate() {
+    let f = Fixture::new().await;
+    let p = f.project("manual").await;
+    let t = f.task(&p, "task", vec![]).await;
+    f.ack(&f.a, &p).await;
+    f.ack(&f.b, &p).await;
+    let (_, v) = f.claim(&f.a, &p, &t, "initial", "work").await;
+    let (old, g) = attempt(&v);
+    let path = format!("/api/v1/projects/{p}/attempts/{old}/checkpoints");
+    let body = json!({"generation":g,"summary":"legacy checkpoint"});
+    assert_eq!(
+        f.call(&f.a, "POST", &path, "cp", body).await.0,
+        StatusCode::OK
+    );
+    sqlx::query("UPDATE projects SET recovery_mode='manual' WHERE id=?")
+        .bind(&p)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    f.clock.0.fetch_add(600_000, Ordering::SeqCst);
+    let (status, v) = f.claim(&f.b, &p, &t, "takeover", "recovery").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"]["details"]["required_actor"], "human");
+}
+
+#[tokio::test]
+async fn checkpoint_revision_migration_applies_to_an_existing_database() {
+    use sqlx::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let migrations = dir.path().join("schema26");
+    std::fs::create_dir(&migrations).unwrap();
+    for m in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 26)
+    {
+        let name = format!("{:04}_{}.sql", m.version, m.description.replace(' ', "_"));
+        std::fs::write(migrations.join(name), m.sql.as_str().as_bytes()).unwrap();
+    }
+    let database = dir.path().join("upgrade.sqlite3");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&database)
+        .create_if_missing(true)
+        .foreign_keys(false);
+    let mut old = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::migrate::Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&mut old)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO checkpoints(id,project_id,attempt_id,summary,current_action,next_step,blockers_json,created_at) VALUES('cp1','p1','a1','old','','','[]',1)")
+        .execute(&mut old).await.unwrap();
+    old.close().await.unwrap();
+    let state = AppState::open(Config {
+        database_path: database,
+        public_origin: "http://127.0.0.1:8080".into(),
+        allow_insecure_loopback: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let kept: Option<String> =
+        sqlx::query_scalar("SELECT revision FROM checkpoints WHERE id='cp1'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        kept, None,
+        "existing checkpoints become legacy (NULL) checkpoints"
+    );
+    let bad = sqlx::query("UPDATE checkpoints SET revision='NOTASHA' WHERE id='cp1'")
+        .execute(&state.pool)
+        .await;
+    assert!(bad.is_err(), "the column only stores full lowercase SHAs");
+}

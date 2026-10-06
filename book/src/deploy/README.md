@@ -402,12 +402,26 @@ own socket directory, read-only, so it cannot reach another launch's helper.
 
 Codex launches are not sandboxed this way: they run in the host namespace as
 the implementer account, which is in every implementer socket directory's
-group. A Codex implementer can therefore connect to the helper of any other
-implementer launch running at the same time, if it learns that launch's
-session id (each run's `.state-started` file holds it), and publish its own
-commit to that launch's candidate ref first. Run Codex implementers one at a
-time, or only alongside launches whose candidates may be rejected on that
-ground.
+group, so file permissions alone would let a Codex implementer reach the
+helper of any other implementer launch running at the same time (each run's
+`.state-started` file holds its session id). The helper therefore serves only
+its own launch: for every connection it reads the client's process id from
+the socket (`SO_PEERCRED`) and walks the parent ids in `/proc` up to the
+`launch-root` that spawned it, refusing any other client with "connection is
+not from this helper's launch" before minting a token or reading the request.
+Leftover processes stay inside that tree, since `launch` is their subreaper. A
+client whose process id or ancestry cannot be read is refused. The check names
+the client process at connect time; with no pidfd for the peer on the
+supported kernels, a client that exits and whose process id is reused by a
+process of the launch in between is not excluded, which a separate launch
+cannot arrange on purpose. The check reads `/proc`, so a host that mounts it
+with `hidepid` makes the helper refuse every client: safe, but every push fails.
+Codex implementers share one account in the host namespace, so on a kernel
+with `kernel.yama.ptrace_scope=0` one could attach to a process of a
+concurrent launch and connect from inside that launch's tree. Ubuntu sets
+`ptrace_scope` to 1, but Debian leaves it at 0 (mxmini reads 0), so set
+`kernel.yama.ptrace_scope=1` in `/etc/sysctl.d/` on every supervised host before
+running Codex implementers concurrently.
 
 Every harness, Codex included, starts with `no_new_privs`, so no setuid,
 setgid or file-capability binary can raise its privileges. The `launch`
@@ -535,10 +549,15 @@ agent account; without it those checks are skipped.
 ## Bringing up a supervised host
 
 This is the owner's ordered checklist for preparing a host to run supervised
-launches, such as oracle-1 as the primary pilot host (decision U6). Each step
-links to the section above that explains it. All steps that need root are
-the owner's; an agent only prepares commands and reads the pasted output.
-Stop at the first step that fails.
+launches, such as oracle-1 as the primary pilot host (decision U6). Steps
+that have background link to the section that explains it. All steps that
+need root are the owner's; an agent only prepares commands and reads the
+pasted output. Stop at the first step that fails.
+
+Prerequisites: the owner's pinned `claude` and `codex` at `~/.local/bin`
+(host-setup always installs both, so `codex` is required even when only Claude
+runs), Bubblewrap 0.8 or newer, and, for UI verification, `node` on `PATH` or
+named by `NODE=`.
 
 1. **Build on the host from one clean revision.** The published release
    packages are x86-64 only, so an ARM64 host such as oracle-1 builds its own
@@ -552,8 +571,9 @@ Stop at the first step that fails.
    ```
 
    The `agentc-integrator` package also builds the `agentc-push` helper. An
-   integrator already installed on the host keeps its own binary, state and
-   configuration; nothing here touches them.
+   integrator already installed on the host
+   ([integrator cutover](../docs/integrator-cutover.md)) keeps its own binary,
+   state and configuration; nothing here touches them.
 2. **Stop role processes,** then run the installer. On Ubuntu 24.04 and newer,
    opt in to the agentc-only AppArmor profile
    ([write confinement](#claude-runtime-write-confinement)):
@@ -578,9 +598,12 @@ Stop at the first step that fails.
    access for the reviewer. Save each as
    `/var/lib/agentc/<role>/coordinator/credentials.toml` (mode 0600, owned
    by the role).
-6. **Staging for UI verification.** Candidates reach staging only on this
-   host's loopback through the launch relay, so the staging coordinator runs
-   on the same host. Run `deploy/agentc/staging.py up` as the owner, run the
+6. **Staging for UI verification.** The simplest setup runs the staging
+   coordinator on this host, which candidates reach on loopback through the
+   launch relay; an https staging coordinator on another host is reached
+   through the egress proxy instead
+   ([reviewer isolation](#reviewer-candidate-code-isolation)).
+   Run `deploy/agentc/staging.py up` as the owner, run the
    commands `deploy/agentc/staging.py credentials` prints, and add its
    `[verification.<project-id>]` entry below the `KEEP` line in
    `/etc/agentc/supervisor.toml`.

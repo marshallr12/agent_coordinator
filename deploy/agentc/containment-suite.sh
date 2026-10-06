@@ -298,7 +298,9 @@ check_relay_probe() {
 
 # Writes the mock Claude harness for launch-root's push leg to $1. Inside the
 # sandbox it requires AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET, a socket it can
-# connect to, and a push root showing only its own launch's `sock/`. It then
+# connect to, a push root showing only its own launch's `sock/`, and a helper
+# that serves it: an empty request must get the helper's `bad_request` reply,
+# not the foreign-launch refusal. It then
 # writes the socket path to $TMPDIR/push-ready and waits up to 120 s for the
 # suite's $TMPDIR/push-release, so the suite can inspect the live helper.
 write_push_mock() {
@@ -310,7 +312,14 @@ sock=\${AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET:-}
 [ -S "\$sock" ] || exit 3
 dir=\${sock%/sock/push.sock}
 [ "\$(ls -A $STATE/push)" = "\${dir##*/}" ] && [ "\$(ls -A "\$dir")" = sock ] || exit 4
-/usr/bin/python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "\$sock" || exit 5
+/usr/bin/python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(10)
+s.connect(sys.argv[1])
+s.shutdown(socket.SHUT_WR)
+reply = s.makefile("rb").readline()
+sys.exit(0 if b"bad_request" in reply else 1)' "\$sock" || exit 5
 printf '%s\n' "\$sock" > "\$TMPDIR/push-ready"
 i=0
 until [ -e "\$TMPDIR/push-release" ]; do i=\$((i + 1)); [ "\$i" -le 600 ] || exit 6; sleep 0.2; done
@@ -489,6 +498,20 @@ connects_as() {
     'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "$2"
 }
 
+# True when a process as account $1 outside every launch's process tree is
+# refused by the push helper on socket $2 as a foreign launch: a concurrent
+# implementer launch shares the account and the socket group, so only the
+# helper's process-ancestry check keeps it out.
+refused_as_foreign() {
+  as "$1" /usr/bin/python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(10)
+s.connect(sys.argv[1])
+reply = s.makefile("rb").readline()
+sys.exit(0 if b"not from this helper\x27s launch" in reply else 1)' "$2"
+}
+
 # True when `stat -c '%a %U %G'` of $1 is $2.
 has_mode() { [ "$(stat -c '%a %U %G' -- "$1")" = "$2" ]; }
 
@@ -544,6 +567,8 @@ check_live_helper() {
   expect_ok "agentc-push: launch directory is 711 root:root" has_mode "$dir" "711 root root"
   expect_ok "agentc-impl: can connect to its launch's push socket" connects_as agentc-impl "$dir/sock/push.sock"
   expect_fail "agentc-rev: cannot connect to the push socket" connects_as agentc-rev "$dir/sock/push.sock"
+  expect_ok "agentc-impl outside the launch (another launch): helper refuses it" \
+    refused_as_foreign agentc-impl "$dir/sock/push.sock"
   expect_ok "agentc-impl/claude: harness sees only its own push socket" \
     test "$(cat "$run/tmp/push-ready")" = "$dir/sock/push.sock"
   expect_fail "next launch-root swept the SIGKILLed launch's directory" \

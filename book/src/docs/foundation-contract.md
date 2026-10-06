@@ -128,6 +128,8 @@ Additional implemented routes:
   "resume"|"restart",summary,saved_work_checked:true,running_jobs_checked:true}`.
   Requires a recovery-mode attempt; only after this inspection may it resume
   normal work or release back to the queue. Incomplete inspections release blocked.
+  When the expired attempt's latest checkpoint recorded a `revision`, send
+  `fetched_revision` instead of the two attestations; the service verifies it.
 
 On a claim replay, `current_authority` reports whether the historical grant still
 holds. The original claim is a receipt, not a fresh countdown. Renewal replay

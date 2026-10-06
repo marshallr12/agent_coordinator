@@ -28,6 +28,8 @@ const tasks = Array.from({ length: 30 }, (_, index) => ({
   title: index ? `Fixture task ${index + 1}` : task.title,
 }));
 const uploadedAttachments = new Map();
+// Workflow activity POSTs (claim/review), so the review test can prove a dismissed form claims nothing.
+const workflowPosts = [];
 const attachmentReservations = new Map();
 const attachmentBytes = new Map();
 let failFirstAttachmentPut = true;
@@ -154,6 +156,11 @@ async function fixtureServer() {
     if (url.pathname === '/api/v1/projects/fixture-project/policy' && request.method === 'PATCH') return policyRoute(request, response);
     if (url.pathname === '/api/v1/projects/fixture-project/integrator/reports') return reportListRoute(url, response);
     if (url.pathname === '/api/v1/projects/fixture-project/sessions') return agentSessionsRoute(url, response);
+    const workflowMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/workflow-activities\/([^/]+)\/(claim|review)$/);
+    if (workflowMatch && request.method === 'POST') {
+      workflowPosts.push({ activity: decodeURIComponent(workflowMatch[1]), action: workflowMatch[2], body: await readJson(request) });
+      return json(response, workflowMatch[2] === 'claim' ? { attempt: { id: 'fixture-claimed', generation: 3 } } : { recorded: true });
+    }
     const resolveMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/integrator\/reports\/([^/]+)\/resolve$/);
     if (resolveMatch && request.method === 'POST') return reportResolveRoute(decodeURIComponent(resolveMatch[1]), request, response);
     if (url.pathname === '/api/v1/projects/fixture-project/tasks') {
@@ -705,8 +712,22 @@ async function main() {
       await openFixtureTask();
       assert(await evaluate("!Array.from(document.querySelectorAll('#task-operator-actions button')).some(button => (button.getAttribute('aria-label') || button.textContent) === 'Resolve blocker')"), `Ordinary blocker resolution offered during ${phase}.`);
       if (phase === 'review') {
-        assert(await evaluate("document.querySelector('#workflow-content').textContent.includes('Claim human review')"), 'Human review claim action missing.');
-        assert(await evaluate("document.querySelector('#workflow-content').textContent.includes('Claiming reserves the review for you; it does not approve the work.')"), 'Review claim/decision distinction missing.');
+        assert(await evaluate("document.querySelector('#workflow-content').textContent.includes('Start human review')"), 'Human review start action missing.');
+        assert(await evaluate("document.querySelector('#workflow-content').textContent.includes('The review is reserved for you only when you record your decision')"), 'Review claim-on-decision explanation missing.');
+        // An earlier step's retried upload may still be pending; the dashboard runs one mutation at a time.
+        await waitPage("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review')?.disabled === false", 'idle review action');
+        await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review').click()");
+        await waitPage("document.querySelector('dialog[open] #workflow-decision')", 'unclaimed human review dialog');
+        await evaluate("document.querySelector('dialog[open]').close()");
+        assert(workflowPosts.length === 0, 'Opening or dismissing the review form claimed the review.');
+        await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review').click()");
+        await waitPage("document.querySelector('dialog[open] #workflow-decision')", 'reopened human review dialog');
+        await evaluate("document.querySelector('#workflow-decision').value = 'approved'; document.querySelector('#workflow-summary').value = 'Synthetic review'; document.querySelector('dialog[open] form').requestSubmit()");
+        const posted = Date.now() + 10000;
+        while (workflowPosts.length < 2 && Date.now() < posted) await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+        assert(workflowPosts.map((post) => post.action).join() === 'claim,review', `Recording did not claim then review: ${JSON.stringify(workflowPosts.map((post) => post.action))}`);
+        assert(workflowPosts[0].body.expected_submission_id === 'fixture-submission', 'Claim did not pin the submission.');
+        assert(workflowPosts[1].body.generation === 3 && workflowPosts[1].body.decision === 'approved', 'Review did not use the claimed attempt generation.');
       }
     }
     task.lifecycle = 'open'; task.work_status = 'waiting_review';

@@ -141,6 +141,10 @@ pub struct CheckpointInput {
     /// Register delegated helpers before they contribute to this task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contributor_session_ids: Vec<String>,
+    /// Full 40-hex commit SHA of the work-in-progress commit already pushed to
+    /// a durable ref. Recovery verifies against it instead of attestations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -160,8 +164,16 @@ pub struct RecoveryInput {
     pub generation: i64,
     pub disposition: String,
     pub summary: String,
+    /// Local attestations, required only when the expired attempt's latest
+    /// checkpoint recorded no revision (a legacy checkpoint).
+    #[serde(default)]
     pub saved_work_checked: bool,
+    #[serde(default)]
     pub running_jobs_checked: bool,
+    /// The full commit SHA the recoverer fetched from the expired attempt's
+    /// work-in-progress ref; it must equal the recorded checkpoint revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_revision: Option<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

@@ -250,6 +250,20 @@ fn start<C>(fixture: &Fixture, credentials: C, timeout: Duration, burst: u32) ->
 where
     C: Credentials + Send + 'static,
 {
+    start_for_launch(fixture, credentials, timeout, burst, std::process::id())
+}
+
+/// As [`start`], serving only descendants of process `launch`.
+fn start_for_launch<C>(
+    fixture: &Fixture,
+    credentials: C,
+    timeout: Duration,
+    burst: u32,
+    launch: u32,
+) -> Running
+where
+    C: Credentials + Send + 'static,
+{
     let socket = bind(&fixture.socket()).unwrap();
     let hour = Duration::from_secs(3600);
     let server = Server {
@@ -260,6 +274,7 @@ where
         budget: Mutex::new(MintBudget::new(burst, hour, Instant::now())),
         askpass: PathBuf::from("/nonexistent/agentc-push"),
         timeout,
+        launch,
     };
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let thread = std::thread::spawn(move || {
@@ -384,6 +399,31 @@ fn mints_beyond_the_budget_are_refused_without_minting() {
         *credentials.revoked.lock().unwrap(),
         ["fake-token-0", "fake-token-1"]
     );
+}
+
+#[test]
+fn a_client_outside_the_launch_is_refused_without_minting() {
+    let fixture = fixture();
+    let credentials = FakeCredentials::default();
+    let mut other = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let running = start_for_launch(
+        &fixture,
+        credentials.clone(),
+        IO_TIMEOUT,
+        MINT_BURST,
+        other.id(),
+    );
+    let reply = refusal(exchange_raw(&fixture, &junk_bundle_request()));
+    assert_eq!(reply.code, RefusalCode::Internal);
+    assert_eq!(reply.message, FOREIGN_LAUNCH);
+    running.stop();
+    other.kill().unwrap();
+    other.wait().unwrap();
+    assert!(credentials.minted.lock().unwrap().is_empty());
+    assert_eq!(fixture.candidate(), None);
 }
 
 #[test]
