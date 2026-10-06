@@ -151,6 +151,7 @@ async fn run_helper(
         budget: Mutex::new(MintBudget::new(MINT_BURST, MINT_INTERVAL, Instant::now())),
         askpass,
         timeout: serve::IO_TIMEOUT,
+        launch: process::parent_id()?,
     };
     server.run(shutdown).await
 }

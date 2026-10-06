@@ -7,6 +7,7 @@
 use crate::askpass;
 use crate::budget::MintBudget;
 use crate::preamble::{Preamble, Replayed};
+use crate::process;
 use crate::socket::BoundSocket;
 use agentc_integrator::github::GithubApp;
 use anyhow::{Context, Result};
@@ -30,6 +31,9 @@ pub const IO_TIMEOUT: Duration = Duration::from_secs(600);
 const NO_CREDENTIALS: &str = "helper could not obtain push credentials";
 /// The refusal sent when the mint budget is spent.
 const RATE_LIMITED: &str = "push rate limit reached; retry later";
+
+/// The refusal for a client outside this helper's launch.
+const FOREIGN_LAUNCH: &str = "connection is not from this helper's launch";
 
 /// Mints and revokes the per-connection token Git pushes with.
 pub trait Credentials {
@@ -86,6 +90,9 @@ pub struct Server<C> {
     pub budget: Mutex<MintBudget>,
     pub askpass: PathBuf,
     pub timeout: Duration,
+    /// The process whose descendants alone may connect: the `launch-root`
+    /// that spawned this helper and its launch.
+    pub launch: u32,
 }
 
 impl<C: Credentials> Server<C> {
@@ -108,11 +115,24 @@ impl<C: Credentials> Server<C> {
 
     /// Serves one connection and logs one line for it.
     async fn handle(&self, stream: tokio::net::UnixStream) {
+        let from_launch = self.is_launch_client(&stream);
         let outcome = match blocking(stream, self.timeout) {
-            Ok(stream) => self.serve_connection(stream).await,
+            Ok(stream) if from_launch => self.serve_connection(stream).await,
+            Ok(stream) => refuse(stream, FOREIGN_LAUNCH).await,
             Err(error) => Err(error),
         };
         eprintln!("{}", outcome_line(self.spec.reference(), &outcome));
+    }
+
+    /// Whether the connecting process belongs to this helper's launch. A
+    /// peer whose process id or ancestry cannot be read is refused.
+    fn is_launch_client(&self, stream: &tokio::net::UnixStream) -> bool {
+        let peer = stream
+            .peer_cred()
+            .ok()
+            .and_then(|credentials| credentials.pid());
+        let peer = peer.and_then(|pid| u32::try_from(pid).ok());
+        peer.is_some_and(|pid| process::descends_from(pid, self.launch).unwrap_or(false))
     }
 
     /// Reads the preamble first. One not worth a mint is served without a
