@@ -1330,16 +1330,22 @@
     view.finish('Record review', (values, dialog) => {
       const remedies = text(values.get('findings')).split('\n').map(v => v.trim()).filter(Boolean);
       if (values.get('decision') === 'approved' && remedies.length) { findings.setCustomValidity('Required remedies must be resolved before approval. Choose changes requested.'); findings.reportValidity(); findings.addEventListener('input', () => findings.setCustomValidity(''), {once:true}); return; }
+      // One claim-then-review chain at a time: the global mutation lock clears between the two requests.
+      if (view.form.dataset.recording === 'true') return;
+      view.form.dataset.recording = 'true'; clearDialogError(view);
       const review = {submission_id: submission.id, decision: values.get('decision'), summary: values.get('summary'), findings: remedies.map(remedy => ({severity:'required',remedy,evidence:text(values.get('summary'))}))};
-      const failed = error => showDialogError(view, error);
-      if (attempt) recordHumanReview(activity, attempt, review, () => dialog.close(), failed);
-      else claimHumanReview(activity, submission, held => recordHumanReview(activity, held, review, () => dialog.close(), error => {
-        // A decision that failed after this form's own claim gives the claim back, unless the outcome is uncertain.
-        if (!error?.uncertain) releaseHumanReview(activity, held);
+      const done = () => { delete view.form.dataset.recording; dialog.close(); };
+      const failed = error => { delete view.form.dataset.recording; showDialogError(view, error); };
+      if (attempt) recordHumanReview(activity, attempt, review, done, failed);
+      else claimHumanReview(activity, submission, held => recordHumanReview(activity, held, review, done, error => {
+        // A decision that failed after this form's own claim gives the claim back, unless the outcome is uncertain or the session ended.
+        if (!error?.uncertain && error?.status !== 401 && error?.code !== 'authentication_required') releaseHumanReview(activity, held);
         failed(error);
       }), failed);
     });
   }
+  // Removes a previous failure note before a retry.
+  function clearDialogError(view) { view.form.querySelector('.dialog-error')?.remove(); }
   // Shows `error` inside the still-open form, so the entered decision can be retried.
   function showDialogError(view, error) {
     let note = view.form.querySelector('.dialog-error');
