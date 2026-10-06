@@ -172,6 +172,26 @@ impl Browser {
     }
 }
 
+/// Asserts that a document defers to the served cleanup instruction (naming its
+/// source and saying it does not restate it) and contains none of its commands.
+fn assert_points_to_served_cleanup(doc: &str, disclaimer: &str) {
+    let doc = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(doc.contains("WORKTREE_CLEANUP_INSTRUCTIONS"));
+    assert!(doc.contains(disclaimer), "missing disclaimer: {disclaimer}");
+    for restated in [
+        "git worktree remove",
+        "worktree list --porcelain",
+        "recursive filesystem deletion",
+        "force-with-lease",
+        "update-ref",
+        "merge-base --is-ancestor",
+        "branch -d",
+        "branch -D",
+    ] {
+        assert!(!doc.contains(restated), "doc restates cleanup: {restated}");
+    }
+}
+
 #[tokio::test]
 async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
     let fixture = Fixture::new().await;
@@ -319,15 +339,12 @@ async fn anonymous_discovery_bootstraps_without_exposing_private_state() {
         );
     }
     assert!(!cleanup.contains("Use git branch -d"));
-    let guide = guide.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(guide.contains("WORKTREE_CLEANUP_INSTRUCTIONS"));
-    assert!(guide.contains("this book deliberately does not restate it"));
-    for restated in ["git worktree remove", "force-with-lease", "update-ref"] {
-        assert!(
-            !guide.contains(restated),
-            "guide restates cleanup: {restated}"
-        );
-    }
+    assert!(cleanup.contains("against the branch's upstream when it has one"));
+    assert_points_to_served_cleanup(guide, "this guide deliberately does not restate it");
+    assert_points_to_served_cleanup(
+        include_str!("../../../book/src/docs/completion-contract.md"),
+        "this book deliberately does not restate it",
+    );
     for private in [
         token.as_str(),
         credential_id.as_str(),

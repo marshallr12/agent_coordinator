@@ -534,13 +534,14 @@ publication, retention and historical backfill requirements.
 
 Every agent cleans up after its own completed tasks, in every project, so
 finished work does not waste or clutter workstation disk. The procedure has one
-source of truth: the service's worktree and branch cleanup instruction
-(`WORKTREE_CLEANUP_INSTRUCTIONS` in `crates/server/src/discovery.rs`). It is the
-same for every project and is served in the orientation `instructions` that each
-agent acknowledges before claiming, as step 8 of the orientation's
+source of truth: the service's worktree and branch cleanup instruction. It is
+the same for every project and is served in the orientation `instructions` that
+each agent acknowledges before claiming, as step 8 of the orientation's
 `completion_workflow`, and in the MCP server instructions (also published
 anonymously in `/api/v1/info` under `data.agent_startup.mcp.instructions`).
-Follow that served text; this book deliberately does not restate it.
+Follow that served text; this guide deliberately does not restate it. Service
+maintainers edit it as `WORKTREE_CLEANUP_INSTRUCTIONS` in the Agent Coordinator
+source (`crates/server/src/discovery.rs`).
 
 Use live `context`, `knowledge`, `decisions`, task history, and artifact records
 for shared facts and progress. No local BACKLOG.md or HANDOFF.md is required to
