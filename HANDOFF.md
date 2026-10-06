@@ -130,6 +130,16 @@ keyless-rerank warnings. Downtime 03:12:11–03:13:07 UTC. `/api/v1/info` `8bf99
 worktree `~/src/worktrees/ac-release-8bf99e8` (rollback `~/.local/bin/agent-coordinator.rollback`).
 Not checked: the oracle-1 integrator journal across the downtime.
 
+**DONE (2026-10-06, not deployed): cleanup rule single-sourced, guarded local branch deletion (4da7ffa0).**
+Owner direction: the served `WORKTREE_CLEANUP_INSTRUCTIONS` (orientation instructions, completion_workflow
+step 8, MCP instructions; same for every project) is the only statement of the cleanup procedure;
+`agent-startup.md` and `completion-contract.md` point to it. Local task branches are deleted with
+`git merge-base --is-ancestor OID REMOTE/TARGET` + no worktree use + `git update-ref -d refs/heads/B OID`
+(`git branch -d` refused merged branches from `autonomy-plan`). Subagent review `branch-cleanup-review-1`
+approved (advisories: the `-d` rationale ignores upstreams; the guide pointer says "this book" though it is
+served to other projects; the no-restatement test checks only 3 phrases). Integrator pushed **`main`
+`8820f08 → b8eaf4d`**. Worktree and branch removed by the new rule.
+
 **DONE (2026-10-06, not deployed): sessions polish 33a3a8dd + idle-session auto-close 601d1601.**
 Session `backlog-1006` (CLI, parent `5b189927…`). 33a3a8dd: `55786eb` — SESSIONS_SQL starts from open
 sessions with per-session indexed lookups (migration **0025**: `attempts(session_id,project_id)`,
