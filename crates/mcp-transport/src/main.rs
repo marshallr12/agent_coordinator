@@ -14,6 +14,9 @@ use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const STATUS: &str = "coordinator_transport_status";
+/// What a host must do after its configured session closed: the adapter
+/// never invents session secrets, so only the host can supply new ones.
+const CLOSED_SESSION_ACTION: &str = "The configured session is closed and cannot be reopened. Stop and ask the host operator to provision a new session ID and proof (and a fresh adapter state directory), then reconnect and register the new session.";
 const RETRY: &str = "coordinator_transport_retry";
 
 #[derive(Parser)]
@@ -156,6 +159,25 @@ impl Adapter {
         Ok(value)
     }
 
+    /// The configured session's service state: `open`, `closed` (explicitly,
+    /// by credential rotation, or by idle-session maintenance), or `unknown`
+    /// when it is unregistered or the service cannot be read. A read only.
+    async fn session_state(&self) -> &'static str {
+        let params = json!({"name":"coordinator_session_get","arguments":{}});
+        let Ok(value) = self.remote("tools/call", params).await else {
+            return "unknown";
+        };
+        let result = &value["result"];
+        if value.get("error").is_some() || result["isError"] == true {
+            return "unknown";
+        }
+        match result["structuredContent"]["data"].get("closed_at") {
+            Some(Value::Null) => "open",
+            Some(_) => "closed",
+            None => "unknown",
+        }
+    }
+
     async fn catalog(&mut self) -> Result<Value> {
         let value = self.remote("tools/list", json!({})).await?;
         ensure!(value.get("error").is_none(), "upstream discovery failed");
@@ -179,7 +201,7 @@ impl Adapter {
         self.tools = catalog;
         let mut result = value["result"].clone();
         let tools = result["tools"].as_array_mut().unwrap();
-        tools.push(local_tool(STATUS,"Inspect durable adapter capability and whether a mutation is pending. Does not grant or renew ownership.",true));
+        tools.push(local_tool(STATUS,"Inspect durable adapter capability, whether a mutation is pending, and whether the configured session is open or closed. Does not grant or renew ownership.",true));
         tools.push(local_tool(RETRY,"Replay the exact pending mutation, or the most recently completed request if no mutation is pending, after uncertainty. Inspect current ownership separately; receipt replay does not renew a lease.",false));
         Ok(result)
     }
@@ -217,7 +239,7 @@ impl Adapter {
                     .to_owned();
                 let instructions = result["instructions"].as_str().unwrap_or("").to_owned();
                 result["instructions"] = json!(format!(
-                    "{instructions}\n\nThis connection uses agent-coordinator-mcp with a private durable journal. Call coordinator_transport_status before mutations; its configured_identity supplies the non-secret session_id and project_id for registration. If session_get reports an unregistered session, use that configured session_id with coordinator_session_register; never invent a different ID. Supply a unique idempotency_key; the adapter saves the exact arguments before sending. After uncertainty use coordinator_transport_retry, never a new key. Reads remain available. A replayed receipt is not proof of current ownership. Do not share this configured session with another host or transport writer."
+                    "{instructions}\n\nThis connection uses agent-coordinator-mcp with a private durable journal. Call coordinator_transport_status before mutations; its configured_identity supplies the non-secret session_id and project_id for registration. If session_get reports an unregistered session, use that configured session_id with coordinator_session_register; never invent a different ID. If transport_status reports session_state closed (for example after idle-session maintenance), stop: the host must provision a new session ID and proof. Supply a unique idempotency_key; the adapter saves the exact arguments before sending. After uncertainty use coordinator_transport_retry, never a new key. Reads remain available. A replayed receipt is not proof of current ownership. Do not share this configured session with another host or transport writer."
                 ));
                 Ok(result)
             }
@@ -239,6 +261,10 @@ impl Adapter {
                     if name == STATUS {
                         let mut status = self.journal.status();
                         status["configured_identity"] = self.public_identity.clone();
+                        status["session_state"] = json!(self.session_state().await);
+                        if status["session_state"] == "closed" {
+                            status["session_action"] = json!(CLOSED_SESSION_ACTION);
+                        }
                         return Ok(structured(status));
                     }
                     let mut pending = self

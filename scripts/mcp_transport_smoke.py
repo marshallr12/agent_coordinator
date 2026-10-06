@@ -256,6 +256,10 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
         mutation('coordinator_checkpoint', {'generation': before['generation'], 'summary': 'Forced interruption independently verified.'}, project=project, attempt=before['id'])
         mutation('coordinator_attempt_release', {'generation': before['generation'], 'summary': 'Adapter smoke complete.', 'blocked': False}, project=project, attempt=before['id'])
         assert api(f"/api/v1/projects/{project}/tasks/{task['id']}")['current_attempt_id'] is None
+        assert tool('coordinator_transport_status')['session_state'] == 'open'
+        mutation('coordinator_session_close', {})
+        closed = tool('coordinator_transport_status')
+        assert closed['session_state'] == 'closed' and 'new session ID and proof' in closed['session_action'], 'A closed session was not reported.'
         invalid = temporary / 'not-a-repository'
         invalid.mkdir()
         try:
@@ -264,7 +268,7 @@ def exercise_mcp_transport(temporary, api, project, origin, binary, evaluation_d
             pass
         else:
             raise AssertionError('Invalid Git check accepted as clean.')
-        print('PASS: standalone MCP durable pre-dispatch journal, forced post-commit interruption, exact replay, one owner/no renewal, concurrent exclusion, invalid Git rejection.')
+        print('PASS: standalone MCP durable pre-dispatch journal, forced post-commit interruption, exact replay, one owner/no renewal, concurrent exclusion, closed-session status, invalid Git rejection.')
     finally:
         if process is not None and process.poll() is None:
             process.kill()
