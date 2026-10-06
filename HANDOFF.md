@@ -393,6 +393,37 @@ do not silently resume a third repair in the completed core wave.
 S6 cutover and the later supervisor security queue remain separate work. The
 planning handoff records the 24-hour polling pass but no live candidate evidence.
 
+## S6 release `1e8aebb` and oracle-1 shadow bootstrap — 2026-09-30
+
+Carried from branch `autonomy/s6` (`af29aae`, `1b3e498`); workflow was off then.
+- **Shipped and deployed:** product candidate `1e8aebb` (incorporating `14e2fda`, `e042e26`,
+  `291b680`). Fresh-context security review (gpt-6-astra/xhigh) reproduced a false-green
+  drain preflight for expired/revoked ordinary task and review attempts whose recovery is
+  derived rather than persisted; fixed by requiring zero `tasks.current_attempt_id`, with an
+  expired-task/review regression (five ops tests pass). Live roster revision 3
+  (`linux-validation`, `documentation`, `dependency-audit`) is mapped to its GitHub job
+  names/paths in `.agent-coordinator/roster.toml`.
+- Gate: 502 workspace tests, fmt, warnings-denied Clippy, locked audit, workspace build,
+  service/CLI smoke, backup/restore smoke, pinned documentation checks, five ops regressions.
+  CI runs `36662950828` and `36662950832` passed on the exact SHA; release acceptance
+  `36663055767` passed Linux package/systemd/HTTPS, five-minute load and Windows packaging.
+- Binaries-only production deploy: all seven preflight counts zero before deploy and after
+  stop; stop/start 03:23:02–03:23:25 UTC, health 03:23:26; public build identity, backup,
+  maintenance, transfer and timers verified. Rollback binaries use suffix `-0.1.1-4a72018`;
+  snapshots old `20260930T032256.016Z-88af7c3f-0b71-4134-8da5-92be7292612f`, new
+  `20260930T032326.636Z-fdd008a6-28f0-42ed-b119-9aca91aaedb7`. Evidence, logs and scripts:
+  `~/.local/share/agent-coordinator-autonomy/release-1e8aebb/`.
+- **oracle-1 integrator build:** ARM64, systemd 259, Rust 1.98.1; clean detached checkout
+  `/home/ubuntu/src/worktrees/agent-coordinator-s6-release` at `1e8aebb`; host-native
+  `agentc-integrator` SHA256 `4018b8cee4e1bda30b64da585fc899bb1b35a0b177b50c508d8f1bb46cce01fa`.
+  Owner bootstrap: `integrator-host-setup.sh` with that binary, `~/integrator-shadow.toml`
+  installed as `/etc/agentc/integrator.toml` (root:root 0644), and a read-only
+  integrator-class credential at `/etc/agentc/integrator-credentials.toml` (root:root 0400;
+  token never in chat or Git). App and coordinator source files are root:root 0400.
+- **Shadow startup:** unit running from 2026-09-30 04:28:08 UTC; first target observation
+  04:28:12 UTC, zero restarts or errors at startup. Journal evidence:
+  `~/.local/share/agent-coordinator-autonomy/release-1e8aebb/shadow-start.log`.
+
 ## Historical S6 implementation checkpoint — 2026-09-29
 
 The user disabled the Agent Coordinator workflow for this session. No service
