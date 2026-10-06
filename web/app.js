@@ -1246,19 +1246,19 @@
     const help = (input, label, description) => contextualHelp(form, input, label, description);
     return { dialog, form, field, help, finish };
   }
-  function workflowMutation(path, body, label, after) {
+  function workflowMutation(path, body, label, after, onError = null) {
     const projectId = state.projectId, taskId = state.selectedTaskId;
     startMutation(path, body, label, async data => {
       if (projectId === state.projectId && taskId === state.selectedTaskId && taskId) await loadTaskDetail();
       else if (projectId === state.projectId) await loadTasks();
       if (after) after(data);
-    }, 'POST', null, { projectId, taskId });
+    }, 'POST', onError, { projectId, taskId });
   }
   function renderWorkflow(data) {
     const target = $('workflow-content'); clear(target); const workflow = data.workflow || {}; const submission = workflow.submission;
     if (!submission) { add(target, el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.')); return; }
     const guidance = {
-      review: 'Work has been submitted for review. The submission is a saved version of the result and its evidence; edits require a new submission. ' + ((workflow.activities || []).some(activity => activity.kind === 'either_review') ? 'An independent agent or a human may claim this review. One approval satisfies the review requirement; requesting changes requires a new submission. Claiming reserves the review and does not approve the work.' : (workflow.activities || []).some(activity => activity.kind === 'human_review') ? 'Review the evidence below, then start an available human review to approve it or request changes. The review is reserved for you only when you record your decision; closing the form leaves it available.' : 'An independent agent must claim the required review and approve the work or request changes.'),
+      review: 'Work has been submitted for review. The submission is a saved version of the result and its evidence; edits require a new submission. ' + ((workflow.activities || []).some(activity => activity.kind === 'either_review') ? 'An independent agent or a human may take this review. One approval satisfies the review requirement; requesting changes requires a new submission. An agent reserves it by claiming; a human reserves it only when recording the decision. Reserving does not approve the work.' : (workflow.activities || []).some(activity => activity.kind === 'human_review') ? 'Review the evidence below, then start an available human review to approve it or request changes. The review is reserved for you only when you record your decision; closing the form leaves it available.' : 'An independent agent must claim the required review and approve the work or request changes.'),
       integration: 'The submitted code is awaiting integration: an agent must validate the required checks, publish the result, and finalize the task. If shown, Authorize integration gives permission to proceed.',
       revision_needed: 'Changes are needed. An agent must claim the task, revise the work, and submit a new version for review. The previous submission stays in the history.',
       done: 'This submission has completed the required workflow.'
@@ -1330,22 +1330,36 @@
     view.finish('Record review', (values, dialog) => {
       const remedies = text(values.get('findings')).split('\n').map(v => v.trim()).filter(Boolean);
       if (values.get('decision') === 'approved' && remedies.length) { findings.setCustomValidity('Required remedies must be resolved before approval. Choose changes requested.'); findings.reportValidity(); findings.addEventListener('input', () => findings.setCustomValidity(''), {once:true}); return; }
-      dialog.close();
       const review = {submission_id: submission.id, decision: values.get('decision'), summary: values.get('summary'), findings: remedies.map(remedy => ({severity:'required',remedy,evidence:text(values.get('summary'))}))};
-      if (attempt) recordHumanReview(activity, attempt, review);
-      else claimHumanReview(activity, submission, held => recordHumanReview(activity, held, review));
+      const failed = error => showDialogError(view, error);
+      if (attempt) recordHumanReview(activity, attempt, review, () => dialog.close(), failed);
+      else claimHumanReview(activity, submission, held => recordHumanReview(activity, held, review, () => dialog.close(), error => {
+        // A decision that failed after this form's own claim gives the claim back, unless the outcome is uncertain.
+        if (!error?.uncertain) releaseHumanReview(activity, held);
+        failed(error);
+      }), failed);
     });
+  }
+  // Shows `error` inside the still-open form, so the entered decision can be retried.
+  function showDialogError(view, error) {
+    let note = view.form.querySelector('.dialog-error');
+    if (!note) { note = el('p', 'inline-alert error dialog-error'); note.setAttribute('role', 'alert'); view.form.prepend(note); }
+    setText(note, `Not recorded: ${errorMessage(error)} Your entries are kept; correct them or try again.`);
   }
   // Claims the review for this session, then hands the new attempt to `after`.
-  function claimHumanReview(activity, submission, after) {
+  function claimHumanReview(activity, submission, after, onError) {
     workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/claim`, {expected_submission_id: submission.id, expected_project_policy_revision: submission.project_policy_revision, expected_workflow_policy_revision: submission.workflow_policy_revision}, 'review claim', response => {
       if (response?.attempt) after(response.attempt);
-      else setGlobalAlert('Refresh the activity to inspect its current ownership.', 'error');
-    });
+      else onError(new ApiError('Refresh the activity to inspect its current ownership.', 0, 'missing_attempt', null, false));
+    }, onError);
   }
-  // Records the decision under the held review `attempt`.
-  function recordHumanReview(activity, attempt, review) {
-    workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/review`, {generation: attempt.generation, ...review}, 'human review');
+  // Records the decision under the held review `attempt`, then calls `done`.
+  function recordHumanReview(activity, attempt, review, done, onError) {
+    workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/review`, {generation: attempt.generation, ...review}, 'human review', done, onError);
+  }
+  // Gives back a review claim this form took when its decision could not be recorded.
+  function releaseHumanReview(activity, attempt) {
+    workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/release`, {generation: attempt.generation, summary: 'Released: the human review decision could not be recorded.'}, 'review release');
   }
   function openIntegrationAuthorization(activity, submission) {
     const view = workflowDialog('Authorize this integration', `Permit agents to integrate submission ${submission.id} after required review and checks. This does not publish source or mark the task done.`);

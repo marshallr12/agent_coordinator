@@ -30,6 +30,8 @@ const tasks = Array.from({ length: 30 }, (_, index) => ({
 const uploadedAttachments = new Map();
 // Workflow activity POSTs (claim/review), so the review test can prove a dismissed form claims nothing.
 const workflowPosts = [];
+// When true, the next review POST is refused once, to exercise the form's failure path.
+let failNextReview = false;
 const attachmentReservations = new Map();
 const attachmentBytes = new Map();
 let failFirstAttachmentPut = true;
@@ -169,9 +171,10 @@ async function fixtureServer() {
     if (url.pathname === '/api/v1/projects/fixture-project/policy' && request.method === 'PATCH') return policyRoute(request, response);
     if (url.pathname === '/api/v1/projects/fixture-project/integrator/reports') return reportListRoute(url, response);
     if (url.pathname === '/api/v1/projects/fixture-project/sessions') return agentSessionsRoute(url, response);
-    const workflowMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/workflow-activities\/([^/]+)\/(claim|review)$/);
+    const workflowMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/workflow-activities\/([^/]+)\/(claim|review|release)$/);
     if (workflowMatch && request.method === 'POST') {
       workflowPosts.push({ activity: decodeURIComponent(workflowMatch[1]), action: workflowMatch[2], body: await readJson(request) });
+      if (workflowMatch[2] === 'review' && failNextReview) { failNextReview = false; return refuse(response, 409, 'submission_stale', 'The submission changed.'); }
       return json(response, workflowMatch[2] === 'claim' ? { attempt: { id: 'fixture-claimed', generation: 3 } } : { recorded: true });
     }
     if (url.pathname.startsWith(`/api/v1/projects/fixture-project/attempts/${recoveryAttempt.id}`)) return recoveryRoute(url.pathname, request, response);
@@ -761,12 +764,23 @@ async function main() {
         assert(workflowPosts.length === 0, 'Opening or dismissing the review form claimed the review.');
         await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review').click()");
         await waitPage("document.querySelector('dialog[open] #workflow-decision')", 'reopened human review dialog');
+        const awaitPosts = async (count) => { const until = Date.now() + 10000; while (workflowPosts.length < count && Date.now() < until) await new Promise((resolveDelay) => setTimeout(resolveDelay, 50)); };
+        const actions = () => workflowPosts.map((post) => post.action).join();
+        failNextReview = true;
+        await waitPage("document.querySelector('dialog[open] button[type=submit]')?.disabled === false", 'idle new review form');
         await evaluate("document.querySelector('#workflow-decision').value = 'approved'; document.querySelector('#workflow-summary').value = 'Synthetic review'; document.querySelector('dialog[open] form').requestSubmit()");
-        const posted = Date.now() + 10000;
-        while (workflowPosts.length < 2 && Date.now() < posted) await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
-        assert(workflowPosts.map((post) => post.action).join() === 'claim,review', `Recording did not claim then review: ${JSON.stringify(workflowPosts.map((post) => post.action))}`);
+        await awaitPosts(3);
+        assert(actions() === 'claim,review,release', `A failed decision did not give its claim back: ${actions()}`);
+        assert(workflowPosts[2].body.generation === 3, 'Release did not name the claimed attempt.');
+        await waitPage("document.querySelector('dialog[open] .dialog-error')?.textContent.includes('The submission changed.')", 'review failure shown in the form');
+        assert(await evaluate("document.querySelector('#workflow-decision').value === 'approved' && document.querySelector('#workflow-summary').value === 'Synthetic review'"), 'The failed form lost the entered decision.');
+        await waitPage("document.querySelector('dialog[open] button[type=submit]')?.disabled === false", 'idle review form');
+        await evaluate("document.querySelector('dialog[open] form').requestSubmit()");
+        await awaitPosts(5);
+        assert(actions() === 'claim,review,release,claim,review', `Retry did not claim then review: ${actions()}`);
         assert(workflowPosts[0].body.expected_submission_id === 'fixture-submission', 'Claim did not pin the submission.');
-        assert(workflowPosts[1].body.generation === 3 && workflowPosts[1].body.decision === 'approved', 'Review did not use the claimed attempt generation.');
+        assert(workflowPosts[4].body.generation === 3 && workflowPosts[4].body.decision === 'approved', 'Review did not use the claimed attempt generation.');
+        await waitPage("!document.querySelector('dialog[open] #workflow-decision')", 'review form closed after recording');
       }
     }
     task.lifecycle = 'open'; task.work_status = 'waiting_review';
