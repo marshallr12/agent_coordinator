@@ -369,9 +369,11 @@ agent-coordinator release --attempt attempt-id --generation 2 --input release.js
 `checkpoint --push-wip` first pushes the prepared worktree's clean commit to the
 create-only ref `refs/agent-coordinator/candidates/wip/<attempt>/<sha>` (with the
 same secret scan and readback as a code submission), then records that SHA as
-the checkpoint's `revision`. A configured candidate push helper refuses this
-explicit ref. A recorded revision lets a later recovery be verified by the
-service instead of by local attestations.
+the checkpoint's `revision`. Under a candidate push helper
+(`AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET`), the helper chooses its own
+create-only ref `refs/agent-coordinator/candidates/wip/<task>/<launch>/<sha>`,
+which never touches the launch's candidate ref. A recorded revision lets a later
+recovery rest on a SHA comparison by the service instead of on local attestations.
 
 ## Worktrees
 
@@ -963,9 +965,11 @@ agent-coordinator recovery resolve \
 
 When the expired attempt's latest checkpoint recorded a `revision`, fetch its
 WIP ref and send the fetched SHA as `fetched_revision` instead of the two
-`*_checked` attestations; the service verifies it equals the recorded SHA
-(`recovery_revision_mismatch` otherwise) and returns
-`"evidence": "service_verified"`. A legacy checkpoint without a revision still
+`*_checked` attestations. The service cannot read Git; it only checks that
+the value equals the recorded SHA (`recovery_revision_mismatch` otherwise), so
+confirm the fetched ref names it before sending. A match returns
+`"evidence": "service_verified"`. The resolution's own checkpoint records no
+revision, so recovering that attempt later needs the attestations. A legacy checkpoint without a revision still
 needs both attestations and returns `"evidence": "local_attestation"`.
 Use the disposition and inspection fields required by the current service
 orientation and attempt detail. Recovery does not cancel or restart jobs and

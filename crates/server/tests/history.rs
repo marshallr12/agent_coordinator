@@ -195,6 +195,29 @@ async fn high_volume_pages_have_no_gaps_and_exclude_concurrent_inserts() {
     );
 }
 
+/// Checkpoint history carries the recorded WIP revision, and NULL for a
+/// legacy checkpoint, so a recoverer can find the SHA to fetch.
+#[tokio::test]
+async fn checkpoint_history_includes_the_recorded_revision() {
+    let f = Fixture::new().await;
+    let (project, task) = f.project_task("revision").await;
+    let attempt = f.attempt(&project, &task, 1, "revision").await;
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    for (index, revision) in [None, Some(sha)].into_iter().enumerate() {
+        sqlx::query("INSERT INTO checkpoints(id,project_id,attempt_id,summary,current_action,next_step,blockers_json,created_at,revision) VALUES(?,?,?,'wip','','','[]',?,?)")
+            .bind(Uuid::new_v4().to_string()).bind(&project).bind(&attempt)
+            .bind(f.state.now() + index as i64).bind(revision).execute(&f.state.pool).await.unwrap();
+    }
+    let page = f.history(&project, &task, "checkpoints", 10, None).await;
+    let revisions: Vec<&Value> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| &item["record"]["revision"])
+        .collect();
+    assert_eq!(revisions, [&Value::Null, &json!(sha)]);
+}
+
 #[tokio::test]
 async fn cursor_and_task_relationships_never_cross_project_or_kind() {
     let f = Fixture::new().await;

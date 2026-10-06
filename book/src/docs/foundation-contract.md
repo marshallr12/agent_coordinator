@@ -129,7 +129,11 @@ Additional implemented routes:
   Requires a recovery-mode attempt; only after this inspection may it resume
   normal work or release back to the queue. Incomplete inspections release blocked.
   When the expired attempt's latest checkpoint recorded a `revision`, send
-  `fetched_revision` instead of the two attestations; the service verifies it.
+  `fetched_revision` instead of the two attestations. The service cannot read
+  Git: it only checks that `fetched_revision` equals the recorded SHA (plus the
+  expired predecessor, the generation bump and no live jobs), and then answers
+  `evidence: "service_verified"`. The resolution's own checkpoint records no
+  revision, so a second recovery falls back to the attestations.
 
 On a claim replay, `current_authority` reports whether the historical grant still
 holds. The original claim is a receipt, not a fresh countdown. Renewal replay

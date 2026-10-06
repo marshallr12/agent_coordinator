@@ -217,12 +217,14 @@ async fn refuse<W: Write + Send + 'static>(mut stream: W, message: &str) -> Resu
 }
 
 /// The log line for one connection to the helper for `reference`: the
-/// outcome code, and for an accepted push the commit and the one it
-/// replaced. Holds no token, Git output or error chain from Git.
+/// outcome code, and for an accepted push the ref it wrote (the candidate
+/// ref or a WIP ref), the commit and the one it replaced. Holds no token,
+/// Git output or error chain from Git.
 pub fn outcome_line(reference: &str, outcome: &Result<PushReply>) -> String {
     let detail = match outcome {
         Ok(PushReply::Accepted(receipt)) => format!(
-            "outcome=accepted revision={} previous={}",
+            "outcome=accepted written={} revision={} previous={}",
+            receipt.reference,
             receipt.revision,
             receipt.previous.as_deref().unwrap_or("none")
         ),

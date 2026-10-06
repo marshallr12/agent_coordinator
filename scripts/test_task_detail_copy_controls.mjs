@@ -58,6 +58,19 @@ let failNextReportPage = false;
 // While set, the project list waits on this promise (a slow load after a reload).
 let projectsGate = null;
 const reportResolutions = [];
+// Recovery resolutions the dashboard posted for the fixture's recovery attempt.
+const recoveryPosts = [];
+const RECORDED_SHA = '0123456789abcdef0123456789abcdef01234567';
+const recoveryAttempt = { id: 'fixture-recovery', task_id: task.id, generation: 2, mode: 'recovery', state: 'active', owner_id: 'fixture-operator', session_id: 'fixture-browser', expires_at: '2026-10-06T23:00:00Z' };
+const expiredAttempt = { id: 'fixture-expired', task_id: task.id, generation: 1, mode: 'work', state: 'expired', owner_id: 'p-worker', session_id: 'launch-1' };
+// Serves the recovery attempt's evidence and records its resolution.
+async function recoveryRoute(pathname, request, response) {
+  if (pathname.endsWith('/recovery-resolution') && request.method === 'POST') {
+    recoveryPosts.push(await readJson(request));
+    return json(response, { attempt: { ...recoveryAttempt, mode: 'work' }, disposition: 'resume', evidence: 'service_verified' });
+  }
+  return json(response, { attempt: recoveryAttempt, authority_valid: true });
+}
 // Connected agent sessions: a subagent reviewer, a plain CLI worker and an idle session.
 const agentSessions = [
   { session_id: 'session-reviewer', principal: { id: 'p-builder', name: 'builder-agent', kind: 'agent' }, harness: 'claude-code', workstation_id: 'ws-laptop', capabilities: [], subagent: { name: 'reviewer-1', parent_session_id: 'session-parent' }, credential_id: 'cred-1', started_at: '2026-10-05T08:00:00Z', last_activity_at: '2026-10-05T10:00:00Z',
@@ -161,6 +174,7 @@ async function fixtureServer() {
       workflowPosts.push({ activity: decodeURIComponent(workflowMatch[1]), action: workflowMatch[2], body: await readJson(request) });
       return json(response, workflowMatch[2] === 'claim' ? { attempt: { id: 'fixture-claimed', generation: 3 } } : { recorded: true });
     }
+    if (url.pathname.startsWith(`/api/v1/projects/fixture-project/attempts/${recoveryAttempt.id}`)) return recoveryRoute(url.pathname, request, response);
     const resolveMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/integrator\/reports\/([^/]+)\/resolve$/);
     if (resolveMatch && request.method === 'POST') return reportResolveRoute(decodeURIComponent(resolveMatch[1]), request, response);
     if (url.pathname === '/api/v1/projects/fixture-project/tasks') {
@@ -456,6 +470,31 @@ async function checkAgentActorControls(page, serverPort) {
   } finally { fixtureActor.kind = 'human'; }
 }
 
+// A human resolves a recovery whose expired attempt recorded a WIP revision: the dialog shows the
+// recorded SHA and WIP refs, asks for the fetched SHA instead of the attestations, and posts it.
+async function checkVerifiedRecovery({ evaluate, waitPage }, openFixtureTask) {
+  Object.assign(task, { work_status: 'in_progress', current_attempt_id: recoveryAttempt.id, attempts: [recoveryAttempt, expiredAttempt], workflow: { activities: [] },
+    checkpoints: [{ id: 'fixture-wip', attempt_id: expiredAttempt.id, summary: 'WIP pushed', current_action: '', next_step: '', blockers: [], revision: RECORDED_SHA, created_at: '2026-10-06T09:00:00Z' }] });
+  await openFixtureTask();
+  const button = "Array.from(document.querySelectorAll('#task-operator-actions button')).find(button => button.textContent === 'Review recovery evidence')";
+  // The dashboard runs one mutation at a time; wait until the action is idle.
+  await waitPage(`${button}?.disabled === false`, 'idle recovery action');
+  await evaluate(`${button}.click()`);
+  await waitPage("document.querySelector('dialog[open] #workflow-fetched_revision')", 'verified recovery dialog');
+  const note = await evaluate("document.querySelector('#recovery-recorded-revision').textContent");
+  assert(note.includes(RECORDED_SHA) && note.includes(`refs/agent-coordinator/candidates/wip/fixture-expired/${RECORDED_SHA}`) && note.includes(`refs/agent-coordinator/candidates/wip/${task.id}/launch-1/${RECORDED_SHA}`), 'Recovery dialog does not show the recorded SHA and WIP refs.');
+  assert(note.includes('only checks that the SHA you enter equals the recorded one'), 'Recovery dialog overclaims what the service verifies.');
+  assert(await evaluate("!document.querySelector('#workflow-saved_work_checked') && !document.querySelector('#workflow-running_jobs_checked')"), 'Verified recovery still asks for local attestations.');
+  await evaluate("document.querySelector('#workflow-summary').value = 'Fetched the WIP ref'; document.querySelector('#workflow-fetched_revision').value = 'not-a-sha'; document.querySelector('dialog[open] form').requestSubmit()");
+  assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && document.querySelector('#workflow-fetched_revision').validity.patternMismatch"), 'A malformed SHA was submitted.');
+  await evaluate(`document.querySelector('#workflow-fetched_revision').value = '${RECORDED_SHA}'; document.querySelector('dialog[open] form').requestSubmit()`);
+  const deadline = Date.now() + 10000;
+  while (recoveryPosts.length < 1 && Date.now() < deadline) await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  const body = recoveryPosts[0];
+  assert(body && body.fetched_revision === RECORDED_SHA && body.generation === 2 && !('saved_work_checked' in body), `Recovery posted the wrong body: ${JSON.stringify(body)}`);
+  Object.assign(task, { current_attempt_id: null, attempts: [], checkpoints: [] });
+}
+
 async function removeProfile(profile) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try { await rm(profile, { recursive: true, force: true }); return; }
@@ -743,6 +782,7 @@ async function main() {
     assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && !document.querySelector('#workflow-findings').validity.valid"), 'Required remedies allowed approval.');
     await evaluate("document.querySelector('dialog[open]').close()");
 
+    await checkVerifiedRecovery({ evaluate, waitPage }, openFixtureTask);
     task.work_status = 'blocked'; task.workflow = { activities: [] };
     await openFixtureTask();
     await evaluate("Array.from(document.querySelectorAll('#task-operator-actions button')).find(button => (button.getAttribute('aria-label') || button.textContent) === 'Resolve blocker').click()");
@@ -783,7 +823,7 @@ async function main() {
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
     await checkReloadedResolutionLabel(ui, serverPort);
-    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {

@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use coordinator_local::candidate_push::PushKind;
 #[cfg(unix)]
 use coordinator_local::candidate_push::{PushRefusal, RefusalCode};
 use coordinator_local::git_workflow::{
@@ -73,6 +74,20 @@ pub fn checkpoint(
     }
 }
 
+/// Publishes and verifies a work-in-progress commit. Directly, it pushes to
+/// the request's explicit create-only ref; through the helper, the helper
+/// chooses its own WIP ref, so the explicit ref is not sent.
+pub fn checkpoint_wip(
+    request: &CheckpointRequest<'_>,
+    helper_socket: Option<&Path>,
+) -> Result<CandidateCheckpoint, Failure> {
+    match helper_socket {
+        None => checkpoint_directly(request),
+        Some(socket) if cfg!(unix) => publish_through_helper(request, socket, PushKind::Wip),
+        Some(_) => Err(unsupported_platform()),
+    }
+}
+
 /// Pushes from the checkout itself with [`checkpoint_candidate`], to the
 /// caller's ref or the default one.
 fn checkpoint_directly(request: &CheckpointRequest<'_>) -> Result<CandidateCheckpoint, Failure> {
@@ -94,6 +109,16 @@ fn checkpoint_through_helper(
     socket: &Path,
 ) -> Result<CandidateCheckpoint, Failure> {
     refuse_explicit_ref(request)?;
+    publish_through_helper(request, socket, PushKind::Candidate)
+}
+
+/// The helper route shared by candidate and WIP pushes: scan, check the base
+/// commit, send a push of `kind`, and read back the ref the helper reports.
+fn publish_through_helper(
+    request: &CheckpointRequest<'_>,
+    socket: &Path,
+    kind: PushKind,
+) -> Result<CandidateCheckpoint, Failure> {
     let snapshot = scan_clean_candidate(
         request.checkout,
         request.repository,
@@ -101,7 +126,7 @@ fn checkpoint_through_helper(
     )
     .map_err(Failure::invalid)?;
     require_base_commit(&snapshot, request.base_revision)?;
-    let reference = send_to_helper(socket, &snapshot, request.base_revision)?;
+    let reference = send_to_helper(socket, &snapshot, request.base_revision, kind)?;
     verify_published_candidate(&snapshot, request.repository, &reference).map_err(Failure::invalid)
 }
 
@@ -140,6 +165,7 @@ fn send_to_helper(
     socket: &Path,
     snapshot: &CleanSnapshot,
     base_revision: &str,
+    kind: PushKind,
 ) -> Result<String, Failure> {
     let stream = std::os::unix::net::UnixStream::connect(socket).map_err(|error| {
         Failure::local(
@@ -150,11 +176,12 @@ fn send_to_helper(
         )
     })?;
     let mut stream = ObservedStream::new(stream);
-    coordinator_local::candidate_push::send_candidate(
+    coordinator_local::candidate_push::send_push(
         &mut stream,
         &snapshot.checkout,
         &snapshot.revision,
         &[base_revision],
+        kind,
     )
     .map(|receipt| receipt.reference)
     .map_err(|error| send_failure(&error, &stream))
@@ -166,6 +193,7 @@ fn send_to_helper(
     _socket: &Path,
     _snapshot: &CleanSnapshot,
     _base_revision: &str,
+    _kind: PushKind,
 ) -> Result<String, Failure> {
     Err(unsupported_platform())
 }

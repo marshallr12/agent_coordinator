@@ -203,6 +203,7 @@ a.nav-item { text-decoration: none; }
 .evidence-entry h3 { margin: 0 0 8px; }
 .evidence-entry p { margin: 5px 0; font-size: 13px; }
 .evidence-entry code { font-size: 11px; }
+.recorded-revision code { display: block; margin: 4px 0; overflow-wrap: anywhere; font-size: 11px; }
 @media (max-width: 900px) { .resource-form { grid-template-columns: 1fr; } .resource-form > div { grid-template-rows: auto auto auto; } .resource-form > button { margin-top: 0; } .sidebar nav { grid-template-columns: repeat(2, 1fr); } }
 .detail-card .card-header, .lease-card .card-header { margin-bottom: 17px; }
 .detail-description { min-height: 24px; color: var(--ink); font-size: 14px; white-space: pre-wrap; }

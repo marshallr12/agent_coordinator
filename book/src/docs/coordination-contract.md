@@ -311,16 +311,24 @@ resume saved work, reconcile already-delivered work, restart with a reason, or
 remain blocked awaiting an observation or operator decision.
 
 A checkpoint may record `revision`, the full 40-hex SHA of a work-in-progress
-commit already pushed to a durable ref. The recorded SHA is authoritative; the
-ref is only transport. When the expired attempt's latest checkpoint recorded a
-revision, the service verifies the recovery itself: the old attempt is expired
-or revoked, the recovery claim bumped the generation, no nonterminal jobs
-remain, and the recoverer's `fetched_revision` equals the recorded SHA. It then
-does not require the local `saved_work_checked`/`running_jobs_checked`
-attestations. A missing SHA is refused with `recovery_revision_required`, a
-different one with `recovery_revision_mismatch`. A legacy checkpoint without a
-revision keeps the attestations, and `recovery_mode=manual` still requires a
-human recovery claim in both cases.
+commit its owner says it pushed to a durable ref. The recorded SHA is
+authoritative; the ref is only transport. The service cannot inspect Git, so it
+never confirms that the ref exists or holds that commit. When the expired
+attempt's latest checkpoint recorded a revision, recovery resolution checks only
+facts in its own database: the old attempt is expired or revoked, the recovery
+claim bumped the generation, no nonterminal jobs remain, and the recoverer's
+`fetched_revision` is byte-for-byte equal to the recorded SHA. Fetching the ref
+and confirming it names that SHA is the recoverer's job. When those checks pass,
+the service does not require the local `saved_work_checked`/`running_jobs_checked`
+attestations and answers `"evidence": "service_verified"`, which means exactly
+that comparison and nothing about the remote. A missing SHA is refused with
+`recovery_revision_required`, a different one with `recovery_revision_mismatch`.
+A legacy checkpoint without a revision keeps the attestations
+(`"evidence": "local_attestation"`), and `recovery_mode=manual` still requires a
+human recovery claim in both cases. The checkpoint that a recovery resolution
+records has no revision. If the recovering attempt also expires before it
+records a checkpoint with a revision, the next recovery falls back to the
+attestations.
 
 Recovery inspection is distinct from permission to start conflicting work. An
 unreachable workstation or a missing heartbeat does not prove its jobs stopped.

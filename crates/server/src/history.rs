@@ -359,7 +359,7 @@ async fn materialize(
             "checkpoints" => (
                 related_task(row),
                 time(Some(row.get("created_at"))),
-                json!({"id":row.get::<String,_>("id"),"attempt_id":row.get::<String,_>("attempt_id"),"summary":row.get::<String,_>("summary"),"current_action":row.get::<String,_>("current_action"),"next_step":row.get::<String,_>("next_step"),"blockers":serde_json::from_str::<Value>(&row.get::<String,_>("blockers_json"))?,"created_at":timestamp(row.get("created_at"))}),
+                json!({"id":row.get::<String,_>("id"),"attempt_id":row.get::<String,_>("attempt_id"),"summary":row.get::<String,_>("summary"),"current_action":row.get::<String,_>("current_action"),"next_step":row.get::<String,_>("next_step"),"blockers":serde_json::from_str::<Value>(&row.get::<String,_>("blockers_json"))?,"revision":row.get::<Option<String>,_>("revision"),"created_at":timestamp(row.get("created_at"))}),
             ),
             "checkouts" => (
                 related_task(row),
