@@ -4,22 +4,45 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P3b and P6 (2026-10-06, workflow on)
+## Current resume point — P3b and P6 (2026-10-06 evening, workflow on)
 
-S6 is complete (canary `f92bf97d` done; live policy `integration_owner=integrator`), and the
-`hardening/claude-token-20261003` and `autonomy/s6` records were reconciled onto `main`. The rest of
-the plan (plan-final §3: **P3b pilot, go/no-go, then P6 dogfood**) is tracked as live
-coordinator tasks in project `fe95a6c5…`. Read them from the service, not from here:
-- P3b core per U28 (ready): run loop `b2c4fab1`; then lease lifecycle `5c9f15eb`, reviewer verdict
-  `6cf630c0`, health/cost/kill switch `393f1680` (each depends on the run loop); recovery evidence
-  `9181e1e3`. Also ready: push-socket isolation `308d4766`, review-dialog lease `7ebdafe0`, U5
-  `distinct_launch` `aecb01d7`.
-- planned: owner `--uninstall` on mxmini `acaea18b`; owner oracle-1 bring-up `740cc14a` (runbook in
-  `book/src/deploy/README.md` "Bringing up a supervised host"); P3b 5-task pilot + go/no-go
-  `47d4403d`; attention budget (deferred to P6 by U28) `c6b33a77`; P6 readiness + dogfood `d513bc21`;
-  optional shadow cost run `c744c495`.
-New agent work is un-paused: these run through the normal coordinator workflow, with review
-subagents and the integrator.
+S6 is complete. U28 (2026-10-06) trimmed the P3b pilot core to essentials (see §6). Landed on `main`
+today, each by independent subagent review plus the integrator (`main` at `1daec90`):
+- run loop `agentc-supervisor run` (b2c4fab1);
+- lease lifecycle (5c9f15eb): progress-gated renewal, drain, release, startup scan, and
+  `max_attempt_seconds` capping every attempt-expiry writer;
+- recovery evidence B5 (9181e1e3) and its follow-ups (aee640c2), including helper WIP refs;
+- push-socket isolation, the oracle-1 runbook, and the review-dialog claim-on-record fixes.
+**Size:** the pilot core is over the U28 estimate (~1.8-2.0k). Run loop ~690, lease ~800+ and
+recovery ~275 non-test lines so far, with two core tasks to go.
+
+Live coordinator tasks (read the service, not this list):
+- ready:
+  - reviewer verdict pipeline `6cf630c0`
+  - health/cost/kill switch `393f1680`
+  - live staging run of the loop `27e76f96` (needs owner root steps on mxmini)
+  - U5 `distinct_launch` `aecb01d7`
+- planned:
+  - owner `--uninstall` on mxmini `acaea18b`
+  - owner oracle-1 bring-up `740cc14a`
+  - 5-task pilot + go/no-go `47d4403d`
+  - attention budget (P6 per U28) `c6b33a77`
+  - P6 `d513bc21`
+  - shadow cost run `c744c495`
+
+Owner actions pending:
+- set `kernel.yama.ptrace_scope=1` on mxmini (reads 0) and oracle-1;
+- run the containment suite on a host to exercise the new push-helper legs;
+- the leftover `~/src/worktrees/agent-coordinator-core-ship` holds superseded uncommitted
+  `ship.py` edits (archived in `~/.local/share/agent-coordinator-autonomy/ship-leftover-20261006/`).
+  A hook blocks agents from discarding them; remove the worktree yourself with
+  `git worktree remove --force ~/src/worktrees/agent-coordinator-core-ship`.
+
+Known follow-ups not yet tasks:
+- `launch-root` SIGTERM handler;
+- continuation claims;
+- review form: the kept-claim path has no fixture, and a kept claim is never re-claimed after a
+  lease loss (minor).
 
 ## S6 reviewed live candidate test — owner runbook (2026-10-05): PASS, historical
 
