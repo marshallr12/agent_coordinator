@@ -1328,3 +1328,37 @@ async fn checkpoint_revision_migration_applies_to_an_existing_database() {
         .await;
     assert!(bad.is_err(), "the column only stores full lowercase SHAs");
 }
+
+#[tokio::test]
+async fn renewal_past_the_maximum_attempt_duration_is_refused() {
+    let f = Fixture::new().await;
+    let p = f.project("max-duration").await;
+    let t = f.task(&p, "task", vec![]).await;
+    let policy = format!("/api/v1/projects/{p}/policy");
+    let limit = json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"max_attempt_seconds":900});
+    let (status, v) = f
+        .call(&f.a, "PATCH", &policy, "agent-limit", limit.clone())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    let (status, v) = f.call(&f.admin, "PATCH", &policy, "limit", limit).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["max_attempt_seconds"], 900);
+    let (status,v)=f.call(&f.a,"POST",&format!("/api/v1/sessions/{}/instruction-acknowledgments",f.a.session),"ack",json!({"project_id":p,"policy_revision":2,"instruction_version":coordinator_core::INSTRUCTION_VERSION,"sections":[coordinator_core::REQUIRED_SECTION]})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status,v)=f.call(&f.a,"POST",&format!("/api/v1/projects/{p}/claims"),"claim",json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":"work","policy_revision":2,"instruction_version":coordinator_core::INSTRUCTION_VERSION})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (id, g) = attempt(&v);
+    let path = format!("/api/v1/projects/{p}/attempts/{id}/renew");
+    f.clock.0.fetch_add(500_000, Ordering::SeqCst);
+    let (status, capped) = f
+        .call(&f.a, "POST", &path, "within", json!({"generation":g}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{capped}");
+    assert_eq!(capped["data"]["lease_remaining_ms"], 400_000);
+    f.clock.0.fetch_add(399_000, Ordering::SeqCst);
+    let (status, refused) = f
+        .call(&f.a, "POST", &path, "past", json!({"generation":g}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "attempt_duration_exceeded");
+}

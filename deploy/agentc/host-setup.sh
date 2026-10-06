@@ -468,6 +468,8 @@ EOF
 # branch = "main"                # mirror branch each clone starts from
 # allow_insecure_loopback = false
 # reviewer = false               # reviewer launches are not implemented yet
+# budget_minutes = 240           # stop renewing a launch's attempt after this
+# drain_seconds = 30             # on stop: SIGTERM, then SIGKILL after this
 
 # Shadow mode (plan P3a): \`agentc-supervisor shadow\` polls the read-only
 # \`next\` endpoint with a read-access host credential and logs would-launch
@@ -602,7 +604,10 @@ Requires=agentc-firewall.service agentc-egress.service
 ExecStart=$PREFIX/bin/agentc-supervisor run
 Restart=on-failure
 RestartSec=30
-TimeoutStopSec=60
+# The loop drains on SIGTERM (drain_seconds, then a release); systemd kills
+# any remaining process only after the loop has exited.
+KillMode=mixed
+TimeoutStopSec=120
 [Install]
 WantedBy=multi-user.target
 UNIT

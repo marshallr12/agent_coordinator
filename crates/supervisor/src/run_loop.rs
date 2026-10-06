@@ -6,16 +6,21 @@
 //! The loop only sequences steps; everything that talks to the coordinator or
 //! runs commands sits behind [`Driver`], so tests drive it with a fake.
 //! Extension points for the follow-up tasks: [`refusal`] (health, cost and
-//! the kill switch), [`review_hook`] (reviewer launches and verdicts) and
-//! [`finish`] (lease release on a failed launch, recovery evidence).
+//! the kill switch) and [`review_hook`] (reviewer launches and verdicts).
+//! [`lease`] renews a running launch's attempt; [`record`] persists launch
+//! identity and releases attempts on exit, failure, drain and recovery.
+pub mod lease;
 #[cfg(target_os = "linux")]
 pub mod live;
+pub mod record;
 #[cfg(target_os = "linux")]
 mod rooted;
 
 use crate::config::Config;
 use crate::profile::{Harness, Role};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+use lease::Lease;
+use record::LaunchRecord;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -46,6 +51,11 @@ pub struct RunConfig {
     pub allow_insecure_loopback: bool,
     /// Also poll reviewer work (a stub until reviewer launches land).
     pub reviewer: bool,
+    /// Stop renewing a launch's attempt after this many minutes.
+    pub budget_minutes: u64,
+    /// On stop, how long a launch may take to exit after SIGTERM before
+    /// SIGKILL.
+    pub drain_seconds: u64,
 }
 
 impl Default for RunConfig {
@@ -59,6 +69,8 @@ impl Default for RunConfig {
             branch: "main".into(),
             allow_insecure_loopback: false,
             reviewer: false,
+            budget_minutes: 240,
+            drain_seconds: 30,
         }
     }
 }
@@ -90,7 +102,12 @@ impl Launch {
     /// A launch with a fresh session id, its clone and `$RUN` under the
     /// implementer's `clones/` and `runs/`.
     pub fn plan(config: &Config, project: &str, suggestion: Suggestion) -> Self {
-        let session_id = Uuid::new_v4();
+        Self::at(config, project, suggestion, Uuid::new_v4())
+    }
+
+    /// The launch of session `session_id`, whose clone and `$RUN` are
+    /// named after it.
+    pub fn at(config: &Config, project: &str, suggestion: Suggestion, session_id: Uuid) -> Self {
         let role = config.state_dir.join(Role::Implementer.slug());
         Self {
             project: project.to_owned(),
@@ -117,11 +134,34 @@ pub trait Driver {
     fn instructions(&mut self, launch: &Launch) -> Vec<(String, String)>;
     /// Writes the rendered prompt into `$RUN`, readable by the role.
     fn install_prompt(&mut self, launch: &Launch, prompt: &str) -> Result<()>;
-    /// Claims the task in the launch's own coordinator session; returns the
-    /// attempt id.
-    fn claim(&mut self, launch: &Launch) -> Result<String>;
-    /// Runs the launch through `launch-root`; returns its exit code.
-    fn launch(&mut self, launch: &Launch) -> Result<i32>;
+    /// Claims the task in the launch's own coordinator session.
+    fn claim(&mut self, launch: &Launch) -> Result<Lease>;
+    /// Spawns `launch-root` for the launch; returns its pid and `/proc`
+    /// start time.
+    fn start(&mut self, launch: &Launch) -> Result<(u32, Option<u64>)>;
+    /// The running launch's exit code once it has exited.
+    fn exited(&mut self) -> Option<i32>;
+    /// Asks the running launch to stop (SIGTERM), or kills it (SIGKILL).
+    fn signal(&mut self, kill: bool);
+    /// When the launch's harness last wrote an event (ms since the epoch).
+    fn last_event_ms(&self, launch: &Launch) -> Option<i64>;
+    /// Renews the attempt in the launch's session.
+    fn renew(&mut self, launch: &Launch, lease: &Lease) -> Result<Lease>;
+    /// Releases the attempt in the launch's session with a handoff
+    /// `summary`; an attempt that is no longer active counts as released.
+    fn release(&mut self, launch: &Launch, lease: &Lease, summary: &str) -> Result<()>;
+    /// This boot's id.
+    fn boot_id(&self) -> String;
+    /// Whether a recorded launch may still be running.
+    fn may_be_alive(&self, record: &LaunchRecord) -> bool;
+    /// Removes the launch's clone and run directory.
+    fn discard(&mut self, launch: &Launch) -> Result<()>;
+    /// Milliseconds since the epoch.
+    fn now_ms(&self) -> i64;
+    /// Sleeps for `duration`.
+    fn pause(&mut self, duration: Duration);
+    /// Whether the host asked the loop to stop (SIGTERM or SIGINT).
+    fn stopping(&self) -> bool;
 }
 
 /// What one poll did; recorded in the heartbeat.
@@ -135,8 +175,7 @@ pub enum Outcome {
 
 /// Polls until stopped (or once), writing the heartbeat after every poll.
 pub fn run(driver: &mut impl Driver, config: &Config, once: bool) -> Result<()> {
-    let settings = &config.run;
-    sweep_terminal(config);
+    sweep_terminal(driver, config);
     for iteration in 1_u64.. {
         let outcome = iterate(driver, config);
         if outcome != Outcome::Idle {
@@ -145,35 +184,54 @@ pub fn run(driver: &mut impl Driver, config: &Config, once: bool) -> Result<()> 
         if let Err(error) = beat(&heartbeat_path(config), iteration, &outcome) {
             eprintln!("agentc-supervisor run: heartbeat: {error:#}");
         }
-        if once {
+        if once || idle(driver, config.run.poll_seconds.max(5)) {
             break;
         }
-        std::thread::sleep(Duration::from_secs(settings.poll_seconds.max(5)));
     }
     Ok(())
 }
 
+/// Waits `seconds` between polls; true when a stop request ends the wait.
+fn idle(driver: &mut impl Driver, seconds: u64) -> bool {
+    for _ in 0..seconds {
+        if driver.stopping() {
+            return true;
+        }
+        driver.pause(Duration::from_secs(1));
+    }
+    driver.stopping()
+}
+
 /// Removes every terminal implementer run, with its clone, that an earlier
 /// loop left behind (it stopped between a launch's exit and its cleanup).
-pub fn sweep_terminal(config: &Config) {
+/// Runs with a launch record are left to [`record::recover`].
+pub fn sweep_terminal(driver: &mut impl Driver, config: &Config) {
     let role = config.state_dir.join(Role::Implementer.slug());
     let Ok(entries) = std::fs::read_dir(role.join("runs")) else {
         return;
     };
-    for run in entries.flatten().map(|entry| entry.path()) {
-        let clone = role
-            .join("clones")
-            .join(run.file_name().unwrap_or_default());
-        if run.join(".state-terminal.json").exists()
-            && let Err(error) = remove_finished(&clone, &run)
+    let names = entries.flatten().map(|entry| entry.file_name());
+    for session in names.filter_map(|name| Uuid::parse_str(name.to_str()?).ok()) {
+        let unknown = Suggestion {
+            task: String::new(),
+            revision: 0,
+            title: String::new(),
+        };
+        let launch = Launch::at(config, driver.project(), unknown, session);
+        if LaunchRecord::load(config, &session).is_none()
+            && launch.run.join(".state-terminal.json").exists()
+            && let Err(error) = driver.discard(&launch)
         {
             eprintln!("agentc-supervisor run: sweep: {error:#}");
         }
     }
 }
 
-/// One poll: admission, `next`, then the launch it suggests.
+/// One poll: recovery, admission, `next`, then the launch it suggests.
 pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
+    if let Some(reason) = record::recover(driver, config) {
+        return Outcome::Refused(reason);
+    }
     if let Some(reason) = refusal(driver, &config.run) {
         return Outcome::Refused(reason);
     }
@@ -188,8 +246,8 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
         return Outcome::Idle;
     };
     let launch = Launch::plan(config, driver.project(), suggestion);
-    let result = work(driver, &launch);
-    finish(&launch, result)
+    let result = work(driver, config, &launch);
+    finish(driver, config, &launch, result)
 }
 
 /// Why the host must not claim now, if it must not. The disk high-water
@@ -230,26 +288,72 @@ pub fn suggestion(next: &Value) -> Option<Suggestion> {
 }
 
 /// Creates, prompts, claims and launches, stopping at the first failure.
-fn work(driver: &mut impl Driver, launch: &Launch) -> Result<i32> {
+/// Once claimed, the attempt is recorded before the spawn and released with
+/// a handoff however the launch ends.
+fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i32> {
     driver.create(launch).context("create clone and run")?;
     let prompt = render_prompt(launch, &driver.instructions(launch));
     driver.install_prompt(launch, &prompt).context("prompt")?;
-    let attempt = driver.claim(launch).context("claim")?;
-    driver.launch(launch).context("launch").inspect_err(|_| {
-        // The lease stays until it expires; releasing it is task 5c9f15eb.
-        let task = &launch.suggestion.task;
-        eprintln!(
-            "agentc-supervisor run: launch failed after claiming task {task} attempt {attempt}"
-        );
-    })
+    ensure!(!driver.stopping(), "the loop is stopping; no new claims");
+    let lease = driver.claim(launch).context("claim")?;
+    let mut record = LaunchRecord::new(launch, &lease, driver.boot_id());
+    let result = (record.save(config).context("record the launch"))
+        .and_then(|()| run_claimed(driver, config, launch, &mut record, lease));
+    let summary = handoff(&result, driver.stopping());
+    record::release(driver, config, launch, &mut record, &summary);
+    result
 }
 
-/// Removes the launch's clone and run directory when it is safe, and turns
-/// the launch result into an outcome. A claimed task whose launch failed
-/// keeps its lease until it expires (crash release is a follow-up task).
-fn finish(launch: &Launch, result: Result<i32>) -> Outcome {
-    if let Err(error) = remove_finished(&launch.clone, &launch.run) {
-        eprintln!("agentc-supervisor run: cleanup: {error:#}");
+/// Spawns the claimed launch, adds its identity to the record and
+/// supervises it until it exits.
+fn run_claimed(
+    driver: &mut impl Driver,
+    config: &Config,
+    launch: &Launch,
+    record: &mut LaunchRecord,
+    lease: Lease,
+) -> Result<i32> {
+    let (pid, ticks) = driver.start(launch).context("launch")?;
+    (record.pid, record.start_ticks) = (Some(pid), ticks);
+    if let Err(error) = record.save(config) {
+        eprintln!("agentc-supervisor run: {error:#}");
+    }
+    Ok(lease::supervise(driver, launch, lease, &config.run))
+}
+
+/// The handoff summary a launch's attempt is released with.
+fn handoff(result: &Result<i32>, stopping: bool) -> String {
+    let how = match result {
+        Ok(code) => format!("the launch exited with code {code}"),
+        Err(error) => format!("the launch failed: {error:#}"),
+    };
+    let why = if stopping {
+        " while the host supervisor stopped (drain)"
+    } else {
+        ""
+    };
+    let text = format!(
+        "agentc-supervisor released the attempt: {how}{why}. Read the last checkpoint before resuming."
+    );
+    text.chars().take(4000).collect()
+}
+
+/// Removes the launch's clone and run directory when it is safe, with its
+/// record, and turns the launch result into an outcome. An attempt whose
+/// release failed keeps all three for [`record::recover`] to retry.
+fn finish(
+    driver: &mut impl Driver,
+    config: &Config,
+    launch: &Launch,
+    result: Result<i32>,
+) -> Outcome {
+    let unreleased = LaunchRecord::load(config, &launch.session_id).is_some_and(|r| !r.released);
+    if !unreleased {
+        match remove_finished(driver, launch) {
+            Ok(true) => LaunchRecord::remove(config, &launch.session_id),
+            Ok(false) => {}
+            Err(error) => eprintln!("agentc-supervisor run: cleanup: {error:#}"),
+        }
     }
     match result {
         Ok(exit_code) => Outcome::Launched {
@@ -260,22 +364,15 @@ fn finish(launch: &Launch, result: Result<i32>) -> Outcome {
     }
 }
 
-/// Removes `clone` and `run` when the run is terminal or never started. A
-/// started run without a terminal record may still have a live harness, so
-/// both are kept for recovery.
-pub fn remove_finished(clone: &Path, run: &Path) -> Result<bool> {
-    let started = run.join(".state-started").exists();
-    if started && !run.join(".state-terminal.json").exists() {
+/// Removes the launch's clone and run when the run is terminal or never
+/// started. A started run without a terminal record may still have a live
+/// harness, so both are kept for recovery.
+pub fn remove_finished(driver: &mut impl Driver, launch: &Launch) -> Result<bool> {
+    let run = &launch.run;
+    if run.join(".state-started").exists() && !run.join(".state-terminal.json").exists() {
         return Ok(false);
     }
-    for path in [clone, run] {
-        match std::fs::remove_dir_all(path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                return Err(error).with_context(|| format!("remove {}", path.display()));
-            }
-            _ => {}
-        }
-    }
+    driver.discard(launch)?;
     Ok(true)
 }
 

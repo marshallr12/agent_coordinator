@@ -157,6 +157,8 @@ struct Project {
     automatic_integration: bool,
     allow_subagent_reviews: bool,
     integration_owner: String,
+    /// The longest an attempt may hold a task, in seconds; 0 is no limit.
+    max_attempt_seconds: i64,
     #[serde(serialize_with = "serialize_timestamp")]
     created_at: i64,
 }
@@ -278,9 +280,12 @@ async fn update_policy(
             .integration_owner
             .as_deref()
             .is_some_and(|owner| !["agent", "integrator"].contains(&owner))
+        || input
+            .max_attempt_seconds
+            .is_some_and(|limit| limit != 0 && !(600..=604_800).contains(&limit))
     {
         return Err(AppError::bad_request(
-            "Invalid review/recovery mode, integration_owner or lease_seconds (30–3600).",
+            "Invalid review/recovery mode, integration_owner, lease_seconds (30–3600) or max_attempt_seconds (0, or 600–604800).",
         ));
     }
     bounded(&input.rules, "rules", 32768, false)?;
@@ -306,11 +311,14 @@ async fn update_policy(
             || input
                 .integration_owner
                 .as_ref()
-                .is_some_and(|owner| *owner != current.integration_owner))
+                .is_some_and(|owner| *owner != current.integration_owner)
+            || input
+                .max_attempt_seconds
+                .is_some_and(|limit| limit != current.max_attempt_seconds))
     {
         return Err(AppError::human_gate(
             "policy_permission_change",
-            "This project has not delegated this rule change. Agents cannot alter permission grants, review mode, recovery mode or the integration owner.",
+            "This project has not delegated this rule change. Agents cannot alter permission grants, review mode, recovery mode, the integration owner or the maximum attempt duration.",
         ));
     }
     if let Some(v) = m.replay {
@@ -333,8 +341,8 @@ async fn update_policy(
             "Finish or reconcile the held integration before changing its policy. Publication may already be in progress.",
         ));
     }
-    sqlx::query("UPDATE projects SET policy_revision=policy_revision+1,review_mode=?,recovery_mode=?,lease_seconds=?,rules=?,agent_rule_editing=?,automatic_integration=?,allow_subagent_reviews=?,integration_owner=? WHERE id=?")
-        .bind(&input.review_mode).bind(&input.recovery_mode).bind(input.lease_seconds).bind(&input.rules).bind(input.agent_rule_editing).bind(input.automatic_integration).bind(input.allow_subagent_reviews.unwrap_or(current.allow_subagent_reviews)).bind(input.integration_owner.as_ref().unwrap_or(&current.integration_owner)).bind(&id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE projects SET policy_revision=policy_revision+1,review_mode=?,recovery_mode=?,lease_seconds=?,rules=?,agent_rule_editing=?,automatic_integration=?,allow_subagent_reviews=?,integration_owner=?,max_attempt_seconds=? WHERE id=?")
+        .bind(&input.review_mode).bind(&input.recovery_mode).bind(input.lease_seconds).bind(&input.rules).bind(input.agent_rule_editing).bind(input.automatic_integration).bind(input.allow_subagent_reviews.unwrap_or(current.allow_subagent_reviews)).bind(input.integration_owner.as_ref().unwrap_or(&current.integration_owner)).bind(input.max_attempt_seconds.unwrap_or(current.max_attempt_seconds)).bind(&id).execute(&mut *m.tx).await?;
     let value = serde_json::to_value(project(&mut m.tx, &id).await?)?;
     sqlx::query("INSERT INTO policy_revisions(project_id,revision,data_json,actor_id,created_at,provenance) VALUES(?,?,?,?,?,?)")
         .bind(&id).bind(current.policy_revision+1).bind(value.to_string()).bind(&m.actor.id).bind(m.now).bind(&input.provenance).execute(&mut *m.tx).await?;
@@ -1796,22 +1804,42 @@ async fn renew(
         return Ok(response(v));
     }
     let proj = project(&mut m.tx, &p).await?;
+    let expires = renewed_expiry(&proj, &current, m.now)?;
     sqlx::query("UPDATE attempts SET expires_at=?,last_heartbeat_at=? WHERE id=?")
-        .bind(m.now + proj.lease_seconds * 1000)
+        .bind(expires)
         .bind(m.now)
         .bind(&id)
         .execute(&mut *m.tx)
         .await?;
     let a = attempt(&mut m.tx, &p, &id).await?;
+    let remaining = expires - m.now;
     Ok(response(
         m.finish(
-            json!({"attempt":a.value(),"lease_remaining_ms":proj.lease_seconds*1000,"renew_after_seconds":(proj.lease_seconds / 3).min(60)}),
+            json!({"attempt":a.value(),"lease_remaining_ms":remaining,"renew_after_seconds":(remaining / 3000).min(60)}),
             Some(&p),
             "attempt.renewed",
             &id,
         )
         .await?,
     ))
+}
+/// The deadline a renewal grants: one lease from now, capped at the project's
+/// maximum attempt duration. Once the lease already reaches that cap the
+/// renewal is refused, so the lease lapses and long work continues in a new
+/// attempt.
+fn renewed_expiry(proj: &Project, a: &Attempt, now: i64) -> Result<i64, AppError> {
+    let lease = now + proj.lease_seconds * 1000;
+    if proj.max_attempt_seconds == 0 {
+        return Ok(lease);
+    }
+    let limit = a.created_at + proj.max_attempt_seconds * 1000;
+    if a.expires_at >= limit {
+        return Err(AppError::conflict(
+            "attempt_duration_exceeded",
+            "This attempt reached the project's max_attempt_seconds and cannot be renewed. Record a checkpoint and release the task with a handoff.",
+        ));
+    }
+    Ok(lease.min(limit))
 }
 async fn add_checkpoint(
     m: &mut Mutation,

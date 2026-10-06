@@ -649,10 +649,41 @@ Each poll it:
 4. as `agentc-impl`, connects a coordinator session named after the launch
    and claims the task with `agent-coordinator claim`; the launch gets the
    same session through `AGENT_COORDINATOR_SESSION`;
-5. runs `launch-root` for the launch;
-6. removes the clone and the run directory once the run is terminal (or never
-   started); a started run without a terminal record is kept for recovery;
-7. rewrites `/var/lib/agentc/heartbeat.json` (poll count, time, outcome).
+5. writes the launch record `/var/lib/agentc/launches/<session>.json` (the
+   attempt, its generation and this boot's id), spawns `launch-root` in a
+   process group of its own, and adds the launch's pid and `/proc` start time
+   to the record;
+6. renews the attempt while the launch runs (see below), and releases it with
+   a handoff summary once the launch exits or fails to start; an attempt the
+   agent already submitted or released is left as it is;
+7. removes the clone and the run directory once the run is terminal (or never
+   started), then the record; a started run without a terminal record is kept
+   for recovery;
+8. rewrites `/var/lib/agentc/heartbeat.json` (poll count, time, outcome).
+
+Renewal is progress-gated. At the service's `renew_after_seconds` cadence the
+loop renews only while `launch-root` is alive, `$RUN/events.jsonl` (the
+harness's event stream) changed in the last 15 minutes, the
+attempt's last checkpoint is under 60 minutes old, and the launch is within
+`[run] budget_minutes` (default 240). The checkpoint age comes from the
+service's own claim and renew responses (`last_progress_at` against
+`expires_at` less `lease_remaining_ms`), so it needs no extra call and no
+local clock. Once a gate fails, the loop logs why and stops renewing; the
+lease lapses one lease period after the last renewal. A project can also cap
+attempts on the service with the policy's `max_attempt_seconds`.
+
+Before each poll the loop settles the records an earlier poll or loop left.
+A launch recorded on this boot whose pid still runs with the recorded start
+time (or whose pid was never recorded) may be alive: it is never respawned,
+and the loop claims nothing while it lives. Any other recorded launch has its
+attempt released (unless that was done) and its clone, run and record
+removed.
+
+SIGTERM or SIGINT drains the loop: it claims nothing new, sends SIGTERM to the
+running launch's process group, sends SIGKILL after `[run] drain_seconds`
+(default 30), releases the attempt with a handoff checkpoint and exits. The
+unit uses `KillMode=mixed`, so systemd signals only the loop and kills what
+is left only after it exits.
 
 `agentc-impl` owns `coordinator/` and `runs/`, so root never follows a
 symlink there. The credential is read, and the run's credential copy and
@@ -661,11 +692,14 @@ prompt are created, one path component at a time from the root-owned
 regular, single-link file owned by `agentc-impl` of at most 64 KiB; a FIFO
 is refused without blocking. Errors name the path, never the contents. The
 instruction files are read as size-bounded blobs from the root-owned mirror
-at the cloned revision, never from the clone. When a launch fails after its
-claim, the loop logs the task and attempt ids; the lease is left to expire.
+at the cloned revision, never from the clone. The event stream's modification
+time is read the same way, from a regular file owned by `agentc-impl`. The clone and run are
+removed through a directory opened without following symlinks. Launch
+records live in the root-owned state directory.
 
-`--once` polls a single time. Recovery claims, reviewer launches, lease
-renewal and release, and the kill switch are not part of this loop yet.
+`--once` polls a single time. Recovery claims, reviewer launches, continuation
+claims for work longer than `max_attempt_seconds`, and the kill switch are not
+part of this loop yet.
 `host-setup.sh` installs the `agentc-run` systemd unit without enabling it.
 It requires the firewall and egress units and restarts after a crash. To opt
 in:
