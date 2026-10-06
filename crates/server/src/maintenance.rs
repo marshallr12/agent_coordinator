@@ -1,5 +1,6 @@
 //! Bounded host-local payload retention that preserves authority and provenance.
 
+use crate::session_idle::{DEFAULT_SESSION_IDLE_DAYS, MAX_SESSION_IDLE_DAYS, close_idle_batch};
 use crate::state::AppState;
 use anyhow::{Context, ensure};
 use coordinator_core::timestamp;
@@ -18,6 +19,9 @@ const DAY_MS: i64 = 86_400_000;
 pub struct MaintenanceOptions {
     pub batch_size: usize,
     pub max_batches: usize,
+    /// Close open agent sessions idle for longer than this many days; 0
+    /// keeps every session open.
+    pub session_idle_days: i64,
 }
 
 impl Default for MaintenanceOptions {
@@ -25,6 +29,7 @@ impl Default for MaintenanceOptions {
         Self {
             batch_size: DEFAULT_MAINTENANCE_BATCH_SIZE,
             max_batches: DEFAULT_MAINTENANCE_MAX_BATCHES,
+            session_idle_days: DEFAULT_SESSION_IDLE_DAYS,
         }
     }
 }
@@ -63,6 +68,8 @@ pub async fn run_maintenance(
             break;
         }
     }
+    let (sessions_closed, sessions_remaining) =
+        close_idle_sessions(state, &run_id, options).await?;
     let completion = Completion {
         receipts,
         observations,
@@ -82,16 +89,19 @@ pub async fn run_maintenance(
         "observation_payloads_compacted":observations,
         "observation_rows_inspected":observation_rows_inspected,
         "artifact_cleanup_passes":artifact_cleanup_passes,
+        "idle_sessions_closed":sessions_closed,
         "batches":batches,
         "remaining":{
             "receipt_results":receipts_remaining,
             "observation_payloads":observations_remaining,
             "observation_rows_to_inspect":observations_remaining,
+            "idle_sessions":sessions_remaining,
         },
         "limits":{
             "batch_size":options.batch_size,
             "max_batches":options.max_batches,
             "receipt_result_retention_days":RECEIPT_RESULT_RETENTION_DAYS,
+            "session_idle_days":options.session_idle_days,
         }
     }))
 }
@@ -105,7 +115,63 @@ fn validate_options(options: MaintenanceOptions) -> anyhow::Result<()> {
         (1..=MAX_MAINTENANCE_BATCHES).contains(&options.max_batches),
         "maintenance max_batches must be between 1 and 100"
     );
+    ensure!(
+        (0..=MAX_SESSION_IDLE_DAYS).contains(&options.session_idle_days),
+        "maintenance session_idle_days must be between 0 and 366"
+    );
     Ok(())
+}
+
+/// Closes idle agent sessions in up to `max_batches` short writer
+/// transactions of `batch_size`, counting them on the run. Returns the number
+/// closed and whether more may remain.
+async fn close_idle_sessions(
+    state: &AppState,
+    run_id: &str,
+    options: MaintenanceOptions,
+) -> anyhow::Result<(u64, bool)> {
+    let limit = i64::try_from(options.batch_size).context("maintenance batch_size overflowed")?;
+    let mut total = 0_u64;
+    for _ in 0..options.max_batches {
+        let closed = close_idle_session_batch(state, run_id, options, limit).await?;
+        total = total.saturating_add(closed);
+        if closed < options.batch_size as u64 {
+            return Ok((total, false));
+        }
+    }
+    Ok((total, true))
+}
+
+/// One clock-guarded writer transaction of idle-session closing.
+async fn close_idle_session_batch(
+    state: &AppState,
+    run_id: &str,
+    options: MaintenanceOptions,
+    limit: i64,
+) -> anyhow::Result<u64> {
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let sample = state.sample_clock(&mut tx).await?;
+    if sample.incident_detected {
+        tx.commit().await?;
+        anyhow::bail!(
+            "clock_reconciliation_required: maintenance stopped after detecting host clock rollback"
+        );
+    }
+    require_safe_clock_for_write(&sample)?;
+    let closed = close_idle_batch(&mut tx, sample.now, options.session_idle_days, limit).await?;
+    let updated = sqlx::query(
+        "UPDATE maintenance_runs SET sessions_closed=sessions_closed+? WHERE id=? AND state='running'",
+    )
+    .bind(i64::try_from(closed).context("idle session count overflowed")?)
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await?;
+    ensure!(
+        updated.rows_affected() == 1,
+        "maintenance run state changed unexpectedly"
+    );
+    tx.commit().await?;
+    Ok(closed)
 }
 
 async fn begin_run(

@@ -28,6 +28,7 @@ from operator_smoke import exercise_operator
 from mcp_launcher_smoke import exercise_mcp_launcher
 from mcp_adoption_smoke import exercise_mcp_adoption
 from mcp_transport_smoke import exercise_mcp_transport
+from session_idle_smoke import exercise_session_idle
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,8 +155,10 @@ def run():
                 assert protected_state.read_bytes() == original_state, "Upgrade changed protected session state."
                 CLI = installed_cli
 
+            session_ids = []
             for index in range(2):
                 connected = cli(index, "connect")
+                session_ids.append(connected["data"]["session"]["id"])
                 assert connected["data"]["orientation"]["instructions_complete"]
                 assert len(cli(index, "projects", "list")["data"]["items"]) == 2
             compatibility = cli(0, "compatibility")
@@ -184,6 +187,7 @@ def run():
             exercise_mcp_adoption(temporary, api, project, credentials[owner]["token"], CLI, owner, attempt)
             cli(owner, "release", *own_args, body={"summary": "Paused safely with a handoff."})
             assert api(f"/api/v1/projects/{project}/tasks/{task['id']}")["work_status"] == "ready"
+            exercise_session_idle(temporary / "test.sqlite3", options, cli, 1 - owner, session_ids[1 - owner])
 
             exercise_jobs(temporary, api, cli, project, owner)
             exercise_completion(temporary, api, cli, owner)
@@ -206,7 +210,8 @@ def run():
             rejected = cli(owner, "tasks", "list", expected=3)
             assert "error" in rejected
             print("PASS: service startup, operator login, two-project visibility, two native harness sessions,")
-            print("      atomic competing claims, renewal, checkpoint visibility, connected-session listing, safe release, and revocation.")
+            print("      atomic competing claims, renewal, checkpoint visibility, connected-session listing, safe release,")
+            print("      idle-session closing with CLI reconnection, and revocation.")
         finally:
             process.terminate()
             try:

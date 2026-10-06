@@ -94,6 +94,7 @@ async fn receipts_become_permanent_tombstones_only_after_thirty_days() {
         MaintenanceOptions {
             batch_size: 1,
             max_batches: 1,
+            ..MaintenanceOptions::default()
         },
     )
     .await
@@ -106,6 +107,7 @@ async fn receipts_become_permanent_tombstones_only_after_thirty_days() {
         MaintenanceOptions {
             batch_size: 100,
             max_batches: 2,
+            ..MaintenanceOptions::default()
         },
     )
     .await
@@ -180,6 +182,7 @@ async fn only_exact_duplicate_middle_running_summaries_are_elided() {
         MaintenanceOptions {
             batch_size: 100,
             max_batches: 2,
+            ..MaintenanceOptions::default()
         },
     )
     .await
@@ -243,6 +246,7 @@ async fn observation_inspection_is_bounded_even_when_nothing_can_be_compacted() 
         MaintenanceOptions {
             batch_size: 3,
             max_batches: 1,
+            ..MaintenanceOptions::default()
         },
     )
     .await
@@ -263,6 +267,7 @@ async fn observation_inspection_is_bounded_even_when_nothing_can_be_compacted() 
         MaintenanceOptions {
             batch_size: 3,
             max_batches: 3,
+            ..MaintenanceOptions::default()
         },
     )
     .await
@@ -316,6 +321,7 @@ async fn invalid_limits_do_not_create_a_maintenance_run() {
             MaintenanceOptions {
                 batch_size: 0,
                 max_batches: 1,
+                ..MaintenanceOptions::default()
             },
         )
         .await
@@ -327,6 +333,7 @@ async fn invalid_limits_do_not_create_a_maintenance_run() {
             MaintenanceOptions {
                 batch_size: 1,
                 max_batches: 101,
+                ..MaintenanceOptions::default()
             },
         )
         .await
@@ -462,4 +469,232 @@ async fn seed_job(fixture: &Fixture) -> String {
     .await
     .unwrap();
     reporter
+}
+
+/// Agents, a project and tasks for the idle-session tests, all old enough
+/// that only the rows a test adds decide idleness.
+struct IdleWorld<'a> {
+    fixture: &'a Fixture,
+    credential: String,
+    tasks: std::cell::Cell<u32>,
+}
+
+impl<'a> IdleWorld<'a> {
+    /// Seeds a credential and a project for `fixture`'s principal.
+    async fn new(fixture: &'a Fixture) -> Self {
+        let credential = Uuid::new_v4().to_string();
+        idle_exec(fixture, "INSERT INTO credentials(id,principal_id,token_hash,created_at) VALUES(?2,?3,'token-'||?2,?1)", &[&credential, &fixture.principal_id], NOW - 100 * DAY_MS).await;
+        idle_exec(fixture, "INSERT INTO projects(id,name,repository_url,target_branch,created_at) VALUES('idle-project','Idle','https://example.test/idle.git','main',?1)", &[], NOW - 100 * DAY_MS).await;
+        Self {
+            fixture,
+            credential,
+            tasks: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Seeds an open session registered `days` ago, optionally a subagent of
+    /// `parent`, and returns its id.
+    async fn session(&self, days: i64, parent: Option<&str>) -> String {
+        let id = Uuid::new_v4().to_string();
+        idle_exec(self.fixture, "INSERT INTO agent_sessions(id,principal_id,credential_id,workstation_id,proof_hash,created_at,capabilities,harness,parent_session_id) VALUES(?2,?3,?4,'host','proof',?1,'[]','test',NULLIF(?5,''))", &[&id, &self.fixture.principal_id, &self.credential, parent.unwrap_or("")], NOW - days * DAY_MS).await;
+        id
+    }
+
+    /// Seeds an attempt by `session` in `state`, last touched `days` ago, on
+    /// a fresh task, and returns its id.
+    async fn attempt(&self, session: &str, state: &str, days: i64) -> String {
+        let n = self.tasks.get() + 1;
+        self.tasks.set(n);
+        let (task, id) = (format!("idle-task-{n}"), Uuid::new_v4().to_string());
+        idle_exec(self.fixture, "INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?2,'idle-project','Task','','[]','code',1,'open',?1,?1)", &[&task], NOW - 100 * DAY_MS).await;
+        idle_exec(self.fixture, "INSERT INTO attempts(id,project_id,task_id,owner_id,session_id,credential_id,generation,state,mode,expires_at,last_heartbeat_at,last_progress_at,created_at) VALUES(?2,'idle-project',?3,?4,?5,?6,1,?7,'work',?1,?1,?1,?1)", &[&id, &task, &self.fixture.principal_id, session, &self.credential, state], NOW - days * DAY_MS).await;
+        id
+    }
+
+    /// Seeds a reservation in `state` and a job in `job_state` on `attempt`,
+    /// returning the job id.
+    async fn job(&self, attempt: &str, reservation_state: &str, job_state: &str) -> String {
+        let (reservation, job) = (Uuid::new_v4().to_string(), Uuid::new_v4().to_string());
+        idle_exec(self.fixture, "INSERT INTO reservations(id,project_id,attempt_id,generation,state,created_by,created_at) VALUES(?2,'idle-project',?3,1,?4,?5,?1)", &[&reservation, attempt, reservation_state, &self.fixture.principal_id], NOW - 30 * DAY_MS).await;
+        idle_exec(self.fixture, "INSERT INTO jobs(id,producer_id,project_id,task_id,attempt_id,generation,runner_instance_id,workstation_id,label,source_revision,source_tree,reservation_id,state,created_at) SELECT ?2,?2,'idle-project',task_id,id,1,'runner','host','test','rev','tree',?3,?4,?1 FROM attempts WHERE id=?5", &[&job, &reservation, job_state, attempt], NOW - 30 * DAY_MS).await;
+        job
+    }
+
+    /// Seeds a reporter for `job` and `session` that expires in `days`.
+    async fn reporter(&self, job: &str, session: &str, days: i64) {
+        let id = Uuid::new_v4().to_string();
+        idle_exec(self.fixture, "INSERT INTO reporters(id,job_id,principal_id,credential_id,session_id,proof_hash,expires_at,renew_until,created_at) VALUES(?2,?3,?4,?5,?6,'proof',?1,?1,?1)", &[&id, job, &self.fixture.principal_id, &self.credential, session], NOW + days * DAY_MS).await;
+    }
+}
+
+/// Runs one statement binding the integer `at` as `?1` and `text` as `?2…`.
+async fn idle_exec(fixture: &Fixture, sql: &'static str, text: &[&str], at: i64) {
+    let mut query = sqlx::query(sql).bind(at);
+    for value in text {
+        query = query.bind(value.to_string());
+    }
+    query.execute(&fixture.state.pool).await.unwrap();
+}
+
+/// Whether session `id` is open.
+async fn session_open(fixture: &Fixture, id: &str) -> bool {
+    sqlx::query_scalar::<_, Option<i64>>("SELECT closed_at FROM agent_sessions WHERE id=?")
+        .bind(id)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap()
+        .is_none()
+}
+
+/// Maintenance with the default seven-day idle period.
+async fn idle_maintenance(fixture: &Fixture) -> serde_json::Value {
+    run_maintenance(&fixture.state, MaintenanceOptions::default())
+        .await
+        .unwrap()
+}
+
+/// Sessions idle past seven days close with one event each; any activity
+/// in the period (registration, acknowledgment, attempt, checkpoint) keeps
+/// a session open.
+#[tokio::test]
+async fn idle_sessions_close_with_an_event_and_recent_activity_keeps_them_open() {
+    let fixture = Fixture::new().await;
+    let world = IdleWorld::new(&fixture).await;
+    let idle = world.session(8, None).await;
+    let finished = world.session(30, None).await;
+    world.attempt(&finished, "submitted", 20).await;
+    let kept = keep_open_by_activity(&world).await;
+    let report = idle_maintenance(&fixture).await;
+    assert_eq!(report["idle_sessions_closed"], 2);
+    assert_eq!(report["remaining"]["idle_sessions"], false);
+    assert_eq!(report["limits"]["session_idle_days"], 7);
+    assert!(!session_open(&fixture, &idle).await && !session_open(&fixture, &finished).await);
+    for id in &kept {
+        assert!(session_open(&fixture, id).await, "{id} was closed");
+    }
+    assert_idle_event(&fixture, &idle, NOW - 8 * DAY_MS).await;
+    let counted: i64 = sqlx::query_scalar("SELECT sessions_closed FROM maintenance_runs")
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(counted, 2);
+    assert_eq!(idle_maintenance(&fixture).await["idle_sessions_closed"], 0);
+}
+
+/// Seeds four old sessions, each with one kind of activity inside the idle
+/// period, and returns their ids.
+async fn keep_open_by_activity(world: &IdleWorld<'_>) -> Vec<String> {
+    let fresh = world.session(6, None).await;
+    let acknowledged = world.session(30, None).await;
+    idle_exec(world.fixture, "INSERT INTO instruction_acknowledgments(session_id,project_id,policy_revision,instruction_version,created_at) VALUES(?2,'idle-project',1,'9',?1)", &[&acknowledged], NOW - 2 * DAY_MS).await;
+    let progressed = world.session(30, None).await;
+    world.attempt(&progressed, "released", 3).await;
+    let checkpointed = world.session(30, None).await;
+    let attempt = world.attempt(&checkpointed, "submitted", 20).await;
+    idle_exec(world.fixture, "INSERT INTO checkpoints(id,project_id,attempt_id,summary,current_action,next_step,blockers_json,created_at) VALUES(?2,'idle-project',?3,'working','testing','more','[]',?1)", &[&Uuid::new_v4().to_string(), &attempt], NOW - DAY_MS).await;
+    vec![fresh, acknowledged, progressed, checkpointed]
+}
+
+/// The close event names the session, its principal and the idle reason.
+async fn assert_idle_event(fixture: &Fixture, session: &str, last_activity: i64) {
+    let row = sqlx::query("SELECT project_id,actor_id,data_json,created_at FROM events WHERE kind='agent_session_closed' AND record_id=?")
+        .bind(session)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<Option<String>, _>("project_id"), None);
+    assert_eq!(row.get::<String, _>("actor_id"), fixture.principal_id);
+    assert_eq!(row.get::<i64, _>("created_at"), NOW);
+    let data: serde_json::Value = serde_json::from_str(row.get("data_json")).unwrap();
+    assert_eq!(data["reason"], "idle");
+    assert_eq!(data["idle_days"], 7);
+    assert_eq!(
+        data["last_activity_at"],
+        coordinator_core::timestamp(last_activity)
+    );
+}
+
+/// Old sessions holding an active attempt (even a lapsed one), a live job
+/// reporter, a held reservation, an unreconciled job or an open subagent
+/// session stay open; an expired reporter does not protect its session.
+#[tokio::test]
+async fn sessions_holding_live_work_are_never_closed() {
+    let fixture = Fixture::new().await;
+    let world = IdleWorld::new(&fixture).await;
+    let lapsed = world.session(30, None).await;
+    world.attempt(&lapsed, "active", 20).await;
+    let reporting = world.session(30, None).await;
+    let attempt = world.attempt(&reporting, "submitted", 20).await;
+    let job = world.job(&attempt, "released", "succeeded").await;
+    world.reporter(&job, &reporting, 1).await;
+    let holding = world.session(30, None).await;
+    let attempt = world.attempt(&holding, "released", 20).await;
+    world.job(&attempt, "held", "succeeded").await;
+    let running = world.session(30, None).await;
+    let attempt = world.attempt(&running, "released", 20).await;
+    world.job(&attempt, "released", "running").await;
+    let parent = world.session(30, None).await;
+    world.session(1, Some(&parent)).await;
+    let expired = world.session(30, None).await;
+    let attempt = world.attempt(&expired, "submitted", 20).await;
+    let job = world.job(&attempt, "released", "succeeded").await;
+    world.reporter(&job, &expired, -1).await;
+    assert_eq!(idle_maintenance(&fixture).await["idle_sessions_closed"], 1);
+    for id in [&lapsed, &reporting, &holding, &running, &parent] {
+        assert!(session_open(&fixture, id).await, "{id} was closed");
+    }
+    assert!(!session_open(&fixture, &expired).await);
+}
+
+/// Closing runs in bounded batches, 0 disables it, and out-of-range idle
+/// periods are refused before a run starts.
+#[tokio::test]
+async fn idle_closing_is_batched_disableable_and_validated() {
+    let fixture = Fixture::new().await;
+    let world = IdleWorld::new(&fixture).await;
+    for _ in 0..3 {
+        world.session(10, None).await;
+    }
+    let options = |batch_size, session_idle_days| MaintenanceOptions {
+        batch_size,
+        max_batches: 1,
+        session_idle_days,
+    };
+    let disabled = run_maintenance(&fixture.state, options(10, 0))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            disabled["idle_sessions_closed"].clone(),
+            disabled["remaining"]["idle_sessions"].clone()
+        ),
+        (0.into(), false.into())
+    );
+    let first = run_maintenance(&fixture.state, options(2, 7))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            first["idle_sessions_closed"].clone(),
+            first["remaining"]["idle_sessions"].clone()
+        ),
+        (2.into(), true.into())
+    );
+    let second = run_maintenance(&fixture.state, options(2, 7))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            second["idle_sessions_closed"].clone(),
+            second["remaining"]["idle_sessions"].clone()
+        ),
+        (1.into(), false.into())
+    );
+    for days in [-1, 367] {
+        assert!(
+            run_maintenance(&fixture.state, options(2, days))
+                .await
+                .is_err()
+        );
+    }
 }

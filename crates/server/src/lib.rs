@@ -28,6 +28,7 @@ pub mod project_sessions;
 pub mod restore;
 mod revert_rules;
 pub mod reverts;
+pub mod session_idle;
 pub mod state;
 pub mod state_wait;
 pub mod workflow;

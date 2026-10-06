@@ -3540,37 +3540,16 @@ async fn connect(
         let response = send_saved(context, &session_path, &mut state).await?;
         require_success(response)?;
     } else if !resumed {
-        let mut body = json!({
-            "session_id": state.session.id,
-            "workstation_id": state.workstation_id,
-            "harness": state.harness,
-            "capabilities": state.capabilities,
-        });
-        if let Some(subagent) = &state.subagent {
-            body["subagent"] = serde_json::to_value(subagent).map_err(Failure::invalid)?;
-        }
-        let pending = PendingMutation {
-            key: Uuid::new_v4().to_string(),
-            method: HttpMethod::Post,
-            path: "/api/v1/sessions".into(),
-            body,
-            include_session_id: false,
-        };
-        state.set_pending(pending).map_err(Failure::invalid)?;
-        state::save(&session_path, &state).map_err(Failure::invalid)?;
-        let response = send_saved(context, &session_path, &mut state).await?;
-        require_success(response)?;
+        register_session(context, &session_path, &mut state).await?;
     }
 
-    let session_response = context
-        .client
-        .get(
-            &format!("/api/v1/sessions/{}", state.session.id),
-            Some(&state.session),
-        )
-        .await
-        .map_err(client_failure)?;
-    let session_body = require_success(session_response)?;
+    let mut session_body = fetch_session(context, &state).await?;
+    let mut replaced_session_id = None;
+    if session_closed(&session_body) {
+        replaced_session_id =
+            Some(replace_closed_session(context, &session_path, &mut state).await?);
+        session_body = fetch_session(context, &state).await?;
+    }
     let orientation_response = context
         .client
         .get(
@@ -3589,6 +3568,7 @@ async fn connect(
     Ok(json!({
         "data": {
             "resumed": resumed,
+            "replaced_closed_session_id": replaced_session_id,
             "local_session": local_session,
             "session": data(&session_body),
             "orientation": data(&orientation_body)
@@ -3598,6 +3578,86 @@ async fn connect(
             "orientation": orientation_body
         }
     }))
+}
+
+/// Registers `state`'s session (and any subagent identity) through the
+/// durable mutation journal, so an interrupted registration retries exactly.
+async fn register_session(
+    context: &ContextData,
+    session_path: &Path,
+    state: &mut SessionState,
+) -> std::result::Result<(), Failure> {
+    let mut body = json!({
+        "session_id": state.session.id,
+        "workstation_id": state.workstation_id,
+        "harness": state.harness,
+        "capabilities": state.capabilities,
+    });
+    if let Some(subagent) = &state.subagent {
+        body["subagent"] = serde_json::to_value(subagent).map_err(Failure::invalid)?;
+    }
+    let pending = PendingMutation {
+        key: Uuid::new_v4().to_string(),
+        method: HttpMethod::Post,
+        path: "/api/v1/sessions".into(),
+        body,
+        include_session_id: false,
+    };
+    state.set_pending(pending).map_err(Failure::invalid)?;
+    state::save(session_path, state).map_err(Failure::invalid)?;
+    let response = send_saved(context, session_path, state).await?;
+    require_success(response)?;
+    Ok(())
+}
+
+/// Reads the service's record of `state`'s session; allowed even when closed.
+async fn fetch_session(
+    context: &ContextData,
+    state: &SessionState,
+) -> std::result::Result<Value, Failure> {
+    let response = context
+        .client
+        .get(
+            &format!("/api/v1/sessions/{}", state.session.id),
+            Some(&state.session),
+        )
+        .await
+        .map_err(client_failure)?;
+    require_success(response)
+}
+
+/// Whether a session read reports the session closed (explicitly, by
+/// credential rotation, or by the service's idle-session maintenance).
+pub(crate) fn session_closed(session_body: &Value) -> bool {
+    !data(session_body)
+        .get("closed_at")
+        .is_none_or(Value::is_null)
+}
+
+/// Replaces a closed saved session with a fresh session identity and proof
+/// under the same local name, keeping its workstation, harness, capabilities
+/// and subagent identity, and returns the closed session's id. A closed
+/// session can never be reopened, and it cannot hold work: the service only
+/// closes idle sessions without attempts, jobs or reservations.
+pub(crate) async fn replace_closed_session(
+    context: &ContextData,
+    session_path: &Path,
+    state: &mut SessionState,
+) -> std::result::Result<String, Failure> {
+    if state.pending.is_some() {
+        return Err(Failure::invalid(
+            "The saved session is closed but has an unresolved mutation; run retry first.",
+        ));
+    }
+    let fresh = SessionAuth {
+        id: Uuid::new_v4().to_string(),
+        proof: random_secret().map_err(Failure::invalid)?,
+    };
+    let closed = std::mem::replace(&mut state.session, fresh);
+    state.orientation = None;
+    state.acknowledged = None;
+    register_session(context, session_path, state).await?;
+    Ok(closed.id)
 }
 
 async fn claim(

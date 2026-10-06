@@ -7,7 +7,8 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
 use crate::{
-    Cli, ContextData, Failure, client_failure, config, load_required_state, require_success, state,
+    Cli, ContextData, Failure, client_failure, config, load_required_state, replace_closed_session,
+    require_success, session_closed, state,
 };
 
 #[derive(Args)]
@@ -19,7 +20,7 @@ pub struct LaunchArgs {
 }
 
 pub async fn launch(cli: &Cli, context: &ContextData, args: &LaunchArgs) -> Result<Value, Failure> {
-    let (session_lock, path, saved) = load_required_state(cli, context)?;
+    let (session_lock, path, mut saved) = load_required_state(cli, context)?;
     if saved.pending.is_some() {
         return Err(Failure::invalid(
             "Resolve the saved pending CLI mutation with retry before launching an MCP client.",
@@ -38,13 +39,14 @@ pub async fn launch(cli: &Cli, context: &ContextData, args: &LaunchArgs) -> Resu
         .await
         .map_err(client_failure)?;
     let response = require_success(response)?;
-    let remote = &response["data"];
-    if remote["session_id"].as_str() != Some(saved.session.id.as_str())
-        || !remote.get("closed_at").is_some_and(Value::is_null)
-    {
+    if response["data"]["session_id"].as_str() != Some(saved.session.id.as_str()) {
         return Err(Failure::invalid(
-            "This harness session is closed or no longer matches. Connect a fresh --session first.",
+            "This harness session no longer matches. Connect a fresh --session first.",
         ));
+    }
+    if session_closed(&response) {
+        // An idle-closed session cannot hold work; continue on a fresh one.
+        replace_closed_session(context, &path, &mut saved).await?;
     }
     let token = config::token(
         &context.origin,

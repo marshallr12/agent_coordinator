@@ -85,6 +85,9 @@ enum Command {
         batch_size: usize,
         #[arg(long, default_value_t = 20)]
         max_batches: usize,
+        /// Close agent sessions idle for longer than this many days (0 disables).
+        #[arg(long, env = "COORDINATOR_SESSION_IDLE_DAYS", default_value_t = coordinator_server::session_idle::DEFAULT_SESSION_IDLE_DAYS)]
+        session_idle_days: i64,
     },
     /// Recover a human account locally and invalidate all of its browser sessions.
     RecoverOperatorPassword {
@@ -178,12 +181,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Maintenance {
             batch_size,
             max_batches,
+            session_idle_days,
         } => {
             let report = coordinator_server::maintenance::run_maintenance(
                 &state,
                 coordinator_server::maintenance::MaintenanceOptions {
                     batch_size,
                     max_batches,
+                    session_idle_days,
                 },
             )
             .await?;
