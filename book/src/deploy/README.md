@@ -531,3 +531,71 @@ harness waits, must take its helper with it and leave its directory, which the
 next `launch-root` must sweep. When `/etc/agentc/push-app.pem` exists, it must be
 mode 0400 `agentc-push:agentc-push`, readable by `agentc-push` and by neither
 agent account; without it those checks are skipped.
+
+## Bringing up a supervised host
+
+This is the owner's ordered checklist for preparing a host to run supervised
+launches, such as oracle-1 as the primary pilot host (decision U6). Each step
+links to the section above that explains it. All steps that need root are
+the owner's; an agent only prepares commands and reads the pasted output.
+Stop at the first step that fails.
+
+1. **Build on the host from one clean revision.** The published release
+   packages are x86-64 only, so an ARM64 host such as oracle-1 builds its own
+   binaries. Use a clean, detached checkout of the current `main`:
+
+   ```sh
+   git -C ~/src/agent_coordinator fetch origin
+   git -C ~/src/agent_coordinator worktree add --detach ~/src/worktrees/agentc-host origin/main
+   cd ~/src/worktrees/agentc-host && export CARGO_TARGET_DIR=$PWD/target
+   cargo build --release --locked -p agentc-supervisor -p agentc-integrator -p coordinator-cli
+   ```
+
+   The `agentc-integrator` package also builds the `agentc-push` helper. An
+   integrator already installed on the host keeps its own binary, state and
+   configuration; nothing here touches them.
+2. **Stop role processes,** then run the installer. On Ubuntu 24.04 and newer,
+   opt in to the agentc-only AppArmor profile
+   ([write confinement](#claude-runtime-write-confinement)):
+
+   ```sh
+   sudo APPARMOR_BWRAP=1 SUPERVISOR=target/release/agentc-supervisor \
+     CLI=target/release/agent-coordinator deploy/agentc/host-setup.sh
+   ```
+
+   It must exit 0. Keep its printed manual steps.
+3. **Per-role Claude tokens.** Check that `/var/lib/agentc/impl/claude-token` and
+   `/var/lib/agentc/rev/claude-token` are `root:agentc-<role>` mode 0440. If a
+   role has none, or the installer warned about a leftover dummy, install one
+   ([Claude token](#claude-token-for-agent-accounts)). Codex roles log in
+   with the `codex login` command the installer printed.
+4. **Push App key.** Each host gets its own key, generated in the push App's
+   settings. Place it at `/etc/agentc/push-app.pem` (root, mode 0400), then
+   re-run step 2 so it is handed to `agentc-push`
+   ([helper host](#setting-up-the-helper-host)).
+5. **Coordinator credentials.** In the dashboard, issue `class=supervised`
+   credentials for the project: write access for the implementer and read
+   access for the reviewer. Save each as
+   `/var/lib/agentc/<role>/coordinator/credentials.toml` (mode 0600, owned
+   by the role).
+6. **Staging for UI verification.** Candidates reach staging only on this
+   host's loopback through the launch relay, so the staging coordinator runs
+   on the same host. Run `deploy/agentc/staging.py up` as the owner, run the
+   commands `deploy/agentc/staging.py credentials` prints, and add its
+   `[verification.<project-id>]` entry below the `KEEP` line in
+   `/etc/agentc/supervisor.toml`.
+7. **Containment suite,** including the build-under-containment leg:
+
+   ```sh
+   sudo deploy/agentc/containment-suite.sh --cargo-test
+   ```
+
+   Pass means rc 0 and no `FAIL`. A `NOTE` about a dummy token means step 3
+   is unfinished. `SKIP` is acceptable only for a leg whose input this host
+   lacks by design; record the reason.
+8. **Record the evidence** outside Git. Paste the installer's and the suite's
+   summaries, with the binaries' commit, into the bring-up task, then remove
+   the build worktree with `git worktree remove`.
+
+A host prepared this way can run `agentc-supervisor launch-root` by hand. Unattended
+claiming is P3b pilot-core work and is not provided by these steps.
