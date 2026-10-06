@@ -15,9 +15,8 @@ Evidence outside Git in `~/.local/share/agent-coordinator-autonomy/s6-stability/
 `ci-jobs.json`, `docs-jobs.json` (`filter=all`), `flip-rate-report.json`, per-attempt
 `ci-loop.log`/`docs-loop.log`, driver `rerun-loop.sh`. Note: the docs log's attempt-19 line
 says `null` because the jobs API lagged the completed run attempt; the run attempt and the job
-later read `completed`/`success`. Remaining S6 chain: production shadow, live candidate test,
-cutover preflight, rulesets, write credential, `integration_owner` switch, canary (all owner
-steps; nothing changed here).
+later read `completed`/`success`. The rest of the S6 chain has since completed: live policy
+has `integration_owner=integrator`, and the post-cutover canary (task `f92bf97d`) is done.
 
 ## U27 Claude setup-token auth — 2026-10-03 (branch `hardening/claude-token-20261003`)
 
