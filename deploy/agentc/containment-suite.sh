@@ -298,7 +298,9 @@ check_relay_probe() {
 
 # Writes the mock Claude harness for launch-root's push leg to $1. Inside the
 # sandbox it requires AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET, a socket it can
-# connect to, and a push root showing only its own launch's `sock/`. It then
+# connect to, a push root showing only its own launch's `sock/`, and a helper
+# that serves it: an empty request must get the helper's `bad_request` reply,
+# not the foreign-launch refusal. It then
 # writes the socket path to $TMPDIR/push-ready and waits up to 120 s for the
 # suite's $TMPDIR/push-release, so the suite can inspect the live helper.
 write_push_mock() {
@@ -310,7 +312,14 @@ sock=\${AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET:-}
 [ -S "\$sock" ] || exit 3
 dir=\${sock%/sock/push.sock}
 [ "\$(ls -A $STATE/push)" = "\${dir##*/}" ] && [ "\$(ls -A "\$dir")" = sock ] || exit 4
-/usr/bin/python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "\$sock" || exit 5
+/usr/bin/python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(10)
+s.connect(sys.argv[1])
+s.shutdown(socket.SHUT_WR)
+reply = s.makefile("rb").readline()
+sys.exit(0 if b"bad_request" in reply else 1)' "\$sock" || exit 5
 printf '%s\n' "\$sock" > "\$TMPDIR/push-ready"
 i=0
 until [ -e "\$TMPDIR/push-release" ]; do i=\$((i + 1)); [ "\$i" -le 600 ] || exit 6; sleep 0.2; done

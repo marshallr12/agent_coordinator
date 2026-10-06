@@ -49,26 +49,25 @@ pub fn clear_environment() {
 
 /// Asks the kernel to send this process SIGTERM when the thread that spawned
 /// it exits, so a crashed supervisor leaves no helper behind, then checks
-/// the parent with [`check_parent`].
-pub fn exit_with_parent(expected: Option<u32>) -> Result<()> {
+/// the parent with [`check_parent`] and returns its verified id: the
+/// `launch-root` whose process tree alone the helper serves.
+pub fn exit_with_parent(expected: Option<u32>) -> Result<u32> {
     let signal = libc::c_ulong::try_from(libc::SIGTERM)?;
     // SAFETY: PR_SET_PDEATHSIG takes a signal number and touches no memory.
     let status = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal) };
     ensure!(status == 0, "could not request a parent-death signal");
     // SAFETY: getppid takes no arguments, cannot fail and touches no memory.
-    let parent = unsafe { libc::getppid() };
-    check_parent(u32::try_from(parent)?, expected)
-}
-
-/// This process's parent id: the `launch-root` whose launch it serves.
-pub fn parent_id() -> Result<u32> {
-    // SAFETY: getppid takes no arguments, cannot fail and touches no memory.
-    Ok(u32::try_from(unsafe { libc::getppid() })?)
+    let parent = u32::try_from(unsafe { libc::getppid() })?;
+    check_parent(parent, expected)?;
+    Ok(parent)
 }
 
 /// Fails when the parent has already gone: `actual` differs from the
-/// `expected` parent id, or, with none given, is init's.
+/// `expected` parent id, or, with none given, is init's. A parent id of 1 or
+/// less is always refused: every process descends from init, so serving its
+/// tree would admit any client.
 pub fn check_parent(actual: u32, expected: Option<u32>) -> Result<()> {
+    ensure!(actual > 1, "the parent process has already exited");
     match expected {
         Some(expected) => ensure!(
             actual == expected,
@@ -168,6 +167,8 @@ mod tests {
         assert!(check_parent(77, Some(42)).is_err());
         assert!(check_parent(42, None).is_ok());
         assert!(check_parent(1, None).is_err());
+        assert!(check_parent(1, Some(1)).is_err());
+        assert!(check_parent(0, Some(0)).is_err());
     }
 
     /// Set in the child run of `children_inherit_only_the_kept_variables`.
