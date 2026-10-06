@@ -130,13 +130,36 @@ keyless-rerank warnings. Downtime 03:12:11–03:13:07 UTC. `/api/v1/info` `8bf99
 worktree `~/src/worktrees/ac-release-8bf99e8` (rollback `~/.local/bin/agent-coordinator.rollback`).
 Not checked: the oracle-1 integrator journal across the downtime.
 
-**New backlog item (user, 2026-10-05): list connected sessions.** Today there is no way to see
-which agent sessions are connected to a project. Sessions register via `POST /api/v1/sessions`,
-but no list route, CLI command or dashboard view exists (`crates/server/src/auth.rs:438-440`
-has create/get/close only). Add a human-visible list of active sessions per project, showing
-principal, agent kind, start time, last activity and held attempts. That lets an owner quiesce
-work before a test, preflight or cutover, which step 1 above had to approximate by checking
-local processes.
+**DONE (2026-10-06): review polish cfda9952 + list connected sessions (027aeac3); deployed.**
+Session `sessions-list` (CLI, `4e0c7a21…`). cfda9952: `ace034c` (failed load-more keeps cursor and
+control; reports label refreshes when projects load; helper comments; browser check fails on old
+web). Subagent review `polish-review-1` (subagent `reviewer`) approved; integrator pushed **`main`
+`8bf99e8 → ace034c` at 03:35:09 UTC**. 027aeac3: `7fdb18b` — `GET /api/v1/projects/{p}/sessions
+?active_within_hours=N` (`crates/server/src/project_sessions.rs`, no migration): open sessions with
+live credential and enabled principal, bound by instruction ack or attempt; last activity = max of
+session start, ack, attempt claim/heartbeat/progress/end, checkpoints (reads don't count); default
+window 24 h, 0 = all; a session holding any `active` attempt is always listed, lapsed leases flagged
+`lease_expired`. Plus `agent-coordinator sessions list`, dashboard project settings → "Connected
+sessions", 8 server tests, browser test, smoke check, book (api-contract, CLI, operator-guide). Gate
+694 tests. Subagent review `sessions-review-1` approved (3 advisories → task `33a3a8dd`, priority 3,
+unclaimed, plus the reload-label browser-test advisory); integrator pushed **`main` `ace034c →
+7fdb18b` at 04:20:45 UTC**. Both tasks `done`; both worktrees removed; local branch
+`dash/polish-cfda9952` kept (`-d` refuses from `autonomy-plan`). Note: reviewers' `reviews claim`
+needs `--candidate-checkout` whose origin matches the repo URL; the classifier flagged a scratch
+clone's `remote set-url` as "Remote Repoint".
+
+**Production deploy 7fdb18b (2026-10-06, binaries-only since 8bf99e8, fully agent-run).** The owner
+added an exact allow rule for `gh workflow run release.yml --ref main`; the agent dispatched release
+run `37413618564` (3 jobs green). Archive sha256 OK, server embeds `7fdb18b`, MCP unchanged
+(`15868f11…`); `release-next` RELEASE = `7fdb18b… … 8bf99e8` (old archive in `release-8bf99e8`).
+Preflight all 0. Old-binary snapshot `20261006T050702.294Z-76f4bd02…` (rollback = binaries
+`*-0.1.1-8bf99e8`); new-binary snapshot `20261006T050728.200Z-ed055d57…` verified; maintenance
+complete; timers re-armed; 0 keyless-rerank warnings. Downtime 05:07:09–05:07:27 UTC. `/api/v1/info`
+`7fdb18b`, not dirty; live `app.js` has the sessions view. Workstation CLI upgraded via
+`upgrade_client.py` from detached worktree `~/src/worktrees/ac-release-7fdb18b` (rollback
+`~/.local/bin/agent-coordinator.rollback`); `sessions list --active-within-hours 0` against
+production lists ~100 open, never-closed sessions since 2026-09-14, none holding attempts (clients
+rarely close sessions; consider auto-closing idle sessions as a backlog item).
 
 ## S6 cutover preflight and full rulesets — 2026-10-05 (workflow off): DONE
 
