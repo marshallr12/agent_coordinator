@@ -798,6 +798,29 @@ async function main() {
         assert(workflowPosts[0].body.expected_submission_id === 'fixture-submission', 'Claim did not pin the submission.');
         assert(workflowPosts[4].body.generation === 3 && workflowPosts[4].body.decision === 'approved', 'Review did not use the claimed attempt generation.');
         await waitPage("!document.querySelector('dialog[open] #workflow-decision')", 'review form closed after recording');
+        // The decision request cannot start after a fresh claim (its pending-request save fails once):
+        // the form reports it, gives the claim back, and a retry still works.
+        const startedAt = workflowPosts.length;
+        await waitPage("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review')?.disabled === false", 'idle review action for the not-started case');
+        await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review').click()");
+        await waitPage("document.querySelector('dialog[open] #workflow-decision')", 'review dialog for the not-started case');
+        await evaluate("document.querySelector('dialog[open] #workflow-decision').value = 'approved'; document.querySelector('dialog[open] #workflow-summary').value = 'Synthetic review'");
+        await evaluate("(() => { const save = Storage.prototype.setItem; let armed = true; Storage.prototype.setItem = function (key, value) { let path = ''; try { path = JSON.parse(value).path || ''; } catch (_) {} if (armed && path.endsWith('/review')) { armed = false; throw new Error('Synthetic storage failure'); } return save.call(this, key, value); }; })()");
+        await submitUntilPosted();
+        await awaitPosts(startedAt + 2);
+        assert(workflowPosts.slice(startedAt).map((post) => post.action).join() === 'claim,release', `A decision that could not start did not give its claim back: ${workflowPosts.slice(startedAt).map((post) => post.action).join()}`);
+        await waitPage("document.querySelector('dialog[open] .dialog-error')?.textContent.includes('could not start')", 'not-started decision reported in the form');
+        await waitPage("document.querySelector('dialog[open] button[type=submit]')?.disabled === false", 'idle form after the not-started decision');
+        await submitUntilPosted();
+        await awaitPosts(startedAt + 4);
+        assert(workflowPosts.slice(startedAt + 2).map((post) => post.action).join() === 'claim,review', 'The form stayed stuck after a decision that could not start.');
+        await waitPage("!document.querySelector('dialog[open] #workflow-decision')", 'review form closed after the retry');
+        // The summary is bounded in UTF-8 bytes, like the service: 6000 three-byte characters exceed it.
+        await waitPage("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review')?.disabled === false", 'idle review action for the byte limit');
+        await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review').click()");
+        await waitPage("document.querySelector('dialog[open] #workflow-summary')", 'review dialog for the byte limit');
+        assert(await evaluate("(() => { const summary = document.querySelector('dialog[open] #workflow-summary'); summary.value = '\u20ac'.repeat(6000); summary.dispatchEvent(new Event('input')); return !summary.validity.valid && summary.maxLength === 16384; })()"), 'An over-limit summary in bytes was accepted.');
+        await evaluate("document.querySelector('dialog[open]').close()");
       }
     }
     task.lifecycle = 'open'; task.work_status = 'waiting_review';

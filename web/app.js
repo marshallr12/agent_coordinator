@@ -223,15 +223,17 @@
     }
   }
 
+  // Starts one mutation and returns whether it started: false while another is pending or when it cannot be saved.
   function startMutation(path, body, label, onSuccess, method = 'POST', onError = null, context = {}) {
-    if (state.mutation) return;
+    if (state.mutation) return false;
     const operation = mutationOperation(path, method);
     state.mutation = { path, body, label, method, key: newKey(), operation, context, onSuccess, onError, inFlight: false };
     if (operation && actorId()) {
       try { persistMutation(state.mutation); }
-      catch (_) { state.mutation = null; setGlobalAlert('This browser cannot save pending requests. Enable session storage before making changes.'); return; }
+      catch (_) { state.mutation = null; setGlobalAlert('This browser cannot save pending requests. Enable session storage before making changes.'); return false; }
     }
     executeMutation(state.mutation);
+    return true;
   }
 
   function renderMutationState() {
@@ -1248,7 +1250,7 @@
   }
   function workflowMutation(path, body, label, after, onError = null) {
     const projectId = state.projectId, taskId = state.selectedTaskId;
-    startMutation(path, body, label, async data => {
+    return startMutation(path, body, label, async data => {
       if (projectId === state.projectId && taskId === state.selectedTaskId && taskId) await loadTaskDetail();
       else if (projectId === state.projectId) await loadTasks();
       if (after) after(data);
@@ -1316,13 +1318,17 @@
   }
   // Opens the review form. With no held `attempt`, the review is claimed only when the
   // decision is recorded, so dismissing the form never leaves the review leased.
+  // The service's byte limit for a review summary (crates/server/src/workflow.rs).
+  const SUMMARY_BYTES = 16384;
   function openHumanReview(activity, submission, attempt) {
     const view = workflowDialog('Review this candidate', `This decision applies only to submission ${submission.id}, source ${submission.candidate_revision || 'general task evidence'}. Inspect its acceptance evidence and checks before deciding.`);
     // An empty first option is the required select's placeholder: no decision is preselected, so the form refuses to record until the reviewer picks one.
     const decision = view.field('decision', 'Decision', '', 'select'); for (const [value,label] of [['','Choose a decision…'],['approved','Approved'],['changes_requested','Changes requested']]) { const option = el('option', '', label); option.value = value; add(decision, option); }
     decision.value = '';
     view.help(decision, 'Decision', 'Nothing is selected until you choose. Choose Approved when the submitted evidence satisfies the acceptance criteria. Choose Changes requested when more work is needed; a revised submission will need fresh review. Approval completes a general task after all required reviews; code must also pass integration.');
-    const summary = view.field('summary', 'Review summary');
+    const summary = view.field('summary', 'Review summary'); summary.maxLength = SUMMARY_BYTES;
+    // The service bounds the summary in UTF-8 bytes, which a character maxLength cannot express.
+    summary.addEventListener('input', () => summary.setCustomValidity(new TextEncoder().encode(summary.value).length > SUMMARY_BYTES ? `The review summary is limited to ${SUMMARY_BYTES} bytes.` : ''));
     view.help(summary, 'Review summary', 'Describe what you inspected and why you approve or request changes. Refer to acceptance criteria, results, or evidence links. For example: Checked the reported test results; the keyboard interaction still needs verification.');
     const findings = view.field('findings', 'Required remedies — one per line'); findings.required = false;
     view.help(findings, 'Required remedies', 'For changes requested, describe each required fix on its own line so the next agent knows what to change. Leave this empty when approving.');
@@ -1336,12 +1342,14 @@
       const review = {submission_id: submission.id, decision: values.get('decision'), summary: values.get('summary'), findings: remedies.map(remedy => ({severity:'required',remedy,evidence:text(values.get('summary'))}))};
       const done = () => { delete view.form.dataset.recording; dialog.close(); };
       const failed = error => { delete view.form.dataset.recording; showDialogError(view, error); };
-      if (attempt) recordHumanReview(activity, attempt, review, done, failed);
-      else claimHumanReview(activity, submission, held => recordHumanReview(activity, held, review, done, error => {
+      // A request that could not start runs neither callback, so it is reported like a failure.
+      const notStarted = () => new ApiError('The request could not start: another request may still be running, or this browser could not save it. Try again.', 0, 'mutation_not_started', null, false);
+      if (attempt) { if (!recordHumanReview(activity, attempt, review, done, failed)) failed(notStarted()); }
+      else if (!claimHumanReview(activity, submission, held => {
         // A decision that failed after this form's own claim gives the claim back, unless the outcome is uncertain or the session ended.
-        if (!error?.uncertain && error?.status !== 401 && error?.code !== 'authentication_required') releaseHumanReview(activity, held);
-        failed(error);
-      }), failed);
+        const settle = error => { if (!error?.uncertain && error?.status !== 401 && error?.code !== 'authentication_required') releaseHumanReview(activity, held); failed(error); };
+        if (!recordHumanReview(activity, held, review, done, settle)) settle(notStarted());
+      }, failed)) failed(notStarted());
     });
   }
   // Removes a previous failure note before a retry.
@@ -1352,16 +1360,16 @@
     if (!note) { note = el('p', 'inline-alert error dialog-error'); note.setAttribute('role', 'alert'); view.form.prepend(note); }
     setText(note, `Not recorded: ${errorMessage(error)} Your entries are kept; correct them or try again.`);
   }
-  // Claims the review for this session, then hands the new attempt to `after`.
+  // Claims the review for this session, then hands the new attempt to `after`; returns whether the claim started.
   function claimHumanReview(activity, submission, after, onError) {
-    workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/claim`, {expected_submission_id: submission.id, expected_project_policy_revision: submission.project_policy_revision, expected_workflow_policy_revision: submission.workflow_policy_revision}, 'review claim', response => {
+    return workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/claim`, {expected_submission_id: submission.id, expected_project_policy_revision: submission.project_policy_revision, expected_workflow_policy_revision: submission.workflow_policy_revision}, 'review claim', response => {
       if (response?.attempt) after(response.attempt);
       else onError(new ApiError('Refresh the activity to inspect its current ownership.', 0, 'missing_attempt', null, false));
     }, onError);
   }
-  // Records the decision under the held review `attempt`, then calls `done`.
+  // Records the decision under the held review `attempt`, then calls `done`; returns whether the request started.
   function recordHumanReview(activity, attempt, review, done, onError) {
-    workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/review`, {generation: attempt.generation, ...review}, 'human review', done, onError);
+    return workflowMutation(`${projectPath()}/workflow-activities/${encodeURIComponent(activity.id)}/review`, {generation: attempt.generation, ...review}, 'human review', done, onError);
   }
   // Gives back a review claim this form took when its decision could not be recorded.
   function releaseHumanReview(activity, attempt) {
