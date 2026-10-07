@@ -7,7 +7,12 @@
 //! drains the launch, as it does on a stop request: SIGTERM to its process
 //! group, then SIGKILL after `[run] drain_seconds`; the caller then releases
 //! the attempt. A host suspend counts as wall-clock time, so a suspend longer
-//! than the event window drains the launch on resume.
+//! than the event window drains the launch on resume. A renewal the service
+//! refuses for good ([`AttemptEnded`]: the agent submitted or released the
+//! attempt, or it expired or changed hands) drains the launch the same way at
+//! once; an attempt the agent submitted is left as it is, not released.
+//! Any other renewal failure is logged and retried at the next cadence.
+use super::renewal::AttemptEnded;
 use super::{Driver, Launch, RunConfig};
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -101,6 +106,8 @@ struct Watch {
     kill_at: Option<i64>,
     /// Why the launch is draining, once it is.
     drain_reason: Option<String>,
+    /// Whether a refused renewal showed the agent submitted the attempt.
+    submitted: bool,
 }
 
 /// How a supervised launch ended.
@@ -109,6 +116,8 @@ pub struct Ended {
     pub code: i32,
     /// Why the loop drained it, if it did.
     pub drained: Option<String>,
+    /// Whether the agent submitted the attempt, so it needs no release.
+    pub submitted: bool,
 }
 
 impl Watch {
@@ -120,6 +129,7 @@ impl Watch {
             renew_at: Some(now.saturating_add(cadence(lease))),
             kill_at: None,
             drain_reason: None,
+            submitted: false,
         }
     }
 
@@ -152,8 +162,12 @@ pub fn supervise(
     let mut watch = Watch::new(driver.now_ms(), &lease);
     loop {
         if let Some(code) = driver.exited() {
-            let drained = watch.drain_reason;
-            return Ended { code, drained };
+            let (drained, submitted) = (watch.drain_reason, watch.submitted);
+            return Ended {
+                code,
+                drained,
+                submitted,
+            };
         }
         let now = driver.now_ms();
         drain(driver, &mut watch, settings, now);
@@ -194,8 +208,8 @@ fn drain(driver: &mut impl Driver, watch: &mut Watch, settings: &RunConfig, now:
 }
 
 /// Renews the lease if every gate holds; otherwise stops renewing and
-/// drains the launch, saying why. A failed renewal is retried at the next
-/// cadence.
+/// drains the launch, saying why. A renewal refused for good drains it too;
+/// any other failed renewal is retried at the next cadence.
 fn renew(
     driver: &mut impl Driver,
     launch: &Launch,
@@ -214,7 +228,25 @@ fn renew(
     }
     match driver.renew(launch, lease) {
         Ok(renewed) => (*lease, watch.seen) = (renewed, now),
-        Err(error) => eprintln!("agentc-supervisor run: renew {}: {error:#}", lease.attempt),
+        Err(error) => {
+            if let Some(ended) = error.downcast_ref::<AttemptEnded>() {
+                return stop(watch, &lease.attempt, ended);
+            }
+            eprintln!("agentc-supervisor run: renew {}: {error:#}", lease.attempt);
+        }
     }
     watch.renew_at = Some(now.saturating_add(cadence(lease)));
+}
+
+/// Stops renewing an attempt the service says has ended and drains its
+/// launch, noting whether the agent submitted it.
+fn stop(watch: &mut Watch, attempt: &str, ended: &AttemptEnded) {
+    let reason = if ended.submitted() {
+        format!("the agent submitted attempt {attempt}; it is not released")
+    } else {
+        format!("attempt {attempt}: {ended}")
+    };
+    eprintln!("agentc-supervisor run: stopped renewing: {reason}");
+    (watch.renew_at, watch.drain_reason) = (None, Some(reason));
+    watch.submitted = ended.submitted();
 }

@@ -34,6 +34,9 @@ struct Fake {
     unhealthy: Vec<Harness>,
     /// When every harness credential expires, if known.
     expiry: Option<i64>,
+    /// From when renewals fail, and how: the attempt ended (`Some`) or a
+    /// transient failure (`None`).
+    renew_fails: Option<(i64, Option<renewal::AttemptEnded>)>,
 }
 
 impl Fake {
@@ -63,6 +66,7 @@ impl Fake {
             events: String::new(),
             unhealthy: Vec::new(),
             expiry: None,
+            renew_fails: None,
         }
     }
 
@@ -156,6 +160,13 @@ impl Driver for Fake {
 
     fn renew(&mut self, _launch: &Launch, lease: &Lease) -> Result<Lease> {
         self.renewals.push(self.now);
+        if let Some((from, ended)) = &self.renew_fails
+            && self.now >= *from
+        {
+            return Err(ended
+                .clone()
+                .map_or_else(|| anyhow::anyhow!("transport_failure"), Into::into));
+        }
         Ok(Lease {
             progress_age_ms: self.now - self.checkpoint_at,
             ..lease.clone()
@@ -703,3 +714,5 @@ fn a_failed_release_keeps_the_launch_for_the_next_poll() {
 
 #[path = "health_tests.rs"]
 mod health_tests;
+#[path = "renewal_tests.rs"]
+mod renewal_tests;

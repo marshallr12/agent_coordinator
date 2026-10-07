@@ -70,9 +70,12 @@ and do not start work the task does not ask for.
      --project-policy-revision <policy_revision> --workflow-policy-revision
      <workflow revision> --checkout {{checkout}} --input
      $TMPDIR/submission.json`. Do not pass `--candidate-ref`.
-6. Exit when the submission is recorded. Do not wait for the review. If you
-   exit without submitting, the supervisor releases the task with a handoff;
-   your last checkpoint is what the next owner reads.
+6. **Stop immediately once `agent-coordinator submissions code` succeeds:
+   end your session at once.** Do not poll, `sleep`, wait for the review or
+   check its status; the submission ends your attempt, and the supervisor
+   stops a launch that keeps running after it. If you exit without
+   submitting, the supervisor releases the task with a handoff; your last
+   checkpoint is what the next owner reads.
 
 ## Hard rules
 

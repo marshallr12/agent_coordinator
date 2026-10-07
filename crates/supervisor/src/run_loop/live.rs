@@ -11,6 +11,7 @@ use super::binding::{self, Binding};
 use super::lease::Lease;
 use super::live_review::LiveReviewer;
 use super::record::{self, LaunchRecord};
+use super::renewal::{AttemptEnded, CliError, attempt_state};
 use super::review::ReviewDriver;
 use super::{Driver, Launch, rooted};
 use crate::clone;
@@ -101,7 +102,8 @@ impl LiveDriver {
     }
 
     /// Runs `program args` as the implementer in `cwd` and returns its
-    /// stdout; fails with its stderr on a non-zero exit.
+    /// stdout; on a non-zero exit fails with the exit code and the CLI's
+    /// error code and message (or stderr), bounded.
     fn as_role(
         &self,
         program: &Path,
@@ -110,12 +112,11 @@ impl LiveDriver {
         launch: &Launch,
     ) -> Result<Vec<u8>> {
         let output = self.run_role(program, args, cwd, launch, b"")?;
-        let stderr = String::from_utf8_lossy(&output.stderr);
         ensure!(
             output.status.success(),
             "{} failed: {}",
             args.join(" "),
-            stderr.trim()
+            CliError::of(&output)
         );
         Ok(output.stdout)
     }
@@ -151,6 +152,23 @@ impl LiveDriver {
         let cli = self.config.bin_dir.join("agent-coordinator");
         let stdout = self.as_role(&cli, args, &launch.clone, launch)?;
         serde_json::from_slice(&stdout).context("the CLI printed no JSON")
+    }
+
+    /// The launch attempt's state from its task's detail, if readable.
+    fn attempt_state(&self, launch: &Launch, lease: &Lease) -> Option<String> {
+        let (project, task) = (&self.binding.project_id, &launch.suggestion.task);
+        let path = format!("/api/v1/projects/{project}/tasks/{task}");
+        let call = crate::shadow::get_data(&self.client, &path, &[]);
+        match self.runtime.block_on(call) {
+            Ok(detail) => attempt_state(&detail, &lease.attempt),
+            Err(error) => {
+                eprintln!(
+                    "agentc-supervisor run: read attempt {}: {error:#}",
+                    lease.attempt
+                );
+                None
+            }
+        }
     }
 
     /// `relative` below the implementer's directory: `$RUN` or the clone.
@@ -335,11 +353,29 @@ impl Driver for LiveDriver {
         i64::try_from(since.as_millis()).ok()
     }
 
+    /// Renews through the CLI. A refusal that ends the attempt for good
+    /// fails with an [`AttemptEnded`] carrying the attempt's state.
     fn renew(&mut self, launch: &Launch, lease: &Lease) -> Result<Lease> {
         let args = ["--json", "renew", &format!("--attempt={}", lease.attempt)];
         let generation = format!("--generation={}", lease.generation);
         let args = [&args.map(String::from)[..], &[generation]].concat();
-        Lease::parse(&self.cli(launch, &args)?)
+        let cli = self.config.bin_dir.join("agent-coordinator");
+        let output = self.run_role(&cli, &args, &launch.clone, launch, b"")?;
+        if output.status.success() {
+            return Lease::parse(&serde_json::from_slice(&output.stdout)?);
+        }
+        let failure = CliError::of(&output);
+        ensure!(
+            failure.ends_attempt(),
+            "{} failed: {failure}",
+            args.join(" ")
+        );
+        let state = self.attempt_state(launch, lease);
+        Err(AttemptEnded {
+            code: failure.code,
+            state,
+        }
+        .into())
     }
 
     /// Releases through the CLI with the handoff on standard input; a 409

@@ -10,7 +10,8 @@
 //! (reviewer launches and verdicts, in [`review`]); [`cost`] records what
 //! each launch used.
 //! [`lease`] renews a running launch's attempt; [`record`] persists launch
-//! identity and releases attempts on exit, failure, drain and recovery.
+//! identity and releases attempts on exit, failure, drain and recovery;
+//! [`renewal`] tells a renewal refused for good from a transient failure.
 pub mod binding;
 pub mod cost;
 pub mod health;
@@ -22,6 +23,7 @@ mod live_health;
 #[cfg(target_os = "linux")]
 mod live_review;
 pub mod record;
+pub mod renewal;
 pub mod review;
 #[cfg(target_os = "linux")]
 mod rooted;
@@ -369,7 +371,8 @@ pub fn suggestion(next: &Value) -> Option<Suggestion> {
 
 /// Creates, claims, registers the checkout, prompts and launches, stopping
 /// at the first failure. Once claimed, the attempt is recorded before
-/// anything else and released with a handoff however the launch ends.
+/// anything else and released with a handoff however the launch ends,
+/// unless the agent submitted it (the submission ended it already).
 fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i32> {
     driver.create(launch).context("create clone and run")?;
     ensure!(!driver.stopping(), "the loop is stopping; no new claims");
@@ -378,8 +381,12 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
     let result = (record.save(config).context("record the launch"))
         .and_then(|()| run_claimed(driver, config, launch, &mut record, lease));
     let cost = record::settle_cost(driver, config, launch, &mut record);
-    let summary = handoff(&result, &cost);
-    record::release(driver, config, launch, &mut record, &summary);
+    if result.as_ref().is_ok_and(|ended| ended.submitted) {
+        record::mark_submitted(config, &mut record);
+    } else {
+        let summary = handoff(&result, &cost);
+        record::release(driver, config, launch, &mut record, &summary);
+    }
     result.map(|ended| ended.code)
 }
 

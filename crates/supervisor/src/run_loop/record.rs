@@ -234,6 +234,19 @@ pub fn release(
     record.released
 }
 
+/// Marks a launch whose agent submitted its attempt as settled: the
+/// submission ended the attempt, so there is nothing to release.
+pub fn mark_submitted(config: &Config, record: &mut LaunchRecord) {
+    eprintln!(
+        "agentc-supervisor run: attempt {} was submitted; no release",
+        record.attempt
+    );
+    record.released = true;
+    if let Err(error) = record.save(config) {
+        eprintln!("agentc-supervisor run: {error:#}");
+    }
+}
+
 /// Lets every record's release be retried again (the loop is starting).
 pub fn reset_retries(config: &Config) {
     for mut record in LaunchRecord::load_all(config) {

@@ -766,7 +766,16 @@ service's own claim and renew responses (`last_progress_at` against
 local clock. Once a gate fails, the loop logs why, stops renewing and
 drains the launch: SIGTERM to its process group, SIGKILL after `[run]
 drain_seconds` (default 30), then a release whose handoff names the reason.
-A hung harness therefore cannot hold the loop. A host suspend counts as
+A hung harness therefore cannot hold the loop. A renewal the service
+refuses for good (error `lease_expired`, `operation_not_permitted` or
+`record_not_found`: the agent submitted or released the attempt, or it
+expired or changed hands) drains the launch the same way at once. The loop
+reads the attempt's state from the task: an attempt the agent submitted
+counts as success and is not released (its cost is still recorded), while
+any other ended attempt gets the usual release with the reason in its
+handoff. Every other renewal failure (a network error, a 5xx, an unresolved
+CLI journal) is logged with the CLI's exit code, error code and bounded
+message, and retried at the next cadence under the same gates. A host suspend counts as
 elapsed time: after a suspend longer than 15 minutes the launch is drained
 on resume (its lease has usually lapsed during the suspend anyway). A project
 can also cap attempts on the service with the policy's `max_attempt_seconds`.
