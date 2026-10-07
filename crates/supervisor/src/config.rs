@@ -54,6 +54,10 @@ pub struct Config {
     pub push_helper: PushHelper,
     /// Live mode: the `run` loop that claims and launches work (P3b).
     pub run: crate::run_loop::RunConfig,
+    /// Admission before each claim: kill switch, caps, vendor health (P3b).
+    pub health: crate::run_loop::health::HealthConfig,
+    /// Host-approved setup command and caches by coordinator project id.
+    pub setup: BTreeMap<String, crate::setup::ProjectSetup>,
 }
 
 /// Where the candidate-push helper is installed and whom it runs as.
@@ -115,6 +119,8 @@ impl Default for Config {
             shadow: crate::shadow::ShadowConfig::default(),
             push_helper: PushHelper::default(),
             run: crate::run_loop::RunConfig::default(),
+            health: crate::run_loop::health::HealthConfig::default(),
+            setup: BTreeMap::new(),
         }
     }
 }

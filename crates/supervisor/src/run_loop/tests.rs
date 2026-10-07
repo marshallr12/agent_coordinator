@@ -27,6 +27,12 @@ struct Fake {
     term_exit_ms: Option<i64>,
     /// Live pids and their start ticks, all on boot `boot-1`.
     pids: std::collections::HashMap<u32, u64>,
+    /// What the launch writes to `$RUN/events.jsonl` when it starts.
+    events: String,
+    /// Harnesses whose sign-in check fails.
+    unhealthy: Vec<Harness>,
+    /// When every harness credential expires, if known.
+    expiry: Option<i64>,
 }
 
 impl Fake {
@@ -52,6 +58,9 @@ impl Fake {
             stop_at: None,
             term_exit_ms: Some(1_000),
             pids: Default::default(),
+            events: String::new(),
+            unhealthy: Vec::new(),
+            expiry: None,
         }
     }
 
@@ -107,6 +116,7 @@ impl Driver for Fake {
         self.steps.push("start".into());
         anyhow::ensure!(!self.fail_start, "spawn launch-root: no such file");
         fs::write(launch.run.join(".state-started"), "s")?;
+        fs::write(launch.run.join("events.jsonl"), &self.events)?;
         self.running = Some(launch.clone());
         self.pids.insert(4242, 77);
         Ok((4242, Some(77)))
@@ -184,6 +194,15 @@ impl Driver for Fake {
 
     fn stopping(&self) -> bool {
         self.stop_at.is_some_and(|at| self.now >= at)
+    }
+
+    fn harness_status(&mut self, harness: Harness) -> Result<()> {
+        anyhow::ensure!(!self.unhealthy.contains(&harness), "exit status 1");
+        Ok(())
+    }
+
+    fn credential_expiry_ms(&self, _harness: Harness) -> Option<i64> {
+        self.expiry
     }
 }
 
@@ -626,3 +645,6 @@ fn a_failed_release_keeps_the_launch_for_the_next_poll() {
         (0, 0)
     );
 }
+
+#[path = "health_tests.rs"]
+mod health_tests;

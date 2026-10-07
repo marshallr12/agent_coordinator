@@ -133,6 +133,9 @@ pub fn wrap(
     for path in writable_directories(spec) {
         mount(&mut args, "--bind", &path, &path);
     }
+    for path in crate::setup::caches(spec, config)? {
+        mount(&mut args, "--bind", &path, &path);
+    }
     // `claude-config` and the role's token stay under the read-only root.
     let persistent = claude_directory(spec, config);
     let cargo = StatePaths::new(&spec.run).cargo.join("config.toml");
@@ -1019,5 +1022,105 @@ test "$(cat /proc/self/fd/0)" = 'mock prompt'
         let native = profile::command(&codex, &config);
         assert_eq!(wrap(native.clone(), &codex, &config).unwrap(), native);
         assert!(check(&codex, &config).is_ok());
+    }
+
+    /// The fixture with a setup for project `p1` that runs `script` in Bash
+    /// with the clone, a test-owned cache directory and the outside file as
+    /// `$1`, `$2` and `$3`.
+    fn with_setup(script: &str) -> (Fixture, PathBuf) {
+        let mut fixture = Fixture::new(Role::Implementer);
+        let cache = fixture._root.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        fixture.spec.project = Some("p1".into());
+        let mut command: Vec<String> = ["/bin/bash", "-euc", script, "setup"]
+            .map(String::from)
+            .into();
+        for path in [&fixture.spec.clone, &cache, &fixture.outside] {
+            command.push(path.display().to_string());
+        }
+        let setup = crate::setup::ProjectSetup {
+            command,
+            cache_paths: vec![cache.clone()],
+            ..Default::default()
+        };
+        fixture.config.setup.insert("p1".into(), setup);
+        (fixture, cache)
+    }
+
+    #[test]
+    fn project_setup_runs_sandboxed_and_writes_only_the_clone_and_caches() {
+        let script = r#"
+deny() { if "$@" 2>/dev/null; then echo "unexpected success: $*" >&2; exit 31; fi; }
+printf fetched > "$1/fetched"
+printf cached > "$2/entry"
+deny sh -c "printf corrupted > '$3'"
+test "$(awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)" = 1
+test "$(awk '/^CapEff:/ {print $2}' /proc/self/status)" = 0000000000000000
+echo setup-output
+"#;
+        let (fixture, cache) = with_setup(script);
+        let result = crate::setup::run(&fixture.spec, &fixture.config);
+        let log = fs::read_to_string(fixture.spec.run.join(crate::setup::SETUP_LOG)).unwrap();
+        assert!(result.is_ok(), "{result:?}: {log}");
+        assert_eq!(
+            fs::read_to_string(fixture.spec.clone.join("fetched")).unwrap(),
+            "fetched"
+        );
+        assert_eq!(fs::read_to_string(cache.join("entry")).unwrap(), "cached");
+        assert_eq!(fs::read_to_string(&fixture.outside).unwrap(), "untouched");
+        assert!(log.contains("setup-output"), "{log}");
+        let wrapped =
+            crate::setup::sandboxed(&fixture.config.setup["p1"], &fixture.spec, &fixture.config);
+        assert_eq!(wrapped.unwrap().program, fixture.config.bubblewrap);
+    }
+
+    #[test]
+    fn a_failed_slow_or_codex_setup_refuses_the_launch() {
+        let (mut fixture, _) = with_setup("exit 3");
+        let error = crate::setup::run(&fixture.spec, &fixture.config).unwrap_err();
+        assert!(format!("{error:#}").contains("setup failed"), "{error:#}");
+        fs::remove_file(fixture.spec.run.join(crate::setup::SETUP_LOG)).unwrap();
+        let setup = fixture.config.setup.get_mut("p1").unwrap();
+        (setup.command, setup.timeout_seconds) = (vec!["/bin/sleep".into(), "30".into()], 1);
+        let error = crate::setup::run(&fixture.spec, &fixture.config).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("longer than 1 s"),
+            "{error:#}"
+        );
+        fixture.spec.harness = Harness::Codex;
+        let error = crate::setup::run(&fixture.spec, &fixture.config).unwrap_err();
+        assert!(format!("{error:#}").contains("Bubblewrap"), "{error:#}");
+        fixture.spec.project = None;
+        assert!(crate::setup::run(&fixture.spec, &fixture.config).is_ok());
+    }
+
+    #[test]
+    fn cache_paths_are_bound_writable_only_when_owned_real_directories() {
+        let (mut fixture, cache) = with_setup("true");
+        let bind = [
+            OsString::from("--bind"),
+            cache.clone().into(),
+            cache.clone().into(),
+        ];
+        assert!(fixture.command("true").args.windows(3).any(|w| w == bind));
+        let link = fixture._root.path().join("link");
+        symlink(&cache, &link).unwrap();
+        // SAFETY: geteuid has no preconditions.
+        let root = unsafe { libc::geteuid() } == 0;
+        let refused = [
+            link,
+            PathBuf::from("relative"),
+            PathBuf::from("/no/such/dir"),
+        ];
+        let foreign = (!root).then(|| PathBuf::from("/proc"));
+        for path in refused.into_iter().chain(foreign) {
+            fixture.config.setup.get_mut("p1").unwrap().cache_paths = vec![path.clone()];
+            let command = profile::command(&fixture.spec, &fixture.config);
+            assert!(
+                wrap(command, &fixture.spec, &fixture.config).is_err(),
+                "{}",
+                path.display()
+            );
+        }
     }
 }

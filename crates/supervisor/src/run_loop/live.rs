@@ -12,7 +12,7 @@ use super::record::{self, LaunchRecord};
 use super::{Driver, Launch, rooted};
 use crate::clone;
 use crate::config::Config;
-use crate::profile::Role;
+use crate::profile::{Harness, Role};
 use crate::push_helper::accounts::{self, Account};
 use anyhow::{Context, Result, ensure};
 use coordinator_client::CoordinatorClient;
@@ -252,7 +252,7 @@ impl Driver for LiveDriver {
     /// Connects the launch's session and claims the task with the pinned CLI,
     /// which acknowledges the current orientation first.
     fn claim(&mut self, launch: &Launch) -> Result<Lease> {
-        let harness = format!("--harness=agentc-supervisor-{:?}", self.config.run.harness);
+        let harness = format!("--harness=agentc-supervisor-{:?}", launch.vendor.harness);
         let connect = ["--json".into(), "connect".into(), harness.to_lowercase()];
         self.cli(launch, &connect)?;
         let s = &launch.suggestion;
@@ -379,6 +379,18 @@ impl Driver for LiveDriver {
     fn stopping(&self) -> bool {
         STOP.load(Ordering::SeqCst)
     }
+
+    fn harness_status(&mut self, harness: Harness) -> Result<()> {
+        super::live_health::status(&self.config, &self.account, harness)
+    }
+
+    fn credential_expiry_ms(&self, harness: Harness) -> Option<i64> {
+        super::live_health::expiry_ms(&self.config, harness)
+    }
+
+    fn events(&self, launch: &Launch) -> Option<Vec<u8>> {
+        super::live_health::events(&self.config, &self.account, launch)
+    }
 }
 
 /// The host mirror clones come from, `<state_dir>/mirror.git`.
@@ -481,15 +493,15 @@ fn role_env(config: &Config, launch: &Launch) -> Vec<(&'static str, String)> {
 
 /// The launch arguments `prepare` and `launch-root` share, in the
 /// `--name=value` form no value can turn into another option.
-fn spec_flags(config: &Config, launch: &Launch) -> Vec<String> {
-    let run = &config.run;
+fn spec_flags(_config: &Config, launch: &Launch) -> Vec<String> {
+    let vendor = &launch.vendor;
     vec![
         "--role=implementer".into(),
-        format!("--harness={:?}", run.harness).to_lowercase(),
+        format!("--harness={:?}", vendor.harness).to_lowercase(),
         format!("--clone={}", launch.clone.display()),
         format!("--run={}", launch.run.display()),
-        format!("--model={}", run.model),
-        format!("--effort={}", run.effort),
+        format!("--model={}", vendor.model),
+        format!("--effort={}", vendor.effort),
         format!("--project={}", launch.project),
         format!("--task={}", launch.suggestion.task),
         format!("--session-id={}", launch.session_id),

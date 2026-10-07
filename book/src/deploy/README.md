@@ -712,9 +712,61 @@ reads the repository binding from `/var/lib/agentc/coordinator-binding.toml`
 (`AGENT_COORDINATOR_REPO_CONFIG`), a root-owned copy of the mirror's
 `.agent-coordinator.toml`, never the clone's role-writable copy.
 
-`--once` polls a single time. Recovery claims, reviewer launches, continuation
-claims for work longer than `max_attempt_seconds`, and the kill switch are not
-part of this loop yet.
+### Admission, cost and project setup
+
+After the disk check, each poll admits a claim only when all of these hold:
+
+- the kill switch is not set: while `/var/lib/agentc/kill-switch` (`[health]
+  kill_switch`) exists, in any form, the loop claims nothing, so creating it
+  stops new claims within one poll. A running launch is not interrupted;
+- the implementer has spent less than `[health] implementer_daily_usd`
+  (default 150; 0 disables) in the last 24 hours, by the cost ledger;
+- a vendor is usable. The `[run]` harness comes first, then the optional
+  `[health.fallback]` (harness, model, effort). A vendor is skipped while a
+  rate limit marks it exhausted, once its credential has expired, or when its
+  own sign-in check fails: `claude auth status` with the role's token, or
+  `codex login status`, run as `agentc-impl`. Only the check's exit code is
+  used. The launch runs, and connects its session, with the chosen vendor.
+
+Once a day the loop logs a warning for each credential expiring within
+`[health] expiry_warn_days` (default 14). A Claude token's expiry is its
+`claude-token` file's modification time plus `token_lifetime_days` (default
+365); Codex refreshes its own login.
+
+When a launch ends, the loop reads its `$RUN/events.jsonl`. A rejected Claude
+`rate_limit_event`, a failed result reporting a 429 or usage limit, or a Codex
+`error` or `turn.failed` naming one marks that vendor exhausted in
+`/var/lib/agentc/vendors.json` until the reset time the event names, else for
+`[health] exhausted_minutes` (default 60); the following polls route to the
+fallback, or refuse, until then. Tool output is never inspected. The launch's
+tokens and dollars (Claude's own `total_cost_usd`; Codex usage priced with the
+`[shadow.prices]` table, or "unpriced") are appended to
+`/var/lib/agentc/costs.jsonl` with the project, task, session and attempt,
+and the release handoff ends with the same figure. A launch the agent already
+submitted or released keeps only the ledger entry.
+
+A host may configure a project setup command, keyed by coordinator project id:
+
+```toml
+[setup.<project-id>]
+command = ["cargo", "fetch", "--locked"]
+cache_paths = ["/var/cache/agentc/cargo"]
+timeout_seconds = 900
+```
+
+`launch` runs the command in the clone after preflight and before the
+harness, inside the launch's own Bubblewrap sandbox, environment and network
+namespace, with its output in `$RUN/setup.log`. A non-zero exit or a timeout
+refuses the launch. Each cache path must be an existing absolute directory,
+reached without symlinks and owned by `agentc-impl`; it is bound writable, at
+the same path, into the sandbox of the setup and of the harness. Codex
+launches have no Bubblewrap boundary, so a Codex launch for a project with a
+setup command is refused. The repository cannot add a command or a cache:
+both come only from the host's configuration.
+
+`--once` polls a single time. Recovery claims, reviewer launches and
+continuation claims for work longer than `max_attempt_seconds` are not part
+of this loop yet.
 `host-setup.sh` installs the `agentc-run` systemd unit without enabling it.
 It requires the firewall and egress units and restarts after a crash. To opt
 in:

@@ -5,13 +5,18 @@
 //!
 //! The loop only sequences steps; everything that talks to the coordinator or
 //! runs commands sits behind [`Driver`], so tests drive it with a fake.
-//! Extension points for the follow-up tasks: [`refusal`] (health, cost and
-//! the kill switch) and [`review_hook`] (reviewer launches and verdicts).
+//! Extension points for the follow-up tasks: [`refusal`] (disk),
+//! [`health::admit`] (kill switch, caps, vendor health) and [`review_hook`]
+//! (reviewer launches and verdicts); [`cost`] records what each launch used.
 //! [`lease`] renews a running launch's attempt; [`record`] persists launch
 //! identity and releases attempts on exit, failure, drain and recovery.
+pub mod cost;
+pub mod health;
 pub mod lease;
 #[cfg(target_os = "linux")]
 pub mod live;
+#[cfg(target_os = "linux")]
+mod live_health;
 pub mod record;
 #[cfg(target_os = "linux")]
 mod rooted;
@@ -100,6 +105,8 @@ pub struct Launch {
     pub session_id: Uuid,
     pub clone: PathBuf,
     pub run: PathBuf,
+    /// The harness, model and effort it runs with ([`health::admit`]).
+    pub vendor: health::Vendor,
 }
 
 impl Launch {
@@ -119,6 +126,7 @@ impl Launch {
             session_id,
             clone: role.join("clones").join(session_id.to_string()),
             run: role.join("runs").join(session_id.to_string()),
+            vendor: health::Vendor::primary(&config.run),
         }
     }
 }
@@ -169,6 +177,19 @@ pub trait Driver {
     fn pause(&mut self, duration: Duration);
     /// Whether the host asked the loop to stop (SIGTERM or SIGINT).
     fn stopping(&self) -> bool;
+    /// Whether `harness` is signed in (`claude auth status` / `codex login
+    /// status`); hosts without the check report healthy.
+    fn harness_status(&mut self, _harness: Harness) -> Result<()> {
+        Ok(())
+    }
+    /// When `harness`'s credential expires (ms since the epoch), if known.
+    fn credential_expiry_ms(&self, _harness: Harness) -> Option<i64> {
+        None
+    }
+    /// The launch's harness event stream, `$RUN/events.jsonl`.
+    fn events(&self, launch: &Launch) -> Option<Vec<u8>> {
+        std::fs::read(launch.run.join("events.jsonl")).ok()
+    }
 }
 
 /// What one poll did; recorded in the heartbeat.
@@ -243,6 +264,10 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
     if let Some(reason) = refusal(driver, &config.run) {
         return Outcome::Refused(reason);
     }
+    let vendor = match health::admit(driver, config) {
+        Ok(vendor) => vendor,
+        Err(reason) => return Outcome::Refused(reason),
+    };
     if config.run.reviewer {
         review_hook(driver);
     }
@@ -253,7 +278,10 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
     let Some(suggestion) = suggestion(&next) else {
         return Outcome::Idle;
     };
-    let launch = Launch::plan(config, driver.project(), suggestion);
+    let launch = Launch {
+        vendor,
+        ..Launch::plan(config, driver.project(), suggestion)
+    };
     let result = work(driver, config, &launch);
     finish(driver, config, &launch, result)
 }
@@ -307,7 +335,7 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
     let mut record = LaunchRecord::new(launch, &lease, driver.boot_id(), driver.now_ms());
     let result = (record.save(config).context("record the launch"))
         .and_then(|()| run_claimed(driver, config, launch, &mut record, lease));
-    let summary = handoff(&result);
+    let summary = handoff(&result, &cost::settle(driver, config, launch, &record));
     record::release(driver, config, launch, &mut record, &summary);
     result.map(|ended| ended.code)
 }
@@ -329,8 +357,9 @@ fn run_claimed(
     Ok(lease::supervise(driver, launch, lease, &config.run))
 }
 
-/// The handoff summary a launch's attempt is released with.
-fn handoff(result: &Result<lease::Ended>) -> String {
+/// The handoff summary a launch's attempt is released with, carrying the
+/// launch's `cost` sentence.
+fn handoff(result: &Result<lease::Ended>, cost: &str) -> String {
     let (how, why) = match result {
         Ok(ended) => (
             format!("the launch exited with code {}", ended.code),
@@ -339,7 +368,7 @@ fn handoff(result: &Result<lease::Ended>) -> String {
         Err(error) => (format!("the launch failed: {error:#}"), String::new()),
     };
     let text = format!(
-        "agentc-supervisor released the attempt: {how}{why}. Read the last checkpoint before resuming."
+        "agentc-supervisor released the attempt: {how}{why}. {cost} Read the last checkpoint before resuming."
     );
     text.chars().take(4000).collect()
 }
