@@ -39,12 +39,20 @@ pub fn skip_when_nested(name: &str) -> bool {
         .into_iter()
         .find(|key| non_empty(key).is_some());
     if let Some(marker) = marker {
-        eprintln!(
+        note(&format!(
             "note: skipping {name}: it runs the real Bubblewrap, which cannot run \
              nested inside another sandbox ({marker} is set)"
-        );
+        ));
     }
     marker.is_some()
+}
+
+/// Writes `line` straight to the process's stderr. The test harness captures
+/// only `print!`/`eprint!` output, so the note reaches a log (such as the
+/// containment suite's) without `--nocapture`.
+fn note(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 /// The value of environment variable `key` when it is set and non-empty.

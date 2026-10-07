@@ -360,7 +360,9 @@ AppArmor restriction refuses the unconfined `/usr/bin/bwrap` to `agentc-impl`.
 Inside `codex sandbox`, Bubblewrap cannot nest: the uid mapping hides its root
 ownership and user namespaces are unavailable. The suite's Codex leg therefore
 sets `AGENTC_TEST_NESTED_SANDBOX=1`, and those tests return early with a
-`note: skipping <test>` line on stderr. `CODEX_SANDBOX` or
+`note: skipping <test>` line, written straight to stderr so it appears in the
+leg's log without `--nocapture`. The suite fails the leg if that log has no such
+note. `CODEX_SANDBOX` or
 `CODEX_SANDBOX_NETWORK_DISABLED` has the same effect. Without one of these
 variables, a Bubblewrap that cannot run fails the tests; the launch-time
 Bubblewrap checks are unchanged.
@@ -380,16 +382,23 @@ installs Playwright's Chromium headless shell for it and writes its path to
 
 The x86-64 zip is byte-identical to Google's Chrome for Testing build of the
 same version. Host-setup downloads the zip as root, refuses it unless the
-checksum matches, and unpacks it `root:root` (directories and the executable
-`0755`, other files `0644`) under `/opt/agentc/browsers/1243/`. A re-run keeps
-a verified install and deletes other revisions. When the dynamic loader cannot
+checksum matches, and unpacks it `root:root` (directories `0755`, files
+`0644`) under `/opt/agentc/browsers/1243/`, with a `.manifest` of every file's
+SHA-256. A re-run re-hashes the tree against that manifest (about two seconds),
+reinstalls it if any file changed, is missing or was added, and deletes other
+revisions. When the dynamic loader cannot
 resolve one of the shell's libraries, host-setup installs Playwright's Chromium
 runtime package list with `apt-get` (the `t64` names on Ubuntu 24.04+ and
 Debian 13+), plus `fonts-liberation`. With `APPARMOR_BWRAP=1` it also loads
 `/etc/apparmor.d/agentc-browser`. Like Ubuntu's own profile for Chrome, that
 profile is unconfined except that it allows user namespaces, so the shell can
 start its own sandbox under the restriction. It attaches only to the pinned
-executable.
+executable, but grants user namespaces to every account that runs it. So, as
+with the agentc Bubblewrap copy, host-setup first makes the executable
+`root:agentc-bwrap` mode `0750`, runnable only by `agentc-impl` and
+`agentc-rev`, and then loads the profile. Implementers keep access for their
+own UI checks. Without `APPARMOR_BWRAP=1`, host-setup unloads the profile first
+and then makes the executable `root:root` mode `0755`.
 
 `browser` is chosen in this order:
 
@@ -400,12 +409,15 @@ executable.
 
 A snap wrapper is never chosen. Ubuntu's `chromium-browser` is one: a snap
 cannot run as `agentc-rev` outside a login session. Set `HEADLESS_SHELL=0` to
-skip the download, for example on a host without UI verification.
-Architectures other than x86-64 and ARM64 also skip it. `--uninstall`
-removes `/opt/agentc/browsers` and the profile. The containment suite fails
-if `browser` is a snap wrapper or if the pinned shell is not
-`755 root:root`. With a staging coordinator running, the suite also has
-`agentc-rev` render the staging dashboard with that browser.
+skip the shell, for example on a host without UI verification: host-setup then
+deletes `/opt/agentc/browsers` and the profile, so `browser` falls back to a
+system browser. Architectures other than x86-64 and ARM64 get the same
+treatment. `--uninstall` also removes both. The containment suite fails if
+`browser` is a snap wrapper. It also fails if the pinned shell's mode is wrong:
+`750 root:agentc-bwrap` with the profile loaded, else `755 root:root`. With the
+profile, it also fails if `agentc-egress` or `agentc-push` can run the shell.
+With a staging coordinator running, the suite also has `agentc-rev` render the
+staging dashboard with that browser.
 
 ## Implementer candidate-push helper
 

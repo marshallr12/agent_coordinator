@@ -41,7 +41,7 @@ BWRAP_COPY=$PREFIX/bin/bwrap
 BWRAP_PROFILE=/etc/apparmor.d/agentc-bwrap
 # Playwright's Chromium headless shell for verifying reviewers (plan M2),
 # pinned to Playwright v1.63.0's chromium-headless-shell (browser revision
-# 1243) and checked against these SHA-256 sums; HEADLESS_SHELL=0 skips it.
+# 1243) and checked against these SHA-256 sums; HEADLESS_SHELL=0 removes it.
 HEADLESS_SHELL=${HEADLESS_SHELL:-1}
 HEADLESS_SHELL_REVISION=1243
 HEADLESS_SHELL_VERSION=153.0.8010.12
@@ -436,28 +436,41 @@ headless_shell_path() {
 
 # Installs the pinned headless shell root-owned under $BROWSERS/<revision>,
 # with its runtime libraries and (APPARMOR_BWRAP=1) its AppArmor profile.
-# A verified install is kept across re-runs; other revisions are deleted.
-# Skipped with HEADLESS_SHELL=0 or on an architecture without a pin.
+# A re-run keeps an install whose files still match their manifest and
+# reinstalls any other; other revisions are deleted. HEADLESS_SHELL=0, or an
+# architecture without a pin, removes the profile and every pinned shell.
 install_headless_shell() {
   local platform target
   platform=$(headless_shell_platform)
   if [ "$HEADLESS_SHELL" != 1 ] || [ -z "$platform" ]; then
     echo "note: no pinned headless shell installed; reviewers get a system browser if any" >&2
-    remove_browser_profile; return
+    remove_browser_profile; refuse_symlink "$BROWSERS"; rm -rf -- "$BROWSERS"; return
   fi
   refuse_symlink "$BROWSERS"
   install -d -o root -g root -m 0755 "$BROWSERS"
   target=$BROWSERS/$HEADLESS_SHELL_REVISION
-  if [ "$(cat "$target/.sha256" 2>/dev/null)" != "$(headless_shell_sha256 "$platform")" ]; then
-    fetch_headless_shell "$platform" "$target"
-  fi
+  headless_shell_intact "$platform" "$target" || fetch_headless_shell "$platform" "$target"
   remove_other_revisions
   install_browser_libraries
-  install_browser_profile
+  install_browser_access
+}
+
+# Succeeds when $2 holds platform $1's pinned zip (its .sha256 marker) and
+# every file still matches the .manifest written at unpack time, with no file
+# added. Re-hashing the unpacked tree takes about a second.
+headless_shell_intact() {
+  local target=$2 listed present
+  [ -d "$target" ] && [ ! -L "$target" ] || return 1
+  [ "$(cat -- "$target/.sha256" 2>/dev/null)" = "$(headless_shell_sha256 "$1")" ] || return 1
+  listed=$(wc -l < "$target/.manifest") || return 1
+  present=$(cd "$target" && find . -type f ! -name .manifest ! -name .sha256 | wc -l)
+  [ "$listed" = "$present" ] && (cd "$target" && sha256sum -c --quiet --status --strict .manifest)
 }
 
 # Downloads platform $1's zip, refuses it unless its SHA-256 matches the pin,
-# and unpacks it root-owned and not group/world-writable as $2.
+# and unpacks it root-owned and not group/world-writable as $2, with a
+# manifest of its files' hashes. The executable stays 0700 until
+# install_browser_access opens it to the right accounts.
 fetch_headless_shell() {
   local platform=$1 target=$2 sum work
   sum=$(headless_shell_sha256 "$platform")
@@ -470,7 +483,9 @@ fetch_headless_shell() {
   python3 -I -m zipfile -e "$work/shell.zip" "$work/unpacked"
   chown -R root:root "$work/unpacked"
   chmod -R u=rwX,go=rX "$work/unpacked"
-  chmod 0755 "$work/unpacked/chrome-headless-shell-$platform/chrome-headless-shell"
+  chmod 0700 "$work/unpacked/chrome-headless-shell-$platform/chrome-headless-shell"
+  (cd "$work/unpacked" && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$work/manifest"
+  mv -- "$work/manifest" "$work/unpacked/.manifest"
   echo "$sum" > "$work/unpacked/.sha256"
   rm -rf -- "$target"
   mv -T -- "$work/unpacked" "$target"
@@ -513,11 +528,20 @@ browser_packages() {
     libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 fonts-liberation
 }
 
-# With APPARMOR_BWRAP=1, loads a profile that lets the pinned headless shell
-# build its own user-namespace sandbox under Ubuntu's restriction (as Ubuntu's
-# own profile for Chrome does); otherwise removes it.
-install_browser_profile() {
-  if [ "$APPARMOR_BWRAP" != 1 ]; then remove_browser_profile; return; fi
+# Sets who may run the pinned headless shell, ordered so it is never both
+# loaded under its profile and runnable by other accounts. With
+# APPARMOR_BWRAP=1 the executable becomes root:$BWRAP_GROUP 0750 (only the
+# role accounts, like the agentc bwrap copy) before the profile loads: the
+# profile grants user namespaces to whoever runs the file. Otherwise the
+# profile goes first and the executable becomes root:root 0755.
+install_browser_access() {
+  local shell
+  shell=$(headless_shell_path)
+  if [ "$APPARMOR_BWRAP" != 1 ]; then
+    remove_browser_profile
+    chown root:root "$shell"; chmod 0755 "$shell"; return
+  fi
+  chown "root:$BWRAP_GROUP" "$shell"; chmod 0750 "$shell"
   refuse_symlink "$BROWSER_PROFILE"
   browser_profile > "$BROWSER_PROFILE"
   chmod 0644 "$BROWSER_PROFILE"

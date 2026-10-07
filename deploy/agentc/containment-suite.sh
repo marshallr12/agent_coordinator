@@ -683,9 +683,21 @@ is_snap_wrapper() {
 check_browser_install() {
   local browser=$1
   expect_fail "reviewer browser $browser is not a snap wrapper" is_snap_wrapper "$browser"
-  case $browser in
-    "$PREFIX"/browsers/*) expect_ok "pinned headless shell is 755 root:root" has_mode "$browser" "755 root root" ;;
-  esac
+  case $browser in "$PREFIX"/browsers/*) check_pinned_shell "$browser" ;; esac
+}
+
+# With the agentc-browser profile loaded (it grants user namespaces to whoever
+# runs the shell), only the role accounts may run the pinned shell: it is
+# 750 root:agentc-bwrap and neither agentc-egress nor the push account can
+# execute it. Without the profile it is 755 root:root.
+check_pinned_shell() {
+  local shell=$1
+  if [ ! -e /etc/apparmor.d/agentc-browser ]; then
+    expect_ok "pinned headless shell is 755 root:root" has_mode "$shell" "755 root root"; return
+  fi
+  expect_ok "pinned headless shell is 750 root:agentc-bwrap" has_mode "$shell" "750 root agentc-bwrap"
+  expect_fail "agentc-egress: cannot run the pinned headless shell" as agentc-egress "$shell" --version
+  expect_fail "$PUSH_USER: cannot run the pinned headless shell" as "$PUSH_USER" "$shell" --version
 }
 
 # The reviewer's pinned headless browser renders the staging dashboard under
@@ -715,7 +727,8 @@ test_bwrap_env() {
 # Optional: the project's tests pass under the implementer profile, both
 # plainly (Claude: uid + firewall) and inside the Codex sandbox. Inside the
 # Codex sandbox Bubblewrap cannot nest, so AGENTC_TEST_NESTED_SANDBOX=1 makes
-# the real-Bubblewrap tests skip with a note; the plain leg runs them.
+# the real-Bubblewrap tests skip, each with a note in the leg's log; the plain
+# leg runs them.
 check_cargo_test() {
   local base=$STATE/impl clone=$STATE/impl/clones/suite run=$STATE/impl/runs/suite
   local env="PATH=$PREFIX/bin:$PREFIX/cargo/bin:/usr/bin:/bin RUSTUP_HOME=$PREFIX/rustup CARGO_HOME=$run/state/cargo CARGO_TARGET_DIR=$run/target HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=127.0.0.1,localhost $(test_bwrap_env)"
@@ -724,6 +737,8 @@ check_cargo_test() {
   local roots="sandbox_workspace_write.writable_roots=[\"$run\",\"$run/state/cargo\"]"
   expect_ok_logged "impl: cargo test inside codex sandbox" /root/agentc-cargo-test-codex.log as agentc-impl sh -c \
     "cd $clone && env $env AGENTC_TEST_NESTED_SANDBOX=1 CODEX_HOME=$base/codex-home $PREFIX/bin/codex sandbox -c sandbox_mode=workspace-write -c sandbox_workspace_write.network_access=true -c '$roots' -- cargo test --workspace --locked --no-fail-fast"
+  expect_ok "impl: codex leg noted its skipped real-Bubblewrap tests" \
+    grep -q '^note: skipping .* (AGENTC_TEST_NESTED_SANDBOX is set)$' /root/agentc-cargo-test-codex.log
 }
 
 main() {
