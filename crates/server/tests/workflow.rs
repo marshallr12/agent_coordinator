@@ -1032,17 +1032,28 @@ async fn subagent_review_opt_in_preserves_identity_contributions_and_default_gua
 /// A project allowing subagent reviews, with a submitted task whose owner
 /// `f.a` is the contributor; returns the project and its agent review.
 async fn subagent_review_subject(f: &Fixture, name: &str) -> (String, Value) {
+    let p = subagent_review_project(f, name).await;
+    (p.clone(), submitted_review(f, &p, &f.a).await)
+}
+
+/// A project whose human-managed policy allows subagent reviews.
+async fn subagent_review_project(f: &Fixture, name: &str) -> String {
     let p = f
         .project(name, &format!("https://example.test/{name}.git"))
         .await;
     let (status, policy) = f.call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"allow_subagent_reviews":true})).await;
     assert_eq!(status, StatusCode::OK, "{policy}");
-    let t = f.task(&p, "general", "Launch independence").await;
-    let owner = f.claim(&f.a, &p, &t, 2).await;
+    p
+}
+
+/// Claims and submits a new task in `p` as `owner`; returns its agent review.
+async fn submitted_review(f: &Fixture, p: &str, owner: &Caller) -> Value {
+    let t = f.task(p, "general", "Launch independence").await;
+    let attempt = f.claim(owner, p, &t, 2).await;
     let submitted = f
-        .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+        .submit(owner, p, &t, &attempt, "general", 2, None, None, None, None)
         .await;
-    (p, activity(&submitted, "agent_review").clone())
+    activity(&submitted, "agent_review").clone()
 }
 
 /// Posts a review decision for `review`, optionally recording `independence`.
@@ -1172,6 +1183,125 @@ async fn distinct_launch_allows_a_subagent_of_another_launch_of_the_same_princip
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{done}");
+}
+
+/// Re-parents `session` under a fresh chain of `links` recorded sessions whose
+/// top link's parent is `root`, as registration would have recorded them.
+async fn nest_under(f: &Fixture, session: &str, root: &str, links: usize) {
+    let mut parent = root.to_owned();
+    for _ in 0..links {
+        let link = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO agent_sessions(id,principal_id,credential_id,workstation_id,proof_hash,created_at,capabilities,harness,parent_session_id) SELECT ?,principal_id,credential_id,workstation_id,proof_hash,created_at,capabilities,harness,? FROM agent_sessions WHERE id=?")
+            .bind(&link).bind(&parent).bind(session).execute(&f.state.pool).await.unwrap();
+        parent = link;
+    }
+    sqlx::query("UPDATE agent_sessions SET parent_session_id=? WHERE id=?")
+        .bind(&parent)
+        .bind(session)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn distinct_launch_fails_closed_for_a_reviewer_nested_beyond_the_walk_cap() {
+    let f = Fixture::new().await;
+    let (p, review) = subagent_review_subject(&f, "launch-deep-reviewer").await;
+    let (deep, _) = register_child(&f, &f.b, &p, "deep-reviewer").await;
+    nest_under(&f, &deep.session, &f.a.session, 64).await;
+    let (status, refused) = f
+        .claim_activity_as(&deep, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
+    let (status, claimed) = f.claim_activity_as(&deep, &p, &review, (2, 0), None).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let generation = &claimed["data"]["attempt"]["generation"];
+    let (status, refused) = decide_review(
+        &f,
+        &deep,
+        &p,
+        (&review, generation),
+        Some("distinct_launch"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
+}
+
+#[tokio::test]
+async fn distinct_launch_fails_closed_for_a_contributor_nested_beyond_the_walk_cap() {
+    let f = Fixture::new().await;
+    let p = subagent_review_project(&f, "launch-deep-contributor").await;
+    let (deep, _) = register_child(&f, &f.a, &p, "deep-contributor").await;
+    nest_under(&f, &deep.session, &f.a.session, 64).await;
+    let review = submitted_review(&f, &p, &deep).await;
+    let (reviewer, _) = register_child(&f, &f.a, &p, "shallow-reviewer").await;
+    let (status, refused) = f
+        .claim_activity_as(&reviewer, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
+}
+
+#[tokio::test]
+async fn distinct_launch_refuses_sibling_subagents_of_one_root() {
+    let f = Fixture::new().await;
+    let p = subagent_review_project(&f, "launch-siblings").await;
+    let root = Caller {
+        session: Uuid::new_v4().to_string(),
+        proof: secret(),
+        ..f.a.clone()
+    };
+    let body = json!({"session_id":root.session,"workstation_id":"root","harness":"root-launch","capabilities":[]});
+    let (status, registered) = register_session(&f, &root, body).await;
+    assert_eq!(status, StatusCode::OK, "{registered}");
+    let (contributor, _) = register_child(&f, &root, &p, "sibling-contributor").await;
+    let (reviewer, _) = register_child(&f, &root, &p, "sibling-reviewer").await;
+    let review = submitted_review(&f, &p, &contributor).await;
+    let (status, refused) = f
+        .claim_activity_as(&reviewer, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
+    let (status, claimed) = f
+        .claim_activity_as(&reviewer, &p, &review, (2, 0), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+}
+
+/// Reads `c`'s read-only preconditions preview of `review`.
+async fn preview(f: &Fixture, c: &Caller, p: &str, review: &Value) -> Value {
+    let id = review["id"].as_str().unwrap();
+    let path = format!("/api/v1/projects/{p}/preconditions/{id}");
+    let (status, preview) = f.call(c, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    preview["data"].clone()
+}
+
+#[tokio::test]
+async fn preconditions_preview_reports_whether_distinct_launch_would_be_accepted() {
+    let f = Fixture::new().await;
+    let (p, review) = subagent_review_subject(&f, "launch-preview").await;
+    let (sibling, _) = register_child(&f, &f.a, &p, "same-launch-reviewer").await;
+    f.ack(&sibling, &p, 2).await;
+    let shared = preview(&f, &sibling, &p, &review).await;
+    assert_eq!(shared["eligible_to_claim"], true, "{shared}");
+    assert_eq!(shared["distinct_launch_eligible"], false, "{shared}");
+    let extra = &shared["distinct_launch_unmet_preconditions"];
+    assert_eq!(extra[0]["code"], "reviewer_shares_launch", "{shared}");
+    assert!(
+        !shared["unmet_preconditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["code"] == "reviewer_shares_launch")
+    );
+    f.ack(&f.b, &p, 2).await;
+    let separate = preview(&f, &f.b, &p, &review).await;
+    assert_eq!(separate["eligible_to_claim"], true, "{separate}");
+    assert_eq!(separate["distinct_launch_eligible"], true, "{separate}");
+    assert_eq!(separate["distinct_launch_unmet_preconditions"], json!([]));
 }
 
 #[tokio::test]

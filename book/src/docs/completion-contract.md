@@ -173,6 +173,14 @@ a carried task is voided like a contributor's approval. Without the assertion th
 principal/session checks above apply unchanged, so a same-launch subagent review
 permitted by `allow_subagent_reviews` still works but cannot be recorded as
 `distinct_launch`. The supervisor's reviewer asserts it at claim and decision.
+The launch walk follows at most 64 parent hops; a reviewer or contributor chain
+nested deeper cannot be resolved, so a `distinct_launch` assertion involving it
+is refused (`reviewer_shares_launch`) rather than trusted. For an agent
+previewing a review activity, the read-only preconditions result also reports
+`distinct_launch_eligible` and `distinct_launch_unmet_preconditions` (the
+`reviewer_shares_launch` blocker the assertion would add), leaving
+`eligible_to_claim` and `unmet_preconditions` unchanged for clients that do not
+assert it.
 Launch lineage is only what sessions declared at registration; a shared credential
 can always open a fresh top-level session, so this enforces the recorded launch
 separation, not process isolation.

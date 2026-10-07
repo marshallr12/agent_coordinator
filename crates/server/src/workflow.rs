@@ -21,6 +21,9 @@ type Reply = Result<Json<Value>, AppError>;
 
 /// The `review_independence` levels a review decision may record (plan §2.3).
 const REVIEW_INDEPENDENCE: [&str; 3] = ["distinct_launch", "distinct_host", "distinct_vendor"];
+/// Deepest `parent_session_id` hop the launch walks follow. A chain longer than
+/// this cannot be resolved, and every launch check treats it as shared.
+const LAUNCH_WALK_CAP: i64 = 64;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -1032,8 +1035,44 @@ pub(crate) async fn activity_preconditions(
         "precondition_hints":if ctx.kind == "integration" { json!([{"code":"candidate_stale_merge_conflict_requires_preflight","state":"requires_local_observation","message":"The service cannot inspect the Git target or detect merge conflicts. Fetch the pinned target and run local integration preflight before publication; a stale or conflicting immutable candidate is revised by the integration owner (reason_code conflict) or reopened by an operator."}]) } else { json!([]) },
         "state":snapshot
     });
+    add_distinct_launch_preview(c, project, &ctx, actor, &mut result).await?;
     result["state_token"] = json!(crate::state_wait::state_token(&result)?);
     Ok(result)
+}
+
+/// For an agent previewing a review activity, reports whether a claim that
+/// asserts `distinct_launch` would also be accepted: `distinct_launch_eligible`
+/// and the extra `distinct_launch_unmet_preconditions` that assertion adds
+/// (`reviewer_shares_launch`). The default result is left unchanged.
+async fn add_distinct_launch_preview(
+    c: &mut SqliteConnection,
+    project: &str,
+    ctx: &ActivityContext,
+    actor: &crate::auth::Actor,
+    result: &mut Value,
+) -> Result<(), AppError> {
+    if actor.kind != "agent" || !matches!(ctx.kind.as_str(), "agent_review" | "either_review") {
+        return Ok(());
+    }
+    let session = actor.session_id.as_deref().unwrap_or("");
+    let reviewer = (actor.id.as_str(), session);
+    let mut extra = Vec::new();
+    if let Err(error) = ensure_independent_reviewer(
+        c,
+        project,
+        &ctx.subject_task,
+        reviewer,
+        Some("distinct_launch"),
+    )
+    .await
+        && error.code == "reviewer_shares_launch"
+    {
+        extra.push(json!({"code":error.code,"message":error.message}));
+    }
+    result["distinct_launch_eligible"] =
+        json!(result["eligible_to_claim"] == true && extra.is_empty());
+    result["distinct_launch_unmet_preconditions"] = json!(extra);
+    Ok(())
 }
 
 pub async fn workflow_snapshot(
@@ -2148,35 +2187,58 @@ async fn ensure_distinct_launch(
     tasks: &[String],
     session: &str,
 ) -> Result<(), AppError> {
-    let launch = launch_root(c, session).await?;
-    for task in tasks {
-        if launch_contributed(c, task, &launch).await? {
-            return Err(AppError::conflict(
-                "reviewer_shares_launch",
-                "A distinct_launch review cannot come from the launch of a recorded contributor. Review from a separate launch, or record the review without distinct_launch.",
-            ));
-        }
+    if launch_shared(c, tasks, session).await? {
+        return Err(AppError::conflict(
+            "reviewer_shares_launch",
+            "A distinct_launch review cannot come from the launch of a recorded contributor. Review from a separate launch, or record the review without distinct_launch.",
+        ));
     }
     Ok(())
 }
 
+/// True when `session`'s launch is the launch of a recorded contributor to
+/// any of `tasks`, or when either launch is too deeply nested to resolve.
+async fn launch_shared(
+    c: &mut SqliteConnection,
+    tasks: &[String],
+    session: &str,
+) -> Result<bool, AppError> {
+    let Some(launch) = launch_root(c, session).await? else {
+        return Ok(true);
+    };
+    for task in tasks {
+        if launch_contributed(c, task, &launch).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The launch of `session`: the root of its `parent_session_id` chain as the
 /// service recorded it at registration (a top-level session is its own launch).
-async fn launch_root(c: &mut SqliteConnection, session: &str) -> Result<String, AppError> {
-    let root: Option<String> = sqlx::query_scalar("WITH RECURSIVE up(id,parent,depth) AS (SELECT id,parent_session_id,0 FROM agent_sessions WHERE id=? UNION ALL SELECT s.id,s.parent_session_id,up.depth+1 FROM agent_sessions s JOIN up ON s.id=up.parent WHERE up.depth<64) SELECT id FROM up ORDER BY depth DESC LIMIT 1")
-        .bind(session).fetch_optional(&mut *c).await?;
-    Ok(root.unwrap_or_else(|| session.to_owned()))
+/// `None` when the chain is deeper than [`LAUNCH_WALK_CAP`], so callers fail
+/// closed instead of mistaking an intermediate ancestor for the launch.
+async fn launch_root(c: &mut SqliteConnection, session: &str) -> Result<Option<String>, AppError> {
+    let deepest: Option<(String, Option<String>)> = sqlx::query_as("WITH RECURSIVE up(id,parent,depth) AS (SELECT id,parent_session_id,0 FROM agent_sessions WHERE id=? UNION ALL SELECT s.id,s.parent_session_id,up.depth+1 FROM agent_sessions s JOIN up ON s.id=up.parent WHERE up.depth<?) SELECT id,parent FROM up ORDER BY depth DESC LIMIT 1")
+        .bind(session).bind(LAUNCH_WALK_CAP).fetch_optional(&mut *c).await?;
+    Ok(match deepest {
+        None => Some(session.to_owned()),
+        Some((root, None)) => Some(root),
+        Some((_, Some(_))) => None,
+    })
 }
 
 /// True when a recorded contributor session of `task` belongs to `launch`,
-/// walking each contributor session up its `parent_session_id` chain.
+/// walking each contributor session up its `parent_session_id` chain. A
+/// contributor chain deeper than [`LAUNCH_WALK_CAP`] counts as a match (fail
+/// closed), since its launch cannot be resolved.
 async fn launch_contributed(
     c: &mut SqliteConnection,
     task: &str,
     launch: &str,
 ) -> Result<bool, AppError> {
-    let n: i64 = sqlx::query_scalar("WITH RECURSIVE up(id,parent,depth) AS (SELECT tc.session_id,s.parent_session_id,0 FROM task_contributors tc LEFT JOIN agent_sessions s ON s.id=tc.session_id WHERE tc.task_id=? UNION ALL SELECT s.id,s.parent_session_id,up.depth+1 FROM agent_sessions s JOIN up ON s.id=up.parent WHERE up.depth<64) SELECT count(*) FROM up WHERE parent IS NULL AND id=?")
-        .bind(task).bind(launch).fetch_one(&mut *c).await?;
+    let n: i64 = sqlx::query_scalar("WITH RECURSIVE up(id,parent,depth) AS (SELECT tc.session_id,s.parent_session_id,0 FROM task_contributors tc LEFT JOIN agent_sessions s ON s.id=tc.session_id WHERE tc.task_id=? UNION ALL SELECT s.id,s.parent_session_id,up.depth+1 FROM agent_sessions s JOIN up ON s.id=up.parent WHERE up.depth<?) SELECT count(*) FROM up WHERE (parent IS NULL AND id=?) OR (depth=? AND parent IS NOT NULL)")
+        .bind(task).bind(LAUNCH_WALK_CAP).bind(launch).bind(LAUNCH_WALK_CAP).fetch_one(&mut *c).await?;
     Ok(n > 0)
 }
 
@@ -2186,8 +2248,7 @@ pub(crate) async fn shares_launch(
     task: &str,
     session: &str,
 ) -> Result<bool, AppError> {
-    let launch = launch_root(c, session).await?;
-    launch_contributed(c, task, &launch).await
+    launch_shared(c, &[task.to_owned()], session).await
 }
 
 /// Rejects a `review_independence` outside the recorded levels.

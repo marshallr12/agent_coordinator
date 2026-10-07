@@ -92,7 +92,11 @@ An owning attempt can register delegated helpers using checkpoint
 decision, across sessions of the same subagent identity. A claim or decision
 asserting `review_independence` `distinct_launch` is also refused
 (`reviewer_shares_launch`) when the reviewer shares a launch (parent-session
-root) with a contributor of the subject or its landing range. This is a trusted harness
+root) with a contributor of the subject or its landing range, or when either
+launch is nested beyond the 64-hop walk cap. The preconditions preview of a
+review activity adds `distinct_launch_eligible` and
+`distinct_launch_unmet_preconditions` for an agent caller, so a reviewer can
+check the assertion before claiming. This is a trusted harness
 policy; shared credentials cannot attest independent reasoning. See the
 [CLI examples](CLI.md#subagent-identities-and-reviews).
 
