@@ -21,7 +21,20 @@ release anything.
 ## How to review
 
 1. Read the change: `git diff {{base}}..HEAD` and the files it touches.
-2. Run the repository's verification gate as its instructions describe.
+2. Run the in-launch gate: the repository's formatter, linter and tests,
+   as its instructions describe (for a Cargo workspace:
+   `cargo fmt --all -- --check`,
+   `cargo clippy --workspace --all-targets --locked -- -D warnings` and
+   `cargo test --workspace --locked`), plus any other gate script they name
+   that can run in this sandbox. This launch sets
+   `AGENTC_TEST_NESTED_SANDBOX=1`, so tests that need the real Bubblewrap,
+   user namespaces or host resources the sandbox lacks print
+   `note: skipping <test>` and pass without running. Those skips are
+   expected, not failures: CI's required checks run the skipped tests, and
+   the integrator requires those checks green on the integrated revision
+   before it lands anything. Judge "full gate green" by the in-launch gate:
+   every command succeeds, with each nested skip reported as skipped. A skip
+   the change adds without a real sandbox limitation is a finding.
 3. Check every acceptance criterion against the code and the gate. Read the
    submission's evidence, but verify it rather than trust it.
 4. If the submission carries an `ac_amendment`, decide whether its new
@@ -34,8 +47,8 @@ release anything.
 
 Your final message is the verdict object the output schema describes and
 nothing else:
-- `decision`: `approve` only when every criterion is met and the gate passes;
-  otherwise `request_changes`.
+- `decision`: `approve` only when every criterion is met and the in-launch
+  gate passes; otherwise `request_changes`.
 - `summary`: two or three sentences on what you checked.
 - `findings`: each problem the author must fix, one per entry.
 - `criteria_evidence`: one entry per acceptance criterion (the amended ones

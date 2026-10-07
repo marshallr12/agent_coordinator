@@ -367,6 +367,37 @@ note. `CODEX_SANDBOX` or
 variables, a Bubblewrap that cannot run fails the tests; the launch-time
 Bubblewrap checks are unchanged.
 
+### The in-launch gate
+
+The supervisor also sets `AGENTC_TEST_NESTED_SANDBOX=1` in the environment of
+every launch, implementer and reviewer, Claude and Codex, so the gate a role
+runs inside its sandbox skips what that sandbox cannot provide. Besides the
+real-Bubblewrap tests (no nested user namespaces there), the `push_helper`
+tests and the `preflight` push-socket test skip because their fixtures live
+under `/tmp` for short socket paths, and a launch's `/tmp` is the host's,
+mounted read-only. The `sandbox` mount-audit test skips because it binds a
+socket deep under `$TMPDIR`, and a launch's long `$TMPDIR` pushes that path
+past the kernel's 108-byte limit. Each skip prints its
+`note: skipping <test>: <reason> (AGENTC_TEST_NESTED_SANDBOX is set)` line.
+
+Both role contracts define that in-launch gate: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --locked -- -D warnings` and
+`cargo test --workspace --locked` (or the repository's own equivalents), plus
+any other gate script that can run in the sandbox, with each nested skip
+reported as skipped rather than passed. The reviewer judges "full gate green"
+by that gate. The skipped tests are not dropped: CI's required checks run them
+on an ordinary runner, and the integrator requires those checks green on the
+integrated revision before it lands anything. Outside a launch, without a
+marker, every one of these tests runs and fails loudly when its host resource
+is missing.
+
+To reproduce a launch's view locally, run the workspace tests in a read-only
+Bubblewrap root as your own account, with the variable set and only the
+target, home and temporary directories writable, for example
+`bwrap --unshare-user --disable-userns --unshare-net --ro-bind / / --proc /proc --dev /dev --bind <target> <target> --bind <tmp> <tmp> --setenv TMPDIR <tmp> --setenv AGENTC_TEST_NESTED_SANDBOX 1 cargo test --workspace --locked --no-fail-fast`
+from the checkout (prebuild the tests first, since the sandbox has no
+network), or under `codex sandbox` as the containment suite's Codex leg does.
+
 ### Reviewer headless browser
 
 A verifying reviewer gets the configured `browser` as `CHROME_BIN`. Host-setup

@@ -521,6 +521,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_push_socket_must_be_an_implementers_short_absolute_socket() {
+        if crate::test_support::skip_when_nested_because(
+            "a_push_socket_must_be_an_implementers_short_absolute_socket",
+            crate::test_support::READ_ONLY_TMP,
+        ) {
+            return;
+        }
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let config = Config {
             state_dir: dir.path().into(),

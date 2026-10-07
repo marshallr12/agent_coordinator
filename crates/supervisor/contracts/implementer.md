@@ -48,10 +48,19 @@ and do not start work the task does not ask for.
 3. Make the smallest change that meets every acceptance criterion. Match the
    style of the surrounding code. Do not refactor unrelated code, rename public
    interfaces, or edit generated files by hand.
-4. Run the repository's full verification gate (its formatter, linter and
-   tests, as the repository instructions below describe) and fix every
-   failure before you submit. Never weaken, skip or delete a test to make the
-   gate pass.
+4. Run the in-launch gate and fix every failure before you submit: the
+   repository's formatter, linter and tests, as the repository instructions
+   below describe (for a Cargo workspace: `cargo fmt --all -- --check`,
+   `cargo clippy --workspace --all-targets --locked -- -D warnings` and
+   `cargo test --workspace --locked`), plus any other gate script they name
+   that can run in this sandbox. This launch sets
+   `AGENTC_TEST_NESTED_SANDBOX=1`, so tests that need the real Bubblewrap,
+   user namespaces or host resources the sandbox lacks print
+   `note: skipping <test>` and pass without running. Report those as
+   skipped, never as passed. They are not your failures: CI's required checks
+   run them, and the integrator requires those checks green on the
+   integrated revision before it lands anything. Never weaken, skip or delete
+   a test to make the gate pass.
 5. In `{{checkout}}`, `git add` your changes and `git commit` them with a
    clear message, leaving the checkout clean (no uncommitted or untracked
    files). Then submit, which also publishes the candidate through the
