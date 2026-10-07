@@ -136,6 +136,12 @@ create_dirs() {
   # by the implementer and helper accounts.
   refuse_symlink "$STATE/push"
   install -d -o root -g root -m 0711 "$STATE/push"
+  # The reviewer principal's write credential and sessions (run loop reviews):
+  # root only, never readable by a launch.
+  for path in "$STATE/verdict" "$STATE/verdict/home"; do
+    refuse_symlink "$path"
+    install -d -o root -g root -m 0700 "$path"
+  done
   for user in "${AGENTS[@]}"; do
     role=$STATE/${user#agentc-}
     refuse_symlink "$role"
@@ -467,7 +473,7 @@ EOF
 # min_free_mib = 20480           # refuse to claim below this much free disk
 # branch = "main"                # mirror branch each clone starts from
 # allow_insecure_loopback = false
-# reviewer = false               # reviewer launches are not implemented yet
+# reviewer = false               # also review, posting with $STATE/verdict/home/credentials.toml
 # budget_minutes = 240           # stop renewing a launch's attempt after this
 # drain_seconds = 30             # on stop: SIGTERM, then SIGKILL after this
 
@@ -871,6 +877,8 @@ Host seeds installed. Manual steps (reserved bootstrap, once per role):
   (repeat for agentc-rev with rev/ paths)
 Coordinator credentials: issue class=supervised (impl: write, rev: read) in the
 dashboard and save each credentials.toml as $STATE/<role>/coordinator/credentials.toml (0600).
+For run-loop reviews, issue a separate write principal (it never implements) and
+save its credentials.toml as $STATE/verdict/home/credentials.toml (root, 0600).
 Staging: deploy/agentc/staging.py up (as the owner), then run the commands
 "deploy/agentc/staging.py credentials" prints and add its [verification.<project-id>]
 entry below the KEEP line in $ETC/supervisor.toml.

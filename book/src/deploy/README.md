@@ -712,9 +712,38 @@ reads the repository binding from `/var/lib/agentc/coordinator-binding.toml`
 (`AGENT_COORDINATOR_REPO_CONFIG`), a root-owned copy of the mirror's
 `.agent-coordinator.toml`, never the clone's role-writable copy.
 
-`--once` polls a single time. Recovery claims, reviewer launches, continuation
-claims for work longer than `max_attempt_seconds`, and the kill switch are not
-part of this loop yet.
+### Reviewer launches
+
+With `[run] reviewer = true` each poll first takes one review. Root reads
+reviewer `next`, the subject task and its submission with the reviewer
+principal's write credential, `/var/lib/agentc/verdict/home/credentials.toml`
+(a root-owned mode 0700 directory, so no launch can read it; the loop refuses
+to start otherwise). It connects a fresh session there and claims the review
+with `agent-coordinator reviews claim`, which verifies the candidate in a
+root-owned clone of the mirror. It fetches the candidate ref into the mirror
+as `refs/heads/agentc-review/<session>` and, as `agentc-rev`, clones it to
+`rev/clones/<session>` and prepares `rev/runs/<session>`. The prompt is the
+reviewer contract (`crates/supervisor/contracts/reviewer.md`) with the
+criteria and submission as JSON data whose `<` are escaped, then the base
+revision's instruction files. The reviewer launch gets no coordinator
+credential and is killed after 45 minutes, inside the unrenewed one-hour lease.
+
+The launch must end with the structured verdict of the review schema:
+`decision`, `summary`, `findings`, `criteria_evidence` and
+`amendment_decision` (null unless the submission carries an `ac_amendment`).
+Root reads Codex's `last.md` or the `structured_output` of Claude's final
+`result` event. An approval needs non-empty evidence for every acceptance
+criterion (the amended ones when it accepts the amendment, M5). A verdict
+that fails this check, cannot be parsed, or that the service refuses is not
+posted: the review is released and queued again. Otherwise root posts it with
+`reviews decide`, findings as `required` (changes requested) or `advisory`
+(approval), the evidence in the summary, and `review_independence =
+distinct_launch` recorded on the decision. The clone, run and mirror branch
+are removed after every review.
+
+`--once` polls a single time. Recovery claims, continuation claims for work
+longer than `max_attempt_seconds`, the kill switch and the other-vendor audit
+sample are not part of this loop yet.
 `host-setup.sh` installs the `agentc-run` systemd unit without enabling it.
 It requires the firewall and egress units and restarts after a crash. To opt
 in:

@@ -35,6 +35,7 @@ dependencies = [
  "chrono",
  "clap",
  "coordinator-client",
+ "coordinator-core",
  "hex",
  "libc",
  "reqwest",
