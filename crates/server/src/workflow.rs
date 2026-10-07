@@ -19,6 +19,9 @@ use uuid::Uuid;
 
 type Reply = Result<Json<Value>, AppError>;
 
+/// The `review_independence` levels a review decision may record (plan §2.3).
+const REVIEW_INDEPENDENCE: [&str; 3] = ["distinct_launch", "distinct_host", "distinct_vendor"];
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -752,6 +755,7 @@ async fn submission_value(c: &mut SqliteConnection, id: &str) -> Result<Value, A
         "base_revision":row.get::<Option<String>,_>("base_revision"),
         "candidate_revision":row.get::<Option<String>,_>("candidate_revision"),
         "candidate_tree":row.get::<Option<String>,_>("candidate_tree"),
+        "ac_amendment":row.get::<Option<String>,_>("ac_amendment_json").map(|j| serde_json::from_str::<Value>(&j)).transpose()?,
         "created_by":row.get::<String,_>("created_by"),
         "created_at":timestamp(row.get("created_at")),
         "superseded_at":row.get::<Option<i64>,_>("superseded_at").map(timestamp)
@@ -777,7 +781,7 @@ async fn activity_value(
         "expires_at":timestamp(row.get("expires_at")),"valid_by_time":row.get::<i64,_>("expires_at")>now,
         "owner_authorized":row.get::<bool,_>("owner_authorized")
     }));
-    let review_row = sqlx::query("SELECT decision,summary,reviewer_id,reviewer_session_id,created_at FROM review_decisions WHERE activity_id=?")
+    let review_row = sqlx::query("SELECT decision,summary,reviewer_id,reviewer_session_id,created_at,amendment_decision,review_independence FROM review_decisions WHERE activity_id=?")
         .bind(id).fetch_optional(&mut *c).await?;
     let review = if let Some(r) = review_row {
         let findings=sqlx::query("SELECT id,severity,remedy,evidence,created_at FROM review_findings WHERE activity_id=? ORDER BY created_at,id LIMIT 101")
@@ -785,7 +789,7 @@ async fn activity_value(
         let truncated = findings.len() > 100;
         let findings=findings.into_iter().take(100).map(|f|json!({"id":f.get::<String,_>("id"),"severity":f.get::<String,_>("severity"),"remedy":f.get::<String,_>("remedy"),"evidence":f.get::<String,_>("evidence"),"created_at":timestamp(f.get("created_at"))})).collect::<Vec<_>>();
         Some(
-            json!({"decision":r.get::<String,_>("decision"),"summary":r.get::<String,_>("summary"),"reviewer_id":r.get::<String,_>("reviewer_id"),"reviewer_session_id":r.get::<String,_>("reviewer_session_id"),"created_at":timestamp(r.get("created_at")),"findings":findings,"findings_truncated":truncated}),
+            json!({"decision":r.get::<String,_>("decision"),"summary":r.get::<String,_>("summary"),"reviewer_id":r.get::<String,_>("reviewer_id"),"reviewer_session_id":r.get::<String,_>("reviewer_session_id"),"created_at":timestamp(r.get("created_at")),"amendment_decision":r.get::<Option<String>,_>("amendment_decision"),"review_independence":r.get::<Option<String>,_>("review_independence"),"findings":findings,"findings_truncated":truncated}),
         )
     } else {
         None
@@ -2151,6 +2155,13 @@ async fn review(
         bounded(&f.remedy, "finding remedy", 8192, true)?;
         bounded(&f.evidence, "finding evidence", 8192, false)?;
     }
+    if let Some(independence) = input.review_independence.as_deref()
+        && !REVIEW_INDEPENDENCE.contains(&independence)
+    {
+        return Err(AppError::bad_request(
+            "review_independence must be distinct_launch, distinct_host or distinct_vendor.",
+        ));
+    }
     if input.decision == "approved" && input.findings.iter().any(|f| f.severity == "required") {
         return Err(AppError::bad_request(
             "An approval cannot retain an unresolved required finding.",
@@ -2202,8 +2213,8 @@ async fn review(
         .bind(&ctx.activity_task)
         .fetch_one(&mut *m.tx)
         .await?;
-    sqlx::query("INSERT INTO review_decisions(activity_id,submission_id,attempt_id,reviewer_id,reviewer_session_id,decision,summary,created_at,amendment_decision) VALUES(?,?,?,?,?,?,?,?,?)")
-        .bind(&ctx.id).bind(&ctx.submission).bind(&attempt_id).bind(&m.actor.id).bind(session(&m.actor)?).bind(decision).bind(&input.summary).bind(m.now).bind(&input.amendment_decision).execute(&mut *m.tx).await?;
+    sqlx::query("INSERT INTO review_decisions(activity_id,submission_id,attempt_id,reviewer_id,reviewer_session_id,decision,summary,created_at,amendment_decision,review_independence) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .bind(&ctx.id).bind(&ctx.submission).bind(&attempt_id).bind(&m.actor.id).bind(session(&m.actor)?).bind(decision).bind(&input.summary).bind(m.now).bind(&input.amendment_decision).bind(&input.review_independence).execute(&mut *m.tx).await?;
     for finding in &input.findings {
         sqlx::query("INSERT INTO review_findings(id,activity_id,severity,remedy,evidence,created_at) VALUES(?,?,?,?,?,?)")
         .bind(Uuid::new_v4().to_string()).bind(&ctx.id).bind(&finding.severity).bind(&finding.remedy).bind(&finding.evidence).bind(m.now).execute(&mut *m.tx).await?;

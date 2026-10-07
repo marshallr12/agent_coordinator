@@ -2694,6 +2694,43 @@ async fn rejected_ac_amendment_requests_changes() {
     );
 }
 
+// P3b verdict pipeline (6cf630c0): the reviewer sees the amendment on the
+// submission, and the supervisor's approval round-trips with its
+// amendment_decision and review_independence recorded on the decision.
+#[tokio::test]
+async fn supervisor_amendment_approval_round_trips_with_independence() {
+    let f = Fixture::new().await;
+    let (base, review, claimed) = amended_submission(&f, "amend-verdict").await;
+    let subject = review["subject_task_id"].as_str().unwrap();
+    let (_, workflow) = f
+        .call(
+            &f.b,
+            "GET",
+            &format!("{base}/tasks/{subject}/workflow"),
+            Value::Null,
+        )
+        .await;
+    let amendment = &workflow["data"]["submission"]["ac_amendment"];
+    assert_eq!(amendment["new"][1], "operator docs updated", "{workflow}");
+    let path = format!(
+        "{base}/workflow-activities/{}/review",
+        review["id"].as_str().unwrap()
+    );
+    let mut body = review_body(&claimed, &review, Some("accepted"));
+    body["review_independence"] = json!("same_launch");
+    let (status, refused) = f.call(&f.b, "POST", &path, body.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    body["review_independence"] = json!("distinct_launch");
+    let (status, done) = f.call(&f.b, "POST", &path, body).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    let decided = activity(&done["data"], "agent_review");
+    assert_eq!(
+        decided["review"]["amendment_decision"], "accepted",
+        "{done}"
+    );
+    assert_eq!(decided["review"]["review_independence"], "distinct_launch");
+}
+
 // Review fix: agents with agent_rule_editing may edit rules text but never review or
 // recovery mode, so an author cannot loosen review to land its own candidate.
 #[tokio::test]

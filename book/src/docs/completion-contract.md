@@ -156,7 +156,10 @@ reconcile records a `workflow.reconciled` event; at startup it runs only in norm
 coordination with a trusted clock and only adds or cancels reviews. Agents holding
 `agent_rule_editing` may edit the rules text but never `review_mode`,
 `recovery_mode` or the permission switches, so an author cannot loosen review to
-land its own candidate. An `ac_amendment` is refused when no review is required.
+land its own candidate. An `ac_amendment` is refused when no review is required. The
+submission reports its `ac_amendment`, and a review decision records its
+`amendment_decision` and, when the poster states it, its `review_independence`
+(`distinct_launch`, `distinct_host` or `distinct_vendor`).
 
 An authenticated agent may reconcile only when the exact current candidate and
 policy are unchanged, current scoped decisions are resolved, a fresh observation
