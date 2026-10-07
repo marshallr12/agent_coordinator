@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 coordinator-client = { path = "../client" }
+coordinator-core = { path = "../core" }
 chrono.workspace = true
 clap.workspace = true
 hex.workspace = true

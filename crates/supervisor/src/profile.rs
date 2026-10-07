@@ -109,14 +109,21 @@ pub mod run_files {
 
 /// Structured verdict every reviewer launch must return (plan §2.3, M5): the
 /// supervisor, not the model, posts it with a separate reviewer credential.
+/// Every property is required (strict structured output); `amendment_decision`
+/// is null unless the submission carries an `ac_amendment`.
 pub fn review_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["decision", "findings", "criteria_evidence"],
+        "required": ["decision", "summary", "findings", "criteria_evidence", "amendment_decision"],
         "properties": {
             "decision": {"enum": ["approve", "request_changes"]},
+            "summary": {"type": "string"},
             "findings": {"type": "array", "items": {"type": "string"}},
+            "amendment_decision": {
+                "type": ["string", "null"],
+                "enum": ["accepted", "rejected", null]
+            },
             "criteria_evidence": {
                 "type": "array",
                 "items": {

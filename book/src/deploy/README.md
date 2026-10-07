@@ -826,9 +826,48 @@ launches have no Bubblewrap boundary, so admission never routes a project
 with a setup command to Codex, and `launch` refuses such a launch. The repository cannot add a command or a cache:
 both come only from the host's configuration.
 
-`--once` polls a single time. Recovery claims, reviewer launches and
-continuation claims for work longer than `max_attempt_seconds` are not part
-of this loop yet.
+### Reviewer launches
+
+With `[run] reviewer = true` each poll first takes one review. Root reads
+reviewer `next`, the subject task and its submission with the reviewer
+principal's write credential, `/var/lib/agentc/verdict/home/credentials.toml`
+(a root-owned mode 0700 directory, so no launch can read it; the loop refuses
+to start otherwise). It connects a fresh session there and claims the review
+with `agent-coordinator reviews claim`, which verifies the candidate in a
+root-owned clone of the mirror. It fetches the candidate ref into the mirror
+as `refs/heads/agentc-review/<session>` and, as `agentc-rev`, clones it to
+`rev/clones/<session>` and prepares `rev/runs/<session>`. The prompt is the
+reviewer contract (`crates/supervisor/contracts/reviewer.md`) with the
+criteria and submission as JSON data whose `<` are escaped, then the base
+revision's instruction files. The reviewer launch gets no coordinator
+credential and is killed after 45 minutes, inside the unrenewed one-hour lease.
+
+The launch must end with the structured verdict of the review schema:
+`decision`, `summary`, `findings`, `criteria_evidence` and
+`amendment_decision` (null unless the submission carries an `ac_amendment`).
+Root reads Codex's `last.md` or the `structured_output` of Claude's final
+`result` event. An approval needs non-empty evidence for every acceptance
+criterion (the amended ones when it accepts the amendment, M5). A verdict
+that fails this check, cannot be parsed, or that the service refuses is not
+posted: the review is released and queued again. Otherwise root posts it with
+`reviews decide`, findings as `required` (changes requested) or `advisory`
+(approval), the evidence in the summary, and `review_independence =
+distinct_launch` recorded on the decision. The `amendment_decision` is sent
+only when the submission carries an `ac_amendment`; an approval must decide
+it, and with requested changes an `accepted` amendment is left undecided (the
+service accepts only `rejected` there). Before claiming, root checks that the
+subject's current submission is the one `next` offered; if the claim reply
+names no attempt, root releases the activity's current attempt rather than
+hold the review for its lease. After `[run] review_attempts` (default 3)
+failed verdicts in a row for one submission, the loop stops claiming it and
+logs why, until it restarts. The clone, run and mirror branch are removed
+after every review. No review is taken while the reviewer has reached `[health]
+reviewer_daily_usd` (default 50) in the ledger below; reviewer launches do not
+record their cost there yet, so today that cap counts no reviewer spend.
+
+`--once` polls a single time. Recovery claims, continuation claims for work
+longer than `max_attempt_seconds` and the other-vendor audit sample are not
+part of this loop yet.
 `host-setup.sh` installs the `agentc-run` systemd unit without enabling it.
 It requires the firewall and egress units and restarts after a crash. To opt
 in:

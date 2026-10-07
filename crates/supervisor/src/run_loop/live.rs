@@ -8,7 +8,9 @@
 //! dies; `launch-root` runs in its own process group, which the drain
 //! signals as a whole.
 use super::lease::Lease;
+use super::live_review::LiveReviewer;
 use super::record::{self, LaunchRecord};
+use super::review::ReviewDriver;
 use super::{Driver, Launch, rooted};
 use crate::clone;
 use crate::config::Config;
@@ -47,6 +49,8 @@ pub struct LiveDriver {
     revision: String,
     /// The running `launch-root`, if any.
     child: Option<Child>,
+    /// The reviewer side when `[run] reviewer` is on.
+    reviewer: Option<LiveReviewer>,
 }
 
 /// Runs the live loop as root until stopped (or once).
@@ -83,6 +87,7 @@ impl LiveDriver {
         let shown = role_dir(config).join(CREDENTIALS);
         let insecure = config.run.allow_insecure_loopback;
         let text = String::from_utf8(credentials).context("credentials are not UTF-8")?;
+        let reviewer = reviewer(config, config_path, &binding)?;
         Ok(Self {
             config: config.clone(),
             config_arg: config_path
@@ -95,6 +100,7 @@ impl LiveDriver {
             account,
             revision: String::new(),
             child: None,
+            reviewer,
         })
     }
 
@@ -176,7 +182,7 @@ impl LiveDriver {
 /// One instruction file at `revision`, read from `mirror` as a blob of
 /// bounded size and truncated for the prompt. A symlink's blob is its target
 /// path, so nothing outside the repository is ever read.
-fn instruction(mirror: &Path, revision: &str, name: &str) -> Option<String> {
+pub(super) fn instruction(mirror: &Path, revision: &str, name: &str) -> Option<String> {
     let object = format!("{revision}:{name}");
     let size: usize = clone::git_output(mirror, &["cat-file", "-s", &object])
         .ok()?
@@ -377,7 +383,11 @@ impl Driver for LiveDriver {
     }
 
     fn stopping(&self) -> bool {
-        STOP.load(Ordering::SeqCst)
+        stop_requested()
+    }
+
+    fn reviewer(&mut self) -> Option<&mut dyn ReviewDriver> {
+        self.reviewer.as_mut().map(|r| r as &mut dyn ReviewDriver)
     }
 
     fn harness_status(&mut self, harness: Harness) -> Result<()> {
@@ -393,14 +403,35 @@ impl Driver for LiveDriver {
     }
 }
 
+/// Whether SIGTERM or SIGINT asked the loop to stop.
+pub(super) fn stop_requested() -> bool {
+    STOP.load(Ordering::SeqCst)
+}
+
+/// The reviewer side, built only when `[run] reviewer` is on.
+fn reviewer(
+    config: &Config,
+    path: Option<&Path>,
+    binding: &Binding,
+) -> Result<Option<LiveReviewer>> {
+    if !config.run.reviewer {
+        return Ok(None);
+    }
+    let arg: Vec<String> = path
+        .map(|p| format!("--config={}", p.display()))
+        .into_iter()
+        .collect();
+    LiveReviewer::new(config, &arg, &binding.service_url, &binding.project_id).map(Some)
+}
+
 /// The host mirror clones come from, `<state_dir>/mirror.git`.
-fn mirror(config: &Config) -> PathBuf {
+pub(super) fn mirror(config: &Config) -> PathBuf {
     config.state_dir.join("mirror.git")
 }
 
 /// The root-owned copy of the mirror's repository binding that every role
 /// CLI command uses, `<state_dir>/coordinator-binding.toml`.
-fn binding_path(config: &Config) -> PathBuf {
+pub(super) fn binding_path(config: &Config) -> PathBuf {
     config.state_dir.join("coordinator-binding.toml")
 }
 

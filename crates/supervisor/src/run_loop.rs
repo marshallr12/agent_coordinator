@@ -7,7 +7,8 @@
 //! runs commands sits behind [`Driver`], so tests drive it with a fake.
 //! Extension points for the follow-up tasks: [`refusal`] (disk),
 //! [`health::admit`] (kill switch, caps, vendor health) and [`review_hook`]
-//! (reviewer launches and verdicts); [`cost`] records what each launch used.
+//! (reviewer launches and verdicts, in [`review`]); [`cost`] records what
+//! each launch used.
 //! [`lease`] renews a running launch's attempt; [`record`] persists launch
 //! identity and releases attempts on exit, failure, drain and recovery.
 pub mod cost;
@@ -17,7 +18,10 @@ pub mod lease;
 pub mod live;
 #[cfg(target_os = "linux")]
 mod live_health;
+#[cfg(target_os = "linux")]
+mod live_review;
 pub mod record;
+pub mod review;
 #[cfg(target_os = "linux")]
 mod rooted;
 
@@ -58,8 +62,11 @@ pub struct RunConfig {
     pub branch: String,
     /// Permit plain HTTP to a loopback coordinator (staging).
     pub allow_insecure_loopback: bool,
-    /// Also poll reviewer work (a stub until reviewer launches land).
+    /// Also claim, launch and decide reviewer work (see [`review`]).
     pub reviewer: bool,
+    /// Stop claiming a submission after this many failed verdicts in a row
+    /// (until the loop restarts).
+    pub review_attempts: u32,
     /// Stop renewing a launch's attempt after this many minutes.
     pub budget_minutes: u64,
     /// On stop, how long a launch may take to exit after SIGTERM before
@@ -78,6 +85,7 @@ impl Default for RunConfig {
             branch: "main".into(),
             allow_insecure_loopback: false,
             reviewer: false,
+            review_attempts: 3,
             budget_minutes: 240,
             drain_seconds: 30,
         }
@@ -177,6 +185,10 @@ pub trait Driver {
     fn pause(&mut self, duration: Duration);
     /// Whether the host asked the loop to stop (SIGTERM or SIGINT).
     fn stopping(&self) -> bool;
+    /// The reviewer side, when this host runs reviews.
+    fn reviewer(&mut self) -> Option<&mut dyn review::ReviewDriver> {
+        None
+    }
     /// Whether `harness` is signed in (`claude auth status` / `codex login
     /// status`); hosts without the check report healthy.
     fn harness_status(&mut self, _harness: Harness) -> Result<()> {
@@ -269,7 +281,7 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
         Err(reason) => return Outcome::Refused(reason),
     };
     if config.run.reviewer {
-        review_hook(driver);
+        review_hook(driver, config);
     }
     let next = match driver.next(Role::Implementer) {
         Ok(next) => next,
@@ -301,13 +313,25 @@ pub fn refusal(driver: &impl Driver, settings: &RunConfig) -> Option<String> {
     }
 }
 
-/// Reviewer launches arrive with task 6cf630c0; until then the hook only
-/// reports that reviewer work is not taken.
-pub fn review_hook(driver: &mut impl Driver) {
-    if let Ok(next) = driver.next(Role::Reviewer)
-        && !next["action"].is_null()
-    {
-        eprintln!("agentc-supervisor run: reviewer work is not launched yet");
+/// Runs one review poll when the driver has a reviewer side and the
+/// reviewer's daily cap allows it; without a side it only reports reviewer
+/// work it cannot take.
+pub fn review_hook(driver: &mut impl Driver, config: &Config) {
+    if let Err(reason) = health::capped(config, Role::Reviewer, driver.now_ms()) {
+        eprintln!("agentc-supervisor run: no review: {reason}");
+        return;
+    }
+    let Some(reviewer) = driver.reviewer() else {
+        if let Ok(next) = driver.next(Role::Reviewer)
+            && !next["action"].is_null()
+        {
+            eprintln!("agentc-supervisor run: reviewer work needs a reviewer side");
+        }
+        return;
+    };
+    let outcome = review::review(reviewer, &config.run);
+    if outcome != review::ReviewOutcome::Idle {
+        eprintln!("agentc-supervisor run: review: {outcome:?}");
     }
 }
 
@@ -426,13 +450,17 @@ pub fn render_prompt(launch: &Launch, files: &[(String, String)]) -> String {
             &defuse(&s.title.replace(['\n', '\r'], " ")),
         )
         .replace("{{session}}", &launch.session_id.to_string());
-    for (name, text) in files {
-        let text = defuse(text);
-        prompt.push_str(&format!(
-            "\n<repository-instructions file=\"{name}\">\n{text}\n</repository-instructions>\n"
-        ));
-    }
+    prompt.push_str(&instruction_blocks(files));
     prompt
+}
+
+/// Each repository file inside defused `<repository-instructions>` tags.
+pub fn instruction_blocks(files: &[(String, String)]) -> String {
+    let block = |(name, text): &(String, String)| {
+        let text = defuse(text);
+        format!("\n<repository-instructions file=\"{name}\">\n{text}\n</repository-instructions>\n")
+    };
+    files.iter().map(block).collect()
 }
 
 /// `text` with every `</` that opens a closing tag (any case) turned into

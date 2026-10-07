@@ -19,6 +19,9 @@ use uuid::Uuid;
 
 type Reply = Result<Json<Value>, AppError>;
 
+/// The `review_independence` levels a review decision may record (plan §2.3).
+const REVIEW_INDEPENDENCE: [&str; 3] = ["distinct_launch", "distinct_host", "distinct_vendor"];
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -752,6 +755,7 @@ async fn submission_value(c: &mut SqliteConnection, id: &str) -> Result<Value, A
         "base_revision":row.get::<Option<String>,_>("base_revision"),
         "candidate_revision":row.get::<Option<String>,_>("candidate_revision"),
         "candidate_tree":row.get::<Option<String>,_>("candidate_tree"),
+        "ac_amendment":row.get::<Option<String>,_>("ac_amendment_json").map(|j| serde_json::from_str::<Value>(&j)).transpose()?,
         "created_by":row.get::<String,_>("created_by"),
         "created_at":timestamp(row.get("created_at")),
         "superseded_at":row.get::<Option<i64>,_>("superseded_at").map(timestamp)
@@ -777,7 +781,7 @@ async fn activity_value(
         "expires_at":timestamp(row.get("expires_at")),"valid_by_time":row.get::<i64,_>("expires_at")>now,
         "owner_authorized":row.get::<bool,_>("owner_authorized")
     }));
-    let review_row = sqlx::query("SELECT decision,summary,reviewer_id,reviewer_session_id,created_at FROM review_decisions WHERE activity_id=?")
+    let review_row = sqlx::query("SELECT decision,summary,reviewer_id,reviewer_session_id,created_at,amendment_decision,review_independence FROM review_decisions WHERE activity_id=?")
         .bind(id).fetch_optional(&mut *c).await?;
     let review = if let Some(r) = review_row {
         let findings=sqlx::query("SELECT id,severity,remedy,evidence,created_at FROM review_findings WHERE activity_id=? ORDER BY created_at,id LIMIT 101")
@@ -785,7 +789,7 @@ async fn activity_value(
         let truncated = findings.len() > 100;
         let findings=findings.into_iter().take(100).map(|f|json!({"id":f.get::<String,_>("id"),"severity":f.get::<String,_>("severity"),"remedy":f.get::<String,_>("remedy"),"evidence":f.get::<String,_>("evidence"),"created_at":timestamp(f.get("created_at"))})).collect::<Vec<_>>();
         Some(
-            json!({"decision":r.get::<String,_>("decision"),"summary":r.get::<String,_>("summary"),"reviewer_id":r.get::<String,_>("reviewer_id"),"reviewer_session_id":r.get::<String,_>("reviewer_session_id"),"created_at":timestamp(r.get("created_at")),"findings":findings,"findings_truncated":truncated}),
+            json!({"decision":r.get::<String,_>("decision"),"summary":r.get::<String,_>("summary"),"reviewer_id":r.get::<String,_>("reviewer_id"),"reviewer_session_id":r.get::<String,_>("reviewer_session_id"),"created_at":timestamp(r.get("created_at")),"amendment_decision":r.get::<Option<String>,_>("amendment_decision"),"review_independence":r.get::<Option<String>,_>("review_independence"),"findings":findings,"findings_truncated":truncated}),
         )
     } else {
         None
@@ -933,9 +937,14 @@ pub(crate) async fn activity_preconditions(
             );
         }
         if matches!(ctx.kind.as_str(), "agent_review" | "either_review")
-            && let Err(error) =
-                ensure_independent_reviewer(c, project, &ctx.subject_task, &actor.id, session_id)
-                    .await
+            && let Err(error) = ensure_independent_reviewer(
+                c,
+                project,
+                &ctx.subject_task,
+                (&actor.id, session_id),
+                None,
+            )
+            .await
         {
             add(&error.code, &error.message);
         }
@@ -1710,6 +1719,7 @@ async fn claim_activity(
     body: Result<Json<ActivityClaimInput>, JsonRejection>,
 ) -> Reply {
     let input = payload(body)?;
+    valid_independence(input.review_independence.as_deref())?;
     let mut m = Mutation::begin(
         &state,
         &auth,
@@ -1784,8 +1794,8 @@ async fn claim_activity(
                 &mut m.tx,
                 &project,
                 &ctx.subject_task,
-                &m.actor.id,
-                &owner_session,
+                (&m.actor.id, &owner_session),
+                input.review_independence.as_deref(),
             )
             .await?;
         }
@@ -2105,14 +2115,16 @@ async fn stacked_contributor_tasks(
 }
 
 /// Refuses a reviewer who contributed to the subject task or to any task whose
-/// commits its landing range carries.
+/// commits its landing range carries. A review asserting `distinct_launch`
+/// must also not share a launch with any of those tasks' contributors.
 async fn ensure_independent_reviewer(
     c: &mut SqliteConnection,
     project: &str,
     task: &str,
-    principal: &str,
-    session: &str,
+    reviewer: (&str, &str),
+    independence: Option<&str>,
 ) -> Result<(), AppError> {
+    let (principal, session) = reviewer;
     let mut tasks = stacked_contributor_tasks(c, task).await?;
     tasks.push(task.to_owned());
     for candidate in &tasks {
@@ -2123,7 +2135,69 @@ async fn ensure_independent_reviewer(
             ));
         }
     }
+    if independence == Some("distinct_launch") {
+        ensure_distinct_launch(c, &tasks, session).await?;
+    }
     Ok(())
+}
+
+/// Refuses a `distinct_launch` reviewer whose launch is also the launch of a
+/// recorded contributor to any of `tasks` (U5, plan §2.3 "Reviewers").
+async fn ensure_distinct_launch(
+    c: &mut SqliteConnection,
+    tasks: &[String],
+    session: &str,
+) -> Result<(), AppError> {
+    let launch = launch_root(c, session).await?;
+    for task in tasks {
+        if launch_contributed(c, task, &launch).await? {
+            return Err(AppError::conflict(
+                "reviewer_shares_launch",
+                "A distinct_launch review cannot come from the launch of a recorded contributor. Review from a separate launch, or record the review without distinct_launch.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The launch of `session`: the root of its `parent_session_id` chain as the
+/// service recorded it at registration (a top-level session is its own launch).
+async fn launch_root(c: &mut SqliteConnection, session: &str) -> Result<String, AppError> {
+    let root: Option<String> = sqlx::query_scalar("WITH RECURSIVE up(id,parent,depth) AS (SELECT id,parent_session_id,0 FROM agent_sessions WHERE id=? UNION ALL SELECT s.id,s.parent_session_id,up.depth+1 FROM agent_sessions s JOIN up ON s.id=up.parent WHERE up.depth<64) SELECT id FROM up ORDER BY depth DESC LIMIT 1")
+        .bind(session).fetch_optional(&mut *c).await?;
+    Ok(root.unwrap_or_else(|| session.to_owned()))
+}
+
+/// True when a recorded contributor session of `task` belongs to `launch`,
+/// walking each contributor session up its `parent_session_id` chain.
+async fn launch_contributed(
+    c: &mut SqliteConnection,
+    task: &str,
+    launch: &str,
+) -> Result<bool, AppError> {
+    let n: i64 = sqlx::query_scalar("WITH RECURSIVE up(id,parent,depth) AS (SELECT tc.session_id,s.parent_session_id,0 FROM task_contributors tc LEFT JOIN agent_sessions s ON s.id=tc.session_id WHERE tc.task_id=? UNION ALL SELECT s.id,s.parent_session_id,up.depth+1 FROM agent_sessions s JOIN up ON s.id=up.parent WHERE up.depth<64) SELECT count(*) FROM up WHERE parent IS NULL AND id=?")
+        .bind(task).bind(launch).fetch_one(&mut *c).await?;
+    Ok(n > 0)
+}
+
+/// True when `session` shares a launch with a recorded contributor of `task`.
+pub(crate) async fn shares_launch(
+    c: &mut SqliteConnection,
+    task: &str,
+    session: &str,
+) -> Result<bool, AppError> {
+    let launch = launch_root(c, session).await?;
+    launch_contributed(c, task, &launch).await
+}
+
+/// Rejects a `review_independence` outside the recorded levels.
+fn valid_independence(independence: Option<&str>) -> Result<(), AppError> {
+    match independence {
+        Some(value) if !REVIEW_INDEPENDENCE.contains(&value) => Err(AppError::bad_request(
+            "review_independence must be distinct_launch, distinct_host or distinct_vendor.",
+        )),
+        _ => Ok(()),
+    }
 }
 
 async fn review(
@@ -2151,6 +2225,7 @@ async fn review(
         bounded(&f.remedy, "finding remedy", 8192, true)?;
         bounded(&f.evidence, "finding evidence", 8192, false)?;
     }
+    valid_independence(input.review_independence.as_deref())?;
     if input.decision == "approved" && input.findings.iter().any(|f| f.severity == "required") {
         return Err(AppError::bad_request(
             "An approval cannot retain an unresolved required finding.",
@@ -2191,8 +2266,8 @@ async fn review(
             &mut m.tx,
             &project,
             &ctx.subject_task,
-            &m.actor.id,
-            &reviewer_session,
+            (&m.actor.id, &reviewer_session),
+            input.review_independence.as_deref(),
         )
         .await?;
     }
@@ -2202,8 +2277,8 @@ async fn review(
         .bind(&ctx.activity_task)
         .fetch_one(&mut *m.tx)
         .await?;
-    sqlx::query("INSERT INTO review_decisions(activity_id,submission_id,attempt_id,reviewer_id,reviewer_session_id,decision,summary,created_at,amendment_decision) VALUES(?,?,?,?,?,?,?,?,?)")
-        .bind(&ctx.id).bind(&ctx.submission).bind(&attempt_id).bind(&m.actor.id).bind(session(&m.actor)?).bind(decision).bind(&input.summary).bind(m.now).bind(&input.amendment_decision).execute(&mut *m.tx).await?;
+    sqlx::query("INSERT INTO review_decisions(activity_id,submission_id,attempt_id,reviewer_id,reviewer_session_id,decision,summary,created_at,amendment_decision,review_independence) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .bind(&ctx.id).bind(&ctx.submission).bind(&attempt_id).bind(&m.actor.id).bind(session(&m.actor)?).bind(decision).bind(&input.summary).bind(m.now).bind(&input.amendment_decision).bind(&input.review_independence).execute(&mut *m.tx).await?;
     for finding in &input.findings {
         sqlx::query("INSERT INTO review_findings(id,activity_id,severity,remedy,evidence,created_at) VALUES(?,?,?,?,?,?)")
         .bind(Uuid::new_v4().to_string()).bind(&ctx.id).bind(&finding.severity).bind(&finding.remedy).bind(&finding.evidence).bind(m.now).execute(&mut *m.tx).await?;

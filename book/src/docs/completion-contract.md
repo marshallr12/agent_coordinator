@@ -121,7 +121,7 @@ the workflow API.
 
 `POST /api/v1/projects/{project}/workflow-activities/{activity}/claim` accepts
 `{expected_submission_id, expected_project_policy_revision,
-expected_workflow_policy_revision}`. It returns `{activity, attempt,
+expected_workflow_policy_revision}` and an optional `review_independence`. It returns `{activity, attempt,
 lease_remaining_ms, renew_after_seconds, current_authority}`. Review activity
 claims enforce actor type. Agent review also rejects every principal/session
 recorded as a contributor to any revision of the subject task; contributor history
@@ -156,7 +156,26 @@ reconcile records a `workflow.reconciled` event; at startup it runs only in norm
 coordination with a trusted clock and only adds or cancels reviews. Agents holding
 `agent_rule_editing` may edit the rules text but never `review_mode`,
 `recovery_mode` or the permission switches, so an author cannot loosen review to
-land its own candidate. An `ac_amendment` is refused when no review is required.
+land its own candidate. An `ac_amendment` is refused when no review is required. The
+submission reports its `ac_amendment`, and a review decision records its
+`amendment_decision` and, when the poster states it, its `review_independence`
+(`distinct_launch`, `distinct_host` or `distinct_vendor`).
+
+`distinct_launch` is enforced (decision U5). A session's *launch* is the root of
+its `parent_session_id` chain as the service recorded it at registration: a
+top-level session is its own launch, and a registered subagent shares its
+parent's. When a review claim or decision asserts `distinct_launch`, the service
+also refuses (`reviewer_shares_launch`) a reviewer whose launch is the launch of
+any recorded contributor session of the subject task or of the tasks its landing
+range carries. When the integrator later records a landing range, an approval
+recorded as `distinct_launch` whose reviewer shares a launch with a contributor of
+a carried task is voided like a contributor's approval. Without the assertion the
+principal/session checks above apply unchanged, so a same-launch subagent review
+permitted by `allow_subagent_reviews` still works but cannot be recorded as
+`distinct_launch`. The supervisor's reviewer asserts it at claim and decision.
+Launch lineage is only what sessions declared at registration; a shared credential
+can always open a fresh top-level session, so this enforces the recorded launch
+separation, not process isolation.
 
 An authenticated agent may reconcile only when the exact current candidate and
 policy are unchanged, current scoped decisions are resolved, a fresh observation

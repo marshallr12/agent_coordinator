@@ -183,7 +183,7 @@ pub(crate) async fn fetch_next(
 }
 
 /// GETs `path` and returns the envelope's `data`, or the service error code.
-async fn get_data(
+pub(crate) async fn get_data(
     client: &CoordinatorClient,
     path: &str,
     query: &[(&str, String)],

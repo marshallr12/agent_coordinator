@@ -93,6 +93,12 @@ pub struct ActivityClaimInput {
     pub expected_submission_id: String,
     pub expected_project_policy_revision: i64,
     pub expected_workflow_policy_revision: i64,
+    /// The independence a review claim asserts (`distinct_launch`,
+    /// `distinct_host` or `distinct_vendor`). With `distinct_launch` the
+    /// service also refuses a reviewer whose launch (the root of its
+    /// `parent_session_id` chain) is shared with a recorded contributor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_independence: Option<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -119,6 +125,12 @@ pub struct ReviewInput {
     /// `ac_amendment`. A rejected amendment makes the whole review changes_requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amendment_decision: Option<String>,
+    /// How independent the reviewer was (`distinct_launch`, `distinct_host` or
+    /// `distinct_vendor`), as the posting supervisor reports it; recorded on the decision.
+    /// `distinct_launch` is enforced: the reviewer's launch must differ from every
+    /// recorded contributor's launch for the subject and its landing range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_independence: Option<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

@@ -165,6 +165,9 @@ The service rejects a contributing subagent across all sessions of its identity,
 both when claiming and deciding review. Ordinary sessions sharing the contributor
 principal remain ineligible. A review-only subagent must inspect the immutable
 candidate and evidence before deciding through the existing review workflow.
+A subagent shares its parent's launch, so its review of that launch's work must
+not assert `review_independence` `distinct_launch`; the service refuses that
+claim or decision with `reviewer_shares_launch`.
 
 When automatic work is authorized and this policy option is enabled, a still-running
 parent that cannot independently review its own or a contributor's submission should
@@ -721,6 +724,14 @@ agent-coordinator reviews claim \
   --activity review-activity-id --submission submission-id \
   --project-policy-revision 3 --workflow-policy-revision 2
 ```
+
+Add `--review-independence distinct_launch` (or `distinct_host`,
+`distinct_vendor`) to assert the review's independence at claim. With
+`distinct_launch` the service refuses (`reviewer_shares_launch`) a reviewer
+session whose launch, the root of its parent-session chain, is also the launch
+of a recorded contributor to the subject or its landing range; record the same
+value as `review_independence` in the decision. Omit it to keep the ordinary
+contributor checks only.
 
 The returned attempt ID and generation are required for renew, release, and
 decision commands:

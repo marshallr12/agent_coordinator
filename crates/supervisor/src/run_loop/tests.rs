@@ -300,6 +300,22 @@ fn idle_and_recovery_suggestions_launch_nothing() {
 }
 
 #[test]
+fn a_reviewer_over_its_daily_cap_takes_no_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = config(dir.path());
+    settings.run.reviewer = true;
+    let spent = json!({"at_ms": 0, "role": "rev", "usd": 60.0});
+    fs::write(cost::ledger(&settings), format!("{spent}\n")).unwrap();
+    let mut fake = Fake::new();
+    review_hook(&mut fake, &settings);
+    assert!(
+        fake.steps.iter().all(|step| step != "next:rev"),
+        "{:?}",
+        fake.steps
+    );
+}
+
+#[test]
 fn reviewer_polling_is_only_a_hook() {
     let dir = tempfile::tempdir().unwrap();
     let mut settings = config(dir.path());
