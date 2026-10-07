@@ -221,7 +221,7 @@ def parse_check(text):
     parts = text.split(":")
     if len(parts) != 3 or not all(part.strip() for part in parts):
         raise argparse.ArgumentTypeError(f"{text!r} is not IDENTITY:VERSION:ENVIRONMENT")
-    return dict(zip(("identity", "version", "environment"), parts))
+    return dict(zip(("identity", "version", "environment"), (part.strip() for part in parts)))
 
 
 def set_required_checks(api, project, checks):
