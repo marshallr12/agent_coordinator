@@ -89,7 +89,10 @@ Names map to durable identities within a project and principal; parent identity
 is immutable, and a new identity requires an active same-principal parent.
 An owning attempt can register delegated helpers using checkpoint
 `contributor_session_ids`. Contributor exclusion is enforced at review claim and
-decision, across sessions of the same subagent identity. This is a trusted harness
+decision, across sessions of the same subagent identity. A claim or decision
+asserting `review_independence` `distinct_launch` is also refused
+(`reviewer_shares_launch`) when the reviewer shares a launch (parent-session
+root) with a contributor of the subject or its landing range. This is a trusted harness
 policy; shared credentials cannot attest independent reasoning. See the
 [CLI examples](CLI.md#subagent-identities-and-reviews).
 

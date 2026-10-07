@@ -380,6 +380,9 @@ struct ActivityClaimArgs {
     /// Clean local repository or worktree into which the candidate ref is fetched before claiming code review or integration work.
     #[arg(long)]
     candidate_checkout: Option<PathBuf>,
+    /// Independence this review claim asserts; with distinct_launch the service refuses a reviewer whose launch a recorded contributor shares.
+    #[arg(long, value_parser = ["distinct_launch", "distinct_host", "distinct_vendor"])]
+    review_independence: Option<String>,
 }
 
 #[derive(Args)]
@@ -2128,15 +2131,25 @@ async fn activity_claim(
         &mut state,
         HttpMethod::Post,
         &path,
-        json!({
-            "expected_submission_id": args.submission,
-            "expected_project_policy_revision": args.project_policy_revision,
-            "expected_workflow_policy_revision": args.workflow_policy_revision
-        }),
+        activity_claim_body(args),
         true,
     )
     .await?;
     require_success(response)
+}
+
+/// The workflow-activity claim body, carrying `review_independence` only
+/// when asserted so older services keep accepting it.
+fn activity_claim_body(args: &ActivityClaimArgs) -> Value {
+    let mut body = json!({
+        "expected_submission_id": args.submission,
+        "expected_project_policy_revision": args.project_policy_revision,
+        "expected_workflow_policy_revision": args.workflow_policy_revision
+    });
+    if let Some(independence) = &args.review_independence {
+        body["review_independence"] = json!(independence);
+    }
+    body
 }
 
 async fn verify_candidate_before_claim(

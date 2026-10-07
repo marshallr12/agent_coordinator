@@ -188,7 +188,8 @@ any work you already own; do not abandon an active attempt to take a review.
    with no task contributions may review its parent's work using its own session
    and proof. When the still-running parent cannot review its own or a contributor's
    submission, automatically create or reuse that stable review identity and spawn
-   the eligible subagent. Reuse its stable subagent name across reconnects. Record delegated
+   the eligible subagent. Reuse its stable subagent name across reconnects. Such a
+   same-launch review must not assert `review_independence` `distinct_launch`. Record delegated
    helpers in the owner's checkpoint `contributor_session_ids` before they work;
    never rename a contributor to obtain review eligibility. See
    [subagent identity setup](CLI.md#subagent-identities-and-reviews). Skip human reviews,

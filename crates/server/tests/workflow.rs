@@ -234,10 +234,36 @@ impl Fixture {
         policy: i64,
         workflow_policy: i64,
     ) -> (StatusCode, Value) {
+        self.claim_activity_as(c, p, a, (policy, workflow_policy), None)
+            .await
+    }
+
+    /// Claims workflow activity `a`, optionally asserting `review_independence`.
+    async fn claim_activity_as(
+        &self,
+        c: &Caller,
+        p: &str,
+        a: &Value,
+        (policy, workflow_policy): (i64, i64),
+        independence: Option<&str>,
+    ) -> (StatusCode, Value) {
         if !c.human {
             self.ack(c, p, policy).await;
         }
-        self.call(c,"POST",&format!("/api/v1/projects/{p}/workflow-activities/{}/claim",a["id"].as_str().unwrap()),json!({"expected_submission_id":a["submission_id"],"expected_project_policy_revision":policy,"expected_workflow_policy_revision":workflow_policy})).await
+        let mut body = json!({"expected_submission_id":a["submission_id"],"expected_project_policy_revision":policy,"expected_workflow_policy_revision":workflow_policy});
+        if let Some(independence) = independence {
+            body["review_independence"] = json!(independence);
+        }
+        self.call(
+            c,
+            "POST",
+            &format!(
+                "/api/v1/projects/{p}/workflow-activities/{}/claim",
+                a["id"].as_str().unwrap()
+            ),
+            body,
+        )
+        .await
     }
 
     async fn review_policy(&self, p: &str, mode: &str) {
@@ -1001,6 +1027,151 @@ async fn subagent_review_opt_in_preserves_identity_contributions_and_default_gua
             assert_eq!(claimed["error"]["code"], "reviewer_not_independent");
         }
     }
+}
+
+/// A project allowing subagent reviews, with a submitted task whose owner
+/// `f.a` is the contributor; returns the project and its agent review.
+async fn subagent_review_subject(f: &Fixture, name: &str) -> (String, Value) {
+    let p = f
+        .project(name, &format!("https://example.test/{name}.git"))
+        .await;
+    let (status, policy) = f.call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"allow_subagent_reviews":true})).await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let t = f.task(&p, "general", "Launch independence").await;
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+        .await;
+    (p, activity(&submitted, "agent_review").clone())
+}
+
+/// Posts a review decision for `review`, optionally recording `independence`.
+async fn decide_review(
+    f: &Fixture,
+    c: &Caller,
+    p: &str,
+    (review, generation): (&Value, &Value),
+    independence: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut body = json!({"generation":generation,"submission_id":review["submission_id"],"decision":"approved","summary":"Inspected the evidence","findings":[]});
+    if let Some(independence) = independence {
+        body["review_independence"] = json!(independence);
+    }
+    let path = format!(
+        "/api/v1/projects/{p}/workflow-activities/{}/review",
+        review["id"].as_str().unwrap()
+    );
+    f.call(c, "POST", &path, body).await
+}
+
+#[tokio::test]
+async fn distinct_launch_claim_refuses_a_reviewer_sharing_a_contributor_launch() {
+    let f = Fixture::new().await;
+    let (p, review) = subagent_review_subject(&f, "launch-claim").await;
+    let (sibling, _) = register_child(&f, &f.a, &p, "same-launch-reviewer").await;
+    let (grandchild, _) = register_child(&f, &sibling, &p, "nested-reviewer").await;
+    for reviewer in [&sibling, &grandchild] {
+        let (status, refused) = f
+            .claim_activity_as(reviewer, &p, &review, (2, 0), Some("distinct_launch"))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
+    }
+    let (status, invalid) = f
+        .claim_activity_as(&sibling, &p, &review, (2, 0), Some("same_room"))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+    let (status, claimed) = f
+        .claim_activity_as(&f.b, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let generation = &claimed["data"]["attempt"]["generation"];
+    let (status, done) =
+        decide_review(&f, &f.b, &p, (&review, generation), Some("distinct_launch")).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["data"]["work_status"], "done");
+}
+
+#[tokio::test]
+async fn distinct_launch_decision_refuses_a_same_launch_subagent_that_may_still_review() {
+    let f = Fixture::new().await;
+    let (p, review) = subagent_review_subject(&f, "launch-decision").await;
+    let (sibling, _) = register_child(&f, &f.a, &p, "same-launch-reviewer").await;
+    let (status, claimed) = f
+        .claim_activity_as(&sibling, &p, &review, (2, 0), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let generation = &claimed["data"]["attempt"]["generation"];
+    let (status, refused) = decide_review(
+        &f,
+        &sibling,
+        &p,
+        (&review, generation),
+        Some("distinct_launch"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
+    let (status, done) = decide_review(&f, &sibling, &p, (&review, generation), None).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["data"]["work_status"], "done");
+}
+
+/// Records, as the integrator would, that `review`'s landing range carries
+/// the commits of `stacked` (plan-final §2.2 item 5a).
+async fn record_stacked_task(f: &Fixture, p: &str, review: &Value, stacked: &Value) {
+    sqlx::query("INSERT INTO integrator_results(id,project_id,submission_id,t0,t0_tree,c,r,r_tree,landing_range_json,roster_json,created_by,created_at,contributor_tasks_json) SELECT ?,?,?,'t0','t0t','c','r','rt','[]','[]',principal_id,0,json_array(?) FROM agent_sessions WHERE id=?")
+        .bind(Uuid::new_v4().to_string()).bind(p).bind(review["submission_id"].as_str().unwrap())
+        .bind(stacked["id"].as_str().unwrap()).bind(&f.b.session)
+        .execute(&f.state.pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn distinct_launch_refuses_a_reviewer_sharing_a_landing_range_contributor_launch() {
+    let f = Fixture::new().await;
+    let (p, review) = subagent_review_subject(&f, "launch-stacked").await;
+    let stacked = f.task(&p, "general", "Stacked under the subject").await;
+    f.claim(&f.b, &p, &stacked, 2).await;
+    record_stacked_task(&f, &p, &review, &stacked).await;
+    let (reviewer, _) = register_child(&f, &f.b, &p, "stacked-launch-reviewer").await;
+    let (status, refused) = f
+        .claim_activity_as(&reviewer, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
+    let (status, claimed) = f
+        .claim_activity_as(&reviewer, &p, &review, (2, 0), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+}
+
+#[tokio::test]
+async fn distinct_launch_allows_a_subagent_of_another_launch_of_the_same_principal() {
+    let f = Fixture::new().await;
+    let (p, review) = subagent_review_subject(&f, "launch-elsewhere").await;
+    let elsewhere = Caller {
+        session: Uuid::new_v4().to_string(),
+        proof: secret(),
+        ..f.a.clone()
+    };
+    let body = json!({"session_id":elsewhere.session,"workstation_id":"elsewhere","harness":"other-launch","capabilities":[]});
+    let (status, registered) = register_session(&f, &elsewhere, body).await;
+    assert_eq!(status, StatusCode::OK, "{registered}");
+    let (reviewer, _) = register_child(&f, &elsewhere, &p, "separate-launch-reviewer").await;
+    let (status, claimed) = f
+        .claim_activity_as(&reviewer, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let generation = &claimed["data"]["attempt"]["generation"];
+    let (status, done) = decide_review(
+        &f,
+        &reviewer,
+        &p,
+        (&review, generation),
+        Some("distinct_launch"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
 }
 
 #[tokio::test]
@@ -3695,8 +3866,21 @@ async fn approved_code_task(
     f: &Fixture,
     p: &str,
     repo: &str,
+    callers: (&Caller, &Caller),
+    work: (&str, &str),
+) -> (Value, Value) {
+    approved_code_task_as(f, p, repo, callers, work, None).await
+}
+
+/// [`approved_code_task`] whose reviewer asserts `independence` at claim
+/// and decision.
+async fn approved_code_task_as(
+    f: &Fixture,
+    p: &str,
+    repo: &str,
     (author, reviewer): (&Caller, &Caller),
     (title, candidate): (&str, &str),
+    independence: Option<&str>,
 ) -> (Value, Value) {
     let t = f.task(p, "code", title).await;
     let owner = f.claim(author, p, &t, 2).await;
@@ -3717,15 +3901,25 @@ async fn approved_code_task(
         )
         .await;
     let review = activity(&submitted, "agent_review").clone();
-    let (status, claimed) = f.claim_activity(reviewer, p, &review, 2, 1).await;
-    assert_eq!(status, StatusCode::OK, "{claimed}");
-    let path = format!(
-        "/api/v1/projects/{p}/workflow-activities/{}/review",
-        review["id"].as_str().unwrap()
-    );
-    let (status, v) = f.call(reviewer, "POST", &path, json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"approved","summary":"ok","findings":[]})).await;
-    assert_eq!(status, StatusCode::OK, "{v}");
+    approve_as(f, reviewer, p, &review, independence).await;
     (t, review["submission_id"].clone())
+}
+
+/// Claims and approves `review` as `reviewer`, asserting `independence`.
+async fn approve_as(
+    f: &Fixture,
+    reviewer: &Caller,
+    p: &str,
+    review: &Value,
+    independence: Option<&str>,
+) {
+    let (status, claimed) = f
+        .claim_activity_as(reviewer, p, review, (2, 1), independence)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let generation = &claimed["data"]["attempt"]["generation"];
+    let (status, v) = decide_review(f, reviewer, p, (review, generation), independence).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
 }
 
 // P4 S2 (plan-final §2.2 5a): an approver who contributed to another task
@@ -3793,6 +3987,38 @@ async fn contributor_approvals_and_unapproved_stacks_block_authority() {
         (status, v["error"]["code"].clone()),
         (StatusCode::CONFLICT, json!("reviewer_not_independent"))
     );
+}
+
+// U5: a distinct_launch approval from the launch of a landing-range
+// contributor is voided once the integrator records the range.
+#[tokio::test]
+async fn a_distinct_launch_approval_sharing_a_stacked_contributor_launch_is_voided() {
+    let f = Fixture::new().await;
+    let repo = "https://example.test/integrator-launch.git";
+    let p = f.project("integrator-launch", repo).await;
+    let (status, v) = f.call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":false,"automatic_integration":true,"allow_subagent_reviews":true})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    f.workflow_policy(&p, repo).await;
+    let below = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
+    approved_code_task(&f, &p, repo, (&f.b, &f.c), ("Stacked below", below)).await;
+    let (reviewer, _) = register_child(&f, &f.b, &p, "launch-reviewer").await;
+    let above = "2222222222222222222222222222222222222222";
+    let callers = (&f.a, &reviewer);
+    let work = ("Stacked above", above);
+    let (t, submission) =
+        approved_code_task_as(&f, &p, repo, callers, work, Some("distinct_launch")).await;
+    let (status, v) = f.call(&f.admin, "PATCH", &format!("/api/v1/projects/{p}/policy"), json!({"expected_revision":2,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"","agent_rule_editing":true,"automatic_integration":true,"integration_owner":"integrator"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let i = integrator_caller(&f).await;
+    let mut body = result_body(submission.as_str().unwrap(), T0, R);
+    body["landing_range"] = json!([below, above]);
+    let (_, v) = integrator_post(&f, &i, &p, "results", body).await;
+    let result = v["data"]["id"].as_str().unwrap().to_owned();
+    receipt(&f, &i, &p, &result, 900, "success").await;
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["refusal"], "approver_is_contributor");
+    assert_eq!(subject_state(&f, &t).await.0, "review");
 }
 
 #[tokio::test]

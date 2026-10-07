@@ -434,24 +434,30 @@ impl LiveReviewer {
             &["--json".into(), "connect".into(), harness.to_lowercase()],
             b"",
         )?;
-        let args = vec![
-            "--json".into(),
-            "reviews".into(),
-            "claim".into(),
-            format!("--activity={}", review.activity),
-            format!("--submission={}", review.submission),
-            format!(
-                "--project-policy-revision={}",
-                review.project_policy_revision
-            ),
-            format!(
-                "--workflow-policy-revision={}",
-                review.workflow_policy_revision
-            ),
-            format!("--candidate-checkout={}", checkout.display()),
-        ];
-        self.cli(session, &args, b"")
+        self.cli(session, &claim_args(review, checkout), b"")
     }
+}
+
+/// `reviews claim` arguments for `review` with its pinned revisions, asserting
+/// the supervisor's `distinct_launch` independence so the service checks it.
+fn claim_args(review: &Review, checkout: &Path) -> Vec<String> {
+    vec![
+        "--json".into(),
+        "reviews".into(),
+        "claim".into(),
+        format!("--activity={}", review.activity),
+        format!("--submission={}", review.submission),
+        format!(
+            "--project-policy-revision={}",
+            review.project_policy_revision
+        ),
+        format!(
+            "--workflow-policy-revision={}",
+            review.workflow_policy_revision
+        ),
+        format!("--candidate-checkout={}", checkout.display()),
+        format!("--review-independence={}", review::INDEPENDENCE),
+    ]
 }
 
 /// Where one review launch lives below the reviewer's role directory.
@@ -657,6 +663,21 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "t");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn the_review_claim_asserts_distinct_launch() {
+        let review = Review {
+            activity: "r1".into(),
+            subject: "t1".into(),
+            submission: "s1".into(),
+            title: String::new(),
+            project_policy_revision: 1,
+            workflow_policy_revision: 0,
+        };
+        let args = claim_args(&review, Path::new("/clone"));
+        assert!(args.contains(&"--review-independence=distinct_launch".to_owned()));
+        assert!(args.contains(&"--activity=r1".to_owned()));
     }
 
     #[test]
