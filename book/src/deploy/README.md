@@ -500,9 +500,20 @@ command is the child subreaper of its harness: processes the harness leaves
 running, even detached with `setsid` or a double fork, are re-parented to it
 and killed, whole tree at once, once the harness exits and before the run is
 marked finished, or as soon as a launch is refused (a preflight probe's
-leftovers included); the supervisor reports how many it killed on standard
-error. Preflight version checks and sandbox probes also run with
-`no_new_privs`, so a probe passes only if the launch itself can run.
+leftovers included). The supervisor reports on standard error what it
+found, by command name, in one informational line such as
+`agentc-supervisor: reaped 3 exited launch processes (bwrap x3)`. Exited
+processes are expected: each Bubblewrap run (the two preflight sandbox
+probes, the project setup when one is configured, and the harness) exits as
+soon as its PID-namespace init reports the command's status, usually without
+reaping that init. By then the init has exited and the kernel has killed
+everything else in the namespace; the init re-parents to `launch` as a
+zombie and is only reaped, so a Claude launch reports up to one per
+Bubblewrap run. A `killed N leftover launch processes (…)` part instead
+names processes that were still running, such as a Codex harness's detached
+children, and is worth a look when it recurs. Preflight version checks and
+sandbox probes also run with `no_new_privs`, so a probe passes only if the
+launch itself can run.
 `launch-root` is a subreaper too, so a Codex harness that kills its own
 `launch` process (they share an account) still has its leftovers killed when
 `launch-root` finishes.
@@ -941,6 +952,9 @@ through the firewall's staging port. With `project_name`, the loop copies the
 implementer's credential into `<project_name>/config/` of the run's
 coordinator state and the reviewer principal's into
 `verdict/home/<project_name>/config/`; the source files stay where they are.
+At startup the loop removes any other `verdict/home/<name>/` holding a copy
+of the reviewer principal's credential, so a changed or removed
+`project_name` leaves no stale copy behind; it never follows a symlink there.
 
 The loop keeps cloning from `/var/lib/agentc/mirror.git`, and the push helper
 keeps publishing candidates to its GitHub repository. Because the CLI reads a
@@ -972,8 +986,11 @@ need `sudo`; stop at the first failure):
    deploy/agentc/staging.py project --repository-url "$ORIGIN"
    ```
 
-   It prints an `AGENTC_STAGING_BINDING=...` line and the `[run.binding]`
-   table. Add that table, with `allow_insecure_loopback = true` under
+   It also gives the project the placeholder required-check roster
+   `staging-diff-check:v1:any` (a code submission needs a workflow policy;
+   `--required-check IDENTITY:VERSION:ENVIRONMENT`, repeatable, replaces
+   it) and prints an `AGENTC_STAGING_BINDING=...` line and the
+   `[run.binding]` table. Add that table, with `allow_insecure_loopback = true` under
    `[run]`, below the `KEEP` line of `/etc/agentc/supervisor.toml`. Leave
    `[run] reviewer` off for this run.
 5. Create one trivial task in it as the staging owner (use the printed

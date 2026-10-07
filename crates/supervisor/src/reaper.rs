@@ -4,6 +4,13 @@
 //! harness exits. Claude launches already get both from Bubblewrap (its own
 //! PID namespace, `--die-with-parent`); this covers Codex, which runs in the
 //! host namespace.
+//!
+//! Every Bubblewrap run (each sandbox probe, the project setup and the
+//! harness) usually leaves one process here: Bubblewrap exits as soon as its
+//! PID-namespace init reports the command's status, without reaping that
+//! init, which re-parents to the launch as an exited zombie. The kernel has
+//! already killed everything inside the namespace by then, so the cleanup
+//! only reaps these; its report tells them apart from live processes killed.
 
 use anyhow::Result;
 use std::process::Command;
@@ -68,29 +75,39 @@ pub fn reaped<T>(body: impl FnOnce(fn()) -> Result<T>) -> Result<T> {
     result
 }
 
+/// One process [`kill_leftovers`] found below the launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leftover {
+    /// The command name from `/proc/<pid>/stat` (`?` when unreadable).
+    pub name: String,
+    /// Whether it had already exited, an unreaped zombie, when first seen;
+    /// such a process was only reaped, not killed.
+    pub exited: bool,
+}
+
 /// SIGKILLs every descendant of this process and reaps them (see
-/// [`kill_rounds`]); returns how many distinct leftovers were found.
-pub fn kill_leftovers() -> Result<usize> {
+/// [`kill_rounds`]); returns each distinct leftover found.
+pub fn kill_leftovers() -> Result<Vec<Leftover>> {
     kill_rounds().map(|(found, _)| found)
 }
 
 /// SIGKILLs every descendant of this process at once (so neither tree depth
 /// nor a ptrace-attached leftover can stall it) and reaps without blocking,
-/// round after round until no descendant or child is left. Returns how many
-/// distinct leftover processes, including unreaped zombies, were found, and
-/// how many rounds that took.
+/// round after round until no descendant or child is left. Returns the
+/// distinct leftover processes, unreaped zombies included, as first seen,
+/// and how many rounds that took.
 #[cfg(target_os = "linux")]
-fn kill_rounds() -> Result<(usize, usize)> {
+fn kill_rounds() -> Result<(Vec<Leftover>, usize)> {
     let deadline = std::time::Instant::now() + KILL_DEADLINE;
-    let mut found = std::collections::BTreeSet::new();
+    let mut found = std::collections::BTreeMap::new();
     for round in 1.. {
         let tree = descendants()?;
         for &pid in &tree {
+            found.entry(pid).or_insert_with(|| observe(pid));
             kill_descendant(pid, &tree);
         }
-        found.extend(tree.iter().copied());
         if !reap_ready() && tree.is_empty() {
-            return Ok((found.len(), round));
+            return Ok((found.into_values().collect(), round));
         }
         if std::time::Instant::now() >= deadline {
             anyhow::bail!("launch processes survived {KILL_DEADLINE:?} of kill rounds");
@@ -102,17 +119,70 @@ fn kill_rounds() -> Result<(usize, usize)> {
 
 /// Elsewhere leftovers are not tracked.
 #[cfg(not(target_os = "linux"))]
-fn kill_rounds() -> Result<(usize, usize)> {
-    Ok((0, 0))
+fn kill_rounds() -> Result<(Vec<Leftover>, usize)> {
+    Ok((Vec::new(), 0))
 }
 
-/// Runs [`kill_leftovers`] and reports on standard error what it killed or
-/// why it could not finish; the launch's own outcome stands either way.
+/// Runs [`kill_leftovers`] and reports on standard error what it killed and
+/// reaped, or why it could not finish; the launch's outcome stands either way.
 pub fn kill_and_report() {
     match kill_leftovers() {
-        Ok(0) => {}
-        Ok(count) => eprintln!("agentc-supervisor: killed {count} leftover launch processes"),
+        Ok(found) => report(&found)
+            .into_iter()
+            .for_each(|line| eprintln!("{line}")),
         Err(error) => eprintln!("agentc-supervisor: warning: {error:#}"),
+    }
+}
+
+/// The informational line for `found`, or `None` when nothing was left:
+/// still-running processes that were killed, then already-exited ones that
+/// were only reaped (each Bubblewrap sandbox leaves its exited PID-namespace
+/// init behind), each group summarised by command name.
+fn report(found: &[Leftover]) -> Option<String> {
+    let (exited, running): (Vec<_>, Vec<_>) = found.iter().partition(|l| l.exited);
+    let mut parts = Vec::new();
+    if !running.is_empty() {
+        let names = summarise(&running);
+        parts.push(format!(
+            "killed {} leftover launch processes ({names})",
+            running.len()
+        ));
+    }
+    if !exited.is_empty() {
+        let names = summarise(&exited);
+        parts.push(format!(
+            "reaped {} exited launch processes ({names})",
+            exited.len()
+        ));
+    }
+    (!parts.is_empty()).then(|| format!("agentc-supervisor: {}", parts.join("; ")))
+}
+
+/// `name` or `name xN` for each distinct command name, in name order.
+fn summarise(leftovers: &[&Leftover]) -> String {
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    for leftover in leftovers {
+        *counts.entry(leftover.name.as_str()).or_default() += 1;
+    }
+    let shown = counts.iter().map(|(name, count)| match count {
+        1 => (*name).to_owned(),
+        _ => format!("{name} x{count}"),
+    });
+    shown.collect::<Vec<_>>().join(", ")
+}
+
+/// The command name and exited state of `pid` from `/proc/<pid>/stat`; a
+/// process that vanished first counts as exited with name `?`.
+#[cfg(target_os = "linux")]
+fn observe(pid: libc::pid_t) -> Leftover {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    let name = stat
+        .split_once('(')
+        .and_then(|(_, rest)| rest.rsplit_once(')'));
+    let state = name.and_then(|(_, rest)| rest.split_whitespace().next());
+    Leftover {
+        name: name.map_or("?", |(name, _)| name).to_owned(),
+        exited: state.is_none_or(|state| matches!(state, "Z" | "X")),
     }
 }
 

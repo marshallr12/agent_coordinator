@@ -55,6 +55,7 @@ impl LiveReviewer {
         let path = home.join("credentials.toml");
         let text =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        remove_stale_credentials(&home, binding)?;
         place_named_credential(&home, binding, &text)?;
         let origin = &binding.service_url;
         Ok(Self {
@@ -533,6 +534,39 @@ fn place_named_credential(home: &Path, binding: &Binding, text: &str) -> Result<
     Ok(file.write_all(text.as_bytes())?)
 }
 
+/// Removes the verdict credential copies a `[run.binding]` change left in
+/// the root-only `home`: every `<name>/` holding `config/credentials.toml`
+/// whose name is not the binding's `project_name` (all of them when it has
+/// none). Paths are opened beneath `home` without following symlinks, so a
+/// symlinked entry is neither recognised nor followed.
+fn remove_stale_credentials(home: &Path, binding: &Binding) -> Result<()> {
+    for entry in std::fs::read_dir(home).with_context(|| format!("list {}", home.display()))? {
+        let name = entry?.file_name();
+        if is_stale_copy(home, &name, binding) {
+            // `remove_tree` opens the entry's parent beneath its base, so the
+            // base is `home`'s parent and the entry's parent `home` itself.
+            let (Some(base), Some(leaf)) = (home.parent(), home.file_name()) else {
+                anyhow::bail!("{} has no parent directory", home.display());
+            };
+            rooted::remove_tree(base, &Path::new(leaf).join(&name))?;
+            eprintln!(
+                "agentc-supervisor: removed the stale verdict credential copy in {}",
+                home.join(&name).display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` in `home` is a project-named credential copy other than
+/// the binding's own. Hidden entries and the claim `checkouts` never are.
+fn is_stale_copy(home: &Path, name: &std::ffi::OsStr, binding: &Binding) -> bool {
+    let current = binding.project_name.as_deref().map(std::ffi::OsStr::new);
+    let hidden = name.as_encoded_bytes().starts_with(b".");
+    let credential = Path::new(name).join("config").join("credentials.toml");
+    Some(name) != current && !hidden && name != "checkouts" && rooted::is_regular(home, &credential)
+}
+
 /// The environment of root's reviewer-principal CLI commands; `insecure`
 /// adds the loopback flag.
 fn verdict_env(config: &Config, session: Uuid, insecure: bool) -> Vec<(&'static str, String)> {
@@ -663,6 +697,38 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "t");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn stale_verdict_credential_copies_are_removed_without_following_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut binding = Binding {
+            service_url: "http://127.0.0.1:18080".into(),
+            project_id: "p".into(),
+            project_name: None,
+        };
+        for name in ["Old", "Current"] {
+            binding.project_name = Some(name.into());
+            place_named_credential(&home, &binding, "t").unwrap();
+        }
+        std::fs::create_dir_all(outside.path().join("config")).unwrap();
+        std::fs::write(outside.path().join("config/credentials.toml"), "x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.join("Linked")).unwrap();
+        std::fs::create_dir_all(home.join("checkouts/s")).unwrap();
+        std::fs::write(home.join("credentials.toml"), "t").unwrap();
+        remove_stale_credentials(&home, &binding).unwrap();
+        assert!(!home.join("Old").exists(), "stale copy kept");
+        assert!(home.join("Current/config/credentials.toml").is_file());
+        assert!(
+            home.join("Linked").is_symlink()
+                && outside.path().join("config/credentials.toml").is_file()
+        );
+        assert!(home.join("checkouts/s").is_dir() && home.join("credentials.toml").is_file());
+        binding.project_name = None;
+        remove_stale_credentials(&home, &binding).unwrap();
+        assert!(!home.join("Current").exists(), "unbound copy kept");
     }
 
     #[test]

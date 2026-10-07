@@ -6,6 +6,7 @@
     deploy/agentc/staging.py cli ROLE ...  # ROLE: owner | impl | rev
     deploy/agentc/staging.py credentials   # print the supervised-install commands
     deploy/agentc/staging.py project --repository-url URL  # project for the live loop
+                                   [--required-check IDENTITY:VERSION:ENVIRONMENT ...]
     deploy/agentc/staging.py down
     deploy/agentc/staging.py destroy --yes
 
@@ -43,6 +44,9 @@ POLICY = {"review_mode": "either", "recovery_mode": "agent", "rules": "",
           "agent_rule_editing": True, "automatic_integration": True,
           "allow_subagent_reviews": True}
 AGENT_STATE = Path("/var/lib/agentc")
+# The placeholder required-check roster `project` gives a new project: a code
+# submission needs a workflow policy, and the server requires 1-100 checks.
+DEFAULT_CHECK = "staging-diff-check:v1:any"
 
 
 def default_dir():
@@ -212,6 +216,22 @@ def create_project(st, api, remote, name="Staging", policy=None):
     return project["id"]
 
 
+def parse_check(text):
+    """One `IDENTITY:VERSION:ENVIRONMENT` required check, as the API takes it."""
+    parts = text.split(":")
+    if len(parts) != 3 or not all(part.strip() for part in parts):
+        raise argparse.ArgumentTypeError(f"{text!r} is not IDENTITY:VERSION:ENVIRONMENT")
+    return dict(zip(("identity", "version", "environment"), parts))
+
+
+def set_required_checks(api, project, checks):
+    """Gives `project` its first workflow policy, the required-check roster
+    `checks`, so it accepts code submissions; returns the policy revision."""
+    policy = api.call(f"/api/v1/projects/{project}/workflow-policy",
+                      {"expected_revision": 0, "required_checks": checks}, method="PUT")
+    return policy["revision"]
+
+
 def issue_credentials(st, api, roles=None, prefix="staging"):
     """Issues one agent credential per role (default: ROLES) named
     `<prefix>-<role>`; each lands in its own 0600 file."""
@@ -305,12 +325,17 @@ def cmd_project(st, args):
 
     The loop's candidates are published by the push helper to its GitHub
     repository and read back from the project's repository, so for the live
-    loop this must be the mirror's origin URL, exactly as Git reports it."""
+    loop this must be the mirror's origin URL, exactly as Git reports it.
+    The project also gets a required-check roster (`--required-check`,
+    default DEFAULT_CHECK), without which it refuses code submissions."""
     if st.state() is None or st.pid() is None:
         sys.exit("staging is not running; run `up` first")
     admin = json.loads(st.path("secrets", "admin.json").read_text())
     api = Api(st.origin, admin["username"], admin["password"])
     project = create_project(st, api, args.repository_url, name=args.name)
+    checks = args.required_check or [parse_check(DEFAULT_CHECK)]
+    revision = set_required_checks(api, project, checks)
+    print(f"# workflow policy revision {revision}: {len(checks)} required check(s)")
     binding = f'service_url = "{st.origin}"\nproject_id = "{project}"\n'
     st.path(f"binding-{project}.toml").write_text(binding)
     print(f"# AGENTC_STAGING_BINDING={st.path(f'binding-{project}.toml')} selects it for `cli`")
@@ -385,6 +410,10 @@ def parser():
     project.add_argument("--repository-url", required=True,
                          help="the supervisor mirror's origin URL")
     project.add_argument("--name", default="Staging pilot")
+    project.add_argument("--required-check", action="append", type=parse_check,
+                         metavar="IDENTITY:VERSION:ENVIRONMENT",
+                         help=f"a required check of the project's roster; repeat for "
+                              f"several (default: {DEFAULT_CHECK})")
     destroy = sub.add_parser("destroy")
     destroy.add_argument("--yes", action="store_true")
     cli = sub.add_parser("cli", help="run agent-coordinator as a staging role")

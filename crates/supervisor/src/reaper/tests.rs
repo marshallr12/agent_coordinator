@@ -40,7 +40,8 @@ fn leftovers_are_killed_in_a_fresh_launch_process() {
         Ok("chain") => deep_chain(),
         Ok("traced") => traced_leftover(),
         Ok("reaped") => reaped_cleans_up_after_success_and_failure(),
-        _ => ["detached", "chain", "traced", "reaped"]
+        Ok("zombie") => exited_leftovers_are_told_apart_from_killed_ones(),
+        _ => ["detached", "chain", "traced", "reaped", "zombie"]
             .into_iter()
             .for_each(run_scenario),
     }
@@ -88,7 +89,7 @@ fn detached_and_orphaned_leftovers() {
         Some(me.as_str()),
         "daemon was not adopted"
     );
-    assert!(kill_leftovers().unwrap() >= 3);
+    assert!(kill_leftovers().unwrap().len() >= 3);
     assert_gone(&[daemon, grandchild]);
     assert!(running.try_wait().is_err(), "running child was not reaped");
 }
@@ -107,7 +108,7 @@ fn deep_chain() {
         .unwrap();
     let leaf = first_line_pid(&mut chain);
     let (found, rounds) = kill_rounds().unwrap();
-    assert!(found >= 100, "found {found}");
+    assert!(found.len() >= 100, "found {}", found.len());
     assert!(rounds < 20, "took {rounds} rounds");
     assert_gone(&[leaf]);
 }
@@ -130,7 +131,7 @@ fn traced_leftover() {
         attached || scope.is_ok_and(|s| s.trim() != "0"),
         "tracer never attached"
     );
-    assert!(kill_leftovers().unwrap() >= 2);
+    assert!(kill_leftovers().unwrap().len() >= 2);
     assert_gone(&[tracee.id(), tracer.id()]);
     assert!(
         tracee.try_wait().is_err() && tracer.try_wait().is_err(),
@@ -156,6 +157,70 @@ fn reaped_cleans_up_after_success_and_failure() {
     });
     assert!(result.is_err());
     assert_gone(&[refused]);
+}
+
+/// An exited, unreaped child (as a Bubblewrap sandbox's PID-namespace init
+/// is left) is reported as exited and reaped; a running one as killed.
+fn exited_leftovers_are_told_apart_from_killed_ones() {
+    adopt_orphans().unwrap();
+    let mut exited = Command::new("/bin/true").spawn().unwrap();
+    wait_for_zombie(exited.id());
+    let mut running = Command::new("/bin/sleep").arg("300").spawn().unwrap();
+    let mut found = kill_leftovers().unwrap();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    let named = |name: &str, exited| Leftover {
+        name: name.into(),
+        exited,
+    };
+    assert_eq!(found, [named("sleep", false), named("true", true)]);
+    assert_gone(&[exited.id(), running.id()]);
+    assert!(
+        exited.try_wait().is_err() && running.try_wait().is_err(),
+        "not reaped"
+    );
+}
+
+/// Waits up to five seconds for `pid` to become a zombie.
+fn wait_for_zombie(pid: u32) {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        if stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .trim_start()
+            .starts_with('Z')
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("{pid} never exited");
+}
+
+#[test]
+fn the_report_names_killed_and_reaped_leftovers_separately() {
+    let named = |name: &str, exited| Leftover {
+        name: name.into(),
+        exited,
+    };
+    assert_eq!(report(&[]), None);
+    let found = [
+        named("bwrap", true),
+        named("node", false),
+        named("bwrap", true),
+    ];
+    assert_eq!(
+        report(&found).unwrap(),
+        "agentc-supervisor: killed 1 leftover launch processes (node); \
+         reaped 2 exited launch processes (bwrap x2)"
+    );
+    let line = report(&found[..1]).unwrap();
+    assert_eq!(
+        line,
+        "agentc-supervisor: reaped 1 exited launch processes (bwrap)"
+    );
 }
 
 /// Attaches to `pid` with ptrace and then sleeps without ever waiting on it.
