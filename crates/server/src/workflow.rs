@@ -937,9 +937,14 @@ pub(crate) async fn activity_preconditions(
             );
         }
         if matches!(ctx.kind.as_str(), "agent_review" | "either_review")
-            && let Err(error) =
-                ensure_independent_reviewer(c, project, &ctx.subject_task, &actor.id, session_id)
-                    .await
+            && let Err(error) = ensure_independent_reviewer(
+                c,
+                project,
+                &ctx.subject_task,
+                (&actor.id, session_id),
+                None,
+            )
+            .await
         {
             add(&error.code, &error.message);
         }
@@ -1714,6 +1719,7 @@ async fn claim_activity(
     body: Result<Json<ActivityClaimInput>, JsonRejection>,
 ) -> Reply {
     let input = payload(body)?;
+    valid_independence(input.review_independence.as_deref())?;
     let mut m = Mutation::begin(
         &state,
         &auth,
@@ -1788,8 +1794,8 @@ async fn claim_activity(
                 &mut m.tx,
                 &project,
                 &ctx.subject_task,
-                &m.actor.id,
-                &owner_session,
+                (&m.actor.id, &owner_session),
+                input.review_independence.as_deref(),
             )
             .await?;
         }
@@ -2109,14 +2115,16 @@ async fn stacked_contributor_tasks(
 }
 
 /// Refuses a reviewer who contributed to the subject task or to any task whose
-/// commits its landing range carries.
+/// commits its landing range carries. A review asserting `distinct_launch`
+/// must also not share a launch with any of those tasks' contributors.
 async fn ensure_independent_reviewer(
     c: &mut SqliteConnection,
     project: &str,
     task: &str,
-    principal: &str,
-    session: &str,
+    reviewer: (&str, &str),
+    independence: Option<&str>,
 ) -> Result<(), AppError> {
+    let (principal, session) = reviewer;
     let mut tasks = stacked_contributor_tasks(c, task).await?;
     tasks.push(task.to_owned());
     for candidate in &tasks {
@@ -2127,7 +2135,69 @@ async fn ensure_independent_reviewer(
             ));
         }
     }
+    if independence == Some("distinct_launch") {
+        ensure_distinct_launch(c, &tasks, session).await?;
+    }
     Ok(())
+}
+
+/// Refuses a `distinct_launch` reviewer whose launch is also the launch of a
+/// recorded contributor to any of `tasks` (U5, plan §2.3 "Reviewers").
+async fn ensure_distinct_launch(
+    c: &mut SqliteConnection,
+    tasks: &[String],
+    session: &str,
+) -> Result<(), AppError> {
+    let launch = launch_root(c, session).await?;
+    for task in tasks {
+        if launch_contributed(c, task, &launch).await? {
+            return Err(AppError::conflict(
+                "reviewer_shares_launch",
+                "A distinct_launch review cannot come from the launch of a recorded contributor. Review from a separate launch, or record the review without distinct_launch.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The launch of `session`: the root of its `parent_session_id` chain as the
+/// service recorded it at registration (a top-level session is its own launch).
+async fn launch_root(c: &mut SqliteConnection, session: &str) -> Result<String, AppError> {
+    let root: Option<String> = sqlx::query_scalar("WITH RECURSIVE up(id,parent,depth) AS (SELECT id,parent_session_id,0 FROM agent_sessions WHERE id=? UNION ALL SELECT s.id,s.parent_session_id,up.depth+1 FROM agent_sessions s JOIN up ON s.id=up.parent WHERE up.depth<64) SELECT id FROM up ORDER BY depth DESC LIMIT 1")
+        .bind(session).fetch_optional(&mut *c).await?;
+    Ok(root.unwrap_or_else(|| session.to_owned()))
+}
+
+/// True when a recorded contributor session of `task` belongs to `launch`,
+/// walking each contributor session up its `parent_session_id` chain.
+async fn launch_contributed(
+    c: &mut SqliteConnection,
+    task: &str,
+    launch: &str,
+) -> Result<bool, AppError> {
+    let n: i64 = sqlx::query_scalar("WITH RECURSIVE up(id,parent,depth) AS (SELECT tc.session_id,s.parent_session_id,0 FROM task_contributors tc LEFT JOIN agent_sessions s ON s.id=tc.session_id WHERE tc.task_id=? UNION ALL SELECT s.id,s.parent_session_id,up.depth+1 FROM agent_sessions s JOIN up ON s.id=up.parent WHERE up.depth<64) SELECT count(*) FROM up WHERE parent IS NULL AND id=?")
+        .bind(task).bind(launch).fetch_one(&mut *c).await?;
+    Ok(n > 0)
+}
+
+/// True when `session` shares a launch with a recorded contributor of `task`.
+pub(crate) async fn shares_launch(
+    c: &mut SqliteConnection,
+    task: &str,
+    session: &str,
+) -> Result<bool, AppError> {
+    let launch = launch_root(c, session).await?;
+    launch_contributed(c, task, &launch).await
+}
+
+/// Rejects a `review_independence` outside the recorded levels.
+fn valid_independence(independence: Option<&str>) -> Result<(), AppError> {
+    match independence {
+        Some(value) if !REVIEW_INDEPENDENCE.contains(&value) => Err(AppError::bad_request(
+            "review_independence must be distinct_launch, distinct_host or distinct_vendor.",
+        )),
+        _ => Ok(()),
+    }
 }
 
 async fn review(
@@ -2155,13 +2225,7 @@ async fn review(
         bounded(&f.remedy, "finding remedy", 8192, true)?;
         bounded(&f.evidence, "finding evidence", 8192, false)?;
     }
-    if let Some(independence) = input.review_independence.as_deref()
-        && !REVIEW_INDEPENDENCE.contains(&independence)
-    {
-        return Err(AppError::bad_request(
-            "review_independence must be distinct_launch, distinct_host or distinct_vendor.",
-        ));
-    }
+    valid_independence(input.review_independence.as_deref())?;
     if input.decision == "approved" && input.findings.iter().any(|f| f.severity == "required") {
         return Err(AppError::bad_request(
             "An approval cannot retain an unresolved required finding.",
@@ -2202,8 +2266,8 @@ async fn review(
             &mut m.tx,
             &project,
             &ctx.subject_task,
-            &m.actor.id,
-            &reviewer_session,
+            (&m.actor.id, &reviewer_session),
+            input.review_independence.as_deref(),
         )
         .await?;
     }

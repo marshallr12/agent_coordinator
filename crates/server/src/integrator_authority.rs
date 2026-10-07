@@ -282,11 +282,12 @@ async fn ensure_not_stacked(
 
 /// Current approvals of the submission with their activity kind.
 async fn approvals(c: &mut SqliteConnection, submission: &str) -> Result<Vec<SqliteRow>, AppError> {
-    Ok(sqlx::query("SELECT rd.activity_id,rd.reviewer_id,rd.reviewer_session_id,wa.kind FROM review_decisions rd JOIN workflow_activities wa ON wa.id=rd.activity_id WHERE rd.submission_id=? AND rd.decision='approved' AND rd.invalidated_at IS NULL")
+    Ok(sqlx::query("SELECT rd.activity_id,rd.reviewer_id,rd.reviewer_session_id,rd.review_independence,wa.kind FROM review_decisions rd JOIN workflow_activities wa ON wa.id=rd.activity_id WHERE rd.submission_id=? AND rd.decision='approved' AND rd.invalidated_at IS NULL")
         .bind(submission).fetch_all(&mut *c).await?)
 }
 
-/// True when the approving reviewer contributed to any of `tasks`.
+/// True when the approving reviewer contributed to any of `tasks`, or, for an
+/// approval recorded as `distinct_launch`, shares a launch with a contributor.
 async fn approver_contributed(
     c: &mut SqliteConnection,
     p: &str,
@@ -295,8 +296,12 @@ async fn approver_contributed(
 ) -> Result<bool, AppError> {
     let reviewer: String = approval.get("reviewer_id");
     let session: String = approval.get("reviewer_session_id");
+    let independence: Option<String> = approval.get("review_independence");
+    let distinct_launch = independence.as_deref() == Some("distinct_launch");
     for task in tasks {
-        if crate::workflow::contributed(c, p, task, &reviewer, &session).await? {
+        if crate::workflow::contributed(c, p, task, &reviewer, &session).await?
+            || (distinct_launch && crate::workflow::shares_launch(c, task, &session).await?)
+        {
             return Ok(true);
         }
     }
