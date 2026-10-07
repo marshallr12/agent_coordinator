@@ -5,14 +5,19 @@
 //!
 //! The loop only sequences steps; everything that talks to the coordinator or
 //! runs commands sits behind [`Driver`], so tests drive it with a fake.
-//! Extension points for the follow-up tasks: [`refusal`] (health, cost and
-//! the kill switch) and [`review_hook`] (reviewer launches and verdicts,
-//! in [`review`]).
+//! Extension points for the follow-up tasks: [`refusal`] (disk),
+//! [`health::admit`] (kill switch, caps, vendor health) and [`review_hook`]
+//! (reviewer launches and verdicts, in [`review`]); [`cost`] records what
+//! each launch used.
 //! [`lease`] renews a running launch's attempt; [`record`] persists launch
 //! identity and releases attempts on exit, failure, drain and recovery.
+pub mod cost;
+pub mod health;
 pub mod lease;
 #[cfg(target_os = "linux")]
 pub mod live;
+#[cfg(target_os = "linux")]
+mod live_health;
 #[cfg(target_os = "linux")]
 mod live_review;
 pub mod record;
@@ -108,6 +113,8 @@ pub struct Launch {
     pub session_id: Uuid,
     pub clone: PathBuf,
     pub run: PathBuf,
+    /// The harness, model and effort it runs with ([`health::admit`]).
+    pub vendor: health::Vendor,
 }
 
 impl Launch {
@@ -127,6 +134,7 @@ impl Launch {
             session_id,
             clone: role.join("clones").join(session_id.to_string()),
             run: role.join("runs").join(session_id.to_string()),
+            vendor: health::Vendor::primary(&config.run),
         }
     }
 }
@@ -180,6 +188,19 @@ pub trait Driver {
     /// The reviewer side, when this host runs reviews.
     fn reviewer(&mut self) -> Option<&mut dyn review::ReviewDriver> {
         None
+    }
+    /// Whether `harness` is signed in (`claude auth status` / `codex login
+    /// status`); hosts without the check report healthy.
+    fn harness_status(&mut self, _harness: Harness) -> Result<()> {
+        Ok(())
+    }
+    /// When `harness`'s credential expires (ms since the epoch), if known.
+    fn credential_expiry_ms(&self, _harness: Harness) -> Option<i64> {
+        None
+    }
+    /// The launch's harness event stream, `$RUN/events.jsonl`.
+    fn events(&self, launch: &Launch) -> Option<Vec<u8>> {
+        std::fs::read(launch.run.join("events.jsonl")).ok()
     }
 }
 
@@ -255,8 +276,12 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
     if let Some(reason) = refusal(driver, &config.run) {
         return Outcome::Refused(reason);
     }
+    let vendor = match health::admit(driver, config) {
+        Ok(vendor) => vendor,
+        Err(reason) => return Outcome::Refused(reason),
+    };
     if config.run.reviewer {
-        review_hook(driver, &config.run);
+        review_hook(driver, config);
     }
     let next = match driver.next(Role::Implementer) {
         Ok(next) => next,
@@ -265,7 +290,10 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
     let Some(suggestion) = suggestion(&next) else {
         return Outcome::Idle;
     };
-    let launch = Launch::plan(config, driver.project(), suggestion);
+    let launch = Launch {
+        vendor,
+        ..Launch::plan(config, driver.project(), suggestion)
+    };
     let result = work(driver, config, &launch);
     finish(driver, config, &launch, result)
 }
@@ -285,9 +313,14 @@ pub fn refusal(driver: &impl Driver, settings: &RunConfig) -> Option<String> {
     }
 }
 
-/// Runs one review poll when the driver has a reviewer side; without one it
-/// only reports reviewer work it cannot take.
-pub fn review_hook(driver: &mut impl Driver, settings: &RunConfig) {
+/// Runs one review poll when the driver has a reviewer side and the
+/// reviewer's daily cap allows it; without a side it only reports reviewer
+/// work it cannot take.
+pub fn review_hook(driver: &mut impl Driver, config: &Config) {
+    if let Err(reason) = health::capped(config, Role::Reviewer, driver.now_ms()) {
+        eprintln!("agentc-supervisor run: no review: {reason}");
+        return;
+    }
     let Some(reviewer) = driver.reviewer() else {
         if let Ok(next) = driver.next(Role::Reviewer)
             && !next["action"].is_null()
@@ -296,7 +329,7 @@ pub fn review_hook(driver: &mut impl Driver, settings: &RunConfig) {
         }
         return;
     };
-    let outcome = review::review(reviewer, settings);
+    let outcome = review::review(reviewer, &config.run);
     if outcome != review::ReviewOutcome::Idle {
         eprintln!("agentc-supervisor run: review: {outcome:?}");
     }
@@ -326,7 +359,8 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
     let mut record = LaunchRecord::new(launch, &lease, driver.boot_id(), driver.now_ms());
     let result = (record.save(config).context("record the launch"))
         .and_then(|()| run_claimed(driver, config, launch, &mut record, lease));
-    let summary = handoff(&result);
+    let cost = record::settle_cost(driver, config, launch, &mut record);
+    let summary = handoff(&result, &cost);
     record::release(driver, config, launch, &mut record, &summary);
     result.map(|ended| ended.code)
 }
@@ -348,8 +382,9 @@ fn run_claimed(
     Ok(lease::supervise(driver, launch, lease, &config.run))
 }
 
-/// The handoff summary a launch's attempt is released with.
-fn handoff(result: &Result<lease::Ended>) -> String {
+/// The handoff summary a launch's attempt is released with, carrying the
+/// launch's `cost` sentence.
+fn handoff(result: &Result<lease::Ended>, cost: &str) -> String {
     let (how, why) = match result {
         Ok(ended) => (
             format!("the launch exited with code {}", ended.code),
@@ -358,7 +393,7 @@ fn handoff(result: &Result<lease::Ended>) -> String {
         Err(error) => (format!("the launch failed: {error:#}"), String::new()),
     };
     let text = format!(
-        "agentc-supervisor released the attempt: {how}{why}. Read the last checkpoint before resuming."
+        "agentc-supervisor released the attempt: {how}{why}. {cost} Read the last checkpoint before resuming."
     );
     text.chars().take(4000).collect()
 }

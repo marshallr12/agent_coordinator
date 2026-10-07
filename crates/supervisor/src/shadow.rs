@@ -67,7 +67,7 @@ impl ShadowConfig {
     }
 
     /// Default prices with the configured ones added or replaced.
-    fn price_table(&self) -> BTreeMap<String, Price> {
+    pub fn price_table(&self) -> BTreeMap<String, Price> {
         let mut table = estimate::default_prices();
         table.extend(self.prices.iter().map(|(k, v)| (k.clone(), *v)));
         table

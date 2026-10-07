@@ -57,6 +57,7 @@ pub fn run(spec: &LaunchSpec, config: &Config, after_harness: impl FnOnce()) -> 
     if spec.harness == profile::Harness::Claude {
         crate::relay::start_host(spec, config).context("start loopback relays")?;
     }
+    crate::setup::run(spec, config).context("project setup")?;
     run_harness(&state, &command, spec, config, after_harness)
 }
 
@@ -151,10 +152,15 @@ fn harness_token(spec: &LaunchSpec, config: &Config) -> Result<Option<String>> {
     if spec.harness != profile::Harness::Claude {
         return Ok(None);
     }
-    let path = profile::claude_token(spec.role, config);
+    role_token(spec.role, config).map(Some)
+}
+
+/// The role's Claude token, read and checked as a launch reads it (the live
+/// loop's sign-in check uses it too). Errors name the file, never its contents.
+pub fn role_token(role: Role, config: &Config) -> Result<String> {
+    let path = profile::claude_token(role, config);
     let bytes = read_token(&path).with_context(|| format!("read {}", path.display()))?;
-    let token = valid_token(&bytes).with_context(|| format!("Claude token {}", path.display()))?;
-    Ok(Some(token))
+    valid_token(&bytes).with_context(|| format!("Claude token {}", path.display()))
 }
 
 /// The most bytes a token file may hold: the token and up to two trailing
@@ -229,7 +235,7 @@ fn valid_token(bytes: &[u8]) -> Result<String> {
 }
 
 /// A pre-existing output, including a planted link, is never truncated.
-fn new_log(path: &std::path::Path) -> Result<File> {
+pub fn new_log(path: &std::path::Path) -> Result<File> {
     confine::path_without_symlinks(path, true)?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);

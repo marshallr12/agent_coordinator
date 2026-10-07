@@ -478,6 +478,29 @@ EOF
 # budget_minutes = 240           # stop renewing a launch's attempt after this
 # drain_seconds = 30             # on stop: SIGTERM, then SIGKILL after this
 
+# Admission before each claim (plan P3b health and cost). While the kill
+# switch file exists the loop claims nothing. A 429 marks the vendor
+# exhausted ($STATE/vendors.json) and routes to the fallback; every launch's
+# tokens and dollars go to $STATE/costs.jsonl and its handoff summary.
+# [health]
+# kill_switch = "$STATE/kill-switch"
+# exhausted_minutes = 60         # when a 429 names no reset time
+# token_lifetime_days = 365      # claude setup-token lifetime
+# expiry_warn_days = 14          # daily warning this far ahead
+# implementer_daily_usd = 150.0  # last-24h spend cap; 0 disables
+# reviewer_daily_usd = 50.0
+# [health.fallback]              # default: no fallback vendor
+# harness = "codex"
+# model = "<codex model id>"
+# effort = "high"
+
+# Host-approved project setup, run in the launch's sandbox before the
+# harness (Claude launches only); output in \$RUN/setup.log.
+# [setup.<project-id>]
+# command = []                   # e.g. ["cargo", "fetch", "--locked"]
+# cache_paths = []               # existing agentc-impl-owned directories
+# timeout_seconds = 900
+
 # Shadow mode (plan P3a): \`agentc-supervisor shadow\` polls the read-only
 # \`next\` endpoint with a read-access host credential and logs would-launch
 # records with cost estimates; \`shadow-report\` summarises the log.
