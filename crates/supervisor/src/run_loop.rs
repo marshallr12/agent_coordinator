@@ -67,6 +67,10 @@ pub struct RunConfig {
     /// The coordinator and project to work on instead of the mirror
     /// branch's `.agent-coordinator.toml` (a staging coordinator).
     pub binding: Option<binding::Binding>,
+    /// Commit author and committer name set in each implementer clone.
+    pub git_name: String,
+    /// Commit author and committer email set in each implementer clone.
+    pub git_email: String,
     /// Also claim, launch and decide reviewer work (see [`review`]).
     pub reviewer: bool,
     /// Stop claiming a submission after this many failed verdicts in a row
@@ -90,6 +94,8 @@ impl Default for RunConfig {
             branch: "main".into(),
             allow_insecure_loopback: false,
             binding: None,
+            git_name: "agentc implementer".into(),
+            git_email: "agentc-impl@agentc.invalid".into(),
             reviewer: false,
             review_attempts: 3,
             budget_minutes: 240,
@@ -124,6 +130,11 @@ pub struct Launch {
 }
 
 impl Launch {
+    /// The attempt's prepared, registered worktree inside the clone.
+    pub fn checkout(&self) -> PathBuf {
+        self.clone.join(crate::clone::CHECKOUT_DIR)
+    }
+
     /// A launch with a fresh session id, its clone and `$RUN` under the
     /// implementer's `clones/` and `runs/`.
     pub fn plan(config: &Config, project: &str, suggestion: Suggestion) -> Self {
@@ -162,6 +173,9 @@ pub trait Driver {
     fn install_prompt(&mut self, launch: &Launch, prompt: &str) -> Result<()>;
     /// Claims the task in the launch's own coordinator session.
     fn claim(&mut self, launch: &Launch) -> Result<Lease>;
+    /// Prepares and registers [`Launch::checkout`] for the claimed attempt
+    /// in the launch's session, so the agent can submit code from it.
+    fn register(&mut self, launch: &Launch, lease: &Lease) -> Result<()>;
     /// Spawns `launch-root` for the launch; returns its pid and `/proc`
     /// start time.
     fn start(&mut self, launch: &Launch) -> Result<(u32, Option<u64>)>;
@@ -353,13 +367,11 @@ pub fn suggestion(next: &Value) -> Option<Suggestion> {
     })
 }
 
-/// Creates, prompts, claims and launches, stopping at the first failure.
-/// Once claimed, the attempt is recorded before the spawn and released with
-/// a handoff however the launch ends.
+/// Creates, claims, registers the checkout, prompts and launches, stopping
+/// at the first failure. Once claimed, the attempt is recorded before
+/// anything else and released with a handoff however the launch ends.
 fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i32> {
     driver.create(launch).context("create clone and run")?;
-    let prompt = render_prompt(launch, &driver.instructions(launch));
-    driver.install_prompt(launch, &prompt).context("prompt")?;
     ensure!(!driver.stopping(), "the loop is stopping; no new claims");
     let lease = driver.claim(launch).context("claim")?;
     let mut record = LaunchRecord::new(launch, &lease, driver.boot_id(), driver.now_ms());
@@ -371,8 +383,18 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
     result.map(|ended| ended.code)
 }
 
-/// Spawns the claimed launch, adds its identity to the record and
-/// supervises it until it exits.
+/// Registers the claimed attempt's checkout and installs the prompt that
+/// names it and the attempt.
+fn prepare_claimed(driver: &mut impl Driver, launch: &Launch, lease: &Lease) -> Result<()> {
+    driver
+        .register(launch, lease)
+        .context("register the checkout")?;
+    let prompt = render_prompt(launch, lease, &driver.instructions(launch));
+    driver.install_prompt(launch, &prompt).context("prompt")
+}
+
+/// Prepares the claimed launch, spawns it, adds its identity to the record
+/// and supervises it until it exits.
 fn run_claimed(
     driver: &mut impl Driver,
     config: &Config,
@@ -380,6 +402,7 @@ fn run_claimed(
     record: &mut LaunchRecord,
     lease: Lease,
 ) -> Result<lease::Ended> {
+    prepare_claimed(driver, launch, &lease)?;
     let (pid, ticks) = driver.start(launch).context("launch")?;
     (record.pid, record.start_ticks) = (Some(pid), ticks);
     if let Err(error) = record.save(config) {
@@ -441,14 +464,18 @@ pub fn remove_finished(driver: &mut impl Driver, launch: &Launch) -> Result<bool
     Ok(true)
 }
 
-/// The prompt: the implementer contract with the launch filled in (the title
-/// inside `<task-title>` tags), then each repository file inside
-/// `<repository-instructions>` tags. Closing tags in the data are defused,
-/// whatever their case, so the data cannot end its own block.
-pub fn render_prompt(launch: &Launch, files: &[(String, String)]) -> String {
+/// The prompt: the implementer contract with the launch and its claimed
+/// attempt filled in (the title inside `<task-title>` tags), then each
+/// repository file inside `<repository-instructions>` tags. Closing tags in
+/// the data are defused, whatever their case, so the data cannot end its
+/// own block.
+pub fn render_prompt(launch: &Launch, lease: &Lease, files: &[(String, String)]) -> String {
     let s = &launch.suggestion;
     let mut prompt = IMPLEMENTER_CONTRACT
         .replace("{{project}}", &launch.project)
+        .replace("{{attempt}}", &lease.attempt)
+        .replace("{{generation}}", &lease.generation.to_string())
+        .replace("{{checkout}}", &launch.checkout().display().to_string())
         .replace("{{task_id}}", &s.task)
         .replace("{{task_revision}}", &s.revision.to_string())
         .replace(

@@ -230,6 +230,8 @@ impl Driver for LiveDriver {
             format!("--revision={sha}"),
             format!("--dest={}", launch.clone.display()),
             format!("--origin-url={origin}"),
+            format!("--user-name={}", self.config.run.git_name),
+            format!("--user-email={}", self.config.run.git_email),
         ];
         let root = Path::new("/");
         self.as_role(
@@ -270,6 +272,14 @@ impl Driver for LiveDriver {
         let claim = ["--json", "claim", &format!("--task={}", s.task)].map(String::from);
         let revision = format!("--revision={}", s.revision);
         Lease::parse(&self.cli(launch, &[&claim[..], &[revision]].concat())?)
+    }
+
+    /// Runs `agent-coordinator worktree prepare` as the implementer in the
+    /// launch's session: it adds [`Launch::checkout`] as a worktree of the
+    /// clone at the cloned revision and registers it for the attempt.
+    fn register(&mut self, launch: &Launch, lease: &Lease) -> Result<()> {
+        let args = checkout_args(launch, lease, &self.revision);
+        self.cli(launch, &args).map(drop)
     }
 
     /// Spawns `launch-root` as root in a process group of its own.
@@ -576,6 +586,22 @@ fn spec_flags(_config: &Config, launch: &Launch) -> Vec<String> {
     ]
 }
 
+/// `worktree prepare` arguments registering the launch's checkout for the
+/// attempt: a branch named after the session, based on `revision`.
+fn checkout_args(launch: &Launch, lease: &Lease, revision: &str) -> Vec<String> {
+    vec![
+        "--json".into(),
+        "worktree".into(),
+        "prepare".into(),
+        format!("--attempt={}", lease.attempt),
+        format!("--generation={}", lease.generation),
+        format!("--source={}", launch.clone.display()),
+        format!("--path={}", launch.checkout().display()),
+        format!("--branch=agentc/{}", launch.session_id),
+        format!("--base={revision}"),
+    ]
+}
+
 /// Bytes available to unprivileged users on the filesystem holding `path`.
 #[allow(clippy::useless_conversion)] // The field types differ between targets.
 fn free_bytes(path: &Path) -> Result<u64> {
@@ -669,6 +695,36 @@ mod tests {
         std::fs::remove_dir_all(home.join("Staging")).unwrap();
         std::os::unix::fs::symlink(base.join("runs"), home.join("Staging")).unwrap();
         assert!(place_credential(&base, run, &binding, b"x", owner).is_err());
+    }
+
+    #[test]
+    fn the_checkout_is_a_session_branch_inside_the_clone_at_the_cloned_revision() {
+        let suggestion = Suggestion {
+            task: "t".into(),
+            revision: 1,
+            title: String::new(),
+        };
+        let launch = Launch::plan(&Config::default(), "p", suggestion);
+        let lease = Lease {
+            attempt: "a1".into(),
+            generation: 2,
+            renew_after_seconds: 60,
+            progress_age_ms: 0,
+        };
+        let args = checkout_args(&launch, &lease, "abc123");
+        let clone = launch.clone.display();
+        let expected = [
+            "--json".to_owned(),
+            "worktree".into(),
+            "prepare".into(),
+            "--attempt=a1".into(),
+            "--generation=2".into(),
+            format!("--source={clone}"),
+            format!("--path={clone}/agentc-checkout"),
+            format!("--branch=agentc/{}", launch.session_id),
+            "--base=abc123".into(),
+        ];
+        assert_eq!(args, expected);
     }
 
     #[test]

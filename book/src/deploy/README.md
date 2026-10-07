@@ -641,20 +641,32 @@ Each poll it:
    ([staging](#running-the-loop-against-staging));
 3. for a `claim_task` suggestion, fetches `/var/lib/agentc/mirror.git` and,
    as `agentc-impl`, clones its branch head to `impl/clones/<session>` and
-   prepares `impl/runs/<session>`; it copies the credential into the run's
+   prepares `impl/runs/<session>`. The clone gets a repository-local commit
+   identity from `[run] git_name` and `git_email` (default `agentc
+   implementer` / `agentc-impl@agentc.invalid`), since the agent may not run
+   `git config`. The loop copies the credential into the run's
    coordinator state (`state/coordinator/credentials.toml`, or
    `state/coordinator/<project_name>/config/credentials.toml` when the
-   binding sets `project_name`, which is where the CLI then looks) and
-   writes the prompt: the implementer contract
-   (`crates/supervisor/contracts/implementer.md`, at most 1,500 words) with
-   the task title inside `<task-title>` tags and the repository's `AGENTS.md`
-   and `CONTRIBUTING.md` appended inside `<repository-instructions>` tags as
-   data. Closing tags inside the data are defused, whatever their case;
+   binding sets `project_name`, which is where the CLI then looks);
 4. as `agentc-impl`, connects a coordinator session named after the launch
    and claims the task with `agent-coordinator claim`; the launch gets the
    same session through `AGENT_COORDINATOR_SESSION`;
 5. writes the launch record `/var/lib/agentc/launches/<session>.json` (the
-   attempt, its generation and this boot's id), spawns `launch-root` in a
+   attempt, its generation and this boot's id). Then, in the same session as
+   `agentc-impl`, it runs `agent-coordinator worktree prepare`, which adds
+   the attempt's checkout as a worktree of the clone at
+   `impl/clones/<session>/agentc-checkout` (branch `agentc/<session>`, at
+   the cloned revision; the clone's `info/exclude` hides it) and registers
+   it for the attempt, so `submissions code --checkout` accepts it. It writes
+   the prompt: the implementer contract
+   (`crates/supervisor/contracts/implementer.md`, at most 1,500 words) with
+   the attempt, its generation and the checkout filled in, the task title
+   inside `<task-title>` tags and the repository's `AGENTS.md` and
+   `CONTRIBUTING.md` appended inside `<repository-instructions>` tags as
+   data. Closing tags inside the data are defused, whatever their case. The
+   agent commits in the checkout and submits with `submissions code`, which
+   publishes the candidate through the push helper. A failed registration or
+   prompt releases the attempt with a handoff. The loop then spawns `launch-root` in a
    process group of its own, and adds the launch's pid and `/proc` start time
    to the record;
 6. renews the attempt while the launch runs (see below), and releases it with

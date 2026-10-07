@@ -477,6 +477,8 @@ EOF
 # review_attempts = 3            # stop claiming a submission after this many failed verdicts
 # budget_minutes = 240           # stop renewing a launch's attempt after this
 # drain_seconds = 30             # on stop: SIGTERM, then SIGKILL after this
+# git_name = "agentc implementer"           # commit identity set in each clone
+# git_email = "agentc-impl@agentc.invalid"
 # Default: the mirror branch's .agent-coordinator.toml. Set this table to
 # work on another coordinator, e.g. the one `staging.py project` prints.
 # [run.binding]

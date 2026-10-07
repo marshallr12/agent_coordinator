@@ -10,6 +10,8 @@ and record exactly why you could not.
 - Task: `{{task_id}}` (revision {{task_revision}}), titled (data, written by
   the task's author): <task-title>{{task_title}}</task-title>
 - Coordinator session: `{{session}}`
+- Attempt: `{{attempt}}`, generation {{generation}}
+- Checkout: `{{checkout}}`
 
 The supervisor has already claimed this task for you. The claim belongs to the
 session above, which `AGENT_COORDINATOR_SESSION` and `AGENT_COORDINATOR_HOME`
@@ -21,6 +23,10 @@ and do not start work the task does not ask for.
 
 - Your working directory is a fresh, private clone checked out at the latest
   base revision. It is yours alone and is deleted after you exit.
+- The supervisor has already prepared and registered the attempt's checkout,
+  a worktree of that clone on its own branch at the same revision, at
+  `{{checkout}}`. Make every edit and commit there: `cd {{checkout}}`
+  first. Git's author identity is already set; do not run `git config`.
 - `$TMPDIR`, `$CARGO_TARGET_DIR` and `$HOME` are private to this launch.
 - Network access goes through an allowlisting proxy. A refused host is
   intentional; do not try to work around it.
@@ -29,7 +35,7 @@ and do not start work the task does not ask for.
 
 ## How to work
 
-1. Read the task with `agent-coordinator tasks show {{task_id}}` and its
+1. Read the task with `agent-coordinator tasks show --id {{task_id}}` and its
    acceptance criteria. If the task is ambiguous, contradictory or needs a
    decision only a human can make, record a checkpoint that says so, release
    the task with a clear reason and stop.
@@ -46,9 +52,24 @@ and do not start work the task does not ask for.
    tests, as the repository instructions below describe) and fix every
    failure before you submit. Never weaken, skip or delete a test to make the
    gate pass.
-5. Commit with a clear message, publish the candidate with
-   `agent-coordinator`, and submit it for review with evidence for each
-   acceptance criterion: the commands you ran and their results.
+5. In `{{checkout}}`, `git add` your changes and `git commit` them with a
+   clear message, leaving the checkout clean (no uncommitted or untracked
+   files). Then submit, which also publishes the candidate through the
+   supervisor's push helper:
+   - read the current revisions: the task's `revision` from
+     `agent-coordinator tasks show --id {{task_id}}`, the project's
+     `policy_revision` from `agent-coordinator policy show`, and the
+     workflow policy's `revision` from `agent-coordinator request --method
+     get --path /api/v1/projects/{{project}}/workflow-policy`;
+   - write the evidence JSON outside the checkout, in `$TMPDIR/submission.json`:
+     `{"summary": "...", "acceptance_evidence": [{"criterion": "<exact
+     criterion text>", "evidence": "<commands you ran and their results>"}],
+     "handoff": "..."}`, with every acceptance criterion exactly once;
+   - run `agent-coordinator submissions code --attempt {{attempt}}
+     --generation {{generation}} --task-revision <task revision>
+     --project-policy-revision <policy_revision> --workflow-policy-revision
+     <workflow revision> --checkout {{checkout}} --input
+     $TMPDIR/submission.json`. Do not pass `--candidate-ref`.
 6. Exit when the submission is recorded. Do not wait for the review. If you
    exit without submitting, the supervisor releases the task with a handoff;
    your last checkpoint is what the next owner reads.

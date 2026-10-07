@@ -10,6 +10,10 @@ use anyhow::{Context, Result, bail, ensure};
 use std::path::Path;
 use std::process::{Command, Output};
 
+/// The directory inside an implementer clone where the loop prepares and
+/// registers the attempt's worktree; the clone's `info/exclude` hides it.
+pub const CHECKOUT_DIR: &str = "agentc-checkout";
+
 /// Push URL that no transport accepts.
 pub const DISABLED_PUSH_URL: &str = "disabled://push-only-via-agent-coordinator";
 
@@ -44,6 +48,34 @@ pub fn create(url: &str, mirror: Option<&Path>, revision: &str, dest: &Path) -> 
     run(Some(dest), &["checkout", "--quiet", "--detach", revision])?;
     let head = text(run(Some(dest), &["rev-parse", "HEAD"])?)?;
     ensure!(head == revision, "clone HEAD {head} is not {revision}");
+    exclude_checkout(dest)
+}
+
+/// Appends [`CHECKOUT_DIR`] to the clone's `info/exclude`, so the prepared
+/// worktree never shows up as untracked in the clone itself.
+fn exclude_checkout(dest: &Path) -> Result<()> {
+    use std::io::Write;
+    let info = dest.join(".git/info");
+    std::fs::create_dir_all(&info)?;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(info.join("exclude"))?;
+    Ok(writeln!(file, "/{CHECKOUT_DIR}/")?)
+}
+
+/// Sets the clone's repository-local commit identity (`user.name`,
+/// `user.email`), which every worktree of the clone shares. The agent may
+/// not run `git config`, so the identity comes from the host configuration.
+pub fn set_identity(dest: &Path, name: &str, email: &str) -> Result<()> {
+    for (key, value) in [("user.name", name), ("user.email", email)] {
+        let plain = !value.is_empty() && !value.starts_with('-');
+        ensure!(
+            plain && !value.contains(['\n', '\r', '\0']),
+            "{key} must be a non-empty single line not starting with '-'"
+        );
+        run(Some(dest), &["config", "--local", key, value])?;
+    }
     Ok(())
 }
 
@@ -213,6 +245,45 @@ mod tests {
         let fetch = text(git(Some(&dest), &["remote", "get-url", "origin"]).unwrap()).unwrap();
         assert_eq!(fetch, "https://github.com/example/repo.git");
         assert!(hardening_problems(&dest).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_identity_lets_a_worktree_commit_and_the_checkout_dir_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, head) = remote(dir.path());
+        let dest = dir.path().join("clone");
+        create(&url, None, &head, &dest).unwrap();
+        assert!(set_identity(&dest, "-x", "a@b.invalid").is_err());
+        assert!(set_identity(&dest, "n", "a\nb").is_err());
+        set_identity(&dest, "agentc implementer", "agentc-impl@agentc.invalid").unwrap();
+        let work = dest.join(CHECKOUT_DIR);
+        let path = work.display().to_string();
+        run(
+            Some(&dest),
+            &["worktree", "add", "-q", "-b", "w", &path, &head],
+        )
+        .unwrap();
+        fs::write(work.join("new.txt"), "x").unwrap();
+        run(Some(&work), &["add", "new.txt"]).unwrap();
+        // Only the clone's own identity: no global, system or env identity.
+        let mut commit = Command::new("git");
+        commit.args(["-C", &path, "commit", "-q", "-m", "m"]);
+        commit
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        for name in
+            ["NAME", "EMAIL"].map(|n| ["AUTHOR", "COMMITTER"].map(|r| format!("GIT_{r}_{n}")))
+        {
+            commit.env_remove(&name[0]).env_remove(&name[1]);
+        }
+        commit.env_remove("EMAIL");
+        let committed = commit.output().unwrap();
+        assert!(committed.status.success(), "{committed:?}");
+        let author = text(run(Some(&work), &["log", "-1", "--format=%an <%ae>"]).unwrap());
+        let author = author.unwrap();
+        assert_eq!(author, "agentc implementer <agentc-impl@agentc.invalid>");
+        let status = text(run(Some(&dest), &["status", "--porcelain"]).unwrap()).unwrap();
+        assert_eq!(status, "");
     }
 
     #[test]

@@ -45,6 +45,12 @@ enum Commands {
         /// Canonical fetch URL for `origin` when `--url` is a local mirror.
         #[arg(long)]
         origin_url: Option<String>,
+        /// Repository-local commit author and committer name.
+        #[arg(long, requires = "user_email")]
+        user_name: Option<String>,
+        /// Repository-local commit author and committer email.
+        #[arg(long, requires = "user_name")]
+        user_email: Option<String>,
     },
     /// Run the egress allowlist proxy on the configured loopback address.
     EgressProxy,
@@ -168,10 +174,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             dest,
             mirror,
             origin_url,
+            user_name,
+            user_email,
         } => {
             clone::create(&url, mirror.as_deref(), &revision, &dest)?;
             if let Some(origin) = origin_url {
                 clone::set_origin(&dest, &origin)?;
+            }
+            if let (Some(name), Some(email)) = (user_name, user_email) {
+                clone::set_identity(&dest, &name, &email)?;
             }
         }
         Commands::EgressProxy => {
