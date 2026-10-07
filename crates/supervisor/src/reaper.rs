@@ -158,17 +158,39 @@ fn report(found: &[Leftover]) -> Option<String> {
     (!parts.is_empty()).then(|| format!("agentc-supervisor: {}", parts.join("; ")))
 }
 
-/// `name` or `name xN` for each distinct command name, in name order.
+/// `name` or `name xN` for each distinct command name, in name order; names
+/// are [`escaped`], since a launch chooses them.
 fn summarise(leftovers: &[&Leftover]) -> String {
     let mut counts = std::collections::BTreeMap::<&str, usize>::new();
     for leftover in leftovers {
         *counts.entry(leftover.name.as_str()).or_default() += 1;
     }
     let shown = counts.iter().map(|(name, count)| match count {
-        1 => (*name).to_owned(),
-        _ => format!("{name} x{count}"),
+        1 => escaped(name),
+        _ => format!("{} x{count}", escaped(name)),
     });
     shown.collect::<Vec<_>>().join(", ")
+}
+
+/// `name` with control characters, line and paragraph separators, and
+/// backslashes escaped (`\n`, `\xNN`, `\u{NNNN}`), so a process name cannot
+/// forge or break a journal line.
+fn escaped(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_ascii_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => {
+                out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The command name and exited state of `pid` from `/proc/<pid>/stat`; a
