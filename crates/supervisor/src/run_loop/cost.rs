@@ -68,7 +68,9 @@ fn claude_result(event: &Value, usage: &mut Usage) {
         input_tokens: tokens(u, "input_tokens") + tokens(u, "cache_creation_input_tokens"),
         cached_input_tokens: tokens(u, "cache_read_input_tokens"),
         output_tokens: tokens(u, "output_tokens"),
-        usd: event["total_cost_usd"].as_f64(),
+        usd: event["total_cost_usd"]
+            .as_f64()
+            .filter(|usd| usd.is_finite() && *usd >= 0.0),
     };
 }
 
@@ -94,19 +96,27 @@ fn rate_limited(event: &Value) -> Option<Option<i64>> {
         let rejected = info["status"] == "rejected";
         return rejected.then(|| info["resetsAt"].as_i64().map(|s| s * 1000));
     }
-    let text = match kind {
-        "result" if event["api_error_status"] == 429 => "429".into(),
-        "result" if event["is_error"] == true => event["result"].to_string(),
-        "error" => event["message"].to_string(),
-        "turn.failed" => event["error"]["message"].to_string(),
+    let (status, text) = match kind {
+        "result" if event["is_error"] == true => (&event["api_error_status"], &event["result"]),
+        "error" => (&event["status"], &event["message"]),
+        "turn.failed" => (&event["error"]["status"], &event["error"]["message"]),
         _ => return None,
     };
+    let text = text.as_str().unwrap_or("");
+    (status == 429 || limit_phrase(text)).then(|| reset_suffix(text))
+}
+
+/// Whether an error message names a rate or usage limit in words; a bare
+/// "429" (a line number, a token count) is not enough.
+fn limit_phrase(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    let limited = ["429", "rate limit", "rate_limit", "usage limit"];
-    limited
-        .iter()
-        .any(|w| lower.contains(w))
-        .then(|| reset_suffix(&text))
+    let phrases = [
+        "rate limit",
+        "rate_limit",
+        "usage limit",
+        "too many requests",
+    ];
+    phrases.iter().any(|phrase| lower.contains(phrase))
 }
 
 /// The epoch seconds after `|` in Claude's "usage limit reached|<epoch>".
@@ -258,6 +268,21 @@ mod tests {
             "usage": {"input_tokens": 1429}});
         let digest = digest(&lines(&[tool, allowed, ok]));
         assert_eq!((digest.exhausted, digest.usage.usd), (None, Some(0.5)));
+    }
+
+    #[test]
+    fn a_negative_reported_cost_is_ignored() {
+        let result = json!({"type": "result", "total_cost_usd": -3.0});
+        assert_eq!(digest(&lines(&[result])).usage.usd, None);
+    }
+
+    #[test]
+    fn an_unrelated_error_mentioning_429_marks_nothing() {
+        let error = json!({"type": "error", "message": "parse error at line 429"});
+        let failed = json!({"type": "turn.failed", "error": {"message": "exit 1 after 429 ms"}});
+        assert_eq!(digest(&lines(&[error, failed])).exhausted, None);
+        let status = json!({"type": "turn.failed", "error": {"status": 429, "message": "x"}});
+        assert_eq!(digest(&lines(&[status])).exhausted, Some(None));
     }
 
     #[test]

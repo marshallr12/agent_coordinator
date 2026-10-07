@@ -62,31 +62,44 @@ pub fn caches(spec: &LaunchSpec, config: &Config) -> Result<Vec<PathBuf>> {
 /// `path` if it is absolute, reached without symlinks, a directory, and
 /// owned by the account running the launch (never root's or another role's).
 fn checked_cache(path: &Path) -> Result<PathBuf> {
-    ensure!(
-        path.is_absolute(),
-        "cache path {} is not absolute",
-        path.display()
-    );
-    confine::path_without_symlinks(path, false)
-        .with_context(|| format!("cache path {}", path.display()))?;
-    let metadata = std::fs::metadata(path).with_context(|| format!("{}", path.display()))?;
-    ensure!(
-        metadata.is_dir(),
-        "cache path {} is not a directory",
-        path.display()
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        let uid = unsafe { libc::geteuid() };
-        let shown = path.display();
-        ensure!(
-            metadata.uid() == uid,
-            "cache path {shown} is not owned by the launch's account"
-        );
-    }
+    let shown = path.display();
+    ensure!(path.is_absolute(), "cache path {shown} is not absolute");
+    confine::path_without_symlinks(path, false).with_context(|| format!("cache path {shown}"))?;
+    let metadata = std::fs::metadata(path).with_context(|| format!("cache path {shown}"))?;
+    ensure!(metadata.is_dir(), "cache path {shown} is not a directory");
+    owned_by_launch_account(path, &metadata)?;
     Ok(path.to_owned())
+}
+
+/// Refuses a cache directory the launch's own account does not own.
+#[cfg(unix)]
+fn owned_by_launch_account(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    let shown = path.display();
+    ensure!(
+        metadata.uid() == uid,
+        "cache path {shown} is not owned by the launch's account"
+    );
+    Ok(())
+}
+
+/// Ownership cannot be checked without Unix metadata, so caches are refused.
+#[cfg(not(unix))]
+fn owned_by_launch_account(path: &Path, _metadata: &std::fs::Metadata) -> Result<()> {
+    bail!("cache path {} needs Unix ownership checks", path.display())
+}
+
+/// Whether a `harness` launch can run `project`'s setup: a project with a
+/// setup command needs the Bubblewrap sandbox only Claude launches have.
+/// Admission uses this to skip such a vendor before claiming.
+pub fn can_run(config: &Config, project: &str, harness: Harness) -> bool {
+    let has_command = config
+        .setup
+        .get(project)
+        .is_some_and(|s| !s.command.is_empty());
+    harness == Harness::Claude || !has_command
 }
 
 /// Runs the project's setup command, if one is configured, sandboxed like

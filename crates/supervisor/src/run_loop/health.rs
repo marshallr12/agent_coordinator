@@ -64,7 +64,7 @@ impl HealthConfig {
 }
 
 /// The harness, model and effort a launch runs with.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Vendor {
     pub harness: Harness,
@@ -154,22 +154,33 @@ pub fn kill_switch(config: &Config) -> PathBuf {
 /// with. Checked every poll, so setting the kill switch stops new claims
 /// within one poll.
 pub fn admit(driver: &mut impl Driver, config: &Config) -> Result<Vendor, String> {
-    let switch = kill_switch(config);
-    if switch.symlink_metadata().is_ok() {
-        return Err(format!("the kill switch {} is set", switch.display()));
-    }
+    switched_off(config)?;
     let now = driver.now_ms();
     capped(config, Role::Implementer, now)?;
     let mut state = VendorState::load(config);
     warn_daily(driver, config, &mut state, now);
     let mut reasons = Vec::new();
     for vendor in vendors(config) {
-        match unusable(driver, &state, &vendor, now) {
+        match unusable(driver, config, &state, &vendor, now) {
             None => return Ok(vendor),
             Some(reason) => reasons.push(reason),
         }
     }
     Err(format!("no vendor is usable: {}", reasons.join("; ")))
+}
+
+/// Refuses while the kill switch is set. A path that cannot be checked
+/// (anything but "not found") counts as set, so the switch fails closed.
+fn switched_off(config: &Config) -> Result<(), String> {
+    let switch = kill_switch(config);
+    let shown = switch.display();
+    match switch.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "the kill switch {shown} cannot be checked ({error}); claims stop"
+        )),
+        Ok(_) => Err(format!("the kill switch {shown} is set")),
+    }
 }
 
 /// The primary vendor, then the fallback if one is configured.
@@ -196,11 +207,18 @@ pub fn capped(config: &Config, role: Role, now: i64) -> Result<(), String> {
 /// Why `vendor` cannot run a launch now, if it cannot.
 fn unusable(
     driver: &mut impl Driver,
+    config: &Config,
     state: &VendorState,
     vendor: &Vendor,
     now: i64,
 ) -> Option<String> {
     let name = name(vendor.harness);
+    if !crate::setup::can_run(config, driver.project(), vendor.harness) {
+        return Some(format!(
+            "{name} cannot run project {}'s setup command (no Bubblewrap sandbox)",
+            driver.project()
+        ));
+    }
     if let Some(until) = state.exhausted_until.get(name).filter(|&&at| at > now) {
         return Some(format!("{name} is exhausted until {}", shown(*until)));
     }

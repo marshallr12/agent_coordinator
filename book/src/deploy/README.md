@@ -718,7 +718,8 @@ After the disk check, each poll admits a claim only when all of these hold:
 
 - the kill switch is not set: while `/var/lib/agentc/kill-switch` (`[health]
   kill_switch`) exists, in any form, the loop claims nothing, so creating it
-  stops new claims within one poll. A running launch is not interrupted;
+  stops new claims within one poll. A path that cannot be checked (any error
+  but "not found") counts as set. A running launch is not interrupted;
 - the implementer has spent less than `[health] implementer_daily_usd`
   (default 150; 0 disables) in the last 24 hours, by the cost ledger;
 - a vendor is usable. The `[run]` harness comes first, then the optional
@@ -726,7 +727,9 @@ After the disk check, each poll admits a claim only when all of these hold:
   rate limit marks it exhausted, once its credential has expired, or when its
   own sign-in check fails: `claude auth status` with the role's token, or
   `codex login status`, run as `agentc-impl`. Only the check's exit code is
-  used. The launch runs, and connects its session, with the chosen vendor.
+  used. A Codex vendor is also skipped for a project with a setup command
+  (see below). The launch runs, and connects its session, with the chosen
+  vendor, which its launch record keeps.
 
 Once a day the loop logs a warning for each credential expiring within
 `[health] expiry_warn_days` (default 14). A Claude token's expiry is its
@@ -743,7 +746,10 @@ tokens and dollars (Claude's own `total_cost_usd`; Codex usage priced with the
 `[shadow.prices]` table, or "unpriced") are appended to
 `/var/lib/agentc/costs.jsonl` with the project, task, session and attempt,
 and the release handoff ends with the same figure. A launch the agent already
-submitted or released keeps only the ledger entry.
+submitted or released keeps only the ledger entry. Recovery does the same for
+a launch that ended while no loop watched it, before removing its run, under
+the vendor its record names; the record notes that the cost is in the ledger,
+so a retried release never counts it twice.
 
 A host may configure a project setup command, keyed by coordinator project id:
 
@@ -760,8 +766,8 @@ namespace, with its output in `$RUN/setup.log`. A non-zero exit or a timeout
 refuses the launch. Each cache path must be an existing absolute directory,
 reached without symlinks and owned by `agentc-impl`; it is bound writable, at
 the same path, into the sandbox of the setup and of the harness. Codex
-launches have no Bubblewrap boundary, so a Codex launch for a project with a
-setup command is refused. The repository cannot add a command or a cache:
+launches have no Bubblewrap boundary, so admission never routes a project
+with a setup command to Codex, and `launch` refuses such a launch. The repository cannot add a command or a cache:
 both come only from the host's configuration.
 
 `--once` polls a single time. Recovery claims, reviewer launches and

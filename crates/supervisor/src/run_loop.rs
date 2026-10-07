@@ -335,7 +335,8 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
     let mut record = LaunchRecord::new(launch, &lease, driver.boot_id(), driver.now_ms());
     let result = (record.save(config).context("record the launch"))
         .and_then(|()| run_claimed(driver, config, launch, &mut record, lease));
-    let summary = handoff(&result, &cost::settle(driver, config, launch, &record));
+    let cost = record::settle_cost(driver, config, launch, &mut record);
+    let summary = handoff(&result, &cost);
     record::release(driver, config, launch, &mut record, &summary);
     result.map(|ended| ended.code)
 }

@@ -189,3 +189,76 @@ fn an_empty_health_section_equals_defaults() {
     assert_eq!(health.kill_switch, None);
     assert_eq!(health.fallback, None);
 }
+
+#[test]
+fn a_recovered_launch_records_its_cost_and_429_once_under_its_own_vendor() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = with_fallback(dir.path());
+    let mut launch = planned(dir.path());
+    launch.vendor = config.health.fallback.clone().unwrap();
+    fs::create_dir_all(&launch.run).unwrap();
+    let events = [
+        json!({"type": "turn.completed", "usage": {"input_tokens": 9, "output_tokens": 4}}),
+        json!({"type": "turn.failed", "error": {"message": "stream error: Too Many Requests"}}),
+    ];
+    let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+    fs::write(launch.run.join("events.jsonl"), lines.join("\n")).unwrap();
+    let mut record = LaunchRecord::new(&launch, &Fake::lease(), "boot-0".into(), 0);
+    (record.pid, record.start_ticks) = (Some(4242), Some(77));
+    record.save(&config).unwrap();
+    let mut fake = Fake::new();
+    fake.fail_release = true;
+    record::recover(&mut fake, &config);
+    fake.fail_release = false;
+    record::recover(&mut fake, &config);
+    let entries = ledger(&config);
+    assert_eq!(
+        entries.len(),
+        1,
+        "the retried release counted the cost twice"
+    );
+    assert_eq!(
+        (&entries[0]["harness"], &entries[0]["model"]),
+        (&json!("codex"), &json!("gpt-5.5"))
+    );
+    assert_eq!(entries[0]["output_tokens"], 4);
+    let vendors = fs::read_to_string(dir.path().join("vendors.json")).unwrap();
+    assert!(vendors.contains("\"codex\""), "{vendors}");
+    assert!(LaunchRecord::load_all(&config).is_empty());
+}
+
+#[test]
+fn a_codex_fallback_is_skipped_before_claiming_for_a_project_with_setup() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = with_fallback(dir.path());
+    let setup = crate::setup::ProjectSetup {
+        command: vec!["cargo".into(), "fetch".into()],
+        ..Default::default()
+    };
+    config.setup.insert("p1".into(), setup);
+    let mut fake = Fake::new();
+    fake.unhealthy = vec![Harness::Claude];
+    let outcome = iterate(&mut fake, &config);
+    let expected = "codex cannot run project p1's setup command";
+    assert!(
+        matches!(&outcome, Outcome::Refused(r) if r.contains(expected)),
+        "{outcome:?}"
+    );
+    assert!(fake.steps.is_empty(), "{:?}", fake.steps);
+}
+
+#[test]
+fn a_kill_switch_that_cannot_be_checked_counts_as_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path());
+    let file = dir.path().join("plain-file");
+    fs::write(&file, "").unwrap();
+    config.health.kill_switch = Some(file.join("switch"));
+    let mut fake = Fake::new();
+    let outcome = iterate(&mut fake, &config);
+    assert!(
+        matches!(&outcome, Outcome::Refused(r) if r.contains("cannot be checked")),
+        "{outcome:?}"
+    );
+    assert!(fake.steps.is_empty());
+}

@@ -14,6 +14,7 @@
 //! check that no `launch-root` for its session runs, release the attempt (or
 //! let its lease lapse), then remove the record and the session's
 //! `impl/clones/` and `impl/runs/` directories.
+use super::health::Vendor;
 use super::lease::Lease;
 use super::{Driver, Launch, Suggestion};
 use crate::config::Config;
@@ -53,6 +54,13 @@ pub struct LaunchRecord {
     /// Failed releases since the loop started.
     #[serde(default)]
     pub release_failures: u32,
+    /// The vendor the launch ran with (absent in older records: `[run]`).
+    #[serde(default)]
+    pub vendor: Option<Vendor>,
+    /// Whether the launch's cost is in the ledger, so it is never counted
+    /// twice when a failed release is retried by recovery.
+    #[serde(default)]
+    pub cost_recorded: bool,
 }
 
 /// The root-owned directory of launch records, `<state_dir>/launches`.
@@ -75,6 +83,8 @@ impl LaunchRecord {
             released: false,
             recorded_ms: now,
             release_failures: 0,
+            vendor: Some(launch.vendor.clone()),
+            cost_recorded: false,
         }
     }
 
@@ -135,7 +145,14 @@ impl LaunchRecord {
             revision: 0,
             title: String::new(),
         };
-        Launch::at(config, project, suggestion, self.session_id)
+        let launch = Launch::at(config, project, suggestion, self.session_id);
+        match &self.vendor {
+            Some(vendor) => Launch {
+                vendor: vendor.clone(),
+                ..launch
+            },
+            None => launch,
+        }
     }
 
     /// The recorded attempt as a lease to release.
@@ -244,15 +261,37 @@ pub fn recover(driver: &mut impl Driver, config: &Config) -> Option<String> {
     (!running.is_empty()).then(|| format!("an earlier launch may still run ({list})"))
 }
 
-/// Releases a dead launch's attempt unless that is done, then removes its
-/// clone, run and record.
+/// Records a dead launch's cost (and any 429) unless that is done, releases
+/// its attempt unless that is done, then removes its clone, run and record.
 fn settle(driver: &mut impl Driver, config: &Config, record: &mut LaunchRecord) {
     let launch = record.launch(config, driver.project());
-    if !record.released && !release(driver, config, &launch, record, RECOVERED) {
+    let cost = settle_cost(driver, config, &launch, record);
+    let summary = format!("{RECOVERED} {cost}").trim_end().to_owned();
+    if !record.released && !release(driver, config, &launch, record, &summary) {
         return;
     }
     match driver.discard(&launch) {
         Ok(()) => LaunchRecord::remove(config, &record.session_id),
         Err(error) => eprintln!("agentc-supervisor run: recovery cleanup: {error:#}"),
     }
+}
+
+/// Settles the launch's cost from its events once (see [`super::cost::settle`])
+/// and marks the record so a retry never counts it again; returns the
+/// handoff's cost sentence (empty when it was already recorded).
+pub fn settle_cost(
+    driver: &impl Driver,
+    config: &Config,
+    launch: &Launch,
+    record: &mut LaunchRecord,
+) -> String {
+    if record.cost_recorded {
+        return String::new();
+    }
+    let sentence = super::cost::settle(driver, config, launch, record);
+    record.cost_recorded = true;
+    if let Err(error) = record.save(config) {
+        eprintln!("agentc-supervisor run: {error:#}");
+    }
+    sentence
 }

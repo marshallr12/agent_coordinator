@@ -24,7 +24,7 @@ pub enum Role {
 }
 
 /// Which vendor harness runs the launch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
     Claude,
