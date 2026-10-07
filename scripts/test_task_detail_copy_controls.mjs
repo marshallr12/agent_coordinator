@@ -39,6 +39,7 @@ const attachmentBytes = new Map();
 let failFirstAttachmentPut = true;
 const attachmentUploadKeys = [];
 const archivedTask = { ...task, id: 'archived-fixture-task', title: 'Archived fixture task', lifecycle: 'canceled', archived_at: '2026-09-23T00:00:00Z' };
+const otherArchivedTask = { ...archivedTask, id: 'archived-other-task', title: 'Older retired item' };
 const fixtureActor = { id: 'fixture-operator', name: 'Fixture operator', role: 'admin', kind: 'human', session_id: 'fixture-browser' };
 const policyProject = {
   id: 'fixture-project', name: 'Fixture project', target_branch: 'main', policy_revision: 7, review_mode: 'either', recovery_mode: 'agent',
@@ -232,7 +233,7 @@ async function fixtureServer() {
       response.end(bytes);
       return;
     }
-    if (url.pathname === '/api/v1/projects/fixture-project/tasks/archived') return json(response, { items: [archivedTask], next_cursor: null });
+    if (url.pathname === '/api/v1/projects/fixture-project/tasks/archived') return json(response, { items: [archivedTask, otherArchivedTask], next_cursor: null });
     if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}`) {
       if (detailDelay) await new Promise((resolveDelay) => setTimeout(resolveDelay, detailDelay));
       return json(response, task);
@@ -503,6 +504,57 @@ async function checkVerifiedRecovery({ evaluate, waitPage }, openFixtureTask) {
   Object.assign(task, { current_attempt_id: null, attempts: [], checkpoints: [] });
 }
 
+async function typeSearch({ evaluate }, id, value) {
+  await evaluate(`(() => { const input = document.querySelector('#${id}'); input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+}
+
+async function visibleTitles({ evaluate }, listId) {
+  return evaluate(`[...document.querySelectorAll('#${listId} .task-row .task-title')].map((node) => node.textContent)`);
+}
+
+// Text search on the task name, for the queue, completed and archived views.
+async function checkTaskSearch(page) {
+  const { evaluate } = page;
+  // Task queue: 30 "Fixture task N" rows plus the original task, case-insensitively.
+  await typeSearch(page, 'tasks-search', 'COPY THIS');
+  let titles = await visibleTitles(page, 'tasks-list');
+  assert(titles.length === 1 && titles[0] === task.title, `Queue search returned ${JSON.stringify(titles)}.`);
+  await typeSearch(page, 'tasks-search', 'Fixture task 2');
+  titles = await visibleTitles(page, 'tasks-list');
+  assert(titles.length === 11 && titles.every((title) => title.includes('Fixture task 2')), `Queue prefix search returned ${titles.length} tasks.`);
+  assert(await evaluate("document.querySelector('#tasks-page-status').textContent") === 'Page 1 of 11 tasks', 'Queue search did not update the page summary.');
+  await typeSearch(page, 'tasks-search', 'no such task');
+  assert((await visibleTitles(page, 'tasks-list')).length === 0, 'Queue search with no match still listed tasks.');
+  assert(await evaluate("document.querySelector('#tasks-state').textContent.includes('match this search')"), 'Queue search with no match gave no empty message.');
+  await typeSearch(page, 'tasks-search', '');
+  assert((await visibleTitles(page, 'tasks-list')).length === 30, 'Clearing the queue search did not restore every task.');
+  // Completed tasks keep their own search text.
+  await typeSearch(page, 'tasks-search', 'Fixture task 2');
+  await evaluate("document.querySelector('#completed-tasks-tab').click()");
+  await page.waitPage("document.querySelector('#tasks-heading').textContent === 'Completed tasks' && document.querySelectorAll('#tasks-list .task-row').length === 1", 'completed tasks view');
+  assert(await evaluate("document.querySelector('#tasks-search').value") === '', 'The queue search text leaked into the completed view.');
+  await typeSearch(page, 'tasks-search', 'nothing');
+  assert((await visibleTitles(page, 'tasks-list')).length === 0, 'Completed search with no match still listed tasks.');
+  await typeSearch(page, 'tasks-search', 'completed FIXTURE');
+  assert((await visibleTitles(page, 'tasks-list')).join() === 'Completed fixture task', 'Completed search did not match the task name.');
+  await typeSearch(page, 'tasks-search', '');
+  assert((await visibleTitles(page, 'tasks-list')).length === 1, 'Clearing the completed search did not restore every completed task.');
+  await evaluate("document.querySelector('#task-queue-tab').click()");
+  await page.waitPage("document.querySelector('#tasks-heading').textContent === 'Task queue' && document.querySelector('#tasks-search').value === 'Fixture task 2'", 'queue search restored');
+  await typeSearch(page, 'tasks-search', '');
+  // Archived tasks.
+  await evaluate("document.querySelector('#archived-tasks-tab').click()");
+  await page.waitPage("document.querySelectorAll('#archived-list .task-row').length === 2", 'archived tasks view');
+  await typeSearch(page, 'archived-search', 'retired');
+  assert((await visibleTitles(page, 'archived-list')).join() === 'Older retired item', 'Archived search did not match the task name.');
+  await typeSearch(page, 'archived-search', 'nothing');
+  assert((await visibleTitles(page, 'archived-list')).length === 0, 'Archived search with no match still listed tasks.');
+  await typeSearch(page, 'archived-search', '');
+  assert((await visibleTitles(page, 'archived-list')).length === 2, 'Clearing the archived search did not restore every archived task.');
+  await evaluate("document.querySelector('#task-queue-tab').click()");
+  await page.waitPage("!document.querySelector('#tasks-view').hidden && document.querySelectorAll('#tasks-list .task-row').length === 30", 'queue after search checks');
+}
+
 async function removeProfile(profile) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try { await rm(profile, { recursive: true, force: true }); return; }
@@ -707,6 +759,7 @@ async function main() {
     await evaluate("(() => { const size = document.querySelector('#tasks-page-size'); size.value = '50'; size.dispatchEvent(new Event('change', { bubbles: true })); })()");
     await waitPage("document.querySelectorAll('#tasks-list .task-row').length === 30 && document.querySelector('#tasks-page-status').textContent === 'Page 1 of 30 tasks'", 'latest 50-item selection');
     assert(await evaluate("document.querySelectorAll('#tasks-list .task-row').length === 30 && document.querySelector('#tasks-page-size').value === '50' && document.querySelector('#tasks-page-status').textContent === 'Page 1 of 30 tasks'"), 'The 50-item selection did not show every queued task on one page.');
+    await checkTaskSearch(ui);
     await evaluate("document.querySelector('#tasks-list .task-row[role=button]').focus()");
     await press('Enter', 'Enter', 13);
     await waitPage("document.querySelector('#task-detail-content') && !document.querySelector('#task-detail-content').hidden", 'task detail');
@@ -888,7 +941,7 @@ async function main() {
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
     await checkReloadedResolutionLabel(ui, serverPort);
-    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
