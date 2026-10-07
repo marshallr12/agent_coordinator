@@ -239,6 +239,28 @@ fn the_report_names_killed_and_reaped_leftovers_separately() {
     );
 }
 
+#[test]
+fn control_characters_in_names_are_escaped_onto_one_line() {
+    let named = |name: &str| Leftover {
+        name: name.into(),
+        exited: false,
+    };
+    let found = [
+        named("evil\nagentc-supervisor: forged"),
+        named("esc\x1b[2J\r\t\0"),
+        named("back\\slash\u{85}\u{2028}"),
+        named("plain"),
+    ];
+    let line = report(&found).unwrap();
+    assert_eq!(
+        line,
+        "agentc-supervisor: killed 4 leftover launch processes (\
+         back\\\\slash\\u{85}\\u{2028}, esc\\x1b[2J\\r\\t\\x00, \
+         evil\\nagentc-supervisor: forged, plain)"
+    );
+    assert!(!line.chars().any(char::is_control));
+}
+
 /// Attaches to `pid` with ptrace and then sleeps without ever waiting on it.
 fn trace_forever(pid: libc::pid_t) {
     // SAFETY: PTRACE_ATTACH takes only a pid; the address and data are null.
