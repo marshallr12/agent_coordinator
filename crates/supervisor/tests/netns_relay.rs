@@ -3,6 +3,7 @@
 //! host socket, while an unrelayed host loopback listener stays unreachable.
 #![cfg(target_os = "linux")]
 
+use agentc_supervisor::test_support::{self, skip_when_nested};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixListener;
@@ -35,12 +36,15 @@ fn script(host_port: u16) -> String {
 
 #[test]
 fn relayed_port_reaches_its_socket_and_other_host_ports_do_not() {
+    if skip_when_nested("relayed_port_reaches_its_socket_and_other_host_ports_do_not") {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("proxy.sock");
     line_echo(&socket);
     let host = TcpListener::bind("127.0.0.1:0").unwrap();
     let relay = format!("127.0.0.1:3128={}", socket.display());
-    let status = Command::new("/usr/bin/bwrap")
+    let status = Command::new(test_support::bubblewrap())
         .args(["--unshare-user", "--unshare-net", "--die-with-parent"])
         .args([
             "--ro-bind",

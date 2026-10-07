@@ -7,6 +7,7 @@
 
 use agentc_supervisor::config::Config;
 use agentc_supervisor::profile::{self, Harness, LaunchSpec, Role, run_files};
+use agentc_supervisor::test_support::{self, skip_when_nested};
 use agentc_supervisor::verification::Verification;
 use agentc_supervisor::{confine, launch, relay, role_settings, sandbox};
 use std::ffi::OsString;
@@ -42,6 +43,7 @@ fn config(root: &Path, proxy: SocketAddr, staging: SocketAddr) -> Config {
         cargo_config_seed: root.join("cargo-seed.toml"),
         bin_dir: root.join("bin"),
         egress_listen: proxy.to_string(),
+        bubblewrap: test_support::bubblewrap(),
         ..Config::default()
     };
     let url = format!("http://127.0.0.1:{}/ui", staging.port());
@@ -144,6 +146,9 @@ fn wait(mut child: std::process::Child) -> Option<i32> {
 
 #[test]
 fn a_wrapped_reviewer_reaches_only_the_relayed_host_services() {
+    if skip_when_nested("a_wrapped_reviewer_reaches_only_the_relayed_host_services") {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let (proxy, staging) = (line_echo(), line_echo());
     let host_only = TcpListener::bind("127.0.0.1:0").unwrap();

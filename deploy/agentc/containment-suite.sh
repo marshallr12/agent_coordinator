@@ -669,31 +669,61 @@ check_push_key() {
   expect_fail "agentc-rev: cannot read the push App key" as agentc-rev test -r "$PUSH_KEY"
 }
 
+# Succeeds when $1 resolves into /snap or is a script that hands off to a snap
+# (Ubuntu's /usr/bin/chromium-browser), which cannot run as a role account.
+is_snap_wrapper() {
+  local resolved
+  resolved=$(readlink -f -- "$1")
+  case $resolved in /snap/*) return 0 ;; esac
+  [ "$(head -c 2 -- "$resolved")" = '#!' ] && grep -q '/snap/' -- "$resolved"
+}
+
+# The configured browser $1 is no snap wrapper, and host-setup's pinned
+# headless shell is root-owned and closed to group/world writes.
+check_browser_install() {
+  local browser=$1
+  expect_fail "reviewer browser $browser is not a snap wrapper" is_snap_wrapper "$browser"
+  case $browser in
+    "$PREFIX"/browsers/*) expect_ok "pinned headless shell is 755 root:root" has_mode "$browser" "755 root root" ;;
+  esac
+}
+
 # The reviewer's pinned headless browser renders the staging dashboard under
 # uid + firewall (plan M2), and the implementer cannot read the reviewer's
 # verification logins. Skipped when no staging coordinator is listening.
 check_browser() {
   local browser run=$STATE/rev/runs/suite
   browser=$(sed -n 's/^browser = "\(.*\)"$/\1/p' /etc/agentc/supervisor.toml)
+  browser=${browser:-/usr/bin/chromium}
   expect_fail "agentc-impl: cannot read the reviewer's verification logins" as agentc-impl ls "$STATE/rev/verification"
+  check_browser_install "$browser"
   if ! curl -sf --max-time 3 "$STAGING/healthz" >/dev/null; then
     echo "SKIP agentc-rev: browser check (no staging coordinator at $STAGING)"; return
   fi
   expect_ok_logged "agentc-rev: headless browser renders the staging dashboard" /root/agentc-browser.log \
-    as agentc-rev sh -c "${browser:-/usr/bin/chromium} --headless=new --disable-gpu --no-first-run \
+    as agentc-rev sh -c "$browser --headless=new --disable-gpu --no-first-run \
       --user-data-dir=$run/tmp/chrome --dump-dom $STAGING/ | grep -q 'Agent Coordinator'"
 }
 
+# The Bubblewrap the project's real-sandbox tests run: the agentc copy when
+# host-setup installed one (Ubuntu's AppArmor userns restriction refuses the
+# unconfined /usr/bin/bwrap), else the tests' own default.
+test_bwrap_env() {
+  if [ -x "$PREFIX/bin/bwrap" ]; then echo "AGENTC_TEST_BWRAP=$PREFIX/bin/bwrap"; fi
+}
+
 # Optional: the project's tests pass under the implementer profile, both
-# plainly (Claude: uid + firewall) and inside the Codex sandbox.
+# plainly (Claude: uid + firewall) and inside the Codex sandbox. Inside the
+# Codex sandbox Bubblewrap cannot nest, so AGENTC_TEST_NESTED_SANDBOX=1 makes
+# the real-Bubblewrap tests skip with a note; the plain leg runs them.
 check_cargo_test() {
   local base=$STATE/impl clone=$STATE/impl/clones/suite run=$STATE/impl/runs/suite
-  local env="PATH=$PREFIX/bin:$PREFIX/cargo/bin:/usr/bin:/bin RUSTUP_HOME=$PREFIX/rustup CARGO_HOME=$run/state/cargo CARGO_TARGET_DIR=$run/target HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=127.0.0.1,localhost"
+  local env="PATH=$PREFIX/bin:$PREFIX/cargo/bin:/usr/bin:/bin RUSTUP_HOME=$PREFIX/rustup CARGO_HOME=$run/state/cargo CARGO_TARGET_DIR=$run/target HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=127.0.0.1,localhost $(test_bwrap_env)"
   expect_ok_logged "impl: cargo test (uid + firewall)" /root/agentc-cargo-test.log \
     as agentc-impl sh -c "cd $clone && env $env cargo test --workspace --locked --no-fail-fast"
   local roots="sandbox_workspace_write.writable_roots=[\"$run\",\"$run/state/cargo\"]"
   expect_ok_logged "impl: cargo test inside codex sandbox" /root/agentc-cargo-test-codex.log as agentc-impl sh -c \
-    "cd $clone && env $env CODEX_HOME=$base/codex-home $PREFIX/bin/codex sandbox -c sandbox_mode=workspace-write -c sandbox_workspace_write.network_access=true -c '$roots' -- cargo test --workspace --locked --no-fail-fast"
+    "cd $clone && env $env AGENTC_TEST_NESTED_SANDBOX=1 CODEX_HOME=$base/codex-home $PREFIX/bin/codex sandbox -c sandbox_mode=workspace-write -c sandbox_workspace_write.network_access=true -c '$roots' -- cargo test --workspace --locked --no-fail-fast"
 }
 
 main() {

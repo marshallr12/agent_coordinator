@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Prepares this Linux host for supervised agent launches (autonomy plan P2).
 #
-#   sudo SUPERVISOR=<path> CLI=<path> [PUSH=<path>] [APPARMOR_BWRAP=1] deploy/agentc/host-setup.sh
+#   sudo SUPERVISOR=<path> CLI=<path> [PUSH=<path>] [APPARMOR_BWRAP=1] [HEADLESS_SHELL=0] \
+#     deploy/agentc/host-setup.sh
 #   sudo deploy/agentc/host-setup.sh --uninstall
 #
 # Creates the agentc-impl / agentc-rev / agentc-egress / agentc-push accounts,
-# root-owned pinned binaries and Rust toolchain under /opt/agentc, private
+# root-owned pinned binaries, Rust toolchain and reviewer headless browser
+# under /opt/agentc (apt adds the browser's missing libraries), private
 # per-role state under /var/lib/agentc, a read-only Git mirror, the egress
 # proxy service and an nftables table that filters ONLY the two agent uids.
 # For the candidate-push helper it also writes /etc/agentc/push.toml when
@@ -37,6 +39,17 @@ APPARMOR_BWRAP=${APPARMOR_BWRAP:-0}
 BWRAP_GROUP=agentc-bwrap
 BWRAP_COPY=$PREFIX/bin/bwrap
 BWRAP_PROFILE=/etc/apparmor.d/agentc-bwrap
+# Playwright's Chromium headless shell for verifying reviewers (plan M2),
+# pinned to Playwright v1.63.0's chromium-headless-shell (browser revision
+# 1243) and checked against these SHA-256 sums; HEADLESS_SHELL=0 skips it.
+HEADLESS_SHELL=${HEADLESS_SHELL:-1}
+HEADLESS_SHELL_REVISION=1243
+HEADLESS_SHELL_VERSION=153.0.8010.12
+HEADLESS_SHELL_CDN=https://cdn.playwright.dev/builds/cft/$HEADLESS_SHELL_VERSION
+HEADLESS_SHELL_SHA256_X64=a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d
+HEADLESS_SHELL_SHA256_ARM64=d433c45172c7836e38124fe545f767b02210bfb43a6262f08a297473a8e91c99
+BROWSERS=$PREFIX/browsers
+BROWSER_PROFILE=/etc/apparmor.d/agentc-browser
 # Shared temp directories --uninstall clears of agent-owned files.
 TEMP_DIRS=(/tmp /var/tmp /dev/shm)
 # The placeholder token containment-suite.sh installs for a run (its
@@ -365,13 +378,165 @@ bubblewrap_setting() {
   else echo '# bubblewrap = "/usr/bin/bwrap"'; fi
 }
 
-# The system headless browser offered to verifying reviewers (plan M2).
+# The headless browser offered to verifying reviewers (plan M2): the pinned
+# headless shell when installed, else a non-snap system Chromium or Chrome,
+# else the in-code default. Never a snap wrapper: a snap cannot run as a role
+# account outside a login session.
 detect_browser() {
-  local candidate
+  local candidate pinned
+  pinned=$(headless_shell_path)
+  if [ -n "$pinned" ] && [ -x "$pinned" ]; then echo "$pinned"; return; fi
   for candidate in /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome; do
-    [ -x "$candidate" ] && { readlink -f "$candidate"; return; }
+    if [ -x "$candidate" ] && ! is_snap_wrapper "$candidate"; then readlink -f "$candidate"; return; fi
   done
   echo /usr/bin/chromium
+}
+
+# Succeeds when $1 resolves into /snap or is a script that hands off to a snap
+# (Ubuntu's /usr/bin/chromium-browser).
+is_snap_wrapper() {
+  local resolved
+  resolved=$(readlink -f -- "$1")
+  case $resolved in /snap/*) return 0 ;; esac
+  [ "$(head -c 2 -- "$resolved")" = '#!' ] && grep -q '/snap/' -- "$resolved"
+}
+
+# This machine's Playwright platform name for the headless shell, empty on
+# architectures without a pin.
+headless_shell_platform() {
+  case "$(uname -m)" in
+    x86_64) echo linux64 ;;
+    aarch64 | arm64) echo linux-arm64 ;;
+  esac
+}
+
+# The pinned SHA-256 of platform $1's headless shell zip.
+headless_shell_sha256() {
+  case $1 in
+    linux64) echo "$HEADLESS_SHELL_SHA256_X64" ;;
+    linux-arm64) echo "$HEADLESS_SHELL_SHA256_ARM64" ;;
+  esac
+}
+
+# Where the pinned headless shell's executable lives on this machine; empty
+# when the architecture has no pin.
+headless_shell_path() {
+  local platform
+  platform=$(headless_shell_platform)
+  if [ -n "$platform" ]; then
+    echo "$BROWSERS/$HEADLESS_SHELL_REVISION/chrome-headless-shell-$platform/chrome-headless-shell"
+  fi
+}
+
+# Installs the pinned headless shell root-owned under $BROWSERS/<revision>,
+# with its runtime libraries and (APPARMOR_BWRAP=1) its AppArmor profile.
+# A verified install is kept across re-runs; other revisions are deleted.
+# Skipped with HEADLESS_SHELL=0 or on an architecture without a pin.
+install_headless_shell() {
+  local platform target
+  platform=$(headless_shell_platform)
+  if [ "$HEADLESS_SHELL" != 1 ] || [ -z "$platform" ]; then
+    echo "note: no pinned headless shell installed; reviewers get a system browser if any" >&2
+    remove_browser_profile; return
+  fi
+  refuse_symlink "$BROWSERS"
+  install -d -o root -g root -m 0755 "$BROWSERS"
+  target=$BROWSERS/$HEADLESS_SHELL_REVISION
+  if [ "$(cat "$target/.sha256" 2>/dev/null)" != "$(headless_shell_sha256 "$platform")" ]; then
+    fetch_headless_shell "$platform" "$target"
+  fi
+  remove_other_revisions
+  install_browser_libraries
+  install_browser_profile
+}
+
+# Downloads platform $1's zip, refuses it unless its SHA-256 matches the pin,
+# and unpacks it root-owned and not group/world-writable as $2.
+fetch_headless_shell() {
+  local platform=$1 target=$2 sum work
+  sum=$(headless_shell_sha256 "$platform")
+  command -v python3 >/dev/null || { echo "installing the headless shell needs python3 (unzip)" >&2; exit 1; }
+  work=$(mktemp -d "$BROWSERS/.fetch.XXXXXX")
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 -sSfL -o "$work/shell.zip" \
+    "$HEADLESS_SHELL_CDN/$platform/chrome-headless-shell-$platform.zip"
+  echo "$sum  $work/shell.zip" | sha256sum -c --quiet - ||
+    { rm -rf -- "$work"; echo "refusing: headless shell zip fails its pinned SHA-256" >&2; exit 1; }
+  python3 -I -m zipfile -e "$work/shell.zip" "$work/unpacked"
+  chown -R root:root "$work/unpacked"
+  chmod -R u=rwX,go=rX "$work/unpacked"
+  chmod 0755 "$work/unpacked/chrome-headless-shell-$platform/chrome-headless-shell"
+  echo "$sum" > "$work/unpacked/.sha256"
+  rm -rf -- "$target"
+  mv -T -- "$work/unpacked" "$target"
+  rm -rf -- "$work"
+}
+
+# Deletes earlier pinned revisions and interrupted downloads under $BROWSERS.
+remove_other_revisions() {
+  local entry
+  for entry in "$BROWSERS"/* "$BROWSERS"/.fetch.*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ "$entry" = "$BROWSERS/$HEADLESS_SHELL_REVISION" ] || rm -rf -- "$entry"
+  done
+}
+
+# Installs the headless shell's runtime libraries (Playwright's Chromium list
+# for Debian and Ubuntu) with apt-get, only when the loader cannot resolve
+# one; without apt-get it names the missing libraries instead.
+install_browser_libraries() {
+  local missing
+  missing=$(ldd "$(headless_shell_path)" 2>/dev/null | awk '/not found/ { print $1 }' | paste -sd' ' || true)
+  [ -n "$missing" ] || return 0
+  if ! command -v apt-get >/dev/null; then
+    echo "note: install the headless shell's missing libraries: $missing" >&2; return
+  fi
+  apt-get update -qq
+  # shellcheck disable=SC2046 # one package name per word
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $(browser_packages)
+}
+
+# Playwright's Chromium runtime packages, with the t64 names on releases that
+# renamed them (Ubuntu 24.04 and newer, Debian 13 and newer).
+browser_packages() {
+  local t64="" name
+  apt-cache show libglib2.0-0t64 >/dev/null 2>&1 && t64=t64
+  for name in libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 libglib2.0-0; do
+    echo "$name$t64"
+  done
+  echo libcairo2 libdbus-1-3 libdrm2 libgbm1 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
+    libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 fonts-liberation
+}
+
+# With APPARMOR_BWRAP=1, loads a profile that lets the pinned headless shell
+# build its own user-namespace sandbox under Ubuntu's restriction (as Ubuntu's
+# own profile for Chrome does); otherwise removes it.
+install_browser_profile() {
+  if [ "$APPARMOR_BWRAP" != 1 ]; then remove_browser_profile; return; fi
+  refuse_symlink "$BROWSER_PROFILE"
+  browser_profile > "$BROWSER_PROFILE"
+  chmod 0644 "$BROWSER_PROFILE"
+  apparmor_parser -r "$BROWSER_PROFILE"
+}
+
+# The headless shell's AppArmor profile: unconfined apart from allowing user
+# namespaces, attached to the pinned executable only.
+browser_profile() {
+  cat <<EOF
+# Written by deploy/agentc/host-setup.sh (APPARMOR_BWRAP=1); removed by --uninstall.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile agentc-browser $(headless_shell_path) flags=(unconfined) {
+  userns,
+}
+EOF
+}
+
+# Unloads and deletes the headless shell's AppArmor profile, if any.
+remove_browser_profile() {
+  [ -f "$BROWSER_PROFILE" ] && [ ! -L "$BROWSER_PROFILE" ] || return 0
+  apparmor_parser -R "$BROWSER_PROFILE" 2>/dev/null || true
+  rm -f -- "$BROWSER_PROFILE"
 }
 
 # Installs a read-only toolchain matching the owner's rustc (CI uses stable).
@@ -734,6 +899,7 @@ uninstall() {
   remove_service agentc-egress
   retire_account agentc-egress
   remove_apparmor_bwrap
+  remove_browser_profile
   remove_service agentc-firewall
   nft delete table inet agentc 2>/dev/null || true
   git config --system --unset-all safe.directory "^$STATE/mirror.git\$" 2>/dev/null || true
@@ -851,7 +1017,7 @@ remove_own_paths() {
   for name in agentc-supervisor agent-coordinator agentc-push claude codex node bwrap; do
     rm -f -- "$PREFIX/bin/$name"
   done
-  rm -rf -- "$PREFIX/rustup" "$PREFIX/cargo" "$PREFIX/rustup-init.sh" "$PREFIX"/suite-bin.*
+  rm -rf -- "$PREFIX/rustup" "$PREFIX/cargo" "$PREFIX/rustup-init.sh" "$PREFIX"/suite-bin.* "$BROWSERS"
   for name in impl rev push mirror.git shadow heartbeat.json heartbeat.tmp; do rm -rf -- "${STATE:?}/$name"; done
   for name in supervisor.toml cargo-config.toml agentc.nft push.toml; do
     rm -f -- "$ETC/$name"
@@ -938,6 +1104,7 @@ main() {
   create_dirs
   install_binaries
   install_apparmor_bwrap
+  install_headless_shell
   install_seeds
   install_toolchain
   refresh_mirror

@@ -26,6 +26,8 @@ pub mod sandbox;
 pub mod setup;
 pub mod shadow;
 pub mod staging_login;
+#[doc(hidden)]
+pub mod test_support;
 pub mod verification;
 
 /// The root-only directory holding each implementer launch's push-helper

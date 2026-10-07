@@ -352,6 +352,61 @@ authenticated Claude runs, and nested harness/browser sandbox compatibility
 remain owner verification work. No authenticated harness or
 native Codex success is claimed by these tests.
 
+The real-Bubblewrap tests (the `sandbox` unit tests and the `launch_relay` and
+`netns_relay` integration tests) run `/usr/bin/bwrap` unless
+`AGENTC_TEST_BWRAP` names another binary. With `--cargo-test`, the suite sets it
+to `/opt/agentc/bin/bwrap` when host-setup installed that copy, because Ubuntu's
+AppArmor restriction refuses the unconfined `/usr/bin/bwrap` to `agentc-impl`.
+Inside `codex sandbox`, Bubblewrap cannot nest: the uid mapping hides its root
+ownership and user namespaces are unavailable. The suite's Codex leg therefore
+sets `AGENTC_TEST_NESTED_SANDBOX=1`, and those tests return early with a
+`note: skipping <test>` line on stderr. `CODEX_SANDBOX` or
+`CODEX_SANDBOX_NETWORK_DISABLED` has the same effect. Without one of these
+variables, a Bubblewrap that cannot run fails the tests; the launch-time
+Bubblewrap checks are unchanged.
+
+### Reviewer headless browser
+
+A verifying reviewer gets the configured `browser` as `CHROME_BIN`. Host-setup
+installs Playwright's Chromium headless shell for it and writes its path to
+`browser` in `supervisor.toml`. The shell is pinned to Playwright v1.63.0's
+`chromium-headless-shell` (Chrome for Testing 153.0.8010.12, browser revision
+1243) for x86-64 and ARM64:
+
+| Architecture | Download | SHA-256 |
+| --- | --- | --- |
+| x86-64 | <https://cdn.playwright.dev/builds/cft/153.0.8010.12/linux64/chrome-headless-shell-linux64.zip> | `a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d` |
+| ARM64 | <https://cdn.playwright.dev/builds/cft/153.0.8010.12/linux-arm64/chrome-headless-shell-linux-arm64.zip> | `d433c45172c7836e38124fe545f767b02210bfb43a6262f08a297473a8e91c99` |
+
+The x86-64 zip is byte-identical to Google's Chrome for Testing build of the
+same version. Host-setup downloads the zip as root, refuses it unless the
+checksum matches, and unpacks it `root:root` (directories and the executable
+`0755`, other files `0644`) under `/opt/agentc/browsers/1243/`. A re-run keeps
+a verified install and deletes other revisions. When the dynamic loader cannot
+resolve one of the shell's libraries, host-setup installs Playwright's Chromium
+runtime package list with `apt-get` (the `t64` names on Ubuntu 24.04+ and
+Debian 13+), plus `fonts-liberation`. With `APPARMOR_BWRAP=1` it also loads
+`/etc/apparmor.d/agentc-browser`. Like Ubuntu's own profile for Chrome, that
+profile is unconfined except that it allows user namespaces, so the shell can
+start its own sandbox under the restriction. It attaches only to the pinned
+executable.
+
+`browser` is chosen in this order:
+
+1. the pinned headless shell, when installed;
+2. a non-snap `/usr/bin/chromium`, `/usr/bin/chromium-browser` or
+   `/usr/bin/google-chrome`;
+3. the in-code default, `/usr/bin/chromium`.
+
+A snap wrapper is never chosen. Ubuntu's `chromium-browser` is one: a snap
+cannot run as `agentc-rev` outside a login session. Set `HEADLESS_SHELL=0` to
+skip the download, for example on a host without UI verification.
+Architectures other than x86-64 and ARM64 also skip it. `--uninstall`
+removes `/opt/agentc/browsers` and the profile. The containment suite fails
+if `browser` is a snap wrapper or if the pinned shell is not
+`755 root:root`. With a staging coordinator running, the suite also has
+`agentc-rev` render the staging dashboard with that browser.
+
 ## Implementer candidate-push helper
 
 An implementer launch publishes its candidate through `agentc-push`, a helper
@@ -561,7 +616,8 @@ pasted output. Stop at the first step that fails.
 Prerequisites: the owner's pinned `claude` and `codex` at `~/.local/bin`
 (host-setup always installs both, so `codex` is required even when only Claude
 runs), Bubblewrap 0.8 or newer, and, for UI verification, `node` on `PATH` or
-named by `NODE=`.
+named by `NODE=`. The installer downloads the pinned reviewer
+[headless browser](#reviewer-headless-browser) and may `apt-get` its libraries.
 
 1. **Build on the host from one clean revision.** The published release
    packages are x86-64 only, so an ARM64 host such as oracle-1 builds its own

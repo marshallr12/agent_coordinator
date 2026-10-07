@@ -408,6 +408,7 @@ fn await_probe(mut command: Command, what: &str) -> Result<()> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use crate::test_support::skip_when_nested;
     use crate::{launch, profile, role_settings};
     use std::fs::{File, OpenOptions};
     use std::os::fd::AsRawFd;
@@ -445,6 +446,7 @@ mod tests {
                 state_dir: root.path().join("roles"),
                 cargo_config_seed: root.path().join("cargo-seed.toml"),
                 bin_dir: root.path().join("bin"),
+                bubblewrap: crate::test_support::bubblewrap(),
                 ..Config::default()
             };
             fs::write(&config.cargo_config_seed, confine::CARGO_CONFIG_SEED).unwrap();
@@ -633,6 +635,11 @@ test ! -e "$HOME/candidate-write"
 
     #[test]
     fn real_bubblewrap_refuses_cross_run_writes_and_seed_replacement_for_both_roles() {
+        if skip_when_nested(
+            "real_bubblewrap_refuses_cross_run_writes_and_seed_replacement_for_both_roles",
+        ) {
+            return;
+        }
         for role in [Role::Implementer, Role::Reviewer] {
             let fixture = Fixture::new(role);
             let mut script = String::from(
@@ -775,6 +782,9 @@ deny unshare -Ur true
 
     #[test]
     fn an_implementer_reaches_its_push_socket_read_only_inside_the_sandbox() {
+        if skip_when_nested("an_implementer_reaches_its_push_socket_read_only_inside_the_sandbox") {
+            return;
+        }
         let mut fixture = Fixture::new(Role::Implementer);
         let directory = fixture.config.state_dir.join("push/l1/sock");
         fs::create_dir_all(&directory).unwrap();
@@ -815,6 +825,11 @@ test -e "$RUN/prompt.md"
 
     #[test]
     fn preflight_refuses_an_unprotected_relay_binary_and_privileged_relay_ports() {
+        if skip_when_nested(
+            "preflight_refuses_an_unprotected_relay_binary_and_privileged_relay_ports",
+        ) {
+            return;
+        }
         let mut fixture = Fixture::new(Role::Reviewer);
         let error = format!("{:#}", check(&fixture.spec, &fixture.config).unwrap_err());
         assert!(error.contains("namespace relay"), "{error}");
@@ -825,6 +840,11 @@ test -e "$RUN/prompt.md"
 
     #[test]
     fn relay_probe_runs_the_installed_binary_and_refuses_one_without_the_relay() {
+        if skip_when_nested(
+            "relay_probe_runs_the_installed_binary_and_refuses_one_without_the_relay",
+        ) {
+            return;
+        }
         let fixture = Fixture::new(Role::Reviewer);
         probe_relay(&fixture.spec, &fixture.config).unwrap();
         let program = crate::relay::program(&fixture.config);
@@ -839,6 +859,9 @@ test -e "$RUN/prompt.md"
 
     #[test]
     fn claude_launches_cannot_reach_host_loopback_listeners() {
+        if skip_when_nested("claude_launches_cannot_reach_host_loopback_listeners") {
+            return;
+        }
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::net::TcpStream::connect(("127.0.0.1", port)).expect("reachable from the host");
@@ -880,6 +903,11 @@ test -e "$RUN/prompt.md"
 
     #[test]
     fn inherited_host_file_and_directory_descriptors_are_closed_before_bubblewrap() {
+        if skip_when_nested(
+            "inherited_host_file_and_directory_descriptors_are_closed_before_bubblewrap",
+        ) {
+            return;
+        }
         let fixture = Fixture::new(Role::Implementer);
         let file = OpenOptions::new()
             .write(true)
@@ -901,6 +929,11 @@ test -e "$RUN/prompt.md"
 
     #[test]
     fn real_bubblewrap_reads_sealed_stdin_but_cannot_rewrite_it_or_the_host_prompt() {
+        if skip_when_nested(
+            "real_bubblewrap_reads_sealed_stdin_but_cannot_rewrite_it_or_the_host_prompt",
+        ) {
+            return;
+        }
         let fixture = Fixture::new(Role::Implementer);
         fixture.successful(
             r#"
@@ -967,6 +1000,11 @@ test "$(cat /proc/self/fd/0)" = 'mock prompt'
 
     #[test]
     fn namespace_teardown_kills_detached_descendants_on_exit_and_wrapper_kill() {
+        if skip_when_nested(
+            "namespace_teardown_kills_detached_descendants_on_exit_and_wrapper_kill",
+        ) {
+            return;
+        }
         for kill_wrapper in [false, true] {
             let fixture = Fixture::new(Role::Implementer);
             let script = if kill_wrapper {
@@ -1006,6 +1044,9 @@ test "$(cat /proc/self/fd/0)" = 'mock prompt'
 
     #[test]
     fn bubblewrap_prerequisites_fail_closed_and_codex_remains_native() {
+        if skip_when_nested("bubblewrap_prerequisites_fail_closed_and_codex_remains_native") {
+            return;
+        }
         let fixture = Fixture::new(Role::Implementer);
         probe(&fixture.config, Role::Implementer).unwrap();
         probe(&fixture.config, Role::Reviewer).unwrap();
@@ -1049,6 +1090,9 @@ test "$(cat /proc/self/fd/0)" = 'mock prompt'
 
     #[test]
     fn project_setup_runs_sandboxed_and_writes_only_the_clone_and_caches() {
+        if skip_when_nested("project_setup_runs_sandboxed_and_writes_only_the_clone_and_caches") {
+            return;
+        }
         let script = r#"
 deny() { if "$@" 2>/dev/null; then echo "unexpected success: $*" >&2; exit 31; fi; }
 printf fetched > "$1/fetched"
@@ -1076,6 +1120,9 @@ echo setup-output
 
     #[test]
     fn a_failed_slow_or_codex_setup_refuses_the_launch() {
+        if skip_when_nested("a_failed_slow_or_codex_setup_refuses_the_launch") {
+            return;
+        }
         let (mut fixture, _) = with_setup("exit 3");
         let error = crate::setup::run(&fixture.spec, &fixture.config).unwrap_err();
         assert!(format!("{error:#}").contains("setup failed"), "{error:#}");
