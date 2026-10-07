@@ -4,11 +4,13 @@
 //! refuses an approval without non-empty evidence for every acceptance
 //! criterion, and posts the verdict with its `review_independence`. Any
 //! failure after the claim releases the review, which queues it again.
+use super::RunConfig;
 use crate::profile::Harness;
 use anyhow::{Context, Result, bail, ensure};
 use coordinator_core::workflow::{ReviewFindingInput, ReviewInput};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// The reviewer role contract; [`render_prompt`] fills its placeholders.
@@ -82,20 +84,57 @@ pub trait ReviewDriver {
     /// Releases the claimed review with a handoff; the service queues it again.
     fn release_review(&mut self, review: &Review, claim: &ReviewClaim, summary: &str)
     -> Result<()>;
+    /// The failed-verdict counts this host keeps between polls.
+    fn strikes(&mut self) -> &mut Strikes;
+}
+
+/// Consecutive failed verdicts per submission, kept in memory, so a broken
+/// reviewer cannot burn launches on one submission forever.
+#[derive(Debug, Default)]
+pub struct Strikes(HashMap<String, u32>);
+
+impl Strikes {
+    /// The failed verdicts recorded for `submission` since its last success.
+    pub fn count(&self, submission: &str) -> u32 {
+        self.0.get(submission).copied().unwrap_or(0)
+    }
+
+    /// Counts one more failure for `submission`, or clears it on success.
+    fn record(&mut self, submission: &str, failed: bool) {
+        if failed {
+            *self.0.entry(submission.to_owned()).or_default() += 1;
+        } else {
+            self.0.remove(submission);
+        }
+    }
 }
 
 /// What one review poll did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReviewOutcome {
     Idle,
-    Decided { activity: String, decision: String },
-    Requeued { activity: String, reason: String },
+    Decided {
+        activity: String,
+        decision: String,
+    },
+    Requeued {
+        activity: String,
+        reason: String,
+    },
+    /// The submission's verdicts failed `failures` times in a row; it is no
+    /// longer claimed until the loop restarts.
+    Skipped {
+        submission: String,
+        failures: u32,
+    },
     Failed(String),
 }
 
 /// One review poll: claim the offered review, launch the reviewer, and post
 /// its verdict, or release the review when the verdict cannot be posted.
-pub fn review(driver: &mut dyn ReviewDriver, harness: Harness) -> ReviewOutcome {
+/// After `settings.review_attempts` failed verdicts in a row a submission is
+/// skipped instead.
+pub fn review(driver: &mut dyn ReviewDriver, settings: &RunConfig) -> ReviewOutcome {
     let next = match driver.next_review() {
         Ok(next) => next,
         Err(error) => return ReviewOutcome::Failed(format!("reviewer next: {error:#}")),
@@ -103,6 +142,26 @@ pub fn review(driver: &mut dyn ReviewDriver, harness: Harness) -> ReviewOutcome 
     let Some(review) = offered(&next) else {
         return ReviewOutcome::Idle;
     };
+    let failures = driver.strikes().count(&review.submission);
+    if failures >= settings.review_attempts {
+        let submission = review.submission;
+        return ReviewOutcome::Skipped {
+            submission,
+            failures,
+        };
+    }
+    let outcome = claim_and_judge(driver, settings.harness, review.clone());
+    let failed = matches!(outcome, ReviewOutcome::Requeued { .. });
+    driver.strikes().record(&review.submission, failed);
+    outcome
+}
+
+/// Claims `review`, then posts its verdict or releases it.
+fn claim_and_judge(
+    driver: &mut dyn ReviewDriver,
+    harness: Harness,
+    review: Review,
+) -> ReviewOutcome {
     let claim = match driver.claim_review(&review) {
         Ok(claim) => claim,
         Err(error) => {
@@ -220,6 +279,10 @@ impl Verdict {
             empty.is_none(),
             "the approval has an empty criteria_evidence entry"
         );
+        ensure!(
+            !amended(claim) || self.amendment_decision.is_some(),
+            "the approval does not decide the submission's ac_amendment"
+        );
         for criterion in self.judged_criteria(claim) {
             ensure!(
                 evidence.iter().any(|e| same(&e.criterion, &criterion)),
@@ -264,9 +327,21 @@ impl Verdict {
             decision: decision.into(),
             summary: self.summary_text(),
             findings: findings.collect(),
-            amendment_decision: self.amendment_decision.clone(),
+            amendment_decision: self.amendment(claim),
             review_independence: Some(INDEPENDENCE.into()),
         })
+    }
+
+    /// The `amendment_decision` the service accepts: none without an
+    /// `ac_amendment`, and never `accepted` with requested changes. Requested
+    /// changes leave the amendment undecided (the service refuses `accepted`
+    /// there); a rejection is kept, since it requests changes either way.
+    fn amendment(&self, claim: &ReviewClaim) -> Option<String> {
+        let decision = self.amendment_decision.as_deref();
+        match (amended(claim), self.decision.as_str(), decision) {
+            (false, _, _) | (true, "request_changes", Some("accepted")) => None,
+            _ => self.amendment_decision.clone(),
+        }
     }
 
     /// The reviewer's summary followed by its per-criterion evidence.
@@ -315,6 +390,11 @@ pub fn render_prompt(
     prompt.push_str(&format!("\n<review-data>\n{data}\n</review-data>\n"));
     prompt.push_str(&super::instruction_blocks(files));
     prompt
+}
+
+/// Whether the claimed submission carries an `ac_amendment`.
+fn amended(claim: &ReviewClaim) -> bool {
+    claim.submission["ac_amendment"].is_object()
 }
 
 /// The strings in a JSON array.

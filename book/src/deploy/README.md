@@ -738,8 +738,16 @@ that fails this check, cannot be parsed, or that the service refuses is not
 posted: the review is released and queued again. Otherwise root posts it with
 `reviews decide`, findings as `required` (changes requested) or `advisory`
 (approval), the evidence in the summary, and `review_independence =
-distinct_launch` recorded on the decision. The clone, run and mirror branch
-are removed after every review.
+distinct_launch` recorded on the decision. The `amendment_decision` is sent
+only when the submission carries an `ac_amendment`; an approval must decide
+it, and with requested changes an `accepted` amendment is left undecided (the
+service accepts only `rejected` there). Before claiming, root checks that the
+subject's current submission is the one `next` offered; if the claim reply
+names no attempt, root releases the activity's current attempt rather than
+hold the review for its lease. After `[run] review_attempts` (default 3)
+failed verdicts in a row for one submission, the loop stops claiming it and
+logs why, until it restarts. The clone, run and mirror branch are removed
+after every review.
 
 `--once` polls a single time. Recovery claims, continuation claims for work
 longer than `max_attempt_seconds`, the kill switch and the other-vendor audit

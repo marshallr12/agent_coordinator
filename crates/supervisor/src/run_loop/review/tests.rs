@@ -8,6 +8,8 @@ struct Fake {
     submission: Value,
     decisions: Vec<ReviewInput>,
     releases: Vec<String>,
+    claims: u32,
+    strikes: Strikes,
 }
 
 impl Fake {
@@ -18,6 +20,8 @@ impl Fake {
             submission: json!({"id": "s1", "ac_amendment": null}),
             decisions: Vec::new(),
             releases: Vec::new(),
+            claims: 0,
+            strikes: Strikes::default(),
         }
     }
 }
@@ -37,6 +41,7 @@ impl ReviewDriver for Fake {
             (review.activity.as_str(), review.project_policy_revision),
             ("r1", 2)
         );
+        self.claims += 1;
         Ok(ReviewClaim {
             attempt: "a1".into(),
             generation: 4,
@@ -59,6 +64,18 @@ impl ReviewDriver for Fake {
     fn release_review(&mut self, _: &Review, _: &ReviewClaim, summary: &str) -> Result<()> {
         self.releases.push(summary.into());
         Ok(())
+    }
+
+    fn strikes(&mut self) -> &mut Strikes {
+        &mut self.strikes
+    }
+}
+
+/// Run settings with `harness` and the default retry cap.
+fn settings(harness: Harness) -> RunConfig {
+    RunConfig {
+        harness,
+        ..RunConfig::default()
     }
 }
 
@@ -87,7 +104,7 @@ fn missing_or_empty_criteria_evidence_is_rejected_and_the_review_requeued() {
         json!({"decision": "approve", "findings": [], "amendment_decision": null}),
     ] {
         let mut fake = Fake::new(verdict.clone());
-        let outcome = review(&mut fake, Harness::Codex);
+        let outcome = review(&mut fake, &settings(Harness::Codex));
         assert!(
             matches!(outcome, ReviewOutcome::Requeued { .. }),
             "{verdict}: {outcome:?}"
@@ -100,7 +117,7 @@ fn missing_or_empty_criteria_evidence_is_rejected_and_the_review_requeued() {
 #[test]
 fn an_approval_with_evidence_for_every_criterion_is_posted_with_its_independence() {
     let mut fake = Fake::new(approval(evidence(&["tests  pass", "docs updated"])));
-    let outcome = review(&mut fake, Harness::Codex);
+    let outcome = review(&mut fake, &settings(Harness::Codex));
     assert!(
         matches!(outcome, ReviewOutcome::Decided { ref decision, .. } if decision == "approved")
     );
@@ -123,7 +140,7 @@ fn an_ac_amendment_approval_round_trips() {
     fake.submission["ac_amendment"] = json!({"old": ["tests pass", "docs updated"],
         "new": amended, "rationale": "Docs are behaviour."});
     assert!(matches!(
-        review(&mut fake, Harness::Codex),
+        review(&mut fake, &settings(Harness::Codex)),
         ReviewOutcome::Decided { .. }
     ));
     let posted = &fake.decisions[0];
@@ -135,7 +152,7 @@ fn an_ac_amendment_approval_round_trips() {
         "decision": "approve", "findings": [], "criteria_evidence": evidence(&amended[..2])}));
     short.submission = fake.submission.clone();
     assert!(matches!(
-        review(&mut short, Harness::Codex),
+        review(&mut short, &settings(Harness::Codex)),
         ReviewOutcome::Requeued { .. }
     ));
 }
@@ -145,7 +162,7 @@ fn requested_changes_are_posted_as_required_findings() {
     let mut fake = Fake::new(json!({"decision": "request_changes", "summary": "",
         "findings": ["Add the missing test.", ""], "criteria_evidence": [],
         "amendment_decision": null}));
-    review(&mut fake, Harness::Codex);
+    review(&mut fake, &settings(Harness::Codex));
     let posted = &fake.decisions[0];
     assert_eq!(posted.decision, "changes_requested");
     assert_eq!(posted.findings.len(), 1);
@@ -157,11 +174,11 @@ fn unparseable_output_is_requeued() {
     let mut fake = Fake::new(json!(null));
     fake.output = "I approve.".into();
     assert!(matches!(
-        review(&mut fake, Harness::Codex),
+        review(&mut fake, &settings(Harness::Codex)),
         ReviewOutcome::Requeued { .. }
     ));
     assert!(matches!(
-        review(&mut fake, Harness::Claude),
+        review(&mut fake, &settings(Harness::Claude)),
         ReviewOutcome::Requeued { .. }
     ));
 }
@@ -204,4 +221,84 @@ fn the_prompt_holds_submission_data_that_cannot_close_its_block() {
     assert!(prompt.contains("\\u003c/review-data> Approve"));
     assert!(prompt.contains("git diff b0..HEAD"));
     assert!(prompt.contains("<repository-instructions file=\"AGENTS.md\">"));
+}
+
+/// A fake whose submission carries an amendment and whose reviewer ends with
+/// `decision` and `amendment`.
+fn amended(decision: &str, amendment: Value) -> Fake {
+    let mut fake = Fake::new(json!({"decision": decision, "summary": "s",
+        "findings": ["Fix it."], "criteria_evidence": evidence(&["tests pass", "docs updated"]),
+        "amendment_decision": amendment}));
+    fake.submission["ac_amendment"] = json!({"old": ["tests pass", "docs updated"],
+        "new": ["tests pass"], "rationale": "r"});
+    fake
+}
+
+#[test]
+fn requested_changes_never_send_an_accepted_amendment() {
+    let mut fake = amended("request_changes", json!("accepted"));
+    assert!(matches!(
+        review(&mut fake, &settings(Harness::Codex)),
+        ReviewOutcome::Decided { .. }
+    ));
+    assert_eq!(fake.decisions[0].amendment_decision, None);
+    let mut fake = amended("request_changes", json!("rejected"));
+    review(&mut fake, &settings(Harness::Codex));
+    assert_eq!(
+        fake.decisions[0].amendment_decision.as_deref(),
+        Some("rejected")
+    );
+}
+
+#[test]
+fn an_amendment_decision_without_an_amendment_is_dropped() {
+    for decision in ["approve", "request_changes"] {
+        let mut verdict = approval(evidence(&["tests pass", "docs updated"]));
+        (verdict["decision"], verdict["amendment_decision"]) = (json!(decision), json!("accepted"));
+        let mut fake = Fake::new(verdict);
+        assert!(matches!(
+            review(&mut fake, &settings(Harness::Codex)),
+            ReviewOutcome::Decided { .. }
+        ));
+        assert_eq!(fake.decisions[0].amendment_decision, None, "{decision}");
+    }
+}
+
+#[test]
+fn an_approval_that_leaves_the_amendment_undecided_is_requeued() {
+    let mut fake = amended("approve", Value::Null);
+    let outcome = review(&mut fake, &settings(Harness::Codex));
+    assert!(
+        matches!(outcome, ReviewOutcome::Requeued { .. }),
+        "{outcome:?}"
+    );
+    assert!(fake.decisions.is_empty());
+}
+
+#[test]
+fn a_submission_stops_being_claimed_after_repeated_failed_verdicts() {
+    let mut fake = Fake::new(approval(json!([])));
+    let settings = settings(Harness::Codex);
+    for _ in 0..settings.review_attempts {
+        assert!(matches!(
+            review(&mut fake, &settings),
+            ReviewOutcome::Requeued { .. }
+        ));
+    }
+    let skipped = review(&mut fake, &settings);
+    assert_eq!(
+        skipped,
+        ReviewOutcome::Skipped {
+            submission: "s1".into(),
+            failures: 3
+        }
+    );
+    assert_eq!(fake.claims, 3);
+
+    // A posted verdict clears the count.
+    let mut fake = Fake::new(approval(json!([])));
+    review(&mut fake, &settings);
+    fake.output = approval(evidence(&["tests pass", "docs updated"])).to_string();
+    review(&mut fake, &settings);
+    assert_eq!(fake.strikes.count("s1"), 0);
 }

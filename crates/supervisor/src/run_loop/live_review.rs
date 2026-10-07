@@ -5,7 +5,7 @@
 //! own clone at the candidate revision, gets no coordinator credential, and
 //! is removed with its `$RUN` once its final output has been read.
 use super::live::{self, binding_path, mirror};
-use super::review::{self, Review, ReviewClaim, ReviewDriver};
+use super::review::{self, Review, ReviewClaim, ReviewDriver, Strikes};
 use super::rooted;
 use crate::clone;
 use crate::config::Config;
@@ -35,6 +35,7 @@ pub struct LiveReviewer {
     client: CoordinatorClient,
     project: String,
     account: Account,
+    strikes: Strikes,
 }
 
 impl LiveReviewer {
@@ -59,6 +60,7 @@ impl LiveReviewer {
             client: crate::shadow::client_from(&text, &path, origin, insecure)?,
             project: project.to_owned(),
             account: Account::lookup(Role::Reviewer.user(config))?,
+            strikes: Strikes::default(),
         })
     }
 
@@ -271,15 +273,34 @@ impl LiveReviewer {
     }
 
     /// `reviews <subcommand>` arguments naming the claimed attempt.
-    fn activity_args(subcommand: &str, review: &Review, claim: &ReviewClaim) -> Vec<String> {
+    fn activity_args(
+        subcommand: &str,
+        activity: &str,
+        attempt: &str,
+        generation: u64,
+    ) -> Vec<String> {
         vec![
             "--json".into(),
             "reviews".into(),
             subcommand.into(),
-            format!("--activity={}", review.activity),
-            format!("--attempt={}", claim.attempt),
-            format!("--generation={}", claim.generation),
+            format!("--activity={activity}"),
+            format!("--attempt={attempt}"),
+            format!("--generation={generation}"),
         ]
+    }
+
+    /// Releases `attempt` of `activity` in `session` with a handoff `summary`.
+    fn release_attempt(
+        &self,
+        session: Uuid,
+        activity: &str,
+        attempt: (&str, u64),
+        summary: &str,
+    ) -> Result<()> {
+        let mut args = Self::activity_args("release", activity, attempt.0, attempt.1);
+        args.push("--input=-".into());
+        let body = serde_json::to_vec(&json!({"summary": summary}))?;
+        self.cli(session, &args, &body).map(drop)
     }
 }
 
@@ -293,6 +314,7 @@ impl ReviewDriver for LiveReviewer {
     /// claims through a root-owned checkout the CLI verifies the candidate in.
     fn claim_review(&mut self, review: &Review) -> Result<ReviewClaim> {
         let workflow = self.get(&format!("tasks/{}/workflow", review.subject))?;
+        let submission = current_submission(review, &workflow)?;
         let task = self.get(&format!("tasks/{}", review.subject))?;
         let session = Uuid::new_v4();
         let checkout = verdict_home(&self.config)
@@ -302,13 +324,18 @@ impl ReviewDriver for LiveReviewer {
             .checkout(&checkout)
             .and_then(|()| self.claim_in(review, session, &checkout));
         let _ = std::fs::remove_dir_all(&checkout);
-        let attempt = &claimed?["data"]["attempt"];
+        let lookup = || self.get(&format!("workflow-activities/{}", review.activity));
+        let summary = "agentc-supervisor could not read its claim; the review is queued again.";
+        let release = |attempt: &str, generation| {
+            self.release_attempt(session, &review.activity, (attempt, generation), summary)
+        };
+        let (attempt, generation) = held_attempt(&claimed?, lookup, release)?;
         Ok(ReviewClaim {
-            attempt: attempt["id"].as_str().context("no attempt id")?.to_owned(),
-            generation: attempt["generation"].as_u64().context("no generation")?,
+            attempt,
+            generation,
             session,
             criteria: review::strings(task["acceptance_criteria"].as_array().map_or(&[], |v| v)),
-            submission: workflow["submission"].clone(),
+            submission,
         })
     }
 
@@ -326,7 +353,8 @@ impl ReviewDriver for LiveReviewer {
             fields.remove("generation");
             fields.remove("submission_id");
         }
-        let mut args = Self::activity_args("decide", review, claim);
+        let mut args =
+            Self::activity_args("decide", &review.activity, &claim.attempt, claim.generation);
         args.extend([
             format!("--submission={}", review.submission),
             "--input=-".into(),
@@ -341,11 +369,52 @@ impl ReviewDriver for LiveReviewer {
         claim: &ReviewClaim,
         summary: &str,
     ) -> Result<()> {
-        let mut args = Self::activity_args("release", review, claim);
-        args.push("--input=-".into());
-        let body = serde_json::to_vec(&json!({"summary": summary}))?;
-        self.cli(claim.session, &args, &body).map(drop)
+        let attempt = (claim.attempt.as_str(), claim.generation);
+        self.release_attempt(claim.session, &review.activity, attempt, summary)
     }
+
+    fn strikes(&mut self) -> &mut Strikes {
+        &mut self.strikes
+    }
+}
+
+/// The subject's current submission, refused unless it is the one `next`
+/// offered (checked before the claim, so nothing is held on a mismatch).
+fn current_submission(review: &Review, workflow: &Value) -> Result<Value> {
+    let submission = &workflow["submission"];
+    ensure!(
+        submission["id"].as_str() == Some(review.submission.as_str()),
+        "the subject's submission is no longer {}",
+        review.submission
+    );
+    Ok(submission.clone())
+}
+
+/// The attempt and generation a claim reply names. A reply that names none
+/// may still have claimed: the activity's current attempt is then released,
+/// so the review is never held for its whole lease, and the claim fails.
+fn held_attempt(
+    reply: &Value,
+    activity: impl FnOnce() -> Result<Value>,
+    release: impl FnOnce(&str, u64) -> Result<()>,
+) -> Result<(String, u64)> {
+    if let Some(found) = attempt_of(&reply["data"]["attempt"]) {
+        return Ok(found);
+    }
+    let activity = activity()?;
+    let record = activity.get("activity").unwrap_or(&activity);
+    let (attempt, generation) = attempt_of(&record["current_attempt"])
+        .context("neither the claim reply nor the activity names an attempt")?;
+    release(&attempt, generation)?;
+    anyhow::bail!("the claim reply named no attempt; attempt {attempt} was released")
+}
+
+/// The `id` and `generation` of an attempt object.
+fn attempt_of(attempt: &Value) -> Option<(String, u64)> {
+    Some((
+        attempt["id"].as_str()?.to_owned(),
+        attempt["generation"].as_u64()?,
+    ))
 }
 
 impl LiveReviewer {
@@ -493,6 +562,45 @@ mod tests {
                 .iter()
                 .all(|(name, _)| !name.starts_with("AGENT_COORDINATOR"))
         );
+    }
+
+    #[test]
+    fn a_claim_reply_without_an_attempt_releases_the_held_review() {
+        let reply = json!({"data": {"attempt": {"id": "a1", "generation": 2}}});
+        let never = || -> Result<Value> { panic!("no lookup needed") };
+        let found = held_attempt(&reply, never, |_, _| panic!("no release")).unwrap();
+        assert_eq!(found, ("a1".to_owned(), 2));
+        let activity = json!({"activity": {"current_attempt": {"id": "a9", "generation": 5}}});
+        let mut released = None;
+        let error = held_attempt(
+            &json!({"data": {}}),
+            || Ok(activity),
+            |a, g| {
+                released = Some((a.to_owned(), g));
+                Ok(())
+            },
+        );
+        assert!(error.is_err());
+        assert_eq!(released, Some(("a9".to_owned(), 5)));
+        let none = held_attempt(&json!({}), || Ok(json!({})), |_, _| panic!("nothing held"));
+        assert!(none.is_err());
+    }
+
+    #[test]
+    fn a_superseded_submission_is_refused_before_the_claim() {
+        let review = Review {
+            activity: "r1".into(),
+            subject: "t1".into(),
+            submission: "s1".into(),
+            title: String::new(),
+            project_policy_revision: 1,
+            workflow_policy_revision: 0,
+        };
+        let current = json!({"submission": {"id": "s1", "ac_amendment": null}});
+        assert_eq!(current_submission(&review, &current).unwrap()["id"], "s1");
+        let moved = json!({"submission": {"id": "s2"}});
+        assert!(current_submission(&review, &moved).is_err());
+        assert!(current_submission(&review, &json!({"submission": null})).is_err());
     }
 
     #[test]

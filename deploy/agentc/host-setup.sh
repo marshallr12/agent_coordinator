@@ -474,6 +474,7 @@ EOF
 # branch = "main"                # mirror branch each clone starts from
 # allow_insecure_loopback = false
 # reviewer = false               # also review, posting with $STATE/verdict/home/credentials.toml
+# review_attempts = 3            # stop claiming a submission after this many failed verdicts
 # budget_minutes = 240           # stop renewing a launch's attempt after this
 # drain_seconds = 30             # on stop: SIGTERM, then SIGKILL after this
 

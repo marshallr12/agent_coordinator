@@ -59,6 +59,9 @@ pub struct RunConfig {
     pub allow_insecure_loopback: bool,
     /// Also claim, launch and decide reviewer work (see [`review`]).
     pub reviewer: bool,
+    /// Stop claiming a submission after this many failed verdicts in a row
+    /// (until the loop restarts).
+    pub review_attempts: u32,
     /// Stop renewing a launch's attempt after this many minutes.
     pub budget_minutes: u64,
     /// On stop, how long a launch may take to exit after SIGTERM before
@@ -77,6 +80,7 @@ impl Default for RunConfig {
             branch: "main".into(),
             allow_insecure_loopback: false,
             reviewer: false,
+            review_attempts: 3,
             budget_minutes: 240,
             drain_seconds: 30,
         }
@@ -252,7 +256,7 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
         return Outcome::Refused(reason);
     }
     if config.run.reviewer {
-        review_hook(driver, config.run.harness);
+        review_hook(driver, &config.run);
     }
     let next = match driver.next(Role::Implementer) {
         Ok(next) => next,
@@ -283,7 +287,7 @@ pub fn refusal(driver: &impl Driver, settings: &RunConfig) -> Option<String> {
 
 /// Runs one review poll when the driver has a reviewer side; without one it
 /// only reports reviewer work it cannot take.
-pub fn review_hook(driver: &mut impl Driver, harness: Harness) {
+pub fn review_hook(driver: &mut impl Driver, settings: &RunConfig) {
     let Some(reviewer) = driver.reviewer() else {
         if let Ok(next) = driver.next(Role::Reviewer)
             && !next["action"].is_null()
@@ -292,7 +296,7 @@ pub fn review_hook(driver: &mut impl Driver, harness: Harness) {
         }
         return;
     };
-    let outcome = review::review(reviewer, harness);
+    let outcome = review::review(reviewer, settings);
     if outcome != review::ReviewOutcome::Idle {
         eprintln!("agentc-supervisor run: review: {outcome:?}");
     }

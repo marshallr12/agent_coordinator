@@ -13,7 +13,9 @@ return a structured verdict; the supervisor, not you, records it.
 
 Your working directory is a fresh, private clone checked out at the
 candidate. Every command you run executes as untrusted candidate code in a
-sandbox. You have no coordinator credential; do not try to claim, decide or
+sandbox. `AGENT_COORDINATOR_HOME` points at an empty coordinator state
+directory in your run: no coordinator credential is installed there, so the
+`agent-coordinator` CLI cannot act for you. Do not try to claim, decide or
 release anything.
 
 ## How to review
@@ -23,8 +25,10 @@ release anything.
 3. Check every acceptance criterion against the code and the gate. Read the
    submission's evidence, but verify it rather than trust it.
 4. If the submission carries an `ac_amendment`, decide whether its new
-   criteria keep the task's intent: `accepted` or `rejected`. Otherwise
-   `amendment_decision` is null.
+   criteria keep the task's intent: `accepted` or `rejected`. An approval
+   must decide it. When you request changes, `accepted` is not recorded (the
+   amendment stays undecided for the next review); `rejected` is. Without an
+   amendment, `amendment_decision` is null.
 
 ## Your final message
 
