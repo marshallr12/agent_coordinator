@@ -11,6 +11,7 @@
 //! each launch used.
 //! [`lease`] renews a running launch's attempt; [`record`] persists launch
 //! identity and releases attempts on exit, failure, drain and recovery.
+pub mod binding;
 pub mod cost;
 pub mod health;
 pub mod lease;
@@ -60,8 +61,12 @@ pub struct RunConfig {
     pub min_free_mib: u64,
     /// Branch of the host mirror (`<state_dir>/mirror.git`) clones start from.
     pub branch: String,
-    /// Permit plain HTTP to a loopback coordinator (staging).
+    /// Permit plain HTTP to a loopback coordinator (staging); an `https`
+    /// or non-loopback origin never gets the flag ([`binding::insecure`]).
     pub allow_insecure_loopback: bool,
+    /// The coordinator and project to work on instead of the mirror
+    /// branch's `.agent-coordinator.toml` (a staging coordinator).
+    pub binding: Option<binding::Binding>,
     /// Also claim, launch and decide reviewer work (see [`review`]).
     pub reviewer: bool,
     /// Stop claiming a submission after this many failed verdicts in a row
@@ -84,6 +89,7 @@ impl Default for RunConfig {
             min_free_mib: 20 * 1024,
             branch: "main".into(),
             allow_insecure_loopback: false,
+            binding: None,
             reviewer: false,
             review_attempts: 3,
             budget_minutes: 240,

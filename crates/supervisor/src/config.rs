@@ -176,6 +176,17 @@ mod tests {
     }
 
     #[test]
+    fn a_run_binding_is_optional_and_must_be_complete() {
+        assert_eq!(Config::default().run.binding, None);
+        let text = "[run.binding]\nservice_url = \"http://127.0.0.1:18080\"\nproject_id = \"p\"\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.run.binding.unwrap().project_id, "p");
+        assert!(toml::from_str::<Config>("[run.binding]\nproject_id = \"p\"\n").is_err());
+        let extra = format!("{text}repository = \"x\"\n");
+        assert!(toml::from_str::<Config>(&extra).is_err());
+    }
+
+    #[test]
     fn unknown_keys_are_rejected() {
         assert!(toml::from_str::<Config>("bin_dirr = '/x'").is_err());
     }

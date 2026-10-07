@@ -5,6 +5,7 @@
     deploy/agentc/staging.py status
     deploy/agentc/staging.py cli ROLE ...  # ROLE: owner | impl | rev
     deploy/agentc/staging.py credentials   # print the supervised-install commands
+    deploy/agentc/staging.py project --repository-url URL  # project for the live loop
     deploy/agentc/staging.py down
     deploy/agentc/staging.py destroy --yes
 
@@ -298,11 +299,32 @@ def cmd_destroy(st, args):
     return 0
 
 
+def cmd_project(st, args):
+    """Creates another staging project whose repository is `--repository-url`
+    and prints the `[run.binding]` table that points the live loop at it.
+
+    The loop's candidates are published by the push helper to its GitHub
+    repository and read back from the project's repository, so for the live
+    loop this must be the mirror's origin URL, exactly as Git reports it."""
+    if st.state() is None or st.pid() is None:
+        sys.exit("staging is not running; run `up` first")
+    admin = json.loads(st.path("secrets", "admin.json").read_text())
+    api = Api(st.origin, admin["username"], admin["password"])
+    project = create_project(st, api, args.repository_url, name=args.name)
+    binding = f'service_url = "{st.origin}"\nproject_id = "{project}"\n'
+    st.path(f"binding-{project}.toml").write_text(binding)
+    print(f"# AGENTC_STAGING_BINDING={st.path(f'binding-{project}.toml')} selects it for `cli`")
+    print(f"[run.binding]\n{binding}", end="")
+    return 0
+
+
 def cli_env(st, role):
-    """The staging-only CLI environment for `role`; never carries a token."""
+    """The staging-only CLI environment for `role`; never carries a token.
+    AGENTC_STAGING_BINDING selects another project's binding file."""
+    binding = os.environ.get("AGENTC_STAGING_BINDING") or st.path("binding.toml")
     env = clean_env(AGENT_COORDINATOR_HOME=st.path("home", role),
                     AGENT_COORDINATOR_STATE_DIR=st.path("state", role),
-                    AGENT_COORDINATOR_REPO_CONFIG=st.path("binding.toml"),
+                    AGENT_COORDINATOR_REPO_CONFIG=binding,
                     AGENT_COORDINATOR_ALLOW_INSECURE_LOOPBACK="true",
                     AGENT_COORDINATOR_SESSION=os.environ.get("AGENTC_STAGING_SESSION",
                                                              f"staging-{role}"))
@@ -359,6 +381,10 @@ def parser():
     up.add_argument("--seed", default=ROOT, help="repository whose main seeds the remote")
     for name in ("status", "down", "credentials"):
         sub.add_parser(name)
+    project = sub.add_parser("project", help="create a project for the live loop")
+    project.add_argument("--repository-url", required=True,
+                         help="the supervisor mirror's origin URL")
+    project.add_argument("--name", default="Staging pilot")
     destroy = sub.add_parser("destroy")
     destroy.add_argument("--yes", action="store_true")
     cli = sub.add_parser("cli", help="run agent-coordinator as a staging role")
@@ -371,7 +397,7 @@ def main():
     """Dispatches the subcommand."""
     args = parser().parse_args()
     handlers = {"up": cmd_up, "status": cmd_status, "down": cmd_down, "destroy": cmd_destroy,
-                "cli": cmd_cli, "credentials": cmd_credentials}
+                "cli": cmd_cli, "credentials": cmd_credentials, "project": cmd_project}
     return handlers[args.command](Staging(args), args) or 0
 
 
