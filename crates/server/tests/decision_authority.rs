@@ -671,3 +671,268 @@ async fn call(
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&bytes).unwrap())
 }
+
+fn policy_body(revision: i64, relay: Option<bool>, agent_rule_editing: bool) -> Value {
+    let mut body = json!({"expected_revision":revision,"review_mode":"none","recovery_mode":"agent",
+        "lease_seconds":600,"rules":"","agent_rule_editing":agent_rule_editing,
+        "automatic_integration":true});
+    if let Some(relay) = relay {
+        body["allow_relayed_human_answers"] = json!(relay);
+    }
+    body
+}
+
+impl Fixture {
+    async fn set_policy(&self, caller: &Caller, project: &str, body: Value) -> (StatusCode, Value) {
+        self.call(
+            caller,
+            "PATCH",
+            &format!("/api/v1/projects/{project}/policy"),
+            &Uuid::new_v4().to_string(),
+            body,
+        )
+        .await
+    }
+
+    async fn answer(
+        &self,
+        caller: &Caller,
+        project: &str,
+        decision: &Value,
+        generation: Value,
+        relay: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let mut body = json!({"expected_generation":generation,"disposition":"allow",
+            "answer":"Proceed","rationale":"The user chose Proceed.","conditions_confirmed":true});
+        if let Some(relay) = relay {
+            body["relay"] = relay;
+        }
+        self.call(
+            caller,
+            "POST",
+            &format!(
+                "/api/v1/projects/{project}/decisions/{}/answer",
+                decision["id"].as_str().unwrap()
+            ),
+            &Uuid::new_v4().to_string(),
+            body,
+        )
+        .await
+    }
+}
+
+fn relay_evidence() -> Value {
+    json!({"prompt":"May this work proceed? Options: Proceed, Wait","response":"Proceed"})
+}
+
+#[tokio::test]
+async fn relayed_human_answer_records_the_relay_and_its_authority() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("relayed-answer").await;
+    let task = fixture.task(&project, "general", "Needs a human").await;
+    let (status, policy) = fixture
+        .set_policy(&fixture.admin, &project, policy_body(1, Some(true), false))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    assert_eq!(policy["data"]["allow_relayed_human_answers"], true);
+    let decision = fixture.decision(&project, vec![task], 2, None).await;
+
+    let (status, answered) = fixture
+        .answer(
+            &fixture.b,
+            &project,
+            &decision,
+            decision["generation"].clone(),
+            Some(relay_evidence()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    let answer = &answered["data"]["answer"];
+    assert_eq!(answered["data"]["status"], "allowed");
+    assert_eq!(answer["relayed"], true);
+    assert_eq!(answer["actor_id"], fixture.b.principal);
+    assert_eq!(answer["actor_session_id"], fixture.b.session);
+    assert_eq!(answer["relay"]["prompt"], relay_evidence()["prompt"]);
+    assert_eq!(answer["relay"]["response"], "Proceed");
+    assert_eq!(answer["relay"]["relayed_by_session"], fixture.b.session);
+    assert_eq!(answer["relay"]["authorized_by"], fixture.admin.principal);
+    assert_eq!(answer["relay"]["policy_revision"], 2);
+
+    let (status, shown) = fixture
+        .call(
+            &fixture.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{project}/decisions/{}",
+                decision["id"].as_str().unwrap()
+            ),
+            &Uuid::new_v4().to_string(),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{shown}");
+    assert_eq!(shown["data"]["answer"]["relayed"], true);
+    let entry = &shown["data"]["history"][0];
+    assert_eq!(entry["answered_by_session"], fixture.b.session);
+    assert_eq!(entry["relay"]["response"], "Proceed");
+    assert_eq!(entry["relay"]["authorized_by"], fixture.admin.principal);
+
+    // A human's direct answer is plainly not relayed.
+    let direct_task = fixture.task(&project, "general", "Direct answer").await;
+    let direct = fixture.decision(&project, vec![direct_task], 2, None).await;
+    let (status, answered) = fixture
+        .answer(
+            &fixture.admin,
+            &project,
+            &direct,
+            direct["generation"].clone(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    assert_eq!(answered["data"]["answer"]["relayed"], false);
+    assert!(answered["data"]["answer"]["relay"].is_null());
+    assert!(answered["data"]["history"][0]["relay"].is_null());
+}
+
+#[tokio::test]
+async fn unrelayed_or_unauthorized_agent_answers_to_human_decisions_are_refused() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("unrelayed-answer").await;
+    let task = fixture.task(&project, "general", "Needs a human").await;
+
+    // Relaying is off by default, so even a relay object is refused.
+    let decision = fixture
+        .decision(&project, vec![task.clone()], 1, None)
+        .await;
+    let generation = decision["generation"].clone();
+    let (status, refused) = fixture
+        .answer(&fixture.b, &project, &decision, generation.clone(), None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["error"]["code"], "operation_not_permitted");
+    let (status, refused) = fixture
+        .answer(
+            &fixture.b,
+            &project,
+            &decision,
+            generation,
+            Some(relay_evidence()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["error"]["code"], "operation_not_permitted");
+
+    // Agents cannot switch relaying on, even with delegated rule editing.
+    let (status, policy) = fixture
+        .set_policy(&fixture.admin, &project, policy_body(1, None, true))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let (status, refused) = fixture
+        .set_policy(&fixture.a, &project, policy_body(2, Some(true), true))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["error"]["code"], "operation_not_permitted");
+
+    // With relaying enabled, an answer without the relay object stays refused,
+    // and a relay is rejected where no human is required or by a human.
+    let (status, policy) = fixture
+        .set_policy(&fixture.admin, &project, policy_body(2, Some(true), true))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let decision = fixture
+        .decision(&project, vec![task.clone()], 3, None)
+        .await;
+    let generation = decision["generation"].clone();
+    let (status, refused) = fixture
+        .answer(&fixture.b, &project, &decision, generation.clone(), None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["error"]["code"], "operation_not_permitted");
+    let (status, rejected) = fixture
+        .answer(
+            &fixture.admin,
+            &project,
+            &decision,
+            generation,
+            Some(relay_evidence()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    let (status, agent_decision) = fixture
+        .call(
+            &fixture.a,
+            "POST",
+            &format!("/api/v1/projects/{project}/decisions"),
+            &Uuid::new_v4().to_string(),
+            json!({"question":"Which option?","options":["Proceed","Wait"],"rationale":"Agent call",
+                "required_actor":"either","affected_tasks":[{"task_id":task["id"],"task_revision":task["revision"]}],
+                "policy_revision":3,"environment":"test","conditions":"none"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{agent_decision}");
+    let agent_decision = agent_decision["data"].clone();
+    let (status, rejected) = fixture
+        .answer(
+            &fixture.b,
+            &project,
+            &agent_decision,
+            agent_decision["generation"].clone(),
+            Some(relay_evidence()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+}
+
+#[tokio::test]
+async fn relayed_answer_for_a_stale_generation_is_refused() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("stale-relay").await;
+    let task = fixture.task(&project, "general", "Needs a human").await;
+    let (status, policy) = fixture
+        .set_policy(&fixture.admin, &project, policy_body(1, Some(true), false))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let decision = fixture
+        .decision(&project, vec![task.clone()], 2, None)
+        .await;
+    let (status, reopened) = fixture
+        .call(
+            &fixture.admin,
+            "POST",
+            &format!(
+                "/api/v1/projects/{project}/decisions/{}/reopen",
+                decision["id"].as_str().unwrap()
+            ),
+            &Uuid::new_v4().to_string(),
+            json!({"expected_generation":1,"rationale":"Scope changed","policy_revision":2,
+                "affected_tasks":[{"task_id":task["id"],"task_revision":task["revision"]}],
+                "environment":"test","conditions":"Operator verified the exact scope"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["data"]["generation"], 2);
+
+    let (status, refused) = fixture
+        .answer(
+            &fixture.b,
+            &project,
+            &decision,
+            json!(1),
+            Some(relay_evidence()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "generation_conflict");
+    let (status, accepted) = fixture
+        .answer(
+            &fixture.b,
+            &project,
+            &decision,
+            json!(2),
+            Some(relay_evidence()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["data"]["answer"]["relayed"], true);
+}

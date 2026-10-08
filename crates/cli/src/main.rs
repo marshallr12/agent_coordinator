@@ -4231,6 +4231,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decisions_answer_help_describes_the_relay_flow() {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        let answer = command
+            .find_subcommand_mut("decisions")
+            .and_then(|decisions| decisions.find_subcommand_mut("answer"))
+            .expect("decisions answer");
+        let help = answer.render_help().to_string();
+        for needle in [
+            "allow_relayed_human_answers",
+            "\"relay\"",
+            "decisions list --json",
+            "Never answer for the user",
+        ] {
+            assert!(help.contains(needle), "missing {needle} in {help}");
+        }
+    }
+
+    #[test]
     fn retryable_service_responses_keep_pending_mutation() {
         assert!(!mutation_response_is_definitive(302));
         assert!(!mutation_response_is_definitive(429));

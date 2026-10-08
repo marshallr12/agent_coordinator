@@ -213,6 +213,11 @@ pub struct PolicyInput {
     /// 600 to 604800. Human-only; omission preserves the current limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_attempt_seconds: Option<i64>,
+    /// Let agent sessions record, as relayed, the answers a human gives them
+    /// to `required_actor=human` decisions. Human-only; omission preserves
+    /// the current setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_relayed_human_answers: Option<bool>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

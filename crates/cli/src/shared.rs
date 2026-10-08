@@ -49,9 +49,18 @@ pub(crate) enum KnowledgeCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum DecisionsCommand {
+    /// List decisions with their question, options, rationale, conditions and generation.
     List(ListArgs),
     Show(RecordArgs),
     Create(InputArgs),
+    /// Answer a decision. Agents cannot answer a required_actor=human decision themselves.
+    /// When the project's human enabled allow_relayed_human_answers, relay the user's reply:
+    /// read `decisions list --json`, ask the user in your own interface, then add
+    /// "relay": {"prompt": "<question exactly as asked>", "response": "<reply exactly as given>"}
+    /// to the answer JSON (with expected_generation, disposition, answer matching an option,
+    /// rationale and conditions_confirmed). The answer is recorded as relayed by this session,
+    /// with the prompt and response as evidence. Never answer for the user.
+    #[command(verbatim_doc_comment)]
     Answer(RecordInput),
     Reopen(RecordInput),
 }

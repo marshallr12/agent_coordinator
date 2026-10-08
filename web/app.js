@@ -1188,6 +1188,7 @@
     review_mode: 'Independent agent requires a reviewer who did not contribute. Human requires a person. Both requires both reviews; Either accepts one independent agent or human review. None removes the review requirement. Required code checks still apply.',
     automatic_integration: 'When allowed, agents may integrate a candidate after required reviews and checks pass. Otherwise a human must authorize each candidate before integration. This setting does not create or run checks.',
     allow_subagent_reviews: 'When enabled, a separately registered project subagent may review its parent’s work only if it did not contribute. Otherwise the reviewer must be an independently enrolled agent. Human reviews always require a person.',
+    allow_relayed_human_answers: 'When enabled, an agent that asked you a human-required decision in its own terminal may record your reply through the CLI. The answer is stored as relayed, with the exact prompt, your reply, the agent session and this policy revision, and is flagged here so you can review or reopen it. Leave this off if only this page should decide.',
     recovery_mode: 'Choose who may inspect and recover expired work. Expiry does not prove a workstation job stopped. The selected agent or human must inspect saved work and any remaining jobs or resource holds before continuing.',
     agent_rule_editing: 'Allow agents to change the binding rules text for this project. Humans still control review, integration, recovery and lease settings. Leave this off when rule changes need an operator.',
     lease_seconds: 'How long task ownership lasts without renewal, from 30 to 3600 seconds. Example only: 600 means ten minutes. Agents must renew before expiry; reading a task or saving a checkpoint does not renew ownership.',
@@ -1556,7 +1557,12 @@
     add(card, el('p', 'muted', [record.kind || kind, record.status || record.availability || record.state, record.revision ? `Revision ${record.revision}` : '', record.project_id && record.project_id !== state.projectId ? `Shared from project ${record.project_id}` : ''].filter(Boolean).join(' · ')));
     add(card, el('p', 'shared-record-body', record.body || record.snippet || record.rationale || record.summary || ''));
     if (record.applicability) add(card, el('p', '', `Applies when: ${record.applicability}`));
-    if (record.answer) recordDetails(card, 'Recorded answer', record.answer);
+    if (record.answer) {
+      add(card, el('p', 'muted', record.answer.relayed
+        ? `Relayed answer: an agent (session ${record.answer.actor_session_id}) recorded what a human told it, under policy revision ${record.answer.relay?.policy_revision} enabled by principal ${record.answer.relay?.authorized_by}. Reopen the decision if this is not what you decided.`
+        : `Direct answer by ${record.answer.actor_id}.`));
+      recordDetails(card, 'Recorded answer', record.answer);
+    }
     recordDetails(card, 'Source and applicability', {id:record.id, provenance:record.provenance, scope:record.scope, source:record.source, conditions:record.conditions, affected_tasks:record.affected_tasks, expires_at:record.expires_at});
     const actions = el('div', 'record-actions');
     const button = (label, run, mutation = false) => { const node = el('button', 'button subtle', label); node.type = 'button'; if (mutation) node.dataset.mutation = 'true'; node.addEventListener('click', run); add(actions, node); };
@@ -1726,6 +1732,7 @@
       selectField(view, 'recovery_mode', 'Expired work recovery', project.recovery_mode, [['agent','Agents may inspect and recover'],['manual','A human must inspect and recover']]);
       selectField(view, 'automatic_integration', 'Integration authorization', project.automatic_integration, [['false','Human authorization for each candidate'],['true','Agents may integrate approved candidates']]);
       selectField(view, 'agent_rule_editing', 'Agent policy changes', project.agent_rule_editing, [['false','Only humans may change binding rules'],['true','Agents may change binding project rules']]);
+      selectField(view, 'allow_relayed_human_answers', 'Human decisions answered in an agent terminal', project.allow_relayed_human_answers || false, [['false','Only a human may answer in this web UI'],['true','Agents may record answers a human gave them, marked as relayed']]);
       selectField(view, 'allow_subagent_reviews', 'Who may perform agent review?', project.allow_subagent_reviews || false, [['false','A separate credential principal'],['true','Also allow a registered, non-contributing subagent']]);
       const lease = view.field('lease_seconds','Ownership lease (seconds)',project.lease_seconds,'input'); lease.type = 'number'; lease.min = '30'; lease.max = '3600';
       const rules = view.field('rules','Binding rules',project.rules); rules.maxLength = 32768; rules.required = false;
@@ -1733,7 +1740,7 @@
       view.field('provenance','Reason and supporting source').maxLength = 4096;
       setupFieldHelp(view.form);
       view.finish('Save policy', (values, dialog) => {
-        const body = {expected_revision:project.policy_revision, review_mode:values.get('review_mode'), recovery_mode:values.get('recovery_mode'), automatic_integration:values.get('automatic_integration') === 'true', agent_rule_editing:values.get('agent_rule_editing') === 'true', allow_subagent_reviews:values.get('allow_subagent_reviews') === 'true', lease_seconds:Number(values.get('lease_seconds')), rules:values.get('rules'), provenance:values.get('provenance')};
+        const body = {expected_revision:project.policy_revision, review_mode:values.get('review_mode'), recovery_mode:values.get('recovery_mode'), automatic_integration:values.get('automatic_integration') === 'true', agent_rule_editing:values.get('agent_rule_editing') === 'true', allow_subagent_reviews:values.get('allow_subagent_reviews') === 'true', allow_relayed_human_answers:values.get('allow_relayed_human_answers') === 'true', lease_seconds:Number(values.get('lease_seconds')), rules:values.get('rules'), provenance:values.get('provenance')};
         dialog.close(); startMutation(`${projectPath(projectId)}/policy`, body, 'project policy', async () => { await loadProjects(); setGlobalAlert('Project policy saved.', 'success'); }, 'PATCH', null, {projectId});
       });
     } catch (error) { setGlobalAlert(errorMessage(error)); }

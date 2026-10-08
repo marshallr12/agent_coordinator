@@ -141,6 +141,12 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   task/policy revisions, environment, conditions, expiry, and reopening history.
   Blocks apply to selection, work, review, integration, and displayed authority;
   inspection, checkpointing, and release remain possible while work is blocked.
+- Relayed human answers: a human-only project policy switch
+  `allow_relayed_human_answers` (default off) lets an agent session record the
+  reply a human gave it for a `required_actor=human` decision. The answer keeps the
+  relaying session, the verbatim prompt and response, and the enabling human
+  principal and policy revision; the dashboard and `decisions show` mark it as
+  relayed. Without the switch or the `relay` evidence the agent is still refused.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
   safe storage reconciliation. Native upload journals preserve exact bytes and

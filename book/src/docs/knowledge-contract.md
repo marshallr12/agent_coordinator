@@ -100,7 +100,25 @@ An answer requires:
 }
 ```
 
-`answer` must exactly match one listed option. `disposition` is `allow`, `deny`, or `defer`. An `allow` requires `conditions_confirmed=true`; `deny` and `defer` are durable answers but keep affected work blocked. Actor type is checked after the SQLite writer lock is obtained, and an agent answer is attributed to a live agent session. Human-required answers require a human principal.
+`answer` must exactly match one listed option. `disposition` is `allow`, `deny`, or `defer`. An `allow` requires `conditions_confirmed=true`; `deny` and `defer` are durable answers but keep affected work blocked. Actor type is checked after the SQLite writer lock is obtained, and an agent answer is attributed to a live agent session. Human-required answers require a human principal, except as relayed below.
+
+### Relayed human answers
+
+Design note (task `d4ee5302`): a human often answers in the agent's terminal, so a
+project's policy may carry the human-only switch `allow_relayed_human_answers`
+(default off; agents cannot change it, like `integration_owner`). When it is on,
+an agent session may add `"relay": {"prompt": "...", "response": "..."}` to an
+answer for a `required_actor=human` decision. The relay object is rejected for any
+other decision or caller. The service then records the answer under the agent
+principal and live session (`actor_id`, `actor_session_id`), sets `relayed=true`,
+and stores the verbatim `prompt` and `response` plus the human principal
+(`authorized_by`) and policy revision that enabled relaying. Without `relay`, with
+the switch off, or with a stale `expected_generation` the answer is refused.
+`answer.relay` and each history entry's `relay` are null for a direct answer. The
+evidence is the agent's attestation bounded by an explicit human opt-in and kept
+for audit; a human can reopen any relayed decision. A stronger per-answer human
+confirmation (a proposed answer the human confirms) was considered and left for
+later.
 
 A prior allow stops blocking only while all of the following remain true:
 

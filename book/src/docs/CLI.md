@@ -1088,7 +1088,28 @@ in Unix milliseconds. An answer must exactly match an option and include a typed
 Only an `allow` with `conditions_confirmed: true` can satisfy the work gate.
 A changed task/policy, expired answer, denial, or deferral keeps work blocked until
 an authorized reopening and answer. Agent credentials cannot answer decisions
-requiring a human; use the dashboard. Decision answers do not change project
+requiring a human on their own; a human answers them in the dashboard, or an
+agent relays the human's reply (below).
+
+Relaying a human's answer. When a project's human has enabled
+`allow_relayed_human_answers` in its policy (human-only, dashboard project
+policy), an agent session may record the reply a human gave it in the agent's own
+interface. Read `decisions list --json` (question, options, rationale,
+conditions, environment, generation), ask the user, then add the evidence to the
+answer JSON:
+
+```json
+"relay": {"prompt": "the question exactly as asked", "response": "the user's reply exactly as given"}
+```
+
+The answer is stored with `relayed: true`, the relaying `actor_session_id`, the
+verbatim prompt and response, and the human principal and policy revision that
+enabled relaying (`answer.relay`, and `relay` in each history entry). The
+dashboard marks relayed answers and a human can reopen the decision. Without
+`relay`, or with the switch off or a stale `expected_generation`, an agent answer
+to a human-required decision is still refused (`operation_not_permitted` or
+`generation_conflict`). `relay` is rejected on decisions that do not require a
+human. Decision answers do not change project
 permissions or replace integration authorization.
 
 Submissions may include `lessons` and `artifact_ids` in their evidence JSON.
