@@ -4,13 +4,21 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P3b GO; P6 started (2026-10-08 ~06:00 UTC, workflow on)
+## Current resume point — P6 gap tasks running on 1469b5a (2026-10-08 ~13:30 UTC, workflow on)
 
 **Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
-Ubuntu 26.04, systemd, at `34e3dde`, `[run] reviewer = true`, kill switch
+Ubuntu 26.04, systemd, at `1469b5a`, `[run] reviewer = true`, kill switch
 `/var/lib/agentc/kill-switch` absent) claims ready tasks of project `fe95a6c5…` in priority order,
-implements, reviews with `distinct_launch`, and `agentc-integrator@run` lands. Production service
-at `34e3dde`; `main` is ahead (migration **0030**, reviewer cost recording `f881fb7`, `9955a70`).
+implements, reviews with `distinct_launch`, and `agentc-integrator@run` lands. Production service at **`1469b5a`** (deployed 2026-10-08 12:46 UTC, release run `37774235379`, migrations
+0030/0031; preflight all 0; downtime ~18 s; old-binary snapshot `20261008T124624.282Z-0d2fe6df…`,
+rollback binaries `*-0.1.1-34e3dde`; new snapshot `20261008T124643.460Z-74286669…` verified; local
+record `release-34e3dde`). Workstation CLI upgraded from worktree `~/src/worktrees/ac-release-1469b5a`.
+oracle-1 rebuilt in `~/src/worktrees/agentc-pilot` at `1469b5a`; owner re-ran `host-setup.sh`
+(`APPARMOR_BWRAP=1` is **required**: the default 0 removes the agentc bwrap that supervisor.toml uses)
+and `integrator-host-setup.sh` (never restarts units: `systemctl restart agentc-integrator@run
+agentc-run` after it). Deploy drill: owner sets the kill switch, the orchestrator releases its
+`d513bc21` claim, preflight/pre/swap, rebuild, owner host-setup, orchestrator **reclaims before** the
+owner clears the kill switch.
 
 **P3b pilot: GO (owner, 2026-10-08).** Decision `bb9bf99f` allow/Go (gen 1 05:46:57Z; reopened as
 gen 2 after admitting `c6b33a77` moved it to rev 2, re-answered Go). Pilot task `47d4403d` **done**
@@ -25,9 +33,9 @@ both). Canary not run (U28 moved it to P6). Ledger outside Git:
 
 **P6 (plan-final §3):** `c6b33a77` attention budget **done** (`ba48c38`); its review exposed
 `8e8ecdcf` (stall rule per plan, P1) and `b59abb08` (agents could time out human-required decisions,
-P1) — **do not deploy `main` before `b59abb08` lands.** `d513bc21` admitted (rev 2, canary-green
+P1) — both landed (`edf5081`, `839ecaa`) and are deployed. `d513bc21` admitted (rev 2, canary-green
 criterion added; decision `bb9bf99f` reopened as gen 3, Go) and **claimed by the orchestrating session**
-(`p3b-pilot`, attempt `9c781ee2`, gen 1; renew every ~15 min). Gap audit done; owner answered U29–U32;
+(`p3b-pilot`, attempt `dccda638`, gen 2; renew every ~15 min). Gap audit done; owner answered U29–U32;
 gap tasks: `4a7bfdb2` canary+digest timers (P1), `a49ace9a` admission (global 5/week), `358537bb`
 digest-neglect (after 4a7bfdb2), `94303638` per-host canary (after 4a7bfdb2), `dd95bb78` Linux host
 updater (after 94303638). Agents cannot admit/edit tasks (human task-definition grant): admissions go
