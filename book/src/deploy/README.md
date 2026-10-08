@@ -1059,9 +1059,11 @@ environment. The owner supplies only:
   (see [Mailing the digest through Gmail](#mailing-the-digest-through-gmail)).
 - the coordinator token file, `/etc/agentc/attention-token`: the supervisor's
   bearer token alone, installed with
-  `sudo install -o root -g agentc-impl -m 0440 /dev/stdin /etc/agentc/attention-token`.
-  host-setup holds it at `root:agentc-impl` 0440 and refuses a token that is
-  not root-owned.
+  `sudo install -o root -g root -m 0400 /dev/stdin /etc/agentc/attention-token`.
+  host-setup holds it at `root:root` 0400 (tightening a group- or
+  other-readable one) and refuses a token that is not root-owned; the
+  canary and digest units run as root, and no implementer or reviewer launch
+  can read it. attention.py refuses a token file other users can read.
 
 Defaulted entries (commented in the file): `ATTENTION_URL`
 (`https://agents.sithbit.com`), `ATTENTION_PROJECT`, `ATTENTION_TOKEN_FILE`,

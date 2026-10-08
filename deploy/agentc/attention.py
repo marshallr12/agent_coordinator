@@ -81,8 +81,14 @@ def now():
 
 
 def read_token(path):
-    """The bearer token in `path`, whitespace trimmed."""
-    token = Path(path).read_text().strip()
+    """The bearer token in `path`, whitespace trimmed; the file must be private."""
+    try:
+        mode = os.stat(path).st_mode
+        token = Path(path).read_text().strip()
+    except OSError as error:
+        raise SystemExit(f"attention: cannot read the token file ({type(error).__name__})")
+    if mode & 0o077:
+        raise SystemExit(f"attention: {path} is readable by other users (use root:root 0400)")
     if not token:
         raise SystemExit(f"attention: {path} holds no token")
     return token

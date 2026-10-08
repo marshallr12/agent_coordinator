@@ -20,6 +20,7 @@ STAGING=http://127.0.0.1:${STAGING_PORT:-18080}
 DISABLED_PUSH=disabled://push-only-via-agent-coordinator
 PUSH_USER=agentc-push
 PUSH_KEY=/etc/agentc/push-app.pem
+ATTENTION_TOKEN=/etc/agentc/attention-token
 FAILED=0
 SUITE_BINS=()
 PUSH_PID=
@@ -669,6 +670,15 @@ check_push_key() {
   expect_fail "agentc-rev: cannot read the push App key" as agentc-rev test -r "$PUSH_KEY"
 }
 
+# The owner-minted coordinator token is root-only: neither role can read it
+# (launches never hold a coordinator credential); skipped without one.
+check_attention_token() {
+  if [ ! -e "$ATTENTION_TOKEN" ]; then echo "SKIP attention token checks (no $ATTENTION_TOKEN on this host)"; return; fi
+  expect_ok "attention token is 400 root:root" has_mode "$ATTENTION_TOKEN" "400 root root"
+  expect_fail "agentc-impl: cannot read the attention token" as agentc-impl test -r "$ATTENTION_TOKEN"
+  expect_fail "agentc-rev: cannot read the attention token" as agentc-rev test -r "$ATTENTION_TOKEN"
+}
+
 # Succeeds when $1 resolves into /snap or is a script that hands off to a snap
 # (Ubuntu's /usr/bin/chromium-browser), which cannot run as a role account.
 is_snap_wrapper() {
@@ -769,6 +779,7 @@ main() {
   check_push_kill "$push_bin"
   check_push_launch "$push_bin"
   check_push_key
+  check_attention_token
   check_browser
   if [ "$cargo_test" = "--cargo-test" ]; then check_cargo_test; fi
   [ "$FAILED" -eq 0 ] && echo "containment suite: all checks passed" || echo "containment suite: FAILURES above"

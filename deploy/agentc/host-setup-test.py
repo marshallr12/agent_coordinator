@@ -135,11 +135,63 @@ class AttentionUnits(unittest.TestCase):
         ready = bash("declare -f attention_ready")
         self.assertIn("ATTENTION_NTFY_TOPIC", ready)
 
-    def test_the_token_is_held_root_owned_and_role_readable_only(self):
+    def secure_token(self, mode=None):
+        """Runs secure_attention_token on a temporary token; returns (mode, chown calls)."""
+        token = self.dir / "attention-token"
+        token.unlink(missing_ok=True)
+        if mode is not None:
+            token.write_text("token\n")
+            token.chmod(mode)
+        # Ownership changes need root, so chown is recorded and owned_by_root is stubbed true.
+        out = bash(f"""
+          ATTENTION_TOKEN={token}
+          owned_by_root() {{ true; }}
+          chown() {{ echo "chown $*" >&2; }}
+          secure_attention_token
+          [ ! -e "$ATTENTION_TOKEN" ] || stat -c %a -- "$ATTENTION_TOKEN"
+        """)
+        return out.strip()
+
+    def test_the_token_is_held_root_root_0400(self):
         secure = bash("declare -f secure_attention_token")
-        self.assertIn('chown "root:$ATTENTION_TOKEN_GROUP"', secure)
-        self.assertIn("chmod 0440", secure)
-        self.assertEqual(bash('echo "$ATTENTION_TOKEN_GROUP"').strip(), "agentc-impl")
+        self.assertIn("chown root:root", secure)
+        self.assertNotIn("0440", secure)
+        self.assertNotIn("agentc-impl", bash("declare -f secure_attention_token attention_token_note"))
+
+    def test_a_fresh_install_keeps_the_token_0400_and_a_missing_one_is_left_alone(self):
+        self.assertEqual(self.secure_token(None), "")
+        self.assertFalse((self.dir / "attention-token").exists())
+        self.assertEqual(self.secure_token(0o400), "400")
+
+    def test_a_preexisting_0440_group_readable_token_is_tightened(self):
+        for mode in (0o440, 0o444, 0o640):
+            self.assertEqual(self.secure_token(mode), "400")
+
+    def test_the_token_is_installed_with_chown_to_root_root(self):
+        token = self.dir / "attention-token"
+        token.write_text("token\n")
+        result = subprocess.run(["bash", "-c", f"""set -euo pipefail; source "$1"
+          ATTENTION_TOKEN={token}; owned_by_root() {{ true; }}
+          chown() {{ echo "chown $*"; }}
+          secure_attention_token""", "bash", str(SCRIPT)], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.strip(), f"chown root:root -- {token}")
+
+    def test_the_token_note_prints_the_root_root_0400_install_command(self):
+        note = bash("attention_token_note")
+        self.assertIn("sudo install -o root -g root -m 0400 /dev/stdin /etc/agentc/attention-token", note)
+        self.assertNotIn("0440", note)
+        self.assertNotIn("agentc-impl", note)
+
+    def test_the_units_run_as_root_so_they_still_read_the_token(self):
+        for name, text in self.units().items():
+            if name.endswith(".service"):
+                self.assertNotIn("User=", text)
+
+    def test_the_containment_suite_checks_roles_cannot_read_the_token(self):
+        suite = (HERE / "containment-suite.sh").read_text()
+        self.assertIn("check_attention_token", suite)
+        self.assertIn("agentc-impl: cannot read the attention token", suite)
+        self.assertIn("agentc-rev: cannot read the attention token", suite)
 
     def test_the_script_parses(self):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)

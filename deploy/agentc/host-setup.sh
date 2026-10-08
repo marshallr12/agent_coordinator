@@ -66,7 +66,6 @@ SUITE_DUMMY_TOKEN=agentc-suite-dummy-token
 ATTENTION_SCRIPT=$PREFIX/bin/attention.py
 ATTENTION_ENV=$ETC/attention.env
 ATTENTION_TOKEN=${ATTENTION_TOKEN:-$ETC/attention-token}
-ATTENTION_TOKEN_GROUP=agentc-impl
 UNIT_DIR=/etc/systemd/system
 CANARY_INTERVAL=${CANARY_INTERVAL:-10min}
 DIGEST_CALENDAR=${DIGEST_CALENDAR:-daily}
@@ -956,9 +955,11 @@ attention_ready() {
   [ "$1" != agentc-canary ] || grep -Eq '^ATTENTION_NTFY_TOPIC=.' "$ATTENTION_ENV"
 }
 
-# Holds the owner-installed coordinator token at root:$ATTENTION_TOKEN_GROUP
-# 0440 (the role can read it, never change it). Only a root-owned token is
-# adopted; a missing one is left for the owner (see attention_token_note).
+# Holds the owner-installed coordinator token at root:root 0400, so no
+# implementer or reviewer launch can read it (the canary and digest units run
+# as root). Only a root-owned token is adopted, and a group- or
+# other-readable one is tightened; a missing one is left for the owner (see
+# attention_token_note).
 secure_attention_token() {
   refuse_symlink "$ATTENTION_TOKEN"
   [ -e "$ATTENTION_TOKEN" ] || return 0
@@ -966,8 +967,7 @@ secure_attention_token() {
   owned_by_root "$ATTENTION_TOKEN" ||
     { echo "refusing $ATTENTION_TOKEN: not root-owned (install it with sudo install -o root); owner repair required" >&2; exit 1; }
   chmod 0400 -- "$ATTENTION_TOKEN"
-  chown "root:$ATTENTION_TOKEN_GROUP" -- "$ATTENTION_TOKEN"
-  chmod 0440 -- "$ATTENTION_TOKEN"
+  chown root:root -- "$ATTENTION_TOKEN"
 }
 
 # Stops the timers and removes the attention units, environment file, script
@@ -997,7 +997,7 @@ Attention canary and digest: attention.py runs from the agentc-canary
 $ATTENTION_ENV. Install the supervisor's coordinator token (the bare token,
 nothing else) and set ATTENTION_NTFY_TOPIC (and the SMTP entries to mail the
 digest) there, then re-run this script to enable the timers:
-  sudo install -o root -g $ATTENTION_TOKEN_GROUP -m 0440 /dev/stdin $ATTENTION_TOKEN
+  sudo install -o root -g root -m 0400 /dev/stdin $ATTENTION_TOKEN
 A relay that needs a login takes ATTENTION_SMTP_USER and a password file
 (root:root 0400, named by ATTENTION_SMTP_PASSWORD_FILE), never the password in
 $ATTENTION_ENV.
