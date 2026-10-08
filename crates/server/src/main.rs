@@ -44,6 +44,12 @@ struct Options {
     artifact_quota_bytes: i64,
     #[arg(long, env = "COORDINATOR_ARTIFACT_DISK_RESERVE_BYTES", default_value_t = 256 * 1024 * 1024, global = true)]
     artifact_disk_reserve_bytes: u64,
+    /// Hours of ready work without task progress before the digest counts a stall.
+    #[arg(long, env = "COORDINATOR_STALL_HOURS", default_value_t = coordinator_server::attention::DEFAULT_STALL_HOURS, global = true)]
+    stall_hours: i64,
+    /// UTC hours excluded from the stall clock, as START-END (for example 22-07).
+    #[arg(long, env = "COORDINATOR_QUIET_HOURS", global = true)]
+    quiet_hours: Option<coordinator_server::attention::QuietHours>,
     #[command(subcommand)]
     command: Command,
 }
@@ -165,6 +171,8 @@ async fn main() -> anyhow::Result<()> {
         artifact_quota_bytes: options.artifact_quota_bytes,
         artifact_disk_reserve_bytes: options.artifact_disk_reserve_bytes,
         context_rerank: context_rerank_config(&options.command),
+        stall_hours: options.stall_hours,
+        quiet_hours: options.quiet_hours,
     };
     let state = if matches!(&options.command, Command::Backup { .. }) {
         AppState::open_existing_read_only(config).await?

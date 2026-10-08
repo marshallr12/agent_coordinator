@@ -29,6 +29,7 @@ impl Clock for TestClock {
 }
 
 const DAY: i64 = 86_400_000;
+const HOUR: i64 = 3_600_000;
 
 #[derive(Clone)]
 struct Caller {
@@ -327,6 +328,101 @@ async fn a_task_that_keeps_ending_without_a_submission_counts_as_a_human_interve
     let hri = f.digest(&p).await["hri"].clone();
     assert_eq!(hri["stalled_tasks"], 1);
     assert_eq!(hri["items"][0]["code"], "stalled_task", "{hri}");
+    assert_eq!(hri["items"][0]["rule"], "repeated_attempt_failures");
+    assert_eq!(hri["stalled_queue"], 0);
+}
+
+#[tokio::test]
+async fn an_idle_queue_with_ready_work_counts_as_a_stall_after_the_threshold() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-idle").await;
+    f.task(&p, "Nobody claims this").await;
+    f.clock.0.fetch_add(6 * HOUR, Ordering::SeqCst);
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(
+        hri["count"], 0,
+        "exactly the threshold is not yet a stall: {hri}"
+    );
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["count"], 1, "{hri}");
+    assert_eq!(hri["stalled_queue"], 1);
+    assert_eq!(hri["stalled_tasks"], 0);
+    let item = &hri["items"][0];
+    assert_eq!(item["code"], "stalled_queue");
+    assert_eq!(item["rule"], "no_progress");
+    assert_eq!(item["ready_tasks"], 1);
+    assert_eq!(item["idle_hours"], 7);
+    assert_eq!(item["threshold_hours"], 6);
+}
+
+#[tokio::test]
+async fn quiet_hours_do_not_count_toward_the_stall_clock() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-quiet").await;
+    f.task(&p, "Waits overnight").await;
+    // The fixture clock sits at 08:00 UTC; the 7 hours since then are 08:00-15:00.
+    f.clock.0.fetch_add(7 * HOUR, Ordering::SeqCst);
+    let mut state = f.state.clone();
+    state.config.quiet_hours = Some("8-12".parse().unwrap());
+    let app = router(state);
+    let digest = |app: Router| {
+        let caller = f.a.clone();
+        let path = format!("/api/v1/projects/{p}/digest");
+        async move {
+            let (status, value) = call(
+                app,
+                &caller,
+                "GET",
+                &path,
+                &Uuid::new_v4().to_string(),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{value}");
+            value["data"]["hri"].clone()
+        }
+    };
+    // Four of those hours are quiet, leaving three.
+    assert_eq!(digest(app.clone()).await["count"], 0);
+    f.clock.0.fetch_add(4 * HOUR, Ordering::SeqCst);
+    let hri = digest(app).await;
+    assert_eq!(hri["count"], 1, "{hri}");
+    assert_eq!(hri["items"][0]["idle_hours"], 7);
+}
+
+#[tokio::test]
+async fn an_empty_queue_is_not_a_stall() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-empty").await;
+    f.clock.0.fetch_add(2 * DAY, Ordering::SeqCst);
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["count"], 0, "{hri}");
+    // A task somebody owns is not ready work either.
+    f.task(&p, "Being worked").await;
+    f.claim_offered(&f.a, &p).await;
+    f.clock.0.fetch_add(2 * DAY, Ordering::SeqCst);
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["count"], 0, "{hri}");
+}
+
+#[tokio::test]
+async fn recent_progress_keeps_a_queue_with_ready_work_from_stalling() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-progress").await;
+    f.task(&p, "First").await;
+    f.task(&p, "Second").await;
+    f.clock.0.fetch_add(7 * HOUR, Ordering::SeqCst);
+    assert_eq!(f.digest(&p).await["hri"]["count"], 1);
+    // A claim is progress, even though the other task is still waiting.
+    f.claim_offered(&f.a, &p).await;
+    assert_eq!(f.digest(&p).await["hri"]["count"], 0);
+    f.clock.0.fetch_add(5 * HOUR, Ordering::SeqCst);
+    assert_eq!(f.digest(&p).await["hri"]["count"], 0);
+    f.clock.0.fetch_add(2 * HOUR, Ordering::SeqCst);
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["count"], 1, "{hri}");
+    assert_eq!(hri["items"][0]["rule"], "no_progress");
 }
 
 #[tokio::test]

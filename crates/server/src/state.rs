@@ -27,6 +27,11 @@ pub struct Config {
     pub artifact_disk_reserve_bytes: u64,
     /// Optional reranking of context search results; off without an API key.
     pub context_rerank: ContextRerankConfig,
+    /// Hours a project may hold ready work without task progress before the
+    /// digest counts a stall as a human-required intervention.
+    pub stall_hours: i64,
+    /// UTC hours excluded from the stall clock; none by default.
+    pub quiet_hours: Option<crate::attention::QuietHours>,
 }
 
 impl Default for Config {
@@ -40,6 +45,8 @@ impl Default for Config {
             artifact_quota_bytes: 10 * 1024 * 1024 * 1024,
             artifact_disk_reserve_bytes: 256 * 1024 * 1024,
             context_rerank: ContextRerankConfig::default(),
+            stall_hours: crate::attention::DEFAULT_STALL_HOURS,
+            quiet_hours: None,
         }
     }
 }
@@ -57,6 +64,10 @@ impl Config {
         anyhow::ensure!(
             self.artifact_disk_reserve_bytes >= 16 * 1024 * 1024,
             "artifact_disk_reserve_bytes must retain at least 16 MiB."
+        );
+        anyhow::ensure!(
+            (1..=24 * 14).contains(&self.stall_hours),
+            "stall_hours must be 1 through 336."
         );
         anyhow::ensure!(
             self.listen.ip().is_loopback(),

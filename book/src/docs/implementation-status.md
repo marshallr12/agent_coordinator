@@ -151,7 +151,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   reversible, and `serve` answers it with that recommendation after 24 hours
   unanswered (`timed_out`); `GET .../digest` lists those decisions and the
   human-required interventions, which include stalled tasks (three consecutive
-  attempts without a submission); tasks may declare paths and `next` skips a
+  attempts without a submission, rule `repeated_attempt_failures`) and a stalled
+  queue (ready work and no task progress for more than 6 hours, rule
+  `no_progress`, configurable, quiet hours excluded); tasks may declare paths and `next` skips a
   task overlapping files the integrator saw land out of band in the last 24
   hours. `deploy/agentc/attention.py` renders and mails the digest and runs a
   canary that pages through ntfy once per failing check; the digest mail and the
