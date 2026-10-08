@@ -16,6 +16,11 @@ SCRIPT = Path(__file__).with_name("upgrade_client.py")
 SPEC = importlib.util.spec_from_file_location("upgrade_client", SCRIPT)
 UPDATER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(UPDATER)
+# The installer checks candidates against the workstation's own target, so the
+# fixtures use the host's target and the wrong-architecture case its opposite.
+HOST_TARGET = UPDATER.target_name()
+HOST_OS, HOST_ARCH = HOST_TARGET.split("-", 1)
+OTHER_ARCH = "x86_64" if HOST_ARCH == "aarch64" else "aarch64"
 
 
 class UpgradeClientTests(unittest.TestCase):
@@ -27,7 +32,7 @@ class UpgradeClientTests(unittest.TestCase):
         self.repository = "https://github.com/example/agent-coordinator"
         self.info = {
             "build": {"source_commit": self.commit, "source_repository": self.repository,
-                      "target_os": "linux", "target_arch": "x86_64", "dirty": False},
+                      "target_os": HOST_OS, "target_arch": HOST_ARCH, "dirty": False},
             "supported_protocol_versions": ["v1"],
             "capabilities": ["durable_candidate_submission_fields"],
         }
@@ -39,11 +44,11 @@ class UpgradeClientTests(unittest.TestCase):
 
     def test_wrong_architecture_is_rejected_before_replacement(self):
         candidate_info = json.loads(json.dumps(self.info))
-        candidate_info["build"]["target_arch"] = "aarch64"
+        candidate_info["build"]["target_arch"] = OTHER_ARCH
         candidate = self.executable(self.root / "candidate", candidate_info)
         with self.assertRaises(SystemExit):
             UPDATER.verify_candidate(candidate, self.commit, self.repository,
-                                     "linux-x86_64", {"v1"}, {"durable_candidate_submission_fields"})
+                                     HOST_TARGET, {"v1"}, {"durable_candidate_submission_fields"})
 
     def test_bad_download_checksum_leaves_installed_client_unchanged(self):
         active = self.executable(self.root / "agent-coordinator", {"legacy": True})
@@ -122,10 +127,10 @@ class UpgradeClientTests(unittest.TestCase):
         candidate = self.executable(self.root / "candidate", self.info)
         with self.assertRaisesRegex(SystemExit, "source commit"):
             UPDATER.verify_candidate(candidate, "b" * 40, self.repository,
-                                     "linux-x86_64", {"v1"}, {"durable_candidate_submission_fields"})
+                                     HOST_TARGET, {"v1"}, {"durable_candidate_submission_fields"})
         with self.assertRaisesRegex(SystemExit, "source repository"):
             UPDATER.verify_candidate(candidate, self.commit, "https://github.com/other/repo",
-                                     "linux-x86_64", {"v1"}, {"durable_candidate_submission_fields"})
+                                     HOST_TARGET, {"v1"}, {"durable_candidate_submission_fields"})
 
     def test_locked_source_build_fallback_uses_exact_clean_origin(self):
         source = self.root / "source"
