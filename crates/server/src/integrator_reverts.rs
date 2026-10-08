@@ -757,6 +757,7 @@ pub(crate) async fn propose_reland(m: &mut Mutation, p: &str, task: &str) -> Res
         .bind(&id).bind(p).bind(&title).bind(&description).bind(acceptance.to_string())
         .bind(revert.get::<String, _>("kind")).bind(revert.get::<i64, _>("priority")).bind(m.now).bind(m.now)
         .execute(&mut *m.tx).await?;
+    crate::admission::record_service(m, &id, None).await?;
     save_task_revision(m, p, &id).await?;
     sqlx::query("UPDATE task_reverts SET reland_task_id=? WHERE task_id=?")
         .bind(&id)

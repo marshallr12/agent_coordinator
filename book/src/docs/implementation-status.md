@@ -169,6 +169,16 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   canary pages through ntfy once when the digest has gone unread for more than
   `ATTENTION_NEGLECT_DAYS` days (default 3) and again only after a new read and
   another lapse; `deploy/agentc/attention-test.py` covers it with a fake clock.
+- Admission control (P6): tasks record their `origin` (`human`, `agent` or
+  `service`) and may carry an `admission_class` (`revert`, `fix_target`,
+  `deflake`, `refusal_fix`); service-created reverts and revise follow-ups set
+  it. An agent-created task without a class is admitted only while fewer than
+  5 (`--agent-task-weekly-budget`) agent-originated tasks were admitted in the
+  current ISO week across all projects; later ones are created `planned`, the
+  response says why, and `GET .../digest` lists them as `held_agent_tasks`.
+  Human tasks and classed tasks are never held. The class is accepted from any
+  creator, so the budget is a guard rail against runaway task creation, not
+  a security boundary against an agent that sets a class.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
   safe storage reconciliation. Native upload journals preserve exact bytes and
