@@ -18,6 +18,11 @@ pub const INSECURE_ENV: &str = "AGENT_COORDINATOR_ALLOW_INSECURE_LOOPBACK";
 /// The variable naming the repository binding the coordinator CLI reads.
 pub const REPO_CONFIG_ENV: &str = "AGENT_COORDINATOR_REPO_CONFIG";
 
+/// Directory names below the verdict home that are not credential
+/// directories: `checkouts` holds the claim checkouts, and stale-credential
+/// cleanup never removes it, so a binding must not share it.
+const RESERVED_NAMES: [&str; 1] = ["checkouts"];
+
 /// One repository binding, as `.agent-coordinator.toml` holds it.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -38,7 +43,8 @@ impl Binding {
     }
 
     /// Requires a non-empty origin and project, and a `project_name` that is
-    /// one plain directory name (it becomes a path component).
+    /// one plain directory name (it becomes a path component) and not a
+    /// reserved one.
     pub fn check(&self) -> Result<()> {
         ensure!(
             !self.service_url.trim().is_empty() && !self.project_id.trim().is_empty(),
@@ -48,6 +54,10 @@ impl Binding {
             ensure!(
                 plain_name(name),
                 "project_name {name:?} must be letters, digits, ' ', '.', '_' or '-', not leading '.'"
+            );
+            ensure!(
+                !RESERVED_NAMES.contains(&name.as_str()),
+                "project_name {name:?} is reserved for the verdict home's own directories"
             );
         }
         Ok(())
@@ -195,6 +205,18 @@ mod tests {
             binding.project_name = Some(bad.into());
             assert!(binding.check().is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_reserved_project_name_is_refused_at_load() {
+        let text = "service_url = \"http://127.0.0.1:18080\"\nproject_id = \"p1\"\nproject_name = \"checkouts\"\n";
+        let error = Binding::parse(text).unwrap_err().to_string();
+        assert!(error.contains("reserved"), "{error}");
+        let mut binding = staging("http://127.0.0.1:18080");
+        binding.project_name = Some("checkouts".into());
+        assert!(binding.check().is_err());
+        binding.project_name = Some("checkouts2".into());
+        binding.check().unwrap();
     }
 
     #[test]
