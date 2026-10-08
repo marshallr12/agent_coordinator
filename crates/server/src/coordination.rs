@@ -380,6 +380,9 @@ struct Task {
     created_at: i64,
     ready_since: i64,
     archived_at: Option<i64>,
+    origin: String,
+    admission_class: Option<String>,
+    budget_held_at: Option<i64>,
     attempt_state: Option<String>,
     attempt_expires: Option<i64>,
     owner_authorized: bool,
@@ -494,7 +497,8 @@ impl Task {
         "work_status":self.status(now),"blocked_reason":self.blocked_reason,"dependencies_ready":self.dependencies_ready,
         "objective_children_ready":self.objective_children_ready,"decisions_ready":self.decisions_ready,
         "objective_id":self.objective_id,"parent_objective_id":self.parent_objective_id,"parent_objective_required":self.parent_objective_required,
-        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions});
+        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
+        "origin":self.origin,"admission_class":self.admission_class,"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned"});
         if self.workflow_phase.as_deref() == Some("integration") {
             value["precondition_hints"] = json!([{
                 "code":"candidate_stale_merge_conflict_requires_preflight",
@@ -970,6 +974,7 @@ async fn create_task(
             "kind must be code/general and priority 0 (urgent) through 3 (low).",
         ));
     }
+    crate::admission::validate_class(input.admission_class.as_deref())?;
     let mut m = Mutation::begin(
         &s,
         &auth,
@@ -983,11 +988,20 @@ async fn create_task(
         return Ok(response(v));
     }
     let id = Uuid::new_v4().to_string();
+    let admission = crate::admission::admit(
+        &mut m,
+        s.config.agent_task_weekly_budget,
+        input.planned,
+        input.admission_class.as_deref(),
+    )
+    .await?;
     sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,?,?,?,?,?)")
         .bind(&id).bind(&p).bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(&input.kind).bind(input.priority)
-        .bind(if input.planned{"planned"}else{"open"}).bind(m.now).bind(m.now).execute(&mut *m.tx).await?;
+        .bind(admission.lifecycle(input.planned)).bind(m.now).bind(m.now).execute(&mut *m.tx).await?;
+    crate::admission::record(&mut m, &id, &admission).await?;
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
-    let value = save_task_revision(&mut m, &p, &id).await?;
+    let mut value = save_task_revision(&mut m, &p, &id).await?;
+    value["admission"] = admission.value();
     Ok(response(
         m.finish(value, Some(&p), "task.created", &id).await?,
     ))
@@ -1174,6 +1188,12 @@ async fn edit_task(
                 "A human administrator must grant this agent task-definition editing authority for this project.",
             ));
         }
+        if current.budget_held_at.is_some() && current.lifecycle == "planned" && !input.planned {
+            return Err(AppError::human_gate(
+                "admission_budget",
+                "The weekly agent-task budget held this task as planned. A human must release it.",
+            ));
+        }
         let previous_dependencies: Vec<String> = sqlx::query_scalar(
             "SELECT prerequisite_id FROM task_dependencies WHERE task_id=? ORDER BY prerequisite_id",
         ).bind(&id).fetch_all(&mut *m.tx).await?;
@@ -1205,6 +1225,12 @@ async fn edit_task(
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
     sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,revision=revision+1 WHERE id=?")
         .bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority).bind(if input.planned{"planned"}else{"open"}).bind(&id).execute(&mut *m.tx).await?;
+    if !input.planned {
+        sqlx::query("UPDATE tasks SET budget_held_at=NULL WHERE id=?")
+            .bind(&id)
+            .execute(&mut *m.tx)
+            .await?;
+    }
     let mut value = save_task_revision(&mut m, &p, &id).await?;
     if let Some(grant_id) = agent_grant {
         value["task_definition_grant_id"] = json!(&grant_id);

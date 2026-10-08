@@ -161,7 +161,7 @@ impl Fixture {
         assert_eq!(s, StatusCode::OK, "{v}");
     }
     async fn task(&self, p: &str, kind: &str, title: &str) -> Value {
-        let (s,v)=self.call(&self.a,"POST",&format!("/api/v1/projects/{p}/tasks"),json!({"title":title,"description":"workflow test","acceptance_criteria":["required behavior verified"],"kind":kind})).await;
+        let (s,v)=self.call(&self.admin,"POST",&format!("/api/v1/projects/{p}/tasks"),json!({"title":title,"description":"workflow test","acceptance_criteria":["required behavior verified"],"kind":kind})).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         v["data"].clone()
     }
@@ -2891,11 +2891,17 @@ async fn agent_revise_is_rate_limited_and_needs_agent_recovery() {
     assert_eq!(manual["error"]["details"]["required_actor"], "human");
 }
 
-/// A general task in `p` at `priority` (lower is more urgent).
+/// A general task in `p` at `priority` (lower is more urgent). A human
+/// creates it, so the weekly agent-task budget never holds fixture tasks.
 async fn task_at(f: &Fixture, p: &str, title: &str, priority: i64) -> Value {
     let body = json!({"title":title,"description":"workflow test","acceptance_criteria":["required behavior verified"],"kind":"general","priority":priority});
     let (status, v) = f
-        .call(&f.a, "POST", &format!("/api/v1/projects/{p}/tasks"), body)
+        .call(
+            &f.admin,
+            "POST",
+            &format!("/api/v1/projects/{p}/tasks"),
+            body,
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{v}");
     v["data"].clone()
@@ -5115,6 +5121,8 @@ async fn a_human_revert_needs_no_review_and_counts_as_a_canary() {
     let (p, t, result, i) = published_subject(&f, "revert-human").await;
     let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
     assert_eq!(revert["revert"]["review_required"], false, "{revert}");
+    assert_eq!(revert["origin"], "human", "{revert}");
+    assert_eq!(revert["admission_class"], "revert", "{revert}");
     assert_eq!(revert["work_status"], "blocked", "{revert}");
     let canaries = events_of(&f, "revert.escaped_defect_canary", &revert["id"]).await;
     assert_eq!(canaries, 1);
@@ -5149,6 +5157,8 @@ async fn an_agent_revert_needs_evidence_and_review() {
     let evidence = json!({"check":"workspace-tests","first_parent":"pass","tip":"fail"});
     let revert = reverted(&f, &f.b, &p, &result, ("defect", evidence)).await;
     assert_eq!(revert["revert"]["review_required"], true, "{revert}");
+    assert_eq!(revert["origin"], "agent", "{revert}");
+    assert_eq!(revert["admission_class"], "revert", "{revert}");
     let body = candidate_body(R, &candidate(0xfeed));
     let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
     assert_eq!(status, StatusCode::OK, "{v}");
@@ -5306,6 +5316,8 @@ async fn an_author_withdraw_that_loses_to_a_push_yields_an_urgent_revert() {
     let view = fresh_task(&f, &p, &revert).await;
     assert_eq!(view["priority"], 0, "{view}");
     assert_eq!(view["revert"]["reason"], "author_withdraw", "{view}");
+    assert_eq!(view["origin"], "service", "{view}");
+    assert_eq!(view["admission_class"], "revert", "{view}");
     assert_eq!(view["revert"]["review_required"], true, "{view}");
     assert_eq!(
         view["revert"]["evidence"]["evidence"], "wrong approach",
@@ -5458,6 +5470,8 @@ async fn a_published_defect_revert_proposes_a_reland() {
     let reland = json!({"id": view["revert"]["reland_task_id"]});
     let reland = fresh_task(&f, &p, &reland).await;
     assert_eq!(reland["lifecycle"], "planned", "{reland}");
+    assert_eq!(reland["origin"], "service", "{reland}");
+    assert_eq!(reland["admission_class"], Value::Null, "{reland}");
     let criteria = reland["acceptance_criteria"].as_array().unwrap();
     let last = criteria.last().unwrap().as_str().unwrap();
     assert!(last.contains("passes on the first parent"), "{reland}");
@@ -5553,6 +5567,9 @@ async fn a_withdraw_before_a_no_op_keeps_an_ordinary_follow_up() {
     let follow_up = json!({"id": v["data"]["revise"]["follow_up_task_id"]});
     let view = fresh_task(&f, &p, &follow_up).await;
     assert_eq!(view["revert"], Value::Null, "{view}");
+    assert_eq!(view["origin"], "service", "{view}");
+    assert_eq!(view["admission_class"], "fix_target", "{view}");
+    assert_eq!(view["lifecycle"], "open", "{view}");
 }
 
 // P4 S4e (red team S2, A2): the reviewer sees the integrator's attestation;

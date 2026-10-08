@@ -74,6 +74,24 @@ A code task also needs its repository/target binding. Use a checklist of explici
 criteria; do not require the service to interpret arbitrary prose as executable
 tests. Planned tasks can hold incomplete drafts.
 
+Admission is also budgeted. Every task records its `origin`: `human` or `agent`
+from the principal that created it, or `service` when the service created it
+(reverts, integrator follow-ups, re-lands and internal review/integration
+tasks). A task may carry an `admission_class` (`revert`, `fix_target`,
+`deflake` or `refusal_fix`) that marks a fix; fixes are always admitted and do
+not use the budget. An agent-created task without a class is admitted only
+while fewer than N agent-originated tasks were admitted in the current ISO week
+(UTC, Monday 00:00 to the next Monday) across all projects together. The
+6th such task in a week is still created, but as `planned`, and the creation
+response carries an `admission` object with `held: true` and the reason; the
+digest lists it under `held_agent_tasks`. A human releases it by editing it to
+`planned: false`; an agent cannot, even with a task-definition grant. Human
+tasks, tasks with a class and tasks an agent itself created as `planned` are
+never held and do not use a place. N defaults to 5 and is the service setting
+`--agent-task-weekly-budget` (`COORDINATOR_AGENT_TASK_WEEKLY_BUDGET`, 0 through
+10000; 0 holds every unclassed agent task). The week rolls over with the clock:
+the first agent task of a new ISO week is admitted again.
+
 Default priorities are urgent, high, normal, and low. Within a project, selection
 filters eligibility and requested task kinds/capabilities, then orders by
 priority, oldest-ready time, and stable ID. Ready time resets only when work

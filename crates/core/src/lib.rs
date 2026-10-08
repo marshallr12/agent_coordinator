@@ -86,6 +86,11 @@ pub struct TaskInput {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub planned: bool,
+    /// Marks an always-admitted fix: `revert`, `fix_target`, `deflake` or
+    /// `refusal_fix`. A task without a class created by an agent counts
+    /// against the weekly admission budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_class: Option<String>,
 }
 fn code() -> String {
     "code".into()

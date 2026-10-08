@@ -723,6 +723,11 @@ async fn apply(
                 )])?;
                 sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,'general',2,?,?,?)")
                     .bind(&task_id).bind(&project).bind(&item.title).bind(description).bind(acceptance).bind(lifecycle).bind(mutation.now).bind(mutation.now).execute(&mut *mutation.tx).await?;
+                sqlx::query("UPDATE tasks SET origin=? WHERE id=?")
+                    .bind(crate::admission::Origin::of_principal(&mutation.actor.kind).as_str())
+                    .bind(&task_id)
+                    .execute(&mut *mutation.tx)
+                    .await?;
                 save_imported_task_revision(&mut mutation, &project, &task_id).await?;
                 (Some(task_id), Some(1_i64), None, None)
             } else {
