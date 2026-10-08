@@ -23,12 +23,16 @@ both). Canary not run (U28 moved it to P6). Ledger outside Git:
 `~/.local/share/agent-coordinator-autonomy/pilot-timeline.log`; journal stream
 `pilot-agentc-run.journal` (`oracle 'journalctl -u agentc-run -f -o short-iso'`).
 
-**P6 (plan-final §3):** `c6b33a77` attention budget **admitted → ready** for the supervisor.
-`d513bc21` P6 readiness stays **planned** (depends on `c6b33a77`; admit after it lands, then audit
-admission control U12, per-vendor/per-host canaries, digest-neglect paging, host updater, a task
-per gap, then the 2-week dogfood). Agents cannot admit/edit tasks (needs a human
-task-definition grant): admissions go through the owner's dashboard. Gotcha: a decision pins exact
-task revisions, so admitting a gated task makes the decision stale → reopen + re-answer.
+**P6 (plan-final §3):** `c6b33a77` attention budget **done** (`ba48c38`); its review exposed
+`8e8ecdcf` (stall rule per plan, P1) and `b59abb08` (agents could time out human-required decisions,
+P1) — **do not deploy `main` before `b59abb08` lands.** `d513bc21` admitted (rev 2, canary-green
+criterion added; decision `bb9bf99f` reopened as gen 3, Go) and **claimed by the orchestrating session**
+(`p3b-pilot`, attempt `9c781ee2`, gen 1; renew every ~15 min). Gap audit done; owner answered U29–U32;
+gap tasks: `4a7bfdb2` canary+digest timers (P1), `a49ace9a` admission (global 5/week), `358537bb`
+digest-neglect (after 4a7bfdb2), `94303638` per-host canary (after 4a7bfdb2), `dd95bb78` Linux host
+updater (after 94303638). Agents cannot admit/edit tasks (human task-definition grant): admissions go
+through the owner's dashboard. Gotcha: a decision pins exact task revisions, so admitting a gated
+task makes it stale → reopen + re-answer.
 
 **Next:** watch `c6b33a77`, `9c201930`, `7cc81dd4` and the rest of the queue; record HRI/cost per
 task. Deploy `main` at a quiet point (decision condition): owner dispatches the release; the agent
@@ -927,6 +931,10 @@ Record answers here.
 | U26 | R-P3b.2 narrows U24: in-launch resubmission is refused by the server (409 `submission_current`) after the helper's ref has already moved | One commit per launch: after its first accepted push the helper refuses any other commit with a new refusal code; an idempotent same-commit retry still succeeds | 2026-10-02: **as recommended** |
 | U27 | Agent-account Claude auth (owner proof 2026-10-03 on oracle-1: Claude 2.1.287 refreshes only after `mkdir claude-config/.oauth_refresh.lock`, which the root-owned claude-config denies, so `claude auth login` credentials die after ~8h) | `claude setup-token` per role (long-lived, inference-only); the supervisor reads root:agentc-<role> 0440 `<state>/<role>/claude-token` at spawn and passes `CLAUDE_CODE_OAUTH_TOKEN` (never in the described/audited env); `.credentials.json` retired; claude-config stays read-only | 2026-10-03: **as recommended** |
 | U28 | P3b pilot-core scope (gap audit `2a84ec3d`: ~2.5-2.7k lines remaining vs the 1.5k budget; plan-final §2.1 stop-and-re-scope) | Trim to essentials: run loop, lease lifecycle, recovery evidence, reviewer verdict, health/cost/kill switch (~1.8-2.0k); attention-budget items (digest, M1 timeouts, canary paging, stall-as-HRI, path overlap, audit sample) become scripts or move to P6 | 2026-10-06: **as recommended** |
+| U29 | P6 admission control (U12 detail): how agent tasks are held and fixes recognised | Recommended: held tasks use `planned`, `admission_class` marks always-admitted fixes, budget per project | 2026-10-08: **global budget** (5/ISO week across all projects); otherwise as recommended → task `a49ace9a` |
+| U30 | P6 digest-neglect paging (U13): what counts as reading the digest | Dashboard view or a signed "I read this" link in the email; no tracking pixel | 2026-10-08: **as recommended** → task `358537bb` |
+| U31 | P6 per-host/per-vendor canary routing | One canary project per supervised host, served with each configured harness in turn; no service-side routing | 2026-10-08: **as recommended** → task `94303638` |
+| U32 | P6 host updater platforms | Linux (systemd) only now; Windows deferred until a Windows host supervises | 2026-10-08: **as recommended** → task `dd95bb78` |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
