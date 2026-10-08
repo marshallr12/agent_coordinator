@@ -27,6 +27,47 @@ use uuid::Uuid;
 /// How long a reviewer launch may run before it is killed and its review
 /// released (well inside the one-hour activity lease, which is not renewed).
 const MAX_REVIEW: Duration = Duration::from_secs(45 * 60);
+/// How [`wait_beating`] paces itself.
+#[derive(Clone, Copy)]
+struct Waits {
+    /// Between looks at the launch.
+    tick: Duration,
+    /// Between heartbeats.
+    beat: Duration,
+}
+
+impl Waits {
+    const LIVE: Self = Self {
+        tick: Duration::from_secs(1),
+        beat: super::lease::BEAT_EVERY,
+    };
+}
+
+/// Waits for `child` to exit, calling `beat` first and then every
+/// `waits.beat`; kills its process group after `limit` or on a stop request.
+fn wait_beating(
+    child: &mut std::process::Child,
+    limit: Duration,
+    waits: Waits,
+    beat: &mut impl FnMut(),
+) -> Result<()> {
+    let started = Instant::now();
+    let mut last: Option<Instant> = None;
+    while child.try_wait()?.is_none() {
+        if started.elapsed() > limit || live::stop_requested() {
+            kill_group(child.id());
+            child.wait()?;
+            anyhow::bail!("the reviewer launch was stopped before it finished");
+        }
+        if last.is_none_or(|at| at.elapsed() >= waits.beat) {
+            beat();
+            last = Some(Instant::now());
+        }
+        std::thread::sleep(waits.tick);
+    }
+    Ok(())
+}
+
 /// The largest final output read back from a launch.
 const MAX_OUTPUT: u64 = 64 * 1024 * 1024;
 
@@ -201,7 +242,7 @@ impl LiveReviewer {
         let (uid, gid) = (self.account.uid, self.account.gid);
         let relative = paths.relative(&paths.run)?.join(run_files::PROMPT);
         rooted::write(&paths.role, &relative, prompt.as_bytes(), uid, gid)?;
-        self.run_launch(paths, claim)?;
+        self.run_launch(paths, review, claim)?;
         self.final_output(paths)
     }
 
@@ -218,8 +259,9 @@ impl LiveReviewer {
     }
 
     /// Runs `launch-root` for the review until it exits, killing its process
-    /// group after [`MAX_REVIEW`] or on a stop request.
-    fn run_launch(&self, paths: &Paths, claim: &ReviewClaim) -> Result<()> {
+    /// group after [`MAX_REVIEW`] or on a stop request, and refreshing the
+    /// heartbeat meanwhile.
+    fn run_launch(&self, paths: &Paths, review: &Review, claim: &ReviewClaim) -> Result<()> {
         use std::os::unix::process::CommandExt;
         let mut args = self.config_arg.clone();
         args.push("launch-root".into());
@@ -227,16 +269,14 @@ impl LiveReviewer {
         let mut command = Command::new(crate::relay::program(&self.config));
         command.args(&args).stdin(Stdio::null()).process_group(0);
         let mut child = command.spawn().context("spawn launch-root")?;
-        let started = Instant::now();
-        while child.try_wait()?.is_none() {
-            if started.elapsed() > MAX_REVIEW || live::stop_requested() {
-                kill_group(child.id());
-                child.wait()?;
-                anyhow::bail!("the reviewer launch was stopped before it finished");
+        let path = super::heartbeat_path(&self.config);
+        let mut beat = || {
+            let role = Role::Reviewer.slug();
+            if let Err(error) = super::beat_busy(&path, role, &review.subject) {
+                eprintln!("agentc-supervisor run: heartbeat: {error:#}");
             }
-            std::thread::sleep(Duration::from_secs(1));
-        }
-        Ok(())
+        };
+        wait_beating(&mut child, MAX_REVIEW, Waits::LIVE, &mut beat)
     }
 
     /// The record of the launch `claim` is about to start.
@@ -670,6 +710,36 @@ fn kill_group(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_reviewer_launch_keeps_beating_until_it_exits() {
+        let mut child = Command::new("sleep").arg("1").spawn().unwrap();
+        let waits = Waits {
+            tick: Duration::from_millis(10),
+            beat: Duration::from_millis(100),
+        };
+        let mut beats = 0;
+        let limit = Duration::from_secs(30);
+        wait_beating(&mut child, limit, waits, &mut || beats += 1).unwrap();
+        assert!((3..=11).contains(&beats), "{beats} beats in about a second");
+    }
+
+    #[test]
+    fn a_reviewer_launch_past_its_limit_is_stopped() {
+        use std::os::unix::process::CommandExt;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let waits = Waits {
+            tick: Duration::from_millis(10),
+            beat: Duration::from_millis(100),
+        };
+        let limit = Duration::from_millis(300);
+        let result = wait_beating(&mut child, limit, waits, &mut || {});
+        assert!(result.is_err());
+    }
 
     #[test]
     fn the_verdict_credential_never_reaches_reviewer_commands() {

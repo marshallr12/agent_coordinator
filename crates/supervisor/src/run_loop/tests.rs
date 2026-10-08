@@ -22,6 +22,8 @@ struct Fake {
     /// When the agent last checkpointed, as renewals report it.
     checkpoint_at: i64,
     renewals: Vec<i64>,
+    /// When the heartbeat was refreshed during the launch, and for which task.
+    beats: Vec<(i64, String)>,
     releases: Vec<String>,
     stop_at: Option<i64>,
     /// Exit this long after SIGTERM; `None` ignores SIGTERM.
@@ -61,6 +63,7 @@ impl Fake {
             event_at: None,
             checkpoint_at: 0,
             renewals: Vec::new(),
+            beats: Vec::new(),
             releases: Vec::new(),
             stop_at: None,
             term_exit_ms: Some(1_000),
@@ -159,6 +162,10 @@ impl Driver for Fake {
 
     fn last_event_ms(&self, _launch: &Launch) -> Option<i64> {
         self.event_at
+    }
+
+    fn heartbeat(&mut self, launch: &Launch) {
+        self.beats.push((self.now, launch.suggestion.task.clone()));
     }
 
     fn renew(&mut self, _launch: &Launch, lease: &Lease) -> Result<Lease> {
@@ -383,6 +390,51 @@ fn run_once_writes_a_heartbeat() {
         (beat["iteration"].as_u64(), beat["outcome"].as_str()),
         (Some(1), Some("Idle"))
     );
+}
+
+#[test]
+fn a_long_implementer_launch_keeps_the_heartbeat_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fake = Fake::new();
+    fake.exit_at = Some(minutes(20));
+    fake.event_at = Some(minutes(20));
+    iterate(&mut fake, &config(dir.path()));
+    let times: Vec<i64> = fake.beats.iter().map(|(at, _)| *at).collect();
+    assert_eq!(times.first(), Some(&0), "{times:?}");
+    assert!(times.len() >= 40, "{times:?}");
+    assert!(
+        times.windows(2).all(|w| w[1] - w[0] <= minutes(1)),
+        "{times:?}"
+    );
+    assert!(
+        minutes(20) - times.last().unwrap() <= minutes(1),
+        "{times:?}"
+    );
+    assert!(fake.beats.iter().all(|(_, task)| task == "t1"));
+}
+
+#[test]
+fn a_launch_beat_keeps_the_last_poll_and_the_next_poll_clears_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("heartbeat.json");
+    let read = || -> Value { serde_json::from_slice(&fs::read(&path).unwrap()).unwrap() };
+    beat_busy(&path, "reviewer", "t9").unwrap();
+    let busy = read();
+    assert_eq!(
+        (busy["iteration"].as_u64(), busy["outcome"].as_str()),
+        (Some(0), Some("Idle"))
+    );
+    assert_eq!(busy["launch"], json!({"role": "reviewer", "task": "t9"}));
+    beat(&path, 4, &Outcome::Failed("x".into())).unwrap();
+    assert!(read().get("launch").is_none());
+    beat_busy(&path, "implementer", "t1").unwrap();
+    let busy = read();
+    assert_eq!(
+        (busy["iteration"].as_u64(), busy["outcome"].as_str()),
+        (Some(4), Some("Failed(\"x\")"))
+    );
+    assert_eq!(busy["launch"], json!({"role": "implementer", "task": "t1"}));
+    assert!(busy["at_ms"].as_u64().unwrap() > 0);
 }
 
 #[test]

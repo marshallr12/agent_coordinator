@@ -12,6 +12,9 @@
 //! attempt, or it expired or changed hands) drains the launch the same way at
 //! once; an attempt the agent submitted is left as it is, not released.
 //! Any other renewal failure is logged and retried at the next cadence.
+//! While it waits, the loop also refreshes the heartbeat every [`BEAT_EVERY`]
+//! ([`Driver::heartbeat`]), so a long launch does not look like a hung
+//! supervisor.
 use super::renewal::AttemptEnded;
 use super::{Driver, Launch, RunConfig};
 use anyhow::{Context, Result};
@@ -24,6 +27,9 @@ pub const MAX_EVENT_AGE_MS: i64 = 15 * 60 * 1000;
 pub const MAX_CHECKPOINT_AGE_MS: i64 = 60 * 60 * 1000;
 /// How often the loop looks at a running launch.
 pub const TICK: Duration = Duration::from_secs(1);
+/// How often the heartbeat is rewritten while a launch runs (the canary
+/// pages when it is older than five minutes).
+pub const BEAT_EVERY: Duration = Duration::from_secs(30);
 
 /// A claimed attempt as the service last described it.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +106,8 @@ struct Watch {
     started: i64,
     /// When the service last described the lease.
     seen: i64,
+    /// When to rewrite the heartbeat next.
+    beat_at: i64,
     /// When to renew next; `None` once renewal has stopped.
     renew_at: Option<i64>,
     /// When a draining launch is killed; `None` until it drains.
@@ -126,6 +134,7 @@ impl Watch {
         Self {
             started: now,
             seen: now,
+            beat_at: now,
             renew_at: Some(now.saturating_add(cadence(lease))),
             kill_at: None,
             drain_reason: None,
@@ -170,6 +179,11 @@ pub fn supervise(
             };
         }
         let now = driver.now_ms();
+        if now >= watch.beat_at {
+            driver.heartbeat(launch);
+            let every = i64::try_from(BEAT_EVERY.as_millis()).unwrap_or(i64::MAX);
+            watch.beat_at = now.saturating_add(every);
+        }
         drain(driver, &mut watch, settings, now);
         if watch.renew_at.is_some_and(|at| now >= at) {
             renew(driver, launch, &mut lease, &mut watch, settings, now);

@@ -443,6 +443,15 @@ impl Driver for LiveDriver {
         stop_requested()
     }
 
+    fn heartbeat(&mut self, launch: &Launch) {
+        let path = super::heartbeat_path(&self.config);
+        if let Err(error) =
+            super::beat_busy(&path, Role::Implementer.slug(), &launch.suggestion.task)
+        {
+            eprintln!("agentc-supervisor run: heartbeat: {error:#}");
+        }
+    }
+
     fn reviewer(&mut self) -> Option<&mut dyn ReviewDriver> {
         self.reviewer.as_mut().map(|r| r as &mut dyn ReviewDriver)
     }

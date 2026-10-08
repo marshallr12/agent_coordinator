@@ -107,7 +107,8 @@ impl Default for RunConfig {
     }
 }
 
-/// The heartbeat file `run` rewrites every poll.
+/// The heartbeat file `run` rewrites after every poll and, while a launch
+/// runs, every [`lease::BEAT_EVERY`].
 pub fn heartbeat_path(config: &Config) -> PathBuf {
     config.state_dir.join("heartbeat.json")
 }
@@ -188,6 +189,9 @@ pub trait Driver {
     fn signal(&mut self, kill: bool);
     /// When the launch's harness last wrote an event (ms since the epoch).
     fn last_event_ms(&self, launch: &Launch) -> Option<i64>;
+    /// Rewrites the heartbeat while `launch` runs ([`beat_busy`]); a failure
+    /// is logged, not fatal.
+    fn heartbeat(&mut self, _launch: &Launch) {}
     /// Renews the attempt in the launch's session.
     fn renew(&mut self, launch: &Launch, lease: &Lease) -> Result<Lease>;
     /// The launch attempt's state (`active`, `submitted`, `released`, ...)
@@ -239,7 +243,8 @@ pub enum Outcome {
     Failed(String),
 }
 
-/// Polls until stopped (or once), writing the heartbeat after every poll.
+/// Polls until stopped (or once), writing the heartbeat after every poll
+/// (and while a launch runs, see [`beat_busy`]).
 pub fn run(driver: &mut impl Driver, config: &Config, once: bool) -> Result<()> {
     sweep_terminal(driver, config);
     record::reset_retries(config);
@@ -550,6 +555,28 @@ pub fn defuse(text: &str) -> String {
 pub fn beat(path: &Path, iteration: u64, outcome: &Outcome) -> Result<()> {
     let record = json!({"pid": std::process::id(), "iteration": iteration,
                         "at_ms": crate::shadow::now_ms(), "outcome": format!("{outcome:?}")});
+    write_beat(path, &record)
+}
+
+/// Refreshes the heartbeat's time while a `role` launch for `task` runs,
+/// adding a `launch` entry that says so. The poll count and last outcome are
+/// kept as the previous poll left them, and the next [`beat`] drops the
+/// entry.
+pub fn beat_busy(path: &Path, role: &str, task: &str) -> Result<()> {
+    let last: Value = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let record = json!({"pid": std::process::id(),
+                        "iteration": last["iteration"].as_u64().unwrap_or(0),
+                        "at_ms": crate::shadow::now_ms(),
+                        "outcome": last["outcome"].as_str().unwrap_or("Idle"),
+                        "launch": {"role": role, "task": task}});
+    write_beat(path, &record)
+}
+
+/// Replaces the heartbeat file with `record`.
+fn write_beat(path: &Path, record: &Value) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
