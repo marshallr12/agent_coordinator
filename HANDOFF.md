@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 gap tasks running on 1469b5a (2026-10-08 ~13:30 UTC, workflow on)
+## Current resume point — P6 gap tasks running on 1469b5a (2026-10-08 ~15:45 UTC, workflow on)
 
 **Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
 Ubuntu 26.04, systemd, at `1469b5a`, `[run] reviewer = true`, kill switch
@@ -42,12 +42,29 @@ updater (after 94303638). Agents cannot admit/edit tasks (human task-definition 
 through the owner's dashboard. Gotcha: a decision pins exact task revisions, so admitting a gated
 task makes it stale → reopen + re-answer.
 
-**Next:** watch `c6b33a77`, `9c201930`, `7cc81dd4` and the rest of the queue; record HRI/cost per
-task. Deploy `main` at a quiet point (decision condition): owner dispatches the release; the agent
-runs scp/preflight/pre/swap and `upgrade_client.py` (preflight needs every attempt drained — set the
-kill switch or wait for an empty queue), rebuilds `~/src/worktrees/agentc-pilot` on oracle-1; the
-owner runs host-setup as root there. Review advisories not yet applied: add a "canary green" exit
-criterion to `d513bc21`; cite `a27689b` for `3faed77b`.
+**Queue / landed since the deploy:** `84243ac7` done (`1b147a1`; first recorded review cost, role
+`rev`), `4a7bfdb2` done (`517a938`: canary + digest timers in host-setup, configured by
+`/etc/agentc/attention.env`). Supervisor on `a49ace9a` (admission); then `358537bb`, `94303638`;
+`d5ae08ef` authenticated TLS SMTP for the digest (Gmail relay, owner choice; after `358537bb`);
+`dd95bb78` updater after `94303638`. `4540596c` (deploy/agentc tests in CI) is **planned on purpose**:
+it edits `.github/workflows`, which implementer launches may not touch — the owner lands it.
+
+**Next:** watch the queue; record HRI/cost (`impl` and `rev` rows in `costs.jsonl`) per task in the
+ledger. After `358537bb` + `94303638` land: rebuild `agentc-pilot` on oracle-1 and hand the owner one
+host-setup run (same command as the deploy record, `APPARMOR_BWRAP=1`) with `attention.env` filled:
+owner-chosen ntfy topic, a dashboard-minted agent credential installed root-only at
+`/etc/agentc/attention-token`, Gmail app password in a root-only file (after `d5ae08ef`). Verify every
+input read-only before handing the command over. Then canary green → start the 2-week dogfood clock
+(d513bc21 exit metrics). Observation to watch: supervisor renew can collide with the agent's own
+session lock (`session_state_access_failure`, once at 14:13); file a task if it recurs.
+
+**Session handover:** background helpers started by the previous session may still run on the
+workstation: `renew.sh` (renews `dccda638` gen 2 every 15 min), `watch.sh` (task-state poller appending
+to `pilot-timeline.log`) and an ssh `journalctl -u agentc-run -f` appending to `pilot-agentc-run.journal`.
+Check with `ps -eo pid,args | grep -E '[r]enew.sh|[w]atch.sh|[j]ournalctl -u agentc-run'`; kill them and
+start your own (they live in the old session's scratchpad). Never `pkill -f` a pattern that also
+matches your own command line. Use `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key
+ubuntu@oracle.sithbit.com` in `!` commands (the `oracle` alias is interactive-only).
 
 Owner actions pending: set `kernel.yama.ptrace_scope=1` on mxmini and oracle-1; remove
 `~/src/worktrees/agent-coordinator-core-ship` with `git worktree remove --force`.
