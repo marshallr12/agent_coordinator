@@ -385,8 +385,8 @@ Both role contracts define that in-launch gate: `cargo fmt --all -- --check`,
 `cargo test --workspace --locked` (or the repository's own equivalents), plus
 any other gate script that can run in the sandbox, with each nested skip
 reported as skipped rather than passed. The reviewer judges "full gate green"
-by that gate. The skipped tests are not dropped: CI's required checks run them
-on an ordinary runner, and the integrator requires those checks green on the
+by that gate. The skipped tests are not dropped: the project's required checks run
+them on an ordinary runner, and the integrator requires those checks green on the
 integrated revision before it lands anything. Outside a launch, without a
 marker, every one of these tests runs and fails loudly when its host resource
 is missing.

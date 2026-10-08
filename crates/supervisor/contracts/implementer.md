@@ -57,10 +57,10 @@ and do not start work the task does not ask for.
    `AGENTC_TEST_NESTED_SANDBOX=1`, so tests that need the real Bubblewrap,
    user namespaces or host resources the sandbox lacks print
    `note: skipping <test>` and pass without running. Report those as
-   skipped, never as passed. They are not your failures: CI's required checks
-   run them, and the integrator requires those checks green on the
-   integrated revision before it lands anything. Never weaken, skip or delete
-   a test to make the gate pass.
+   skipped, never as passed. They are not your failures: the project's
+   required checks run them, and the integrator requires those checks green
+   on the integrated revision before it lands anything. Never weaken, skip or
+   delete a test to make the gate pass.
 5. In `{{checkout}}`, `git add` your changes and `git commit` them with a
    clear message, leaving the checkout clean (no uncommitted or untracked
    files). Then submit, which also publishes the candidate through the

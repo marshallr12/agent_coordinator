@@ -457,6 +457,9 @@ mod tests {
         )
         .unwrap();
         fs::write(spec.run.join("last.md"), "keep this output").unwrap();
+        // Release the lifecycle lock explicitly: a flock outlives drop while a
+        // child forked by a parallel test still holds a copy of the descriptor.
+        state._lock.unlock().unwrap();
         spec
     }
 
@@ -619,11 +622,15 @@ mod tests {
         for i in 3..=8 {
             completed(&config, Role::Implementer, &format!("done-{i}"), i);
         }
-        drop(current_lock);
+        // Unlock explicitly: dropping only closes this descriptor, and a child
+        // forked by a parallel test can briefly hold a copy of it. A flock lives
+        // as long as any copy of the open file description, so a drop-release
+        // would leave the run locked and make the final prune skip it.
+        current_lock.unlock().unwrap();
         prune_terminal(&config, Role::Implementer, &current.run).unwrap();
         assert!(StatePaths::new(&locked.run).root.exists());
         assert!(StatePaths::new(&current.run).root.exists());
-        drop(lock);
+        lock.unlock().unwrap();
         prune_terminal(&config, Role::Implementer, &current.run).unwrap();
         assert!(!StatePaths::new(&locked.run).root.exists());
     }

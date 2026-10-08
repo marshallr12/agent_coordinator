@@ -116,6 +116,11 @@ impl fmt::Display for AttemptEnded {
 
 impl std::error::Error for AttemptEnded {}
 
+/// `read`'s answer, asking once more if the first attempt found nothing.
+pub fn retry_once<T>(mut read: impl FnMut() -> Option<T>) -> Option<T> {
+    read().or_else(read)
+}
+
 /// The state of attempt `attempt` in a task detail's `attempts` history.
 pub fn attempt_state(task: &Value, attempt: &str) -> Option<String> {
     let attempts = task["attempts"].as_array()?;
@@ -163,6 +168,28 @@ mod tests {
                 .to_string()
                 .starts_with("exit signal, no error code: ")
         );
+    }
+
+    #[test]
+    fn an_unreadable_state_is_read_once_more_and_no_further() {
+        let mut reads = 0;
+        let found = retry_once(|| {
+            reads += 1;
+            (reads == 2).then_some("submitted")
+        });
+        assert_eq!((found, reads), (Some("submitted"), 2));
+        let mut reads = 0;
+        let found = retry_once(|| {
+            reads += 1;
+            None::<&str>
+        });
+        assert_eq!((found, reads), (None, 2));
+        let mut reads = 0;
+        let found = retry_once(|| {
+            reads += 1;
+            Some("active")
+        });
+        assert_eq!((found, reads), (Some("active"), 1));
     }
 
     #[test]
