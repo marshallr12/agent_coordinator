@@ -1122,10 +1122,21 @@ The run fails too when `costs.jsonl` shows a harness other than the requested
 one served the task, so a fallback vendor never passes for the primary.
 
 Each supervised host has its own canary project and its supervisor serves it,
-so the service needs no routing. The supervisor, not the canary, picks the
-vendor (`[run] harness`, then `[health.fallback]`): list a harness in
-`E2E_HARNESSES` only when this host's supervisor serves the canary project with
-it, otherwise its daily run pages with "served by ..., not ...".
+so the service needs no routing. The canary cannot choose the harness: the
+supervisor picks the vendor for every launch (`[run] harness`, then
+`[health.fallback]`), and the canary only reads `costs.jsonl` afterwards. The
+routing is therefore the owner's to arrange, and it is not automatic:
+
+- A host whose supervisor has one `[run] harness` canaries that harness only.
+  Leave `E2E_HARNESSES` at its default or set it to that harness.
+- A host that should canary both harnesses needs its canary project served with
+  each of them in turn, for example by switching the supervisor's `[run]
+  harness` (and restarting it) between the daily runs. Nothing in host-setup does
+  that, and every `E2E_HARNESSES` instance uses the same `E2E_PROJECT`. A harness
+  listed without that arrangement makes its daily run page with "served by ...,
+  not ...": the intended signal that the routing is missing, never a false pass.
+- While the primary vendor is exhausted and `[health.fallback]` serves the
+  canary task, the primary's run pages for the same reason.
 
 #### Project setup (once per host)
 
