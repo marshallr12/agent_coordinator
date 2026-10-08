@@ -130,7 +130,19 @@ confirmed, and `timed_out: true`, attributed to the principal that asked (there
 is no live session). The sweep runs inside `serve` every five minutes under the
 writer lock and skips a decision whose scope is stale or whose own `expires_at`
 has passed, so a recommendation is never applied to a different scope. A human
-can reopen a timed-out decision like any other. The project digest
+can reopen a timed-out decision like any other.
+
+Only a decision an agent may take itself can time out. A decision with
+`required_actor: human` is reserved for a human, so it times out only when a
+human created it or last reopened it. The service refuses `reversible: true`
+together with `required_actor: human` when an agent creates the decision, and
+refuses an agent's reopening of such a decision. The sweep also skips, and the
+digest does not list as pending, a human-required decision whose current cycle an
+agent opened, including rows recorded before this rule. Decisions with
+`required_actor` `agent` or `either`, and decisions that are not reversible,
+follow the rules above: the former may time out, the latter never do.
+
+The project digest
 (`GET /api/v1/projects/{project_id}/digest`, see the API contract) lists what
 proceeded this way and what is about to.
 

@@ -149,7 +149,8 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   relayed. Without the switch or the `relay` evidence the agent is still refused.
 - Attention budget (P3b): a decision may carry a recommendation and be marked
   reversible, and `serve` answers it with that recommendation after 24 hours
-  unanswered (`timed_out`); `GET .../digest` lists those decisions and the
+  unanswered (`timed_out`), except that a `required_actor=human` decision times
+  out only when a human created or last reopened it; `GET .../digest` lists those decisions and the
   human-required interventions, which include stalled tasks (three consecutive
   attempts without a submission); tasks may declare paths and `next` skips a
   task overlapping files the integrator saw land out of band in the last 24

@@ -893,6 +893,22 @@ async fn validate_decision_scope(
     Ok(())
 }
 
+/// Timeout-to-recommendation is only for reversible decisions agents may take
+/// themselves. An agent therefore cannot open or reopen a reversible decision
+/// that requires a human.
+fn refuse_agent_reversible_human_decision(
+    actor_kind: &str,
+    required_actor: &str,
+    reversible: bool,
+) -> Result<(), AppError> {
+    if actor_kind == "agent" && required_actor == "human" && reversible {
+        return Err(AppError::bad_request(
+            "A decision that requires a human cannot be reversible when an agent opens it: it would time out to its recommendation without a human answer. Leave reversible false, or ask a human to open it.",
+        ));
+    }
+    Ok(())
+}
+
 async fn create_decision(
     State(state): State<AppState>,
     auth: Auth,
@@ -910,6 +926,7 @@ async fn create_decision(
         &input,
     )
     .await?;
+    refuse_agent_reversible_human_decision(&m.actor.kind, &input.required_actor, input.reversible)?;
     if input.expires_at.is_some_and(|value| value <= m.now) {
         return Err(AppError::bad_request("expires_at must be in the future."));
     }
@@ -1295,8 +1312,8 @@ async fn reopen_decision(
     if input.expires_at.is_some_and(|value| value <= m.now) {
         return Err(AppError::bad_request("expires_at must be in the future."));
     }
-    let generation = sqlx::query_scalar::<_, i64>(
-        "SELECT current_generation FROM decisions WHERE project_id=? AND id=?",
+    let (generation, required_actor, reversible) = sqlx::query_as::<_, (i64, String, bool)>(
+        "SELECT current_generation,required_actor,reversible FROM decisions WHERE project_id=? AND id=?",
     )
     .bind(&project)
     .bind(&id)
@@ -1309,6 +1326,7 @@ async fn reopen_decision(
             "Read the current decision generation before reopening.",
         ));
     }
+    refuse_agent_reversible_human_decision(&m.actor.kind, &required_actor, reversible)?;
     validate_decision_scope(
         &mut m.tx,
         &project,
