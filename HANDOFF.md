@@ -4,45 +4,58 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P3b and P6 (2026-10-06 evening, workflow on)
+## Current resume point — P3b pilot running (2026-10-08 ~02:30 UTC, workflow on)
 
-S6 is complete. U28 (2026-10-06) trimmed the P3b pilot core to essentials (see §6). Landed on `main`
-today, each by independent subagent review plus the integrator (`main` at `1daec90`):
-- run loop `agentc-supervisor run` (b2c4fab1);
-- lease lifecycle (5c9f15eb): progress-gated renewal, drain, release, startup scan, and
-  `max_attempt_seconds` capping every attempt-expiry writer;
-- recovery evidence B5 (9181e1e3) and its follow-ups (aee640c2), including helper WIP refs;
-- push-socket isolation, the oracle-1 runbook, and the review-dialog claim-on-record fixes.
-**Size:** the pilot core is over the U28 estimate (~1.8-2.0k). Run loop ~690, lease ~800+ and
-recovery ~275 non-test lines so far, with two core tasks to go.
+**Read the service, not this list.** P3b core and the pilot fixes are on `main` (`3b5d51c`).
+The live supervisor `agentc-run` runs on **oracle-1** (aarch64 Ubuntu 26.04, systemd) at
+`34e3dde`, `[run] reviewer = true`, kill switch `/var/lib/agentc/kill-switch` absent. It claims
+ready tasks of project `fe95a6c5…` in priority order, implements, reviews with
+`distinct_launch`, and the oracle-1 integrator (`agentc-integrator@run`) lands. Production
+service at `34e3dde` (deployed 00:32 UTC; preflight needs **every** attempt drained, including
+other projects' integrations such as sithbit, and this session's own pilot claim).
 
-Live coordinator tasks (read the service, not this list):
-- ready:
-  - reviewer verdict pipeline `6cf630c0`
-  - health/cost/kill switch `393f1680`
-  - live staging run of the loop `27e76f96` (needs owner root steps on mxmini)
-  - U5 `distinct_launch` `aecb01d7`
-- planned:
-  - owner `--uninstall` on mxmini `acaea18b`
-  - owner oracle-1 bring-up `740cc14a`
-  - 5-task pilot + go/no-go `47d4403d`
-  - attention budget (P6 per U28) `c6b33a77`
-  - P6 `d513bc21`
-  - shadow cost run `c744c495`
+**Pilot task `47d4403d`** is claimed by the orchestrating session (CLI session `p3b-pilot`,
+attempt `4b1df778-648a-4f65-a579-5a4fbf125147`, generation 2). Renew it every ~15 min
+(`agent-coordinator --session p3b-pilot renew --attempt … --generation 2`); if a renew fails
+with a journal error run `agent-coordinator --session p3b-pilot retry`. If the lease lapsed:
+`claim --mode recovery`, `recovery resolve` disposition `resume`. Do **not** claim the pilot's
+real tasks yourself; the supervisor must do them. Pilot evidence (outside Git):
+`~/.local/share/agent-coordinator-autonomy/pilot-timeline.log` (per-task HRI, cost, audit
+notes) and `pilot-agentc-run.journal` (stream with `ssh -i
+~/gdrive/Development/oracle-1-key-2026-09-16.key ubuntu@oracle.sithbit.com 'journalctl -u
+agentc-run -f -o short-iso'`). Costs: `sudo tail /var/lib/agentc/costs.jsonl` on oracle-1.
 
-Owner actions pending:
-- set `kernel.yama.ptrace_scope=1` on mxmini (reads 0) and oracle-1;
-- run the containment suite on a host to exercise the new push-helper legs;
-- the leftover `~/src/worktrees/agent-coordinator-core-ship` holds superseded uncommitted
-  `ship.py` edits (archived in `~/.local/share/agent-coordinator-autonomy/ship-leftover-20261006/`).
-  A hook blocks agents from discarding them; remove the worktree yourself with
-  `git worktree remove --force ~/src/worktrees/agent-coordinator-core-ship`.
+Pilot ledger so far (HRI = human interventions):
+- `3faed77b` done, HRI 0, impl $0.78.
+- `6fd17b11` changes requested (in-launch gate unprovable, fixed by 62bb29a5), HRI 1, $0.25.
+- `84243ac7` changes requested 01:12 (candidate on a pre-62bb29a5 base), HRI 0, $0.33.
+- `d4ee5302` **done** 02:09 (`02a80c0`), HRI 0, impl $1.58; reviewer passed a preflight test
+  failure as an environment artifact without a base comparison (audit note). Adds migration
+  **0030** (`allow_relayed_human_answers`); production needs a deploy before it is live.
+- `68a46f3b` submitted 02:25; launch did not exit, the supervisor drained it (0f11849d proven
+  live); impl $0.19 (likely undercounted).
+Ready, supervisor's queue: `6fd17b11`, `48e2f2ce`, `7cc81dd4`, `84243ac7`, `9b0c412f`, plus two
+filed 2026-10-08 from pilot findings: `8366d1f4` reviewer launch costs are never written to
+`costs.jsonl` (so review cost is missing and the reviewer daily budget never trips) and
+`081aff61` the preflight `missing_containment_is_reported_not_skipped` test fails inside
+reviewer launches (runs as the role account). Landed by this session outside the supervisor:
+`7f82c7fc` (`f1e39ac`) upgrade_client_test fixture uses the host target (smoke failed on
+aarch64). Advisories from its review (assertRaisesRegex; two-arch assumption) are not tasks yet.
 
-Known follow-ups not yet tasks:
-- `launch-root` SIGTERM handler;
-- continuation claims;
-- review form: the kept-claim path has no fixture, and a kept claim is never re-claimed after a
-  lease loss (minor).
+**Next:** keep watching until 5 real pilot tasks are done; record HRI, cost per task and audit
+disagreements; then put the go/no-go to the owner with a recommendation, record it as a
+coordinator decision, and submit `47d4403d`. After go: P6 `d513bc21` (needs admission),
+attention budget `c6b33a77` (planned), optional shadow run `c744c495`. Deploy `main` (0030)
+at a quiet point: owner dispatches the release; the agent runs scp/preflight/pre/swap and
+`upgrade_client.py`, then rebuilds `~/src/worktrees/agentc-pilot` on oracle-1; the owner runs
+host-setup as root there (classifier blocks the agent: "Remote Shell Writes").
+
+Owner actions pending: set `kernel.yama.ptrace_scope=1` on mxmini and oracle-1; remove
+`~/src/worktrees/agent-coordinator-core-ship` (superseded `ship.py` edits, archived) with
+`git worktree remove --force`.
+
+Known follow-ups not yet tasks: `launch-root` SIGTERM handler; continuation claims; review
+form kept-claim path has no fixture.
 
 ## S6 reviewed live candidate test — owner runbook (2026-10-05): PASS, historical
 
