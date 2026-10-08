@@ -1,0 +1,477 @@
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode},
+};
+use coordinator_server::{
+    auth::{digest, secret},
+    router,
+    state::{AppState, Clock, Config},
+};
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
+use tower::ServiceExt;
+use uuid::Uuid;
+
+struct TestClock(AtomicI64);
+
+impl Clock for TestClock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+    fn use_monotonic_elapsed(&self) -> bool {
+        false
+    }
+}
+
+const DAY: i64 = 86_400_000;
+
+#[derive(Clone)]
+struct Caller {
+    token: String,
+    session: String,
+    proof: String,
+    principal: String,
+    _credential: String,
+    human: bool,
+}
+
+struct Fixture {
+    state: AppState,
+    app: Router,
+    clock: Arc<TestClock>,
+    _dir: tempfile::TempDir,
+    admin: Caller,
+    a: Caller,
+    b: Caller,
+    integrator: Caller,
+}
+
+impl Fixture {
+    async fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::open(Config {
+            database_path: dir.path().join("attention.sqlite3"),
+            public_origin: "http://127.0.0.1:8080".into(),
+            allow_insecure_loopback: true,
+            ..Config::default()
+        })
+        .await
+        .unwrap();
+        let clock = Arc::new(TestClock(AtomicI64::new(1_800_000_000_000)));
+        state.clock = clock.clone();
+        let admin = seed(&state, true, "attention-admin").await;
+        let a = seed(&state, false, "attention-a").await;
+        let b = seed(&state, false, "attention-b").await;
+        let integrator = seed(&state, false, "attention-integrator").await;
+        sqlx::query("UPDATE credentials SET class='integrator' WHERE id=?")
+            .bind(&integrator._credential)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        Self {
+            app: router(state.clone()),
+            state,
+            clock,
+            _dir: dir,
+            admin,
+            a,
+            b,
+            integrator,
+        }
+    }
+
+    async fn call(
+        &self,
+        caller: &Caller,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        call(
+            self.app.clone(),
+            caller,
+            method,
+            path,
+            &Uuid::new_v4().to_string(),
+            body,
+        )
+        .await
+    }
+
+    async fn ok(&self, caller: &Caller, method: &str, path: &str, body: Value) -> Value {
+        let (status, value) = self.call(caller, method, path, body).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        value["data"].clone()
+    }
+
+    async fn project(&self, name: &str) -> String {
+        let created = self
+            .ok(
+                &self.admin,
+                "POST",
+                "/api/v1/projects",
+                json!({"name":name,"repository_url":format!("https://example.test/{name}.git"),"target_branch":"main"}),
+            )
+            .await;
+        let project = created["id"].as_str().unwrap().to_owned();
+        sqlx::query("UPDATE projects SET integration_owner='integrator' WHERE id=?")
+            .bind(&project)
+            .execute(&self.state.pool)
+            .await
+            .unwrap();
+        project
+    }
+
+    async fn task(&self, project: &str, title: &str) -> Value {
+        self.ok(
+            &self.a,
+            "POST",
+            &format!("/api/v1/projects/{project}/tasks"),
+            json!({"title":title,"description":"attention budget","acceptance_criteria":["done"],"kind":"general"}),
+        )
+        .await
+    }
+
+    async fn ack(&self, caller: &Caller, project: &str) {
+        self.ok(
+            caller,
+            "POST",
+            &format!(
+                "/api/v1/sessions/{}/instruction-acknowledgments",
+                caller.session
+            ),
+            json!({"project_id":project,"policy_revision":self.policy(project).await,
+                "instruction_version":coordinator_core::INSTRUCTION_VERSION,
+                "sections":[coordinator_core::REQUIRED_SECTION]}),
+        )
+        .await;
+    }
+
+    async fn policy(&self, project: &str) -> i64 {
+        sqlx::query_scalar("SELECT policy_revision FROM projects WHERE id=?")
+            .bind(project)
+            .fetch_one(&self.state.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn next(&self, caller: &Caller, project: &str) -> Value {
+        self.ok(
+            caller,
+            "GET",
+            &format!("/api/v1/projects/{project}/next?role=implementer"),
+            Value::Null,
+        )
+        .await
+    }
+
+    /// Claims whatever `next` offers and returns the claimed attempt.
+    async fn claim_offered(&self, caller: &Caller, project: &str) -> Value {
+        self.ack(caller, project).await;
+        let offered = self.next(caller, project).await;
+        let call = &offered["action"]["call"];
+        let claimed = self
+            .ok(
+                caller,
+                "POST",
+                call["path"].as_str().unwrap(),
+                call["body"].clone(),
+            )
+            .await;
+        claimed["claim"]["attempt"].clone()
+    }
+
+    async fn release(&self, caller: &Caller, project: &str, attempt: &Value) {
+        self.ok(
+            caller,
+            "POST",
+            &format!(
+                "/api/v1/projects/{project}/attempts/{}/release",
+                attempt["id"].as_str().unwrap()
+            ),
+            json!({"generation":attempt["generation"],"summary":"Could not make progress"}),
+        )
+        .await;
+    }
+
+    async fn digest(&self, project: &str) -> Value {
+        self.ok(
+            &self.a,
+            "GET",
+            &format!("/api/v1/projects/{project}/digest"),
+            Value::Null,
+        )
+        .await
+    }
+
+    async fn reversible_decision(&self, project: &str, task: &Value, reversible: bool) -> Value {
+        self.ok(
+            &self.a,
+            "POST",
+            &format!("/api/v1/projects/{project}/decisions"),
+            json!({"question":"Rename the flag?","options":["Rename","Keep"],
+                "rationale":"Either is easy to undo","required_actor":"human",
+                "affected_tasks":[{"task_id":task["id"],"task_revision":task["revision"]}],
+                "policy_revision":self.policy(project).await,"environment":"test",
+                "conditions":"Nothing ships before review","recommendation":"Rename",
+                "reversible":reversible}),
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn an_unanswered_reversible_decision_proceeds_after_a_day_and_is_in_the_digest() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-decision").await;
+    let task = f.task(&p, "Rename the flag").await;
+    let decision = f.reversible_decision(&p, &task, true).await;
+    let irreversible = f.reversible_decision(&p, &task, false).await;
+    assert_eq!(decision["recommendation"], "Rename");
+    assert_eq!(decision["status"], "pending");
+    assert!(
+        f.next(&f.a, &p).await["action"].is_null(),
+        "blocked while pending"
+    );
+
+    f.clock.0.fetch_add(DAY - 1, Ordering::SeqCst);
+    let early = coordinator_server::attention::sweep_timed_out_decisions(&f.state)
+        .await
+        .unwrap();
+    assert!(early.is_empty(), "{early:?}");
+    let digest = f.digest(&p).await;
+    assert_eq!(
+        digest["pending_reversible_decisions"][0]["decision_id"],
+        decision["id"]
+    );
+    assert_eq!(digest["proceeded_decisions"], json!([]));
+
+    f.clock.0.fetch_add(1, Ordering::SeqCst);
+    let swept = coordinator_server::attention::sweep_timed_out_decisions(&f.state)
+        .await
+        .unwrap();
+    assert_eq!(swept, vec![decision["id"].as_str().unwrap().to_owned()]);
+    let swept_again = coordinator_server::attention::sweep_timed_out_decisions(&f.state)
+        .await
+        .unwrap();
+    assert!(swept_again.is_empty());
+
+    let path = |d: &Value| {
+        format!(
+            "/api/v1/projects/{p}/decisions/{}",
+            d["id"].as_str().unwrap()
+        )
+    };
+    let answered = f.ok(&f.a, "GET", &path(&decision), Value::Null).await;
+    assert_eq!(answered["status"], "allowed", "{answered}");
+    assert_eq!(answered["answer"]["answer"], "Rename");
+    assert_eq!(answered["answer"]["timed_out"], true);
+    let still_open = f.ok(&f.a, "GET", &path(&irreversible), Value::Null).await;
+    assert_eq!(
+        still_open["status"], "pending",
+        "an irreversible decision never times out"
+    );
+
+    let digest = f.digest(&p).await;
+    let listed = &digest["proceeded_decisions"][0];
+    assert_eq!(listed["decision_id"], decision["id"], "{digest}");
+    assert_eq!(listed["proceeded_with"], "Rename");
+    assert_eq!(listed["affected_task_ids"][0], task["id"]);
+    assert_eq!(digest["pending_reversible_decisions"], json!([]));
+}
+
+#[tokio::test]
+async fn a_reversible_decision_needs_a_recommendation_among_its_options() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-validation").await;
+    let task = f.task(&p, "Rename the flag").await;
+    for (recommendation, reversible) in [(Value::Null, true), (json!("Elsewhere"), false)] {
+        let (status, value) = f
+            .call(
+                &f.a,
+                "POST",
+                &format!("/api/v1/projects/{p}/decisions"),
+                json!({"question":"Rename the flag?","options":["Rename","Keep"],
+                    "rationale":"Either is easy to undo","required_actor":"human",
+                    "affected_tasks":[{"task_id":task["id"],"task_revision":task["revision"]}],
+                    "policy_revision":f.policy(&p).await,"recommendation":recommendation,
+                    "reversible":reversible}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    }
+}
+
+#[tokio::test]
+async fn a_task_that_keeps_ending_without_a_submission_counts_as_a_human_intervention() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-stall").await;
+    f.task(&p, "Stubborn task").await;
+    assert_eq!(f.digest(&p).await["hri"]["count"], 0);
+    for round in 0..3 {
+        let claimant = if round % 2 == 0 { &f.a } else { &f.b };
+        let attempt = f.claim_offered(claimant, &p).await;
+        f.release(claimant, &p, &attempt).await;
+        let hri = f.digest(&p).await["hri"].clone();
+        assert_eq!(
+            hri["count"],
+            if round < 2 { 0 } else { 1 },
+            "round {round}: {hri}"
+        );
+    }
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["stalled_tasks"], 1);
+    assert_eq!(hri["items"][0]["code"], "stalled_task", "{hri}");
+}
+
+#[tokio::test]
+async fn next_skips_a_task_whose_paths_overlap_a_recent_human_change() {
+    let f = Fixture::new().await;
+    let p = f.project("attention-overlap").await;
+    let touched = f.task(&p, "Touch the server").await;
+    let elsewhere = f.task(&p, "Touch the docs").await;
+    let paths = |task: &Value| {
+        format!(
+            "/api/v1/projects/{p}/tasks/{}/paths",
+            task["id"].as_str().unwrap()
+        )
+    };
+    f.ok(
+        &f.a,
+        "POST",
+        &paths(&touched),
+        json!({"paths":["crates/server/"]}),
+    )
+    .await;
+    f.ok(
+        &f.a,
+        "POST",
+        &paths(&elsewhere),
+        json!({"paths":["book/src/docs"]}),
+    )
+    .await;
+    sqlx::query("UPDATE tasks SET ready_since=ready_since-1000 WHERE id=?")
+        .bind(touched["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    f.ack(&f.b, &p).await;
+    // The older task is offered first until a human change lands on its paths.
+    assert_eq!(f.next(&f.b, &p).await["action"]["task_id"], touched["id"]);
+
+    let ships = format!("/api/v1/projects/{p}/integrator/human-ships");
+    let ship = json!({"commit":"abcdef1234","files":["crates/server/src/next.rs"]});
+    let (status, _) = f.call(&f.admin, "POST", &ships, ship.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "only the integrator records human ships"
+    );
+    let (status, _) = f.call(&f.a, "POST", &ships, ship.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let recorded = f.ok(&f.integrator, "POST", &ships, ship).await;
+    assert_eq!(recorded["recorded_files"], 1);
+
+    let offered = f.next(&f.b, &p).await;
+    assert_eq!(offered["action"]["task_id"], elsewhere["id"], "{offered}");
+    assert_eq!(offered["skipped"]["path_overlap"], 1, "{offered}");
+
+    f.clock.0.fetch_add(DAY, Ordering::SeqCst);
+    let later = f.next(&f.b, &p).await;
+    assert_eq!(
+        later["action"]["task_id"], touched["id"],
+        "the hold lasts 24 hours: {later}"
+    );
+}
+
+async fn seed(state: &AppState, human: bool, name: &str) -> Caller {
+    let caller = Caller {
+        token: secret(),
+        session: Uuid::new_v4().to_string(),
+        proof: secret(),
+        principal: Uuid::new_v4().to_string(),
+        _credential: Uuid::new_v4().to_string(),
+        human,
+    };
+    sqlx::query(
+        "INSERT INTO principals(id,name,kind,role,password_hash,created_at) VALUES(?,?,?,?,?,?)",
+    )
+    .bind(&caller.principal)
+    .bind(name)
+    .bind(if human { "human" } else { "agent" })
+    .bind(if human { "admin" } else { "agent" })
+    .bind(if human { Some("unused") } else { None })
+    .bind(state.now())
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    if human {
+        sqlx::query(
+            "INSERT INTO browser_sessions(id,principal_id,token_hash,expires_at) VALUES(?,?,?,?)",
+        )
+        .bind(&caller.session)
+        .bind(&caller.principal)
+        .bind(digest(&caller.token))
+        .bind(state.now() + 86_400_000)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    } else {
+        sqlx::query(
+            "INSERT INTO credentials(id,principal_id,token_hash,created_at) VALUES(?,?,?,?)",
+        )
+        .bind(&caller._credential)
+        .bind(&caller.principal)
+        .bind(digest(&caller.token))
+        .bind(state.now())
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agent_sessions(id,principal_id,credential_id,workstation_id,proof_hash,created_at,capabilities,harness) VALUES(?,?,?,?,?,?,'[]','test')")
+            .bind(&caller.session).bind(&caller.principal).bind(&caller._credential)
+            .bind(format!("{}-workstation",caller.principal)).bind(digest(&caller.proof))
+            .bind(state.now()).execute(&state.pool).await.unwrap();
+    }
+    caller
+}
+
+async fn call(
+    app: Router,
+    caller: &Caller,
+    method: &str,
+    path: &str,
+    key: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("idempotency-key", key);
+    if caller.human {
+        request = request
+            .header("cookie", format!("coordinator_local={}", caller.token))
+            .header("origin", "http://127.0.0.1:8080")
+            .header(
+                "x-csrf-token",
+                digest(&format!("coordinator-browser-csrf-v1:{}", caller.token)),
+            );
+    } else {
+        request = request
+            .header("authorization", format!("Bearer {}", caller.token))
+            .header("x-coordinator-session", &caller.session)
+            .header("x-coordinator-session-proof", &caller.proof);
+    }
+    let response = app
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}

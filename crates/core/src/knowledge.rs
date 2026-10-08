@@ -123,6 +123,13 @@ pub struct DecisionInput {
     #[serde(default)]
     pub conditions: String,
     pub expires_at: Option<i64>,
+    /// The option the asker recommends; must be one of `options`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<String>,
+    /// A reversible decision with a recommendation proceeds with that
+    /// recommendation once its cycle has gone unanswered for 24 hours.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reversible: bool,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

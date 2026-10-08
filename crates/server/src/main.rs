@@ -233,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
                     anyhow::anyhow!("Artifact store initialization failed: {}", error.code)
                 })?;
             tracing::info!(listen = %state.config.listen, "Agent Coordinator service started");
+            tokio::spawn(sweep_decision_timeouts(state.clone()));
             axum::serve(listener, router(state).into_make_service())
                 .with_graceful_shutdown(shutdown())
                 .await?;
@@ -240,6 +241,24 @@ async fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
+/// Answers reversible decisions that waited 24 hours, every few minutes.
+async fn sweep_decision_timeouts(state: AppState) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+    loop {
+        tick.tick().await;
+        match coordinator_server::attention::sweep_timed_out_decisions(&state).await {
+            Ok(answered) if !answered.is_empty() => {
+                tracing::info!(
+                    count = answered.len(),
+                    "Reversible decisions proceeded after 24 hours"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "Decision timeout sweep failed"),
+        }
+    }
+}
+
 /// Reranking settings for `command`. Only `serve` reads TYPESAFE_API_KEY from
 /// the environment, and it logs one warning when the key is unset or blank;
 /// every other command gets the keyless default, which reranks nothing.

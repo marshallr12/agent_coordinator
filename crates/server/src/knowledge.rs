@@ -831,6 +831,18 @@ fn validate_decision(input: &DecisionInput) -> Result<(), AppError> {
             return Err(AppError::bad_request("Decision options must be unique."));
         }
     }
+    if let Some(recommendation) = &input.recommendation
+        && !input.options.contains(recommendation)
+    {
+        return Err(AppError::bad_request(
+            "The recommendation must exactly match one of the decision options.",
+        ));
+    }
+    if input.reversible && input.recommendation.is_none() {
+        return Err(AppError::bad_request(
+            "A reversible decision needs a recommendation to proceed with.",
+        ));
+    }
     validate_decision_tasks(&input.affected_tasks)?;
     if input.policy_revision <= 0 {
         return Err(AppError::bad_request(
@@ -912,8 +924,8 @@ async fn create_decision(
         return Ok(response(value));
     }
     let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO decisions(id,project_id,question,options_json,rationale,required_actor,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)")
-        .bind(&id).bind(&project).bind(&input.question).bind(serde_json::to_string(&input.options)?).bind(&input.rationale).bind(&input.required_actor).bind(&m.actor.id).bind(m.now).execute(&mut *m.tx).await?;
+    sqlx::query("INSERT INTO decisions(id,project_id,question,options_json,rationale,required_actor,created_by,created_at,recommendation,reversible) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .bind(&id).bind(&project).bind(&input.question).bind(serde_json::to_string(&input.options)?).bind(&input.rationale).bind(&input.required_actor).bind(&m.actor.id).bind(m.now).bind(&input.recommendation).bind(input.reversible).execute(&mut *m.tx).await?;
     sqlx::query("INSERT INTO decision_cycles(decision_id,generation,policy_revision,environment,conditions,expires_at,rationale,opened_by,created_at) VALUES(?,1,?,?,?,?,?,?,?)")
         .bind(&id).bind(input.policy_revision).bind(&input.environment).bind(&input.conditions).bind(input.expires_at).bind(&input.rationale).bind(&m.actor.id).bind(m.now).execute(&mut *m.tx).await?;
     insert_decision_tasks(&mut m.tx, &id, 1, &project, &input.affected_tasks).await?;
@@ -1048,7 +1060,7 @@ fn relay_value(row: &sqlx::sqlite::SqliteRow) -> Value {
     json!({"prompt":row.get::<Option<String>,_>("relay_prompt"),"response":row.get::<Option<String>,_>("relay_response"),"relayed_by_session":row.get::<Option<String>,_>("actor_session_id"),"authorized_by":row.get::<Option<String>,_>("relay_authorized_by"),"policy_revision":row.get::<Option<i64>,_>("relay_policy_revision")})
 }
 
-async fn decision_value(
+pub(crate) async fn decision_value(
     c: &mut SqliteConnection,
     project: &str,
     id: &str,
@@ -1089,8 +1101,8 @@ async fn decision_value(
     } else {
         "pending"
     };
-    let answer_value=answer.map(|a|json!({"disposition":a.get::<String,_>("disposition"),"answer":a.get::<String,_>("answer"),"rationale":a.get::<String,_>("rationale"),"conditions_confirmed":a.get::<bool,_>("conditions_confirmed"),"actor_id":a.get::<String,_>("actor_id"),"actor_session_id":a.get::<Option<String>,_>("actor_session_id"),"relayed":a.get::<bool,_>("relayed"),"relay":relay_value(&a),"created_at":timestamp(a.get("created_at"))}));
-    let mut value = json!({"id":id,"project_id":project,"question":row.get::<String,_>("question"),"options":serde_json::from_str::<Value>(&row.get::<String,_>("options_json"))?,"rationale":row.get::<String,_>("rationale"),"required_actor":row.get::<String,_>("required_actor"),"generation":generation,"status":status,"work_allowed":status=="allowed","policy_revision":cycle.get::<i64,_>("policy_revision"),"environment":cycle.get::<String,_>("environment"),"conditions":cycle.get::<String,_>("conditions"),"expires_at":expires.map(timestamp),"affected_tasks":tasks.iter().map(|r|json!({"task_id":r.get::<String,_>("task_id"),"task_revision":r.get::<i64,_>("task_revision"),"current_revision":r.get::<i64,_>("current_revision")})).collect::<Vec<_>>(),"answer":answer_value,"created_by":row.get::<String,_>("created_by"),"created_at":timestamp(row.get("created_at"))});
+    let answer_value=answer.map(|a|json!({"disposition":a.get::<String,_>("disposition"),"answer":a.get::<String,_>("answer"),"rationale":a.get::<String,_>("rationale"),"conditions_confirmed":a.get::<bool,_>("conditions_confirmed"),"actor_id":a.get::<String,_>("actor_id"),"actor_session_id":a.get::<Option<String>,_>("actor_session_id"),"relayed":a.get::<bool,_>("relayed"),"timed_out":a.get::<bool,_>("timed_out"),"relay":relay_value(&a),"created_at":timestamp(a.get("created_at"))}));
+    let mut value = json!({"id":id,"project_id":project,"question":row.get::<String,_>("question"),"options":serde_json::from_str::<Value>(&row.get::<String,_>("options_json"))?,"rationale":row.get::<String,_>("rationale"),"required_actor":row.get::<String,_>("required_actor"),"generation":generation,"status":status,"work_allowed":status=="allowed","policy_revision":cycle.get::<i64,_>("policy_revision"),"environment":cycle.get::<String,_>("environment"),"conditions":cycle.get::<String,_>("conditions"),"expires_at":expires.map(timestamp),"recommendation":row.get::<Option<String>,_>("recommendation"),"reversible":row.get::<bool,_>("reversible"),"affected_tasks":tasks.iter().map(|r|json!({"task_id":r.get::<String,_>("task_id"),"task_revision":r.get::<i64,_>("task_revision"),"current_revision":r.get::<i64,_>("current_revision")})).collect::<Vec<_>>(),"answer":answer_value,"created_by":row.get::<String,_>("created_by"),"created_at":timestamp(row.get("created_at"))});
     if history {
         let cycles=sqlx::query("SELECT c.*,a.disposition,a.answer,a.rationale AS answer_rationale,a.conditions_confirmed,a.actor_id,a.actor_session_id,a.relayed,a.relay_prompt,a.relay_response,a.relay_authorized_by,a.relay_policy_revision,a.created_at AS answered_at FROM decision_cycles c LEFT JOIN decision_answers a ON a.decision_id=c.decision_id AND a.generation=c.generation WHERE c.decision_id=? ORDER BY c.generation DESC LIMIT 200").bind(id).fetch_all(&mut *c).await?;
         value["history"] = json!(
@@ -1223,7 +1235,7 @@ async fn relay_authority_for(
         .bind(project).bind(project).fetch_optional(&mut *c).await?)
 }
 
-async fn ensure_decision_scope_current(
+pub(crate) async fn ensure_decision_scope_current(
     c: &mut SqliteConnection,
     project: &str,
     id: &str,

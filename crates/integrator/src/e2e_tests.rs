@@ -56,6 +56,7 @@ struct Mock {
     observations: Vec<Value>,
     revises: Vec<Value>,
     reports: Vec<Value>,
+    human_ships: Vec<Value>,
     keys: HashMap<String, (Value, Reply)>,
 }
 
@@ -291,6 +292,20 @@ async fn reports(State(mock): State<Shared>, headers: HeaderMap, Json(body): Jso
     })
 }
 
+/// Stores each human-ship body.
+async fn human_ships(
+    State(mock): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Reply {
+    idempotent(&mock, &headers, body, |mock, body| {
+        mock.human_ships.push(body.clone());
+        ok(
+            json!({"commit": body["commit"], "recorded_files": body["files"].as_array().map_or(0, Vec::len)}),
+        )
+    })
+}
+
 /// Records revert `id`'s candidate and queues it as the revert's subject
 /// (`rs-<id>`, marked with `revert_task_id`), like the server's candidate
 /// route for a human's revert, which needs no review.
@@ -364,6 +379,7 @@ async fn serve(mock: Shared) -> String {
         .route(&format!("{base}/observations"), post(observations))
         .route(&format!("{base}/revise"), post(revise))
         .route(&format!("{base}/reports"), post(reports))
+        .route(&format!("{base}/human-ships"), post(human_ships))
         .route(
             &format!("{base}/reverts/{{id}}/candidate"),
             post(revert_candidate),
@@ -1154,6 +1170,23 @@ async fn only_commits_after_a_publish_are_out_of_band() {
     assert_eq!(flagged_shas(&details), [json!(late)]);
     assert_eq!(details["integrator_results"], json!([r]));
     assert_eq!(details["unflagged_count"], 0);
+}
+
+#[tokio::test]
+async fn the_files_of_out_of_band_user_commits_are_recorded_but_agent_commits_are_not() {
+    let (remote, _) = seeded_remote();
+    let mut h = Harness::idle(&remote).await;
+    h.checks(None, &RULES);
+    assert_eq!(h.cycle().await, Step::Idle);
+    let user = advance_main(&remote, "docs/guide.md");
+    land(&remote, "agent.txt", AGENT_MESSAGE);
+    assert_eq!(h.cycle().await, Step::Idle);
+    let ships = h.peek(|m| m.human_ships.clone());
+    assert_eq!(
+        ships,
+        [json!({"commit": user, "files": ["docs/guide.md"]})],
+        "{ships:?}"
+    );
 }
 
 #[tokio::test]

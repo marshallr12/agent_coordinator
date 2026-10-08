@@ -120,6 +120,20 @@ for audit; a human can reopen any relayed decision. A stronger per-answer human
 confirmation (a proposed answer the human confirms) was considered and left for
 later.
 
+### Recommendations and reversible decisions
+
+A decision may carry a `recommendation` (exactly one of its `options`) and
+`reversible: true`; a reversible decision needs a recommendation. When the
+current cycle of such a decision has gone unanswered for 24 hours, the service
+answers it: an `allow` with `answer` equal to the recommendation, conditions
+confirmed, and `timed_out: true`, attributed to the principal that asked (there
+is no live session). The sweep runs inside `serve` every five minutes under the
+writer lock and skips a decision whose scope is stale or whose own `expires_at`
+has passed, so a recommendation is never applied to a different scope. A human
+can reopen a timed-out decision like any other. The project digest
+(`GET /api/v1/projects/{project_id}/digest`, see the API contract) lists what
+proceeded this way and what is about to.
+
 A prior allow stops blocking only while all of the following remain true:
 
 - every affected task's judged fields (title, description, acceptance criteria,

@@ -174,6 +174,29 @@ pub fn commits_between(mirror: &Path, from: &str, to: &str) -> Result<Vec<Commit
     Ok(out.split('\x1e').filter_map(parse_commit).collect())
 }
 
+/// The paths `sha` changed (against each parent for a merge), sorted and
+/// without duplicates.
+pub fn changed_files(mirror: &Path, sha: &str) -> Result<Vec<String>> {
+    let out = run(
+        mirror,
+        [
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-m",
+            "--root",
+            "-z",
+            sha,
+        ],
+    )?;
+    ensure!(out.status.success(), "git diff-tree failed");
+    let names = String::from_utf8_lossy(&out.stdout);
+    let files: std::collections::BTreeSet<&str> =
+        names.split('\0').filter(|name| !name.is_empty()).collect();
+    Ok(files.into_iter().map(str::to_owned).collect())
+}
+
 /// Parses one `commits_between` record; blank separators yield `None`.
 fn parse_commit(record: &str) -> Option<CommitInfo> {
     let mut fields = record.trim_start_matches('\n').splitn(3, '\x1f');

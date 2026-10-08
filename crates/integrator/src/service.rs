@@ -457,6 +457,19 @@ impl Service {
         self.post(project, "reports", &json!(report), &key).await
     }
 
+    /// Records the files of a commit a human shipped to the target, so the
+    /// service's `next` steers agents away from them for a day.
+    pub async fn human_ship(
+        &self,
+        project: &str,
+        commit: &str,
+        files: &[String],
+    ) -> Result<Reply<Value>> {
+        let body = json!({"commit": commit, "files": files});
+        let key = body_key("human-ship", &body, commit);
+        self.post(project, "human-ships", &body, &key).await
+    }
+
     /// POSTs to `…/integrator/<route>` with an idempotency key.
     async fn post<T: DeserializeOwned>(
         &self,

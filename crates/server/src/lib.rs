@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod attention;
 pub mod auth;
 pub mod autonomy;
 pub mod backup;
@@ -61,6 +62,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(coordination::routes())
         .merge(workflow::routes())
         .merge(next::routes())
+        .merge(attention::routes())
         .merge(integrator::routes())
         .merge(integrator_authority::routes())
         .merge(integrator_observe::routes())

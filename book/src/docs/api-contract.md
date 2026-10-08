@@ -219,6 +219,23 @@ must be reopened by an operator or revised by an agent (`reason_code`
 `operation_not_permitted` and add `details.required_actor: "human"` and a
 `details.gate` name, or `required_actor: "human"` on the precondition.
 
+`GET /api/v1/projects/{project_id}/digest?hours=N` (default 24, at most 336)
+is the attention-budget summary: `proceeded_decisions` (reversible decisions the
+service answered with their recommendation in the window),
+`pending_reversible_decisions` (with `proceeds_at`), and `hri`, the
+human-required interventions: `count`, `stalled_tasks` and `items`. A task is
+stalled when it is open and its last three attempts all ended (released,
+blocked, expired or canceled) without a submission; open human-required
+integrator reports are the other items. `POST /api/v1/projects/{project_id}/tasks/{task_id}/paths`
+with `{"paths": [...]}` replaces the repository-relative paths (files or
+directories, at most 50) a task touches. The integrator records the files of
+out-of-band commits without an agent trailer with
+`POST /api/v1/projects/{project_id}/integrator/human-ships`
+(`{"commit", "files"}`, integrator credentials only), and `next` (implementer)
+skips a task whose declared paths equal or contain, or sit inside, a file
+recorded in the last 24 hours, counting it under `skipped.path_overlap`. Claims
+by explicit task are not affected.
+
 `GET /api/v1/projects/{project_id}/next?role=implementer|reviewer` is a read-only
 answer to "what should a launch of this role do now". It walks the same
 candidates and preconditions a claim would check and returns at most one
