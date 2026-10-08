@@ -4,58 +4,44 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P3b pilot running (2026-10-08 ~02:30 UTC, workflow on)
+## Current resume point — P3b GO; P6 started (2026-10-08 ~06:00 UTC, workflow on)
 
-**Read the service, not this list.** P3b core and the pilot fixes are on `main` (`3b5d51c`).
-The live supervisor `agentc-run` runs on **oracle-1** (aarch64 Ubuntu 26.04, systemd) at
-`34e3dde`, `[run] reviewer = true`, kill switch `/var/lib/agentc/kill-switch` absent. It claims
-ready tasks of project `fe95a6c5…` in priority order, implements, reviews with
-`distinct_launch`, and the oracle-1 integrator (`agentc-integrator@run`) lands. Production
-service at `34e3dde` (deployed 00:32 UTC; preflight needs **every** attempt drained, including
-other projects' integrations such as sithbit, and this session's own pilot claim).
+**Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
+Ubuntu 26.04, systemd, at `34e3dde`, `[run] reviewer = true`, kill switch
+`/var/lib/agentc/kill-switch` absent) claims ready tasks of project `fe95a6c5…` in priority order,
+implements, reviews with `distinct_launch`, and `agentc-integrator@run` lands. Production service
+at `34e3dde`; `main` is ahead (migration **0030**, reviewer cost recording `f881fb7`, `9955a70`).
 
-**Pilot task `47d4403d`** is claimed by the orchestrating session (CLI session `p3b-pilot`,
-attempt `4b1df778-648a-4f65-a579-5a4fbf125147`, generation 2). Renew it every ~15 min
-(`agent-coordinator --session p3b-pilot renew --attempt … --generation 2`); if a renew fails
-with a journal error run `agent-coordinator --session p3b-pilot retry`. If the lease lapsed:
-`claim --mode recovery`, `recovery resolve` disposition `resume`. Do **not** claim the pilot's
-real tasks yourself; the supervisor must do them. Pilot evidence (outside Git):
-`~/.local/share/agent-coordinator-autonomy/pilot-timeline.log` (per-task HRI, cost, audit
-notes) and `pilot-agentc-run.journal` (stream with `ssh -i
-~/gdrive/Development/oracle-1-key-2026-09-16.key ubuntu@oracle.sithbit.com 'journalctl -u
-agentc-run -f -o short-iso'`). Costs: `sudo tail /var/lib/agentc/costs.jsonl` on oracle-1.
+**P3b pilot: GO (owner, 2026-10-08).** Decision `bb9bf99f` allow/Go (gen 1 05:46:57Z; reopened as
+gen 2 after admitting `c6b33a77` moved it to rev 2, re-answered Go). Pilot task `47d4403d` **done**
+(independent subagent review approved). Five real tasks, HRI 0 each: `3faed77b` $0.78,
+`d4ee5302` $1.58, `68a46f3b` $0.19, `8366d1f4` ~$1.0, `081aff61` ~$0.18 (impl only, ~$0.75/task;
+review cost unrecorded until oracle-1 runs `f881fb7`). Pilot-wide HRI 1 (`6fd17b11` before the
+62bb29a5 gate fix). One audit disagreement (d4ee5302 reviewer dismissed a failure without base
+comparison) → task `9c201930`. Two of five launches drained after submission (0f11849d handled
+both). Canary not run (U28 moved it to P6). Ledger outside Git:
+`~/.local/share/agent-coordinator-autonomy/pilot-timeline.log`; journal stream
+`pilot-agentc-run.journal` (`oracle 'journalctl -u agentc-run -f -o short-iso'`).
 
-Pilot ledger so far (HRI = human interventions):
-- `3faed77b` done, HRI 0, impl $0.78.
-- `6fd17b11` changes requested (in-launch gate unprovable, fixed by 62bb29a5), HRI 1, $0.25.
-- `84243ac7` changes requested 01:12 (candidate on a pre-62bb29a5 base), HRI 0, $0.33.
-- `d4ee5302` **done** 02:09 (`02a80c0`), HRI 0, impl $1.58; reviewer passed a preflight test
-  failure as an environment artifact without a base comparison (audit note). Adds migration
-  **0030** (`allow_relayed_human_answers`); production needs a deploy before it is live.
-- `68a46f3b` submitted 02:25; launch did not exit, the supervisor drained it (0f11849d proven
-  live); impl $0.19 (likely undercounted).
-Ready, supervisor's queue: `6fd17b11`, `48e2f2ce`, `7cc81dd4`, `84243ac7`, `9b0c412f`, plus two
-filed 2026-10-08 from pilot findings: `8366d1f4` reviewer launch costs are never written to
-`costs.jsonl` (so review cost is missing and the reviewer daily budget never trips) and
-`081aff61` the preflight `missing_containment_is_reported_not_skipped` test fails inside
-reviewer launches (runs as the role account). Landed by this session outside the supervisor:
-`7f82c7fc` (`f1e39ac`) upgrade_client_test fixture uses the host target (smoke failed on
-aarch64). Advisories from its review (assertRaisesRegex; two-arch assumption) are not tasks yet.
+**P6 (plan-final §3):** `c6b33a77` attention budget **admitted → ready** for the supervisor.
+`d513bc21` P6 readiness stays **planned** (depends on `c6b33a77`; admit after it lands, then audit
+admission control U12, per-vendor/per-host canaries, digest-neglect paging, host updater, a task
+per gap, then the 2-week dogfood). Agents cannot admit/edit tasks (needs a human
+task-definition grant): admissions go through the owner's dashboard. Gotcha: a decision pins exact
+task revisions, so admitting a gated task makes the decision stale → reopen + re-answer.
 
-**Next:** keep watching until 5 real pilot tasks are done; record HRI, cost per task and audit
-disagreements; then put the go/no-go to the owner with a recommendation, record it as a
-coordinator decision, and submit `47d4403d`. After go: P6 `d513bc21` (needs admission),
-attention budget `c6b33a77` (planned), optional shadow run `c744c495`. Deploy `main` (0030)
-at a quiet point: owner dispatches the release; the agent runs scp/preflight/pre/swap and
-`upgrade_client.py`, then rebuilds `~/src/worktrees/agentc-pilot` on oracle-1; the owner runs
-host-setup as root there (classifier blocks the agent: "Remote Shell Writes").
+**Next:** watch `c6b33a77`, `9c201930`, `7cc81dd4` and the rest of the queue; record HRI/cost per
+task. Deploy `main` at a quiet point (decision condition): owner dispatches the release; the agent
+runs scp/preflight/pre/swap and `upgrade_client.py` (preflight needs every attempt drained — set the
+kill switch or wait for an empty queue), rebuilds `~/src/worktrees/agentc-pilot` on oracle-1; the
+owner runs host-setup as root there. Review advisories not yet applied: add a "canary green" exit
+criterion to `d513bc21`; cite `a27689b` for `3faed77b`.
 
 Owner actions pending: set `kernel.yama.ptrace_scope=1` on mxmini and oracle-1; remove
-`~/src/worktrees/agent-coordinator-core-ship` (superseded `ship.py` edits, archived) with
-`git worktree remove --force`.
+`~/src/worktrees/agent-coordinator-core-ship` with `git worktree remove --force`.
 
-Known follow-ups not yet tasks: `launch-root` SIGTERM handler; continuation claims; review
-form kept-claim path has no fixture.
+Known follow-ups not yet tasks: `launch-root` SIGTERM handler; continuation claims; review form
+kept-claim path has no fixture; launches that do not exit after submission (2/5 in the pilot).
 
 ## S6 reviewed live candidate test — owner runbook (2026-10-05): PASS, historical
 
