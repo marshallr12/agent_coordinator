@@ -2,8 +2,9 @@
 """Attention-budget helpers for one agentc host (autonomy plan P3b, U13).
 
     attention.py digest --url URL --project ID --token-file FILE [--hours 24]
-                        [--mail-to ADDR --smtp-host HOST [--smtp-port 25]
-                         [--mail-from ADDR]]
+                        [--mail-to ADDR --smtp-host HOST [--smtp-port N]
+                         [--smtp-tls starttls|tls|none] [--smtp-user USER
+                          --smtp-password-file FILE] [--mail-from ADDR]]
     attention.py canary --url URL --project ID --token-file FILE
                         --heartbeat /var/lib/agentc/heartbeat.json
                         --ntfy-topic TOPIC [--ntfy-url https://ntfy.sh]
@@ -16,6 +17,15 @@ human-required integrator reports and stalled tasks). With --mail-to it also
 mails the text through the given SMTP host, with a signed "I read this" link
 that records the read (the digest printed to the journal carries no link).
 Opening the digest in the dashboard records a read too; reading it here does not.
+
+The mail goes through an authenticated TLS relay when one is configured:
+--smtp-tls (ATTENTION_SMTP_TLS) is `starttls` (port 587), `tls` (implicit TLS,
+port 465) or `none` (port 25), defaulting to `starttls` when a password file is
+set and `none` otherwise; --smtp-port overrides the port. --smtp-user logs in
+with the password read from --smtp-password-file, a file only its owner may
+read, never from the environment file or the command line. A failed delivery
+or login exits non-zero and prints the error's type and code, never the
+server's reply or the password.
 
 `canary` probes the loop end to end and pages through ntfy when an SLO fails:
 the service answers /healthz, the supervisor's own `next` call (implementer
@@ -40,6 +50,7 @@ import json
 import os
 from pathlib import Path
 import smtplib
+import ssl
 import sys
 import time
 import urllib.error
@@ -58,6 +69,8 @@ DEFAULT_PROJECT = "fe95a6c5-2aad-463f-8446-4366d9a281c7"
 DEFAULT_HEARTBEAT = "/var/lib/agentc/heartbeat.json"
 DEFAULT_TOKEN_FILE = "/etc/agentc/attention-token"
 DEFAULT_MAIL_FROM = "agentc@localhost"
+SMTP_TLS_MODES = ("starttls", "tls", "none")
+SMTP_PORTS = {"starttls": 587, "tls": 465, "none": 25}
 DEFAULT_NEGLECT_DAYS = 3
 DAY_SECONDS = 86400.0
 
@@ -73,6 +86,20 @@ def read_token(path):
     if not token:
         raise SystemExit(f"attention: {path} holds no token")
     return token
+
+
+def read_password(path):
+    """The SMTP password in `path` (trailing whitespace trimmed); the file must be private."""
+    try:
+        mode = os.stat(path).st_mode
+        password = Path(path).read_text().strip()
+    except OSError as error:
+        raise SystemExit(f"attention: cannot read the SMTP password file ({type(error).__name__})")
+    if mode & 0o077:
+        raise SystemExit(f"attention: {path} is readable by other users (use root:root 0400)")
+    if not password:
+        raise SystemExit(f"attention: {path} holds no password")
+    return password
 
 
 def fetch(url, token=None, timeout=15.0):
@@ -142,9 +169,41 @@ def run_digest(args):
         message["From"] = args.mail_from
         message["To"] = args.mail_to
         message.set_content(text)
-        with smtplib.SMTP(args.smtp_host, args.smtp_port, timeout=30) as smtp:
-            smtp.send_message(message)
+        send_mail(args, message)
     return 0
+
+
+def send_mail(args, message):
+    """Send `message` through the configured relay; failures exit without the server's reply."""
+    mode = args.smtp_tls or ("starttls" if args.smtp_password_file else "none")
+    port = args.smtp_port or SMTP_PORTS[mode]
+    if args.smtp_user and not args.smtp_password_file:
+        raise SystemExit("attention: --smtp-user needs --smtp-password-file")
+    if args.smtp_password_file and not args.smtp_user:
+        raise SystemExit("attention: --smtp-password-file needs --smtp-user")
+    if mode == "none" and args.smtp_password_file:
+        raise SystemExit("attention: refusing to log in without TLS (set ATTENTION_SMTP_TLS)")
+    password = read_password(args.smtp_password_file) if args.smtp_password_file else None
+    try:
+        if mode == "tls":
+            smtp = smtplib.SMTP_SSL(args.smtp_host, port, timeout=30, context=tls_context())
+        else:
+            smtp = smtplib.SMTP(args.smtp_host, port, timeout=30)
+        with smtp:
+            if mode == "starttls":
+                smtp.starttls(context=tls_context())
+            if password:
+                smtp.login(args.smtp_user, password)
+            smtp.send_message(message)
+    except smtplib.SMTPResponseException as error:
+        raise SystemExit(f"attention: mail not sent ({type(error).__name__} {error.smtp_code})")
+    except (smtplib.SMTPException, OSError) as error:
+        raise SystemExit(f"attention: mail not sent ({type(error).__name__})")
+
+
+def tls_context():
+    """The TLS settings for the relay: certificate and host name verified; tests replace this."""
+    return ssl.create_default_context()
 
 
 # ------------------------------------------------------------------- canary
@@ -322,7 +381,10 @@ def parse(argv):
     digest.add_argument("--mail-to", default=env("ATTENTION_MAIL_TO"))
     digest.add_argument("--mail-from", default=env("ATTENTION_MAIL_FROM", DEFAULT_MAIL_FROM))
     digest.add_argument("--smtp-host", default=env("ATTENTION_SMTP_HOST"))
-    digest.add_argument("--smtp-port", type=int, default=env("ATTENTION_SMTP_PORT", 25, int))
+    digest.add_argument("--smtp-port", type=int, default=env("ATTENTION_SMTP_PORT", None, int))
+    digest.add_argument("--smtp-tls", choices=SMTP_TLS_MODES, default=env("ATTENTION_SMTP_TLS"))
+    digest.add_argument("--smtp-user", default=env("ATTENTION_SMTP_USER"))
+    digest.add_argument("--smtp-password-file", default=env("ATTENTION_SMTP_PASSWORD_FILE"))
     canary = sub.choices["canary"]
     canary.add_argument("--heartbeat", default=env("ATTENTION_HEARTBEAT", DEFAULT_HEARTBEAT))
     canary.add_argument("--heartbeat-max-age", type=float,
@@ -336,6 +398,8 @@ def parse(argv):
     args = parser.parse_args(argv)
     if args.command == "canary" and not args.ntfy_topic:
         parser.error("canary needs --ntfy-topic or ATTENTION_NTFY_TOPIC")
+    if args.command == "digest" and args.smtp_tls not in (None, *SMTP_TLS_MODES):
+        parser.error(f"ATTENTION_SMTP_TLS must be one of {', '.join(SMTP_TLS_MODES)}")
     return args
 
 

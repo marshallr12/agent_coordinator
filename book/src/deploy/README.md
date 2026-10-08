@@ -1054,6 +1054,9 @@ environment. The owner supplies only:
   canary timer). Add `NTFY_TOKEN` for a protected topic.
 - `ATTENTION_SMTP_HOST` and `ATTENTION_MAIL_TO`: mail the digest; without them
   the digest only prints to the journal (`journalctl -u agentc-digest`).
+- `ATTENTION_SMTP_USER` and `ATTENTION_SMTP_PASSWORD_FILE`, with
+  `ATTENTION_SMTP_TLS` and `ATTENTION_SMTP_PORT` when the relay needs a login
+  (see [Mailing the digest through Gmail](#mailing-the-digest-through-gmail)).
 - the coordinator token file, `/etc/agentc/attention-token`: the supervisor's
   bearer token alone, installed with
   `sudo install -o root -g agentc-impl -m 0440 /dev/stdin /etc/agentc/attention-token`.
@@ -1065,8 +1068,9 @@ Defaulted entries (commented in the file): `ATTENTION_URL`
 `ATTENTION_HEARTBEAT` (`/var/lib/agentc/heartbeat.json`),
 `ATTENTION_HEARTBEAT_MAX_AGE` (300 seconds), `ATTENTION_NTFY_URL`
 (`https://ntfy.sh`), `ATTENTION_STATE`, `ATTENTION_MAX_HRI` (unset: no HRI
-check), `ATTENTION_HOURS` (24), `ATTENTION_NEGLECT_DAYS` (3), `ATTENTION_SMTP_PORT` (25) and
-`ATTENTION_MAIL_FROM`.
+check), `ATTENTION_HOURS` (24), `ATTENTION_NEGLECT_DAYS` (3), `ATTENTION_SMTP_TLS` (`starttls` when a password
+file is set, otherwise `none`), `ATTENTION_SMTP_PORT` (587 with `starttls`, 465
+with `tls`, 25 with `none`) and `ATTENTION_MAIL_FROM`.
 
 host-setup enables a timer only once what it needs exists (the token file; for
 the canary also a non-empty `ATTENTION_NTFY_TOPIC`), so an unconfigured host
@@ -1077,6 +1081,46 @@ the four units, `attention.env`, `attention.py` and the canary state file; the
 token file is kept and handed back to `root:root` 0400, like the push key.
 `deploy/agentc/host-setup-test.py` checks the generated units and the
 uninstall list without root.
+
+#### Mailing the digest through Gmail
+
+The host has no mail server, so the digest goes through an authenticated relay.
+For Gmail:
+
+1. On the Google account that will send the mail, turn on 2-Step Verification,
+   then create an app password (Google Account → Security → App passwords).
+   Google shows the 16-character password once; the account's normal password
+   does not work for SMTP.
+2. Install it as its own file, owned by root and readable by no one else (the
+   digest runs as root and refuses a file other users can read). Paste the
+   password, then press Ctrl-D:
+
+   ```sh
+   sudo install -o root -g root -m 0400 /dev/stdin /etc/agentc/smtp-password
+   ```
+
+   Never put the password in `attention.env`, on a command line, or in the
+   repository.
+3. In `/etc/agentc/attention.env` set:
+
+   ```sh
+   ATTENTION_SMTP_HOST=smtp.gmail.com
+   ATTENTION_SMTP_USER=you@gmail.com
+   ATTENTION_SMTP_PASSWORD_FILE=/etc/agentc/smtp-password
+   ATTENTION_MAIL_FROM=you@gmail.com
+   ATTENTION_MAIL_TO=you@example.org
+   ```
+
+   `ATTENTION_SMTP_TLS` defaults to `starttls` (port 587) once a password file is
+   set; `tls` is implicit TLS on port 465, and `none` (port 25, no login) is for
+   a local relay. The certificate and host name are always verified, and the
+   login is refused over `none`. Gmail rewrites the From address to the account's
+   own, so use that address.
+4. Send one now: `sudo systemctl start agentc-digest.service`, then
+   `journalctl -u agentc-digest`. A refused login exits non-zero and logs only
+   `mail not sent (SMTPAuthenticationError 535)`; check the app password and
+   that 2-Step Verification is on. Revoke the app password in the Google
+   account to cut off mail; rotate it by reinstalling the file.
 
 #### Testing that paging works
 

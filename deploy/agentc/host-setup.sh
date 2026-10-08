@@ -883,8 +883,16 @@ ATTENTION_NTFY_TOPIC=
 # Owner-supplied: mail the daily digest (leave empty to print it to the journal).
 ATTENTION_SMTP_HOST=
 ATTENTION_MAIL_TO=
-# ATTENTION_SMTP_PORT=25
 # ATTENTION_MAIL_FROM=agentc@localhost
+
+# An authenticated TLS relay (for Gmail: smtp.gmail.com and an app password).
+# The password is never read from this file: install it as its own file,
+#   sudo install -o root -g root -m 0400 /dev/stdin /etc/agentc/smtp-password
+# and name it below. The digest refuses a password file other users can read.
+# ATTENTION_SMTP_USER=
+# ATTENTION_SMTP_PASSWORD_FILE=     # no default; /etc/agentc/smtp-password
+# ATTENTION_SMTP_TLS=starttls       # starttls | tls | none (none unless a password file is set)
+# ATTENTION_SMTP_PORT=587           # 465 with tls, 25 with none
 
 # ATTENTION_URL=https://agents.sithbit.com
 # ATTENTION_PROJECT=fe95a6c5-2aad-463f-8446-4366d9a281c7
@@ -978,6 +986,9 @@ $ATTENTION_ENV. Install the supervisor's coordinator token (the bare token,
 nothing else) and set ATTENTION_NTFY_TOPIC (and the SMTP entries to mail the
 digest) there, then re-run this script to enable the timers:
   sudo install -o root -g $ATTENTION_TOKEN_GROUP -m 0440 /dev/stdin $ATTENTION_TOKEN
+A relay that needs a login takes ATTENTION_SMTP_USER and a password file
+(root:root 0400, named by ATTENTION_SMTP_PASSWORD_FILE), never the password in
+$ATTENTION_ENV.
 EOF
 }
 

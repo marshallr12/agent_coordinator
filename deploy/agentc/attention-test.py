@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Tests for attention.py against local fake coordinator and ntfy servers."""
+import base64
 import contextlib
 import importlib.util
 import io
 import json
 import os
+import socket
+import socketserver
+import ssl
+import subprocess
 import tempfile
 import threading
 import time
@@ -81,6 +86,274 @@ class Fake:
         for server in self.servers:
             server.shutdown()
             server.server_close()
+
+
+PASSWORD = "app-password-s3cret"
+SMTP_USER = "digest@example.org"
+
+
+class FakeSmtp:
+    """A loopback SMTP server that offers STARTTLS (or implicit TLS) and AUTH PLAIN/LOGIN."""
+
+    def __init__(self, certdir, implicit_tls=False, accept_password=PASSWORD):
+        self.messages = []
+        self.logins = []
+        self.plain_commands = []
+        self.accept_password = accept_password
+        fake = self
+        self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.context.load_cert_chain(certdir / "cert.pem", certdir / "key.pem")
+
+        class Handler(socketserver.StreamRequestHandler):
+            def reply(self, text):
+                self.wfile.write(text.encode() + b"\r\n")
+                self.wfile.flush()
+
+            def line(self):
+                return self.rfile.readline().decode().rstrip("\r\n")
+
+            def handle(self):
+                tls = implicit_tls
+                if tls:
+                    self.upgrade()
+                self.reply("220 fake ESMTP")
+                while True:
+                    line = self.line()
+                    verb = line.split(" ")[0].upper()
+                    if not line:
+                        return
+                    if verb == "EHLO":
+                        self.wfile.write(b"250-fake\r\n")
+                        if not tls:
+                            self.wfile.write(b"250-STARTTLS\r\n")
+                        else:
+                            self.wfile.write(b"250-AUTH PLAIN LOGIN\r\n")
+                        self.reply("250 8BITMIME")
+                    elif verb == "STARTTLS":
+                        self.reply("220 go ahead")
+                        self.upgrade()
+                        tls = True
+                    elif verb == "AUTH":
+                        if not tls:
+                            fake.plain_commands.append(line.split(" ")[0])
+                        self.auth(line)
+                    elif verb == "MAIL" or verb == "RCPT":
+                        self.reply("250 ok")
+                    elif verb == "DATA":
+                        self.reply("354 go")
+                        data = []
+                        while (row := self.line()) != ".":
+                            data.append(row)
+                        fake.messages.append("\n".join(data))
+                        self.reply("250 queued")
+                    elif verb == "QUIT":
+                        self.reply("221 bye")
+                        return
+                    else:
+                        self.reply("250 ok")
+
+            def upgrade(self):
+                self.connection = fake.context.wrap_socket(self.connection, server_side=True)
+                self.rfile = self.connection.makefile("rb")
+                self.wfile = self.connection.makefile("wb")
+
+            def auth(self, line):
+                parts = line.split(" ")
+                if parts[1].upper() == "PLAIN":
+                    blob = parts[2] if len(parts) > 2 else (self.reply("334 ") or self.line())
+                    _, user, password = base64.b64decode(blob).decode().split("\0")
+                else:
+                    self.reply("334 " + base64.b64encode(b"Username:").decode())
+                    user = base64.b64decode(self.line()).decode()
+                    self.reply("334 " + base64.b64encode(b"Password:").decode())
+                    password = base64.b64decode(self.line()).decode()
+                fake.logins.append(user)
+                if password == fake.accept_password:
+                    self.reply("235 2.7.0 accepted")
+                else:
+                    self.reply(f"535 5.7.8 rejected {password} for {user}")
+
+        class Server(socketserver.ThreadingTCPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, args=(0.05,), daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def make_certificate(directory):
+    """A self-signed certificate for 127.0.0.1 and localhost; returns its client context."""
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                    "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                    "-keyout", str(directory / "key.pem"), "-out", str(directory / "cert.pem")],
+                   check=True, capture_output=True)
+    context = ssl.create_default_context(cafile=str(directory / "cert.pem"))
+    return context
+
+
+class SmtpRelayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.certs = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.certs.cleanup)
+        cls.certdir = Path(cls.certs.name)
+        cls.context = make_certificate(cls.certdir)
+
+    def setUp(self):
+        self.fake = Fake()
+        self.addCleanup(self.fake.close)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.token = self.dir / "token"
+        self.token.write_text(TOKEN + "\n")
+        self.password_file = self.dir / "smtp-password"
+        self.password_file.write_text(PASSWORD + "\n")
+        self.password_file.chmod(0o400)
+        patch = mock.patch.object(attention, "tls_context", lambda: self.context)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def digest(self, smtp, *extra, environ=None):
+        argv = ["digest", "--url", self.fake.url, "--project", "p", "--token-file", str(self.token),
+                "--mail-to", "me@example.org", "--smtp-host", "localhost",
+                "--smtp-port", str(smtp.port), *extra]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, environ or {}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = attention.main(argv)
+            except SystemExit as exit_:
+                code = exit_.code
+        return code, out.getvalue() + (code if isinstance(code, str) else "") + err.getvalue()
+
+    def serve(self, **kwargs):
+        smtp = FakeSmtp(self.certdir, **kwargs)
+        self.addCleanup(smtp.close)
+        return smtp
+
+    def test_starttls_then_login_delivers_the_digest(self):
+        smtp = self.serve()
+        code, output = self.digest(smtp, "--smtp-tls", "starttls", "--smtp-user", SMTP_USER,
+                                   "--smtp-password-file", str(self.password_file))
+        self.assertEqual(code, 0, output)
+        self.assertEqual(smtp.logins, [SMTP_USER])
+        self.assertEqual(smtp.plain_commands, [], "the login happened only after STARTTLS")
+        self.assertEqual(len(smtp.messages), 1)
+        self.assertIn("Rename the flag?", smtp.messages[0])
+        self.assertNotIn(PASSWORD, output)
+
+    def test_implicit_tls_logs_in_and_delivers(self):
+        smtp = self.serve(implicit_tls=True)
+        code, output = self.digest(smtp, "--smtp-tls", "tls", "--smtp-user", SMTP_USER,
+                                   "--smtp-password-file", str(self.password_file))
+        self.assertEqual(code, 0, output)
+        self.assertEqual((smtp.logins, len(smtp.messages)), ([SMTP_USER], 1))
+
+    def test_starttls_is_the_default_when_a_password_file_is_set_and_comes_from_the_environment(self):
+        smtp = self.serve()
+        env = {"ATTENTION_SMTP_USER": SMTP_USER, "ATTENTION_SMTP_PASSWORD_FILE": str(self.password_file)}
+        code, output = self.digest(smtp, environ=env)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(smtp.logins, [SMTP_USER])
+
+    def test_a_refused_login_exits_non_zero_without_the_secret_in_the_output(self):
+        smtp = self.serve(accept_password="another-password")
+        code, output = self.digest(smtp, "--smtp-user", SMTP_USER,
+                                   "--smtp-password-file", str(self.password_file))
+        self.assertNotIn(code, (0, None))
+        self.assertIn("SMTPAuthenticationError 535", output)
+        self.assertEqual(smtp.messages, [])
+        self.assertNotIn(PASSWORD, output)
+        self.assertNotIn(TOKEN, output)
+
+    def test_the_unauthenticated_path_still_works_in_the_clear(self):
+        sent = []
+
+        class Plain(socketserver.StreamRequestHandler):
+            def handle(self):
+                self.wfile.write(b"220 plain\r\n")
+                while line := self.rfile.readline().decode().rstrip("\r\n"):
+                    verb = line.split(" ")[0].upper()
+                    if verb == "DATA":
+                        self.wfile.write(b"354 go\r\n")
+                        body = []
+                        while (row := self.rfile.readline().decode().rstrip("\r\n")) != ".":
+                            body.append(row)
+                        sent.append("\n".join(body))
+                        self.wfile.write(b"250 queued\r\n")
+                    elif verb == "QUIT":
+                        self.wfile.write(b"221 bye\r\n")
+                        return
+                    else:
+                        self.wfile.write(b"250 ok\r\n")
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Plain)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True).start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close()))
+        smtp = mock.Mock(port=server.server_address[1])
+        self.assertEqual(self.digest(smtp)[0], 0)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Rename the flag?", sent[0])
+
+    def test_login_settings_must_be_complete_private_and_encrypted(self):
+        smtp = self.serve()
+        self.password_file.chmod(0o440)
+        code, output = self.digest(smtp, "--smtp-user", SMTP_USER,
+                                   "--smtp-password-file", str(self.password_file))
+        self.assertIn("readable by other users", output)
+        self.assertNotIn(PASSWORD, output)
+        self.password_file.chmod(0o400)
+        self.assertIn("needs --smtp-password-file", self.digest(smtp, "--smtp-user", SMTP_USER)[1])
+        self.assertIn("needs --smtp-user",
+                      self.digest(smtp, "--smtp-password-file", str(self.password_file))[1])
+        self.assertIn("without TLS", self.digest(smtp, "--smtp-tls", "none", "--smtp-user", SMTP_USER,
+                                                 "--smtp-password-file", str(self.password_file))[1])
+        self.assertEqual((smtp.logins, smtp.messages), ([], []))
+
+    def test_tls_mode_and_port_defaults(self):
+        with mock.patch.dict(os.environ, clear=True):
+            args = attention.parse(["digest"])
+            self.assertEqual((args.smtp_tls, args.smtp_port, args.smtp_user, args.smtp_password_file),
+                             (None, None, None, None))
+        with mock.patch.dict(os.environ, {"ATTENTION_SMTP_TLS": "tls", "ATTENTION_SMTP_USER": "u",
+                                          "ATTENTION_SMTP_PASSWORD_FILE": "/f"}):
+            args = attention.parse(["digest"])
+            self.assertEqual((args.smtp_tls, args.smtp_user, args.smtp_password_file), ("tls", "u", "/f"))
+        with mock.patch.dict(os.environ, {"ATTENTION_SMTP_TLS": "ssl"}):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                attention.parse(["digest"])
+        self.assertEqual(attention.SMTP_PORTS, {"starttls": 587, "tls": 465, "none": 25})
+
+    def test_the_relay_port_follows_the_tls_mode(self):
+        calls = []
+
+        class Smtp:
+            def __init__(self, host, port, timeout, context=None):
+                calls.append((type(self).__name__, port))
+                raise OSError("stop")
+
+        class SmtpSsl(Smtp):
+            pass
+
+        with mock.patch.object(attention.smtplib, "SMTP", Smtp), \
+                mock.patch.object(attention.smtplib, "SMTP_SSL", SmtpSsl):
+            for extra in ([], ["--smtp-tls", "tls"], ["--smtp-tls", "none"],
+                          ["--smtp-user", "u", "--smtp-password-file", str(self.password_file)]):
+                argv = ["digest", "--url", self.fake.url, "--project", "p", "--token-file",
+                        str(self.token), "--mail-to", "me@example.org", "--smtp-host", "h", *extra]
+                with mock.patch.dict(os.environ), contextlib.redirect_stdout(io.StringIO()), \
+                        self.assertRaises(SystemExit):
+                    for name in [name for name in os.environ if name.startswith("ATTENTION_")]:
+                        del os.environ[name]
+                    attention.main(argv)
+        self.assertEqual(calls, [("Smtp", 25), ("SmtpSsl", 465), ("Smtp", 25), ("Smtp", 587)])
 
 
 class AttentionTests(unittest.TestCase):

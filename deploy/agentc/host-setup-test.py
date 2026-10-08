@@ -81,9 +81,12 @@ class AttentionUnits(unittest.TestCase):
         active = [line for line in lines if line and not line.startswith("#")]
         self.assertEqual(active, ["ATTENTION_NTFY_TOPIC=", "ATTENTION_SMTP_HOST=", "ATTENTION_MAIL_TO="])
         for name in ("URL", "PROJECT", "TOKEN_FILE", "HEARTBEAT", "HEARTBEAT_MAX_AGE", "NTFY_URL",
-                     "STATE", "MAX_HRI", "HOURS", "SMTP_PORT", "MAIL_FROM"):
+                     "STATE", "MAX_HRI", "HOURS", "SMTP_PORT", "MAIL_FROM", "SMTP_TLS", "SMTP_USER",
+                     "SMTP_PASSWORD_FILE"):
             self.assertTrue(any(line.startswith(f"# ATTENTION_{name}=") for line in lines), name)
         self.assertIn("# ATTENTION_TOKEN_FILE=/etc/agentc/attention-token", lines)
+        self.assertIn("# ATTENTION_SMTP_TLS=starttls", " ".join(lines))
+        self.assertIn("-o root -g root -m 0400", "\n".join(lines))
 
     def test_every_environment_variable_names_a_default_in_attention_py(self):
         source = (HERE / "attention.py").read_text()
