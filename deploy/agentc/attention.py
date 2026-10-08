@@ -26,6 +26,10 @@ failed, 2 the page could not be delivered (the next run retries it).
 
 The token files hold one bearer token (and nothing else); tokens are never
 printed. ntfy credentials come from NTFY_TOKEN when set. Standard library only.
+
+Every option defaults from an ATTENTION_* environment variable (the names are
+in parse() below, and host-setup.sh's attention.env lists them), so the systemd units host-setup.sh installs carry no arguments;
+an empty variable counts as unset, and a command-line option wins.
 """
 import argparse
 import json
@@ -44,6 +48,11 @@ HEALTH_BUDGET_SECONDS = 5.0
 NEXT_BUDGET_SECONDS = 10.0
 HEARTBEAT_MAX_AGE_SECONDS = 300.0
 DEFAULT_NTFY = "https://ntfy.sh"
+DEFAULT_URL = "https://agents.sithbit.com"
+DEFAULT_PROJECT = "fe95a6c5-2aad-463f-8446-4366d9a281c7"
+DEFAULT_HEARTBEAT = "/var/lib/agentc/heartbeat.json"
+DEFAULT_TOKEN_FILE = "/etc/agentc/attention-token"
+DEFAULT_MAIL_FROM = "agentc@localhost"
 
 
 def read_token(path):
@@ -238,28 +247,38 @@ def run_canary(args):
 # --------------------------------------------------------------------- main
 
 
+def env(name, default=None, kind=str):
+    """The environment variable `name` as `kind`, or `default` when unset or empty."""
+    value = os.environ.get(name, "").strip()
+    return kind(value) if value else default
+
+
 def parse(argv):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("digest", "canary"):
         p = sub.add_parser(name)
-        p.add_argument("--url", required=True)
-        p.add_argument("--project", required=True)
-        p.add_argument("--token-file", required=True)
-        p.add_argument("--hours", type=int, default=24)
+        p.add_argument("--url", default=env("ATTENTION_URL", DEFAULT_URL))
+        p.add_argument("--project", default=env("ATTENTION_PROJECT", DEFAULT_PROJECT))
+        p.add_argument("--token-file", default=env("ATTENTION_TOKEN_FILE", DEFAULT_TOKEN_FILE))
+        p.add_argument("--hours", type=int, default=env("ATTENTION_HOURS", 24, int))
     digest = sub.choices["digest"]
-    digest.add_argument("--mail-to")
-    digest.add_argument("--mail-from", default="agentc@localhost")
-    digest.add_argument("--smtp-host")
-    digest.add_argument("--smtp-port", type=int, default=25)
+    digest.add_argument("--mail-to", default=env("ATTENTION_MAIL_TO"))
+    digest.add_argument("--mail-from", default=env("ATTENTION_MAIL_FROM", DEFAULT_MAIL_FROM))
+    digest.add_argument("--smtp-host", default=env("ATTENTION_SMTP_HOST"))
+    digest.add_argument("--smtp-port", type=int, default=env("ATTENTION_SMTP_PORT", 25, int))
     canary = sub.choices["canary"]
-    canary.add_argument("--heartbeat")
-    canary.add_argument("--heartbeat-max-age", type=float, default=HEARTBEAT_MAX_AGE_SECONDS)
-    canary.add_argument("--ntfy-topic", required=True)
-    canary.add_argument("--ntfy-url", default=DEFAULT_NTFY)
-    canary.add_argument("--state")
-    canary.add_argument("--max-hri", type=int)
-    return parser.parse_args(argv)
+    canary.add_argument("--heartbeat", default=env("ATTENTION_HEARTBEAT", DEFAULT_HEARTBEAT))
+    canary.add_argument("--heartbeat-max-age", type=float,
+                        default=env("ATTENTION_HEARTBEAT_MAX_AGE", HEARTBEAT_MAX_AGE_SECONDS, float))
+    canary.add_argument("--ntfy-topic", default=env("ATTENTION_NTFY_TOPIC"))
+    canary.add_argument("--ntfy-url", default=env("ATTENTION_NTFY_URL", DEFAULT_NTFY))
+    canary.add_argument("--state", default=env("ATTENTION_STATE"))
+    canary.add_argument("--max-hri", type=int, default=env("ATTENTION_MAX_HRI", None, int))
+    args = parser.parse_args(argv)
+    if args.command == "canary" and not args.ntfy_topic:
+        parser.error("canary needs --ntfy-topic or ATTENTION_NTFY_TOPIC")
+    return args
 
 
 def main(argv=None):

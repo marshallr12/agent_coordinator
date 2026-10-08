@@ -4,12 +4,14 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("attention", HERE / "attention.py")
@@ -151,6 +153,34 @@ class AttentionTests(unittest.TestCase):
         self.assertIn("Stubborn task", text)
         self.assertNotIn(TOKEN, text)
         self.assertEqual(set(self.fake.coordinator_tokens), {f"Bearer {TOKEN}"})
+
+    def test_options_default_from_the_environment_and_flags_win(self):
+        env = {"ATTENTION_URL": self.fake.url, "ATTENTION_PROJECT": "p",
+               "ATTENTION_TOKEN_FILE": str(self.token), "ATTENTION_HEARTBEAT": str(self.heartbeat),
+               "ATTENTION_NTFY_TOPIC": "alerts", "ATTENTION_NTFY_URL": self.fake.ntfy,
+               "ATTENTION_MAX_HRI": "", "ATTENTION_SMTP_PORT": "2525"}
+        self.fake.next_status = 500
+        with mock.patch.dict(os.environ, env):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(attention.main(["canary"]), 1)
+            args = attention.parse(["digest", "--smtp-port", "26"])
+            self.assertEqual((args.url, args.smtp_port), (self.fake.url, 26))
+            self.assertIsNone(attention.parse(["canary"]).max_hri)
+            self.assertEqual(attention.parse(["digest"]).smtp_port, 2525)
+        self.assertEqual(self.fake.pages[0][0], "/alerts")
+
+    def test_the_canary_needs_a_topic_from_a_flag_or_the_environment(self):
+        with mock.patch.dict(os.environ, {"ATTENTION_NTFY_TOPIC": ""}):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                attention.parse(["canary"])
+
+    def test_code_defaults_name_the_production_service(self):
+        with mock.patch.dict(os.environ, clear=True):
+            args = attention.parse(["canary", "--ntfy-topic", "t"])
+        self.assertEqual(args.url, "https://agents.sithbit.com")
+        self.assertEqual(args.token_file, "/etc/agentc/attention-token")
+        self.assertEqual(args.heartbeat, "/var/lib/agentc/heartbeat.json")
+        self.assertEqual(args.ntfy_url, "https://ntfy.sh")
 
 
 if __name__ == "__main__":

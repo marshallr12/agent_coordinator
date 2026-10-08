@@ -994,13 +994,90 @@ attention.py canary --url URL --project ID --token-file TOKEN \
     --heartbeat /var/lib/agentc/heartbeat.json --ntfy-topic TOPIC --max-hri 3
 ```
 
-Run the digest daily and the canary every few minutes from a timer. The canary
-checks `/healthz`, the supervisor's own `next` call (10 s budget), that the
+`host-setup.sh` installs the script as `/opt/agentc/bin/attention.py` and
+schedules both from systemd timers (hosts without systemd get the script and
+environment file only). The canary checks `/healthz`, the supervisor's own `next` call (10 s budget), that the
 heartbeat is under 300 s old, and, with `--max-hri`, the HRI count. A failing
 check sends one ntfy page and stays quiet until it recovers; a page that could
 not be delivered exits 2 and is retried by the next run. `NTFY_TOKEN`, when set,
 authenticates to ntfy. `deploy/agentc/attention-test.py` tests both against
 local fake servers.
+
+#### Timers and settings
+
+| Unit | Runs | Default schedule |
+| --- | --- | --- |
+| `agentc-canary.timer` → `agentc-canary.service` | `attention.py canary` | 2 minutes after boot, then every 10 minutes (`OnUnitActiveSec`) |
+| `agentc-digest.timer` → `agentc-digest.service` | `attention.py digest` | daily (`OnCalendar=daily`, `Persistent=true`, so a missed run happens at boot) |
+
+Both services are oneshot units that run as root (the agent firewall filters
+only the two agent uids, so they can reach ntfy, SMTP and the coordinator),
+under `NoNewPrivileges`, `ProtectSystem=strict` and `PrivateTmp`, writing only
+under `/var/lib/agentc` (the canary's paged-set file
+`/var/lib/agentc/canary-state.json`). Change a schedule by re-running
+host-setup with `CANARY_INTERVAL=5min` or `DIGEST_CALENDAR='*-*-* 07:30:00'`
+(any `OnUnitActiveSec` or `OnCalendar` value).
+
+Settings live in `/etc/agentc/attention.env`, which host-setup writes once and
+never overwrites. Every option has a default in `attention.py`, so the file
+shows those entries commented out; a command-line flag still wins over the
+environment. The owner supplies only:
+
+- `ATTENTION_NTFY_TOPIC`: the ntfy topic the canary pages (required for the
+  canary timer). Add `NTFY_TOKEN` for a protected topic.
+- `ATTENTION_SMTP_HOST` and `ATTENTION_MAIL_TO`: mail the digest; without them
+  the digest only prints to the journal (`journalctl -u agentc-digest`).
+- the coordinator token file, `/etc/agentc/attention-token`: the supervisor's
+  bearer token alone, installed with
+  `sudo install -o root -g agentc-impl -m 0440 /dev/stdin /etc/agentc/attention-token`.
+  host-setup holds it at `root:agentc-impl` 0440 and refuses a token that is
+  not root-owned.
+
+Defaulted entries (commented in the file): `ATTENTION_URL`
+(`https://agents.sithbit.com`), `ATTENTION_PROJECT`, `ATTENTION_TOKEN_FILE`,
+`ATTENTION_HEARTBEAT` (`/var/lib/agentc/heartbeat.json`),
+`ATTENTION_HEARTBEAT_MAX_AGE` (300 seconds), `ATTENTION_NTFY_URL`
+(`https://ntfy.sh`), `ATTENTION_STATE`, `ATTENTION_MAX_HRI` (unset: no HRI
+check), `ATTENTION_HOURS` (24), `ATTENTION_SMTP_PORT` (25) and
+`ATTENTION_MAIL_FROM`.
+
+host-setup enables a timer only once what it needs exists (the token file; for
+the canary also a non-empty `ATTENTION_NTFY_TOPIC`), so an unconfigured host
+does not fail every ten minutes. After filling in the file and the token,
+re-run host-setup (or `sudo systemctl enable --now agentc-canary.timer
+agentc-digest.timer`). `host-setup.sh --uninstall` stops the timers and removes
+the four units, `attention.env`, `attention.py` and the canary state file; the
+token file is kept and handed back to `root:root` 0400, like the push key.
+`deploy/agentc/host-setup-test.py` checks the generated units and the
+uninstall list without root.
+
+#### Testing that paging works
+
+Force a failing check and confirm the page arrives:
+
+1. Point a one-off canary run at a heartbeat file that does not exist, with
+   its own paged-set file, using the same environment file:
+
+   ```sh
+   sudo systemd-run --wait --pipe \
+     -p EnvironmentFile=/etc/agentc/attention.env \
+     -p Environment=ATTENTION_HEARTBEAT=/nonexistent \
+     -p Environment=ATTENTION_STATE=/var/lib/agentc/canary-test.json \
+     /usr/bin/python3 -I /opt/agentc/bin/attention.py canary
+   ```
+
+   It exits 1, prints `canary: supervisor: supervisor heartbeat unreadable
+   (FileNotFoundError)` and sends one ntfy page titled "agentc canary failed".
+2. Run it again: it stays quiet, because that failure was already paged. Delete
+   `/var/lib/agentc/canary-test.json` when done.
+3. With the timer's real settings, stop the loop (`sudo systemctl stop
+   agentc-run`); within 5 minutes plus one timer period the heartbeat is stale,
+   `systemctl start agentc-canary.service` exits 1 and pages. Restart
+   `agentc-run` afterwards. A page that could not be delivered exits 2 and is
+   retried by the next run.
+
+Use a separate `ATTENTION_STATE` file for hand tests so they do not rearm or
+mask the timer's own paged set.
 
 ### Running the loop against staging
 
