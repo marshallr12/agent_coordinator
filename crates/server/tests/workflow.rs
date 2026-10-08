@@ -1244,6 +1244,66 @@ async fn distinct_launch_fails_closed_for_a_contributor_nested_beyond_the_walk_c
     assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
 }
 
+/// A session nested under `root` through exactly `LAUNCH_WALK_CAP` (64) parent
+/// hops is the deepest one whose launch still resolves: one link fewer than
+/// the 64 links that push it past the cap.
+const DEEPEST_RESOLVABLE_LINKS: usize = 63;
+
+#[tokio::test]
+async fn distinct_launch_resolves_a_reviewer_exactly_at_the_walk_cap() {
+    let f = Fixture::new().await;
+    let (p, review) = subagent_review_subject(&f, "launch-cap-reviewer").await;
+    let (deep, _) = register_child(&f, &f.b, &p, "cap-reviewer").await;
+    nest_under(&f, &deep.session, &f.b.session, DEEPEST_RESOLVABLE_LINKS).await;
+    let (status, claimed) = f
+        .claim_activity_as(&deep, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let generation = &claimed["data"]["attempt"]["generation"];
+    let (status, done) = decide_review(
+        &f,
+        &deep,
+        &p,
+        (&review, generation),
+        Some("distinct_launch"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["data"]["work_status"], "done");
+}
+
+#[tokio::test]
+async fn distinct_launch_still_refuses_a_reviewer_at_the_walk_cap_that_shares_a_launch() {
+    let f = Fixture::new().await;
+    let (p, review) = subagent_review_subject(&f, "launch-cap-shared").await;
+    let (deep, _) = register_child(&f, &f.b, &p, "cap-shared-reviewer").await;
+    nest_under(&f, &deep.session, &f.a.session, DEEPEST_RESOLVABLE_LINKS).await;
+    let (status, refused) = f
+        .claim_activity_as(&deep, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
+}
+
+#[tokio::test]
+async fn distinct_launch_resolves_a_contributor_exactly_at_the_walk_cap() {
+    let f = Fixture::new().await;
+    let p = subagent_review_project(&f, "launch-cap-contributor").await;
+    let (deep, _) = register_child(&f, &f.a, &p, "cap-contributor").await;
+    nest_under(&f, &deep.session, &f.a.session, DEEPEST_RESOLVABLE_LINKS).await;
+    let review = submitted_review(&f, &p, &deep).await;
+    let (sibling, _) = register_child(&f, &f.a, &p, "cap-same-launch-reviewer").await;
+    let (status, refused) = f
+        .claim_activity_as(&sibling, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "reviewer_shares_launch");
+    let (status, claimed) = f
+        .claim_activity_as(&f.b, &p, &review, (2, 0), Some("distinct_launch"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+}
+
 #[tokio::test]
 async fn distinct_launch_refuses_sibling_subagents_of_one_root() {
     let f = Fixture::new().await;
