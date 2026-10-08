@@ -13,15 +13,19 @@ use crate::{auth::Auth, error::AppError, mutation::Mutation, response, state::Ap
 use anyhow::Context;
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path, Query, State, rejection::JsonRejection},
-    http::HeaderMap,
+    http::{HeaderMap, Method, StatusCode},
+    response::Html,
     routing::{get, post},
 };
 use coordinator_core::timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
 use std::{collections::BTreeSet, str::FromStr};
+use subtle::ConstantTimeEq;
 
 type Reply = Result<Json<Value>, AppError>;
 
@@ -43,6 +47,9 @@ const MAX_SHIPPED_FILES: usize = 1_000;
 const DIGEST_LIMIT: i64 = 100;
 const DEFAULT_DIGEST_HOURS: i64 = 24;
 const MAX_DIGEST_HOURS: i64 = 24 * 14;
+/// How long an acknowledgement link in an emailed digest stays valid.
+pub const ACK_LINK_TTL_MS: i64 = 7 * DAY_MS;
+const ACK_PURPOSE: &str = "agentc-digest-ack-v1";
 
 /// A daily span of UTC hours that does not count toward the stall clock. The
 /// span starts at `start` and ends before `end`; it wraps past midnight when
@@ -101,6 +108,14 @@ impl QuietHours {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/projects/{project}/digest", get(digest))
+        .route(
+            "/api/v1/projects/{project}/digest/read",
+            post(mark_digest_read),
+        )
+        .route(
+            "/api/v1/projects/{project}/digest/ack",
+            get(ack_page).post(ack_digest),
+        )
         .route(
             "/api/v1/projects/{project}/tasks/{task}/paths",
             post(set_task_paths),
@@ -399,6 +414,219 @@ pub async fn sweep_timed_out_decisions(state: &AppState) -> anyhow::Result<Vec<S
 #[derive(Deserialize)]
 struct DigestQuery {
     hours: Option<i64>,
+    ack_link: Option<bool>,
+}
+
+/// True for the two requests the signed acknowledgement link makes. They carry
+/// no credential: the token in the link is the whole authority.
+pub(crate) fn is_ack_link(method: &Method, path: &str) -> bool {
+    matches!(*method, Method::GET | Method::POST)
+        && path
+            .strip_prefix("/api/v1/projects/")
+            .and_then(|rest| rest.strip_suffix("/digest/ack"))
+            .is_some_and(|project| !project.is_empty() && !project.contains('/'))
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let key = if key.len() > 64 {
+        Sha256::digest(key).to_vec()
+    } else {
+        key.to_vec()
+    };
+    let (mut inner, mut outer) = ([0x36u8; 64], [0x5cu8; 64]);
+    for (i, byte) in key.iter().enumerate() {
+        inner[i] ^= byte;
+        outer[i] ^= byte;
+    }
+    let inner_hash = Sha256::new()
+        .chain_update(inner)
+        .chain_update(message)
+        .finalize();
+    Sha256::new()
+        .chain_update(outer)
+        .chain_update(inner_hash)
+        .finalize()
+        .into()
+}
+
+fn ack_signature(key: &[u8], project: &str, expires_at: i64) -> String {
+    hex::encode(hmac_sha256(
+        key,
+        format!("{ACK_PURPOSE}\n{project}\n{expires_at}").as_bytes(),
+    ))
+}
+
+/// The acknowledgement token for `project`, valid until `expires_at`.
+fn ack_token(key: &[u8], project: &str, expires_at: i64) -> String {
+    format!("{expires_at}.{}", ack_signature(key, project, expires_at))
+}
+
+/// Checks `token` against the project, the signing key and the clock.
+fn check_ack_token(key: &[u8], project: &str, token: &str, now: i64) -> Result<(), AppError> {
+    let invalid = || {
+        AppError::new(
+            StatusCode::BAD_REQUEST,
+            "digest_link_invalid",
+            "This acknowledgement link is not valid.",
+        )
+    };
+    let (expires, signature) = token.split_once('.').ok_or_else(invalid)?;
+    let expires_at: i64 = expires.parse().map_err(|_| invalid())?;
+    let expected = ack_signature(key, project, expires_at);
+    if !bool::from(expected.as_bytes().ct_eq(signature.as_bytes())) {
+        return Err(invalid());
+    }
+    if now >= expires_at {
+        return Err(AppError::new(
+            StatusCode::GONE,
+            "digest_link_expired",
+            "This acknowledgement link has expired. Open the digest in the dashboard instead.",
+        ));
+    }
+    Ok(())
+}
+
+async fn ack_key(c: &mut SqliteConnection) -> Result<Vec<u8>, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT key FROM digest_ack_key WHERE singleton=1")
+            .fetch_one(&mut *c)
+            .await?,
+    )
+}
+
+async fn project_exists(c: &mut SqliteConnection, project: &str) -> Result<bool, AppError> {
+    let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM projects WHERE id=?")
+        .bind(project)
+        .fetch_one(&mut *c)
+        .await?;
+    Ok(exists == 1)
+}
+
+async fn record_read(
+    c: &mut SqliteConnection,
+    project: &str,
+    now: i64,
+    via: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO digest_reads(project_id,last_read_at,read_via) VALUES(?,?,?) \
+         ON CONFLICT(project_id) DO UPDATE SET last_read_at=excluded.last_read_at,\
+         read_via=excluded.read_via",
+    )
+    .bind(project)
+    .bind(now)
+    .bind(via)
+    .execute(&mut *c)
+    .await?;
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DigestReadInput {}
+
+/// `POST /api/v1/projects/{project}/digest/read`: a human opened the digest in
+/// the dashboard. Agents read the digest without marking it read.
+async fn mark_digest_read(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<DigestReadInput>, JsonRejection>,
+) -> Reply {
+    let input = payload(body)?;
+    let mut m = Mutation::begin(
+        &state,
+        &auth,
+        &headers,
+        &format!("POST /api/v1/projects/{project}/digest/read"),
+        &input,
+    )
+    .await?;
+    if m.actor.kind != "human" {
+        return Err(AppError::forbidden(
+            "Only a human reading the digest marks it read.",
+        ));
+    }
+    if !project_exists(&mut m.tx, &project).await? {
+        return Err(AppError::not_found());
+    }
+    if let Some(value) = m.replay {
+        return Ok(response(value));
+    }
+    record_read(&mut m.tx, &project, m.now, "dashboard").await?;
+    let value = json!({"project_id": project, "last_read_at": timestamp(m.now)});
+    Ok(response(
+        m.finish(value, Some(&project), "digest.read", &project)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct AckQuery {
+    token: String,
+}
+
+fn ack_html(heading: &str, body: &str) -> Html<String> {
+    Html(format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <title>agentc attention digest</title></head><body><h1>{heading}</h1>{body}</body></html>"
+    ))
+}
+
+/// `GET .../digest/ack?token=`: a page with one button. Mail scanners and link
+/// previews fetch links without clicking, so only the button's POST records.
+async fn ack_page(
+    State(state): State<AppState>,
+    Path(project): Path<String>,
+    Query(query): Query<AckQuery>,
+) -> Result<Html<String>, AppError> {
+    let mut c = state.pool.acquire().await?;
+    let key = ack_key(&mut c).await?;
+    check_ack_token(&key, &project, &query.token, state.now())?;
+    if !project_exists(&mut c, &project).await? {
+        return Err(AppError::not_found());
+    }
+    // A valid token is digits, a dot and hex, so it needs no escaping.
+    Ok(ack_html(
+        "Attention digest",
+        &format!(
+            "<form method=\"post\" action=\"/api/v1/projects/{project}/digest/ack\">\
+             <input type=\"hidden\" name=\"token\" value=\"{}\">\
+             <button type=\"submit\">I read this</button></form>",
+            query.token
+        ),
+    ))
+}
+
+/// `POST .../digest/ack` with a form body `token=`: records that the owner read
+/// the digest. The token authorizes this one effect and nothing else.
+async fn ack_digest(
+    State(state): State<AppState>,
+    Path(project): Path<String>,
+    body: Bytes,
+) -> Result<Html<String>, AppError> {
+    let token = url::form_urlencoded::parse(&body)
+        .find(|(name, _)| name == "token")
+        .map(|(_, value)| value.into_owned())
+        .ok_or_else(|| AppError::bad_request("The form needs a token field."))?;
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let clock = state.sample_clock(&mut tx).await?;
+    if clock.incident_detected {
+        tx.commit().await?;
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    let key = ack_key(&mut tx).await?;
+    check_ack_token(&key, &project, &token, clock.now)?;
+    if !project_exists(&mut tx, &project).await? {
+        return Err(AppError::not_found());
+    }
+    record_read(&mut tx, &project, clock.now, "ack_link").await?;
+    tx.commit().await?;
+    Ok(ack_html(
+        "Recorded",
+        "<p>The attention digest is marked read.</p>",
+    ))
 }
 
 /// Open tasks whose last [`STALL_ATTEMPTS`] attempts all ended without a
@@ -506,11 +734,7 @@ async fn digest(
         return Err(AppError::bad_request("hours must be between 1 and 336."));
     }
     let mut c = state.pool.acquire().await?;
-    let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM projects WHERE id=?")
-        .bind(&project)
-        .fetch_one(&mut *c)
-        .await?;
-    if exists != 1 {
+    if !project_exists(&mut c, &project).await? {
         return Err(AppError::not_found());
     }
     let now = state.now();
@@ -548,8 +772,30 @@ async fn digest(
     let stalled_queue = usize::from(queue.is_some());
     items.extend(queue);
     items.extend(crate::integrator_reports::human_queue_items(&mut c, &project).await?);
+    let last_read: Option<i64> =
+        sqlx::query_scalar("SELECT last_read_at FROM digest_reads WHERE project_id=?")
+            .bind(&project)
+            .fetch_optional(&mut *c)
+            .await?;
+    // The link is a bearer capability to mark the digest read, so only a
+    // caller that asks for it receives one.
+    let ack = if query.ack_link.unwrap_or(false) {
+        let expires_at = now + ACK_LINK_TTL_MS;
+        let token = ack_token(&ack_key(&mut c).await?, &project, expires_at);
+        Some(json!({
+            "url": format!(
+                "{}/api/v1/projects/{project}/digest/ack?token={token}",
+                state.config.public_origin
+            ),
+            "expires_at": timestamp(expires_at),
+        }))
+    } else {
+        None
+    };
     Ok(response(json!({
         "project_id": project,
+        "last_read_at": last_read.map(timestamp),
+        "ack_link": ack,
         "window_hours": hours,
         "since": timestamp(since),
         "until": timestamp(now),
@@ -603,6 +849,20 @@ mod tests {
         );
         assert_eq!(QuietHours::active_ms(None, day(0), day(5)), 5 * HOUR_MS);
         assert_eq!(QuietHours::active_ms(Some(daytime), day(5), day(1)), 0);
+    }
+
+    #[test]
+    fn hmac_matches_the_rfc_4231_vector_and_binds_project_and_expiry() {
+        assert_eq!(
+            hex::encode(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        let key = [7u8; 32];
+        let token = ack_token(&key, "p", 1_000);
+        assert!(check_ack_token(&key, "p", &token, 999).is_ok());
+        assert!(check_ack_token(&key, "p", &token, 1_000).is_err());
+        assert!(check_ack_token(&key, "q", &token, 999).is_err());
+        assert!(check_ack_token(&[8u8; 32], "p", &token, 999).is_err());
     }
 
     #[test]

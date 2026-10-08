@@ -895,6 +895,7 @@ ATTENTION_MAIL_TO=
 # ATTENTION_STATE=$STATE/canary-state.json
 # ATTENTION_MAX_HRI=                # page when more human-required items are open
 # ATTENTION_HOURS=24                # the digest's window
+# ATTENTION_NEGLECT_DAYS=3          # page when the digest goes unread this many days (0: off)
 EOF
 }
 

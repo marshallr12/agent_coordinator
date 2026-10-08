@@ -139,6 +139,7 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
                     | "/api/v1/help/authentication"
             ));
     let login = parts.method == Method::POST && parts.uri.path() == "/api/v1/auth/login";
+    let ack_link = attention::is_ack_link(&parts.method, parts.uri.path());
     let mut result = if parts.uri.path().starts_with("/api/v1/reporters/") {
         match jobs::ReporterAuth::authenticate(&parts, &state).await {
             Ok(auth) => {
@@ -147,7 +148,7 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
             }
             Err(error) => error.into_response(),
         }
-    } else if !public_read && !login {
+    } else if !public_read && !login && !ack_link {
         match auth::Auth::authenticate(&parts, &state).await {
             Ok(auth) => {
                 parts.extensions.insert(auth);

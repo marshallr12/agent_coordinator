@@ -7,18 +7,22 @@
     attention.py canary --url URL --project ID --token-file FILE
                         --heartbeat /var/lib/agentc/heartbeat.json
                         --ntfy-topic TOPIC [--ntfy-url https://ntfy.sh]
-                        [--state FILE] [--max-hri N]
+                        [--state FILE] [--max-hri N] [--neglect-days N]
 
 `digest` reads `GET /api/v1/projects/ID/digest` and prints what the attention
 budget did: reversible decisions that proceeded on their recommendation after
 24 hours, the ones about to, and the human-required interventions (HRI: open
 human-required integrator reports and stalled tasks). With --mail-to it also
-mails the text through the given SMTP host.
+mails the text through the given SMTP host, with a signed "I read this" link
+that records the read (the digest printed to the journal carries no link).
+Opening the digest in the dashboard records a read too; reading it here does not.
 
 `canary` probes the loop end to end and pages through ntfy when an SLO fails:
 the service answers /healthz, the supervisor's own `next` call (implementer
 role, authenticated) succeeds within its latency budget, the supervisor
-heartbeat is fresh, and, with --max-hri, the HRI count is within bounds. A
+heartbeat is fresh, with --max-hri the HRI count is within bounds, and the
+digest has not gone unread for more than --neglect-days days (default 3; 0
+turns the check off). A digest never read counts from the canary's first run. A
 failing check pages once; it pages again only after it has recovered and
 failed again, or when a different check starts failing. The paged set lives
 in --state (default: next to the heartbeat). Exit status: 0 healthy, 1 an SLO
@@ -40,6 +44,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from email.message import EmailMessage
 
 sys.dont_write_bytecode = True
@@ -53,6 +58,13 @@ DEFAULT_PROJECT = "fe95a6c5-2aad-463f-8446-4366d9a281c7"
 DEFAULT_HEARTBEAT = "/var/lib/agentc/heartbeat.json"
 DEFAULT_TOKEN_FILE = "/etc/agentc/attention-token"
 DEFAULT_MAIL_FROM = "agentc@localhost"
+DEFAULT_NEGLECT_DAYS = 3
+DAY_SECONDS = 86400.0
+
+
+def now():
+    """Seconds since the epoch; tests replace this with a fake clock."""
+    return time.time()
 
 
 def read_token(path):
@@ -89,8 +101,8 @@ def project_url(args, route):
 # ------------------------------------------------------------------- digest
 
 
-def render_digest(data):
-    """The digest body as plain text."""
+def render_digest(data, ack_url=None):
+    """The digest body as plain text, with the acknowledgement link when given."""
     hri = data["hri"]
     lines = [f"Attention digest, last {data['window_hours']}h (until {data['until']})", ""]
     lines.append(f"Proceeded on their recommendation ({len(data['proceeded_decisions'])}):")
@@ -105,22 +117,26 @@ def render_digest(data):
                   f"({hri['stalled_tasks']} stalled tasks)"]
     for item in hri["items"]:
         lines.append(f"  - {item.get('code')}: {item.get('title') or item.get('summary') or item}")
+    if ack_url:
+        lines += ["", f"I read this (records the read; it does nothing else): {ack_url}"]
     return "\n".join(lines) + "\n"
 
 
-def read_digest(args, token):
-    status, body, _ = fetch(project_url(args, f"digest?hours={args.hours}"), token)
+def read_digest(args, token, ack_link=False):
+    query = f"digest?hours={args.hours}" + ("&ack_link=true" if ack_link else "")
+    status, body, _ = fetch(project_url(args, query), token)
     if status != 200 or not body or "data" not in body:
         raise SystemExit(f"attention: digest request failed with status {status}")
     return body["data"]
 
 
 def run_digest(args):
-    text = render_digest(read_digest(args, read_token(args.token_file)))
-    print(text, end="")
+    data = read_digest(args, read_token(args.token_file), ack_link=bool(args.mail_to))
+    print(render_digest(data), end="")
     if args.mail_to:
         if not args.smtp_host:
             raise SystemExit("attention: --mail-to needs --smtp-host")
+        text = render_digest(data, (data.get("ack_link") or {}).get("url"))
         message = EmailMessage()
         message["Subject"] = "agentc attention digest"
         message["From"] = args.mail_from
@@ -157,7 +173,7 @@ def probe_heartbeat(args, token):
         return None
     try:
         beat = json.loads(Path(args.heartbeat).read_text())
-        age = time.time() - beat["at_ms"] / 1000.0
+        age = now() - beat["at_ms"] / 1000.0
     except (OSError, ValueError, KeyError, TypeError) as error:
         return f"supervisor heartbeat unreadable ({type(error).__name__})"
     if age > args.heartbeat_max_age:
@@ -174,8 +190,39 @@ def probe_hri(args, token):
     return None
 
 
+def parse_time(text):
+    """Seconds since the epoch for an RFC 3339 timestamp such as 2026-10-08T00:00:00.000Z."""
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+
+
+def probe_digest(args, token):
+    """Fails once the digest has gone unread for more than --neglect-days days.
+
+    The clock starts at the last read, or at the canary's first run while the
+    digest has never been read (kept in the state file).
+    """
+    if not args.neglect_days:
+        return None
+    last_read = read_digest(args, token).get("last_read_at")
+    started = parse_time(last_read) if last_read else digest_baseline(args)
+    unread_days = (now() - started) / DAY_SECONDS
+    if unread_days > args.neglect_days:
+        return f"digest unread for {int(unread_days)} days (limit {args.neglect_days})"
+    return None
+
+
+def digest_baseline(args):
+    """When the canary first saw the digest unread, recorded on first use."""
+    path = state_path(args)
+    state = load_state(path)
+    if "digest_baseline" not in state:
+        state["digest_baseline"] = now()
+        save_state(path, state)
+    return state["digest_baseline"]
+
+
 PROBES = {"service": probe_service, "next": probe_next,
-          "supervisor": probe_heartbeat, "hri": probe_hri}
+          "supervisor": probe_heartbeat, "hri": probe_hri, "digest": probe_digest}
 
 
 def run_probes(args, token):
@@ -198,17 +245,24 @@ def state_path(args):
     return base / "canary-state.json"
 
 
-def load_paged(path):
+def load_state(path):
+    """The canary state: {"paged": [...], "digest_baseline": seconds}, or {} when unreadable."""
     try:
-        return set(json.loads(path.read_text())["paged"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return set()
+        state = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
 
 
-def save_paged(path, paged):
+def save_state(path, state):
     temp = path.with_name(path.name + ".tmp")
-    temp.write_text(json.dumps({"paged": sorted(paged)}))
+    temp.write_text(json.dumps(state))
     os.replace(temp, path)
+
+
+def load_paged(path):
+    paged = load_state(path).get("paged")
+    return set(paged) if isinstance(paged, list) else set()
 
 
 def page(args, failures):
@@ -240,7 +294,9 @@ def run_canary(args):
         except (OSError, urllib.error.URLError) as error:
             print(f"canary: ntfy page not delivered ({type(error).__name__})", file=sys.stderr)
             return 2
-    save_paged(path, set(failures))
+    state = load_state(path)
+    state["paged"] = sorted(failures)
+    save_state(path, state)
     return 1 if failures else 0
 
 
@@ -275,6 +331,8 @@ def parse(argv):
     canary.add_argument("--ntfy-url", default=env("ATTENTION_NTFY_URL", DEFAULT_NTFY))
     canary.add_argument("--state", default=env("ATTENTION_STATE"))
     canary.add_argument("--max-hri", type=int, default=env("ATTENTION_MAX_HRI", None, int))
+    canary.add_argument("--neglect-days", type=float,
+                        default=env("ATTENTION_NEGLECT_DAYS", DEFAULT_NEGLECT_DAYS, float))
     args = parser.parse_args(argv)
     if args.command == "canary" and not args.ntfy_topic:
         parser.error("canary needs --ntfy-topic or ATTENTION_NTFY_TOPIC")

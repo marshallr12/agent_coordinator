@@ -1003,6 +1003,33 @@ not be delivered exits 2 and is retried by the next run. `NTFY_TOKEN`, when set,
 authenticates to ntfy. `deploy/agentc/attention-test.py` tests both against
 local fake servers.
 
+#### Digest read tracking and the neglect page
+
+The service records when the owner last read the digest (`last_read_at` in
+`GET .../digest`, kept per project). Two things count as a read, and nothing
+else does (in particular the canary's and the mailer's own reads of the digest
+API do not):
+
+- opening **Project settings → Attention digest** in the dashboard, as a human;
+- pressing **I read this** on the page behind the link in the emailed digest.
+  `attention.py digest --mail-to` asks the service for a signed link and adds it
+  to the mail only; the text printed to the journal carries none. The link is an
+  HMAC-signed token for one project that expires after 7 days. It can do exactly
+  one thing, record a read: it is not a login, a session or an API credential,
+  and it is useless for any other project or route. Opening the link only shows
+  a button, so a mail scanner that fetches it records nothing. Anyone holding
+  the mail can use the link until it expires, so treat it as you treat the mail.
+  There is no tracking pixel.
+
+The canary compares `last_read_at` with the clock on every run. When the digest
+has gone unread for more than `ATTENTION_NEGLECT_DAYS` days (default 3,
+`--neglect-days`; `0` turns the check off) it fails the `digest` check, which
+sends **one** ntfy page like any failing check and stays quiet while the lapse
+continues. A new read ends the lapse; the next page needs another full N days
+without a read. A digest that was never read counts from the canary's first run
+(recorded in its state file, `canary-state.json`). The check shows as exit
+status 1 of `agentc-canary.service` while it fails, like the other checks.
+
 #### Timers and settings
 
 | Unit | Runs | Default schedule |
@@ -1038,7 +1065,7 @@ Defaulted entries (commented in the file): `ATTENTION_URL`
 `ATTENTION_HEARTBEAT` (`/var/lib/agentc/heartbeat.json`),
 `ATTENTION_HEARTBEAT_MAX_AGE` (300 seconds), `ATTENTION_NTFY_URL`
 (`https://ntfy.sh`), `ATTENTION_STATE`, `ATTENTION_MAX_HRI` (unset: no HRI
-check), `ATTENTION_HOURS` (24), `ATTENTION_SMTP_PORT` (25) and
+check), `ATTENTION_HOURS` (24), `ATTENTION_NEGLECT_DAYS` (3), `ATTENTION_SMTP_PORT` (25) and
 `ATTENTION_MAIL_FROM`.
 
 host-setup enables a timer only once what it needs exists (the token file; for

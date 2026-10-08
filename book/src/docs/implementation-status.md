@@ -162,6 +162,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   installs the script with the `agentc-canary` (every 10 minutes) and
   `agentc-digest` (daily) systemd timers; `deploy/agentc/host-setup-test.py`
   checks the generated units and the uninstall list without root.
+- Digest read tracking and the neglect page: the service stores a per-project
+  `last_read_at` for the digest (`digest_reads`), set by a human opening the
+  digest page in the dashboard or by the signed, expiring "I read this" link in
+  the emailed digest; reading the digest through the API does not count. The
+  canary pages through ntfy once when the digest has gone unread for more than
+  `ATTENTION_NEGLECT_DAYS` days (default 3) and again only after a new read and
+  another lapse; `deploy/agentc/attention-test.py` covers it with a fake clock.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
   safe storage reconciliation. Native upload journals preserve exact bytes and

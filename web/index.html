@@ -84,6 +84,7 @@
                 <article class="card"><h3>Required checks</h3><p class="muted">Configure the validation checks required before code can be integrated.</p><button id="workflow-settings" class="button subtle" type="button">Required check settings</button></article>
                 <article class="card"><h3>Integration owner</h3><p id="integration-owner-summary" class="muted">Who publishes approved code to the target branch.</p><button id="integration-owner-button" class="button subtle" data-mutation="true" type="button">Change integration owner</button></article>
                 <article class="card"><h3>Integrator reports</h3><p class="muted">Findings the integrator recorded, such as privilege gates and flaky checks. Resolve the ones that need a person.</p><button id="integrator-reports-button" class="button subtle" type="button">Integrator reports</button></article>
+                <article class="card"><h3>Attention digest</h3><p class="muted">What the attention budget did on its own and what still needs a person. Opening it here records that you read it.</p><button id="digest-button" class="button subtle" type="button">Attention digest</button></article>
                 <article class="card"><h3>Connected sessions</h3><p class="muted">Agent sessions still working in this project. Check them before a test, preflight or cutover.</p><button id="agent-sessions-button" class="button subtle" type="button">Connected sessions</button></article>
               </div>
               <article class="card project-binding-card"><h2>Repository binding</h2><p class="muted">Download this non-secret file, then place <code>.agent-coordinator.toml</code> in the root of your repository so agents connect to this project.</p><div id="project-binding-content" class="binding-content"></div></article>
@@ -96,6 +97,14 @@
               <div id="reports-state" class="state-panel" role="status"></div>
               <div id="reports-list" class="report-list"></div>
               <button id="load-more-reports" class="button subtle" type="button" hidden>Load more reports</button>
+            </section>
+
+            <section id="digest-view" class="page-view" aria-labelledby="digest-heading" hidden>
+              <div class="detail-back-row"><button id="digest-back" class="button text-button" type="button">← Project settings</button></div>
+              <div class="page-heading"><div><p id="digest-project-label" class="eyebrow"></p><h1 id="digest-heading" tabindex="-1">Attention digest</h1><p class="muted">Decisions that proceeded on their recommendation, the ones about to, and the interventions that need a person. Opening this page records that the digest was read; if it goes unread for several days the canary pages.</p></div></div>
+              <div class="toolbar"><button id="refresh-digest" class="button subtle" type="button">Refresh</button></div>
+              <div id="digest-state" class="state-panel" role="status"></div>
+              <div id="digest-content" class="report-list"></div>
             </section>
 
             <section id="agent-sessions-view" class="page-view" aria-labelledby="agent-sessions-heading" hidden>

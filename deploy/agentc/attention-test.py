@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -19,6 +20,9 @@ attention = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(attention)
 
 TOKEN = "t" * 40
+ACK_URL = "https://agents.example/api/v1/projects/p/digest/ack?token=123.abc"
+DAY = 86400.0
+START = 1_790_000_000.0
 DIGEST = {"project_id": "p", "window_hours": 24, "since": "a", "until": "2026-10-08T00:00:00.000Z",
           "proceeded_decisions": [{"decision_id": "d1", "question": "Rename the flag?",
                                    "proceeded_with": "Rename", "proceeded_at": "x",
@@ -33,6 +37,8 @@ class Fake:
 
     def __init__(self):
         self.next_status = 200
+        self.last_read_at = None
+        self.digest_queries = []
         self.pages = []
         self.coordinator_tokens = []
         fake = self
@@ -44,7 +50,10 @@ class Fake:
                 if self.path.startswith("/api/v1/projects/p/next"):
                     status, body = fake.next_status, {"data": {"action": None}}
                 elif self.path.startswith("/api/v1/projects/p/digest"):
-                    body = {"data": DIGEST}
+                    fake.digest_queries.append(self.path)
+                    body = {"data": {**DIGEST, "last_read_at": fake.last_read_at,
+                                     "ack_link": {"url": ACK_URL, "expires_at": "later"}
+                                     if "ack_link=true" in self.path else None}}
                 self.send_response(status)
                 self.end_headers()
                 self.wfile.write(json.dumps(body).encode())
@@ -153,6 +162,90 @@ class AttentionTests(unittest.TestCase):
         self.assertIn("Stubborn task", text)
         self.assertNotIn(TOKEN, text)
         self.assertEqual(set(self.fake.coordinator_tokens), {f"Bearer {TOKEN}"})
+
+    def test_the_emailed_digest_carries_the_ack_link_and_the_printed_one_does_not(self):
+        sent = []
+
+        class Smtp:
+            def __init__(self, host, port, timeout):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def send_message(self, message):
+                sent.append(message)
+
+        out = io.StringIO()
+        with mock.patch.object(attention.smtplib, "SMTP", Smtp), contextlib.redirect_stdout(out):
+            attention.main(["digest", "--url", self.fake.url, "--project", "p",
+                            "--token-file", str(self.token), "--mail-to", "me@example.org",
+                            "--smtp-host", "localhost"])
+        self.assertEqual(len(sent), 1)
+        self.assertIn(ACK_URL, sent[0].get_content())
+        self.assertNotIn(ACK_URL, out.getvalue())
+        self.assertIn("ack_link=true", self.fake.digest_queries[0])
+        # Without mail the digest asks for no link.
+        with contextlib.redirect_stdout(io.StringIO()):
+            attention.main(["digest", "--url", self.fake.url, "--project", "p",
+                            "--token-file", str(self.token)])
+        self.assertNotIn("ack_link", self.fake.digest_queries[1])
+
+    def neglect_canary(self, clock, day, *extra):
+        """One canary run on `day` of a fake clock that starts at START."""
+        clock[0] = START + day * DAY
+        self.heartbeat.write_text(json.dumps({"at_ms": int(clock[0] * 1000)}))
+        return self.canary(*extra)[0]
+
+    def read_at(self, day):
+        stamp = datetime.fromtimestamp(START + day * DAY, timezone.utc)
+        self.fake.last_read_at = stamp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def test_a_digest_unread_for_more_than_n_days_pages_once_and_a_read_rearms_it(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.read_at(0)
+            self.assertEqual(self.neglect_canary(clock, 0), 0)
+            self.assertEqual(self.neglect_canary(clock, 2), 0)
+            self.assertEqual(self.fake.pages, [], "no page on day 2")
+            self.assertEqual(self.neglect_canary(clock, 4), 1)
+            self.assertEqual(len(self.fake.pages), 1, "one page on day 4")
+            self.assertIn("digest: digest unread for 4 days (limit 3)", self.fake.pages[0][1])
+            self.assertEqual(self.neglect_canary(clock, 5), 1)
+            self.assertEqual(len(self.fake.pages), 1, "no repeat page on day 5")
+            # A read re-arms the page, but only another lapse of N days pages again.
+            self.read_at(5)
+            self.assertEqual(self.neglect_canary(clock, 5), 0)
+            self.assertEqual(self.neglect_canary(clock, 7), 0)
+            self.assertEqual(len(self.fake.pages), 1)
+            self.assertEqual(self.neglect_canary(clock, 9), 1)
+            self.assertEqual(len(self.fake.pages), 2)
+            self.assertEqual(self.neglect_canary(clock, 10), 1)
+            self.assertEqual(len(self.fake.pages), 2)
+
+    def test_a_digest_never_read_counts_from_the_first_canary_run(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.assertEqual(self.neglect_canary(clock, 0), 0)
+            self.assertEqual(self.neglect_canary(clock, 2), 0)
+            self.assertEqual(self.neglect_canary(clock, 4), 1)
+            self.assertEqual(self.neglect_canary(clock, 5), 1)
+            self.assertEqual(len(self.fake.pages), 1)
+
+    def test_the_neglect_limit_is_a_setting_and_zero_turns_it_off(self):
+        clock = [START]
+        with mock.patch.object(attention, "now", lambda: clock[0]):
+            self.read_at(0)
+            self.assertEqual(self.neglect_canary(clock, 2, "--neglect-days", "1"), 1)
+            self.assertEqual(self.neglect_canary(clock, 30, "--neglect-days", "0"), 0)
+        self.assertEqual(len(self.fake.pages), 1)
+        with mock.patch.dict(os.environ, clear=True):
+            self.assertEqual(attention.parse(["canary", "--ntfy-topic", "t"]).neglect_days, 3)
+        with mock.patch.dict(os.environ, {"ATTENTION_NEGLECT_DAYS": "5"}):
+            self.assertEqual(attention.parse(["canary", "--ntfy-topic", "t"]).neglect_days, 5)
 
     def test_options_default_from_the_environment_and_flags_win(self):
         env = {"ATTENTION_URL": self.fake.url, "ATTENTION_PROJECT": "p",

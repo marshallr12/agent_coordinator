@@ -568,6 +568,171 @@ async fn next_skips_a_task_whose_paths_overlap_a_recent_human_change() {
     );
 }
 
+/// A request with no credentials, as a mail client's browser makes it.
+async fn anonymous(
+    app: &Router,
+    method: &str,
+    path: &str,
+    form: Option<&str>,
+) -> (StatusCode, String) {
+    let mut request = Request::builder().method(method).uri(path);
+    if form.is_some() {
+        request = request.header("content-type", "application/x-www-form-urlencoded");
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(form.unwrap_or_default().to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+/// The ack link the digest hands an agent that asks for one: path and token.
+async fn ack_link(f: &Fixture, project: &str) -> (String, String) {
+    let digest = f
+        .ok(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{project}/digest?ack_link=true"),
+            Value::Null,
+        )
+        .await;
+    let url = digest["ack_link"]["url"].as_str().unwrap().to_owned();
+    let url = url.strip_prefix("http://127.0.0.1:8080").unwrap();
+    let (path, token) = url.split_once("?token=").unwrap();
+    (path.to_owned(), token.to_owned())
+}
+
+#[tokio::test]
+async fn a_human_opening_the_digest_records_the_read_and_an_agent_cannot() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-read").await;
+    assert_eq!(f.digest(&p).await["last_read_at"], Value::Null);
+    assert_eq!(f.digest(&p).await["ack_link"], Value::Null);
+
+    let path = format!("/api/v1/projects/{p}/digest/read");
+    let (status, refused) = f.call(&f.a, "POST", &path, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(f.digest(&p).await["last_read_at"], Value::Null);
+
+    let read = f.ok(&f.admin, "POST", &path, json!({})).await;
+    let now = coordinator_core::timestamp(f.clock.0.load(Ordering::SeqCst));
+    assert_eq!(read["last_read_at"], now);
+    assert_eq!(f.digest(&p).await["last_read_at"], now);
+
+    f.clock.0.fetch_add(2 * HOUR, Ordering::SeqCst);
+    f.ok(&f.admin, "POST", &path, json!({})).await;
+    let later = coordinator_core::timestamp(f.clock.0.load(Ordering::SeqCst));
+    assert_eq!(f.digest(&p).await["last_read_at"], later);
+}
+
+#[tokio::test]
+async fn the_signed_ack_link_records_a_read_without_any_credential() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-ack").await;
+    let (path, token) = ack_link(&f, &p).await;
+    assert_eq!(path, format!("/api/v1/projects/{p}/digest/ack"));
+
+    // Opening the link only shows a button; a link preview records nothing.
+    let (status, page) = anonymous(&f.app, "GET", &format!("{path}?token={token}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("I read this"), "{page}");
+    assert_eq!(f.digest(&p).await["last_read_at"], Value::Null);
+
+    let (status, done) = anonymous(&f.app, "POST", &path, Some(&format!("token={token}"))).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    let now = coordinator_core::timestamp(f.clock.0.load(Ordering::SeqCst));
+    assert_eq!(f.digest(&p).await["last_read_at"], now);
+    let via: String = sqlx::query_scalar("SELECT read_via FROM digest_reads WHERE project_id=?")
+        .bind(&p)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(via, "ack_link");
+}
+
+#[tokio::test]
+async fn the_ack_link_cannot_do_anything_else() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-ack-scope").await;
+    let other = f.project("digest-ack-other").await;
+    let (path, token) = ack_link(&f, &p).await;
+
+    // The token is no credential: not as a bearer token, not on the digest read
+    // route, and not for another project.
+    let (status, _) = anonymous(&f.app, "GET", &format!("/api/v1/projects/{p}/digest"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = anonymous(
+        &f.app,
+        "POST",
+        &format!("/api/v1/projects/{p}/digest/read"),
+        Some(&format!("token={token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let bearer = Caller {
+        token: token.clone(),
+        ..f.a.clone()
+    };
+    let (status, _) = f
+        .call(
+            &bearer,
+            "POST",
+            &format!("/api/v1/projects/{p}/tasks"),
+            json!({"title":"x","description":"x","acceptance_criteria":["x"],"kind":"general"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let other_path = format!("/api/v1/projects/{other}/digest/ack");
+    let (status, _) = anonymous(&f.app, "POST", &other_path, Some(&format!("token={token}"))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(f.digest(&other).await["last_read_at"], Value::Null);
+
+    // Other methods on the ack route need a credential, and a forged or edited
+    // token is refused.
+    let (status, _) = anonymous(&f.app, "DELETE", &path, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (expires, signature) = token.split_once('.').unwrap();
+    let longer: i64 = expires.parse::<i64>().unwrap() + DAY;
+    for forged in [
+        format!("{longer}.{signature}"),
+        format!("{expires}.{}", "0".repeat(64)),
+        "garbage".to_owned(),
+        String::new(),
+    ] {
+        let (status, body) =
+            anonymous(&f.app, "POST", &path, Some(&format!("token={forged}"))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{forged}: {body}");
+        let (status, _) = anonymous(&f.app, "GET", &format!("{path}?token={forged}"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{forged}");
+    }
+    assert_eq!(f.digest(&p).await["last_read_at"], Value::Null);
+}
+
+#[tokio::test]
+async fn the_ack_link_expires_after_seven_days() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-ack-expiry").await;
+    let (path, token) = ack_link(&f, &p).await;
+
+    f.clock.0.fetch_add(7 * DAY - HOUR, Ordering::SeqCst);
+    let (status, _) = anonymous(&f.app, "GET", &format!("{path}?token={token}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    f.clock.0.fetch_add(2 * HOUR, Ordering::SeqCst);
+    let (status, body) = anonymous(&f.app, "POST", &path, Some(&format!("token={token}"))).await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    let (status, _) = anonymous(&f.app, "GET", &format!("{path}?token={token}"), None).await;
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(f.digest(&p).await["last_read_at"], Value::Null);
+}
+
 async fn seed(state: &AppState, human: bool, name: &str) -> Caller {
     let caller = Caller {
         token: secret(),

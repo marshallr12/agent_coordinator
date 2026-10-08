@@ -240,7 +240,21 @@ one item, with `ready_tasks`, `idle_hours`, `threshold_hours`,
 defaults to 6 hours and is set with `--stall-hours` or `COORDINATOR_STALL_HOURS`
 (1 through 336). `--quiet-hours START-END` or `COORDINATOR_QUIET_HOURS`, in UTC
 hours such as `22-07`, removes those hours from the idle clock; they are unset
-by default. Open human-required integrator reports are the other items. `POST /api/v1/projects/{project_id}/tasks/{task_id}/paths`
+by default. Open human-required integrator reports are the other items. The
+digest also reports `last_read_at`, when it was last read (`null` if never).
+Reads are recorded in two ways only. A human opening the digest in the dashboard
+sends `POST /api/v1/projects/{project_id}/digest/read` (`{}`, an idempotent
+mutation; agent credentials get `operation_not_permitted`), and `GET ...digest`
+itself never counts as a read. `GET ...digest?ack_link=true` adds `ack_link`:
+`url` and `expires_at` of a signed acknowledgement link, valid for 7 days. The
+link's token is `<expiry ms>.<HMAC-SHA256 of purpose, project and expiry>` under
+a key the service generates; it is a bearer capability for one effect and no
+credential. `GET .../digest/ack?token=` answers a page with an "I read this"
+button (so a link preview or mail scanner records nothing), and
+`POST .../digest/ack` with the form field `token` records the read. Both need no
+other credential, and both refuse a token that is malformed or signed for
+another project (`digest_link_invalid`, 400) or past its expiry
+(`digest_link_expired`, 410). `POST /api/v1/projects/{project_id}/tasks/{task_id}/paths`
 with `{"paths": [...]}` replaces the repository-relative paths (files or
 directories, at most 50) a task touches. The integrator records the files of
 out-of-band commits without an agent trailer with

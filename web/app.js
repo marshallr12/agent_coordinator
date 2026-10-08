@@ -8,7 +8,7 @@
     try { return localStorage.getItem(TASK_AUTO_REFRESH_KEY) === 'true'; } catch { return false; }
   }
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0, reportsCursor: null, reportsSeq: 0, agentSessionsSeq: 0,
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], resources: [], resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedSeq: 0, reportsCursor: null, reportsSeq: 0, agentSessionsSeq: 0, digestSeq: 0,
     projectId: '', selectedTaskId: '', currentView: 'overview', detail: null, credentialDownloadUrl: null,
     taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedTasks: [], archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
@@ -261,6 +261,7 @@
     ++state.sharedSeq; state.sharedCursor = null; clear($('shared-list')); setText($('shared-freshness'), '');
     ++state.reportsSeq; state.reportsCursor = null; clear($('reports-list'));
     ++state.agentSessionsSeq; clear($('agent-sessions-list'));
+    ++state.digestSeq; clear($('digest-content'));
     $('context-search').reset();
     state.credentials = []; state.resources = []; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
@@ -280,10 +281,10 @@
 
   function showView(view) {
     state.currentView = view;
-    ['overview', 'project', 'reports', 'agent-sessions', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
+    ['overview', 'project', 'reports', 'agent-sessions', 'digest', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
     show($('task-view-tabs'), view === 'tasks' || view === 'archived');
     updateTaskViewTabs();
-    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports', 'agent-sessions'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
+    document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports', 'agent-sessions', 'digest'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
     if (view === 'tasks') { fillProjectSelect(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; $('project-select')?.focus(); }
   }
 
@@ -348,7 +349,7 @@
       const changed = JSON.stringify(projects) !== JSON.stringify(state.projects);
       state.projects = projects;
       if (!silent || changed) { renderProjects(); fillProjectSelect(); }
-      renderSummary(); if (state.currentView === 'reports') setReportsProjectLabel(); if (state.currentView === 'agent-sessions') setAgentSessionsProjectLabel();
+      renderSummary(); if (state.currentView === 'reports') setReportsProjectLabel(); if (state.currentView === 'agent-sessions') setAgentSessionsProjectLabel(); if (state.currentView === 'digest') setDigestProjectLabel();
     }
     catch (error) { if (!silent) { setState($('projects-state'), errorMessage(error), false, true); } }
     finally { state.fetching.delete('projects'); }
@@ -433,6 +434,9 @@
   $('reports-filter').addEventListener('change', () => loadReports());
   $('refresh-reports').addEventListener('click', () => loadReports());
   $('load-more-reports').addEventListener('click', () => loadReports(true));
+  $('digest-button').addEventListener('click', openDigest);
+  $('digest-back').addEventListener('click', () => openProjectSettings(state.projectId));
+  $('refresh-digest').addEventListener('click', () => loadDigest());
   $('agent-sessions-button').addEventListener('click', openAgentSessions);
   $('agent-sessions-back').addEventListener('click', () => openProjectSettings(state.projectId));
   $('agent-sessions-window').addEventListener('change', () => loadAgentSessions());
@@ -1818,6 +1822,40 @@
   // Connected sessions: open agent sessions bound to the project, so an owner can quiesce work.
   const NO_AGENT_SESSIONS = 'No agent sessions are connected to this project in this window.';
   // Opens the connected-sessions page for the current project.
+  // The attention digest: what the attention budget did and what needs a person.
+  // Showing it to a person records the read the canary watches for.
+  function openDigest() {
+    if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    setDigestProjectLabel(); showView('digest'); $('digest-heading').focus(); loadDigest();
+  }
+  function setDigestProjectLabel() {
+    const project = state.projects.find(item => text(item.id) === state.projectId);
+    setText($('digest-project-label'), project?.name || 'Project');
+  }
+  // Loads and shows the digest, then records the read; a superseded response is dropped.
+  async function loadDigest() {
+    const projectId = state.projectId, seq = ++state.digestSeq;
+    clear($('digest-content')); setState($('digest-state'), 'Loading the digest…', true);
+    try {
+      const digest = (await request(`${projectPath(projectId)}/digest`)).data;
+      if (seq !== state.digestSeq || projectId !== state.projectId) return;
+      renderDigest(digest);
+      try { await request(`${projectPath(projectId)}/digest/read`, { method: 'POST', body: {}, idempotencyKey: newKey() }); }
+      catch (error) { if (seq === state.digestSeq) setState($('digest-state'), `Showing the digest, but recording the read failed: ${errorMessage(error)}`, false, true); }
+    } catch (error) { if (seq === state.digestSeq && projectId === state.projectId) setState($('digest-state'), errorMessage(error), false, true); }
+  }
+  function renderDigest(digest) {
+    const content = $('digest-content'), hri = digest.hri || {}, proceeded = digest.proceeded_decisions || [], pending = digest.pending_reversible_decisions || [];
+    const section = (title, items, line) => {
+      const card = add(content, el('article', 'card report-card')); add(card, el('h2', '', `${title} (${items.length})`));
+      if (!items.length) add(card, el('p', 'muted', 'None.'));
+      items.forEach(item => add(card, el('p', '', line(item))));
+    };
+    section(`Proceeded on their recommendation in the last ${digest.window_hours} hours`, proceeded, item => `${text(item.question)} → ${text(item.proceeded_with)} at ${formatDate(item.proceeded_at)}. Reopen decision ${text(item.decision_id)} to undo.`);
+    section('Will proceed on their own', pending, item => `${text(item.question)} → ${text(item.recommendation)} at ${formatDate(item.proceeds_at)}`);
+    section('Human-required interventions', hri.items || [], item => `${text(item.code)}: ${text(item.title || item.summary)}`);
+    setState($('digest-state'), digest.last_read_at ? `Last read ${formatDate(digest.last_read_at)} (before this visit).` : 'This digest had not been read before this visit.');
+  }
   function openAgentSessions() {
     if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
     setAgentSessionsProjectLabel(); showView('agent-sessions'); $('agent-sessions-heading').focus(); loadAgentSessions();
