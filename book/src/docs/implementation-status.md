@@ -162,6 +162,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   installs the script with the `agentc-canary` (every 10 minutes) and
   `agentc-digest` (daily) systemd timers; `deploy/agentc/host-setup-test.py`
   checks the generated units and the uninstall list without root.
+  `deploy/agentc/e2e-canary.py` is a daily end-to-end canary: it creates a
+  trivial task in the host's own canary project (`canary-setup.py` creates it
+  once), waits for it to reach `done` within a deadline, appends the host,
+  harness, outcome and duration to a results file and pages through ntfy on
+  failure or timeout; `host-setup.sh` installs an `agentc-e2e-canary@<harness>`
+  daily timer per configured harness. Tests cover it against fake servers; live
+  runs per host and harness are owner evidence and have not been recorded.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
   safe storage reconciliation. Native upload journals preserve exact bytes and
