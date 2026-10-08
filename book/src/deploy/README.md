@@ -892,6 +892,14 @@ a launch that ended while no loop watched it, before removing its run, under
 the vendor its record names; the record notes that the cost is in the ledger,
 so a retried release never counts it twice.
 
+A reviewer launch's cost is recorded the same way, as one `role` `rev` row
+(task under review, reviewer session, tokens, dollars) once the launch ends,
+so the reviewer's `[health] reviewer_daily_usd` cap counts it. The loop keeps a
+root-owned record, `/var/lib/agentc/reviews/<session>.json`, from before the
+launch spawns until its cost is in the ledger and its run is removed; a record
+left by a supervisor that stopped meanwhile is settled on the next poll, and
+the ledger holds at most one reviewer row per session.
+
 A host may configure a project setup command, keyed by coordinator project id:
 
 ```toml

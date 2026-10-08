@@ -84,6 +84,9 @@ pub trait ReviewDriver {
     /// Releases the claimed review with a handoff; the service queues it again.
     fn release_review(&mut self, review: &Review, claim: &ReviewClaim, summary: &str)
     -> Result<()>;
+    /// Settles the cost of reviewer launches an earlier supervisor left
+    /// unsettled (it stopped between a launch's end and its cleanup).
+    fn recover(&mut self) {}
     /// The failed-verdict counts this host keeps between polls.
     fn strikes(&mut self) -> &mut Strikes;
 }
