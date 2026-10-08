@@ -931,6 +931,7 @@ pub(crate) async fn activity_preconditions(
     if let Some(reason) = blocked_reason {
         add("activity_blocked", &reason);
     }
+    let mut independent_tasks = None;
     if actor.kind == "agent" {
         let session_id = actor.session_id.as_deref().unwrap_or("");
         if !crate::autonomy::instructions_acknowledged(c, session_id, project).await? {
@@ -939,17 +940,13 @@ pub(crate) async fn activity_preconditions(
                 "Read and acknowledge current coordination instructions before claiming workflow work.",
             );
         }
-        if matches!(ctx.kind.as_str(), "agent_review" | "either_review")
-            && let Err(error) = ensure_independent_reviewer(
-                c,
-                project,
-                &ctx.subject_task,
-                (&actor.id, session_id),
-                None,
-            )
-            .await
-        {
-            add(&error.code, &error.message);
+        if matches!(ctx.kind.as_str(), "agent_review" | "either_review") {
+            match independent_reviewer_tasks(c, project, &ctx.subject_task, (&actor.id, session_id))
+                .await
+            {
+                Ok(tasks) => independent_tasks = Some(tasks),
+                Err(error) => add(&error.code, &error.message),
+            }
         }
         if ctx.kind == "human_review" {
             add(
@@ -1035,7 +1032,7 @@ pub(crate) async fn activity_preconditions(
         "precondition_hints":if ctx.kind == "integration" { json!([{"code":"candidate_stale_merge_conflict_requires_preflight","state":"requires_local_observation","message":"The service cannot inspect the Git target or detect merge conflicts. Fetch the pinned target and run local integration preflight before publication; a stale or conflicting immutable candidate is revised by the integration owner (reason_code conflict) or reopened by an operator."}]) } else { json!([]) },
         "state":snapshot
     });
-    add_distinct_launch_preview(c, project, &ctx, actor, &mut result).await?;
+    add_distinct_launch_preview(c, &ctx, actor, independent_tasks.as_deref(), &mut result).await?;
     result["state_token"] = json!(crate::state_wait::state_token(&result)?);
     Ok(result)
 }
@@ -1044,28 +1041,22 @@ pub(crate) async fn activity_preconditions(
 /// asserts `distinct_launch` would also be accepted: `distinct_launch_eligible`
 /// and the extra `distinct_launch_unmet_preconditions` that assertion adds
 /// (`reviewer_shares_launch`). The default result is left unchanged.
+/// `independent_tasks` is the subject and stacked tasks the reviewer already
+/// passed the contributor check for, or `None` when that check refused them.
 async fn add_distinct_launch_preview(
     c: &mut SqliteConnection,
-    project: &str,
     ctx: &ActivityContext,
     actor: &crate::auth::Actor,
+    independent_tasks: Option<&[String]>,
     result: &mut Value,
 ) -> Result<(), AppError> {
     if actor.kind != "agent" || !matches!(ctx.kind.as_str(), "agent_review" | "either_review") {
         return Ok(());
     }
     let session = actor.session_id.as_deref().unwrap_or("");
-    let reviewer = (actor.id.as_str(), session);
     let mut extra = Vec::new();
-    if let Err(error) = ensure_independent_reviewer(
-        c,
-        project,
-        &ctx.subject_task,
-        reviewer,
-        Some("distinct_launch"),
-    )
-    .await
-        && error.code == "reviewer_shares_launch"
+    if let Some(tasks) = independent_tasks
+        && let Err(error) = ensure_distinct_launch(c, tasks, session).await
     {
         extra.push(json!({"code":error.code,"message":error.message}));
     }
@@ -2163,6 +2154,21 @@ async fn ensure_independent_reviewer(
     reviewer: (&str, &str),
     independence: Option<&str>,
 ) -> Result<(), AppError> {
+    let tasks = independent_reviewer_tasks(c, project, task, reviewer).await?;
+    if independence == Some("distinct_launch") {
+        ensure_distinct_launch(c, &tasks, reviewer.1).await?;
+    }
+    Ok(())
+}
+
+/// The subject `task` and the tasks its landing range carries, once the
+/// reviewer is known to have contributed to none of them.
+async fn independent_reviewer_tasks(
+    c: &mut SqliteConnection,
+    project: &str,
+    task: &str,
+    reviewer: (&str, &str),
+) -> Result<Vec<String>, AppError> {
     let (principal, session) = reviewer;
     let mut tasks = stacked_contributor_tasks(c, task).await?;
     tasks.push(task.to_owned());
@@ -2174,10 +2180,7 @@ async fn ensure_independent_reviewer(
             ));
         }
     }
-    if independence == Some("distinct_launch") {
-        ensure_distinct_launch(c, &tasks, session).await?;
-    }
-    Ok(())
+    Ok(tasks)
 }
 
 /// Refuses a `distinct_launch` reviewer whose launch is also the launch of a

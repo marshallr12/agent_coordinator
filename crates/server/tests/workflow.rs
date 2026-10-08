@@ -1304,6 +1304,77 @@ async fn preconditions_preview_reports_whether_distinct_launch_would_be_accepted
     assert_eq!(separate["distinct_launch_unmet_preconditions"], json!([]));
 }
 
+/// Collects the text of every tracing event so a test can count statements.
+#[derive(Clone, Default)]
+struct StatementLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for StatementLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Replaces every pooled connection with one that logs its statements.
+async fn log_statements(f: &Fixture) {
+    use sqlx::ConnectOptions;
+    let options = (*f.state.pool.connect_options())
+        .clone()
+        .log_statements(tracing::log::LevelFilter::Debug)
+        .log_slow_statements(
+            tracing::log::LevelFilter::Debug,
+            std::time::Duration::from_secs(3600),
+        );
+    f.state.pool.set_connect_options(options);
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(f.state.pool.acquire().await.unwrap());
+    }
+    for connection in held {
+        drop(connection.detach());
+    }
+}
+
+#[tokio::test]
+async fn preconditions_preview_queries_contributors_once_per_activity() {
+    let f = Fixture::new().await;
+    let (p, review) = subagent_review_subject(&f, "launch-preview-queries").await;
+    let (sibling, _) = register_child(&f, &f.a, &p, "counted-reviewer").await;
+    f.ack(&sibling, &p, 2).await;
+    log_statements(&f).await;
+    // Only this test's connections log statements, and sqlx may emit the event
+    // from its worker thread, so the subscriber is global to the test binary.
+    let log = StatementLog::default();
+    let writer = log.clone();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish(),
+    )
+    .unwrap();
+    let shared = preview(&f, &sibling, &p, &review).await;
+    assert_eq!(shared["distinct_launch_eligible"], false, "{shared}");
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let count = |needle: &str| text.matches(needle).count();
+    // The independence check reads the subject's contributors once, and the
+    // distinct_launch outcome reuses that result: it adds only the launch walk.
+    for statement in [
+        "contributor_tasks_json IS NOT NULL",
+        "JOIN subagent_identities i ON",
+        "SELECT count(*) FROM task_contributors tc",
+        "SELECT tc.session_id,s.parent_session_id",
+        "SELECT id,parent FROM up",
+    ] {
+        assert_eq!(count(statement), 1, "{statement}: {text}");
+    }
+}
+
 #[tokio::test]
 async fn omitted_subagent_policy_preserves_existing_permission() {
     let f = Fixture::new().await;
