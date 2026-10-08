@@ -32,6 +32,9 @@ pub struct Config {
     pub stall_hours: i64,
     /// UTC hours excluded from the stall clock; none by default.
     pub quiet_hours: Option<crate::attention::QuietHours>,
+    /// Agent-created tasks without an admission class admitted per ISO week
+    /// across all projects; later ones are created planned.
+    pub agent_task_weekly_budget: i64,
 }
 
 impl Default for Config {
@@ -47,6 +50,7 @@ impl Default for Config {
             context_rerank: ContextRerankConfig::default(),
             stall_hours: crate::attention::DEFAULT_STALL_HOURS,
             quiet_hours: None,
+            agent_task_weekly_budget: crate::admission::DEFAULT_WEEKLY_BUDGET,
         }
     }
 }
@@ -68,6 +72,10 @@ impl Config {
         anyhow::ensure!(
             (1..=24 * 14).contains(&self.stall_hours),
             "stall_hours must be 1 through 336."
+        );
+        anyhow::ensure!(
+            (0..=crate::admission::MAX_WEEKLY_BUDGET).contains(&self.agent_task_weekly_budget),
+            "agent_task_weekly_budget must be 0 through 10000."
         );
         anyhow::ensure!(
             self.listen.ip().is_loopback(),

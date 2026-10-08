@@ -568,6 +568,200 @@ async fn next_skips_a_task_whose_paths_overlap_a_recent_human_change() {
     );
 }
 
+const WEEK: i64 = 7 * DAY;
+
+impl Fixture {
+    async fn create_task(
+        &self,
+        caller: &Caller,
+        project: &str,
+        title: &str,
+        extra: Value,
+    ) -> Value {
+        let mut body = json!({"title":title,"description":"admission","acceptance_criteria":["done"],"kind":"general"});
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        self.ok(
+            caller,
+            "POST",
+            &format!("/api/v1/projects/{project}/tasks"),
+            body,
+        )
+        .await
+    }
+
+    /// Creates `count` agent tasks in `project` and checks each was admitted.
+    async fn admitted(&self, project: &str, count: usize) {
+        for n in 0..count {
+            let task = self
+                .create_task(&self.a, project, &format!("Admitted {n}"), json!({}))
+                .await;
+            assert_eq!(task["lifecycle"], "open", "{task}");
+            assert_eq!(task["admission"]["held"], false, "{task}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_sixth_agent_task_in_a_week_lands_planned_across_all_projects() {
+    let f = Fixture::new().await;
+    let (p, q) = (
+        f.project("admission-p").await,
+        f.project("admission-q").await,
+    );
+    f.admitted(&p, 3).await;
+    f.admitted(&q, 2).await;
+
+    let held = f.create_task(&f.a, &p, "Sixth", json!({})).await;
+    assert_eq!(held["lifecycle"], "planned", "{held}");
+    assert_eq!(held["origin"], "agent");
+    assert_eq!(held["admission"]["held"], true);
+    assert_eq!(held["admission"]["weekly_budget"]["limit"], 5);
+    assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+    let reason = held["admission"]["reason"].as_str().unwrap();
+    assert!(reason.contains("held as planned"), "{reason}");
+    let also_held = f.create_task(&f.a, &q, "Seventh", json!({})).await;
+    assert_eq!(also_held["lifecycle"], "planned", "{also_held}");
+
+    let fetched = f
+        .ok(
+            &f.a,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/tasks/{}",
+                held["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(fetched["origin"], "agent", "{fetched}");
+    assert_eq!(fetched["held_by_budget"], true);
+
+    let digest = f.digest(&p).await;
+    let listed = digest["held_agent_tasks"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{digest}");
+    assert_eq!(listed[0]["task_id"], held["id"]);
+    assert_eq!(listed[0]["title"], "Sixth");
+    assert_eq!(digest["agent_task_weekly_budget"]["limit"], 5);
+    assert_eq!(
+        f.digest(&q).await["held_agent_tasks"][0]["task_id"],
+        also_held["id"]
+    );
+
+    // A task the agent itself asked to keep planned neither uses nor is held by the budget.
+    let planned = f
+        .create_task(&f.a, &p, "Parked", json!({"planned":true}))
+        .await;
+    assert_eq!(planned["lifecycle"], "planned");
+    assert_eq!(planned["admission"]["held"], false, "{planned}");
+    assert_eq!(
+        f.digest(&p).await["held_agent_tasks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn fixes_and_human_tasks_are_never_held_and_do_not_use_the_budget() {
+    let f = Fixture::new().await;
+    let p = f.project("admission-fixes").await;
+    f.admitted(&p, 5).await;
+
+    for class in ["revert", "fix_target", "deflake", "refusal_fix"] {
+        let fix = f
+            .create_task(
+                &f.a,
+                &p,
+                &format!("Fix {class}"),
+                json!({"admission_class":class}),
+            )
+            .await;
+        assert_eq!(fix["lifecycle"], "open", "{fix}");
+        assert_eq!(fix["admission_class"], class);
+        assert_eq!(fix["admission"]["held"], false);
+    }
+    let human = f.create_task(&f.admin, &p, "From a human", json!({})).await;
+    assert_eq!(human["lifecycle"], "open", "{human}");
+    assert_eq!(human["origin"], "human");
+    assert_eq!(human["admission"]["held"], false);
+    assert!(human["admission"].get("reason").is_none());
+
+    let (status, refused) = f
+        .call(
+            &f.a,
+            "POST",
+            &format!("/api/v1/projects/{p}/tasks"),
+            json!({"title":"Bad","acceptance_criteria":["done"],"admission_class":"urgent"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    // Neither fixes nor human tasks used a place: the budget is still exactly spent.
+    let held = f.create_task(&f.a, &p, "Plain", json!({})).await;
+    assert_eq!(held["lifecycle"], "planned", "{held}");
+    assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+}
+
+#[tokio::test]
+async fn the_budget_starts_over_with_the_next_iso_week() {
+    let f = Fixture::new().await;
+    let p = f.project("admission-week").await;
+    f.admitted(&p, 5).await;
+    let held = f.create_task(&f.a, &p, "Held", json!({})).await;
+    assert_eq!(held["lifecycle"], "planned");
+
+    let now = f.clock.0.load(Ordering::SeqCst);
+    let next_week = coordinator_server::admission::week_start(now) + WEEK;
+    assert_eq!(next_week % WEEK, 4 * DAY, "weeks start on Monday");
+    f.clock.0.store(next_week - 1, Ordering::SeqCst);
+    let last_moment = f.create_task(&f.a, &p, "Still this week", json!({})).await;
+    assert_eq!(last_moment["lifecycle"], "planned", "{last_moment}");
+
+    f.clock.0.store(next_week, Ordering::SeqCst);
+    let fresh = f.create_task(&f.a, &p, "New week", json!({})).await;
+    assert_eq!(fresh["lifecycle"], "open", "{fresh}");
+    assert_eq!(fresh["admission"]["weekly_budget"]["admitted_this_week"], 1);
+    f.admitted(&p, 4).await;
+    let again = f.create_task(&f.a, &p, "New week, sixth", json!({})).await;
+    assert_eq!(again["lifecycle"], "planned", "{again}");
+}
+
+#[tokio::test]
+async fn only_a_human_releases_a_task_the_budget_held() {
+    let f = Fixture::new().await;
+    let p = f.project("admission-release").await;
+    f.admitted(&p, 5).await;
+    let held = f.create_task(&f.a, &p, "Held", json!({})).await;
+    f.ok(
+        &f.admin,
+        "POST",
+        &format!("/api/v1/projects/{p}/task-definition-grants"),
+        json!({"target_kind":"principal","agent_principal_id":f.a.principal}),
+    )
+    .await;
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        held["id"].as_str().unwrap()
+    );
+    let edit = json!({"expected_revision":held["revision"],"title":"Held","description":"admission",
+        "acceptance_criteria":["done"],"priority":2,"depends_on":[],"planned":false});
+
+    let (status, refused) = f.call(&f.a, "PATCH", &path, edit.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error"]["details"]["gate"], "admission_budget",
+        "{refused}"
+    );
+
+    let released = f.ok(&f.admin, "PATCH", &path, edit).await;
+    assert_eq!(released["lifecycle"], "open", "{released}");
+    assert_eq!(released["held_by_budget"], false);
+    assert_eq!(f.digest(&p).await["held_agent_tasks"], json!([]));
+}
+
 async fn seed(state: &AppState, human: bool, name: &str) -> Caller {
     let caller = Caller {
         token: secret(),

@@ -378,11 +378,19 @@ async fn create_objective(
         return Ok(response(value));
     }
     let id = Uuid::new_v4().to_string();
+    let admission = crate::admission::admit(
+        &mut mutation,
+        state.config.agent_task_weekly_budget,
+        input.planned,
+        None,
+    )
+    .await?;
     sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,'general',?,?,?,?)")
         .bind(&id).bind(&project).bind(&input.title).bind(&input.description)
         .bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority)
-        .bind(if input.planned { "planned" } else { "open" }).bind(mutation.now).bind(mutation.now)
+        .bind(admission.lifecycle(input.planned)).bind(mutation.now).bind(mutation.now)
         .execute(&mut *mutation.tx).await?;
+    crate::admission::record(&mut mutation, &id, &admission).await?;
     sqlx::query("INSERT INTO objectives(project_id,task_id,revision,created_by,created_at,updated_at) VALUES(?,?,1,?,?,?)")
         .bind(&project).bind(&id).bind(&mutation.actor.id).bind(mutation.now).bind(mutation.now)
         .execute(&mut *mutation.tx).await?;
@@ -391,7 +399,9 @@ async fn create_objective(
         .bind(&id).bind(serde_json::to_string(&input.children)?).bind(&mutation.actor.id).bind(mutation.now)
         .execute(&mut *mutation.tx).await?;
     crate::coordination::save_task_revision(&mut mutation, &project, &id).await?;
-    let value = objective_detail(&mut mutation.tx, &project, &id, mutation.now, None, 50).await?;
+    let mut value =
+        objective_detail(&mut mutation.tx, &project, &id, mutation.now, None, 50).await?;
+    value["admission"] = admission.value();
     Ok(response(
         mutation
             .finish(value, Some(&project), "objective.created", &id)

@@ -6,6 +6,8 @@
 //!   human-required interventions (HRI): open human-required integrator
 //!   reports, stalled tasks (`repeated_attempt_failures`) and a stalled queue
 //!   (`no_progress`: ready work and no task progress for the stall threshold).
+//! * The digest also lists the agent tasks the weekly admission budget held
+//!   (see [`crate::admission`]).
 //! * Tasks may declare the paths they touch; the integrator records the files
 //!   that landed on the target outside its own results, and `next` skips a
 //!   task whose paths overlap one of them from the last 24 hours.
@@ -493,6 +495,29 @@ async fn stalled_queue(
     })))
 }
 
+/// Agent-created tasks of the project that the weekly admission budget
+/// holds as planned, oldest first.
+async fn held_agent_tasks(c: &mut SqliteConnection, project: &str) -> Result<Vec<Value>, AppError> {
+    let rows = sqlx::query(
+        "SELECT id,title,priority,budget_held_at FROM tasks WHERE project_id=? \
+         AND budget_held_at IS NOT NULL AND lifecycle='planned' AND archived_at IS NULL \
+         AND deleted_at IS NULL ORDER BY budget_held_at,id LIMIT ?",
+    )
+    .bind(project)
+    .bind(DIGEST_LIMIT)
+    .fetch_all(&mut *c)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            json!({"task_id": row.get::<String, _>("id"),
+                   "title": row.get::<String, _>("title"),
+                   "priority": row.get::<i64, _>("priority"),
+                   "held_at": timestamp(row.get("budget_held_at"))})
+        })
+        .collect())
+}
+
 /// `GET /api/v1/projects/{project}/digest?hours=N`: what the attention budget
 /// did in the last `hours` (default 24) and what still needs a human.
 async fn digest(
@@ -542,6 +567,7 @@ async fn digest(
     .bind(DIGEST_LIMIT)
     .fetch_all(&mut *c)
     .await?;
+    let held = held_agent_tasks(&mut c, &project).await?;
     let mut items = stalled_tasks(&mut c, &project).await?;
     let stalled = items.len();
     let queue = stalled_queue(&mut c, &project, now, &state.config).await?;
@@ -568,6 +594,11 @@ async fn digest(
             "recommendation": row.get::<String, _>("recommendation"),
             "proceeds_at": timestamp(row.get::<i64, _>("created_at") + DECISION_TIMEOUT_MS),
         })).collect::<Vec<_>>(),
+        "held_agent_tasks": held,
+        "agent_task_weekly_budget": {
+            "limit": state.config.agent_task_weekly_budget,
+            "week_start": timestamp(crate::admission::week_start(now)),
+        },
         "hri": {"count": items.len(), "stalled_tasks": stalled,
                 "stalled_queue": stalled_queue, "items": items},
     })))
