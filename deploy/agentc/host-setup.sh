@@ -17,7 +17,9 @@
 # logins, coordinator credentials and the push App key stay manual (printed at
 # the end); an installed Claude token is held at root:<role> 0440. It also
 # installs attention.py with the agentc-canary (every 10 minutes) and
-# agentc-digest (daily) systemd timers, configured by /etc/agentc/attention.env.
+# agentc-digest (daily) systemd timers, configured by /etc/agentc/attention.env,
+# and e2e-canary.py with a daily agentc-e2e-canary@<harness> timer per
+# configured harness, configured by /etc/agentc/e2e-canary.env.
 set -euo pipefail
 
 PREFIX=/opt/agentc
@@ -68,6 +70,16 @@ ATTENTION_TOKEN_GROUP=agentc-impl
 UNIT_DIR=/etc/systemd/system
 CANARY_INTERVAL=${CANARY_INTERVAL:-10min}
 DIGEST_CALENDAR=${DIGEST_CALENDAR:-daily}
+# The daily end-to-end canary (e2e-canary.py): one timer instance per harness
+# in the environment file's E2E_HARNESSES (default claude), all serialized by
+# one lock so the harnesses run in turn. Its token is root-only: the unit
+# runs as root.
+E2E_SCRIPT=$PREFIX/bin/e2e-canary.py
+E2E_ENV=$ETC/e2e-canary.env
+E2E_TOKEN=${E2E_TOKEN:-$ETC/e2e-canary-token}
+E2E_CALENDAR=${E2E_CALENDAR:-daily}
+E2E_KNOWN_HARNESSES=(claude codex)
+E2E_DEFAULT_HARNESSES=claude
 KEEP="# --- entries below this line are kept when host-setup.sh re-runs ---"
 
 # Refuses to run without root and the invoking owner account.
@@ -981,6 +993,170 @@ digest) there, then re-run this script to enable the timers:
 EOF
 }
 
+# Prints, one per line, every path --uninstall removes for the end-to-end
+# canary. The results file (the canary's evidence) and the owner's token are
+# kept; see remove_e2e.
+e2e_paths() {
+  echo "$UNIT_DIR/agentc-e2e-canary@.service"
+  echo "$UNIT_DIR/agentc-e2e-canary@.timer"
+  echo "$E2E_ENV"
+  echo "$E2E_SCRIPT"
+  echo "$STATE/e2e-canary.lock"
+}
+
+# The service template for harness %i. It runs as root (the agent firewall
+# filters only the agent uids) and holds a lock so two harnesses never run at
+# once: the host's supervisor serves one canary task at a time.
+e2e_service() {
+  cat <<EOF
+[Unit]
+Description=agentc end-to-end canary (%i)
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+EnvironmentFile=$E2E_ENV
+ExecStart=/usr/bin/flock $STATE/e2e-canary.lock /usr/bin/python3 -I $E2E_SCRIPT --harness %i
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=$STATE
+EOF
+}
+
+# The timer template: instance %i starts agentc-e2e-canary@%i.service daily.
+e2e_timer() {
+  cat <<EOF
+[Unit]
+Description=Run the agentc end-to-end canary for %i ($E2E_CALENDAR)
+[Timer]
+OnCalendar=$E2E_CALENDAR
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+# The environment file written when absent. Entries with a code default in
+# e2e-canary.py are shown commented; the project, topic and harnesses are the
+# owner's (the project comes from canary-setup.py).
+e2e_env_file() {
+  cat <<EOF
+# agentc end-to-end canary (e2e-canary.py). Written by
+# deploy/agentc/host-setup.sh when absent; never overwritten, removed by
+# --uninstall. Commented lines show the in-code defaults.
+
+# Owner-supplied: the canary project (printed by canary-setup.py), where
+# failures page, and the harnesses to canary (space separated; default
+# $E2E_DEFAULT_HARNESSES). Re-run host-setup.sh after changing them.
+E2E_PROJECT=
+E2E_NTFY_TOPIC=
+# NTFY_TOKEN=                  # only for a protected ntfy topic
+# E2E_HARNESSES=$E2E_DEFAULT_HARNESSES
+
+# E2E_URL=https://agents.sithbit.com
+# E2E_TOKEN_FILE=$E2E_TOKEN
+# E2E_NTFY_URL=https://ntfy.sh
+# E2E_TIMEOUT_MINUTES=90            # page when the task is not done by then
+# E2E_POLL_SECONDS=20
+# E2E_RESULTS=$STATE/e2e-canary.jsonl
+# E2E_LEDGER=$STATE/costs.jsonl     # the supervisor's ledger; names the serving harness
+# E2E_HOST=                         # label in results (default: hostname)
+EOF
+}
+
+# The harnesses named by E2E_HARNESSES in the environment file (commas or
+# spaces), else the default, one per line; only known harnesses are listed.
+e2e_harnesses() {
+  local line="" harness
+  [ ! -f "$E2E_ENV" ] || line=$(sed -n 's/^E2E_HARNESSES=//p' "$E2E_ENV" | tail -n 1)
+  line=${line//,/ }
+  [ -n "${line// /}" ] || line=$E2E_DEFAULT_HARNESSES
+  for harness in $line; do
+    case " ${E2E_KNOWN_HARNESSES[*]} " in
+      *" $harness "*) echo "$harness" ;;
+      *) echo "ignoring unknown E2E_HARNESSES entry '$harness'" >&2 ;;
+    esac
+  done
+}
+
+# Succeeds when the canary has what it needs to run: the token file and a
+# non-empty project and ntfy topic in the environment file.
+e2e_ready() {
+  [ -f "$E2E_TOKEN" ] && [ -f "$E2E_ENV" ] || return 1
+  grep -Eq '^E2E_PROJECT=.' "$E2E_ENV" && grep -Eq '^E2E_NTFY_TOPIC=.' "$E2E_ENV"
+}
+
+# Writes the two unit templates into directory $1.
+write_e2e_units() {
+  e2e_service > "$1/agentc-e2e-canary@.service"
+  e2e_timer > "$1/agentc-e2e-canary@.timer"
+}
+
+# Installs e2e-canary.py (it needs attention.py beside it), the environment
+# file (once) and the unit templates; enables the timer of each configured
+# harness once e2e_ready, and disables the others.
+install_e2e() {
+  local harness wanted=()
+  refuse_symlink "$E2E_SCRIPT"; refuse_symlink "$E2E_ENV"
+  install -o root -g root -m 0755 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/e2e-canary.py" "$E2E_SCRIPT"
+  if [ ! -e "$E2E_ENV" ]; then
+    e2e_env_file | install -o root -g root -m 0644 /dev/stdin "$E2E_ENV"
+  fi
+  secure_e2e_token
+  has_systemd || { echo "no systemd: end-to-end canary timers not installed"; return 0; }
+  write_e2e_units "$UNIT_DIR"
+  systemctl daemon-reload
+  while IFS= read -r harness; do wanted+=("$harness"); done < <(e2e_harnesses)
+  for harness in "${E2E_KNOWN_HARNESSES[@]}"; do
+    if e2e_ready && [[ " ${wanted[*]:-} " == *" $harness "* ]]; then
+      systemctl enable --now --quiet "agentc-e2e-canary@$harness.timer"
+    else
+      systemctl disable --now --quiet "agentc-e2e-canary@$harness.timer" 2>/dev/null || true
+    fi
+  done
+}
+
+# Holds the owner-installed canary token root-only (0400). Only a root-owned
+# token is adopted; a missing one is left for the owner.
+secure_e2e_token() {
+  refuse_symlink "$E2E_TOKEN"
+  [ -e "$E2E_TOKEN" ] || return 0
+  require_single_file "$E2E_TOKEN"
+  owned_by_root "$E2E_TOKEN" ||
+    { echo "refusing $E2E_TOKEN: not root-owned (install it with sudo install -o root); owner repair required" >&2; exit 1; }
+  chmod 0400 -- "$E2E_TOKEN"
+}
+
+# Stops the canary timers and removes the units, environment file, script and
+# lock. The token and the results file are the owner's evidence: kept.
+remove_e2e() {
+  local harness path
+  if has_systemd; then
+    for harness in "${E2E_KNOWN_HARNESSES[@]}"; do
+      systemctl disable --now "agentc-e2e-canary@$harness.timer" 2>/dev/null || true
+      systemctl stop "agentc-e2e-canary@$harness.service" 2>/dev/null || true
+    done
+  fi
+  while IFS= read -r path; do rm -f -- "$path"; done < <(e2e_paths)
+  if has_systemd; then systemctl daemon-reload; fi
+  if [ -f "$E2E_TOKEN" ]; then echo "kept $E2E_TOKEN; delete it yourself to retire the token"; fi
+  if [ -f "$STATE/e2e-canary.jsonl" ]; then echo "kept $STATE/e2e-canary.jsonl (the canary's results)"; fi
+}
+
+# Prints what the owner supplies for the end-to-end canary.
+e2e_token_note() {
+  cat <<EOF
+End-to-end canary: once per host run deploy/agentc/canary-setup.py to create
+the canary project, then install its agent token and set E2E_PROJECT and
+E2E_NTFY_TOPIC (E2E_HARNESSES to canary more than $E2E_DEFAULT_HARNESSES) in
+$E2E_ENV, and re-run this script to enable the daily agentc-e2e-canary@<harness>
+timers:
+  sudo install -o root -g root -m 0400 /dev/stdin $E2E_TOKEN
+EOF
+}
+
 # Agent uids may reach loopback only on the proxy, the staging coordinator
 # and the ephemeral range (tests bind port 0); everything else, including
 # DNS and every non-loopback address, is rejected. Claude launches run in
@@ -1132,6 +1308,7 @@ uninstall() {
   # The loop runs launches as the agent accounts; stop it before retiring them.
   remove_service agentc-run
   remove_attention
+  remove_e2e
   for user in "${AGENTS[@]}" "$PUSH_USER"; do retire_account "$user"; done
   remove_service agentc-egress
   retire_account agentc-egress
@@ -1310,6 +1487,7 @@ That suite uses a mock shell; authenticated Claude/browser compatibility
 still requires separate owner verification.
 EOF
   attention_token_note
+  e2e_token_note
   push_steps
 }
 
@@ -1355,6 +1533,7 @@ main() {
   install_egress_service
   install_run_unit
   install_attention
+  install_e2e
   next_steps
 }
 

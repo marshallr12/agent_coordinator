@@ -142,5 +142,114 @@ class AttentionUnits(unittest.TestCase):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
 
 
+class E2EUnits(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def units(self):
+        bash(f'write_e2e_units "{self.dir}"')
+        return {p.name: p.read_text() for p in sorted(self.dir.iterdir())}
+
+    def test_two_unit_templates_are_written(self):
+        self.assertEqual(sorted(self.units()), ["agentc-e2e-canary@.service", "agentc-e2e-canary@.timer"])
+
+    def test_the_service_runs_one_harness_per_instance_under_a_shared_lock(self):
+        service = parse_unit(self.units()["agentc-e2e-canary@.service"])["Service"]
+        self.assertEqual(service["Type"], "oneshot")
+        self.assertEqual(service["EnvironmentFile"], "/etc/agentc/e2e-canary.env")
+        self.assertEqual(service["ExecStart"], "/usr/bin/flock /var/lib/agentc/e2e-canary.lock "
+                         "/usr/bin/python3 -I /opt/agentc/bin/e2e-canary.py --harness %i")
+        self.assertEqual(service["ProtectSystem"], "strict")
+        self.assertEqual(service["NoNewPrivileges"], "yes")
+        self.assertEqual(service["ReadWritePaths"], "/var/lib/agentc")
+
+    def test_the_timer_is_daily_and_persistent_by_default_and_overridable(self):
+        timer = parse_unit(self.units()["agentc-e2e-canary@.timer"])
+        self.assertEqual(timer["Timer"]["OnCalendar"], "daily")
+        self.assertEqual(timer["Timer"]["Persistent"], "true")
+        self.assertEqual(timer["Install"]["WantedBy"], "timers.target")
+        env = {"PATH": "/usr/bin:/bin", "E2E_CALENDAR": "*-*-* 03:00:00"}
+        self.assertIn("OnCalendar=*-*-* 03:00:00", bash("e2e_timer", env))
+
+    def test_the_environment_file_asks_only_for_owner_values_and_names_code_defaults(self):
+        lines = bash("e2e_env_file").splitlines()
+        active = [line for line in lines if line and not line.startswith("#")]
+        self.assertEqual(active, ["E2E_PROJECT=", "E2E_NTFY_TOPIC="])
+        for name in ("HARNESSES", "URL", "TOKEN_FILE", "NTFY_URL", "TIMEOUT_MINUTES", "POLL_SECONDS",
+                     "RESULTS", "LEDGER", "HOST"):
+            self.assertTrue(any(line.startswith(f"# E2E_{name}=") for line in lines), name)
+        self.assertIn("# E2E_TOKEN_FILE=/etc/agentc/e2e-canary-token", lines)
+
+    def test_every_environment_variable_names_a_default_in_e2e_canary_py(self):
+        source = (HERE / "e2e-canary.py").read_text()
+        for line in bash("e2e_env_file").splitlines():
+            name = line.lstrip("# ").split("=")[0]
+            # E2E_HARNESSES is read by host-setup.sh itself, to pick the timers.
+            if name.startswith("E2E_") and name != "E2E_HARNESSES":
+                self.assertIn(f'"{name}"', source)
+
+    def test_harnesses_default_to_claude_and_unknown_ones_are_ignored(self):
+        env_file = self.dir / "e2e.env"
+        self.assertEqual(bash(f'E2E_ENV={env_file}; e2e_harnesses').split(), ["claude"])
+        env_file.write_text("E2E_HARNESSES=\n")
+        self.assertEqual(bash(f'E2E_ENV={env_file}; e2e_harnesses').split(), ["claude"])
+        env_file.write_text("E2E_PROJECT=p\nE2E_HARNESSES=codex, claude gemini\n")
+        self.assertEqual(bash(f'E2E_ENV={env_file}; e2e_harnesses 2>/dev/null').split(), ["codex", "claude"])
+
+    def test_the_timers_are_ready_only_with_token_project_and_topic(self):
+        def ready(env_text, token=True):
+            env_file, token_file = self.dir / "e2e.env", self.dir / "token"
+            env_file.write_text(env_text)
+            token_file.unlink(missing_ok=True)
+            if token:
+                token_file.write_text("t")
+            result = subprocess.run(["bash", "-c", f'source "$1"; E2E_ENV={env_file}; E2E_TOKEN={token_file}; e2e_ready',
+                                     "bash", str(SCRIPT)], capture_output=True)
+            return result.returncode == 0
+        self.assertTrue(ready("E2E_PROJECT=p\nE2E_NTFY_TOPIC=t\n"))
+        self.assertFalse(ready("E2E_PROJECT=p\nE2E_NTFY_TOPIC=t\n", token=False))
+        self.assertFalse(ready("E2E_PROJECT=\nE2E_NTFY_TOPIC=t\n"))
+        self.assertFalse(ready("E2E_PROJECT=p\nE2E_NTFY_TOPIC=\n"))
+
+    def test_uninstall_removes_units_environment_file_and_script_but_keeps_token_and_results(self):
+        paths = bash("e2e_paths").splitlines()
+        for path in ("/etc/systemd/system/agentc-e2e-canary@.service", "/etc/systemd/system/agentc-e2e-canary@.timer",
+                     "/etc/agentc/e2e-canary.env", "/opt/agentc/bin/e2e-canary.py"):
+            self.assertIn(path, paths)
+        self.assertNotIn("/etc/agentc/e2e-canary-token", paths)
+        self.assertNotIn("/var/lib/agentc/e2e-canary.jsonl", paths)
+        uninstall = bash("declare -f uninstall")
+        self.assertLess(uninstall.index("remove_e2e"), uninstall.index("retire_account"))
+
+    def test_remove_e2e_deletes_what_was_installed_and_keeps_token_and_results(self):
+        root = self.dir
+        for name in ("units", "etc", "bin", "state"):
+            (root / name).mkdir()
+        bash(f"""
+          UNIT_DIR={root}/units E2E_ENV={root}/etc/e2e.env E2E_SCRIPT={root}/bin/e2e-canary.py
+          STATE={root}/state E2E_TOKEN={root}/etc/token
+          has_systemd() {{ false; }}
+          write_e2e_units "$UNIT_DIR"
+          e2e_env_file > "$E2E_ENV"; touch "$E2E_SCRIPT" "$E2E_TOKEN" "$STATE/e2e-canary.jsonl" "$STATE/e2e-canary.lock"
+          remove_e2e
+        """)
+        self.assertEqual(sorted(p.name for p in root.rglob("*") if p.is_file()), ["e2e-canary.jsonl", "token"])
+
+    def test_install_runs_after_attention_and_only_enables_configured_ready_harnesses(self):
+        main = bash("declare -f main")
+        self.assertLess(main.index("install_attention"), main.index("install_e2e"))
+        install = bash("declare -f install_e2e")
+        self.assertIn("e2e_ready", install)
+        self.assertIn("e2e_harnesses", install)
+        self.assertIn("enable --now", install)
+
+    def test_the_token_is_adopted_only_when_root_owned_and_held_root_only(self):
+        secure = bash("declare -f secure_e2e_token")
+        self.assertIn("owned_by_root", secure)
+        self.assertIn("chmod 0400", secure)
+
+
 if __name__ == "__main__":
     unittest.main()

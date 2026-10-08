@@ -1106,6 +1106,90 @@ Force a failing check and confirm the page arrives:
 Use a separate `ATTENTION_STATE` file for hand tests so they do not rearm or
 mask the timer's own paged set.
 
+### Daily end-to-end canary per host and harness
+
+The attention canary above only probes liveness. `deploy/agentc/e2e-canary.py`
+exercises the whole loop: it creates one trivial task in the host's own canary
+project (append one line to `CANARY.md`) and waits for it to reach `done`,
+which needs the supervisor to claim it, launch the harness, get a review and
+have the integrator land it. Each run appends a line to
+`/var/lib/agentc/e2e-canary.jsonl` with the host, harness, `outcome` (`ok`,
+`failed`, `timeout`), `duration_seconds`, the task id and the harness the cost
+ledger shows serving it. A task that is not `done` within 90 minutes
+(`E2E_TIMEOUT_MINUTES`), is canceled, or cannot be created sends an ntfy page
+titled "agentc e2e canary failed" and exits 1; an undelivered page exits 2.
+The run fails too when `costs.jsonl` shows a harness other than the requested
+one served the task, so a fallback vendor never passes for the primary.
+
+Each supervised host has its own canary project and its supervisor serves it,
+so the service needs no routing. The supervisor, not the canary, picks the
+vendor (`[run] harness`, then `[health.fallback]`): list a harness in
+`E2E_HARNESSES` only when this host's supervisor serves the canary project with
+it, otherwise its daily run pages with "served by ..., not ...".
+
+#### Project setup (once per host)
+
+`deploy/agentc/canary-setup.py` creates the project and the repository seed:
+
+```sh
+deploy/agentc/canary-setup.py --repository-url git@github.com:OWNER/agentc-canary-HOST.git \
+  --seed-dir ~/agentc-canary-seed --host HOST --username OPERATOR
+```
+
+Create the empty GitHub repository first. The script reads the operator
+password from `--password-file`, `CANARY_SETUP_PASSWORD` or a prompt, creates
+`canary-HOST` with the autonomy policy (agent or human review, automatic
+integration) and the required check `canary-diff-check:v1:any` (override with
+`--required-check`), and writes a one-commit `main` into `--seed-dir`: the
+project's `.agent-coordinator.toml`, `CANARY.md`, a roster mapping the check to
+the seed's `.github/workflows/canary.yml` (`git diff --check`). It never pushes.
+It prints the remaining steps: push the seed, install an agent token that may
+create tasks in the project at `/etc/agentc/e2e-canary-token` (root-owned),
+point the host's supervisor at the project (`[run.binding]`, reviewer launches
+on) and fill in the environment file.
+
+#### Timers and settings
+
+`host-setup.sh` installs `e2e-canary.py` beside `attention.py` (it imports
+it), the templates `agentc-e2e-canary@.service` and `agentc-e2e-canary@.timer`,
+and `/etc/agentc/e2e-canary.env`, written once and never overwritten. One timer
+instance runs per harness in `E2E_HARNESSES` (space separated, default
+`claude`; known: `claude`, `codex`): `agentc-e2e-canary@claude.timer` starts
+`agentc-e2e-canary@claude.service` at `OnCalendar=daily` (`Persistent=true`).
+All instances take one lock, `/var/lib/agentc/e2e-canary.lock`, so harnesses
+run in turn. The service runs as root under `NoNewPrivileges`,
+`ProtectSystem=strict` and `PrivateTmp`, writing only under `/var/lib/agentc`.
+Change the schedule by re-running host-setup with
+`E2E_CALENDAR='*-*-* 03:00:00'`.
+
+The owner supplies `E2E_PROJECT` (printed by `canary-setup.py`),
+`E2E_NTFY_TOPIC` (plus `NTFY_TOKEN` for a protected topic) and, beyond the
+default, `E2E_HARNESSES`, in the environment file, and the token file.
+Everything else has a default in `e2e-canary.py`, shown commented in the file:
+`E2E_URL`, `E2E_TOKEN_FILE` (`/etc/agentc/e2e-canary-token`), `E2E_NTFY_URL`,
+`E2E_TIMEOUT_MINUTES` (90), `E2E_POLL_SECONDS` (20), `E2E_RESULTS`,
+`E2E_LEDGER` (`/var/lib/agentc/costs.jsonl`) and `E2E_HOST` (the hostname).
+host-setup enables a harness's timer only once the token file, `E2E_PROJECT`
+and `E2E_NTFY_TOPIC` exist, so re-run it after filling them in (or `sudo
+systemctl enable --now agentc-e2e-canary@claude.timer`). `host-setup.sh
+--uninstall` stops the timers and removes the templates, environment file,
+script and lock; the token and the results file are kept.
+
+Run one now and read the result:
+
+```sh
+sudo systemctl start agentc-e2e-canary@claude.service   # blocks until done or timeout
+sudo tail -n 1 /var/lib/agentc/e2e-canary.jsonl
+```
+
+To test paging, run it with `-p Environment=E2E_TIMEOUT_MINUTES=0.1` through
+`systemd-run` as in the attention test above, with the supervisor stopped; the
+run times out and pages. `deploy/agentc/e2e-canary-test.py` tests a green run, a
+timeout, a canceled or uncreatable task, a wrong-harness run and the setup
+script against fake servers, and `host-setup-test.py` checks the generated
+units and the uninstall list; neither starts a real harness. A live green run
+per host and harness is owner evidence, recorded from the results file.
+
 ### Running the loop against staging
 
 `[run.binding]` in `/etc/agentc/supervisor.toml` replaces the mirror's
