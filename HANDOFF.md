@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood running on production `60eda26` (2026-10-09 ~18:45 UTC, workflow on)
+## Current resume point — P6 dogfood running on production `60eda26` (2026-10-09 ~19:10 UTC, workflow on)
 
 **Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
 Ubuntu 26.04, `[run] reviewer = true`, harness claude, kill switch `/var/lib/agentc/kill-switch`
@@ -18,7 +18,15 @@ digest sender = `attention-oracle-1` (principal `b5c08634…`)). Record and plan
 Every agent CLI must be rebuilt at the production commit (exact match, `agent-coordinator
 compatibility --json`): workstation done via `scripts/upgrade_client.py --source-root
 ~/src/worktrees/ac-release-60eda26` (the release's x86_64 CLI needs glibc 2.39, too new for this
-workstation). Deploy drill (done 2026-10-09): owner kill switch → drain → orchestrator releases
+workstation). **All known CLIs are at `60eda26`** (2026-10-09): mxmini `~/.local/bin` and
+`/usr/local/bin` (stale Sep 17 copy replaced; old kept at
+`~/.local/share/agent-coordinator-autonomy/usr-local-agent-coordinator.pre-60eda26`), oracle-1
+`/opt/agentc/bin` and `/usr/local/bin` (stale Sep 24 copy → `/usr/local/bin/agent-coordinator.pre-60eda26`),
+MiniAir Windows `C:\Users\marsh\.local\bin\agent-coordinator.exe` (owner, `--candidate` with the
+release run's native Windows exe, sha256 `9bad8bef…`). The release run also builds a Windows zip
+(`agent-coordinator-windows-x86_64`): use it for Windows hosts instead of a source build. Peer
+sessions: the MiniAir session "Inter-agent message handling" is reachable over Remote Control
+(`ListAgents`/`SendMessage`); its auto mode blocks CLI installs, so the owner runs them. Deploy drill (done 2026-10-09): owner kill switch → drain → orchestrator releases
 `d513bc21` → preflight must be 0 **across all projects** (another project's agent claim blocks it;
 2026-10-09 a codex session in `sithbit` did) → pre/swap → CLIs → host-setup → reclaim → clear.
 
@@ -35,7 +43,8 @@ runs in the dogfood project.
 
 **P6 / d513bc21** (claimed by the orchestrating session `p3b-pilot`, **attempt `31af890a`, gen 3**,
 renewed every 15 min by a background loop): prerequisites done; e2e canary green (`8634ad52`,
-`outcome: ok` 13:07:42Z; post-deploy run started 18:39Z → task `1703cdd3` P0, created without 403).
+`outcome: ok` 13:07:42Z; post-deploy run 18:39Z → task `1703cdd3` P0, created without 403,
+`outcome: ok` 18:50:48Z in 705 s, $0.12).
 **Dogfood started 2026-10-09 13:07Z, ends 2026-10-23 13:07Z** (ledger `pilot-timeline.log`). Exit
 metrics (plan-final §3 P6 row): HRI/task = 0 excluding reserved decisions; value canary not worse
 than baseline; direct-push canary flat; digest ≤ 1/day. Next: run the dogfood; record per task.
@@ -56,7 +65,8 @@ behind P1 work (review/implement alternate); task `depends_on` can only be set a
 **Session handover:** background helpers of the orchestrating session run on the workstation from
 its scratchpad: `renew.sh` (renews `31af890a` gen 3 every 15 min), `watch.sh` (task-state poller
 appending to `pilot-timeline.log`), an ssh `journalctl -u agentc-run -f` appending to
-`pilot-agentc-run.journal`. Never wait on `pgrep -f PATTERN` over ssh: the pattern matches the
+`pilot-agentc-run.journal` (2026-10-09 session `17653fa6…` scratchpad: renew.sh pid 67821, watch.sh
+3387285, journal ssh 3387286). Never wait on `pgrep -f PATTERN` over ssh: the pattern matches the
 remote shell's own command line (cost 3.3 h on 2026-10-09). Check
 with `ps -eo pid,args | grep -E '[r]enew.sh|[w]atch.sh|[j]ournalctl -u agentc-run|[e]2e-canary.jsonl'`;
 kill them by PID and start your own. Use `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key
