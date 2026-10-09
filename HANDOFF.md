@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 timers live, e2e canary next in the queue (2026-10-09 ~12:20 UTC, workflow on)
+## Current resume point — P6 dogfood running since 2026-10-09 13:07Z; next release prep (workflow on)
 
 **Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
 Ubuntu 26.04, `[run] reviewer = true`, harness claude, kill switch `/var/lib/agentc/kill-switch`
@@ -35,19 +35,23 @@ project).
 **P6 / d513bc21** (claimed by the orchestrating session `p3b-pilot`, attempt `dccda638`, gen 2,
 renewed every 15 min by a background loop): exit criteria = prerequisites present or tasked (done:
 admission a49ace9a, digest-neglect 358537bb, per-host canary 94303638, timers 4a7bfdb2; updater
-dd95bb78 ready), **e2e canary green before the 2-week dogfood starts** (first run started 00:55Z →
-canary task `8634ad52`, P3, queued behind P1/P2 work; result lands in
-`/var/lib/agentc/e2e-canary.jsonl`), then 2 weeks with exit metrics (plan-final §3 P6 row). When
-the canary is green: record the dogfood start in the ledger and HANDOFF, then hand the owner the
-oracle-1 supervisor update (rebuild at the production commit, kill-switch drill) so a050d94a and
-fdf782fa run there.
+dd95bb78 ready), e2e canary green (**done:** canary task `8634ad52` landed, first
+`/var/lib/agentc/e2e-canary.jsonl` line `outcome: ok` at 2026-10-09 13:07:42Z), then 2 weeks.
+**Dogfood started 2026-10-09 13:07Z, ends 2026-10-23 13:07Z** (ledger `pilot-timeline.log`). Exit
+metrics (plan-final §3 P6 row): HRI/task = 0 excluding reserved decisions; value canary not worse
+than baseline; direct-push canary flat; digest ≤ 1/day. Next: the next production release per
+`PREREQS-next.md`, then the oracle-1 supervisor update (rebuild at the released commit, CLI
+checked with `agent-coordinator compatibility`, kill-switch drill) so a050d94a and fdf782fa run
+there.
 
 **Landed overnight (all HRI 0; main now `79d2043`):** 358537bb, d5ae08ef, 94303638, a49ace9a,
 a050d94a, 0bdd6619, fdf782fa, 91d49e19, 0cba8250 (U34), bd68fdbe, 60e7eb6e, b15bb3af (ETXTBSY
 deflake), dd95bb78 (host updater; inert until owner lands 55b8a06d), 6f1d4403, e3296c30 (canary
-E2E_PRIORITY + second supervisor binding, $6.70 — largest). **Open:** fb8b2326 (renew backoff,
-in review after a docs fix), then the canary task `8634ad52` is the only ready work; owner-landed
-planned tasks 55b8a06d (release builds the agentc-host bundle) and 4540596c (deploy tests in CI).
+E2E_PRIORITY + second supervisor binding, $6.70 — largest). **Then (2026-10-09 day, HRI 0):**
+fb8b2326 (renew backoff, main `77fdbda`), 8634ad52 (e2e canary). **Open:** 416845fc (P3: harness
+background-task output invisible inside candidate-shell, so reviewer wait loops spin; seen in
+fb8b2326's review); owner-landed planned tasks 55b8a06d (release builds the agentc-host bundle) and
+4540596c (deploy tests in CI).
 **Next release** (owner dispatches) ships all of the above: follow `PREREQS-next.md` (canary
 principals, digest sender designation, oracle-1 rebuild at the released commit with its CLI).
 
