@@ -11,7 +11,12 @@
 //! refuses for good ([`AttemptEnded`]: the agent submitted or released the
 //! attempt, or it expired or changed hands) drains the launch the same way at
 //! once; an attempt the agent submitted is left as it is, not released.
-//! Any other renewal failure is logged and retried at the next cadence.
+//! Any other renewal failure (a busy session lock, a transport failure, an
+//! HTTP 5xx, a timeout) is logged and retried after a short backoff
+//! ([`RETRY_BASE`], doubling per consecutive failure, at most [`RETRY_CAP`]
+//! and never later than the next cadence), not a full cadence later; a
+//! retry passes the same gates as any renewal and does not run once the
+//! launch drains.
 //! While it waits, the loop also refreshes the heartbeat every [`BEAT_EVERY`]
 //! ([`Driver::heartbeat`]), so a long launch does not look like a hung
 //! supervisor.
@@ -30,6 +35,11 @@ pub const TICK: Duration = Duration::from_secs(1);
 /// How often the heartbeat is rewritten while a launch runs (the canary
 /// pages when it is older than five minutes).
 pub const BEAT_EVERY: Duration = Duration::from_secs(30);
+
+/// The wait before the first retry of a failed renewal.
+pub const RETRY_BASE: Duration = Duration::from_secs(30);
+/// The longest wait between retries of a failed renewal.
+pub const RETRY_CAP: Duration = Duration::from_secs(5 * 60);
 
 /// A claimed attempt as the service last described it.
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +120,8 @@ struct Watch {
     beat_at: i64,
     /// When to renew next; `None` once renewal has stopped.
     renew_at: Option<i64>,
+    /// Renewals that failed in a row since the last success.
+    failures: u32,
     /// When a draining launch is killed; `None` until it drains.
     kill_at: Option<i64>,
     /// Why the launch is draining, once it is.
@@ -136,6 +148,7 @@ impl Watch {
             seen: now,
             beat_at: now,
             renew_at: Some(now.saturating_add(cadence(lease))),
+            failures: 0,
             kill_at: None,
             drain_reason: None,
             submitted: false,
@@ -185,7 +198,7 @@ pub fn supervise(
             watch.beat_at = now.saturating_add(every);
         }
         drain(driver, &mut watch, settings, now);
-        if watch.renew_at.is_some_and(|at| now >= at) {
+        if watch.drain_reason.is_none() && watch.renew_at.is_some_and(|at| now >= at) {
             renew(driver, launch, &mut lease, &mut watch, settings, now);
         }
         driver.pause(TICK);
@@ -195,6 +208,16 @@ pub fn supervise(
 /// The service's renewal cadence in milliseconds.
 fn cadence(lease: &Lease) -> i64 {
     millis_of(lease.renew_after_seconds, 1000)
+}
+
+/// How long to wait before retrying after `failures` renewals failed in a
+/// row: [`RETRY_BASE`] doubled per earlier failure, at most [`RETRY_CAP`]
+/// and the cadence.
+fn backoff(lease: &Lease, failures: u32) -> i64 {
+    let base = millis_of(RETRY_BASE.as_secs(), 1000);
+    let cap = millis_of(RETRY_CAP.as_secs(), 1000).min(cadence(lease));
+    let doublings = failures.saturating_sub(1).min(16);
+    base.saturating_mul(1 << doublings).min(cap)
 }
 
 /// Once the launch must drain (a failed gate or a stop request), asks it to
@@ -223,7 +246,8 @@ fn drain(driver: &mut impl Driver, watch: &mut Watch, settings: &RunConfig, now:
 
 /// Renews the lease if every gate holds; otherwise stops renewing and
 /// drains the launch, saying why. A renewal refused for good drains it too;
-/// any other failed renewal is retried at the next cadence.
+/// any other failed renewal is retried after a [`backoff`], which the gates
+/// above are checked again before.
 fn renew(
     driver: &mut impl Driver,
     launch: &Launch,
@@ -241,15 +265,24 @@ fn renew(
         return;
     }
     match driver.renew(launch, lease) {
-        Ok(renewed) => (*lease, watch.seen) = (renewed, now),
+        Ok(renewed) => {
+            (*lease, watch.seen, watch.failures) = (renewed, now, 0);
+            watch.renew_at = Some(now.saturating_add(cadence(lease)));
+        }
         Err(error) => {
             if let Some(ended) = error.downcast_ref::<AttemptEnded>() {
                 return stop(watch, &lease.attempt, ended);
             }
-            eprintln!("agentc-supervisor run: renew {}: {error:#}", lease.attempt);
+            watch.failures = watch.failures.saturating_add(1);
+            let wait = backoff(lease, watch.failures);
+            let attempt = &lease.attempt;
+            eprintln!(
+                "agentc-supervisor run: renew {attempt}: {error:#}; retrying in {} s",
+                wait / 1000
+            );
+            watch.renew_at = Some(now.saturating_add(wait));
         }
     }
-    watch.renew_at = Some(now.saturating_add(cadence(lease)));
 }
 
 /// Stops renewing an attempt the service says has ended and drains its
