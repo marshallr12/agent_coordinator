@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 timers live, waiting for the first green e2e canary (2026-10-09 ~02:40 UTC, workflow on)
+## Current resume point — P6 timers live, e2e canary next in the queue (2026-10-09 ~12:20 UTC, workflow on)
 
 **Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
 Ubuntu 26.04, `[run] reviewer = true`, harness claude, kill switch `/var/lib/agentc/kill-switch`
@@ -42,14 +42,14 @@ the canary is green: record the dogfood start in the ledger and HANDOFF, then ha
 oracle-1 supervisor update (rebuild at the production commit, kill-switch drill) so a050d94a and
 fdf782fa run there.
 
-**Landed tonight (all HRI 0):** 358537bb, d5ae08ef, 94303638, a49ace9a (3 approvals, 2 integrator
-conflicts incl. a duplicate migration 0032), a050d94a, 0bdd6619, fdf782fa, 91d49e19. **Queue:**
-60e7eb6e (digest ack minting, in review — likely adds a "designate digest sender" release step),
-0cba8250 (U34 per-project budget, P1), bd68fdbe (agent-set admission_class bypass, P2), fb8b2326
-(renew backoff; its launch was killed in the incident, back to ready), e3296c30 (canary priority /
-second binding), dd95bb78, 4540596c (owner lands: .github). Per-task HRI/cost/disagreements:
-ledger `~/.local/share/agent-coordinator-autonomy/pilot-timeline.log`; journal stream
-`pilot-agentc-run.journal`.
+**Landed overnight (all HRI 0; main now `79d2043`):** 358537bb, d5ae08ef, 94303638, a49ace9a,
+a050d94a, 0bdd6619, fdf782fa, 91d49e19, 0cba8250 (U34), bd68fdbe, 60e7eb6e, b15bb3af (ETXTBSY
+deflake), dd95bb78 (host updater; inert until owner lands 55b8a06d), 6f1d4403, e3296c30 (canary
+E2E_PRIORITY + second supervisor binding, $6.70 — largest). **Open:** fb8b2326 (renew backoff,
+in review after a docs fix), then the canary task `8634ad52` is the only ready work; owner-landed
+planned tasks 55b8a06d (release builds the agentc-host bundle) and 4540596c (deploy tests in CI).
+**Next release** (owner dispatches) ships all of the above: follow `PREREQS-next.md` (canary
+principals, digest sender designation, oracle-1 rebuild at the released commit with its CLI).
 
 **Watch items:** drained launches record 0 cost until oracle-1 runs a050d94a; P2 reviews wait
 behind P1 work (review/implement alternate); task `depends_on` can only be set at creation
