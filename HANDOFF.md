@@ -4,73 +4,71 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 gap tasks running on 1469b5a (2026-10-08 ~15:45 UTC, workflow on)
+## Current resume point — P6 timers live, waiting for the first green e2e canary (2026-10-09 ~02:40 UTC, workflow on)
 
 **Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
-Ubuntu 26.04, systemd, at `1469b5a`, `[run] reviewer = true`, kill switch
-`/var/lib/agentc/kill-switch` absent) claims ready tasks of project `fe95a6c5…` in priority order,
-implements, reviews with `distinct_launch`, and `agentc-integrator@run` lands. Production service at **`1469b5a`** (deployed 2026-10-08 12:46 UTC, release run `37774235379`, migrations
-0030/0031; preflight all 0; downtime ~18 s; old-binary snapshot `20261008T124624.282Z-0d2fe6df…`,
-rollback binaries `*-0.1.1-34e3dde`; new snapshot `20261008T124643.460Z-74286669…` verified; local
-record `release-34e3dde`). Workstation CLI upgraded from worktree `~/src/worktrees/ac-release-1469b5a`.
-oracle-1 rebuilt in `~/src/worktrees/agentc-pilot` at `1469b5a`; owner re-ran `host-setup.sh`
-(`APPARMOR_BWRAP=1` is **required**: the default 0 removes the agentc bwrap that supervisor.toml uses)
-and `integrator-host-setup.sh` (never restarts units: `systemctl restart agentc-integrator@run
-agentc-run` after it). Deploy drill: owner sets the kill switch, the orchestrator releases its
-`d513bc21` claim, preflight/pre/swap, rebuild, owner host-setup, orchestrator **reclaims before** the
-owner clears the kill switch.
+Ubuntu 26.04, `[run] reviewer = true`, harness claude, kill switch `/var/lib/agentc/kill-switch`
+absent) claims ready tasks of project `fe95a6c5…` in priority order, implements, reviews with
+`distinct_launch`, and `agentc-integrator@run` lands. **Production service at `1469b5a`**
+(deployed 2026-10-08 12:46 UTC, release run `37774235379`, migrations 0030/0031; rollback binaries
+`*-0.1.1-34e3dde`; local record `release-34e3dde`). Main has moved on (migrations 0032 digest
+reads, 0033 admission) — undeployed. Deploy drill: owner sets the kill switch, the orchestrator
+releases its `d513bc21` claim, preflight/pre/swap, rebuild, owner host-setup, orchestrator
+**reclaims before** the owner clears the kill switch. **Next-release prerequisites:**
+`~/.local/share/agent-coordinator-autonomy/release-next/PREREQS-next.md` (incl.
+`COORDINATOR_CANARY_PRINCIPALS` for 91d49e19, else the e2e canary is refused 403).
 
-**P3b pilot: GO (owner, 2026-10-08).** Decision `bb9bf99f` allow/Go (gen 1 05:46:57Z; reopened as
-gen 2 after admitting `c6b33a77` moved it to rev 2, re-answered Go). Pilot task `47d4403d` **done**
-(independent subagent review approved). Five real tasks, HRI 0 each: `3faed77b` $0.78,
-`d4ee5302` $1.58, `68a46f3b` $0.19, `8366d1f4` ~$1.0, `081aff61` ~$0.18 (impl only, ~$0.75/task;
-review cost unrecorded until oracle-1 runs `f881fb7`). Pilot-wide HRI 1 (`6fd17b11` before the
-62bb29a5 gate fix). One audit disagreement (d4ee5302 reviewer dismissed a failure without base
-comparison) → task `9c201930`. Two of five launches drained after submission (0f11849d handled
-both). Canary not run (U28 moved it to P6). Ledger outside Git:
-`~/.local/share/agent-coordinator-autonomy/pilot-timeline.log`; journal stream
-`pilot-agentc-run.journal` (`oracle 'journalctl -u agentc-run -f -o short-iso'`).
+**oracle-1 host state:** binaries in `/opt/agentc/bin`: supervisor/push from `agentc-pilot` at
+`8fe656d` (no supervisor/CLI code change since 1469b5a), **CLI rebuilt at `1469b5a`** (sha256
+`ab5aafc2…`). The CLI must match production's source commit exactly (`agent-coordinator
+compatibility --json`, run inside a repo dir) — host-setup installs CLI= and **restarts
+agentc-run** (2026-10-09 00:55 incident: 8fe656d CLI → every claim `client_upgrade_required`,
+~3.5 min outage, fb8b2326 launch killed). Timers installed by the owner's
+`~/agentc-p6-timers.sh` (00:55Z): `agentc-canary` (10 min), `agentc-digest` (daily, Gmail
+STARTTLS as marshall.rosenstein@gmail.com), `agentc-e2e-canary@claude` (daily). Secrets root:root
+0400 in `/etc/agentc/{attention-token,e2e-canary-token,smtp-password}` (one dashboard credential
+`attention-oracle-1`, class supervised, write); env files 0600. Interim settings to remove later:
+`ATTENTION_HEARTBEAT_MAX_AGE=15300` (until oracle-1 runs fdf782fa), `E2E_TIMEOUT_MINUTES=1440`
+(until e3296c30). U33: the e2e canary runs **in the dogfood project** (a supervisor serves one
+project).
 
-**P6 (plan-final §3):** `c6b33a77` attention budget **done** (`ba48c38`); its review exposed
-`8e8ecdcf` (stall rule per plan, P1) and `b59abb08` (agents could time out human-required decisions,
-P1) — both landed (`edf5081`, `839ecaa`) and are deployed. `d513bc21` admitted (rev 2, canary-green
-criterion added; decision `bb9bf99f` reopened as gen 3, Go) and **claimed by the orchestrating session**
-(`p3b-pilot`, attempt `dccda638`, gen 2; renew every ~15 min). Gap audit done; owner answered U29–U32;
-gap tasks: `4a7bfdb2` canary+digest timers (P1), `a49ace9a` admission (global 5/week), `358537bb`
-digest-neglect (after 4a7bfdb2), `94303638` per-host canary (after 4a7bfdb2), `dd95bb78` Linux host
-updater (after 94303638). Agents cannot admit/edit tasks (human task-definition grant): admissions go
-through the owner's dashboard. Gotcha: a decision pins exact task revisions, so admitting a gated
-task makes it stale → reopen + re-answer.
+**P6 / d513bc21** (claimed by the orchestrating session `p3b-pilot`, attempt `dccda638`, gen 2,
+renewed every 15 min by a background loop): exit criteria = prerequisites present or tasked (done:
+admission a49ace9a, digest-neglect 358537bb, per-host canary 94303638, timers 4a7bfdb2; updater
+dd95bb78 ready), **e2e canary green before the 2-week dogfood starts** (first run started 00:55Z →
+canary task `8634ad52`, P3, queued behind P1/P2 work; result lands in
+`/var/lib/agentc/e2e-canary.jsonl`), then 2 weeks with exit metrics (plan-final §3 P6 row). When
+the canary is green: record the dogfood start in the ledger and HANDOFF, then hand the owner the
+oracle-1 supervisor update (rebuild at the production commit, kill-switch drill) so a050d94a and
+fdf782fa run there.
 
-**Queue / landed since the deploy:** `84243ac7` done (`1b147a1`; first recorded review cost, role
-`rev`), `4a7bfdb2` done (`517a938`: canary + digest timers in host-setup, configured by
-`/etc/agentc/attention.env`). Supervisor on `a49ace9a` (admission); then `358537bb`, `94303638`;
-`d5ae08ef` authenticated TLS SMTP for the digest (Gmail relay, owner choice; after `358537bb`);
-`dd95bb78` updater after `94303638`. `4540596c` (deploy/agentc tests in CI) is **planned on purpose**:
-it edits `.github/workflows`, which implementer launches may not touch — the owner lands it.
+**Landed tonight (all HRI 0):** 358537bb, d5ae08ef, 94303638, a49ace9a (3 approvals, 2 integrator
+conflicts incl. a duplicate migration 0032), a050d94a, 0bdd6619, fdf782fa, 91d49e19. **Queue:**
+60e7eb6e (digest ack minting, in review — likely adds a "designate digest sender" release step),
+0cba8250 (U34 per-project budget, P1), bd68fdbe (agent-set admission_class bypass, P2), fb8b2326
+(renew backoff; its launch was killed in the incident, back to ready), e3296c30 (canary priority /
+second binding), dd95bb78, 4540596c (owner lands: .github). Per-task HRI/cost/disagreements:
+ledger `~/.local/share/agent-coordinator-autonomy/pilot-timeline.log`; journal stream
+`pilot-agentc-run.journal`.
 
-**Next:** watch the queue; record HRI/cost (`impl` and `rev` rows in `costs.jsonl`) per task in the
-ledger. After `358537bb` + `94303638` land: rebuild `agentc-pilot` on oracle-1 and hand the owner one
-host-setup run (same command as the deploy record, `APPARMOR_BWRAP=1`) with `attention.env` filled:
-owner-chosen ntfy topic, a dashboard-minted agent credential installed root-only at
-`/etc/agentc/attention-token`, Gmail app password in a root-only file (after `d5ae08ef`). Verify every
-input read-only before handing the command over. Then canary green → start the 2-week dogfood clock
-(d513bc21 exit metrics). Observation to watch: supervisor renew can collide with the agent's own
-session lock (`session_state_access_failure`, once at 14:13); file a task if it recurs.
+**Watch items:** drained launches record 0 cost until oracle-1 runs a050d94a; P2 reviews wait
+behind P1 work (review/implement alternate); task `depends_on` can only be set at creation
+(agents cannot edit tasks; `unblock` works for this session).
 
-**Session handover:** background helpers started by the previous session may still run on the
-workstation: `renew.sh` (renews `dccda638` gen 2 every 15 min), `watch.sh` (task-state poller appending
-to `pilot-timeline.log`) and an ssh `journalctl -u agentc-run -f` appending to `pilot-agentc-run.journal`.
-Check with `ps -eo pid,args | grep -E '[r]enew.sh|[w]atch.sh|[j]ournalctl -u agentc-run'`; kill them and
-start your own (they live in the old session's scratchpad). Never `pkill -f` a pattern that also
-matches your own command line. Use `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key
-ubuntu@oracle.sithbit.com` in `!` commands (the `oracle` alias is interactive-only).
+**Session handover:** background helpers of the orchestrating session run on the workstation from
+its scratchpad: `renew.sh` (renews `dccda638` gen 2 every 15 min), `watch.sh` (task-state poller
+appending to `pilot-timeline.log`), an ssh `journalctl -u agentc-run -f` appending to
+`pilot-agentc-run.journal`, and an until-loop waiting for the first `e2e-canary.jsonl` line. Check
+with `ps -eo pid,args | grep -E '[r]enew.sh|[w]atch.sh|[j]ournalctl -u agentc-run|[e]2e-canary.jsonl'`;
+kill them by PID and start your own. Use `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key
+ubuntu@oracle.sithbit.com` in `!` commands; secrets go through the owner's own terminal (`ssh -t`),
+never `!`.
 
 Owner actions pending: set `kernel.yama.ptrace_scope=1` on mxmini and oracle-1; remove
 `~/src/worktrees/agent-coordinator-core-ship` with `git worktree remove --force`.
 
 Known follow-ups not yet tasks: `launch-root` SIGTERM handler; continuation claims; review form
-kept-claim path has no fixture; launches that do not exit after submission (2/5 in the pilot).
+kept-claim path has no fixture; launches that do not exit after submission (drains).
 
 ## S6 reviewed live candidate test — owner runbook (2026-10-05): PASS, historical
 
@@ -960,6 +958,8 @@ Record answers here.
 | U30 | P6 digest-neglect paging (U13): what counts as reading the digest | Dashboard view or a signed "I read this" link in the email; no tracking pixel | 2026-10-08: **as recommended** → task `358537bb` |
 | U31 | P6 per-host/per-vendor canary routing | One canary project per supervised host, served with each configured harness in turn; no service-side routing | 2026-10-08: **as recommended** → task `94303638` |
 | U32 | P6 host updater platforms | Linux (systemd) only now; Windows deferred until a Windows host supervises | 2026-10-08: **as recommended** → task `dd95bb78` |
+| U33 | P6 e2e canary on oracle-1: a supervisor serves one project, so the landed per-host canary project needs a rebind | Run the canary in the dogfood project fe95a6c5 for now; own project later (U31 stays the target) | 2026-10-08: **as recommended** → task `e3296c30` (priority setting, second binding) |
+| U34 | Admission budget scope: global across projects, so agent tasks in other projects (sithbit etc.) use up the dogfood budget | Count the weekly agent-task budget per project | 2026-10-09: **as recommended** → task `0cba8250` (after `91d49e19`) |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
