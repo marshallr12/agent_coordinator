@@ -1216,8 +1216,19 @@ project's `.agent-coordinator.toml`, `CANARY.md`, a roster mapping the check to
 the seed's `.github/workflows/canary.yml` (`git diff --check`). It never pushes.
 It prints the remaining steps: push the seed, install an agent token that may
 create tasks in the project at `/etc/agentc/e2e-canary-token` (root-owned),
-point the host's supervisor at the project (`[run.binding]`, reviewer launches
+name that agent's principal in the coordinator's `COORDINATOR_CANARY_PRINCIPALS`
+(see below), point the host's supervisor at the project (`[run.binding]`, reviewer launches
 on) and fill in the environment file.
+
+The canary creates its task with `admission_class: "canary"`, which keeps it out
+of the coordinator's weekly agent-task budget (a daily canary alone would admit
+seven tasks a week, more than the default budget of five, and would hold every
+genuine agent-filed task). The coordinator accepts that class only from an agent
+principal whose name is listed in `COORDINATOR_CANARY_PRINCIPALS`
+(comma-separated, `--canary-principals`; unset by default, so nobody may). Set
+it in the service environment to the canary token's agent name and restart the
+service; a canary token whose principal is not listed gets a 403 and the run
+fails and pages. Any other agent that sends the class is refused the same way.
 
 #### Timers and settings
 

@@ -53,6 +53,14 @@ struct Options {
     /// Agent-created tasks without an admission class admitted per ISO week across all projects.
     #[arg(long, env = "COORDINATOR_AGENT_TASK_WEEKLY_BUDGET", default_value_t = coordinator_server::admission::DEFAULT_WEEKLY_BUDGET, global = true)]
     agent_task_weekly_budget: i64,
+    /// Comma-separated names of the agent principals that may create tasks in the `canary` admission class.
+    #[arg(
+        long,
+        env = "COORDINATOR_CANARY_PRINCIPALS",
+        value_delimiter = ',',
+        global = true
+    )]
+    canary_principals: Vec<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -177,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         stall_hours: options.stall_hours,
         quiet_hours: options.quiet_hours,
         agent_task_weekly_budget: options.agent_task_weekly_budget,
+        canary_principals: options.canary_principals,
     };
     let state = if matches!(&options.command, Command::Backup { .. }) {
         AppState::open_existing_read_only(config).await?

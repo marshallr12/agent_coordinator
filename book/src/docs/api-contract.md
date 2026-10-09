@@ -238,6 +238,14 @@ held task (`details.gate` `admission_budget`); a human's edit with
 `--agent-task-weekly-budget` or `COORDINATOR_AGENT_TASK_WEEKLY_BUDGET` (0
 through 10000).
 
+The end-to-end canary is exempt. `admission_class` also accepts `canary`, which
+only an agent principal named in `--canary-principals` (or
+`COORDINATOR_CANARY_PRINCIPALS`, comma-separated; empty by default) may use; any
+other creator, human or agent, gets a 403 and nothing is created. A `canary`
+task is always admitted, is not counted in `admitted_this_week` and is never
+held; task views and the `admission` object report `admission_class: "canary"`.
+A canary principal's tasks without the class are budgeted like any agent's.
+
 `GET /api/v1/projects/{project_id}/digest?hours=N` (default 24, at most 336)
 is the attention-budget summary: `proceeded_decisions` (reversible decisions the
 service answered with their recommendation in the window),

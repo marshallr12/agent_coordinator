@@ -382,6 +382,7 @@ struct Task {
     archived_at: Option<i64>,
     origin: String,
     admission_class: Option<String>,
+    budget_exempt: Option<String>,
     budget_held_at: Option<i64>,
     attempt_state: Option<String>,
     attempt_expires: Option<i64>,
@@ -498,7 +499,7 @@ impl Task {
         "objective_children_ready":self.objective_children_ready,"decisions_ready":self.decisions_ready,
         "objective_id":self.objective_id,"parent_objective_id":self.parent_objective_id,"parent_objective_required":self.parent_objective_required,
         "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
-        "origin":self.origin,"admission_class":self.admission_class,"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned"});
+        "origin":self.origin,"admission_class":self.admission_class.as_ref().or(self.budget_exempt.as_ref()),"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned"});
         if self.workflow_phase.as_deref() == Some("integration") {
             value["precondition_hints"] = json!([{
                 "code":"candidate_stale_merge_conflict_requires_preflight",
@@ -990,7 +991,7 @@ async fn create_task(
     let id = Uuid::new_v4().to_string();
     let admission = crate::admission::admit(
         &mut m,
-        s.config.agent_task_weekly_budget,
+        &s.config,
         input.planned,
         input.admission_class.as_deref(),
     )

@@ -10,7 +10,13 @@
 //!   (UTC, Monday through Sunday) across all projects. Beyond it the task is
 //!   created `planned`, the response says why, and the digest lists it.
 //!   Human-created tasks are never held.
-use crate::{error::AppError, mutation::Mutation};
+//! * The end-to-end canary files one task per host and harness per day, which
+//!   alone would use the whole weekly budget. A request-only class, `canary`,
+//!   exempts such a task: neither counted nor held, recorded in
+//!   `budget_exempt`. Only an agent principal the service names with
+//!   `--canary-principals` may use it; anyone else is refused, so the class
+//!   is no way around the budget.
+use crate::{error::AppError, mutation::Mutation, state::Config};
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 
@@ -21,6 +27,9 @@ pub const DEFAULT_WEEKLY_BUDGET: i64 = 5;
 pub const MAX_WEEKLY_BUDGET: i64 = 10_000;
 /// Always-admitted fix classes.
 pub const CLASSES: [&str; 4] = ["revert", "fix_target", "deflake", "refusal_fix"];
+/// The budget-exempt class of the end-to-end canary; only a designated
+/// canary principal may request it.
+pub const CANARY_CLASS: &str = "canary";
 const DAY_MS: i64 = 86_400_000;
 const WEEK_MS: i64 = 7 * DAY_MS;
 
@@ -60,9 +69,11 @@ pub fn week_start(now: i64) -> i64 {
 
 pub fn validate_class(class: Option<&str>) -> Result<(), AppError> {
     match class {
-        Some(class) if !CLASSES.contains(&class) => Err(AppError::bad_request(
-            "admission_class must be revert, fix_target, deflake or refusal_fix.",
-        )),
+        Some(class) if class != CANARY_CLASS && !CLASSES.contains(&class) => {
+            Err(AppError::bad_request(
+                "admission_class must be revert, fix_target, deflake, refusal_fix or canary.",
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -71,6 +82,8 @@ pub fn validate_class(class: Option<&str>) -> Result<(), AppError> {
 pub struct Admission {
     pub origin: Origin,
     pub class: Option<String>,
+    /// True for a canary task, which the weekly budget neither counts nor holds.
+    exempt: bool,
     /// True when the weekly budget held the task.
     pub held: bool,
     /// True when the task used one place of the weekly budget.
@@ -94,7 +107,7 @@ impl Admission {
     pub fn value(&self) -> Value {
         let mut value = json!({
             "origin": self.origin.as_str(),
-            "admission_class": self.class,
+            "admission_class": self.class.as_deref().or(self.exempt.then_some(CANARY_CLASS)),
             "held": self.held,
             "weekly_budget": {
                 "limit": self.limit,
@@ -129,13 +142,21 @@ async fn admitted_in_week(c: &mut SqliteConnection, start: i64) -> Result<i64, A
 /// result on the inserted task.
 pub async fn admit(
     m: &mut Mutation,
-    limit: i64,
+    config: &Config,
     requested_planned: bool,
     class: Option<&str>,
 ) -> Result<Admission, AppError> {
+    let limit = config.agent_task_weekly_budget;
     let origin = Origin::of_principal(&m.actor.kind);
+    let exempt = class == Some(CANARY_CLASS);
+    if exempt && !(origin == Origin::Agent && config.canary_principals.contains(&m.actor.name)) {
+        return Err(AppError::forbidden(
+            "Only an agent principal the service designates as a canary may use the canary admission class.",
+        ));
+    }
+    let class = class.filter(|_| !exempt);
     let start = week_start(m.now);
-    let budgeted = origin == Origin::Agent && class.is_none();
+    let budgeted = origin == Origin::Agent && class.is_none() && !exempt;
     let admitted_this_week = if budgeted {
         admitted_in_week(&mut m.tx, start).await?
     } else {
@@ -145,6 +166,7 @@ pub async fn admit(
     Ok(Admission {
         origin,
         class: class.map(str::to_owned),
+        exempt,
         held: budgeted && !requested_planned && !within,
         consumed: budgeted && !requested_planned && within,
         admitted_this_week: admitted_this_week
@@ -157,10 +179,11 @@ pub async fn admit(
 /// Stores the admission outcome on the inserted task.
 pub async fn record(m: &mut Mutation, task: &str, admission: &Admission) -> Result<(), AppError> {
     sqlx::query(
-        "UPDATE tasks SET origin=?,admission_class=?,budget_admitted_at=?,budget_held_at=? WHERE id=?",
+        "UPDATE tasks SET origin=?,admission_class=?,budget_exempt=?,budget_admitted_at=?,budget_held_at=? WHERE id=?",
     )
     .bind(admission.origin.as_str())
     .bind(&admission.class)
+    .bind(admission.exempt.then_some(CANARY_CLASS))
     .bind(admission.consumed.then_some(m.now))
     .bind(admission.held.then_some(m.now))
     .bind(task)
@@ -204,6 +227,7 @@ mod tests {
     fn classes_are_validated() {
         assert!(validate_class(None).is_ok());
         assert!(validate_class(Some("revert")).is_ok());
+        assert!(validate_class(Some("canary")).is_ok());
         assert!(validate_class(Some("urgent")).is_err());
     }
 }

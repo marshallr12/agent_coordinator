@@ -162,6 +162,7 @@ class E2ETests(unittest.TestCase):
         self.assertEqual((task["kind"], task["priority"]), ("code", 3))
         self.assertIn("CANARY.md", task["description"])
         self.assertEqual(len(task["acceptance_criteria"]), 1)
+        self.assertEqual(task["admission_class"], "canary")  # outside the weekly agent budget
         self.assertEqual({a for _, _, a in self.fake.requests}, {f"Bearer {TOKEN}"})
         self.assertNotIn(TOKEN, err + json.dumps(row))
 

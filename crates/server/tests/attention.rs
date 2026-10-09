@@ -50,6 +50,7 @@ struct Fixture {
     a: Caller,
     b: Caller,
     integrator: Caller,
+    canary: Caller,
 }
 
 impl Fixture {
@@ -59,6 +60,7 @@ impl Fixture {
             database_path: dir.path().join("attention.sqlite3"),
             public_origin: "http://127.0.0.1:8080".into(),
             allow_insecure_loopback: true,
+            canary_principals: vec!["attention-canary".into()],
             ..Config::default()
         })
         .await
@@ -69,6 +71,7 @@ impl Fixture {
         let a = seed(&state, false, "attention-a").await;
         let b = seed(&state, false, "attention-b").await;
         let integrator = seed(&state, false, "attention-integrator").await;
+        let canary = seed(&state, false, "attention-canary").await;
         sqlx::query("UPDATE credentials SET class='integrator' WHERE id=?")
             .bind(&integrator._credential)
             .execute(&state.pool)
@@ -83,6 +86,7 @@ impl Fixture {
             a,
             b,
             integrator,
+            canary,
         }
     }
 
@@ -868,6 +872,92 @@ async fn fixes_and_human_tasks_are_never_held_and_do_not_use_the_budget() {
     let held = f.create_task(&f.a, &p, "Plain", json!({})).await;
     assert_eq!(held["lifecycle"], "planned", "{held}");
     assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+}
+
+#[tokio::test]
+async fn canary_tasks_never_use_or_meet_the_weekly_budget() {
+    let f = Fixture::new().await;
+    let p = f.project("admission-canary").await;
+    let canary = json!({"admission_class":"canary"});
+
+    // A daily canary files seven tasks in a week; every one is admitted.
+    for day in 0..7 {
+        let task = f
+            .create_task(&f.canary, &p, &format!("Canary {day}"), canary.clone())
+            .await;
+        assert_eq!(task["lifecycle"], "open", "{task}");
+        assert_eq!(task["origin"], "agent");
+        assert_eq!(task["admission_class"], "canary");
+        assert_eq!(task["admission"]["held"], false, "{task}");
+        assert_eq!(task["admission"]["admission_class"], "canary");
+        assert_eq!(task["admission"]["weekly_budget"]["admitted_this_week"], 0);
+    }
+    let digest = f.digest(&p).await;
+    assert_eq!(digest["held_agent_tasks"], json!([]), "{digest}");
+
+    // The budget is untouched: five ordinary agent tasks are still admitted and the sixth is held.
+    f.admitted(&p, 5).await;
+    let held = f.create_task(&f.a, &p, "Sixth", json!({})).await;
+    assert_eq!(held["lifecycle"], "planned", "{held}");
+    assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+
+    // Canary tasks stay admitted with the budget spent, and read back as canary tasks.
+    let later = f
+        .create_task(&f.canary, &p, "Canary after the budget", canary)
+        .await;
+    assert_eq!(later["lifecycle"], "open", "{later}");
+    let fetched = f
+        .ok(
+            &f.canary,
+            "GET",
+            &format!(
+                "/api/v1/projects/{p}/tasks/{}",
+                later["id"].as_str().unwrap()
+            ),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(fetched["admission_class"], "canary", "{fetched}");
+    assert_eq!(fetched["held_by_budget"], false);
+
+    // The canary principal's ordinary tasks are budgeted like any agent's.
+    let plain = f
+        .create_task(&f.canary, &p, "Not a canary", json!({}))
+        .await;
+    assert_eq!(plain["lifecycle"], "planned", "{plain}");
+}
+
+#[tokio::test]
+async fn only_a_designated_canary_may_use_the_canary_class() {
+    let f = Fixture::new().await;
+    let p = f.project("admission-canary-refused").await;
+    for caller in [&f.a, &f.integrator, &f.admin] {
+        let (status, refused) = f
+            .call(
+                caller,
+                "POST",
+                &format!("/api/v1/projects/{p}/tasks"),
+                json!({"title":"Sneaky","acceptance_criteria":["done"],"admission_class":"canary"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    }
+    // The refusals created nothing and used no place.
+    f.admitted(&p, 5).await;
+    let held = f.create_task(&f.a, &p, "Sixth", json!({})).await;
+    assert_eq!(held["lifecycle"], "planned", "{held}");
+    let listed = f
+        .ok(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks"),
+            Value::Null,
+        )
+        .await;
+    assert!(
+        !listed.to_string().contains("Sneaky"),
+        "a refused canary task was created: {listed}"
+    );
 }
 
 #[tokio::test]

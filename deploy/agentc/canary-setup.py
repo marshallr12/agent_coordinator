@@ -104,6 +104,9 @@ Remaining owner steps:
   2. Issue an agent token that may create tasks in the project (an
      interactive/write agent in the operator UI), and install it with
        sudo install -o root -g root -m 0400 /dev/stdin /etc/agentc/e2e-canary-token
+     Add that agent's name to the coordinator's COORDINATOR_CANARY_PRINCIPALS
+     and restart it: canary tasks are filed outside the weekly agent-task
+     budget, and the coordinator refuses that to any other agent.
   3. Serve the project from this host's supervisor: its `[run.binding]` (or
      a second supervisor instance) names service_url = "{args.url}" and
      project_id = "{project}"; reviewer launches must be enabled there.

@@ -20,7 +20,10 @@ canary also reads which harness served the task and fails the run when it was
 not --harness, so a fallback never passes for the primary.
 
 The token file holds one bearer token for an agent allowed to create tasks in
-the canary project; it is never printed. ntfy credentials come from NTFY_TOKEN
+the canary project; it is never printed. The task is created in the `canary`
+admission class, which keeps it out of the coordinator's weekly agent-task
+budget; the coordinator accepts that class only from an agent principal named
+in its `--canary-principals` (`COORDINATOR_CANARY_PRINCIPALS`). ntfy credentials come from NTFY_TOKEN
 when set. Every option defaults from an E2E_* environment variable (see
 parse() and host-setup.sh's e2e-canary.env); an empty variable counts as unset
 and a command-line option wins. Standard library only.
@@ -66,6 +69,9 @@ def task_body(harness, host, run_id):
         "acceptance_criteria": [f"CANARY.md ends with the line `{line}` and no other file changed"],
         "kind": "code",
         "priority": 3,
+        # The coordinator exempts the task from its weekly agent-task budget
+        # only for a principal it designates as a canary (--canary-principals).
+        "admission_class": "canary",
     }
 
 

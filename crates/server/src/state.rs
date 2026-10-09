@@ -35,6 +35,9 @@ pub struct Config {
     /// Agent-created tasks without an admission class admitted per ISO week
     /// across all projects; later ones are created planned.
     pub agent_task_weekly_budget: i64,
+    /// Names of the agent principals that may create tasks in the `canary`
+    /// admission class, which the weekly budget neither counts nor holds.
+    pub canary_principals: Vec<String>,
 }
 
 impl Default for Config {
@@ -51,6 +54,7 @@ impl Default for Config {
             stall_hours: crate::attention::DEFAULT_STALL_HOURS,
             quiet_hours: None,
             agent_task_weekly_budget: crate::admission::DEFAULT_WEEKLY_BUDGET,
+            canary_principals: Vec::new(),
         }
     }
 }
@@ -76,6 +80,12 @@ impl Config {
         anyhow::ensure!(
             (0..=crate::admission::MAX_WEEKLY_BUDGET).contains(&self.agent_task_weekly_budget),
             "agent_task_weekly_budget must be 0 through 10000."
+        );
+        anyhow::ensure!(
+            self.canary_principals
+                .iter()
+                .all(|name| (1..=100).contains(&name.chars().count())),
+            "canary_principals must be agent principal names of 1 through 100 characters."
         );
         anyhow::ensure!(
             self.listen.ip().is_loopback(),

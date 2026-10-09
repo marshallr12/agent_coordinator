@@ -185,7 +185,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   response says why, and `GET .../digest` lists them as `held_agent_tasks`.
   Human tasks and classed tasks are never held. The class is accepted from any
   creator, so the budget is a guard rail against runaway task creation, not
-  a security boundary against an agent that sets a class.
+  a security boundary against an agent that sets a class. The one exception is
+  the request-only `canary` class used by `e2e-canary.py`: the service refuses it
+  (403) unless the creator is an agent principal named in `--canary-principals`
+  (`COORDINATOR_CANARY_PRINCIPALS`), and a canary task neither uses nor is held
+  by the budget (`tasks.budget_exempt`). Server tests in `tests/attention.rs`
+  cover seven canary tasks in a week leaving the budget untouched and an
+  ordinary agent being refused.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
   safe storage reconciliation. Native upload journals preserve exact bytes and

@@ -92,6 +92,15 @@ never held and do not use a place. N defaults to 5 and is the service setting
 10000; 0 holds every unclassed agent task). The week rolls over with the clock:
 the first agent task of a new ISO week is admitted again.
 
+The end-to-end canary (one task per host and harness per day, seven or more a
+week) would otherwise use the whole budget and hold genuine agent work, so it
+has its own route: the request-only `admission_class` `canary`. It is accepted
+only from an agent principal the operator designates with
+`--canary-principals` (`COORDINATOR_CANARY_PRINCIPALS`); any other creator is
+refused with a 403 and no task. A canary task is always admitted and is not
+counted against the budget, and the same principal's tasks without the class
+are budgeted normally.
+
 Default priorities are urgent, high, normal, and low. Within a project, selection
 filters eligibility and requested task kinds/capabilities, then orders by
 priority, oldest-ready time, and stable ID. Ready time resets only when work
