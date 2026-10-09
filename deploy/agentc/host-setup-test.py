@@ -306,5 +306,103 @@ class E2EUnits(unittest.TestCase):
         self.assertIn("chmod 0400", secure)
 
 
+class UpdaterUnits(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def units(self):
+        bash(f'write_update_units "{self.dir}"')
+        return {p.name: p.read_text() for p in sorted(self.dir.iterdir())}
+
+    def test_a_service_and_a_timer_are_written(self):
+        self.assertEqual(sorted(self.units()), ["agentc-update.service", "agentc-update.timer"])
+
+    def test_the_service_runs_the_updater_as_root_with_both_environment_files(self):
+        service = parse_unit(self.units()["agentc-update.service"])["Service"]
+        self.assertEqual(service["Type"], "oneshot")
+        self.assertEqual(service["ExecStart"], "/usr/bin/python3 -I /opt/agentc/bin/agentc-update")
+        self.assertNotIn("User", service)
+        # Root-owned, but not sandboxed: it replaces files under /opt and /etc and runs the suite.
+        self.assertNotIn("ProtectSystem", service)
+        self.assertNotIn("NoNewPrivileges", service)
+        text = self.units()["agentc-update.service"]
+        self.assertIn("EnvironmentFile=-/etc/agentc/e2e-canary.env", text)
+        self.assertIn("EnvironmentFile=-/etc/agentc/update.env", text)
+
+    def test_the_timer_is_daily_persistent_and_overridable(self):
+        timer = parse_unit(self.units()["agentc-update.timer"])
+        self.assertEqual(timer["Timer"]["OnCalendar"], "daily")
+        self.assertEqual(timer["Timer"]["Persistent"], "true")
+        self.assertEqual(timer["Install"]["WantedBy"], "timers.target")
+        env = {"PATH": "/usr/bin:/bin", "UPDATE_CALENDAR": "Sun *-*-* 04:00:00"}
+        self.assertIn("OnCalendar=Sun *-*-* 04:00:00", bash("update_timer", env))
+
+    def test_every_environment_variable_names_a_default_in_agentc_update_py(self):
+        source = (HERE / "agentc-update.py").read_text()
+        names = []
+        for line in bash("update_env_file").splitlines():
+            name = line.lstrip("# ").split("=")[0]
+            if name.startswith("UPDATE_"):
+                names.append(name)
+                self.assertIn(f'"{name}"', source)
+        self.assertIn("UPDATE_REPO", names)
+        # Nothing is active: every setting has a code default.
+        self.assertEqual([l for l in bash("update_env_file").splitlines() if l and not l.startswith("#")], [])
+
+    def test_the_updater_shares_the_canary_lock_and_paths_of_the_host(self):
+        source = (HERE / "agentc-update.py").read_text()
+        self.assertIn('self.state_dir / "e2e-canary.lock"', source)
+        self.assertIn("/var/lib/agentc/e2e-canary.lock", bash("e2e_service"))
+        self.assertIn('DEFAULT_PREFIX = "/opt/agentc"', source)
+        self.assertIn('DEFAULT_ETC = "/etc/agentc"', source)
+
+    def test_uninstall_removes_the_updater_but_keeps_its_results(self):
+        paths = bash("update_paths").splitlines()
+        for path in ("/etc/systemd/system/agentc-update.service", "/etc/systemd/system/agentc-update.timer",
+                     "/etc/agentc/update.env", "/opt/agentc/bin/agentc-update", "/var/lib/agentc/update-state.json",
+                     "/var/lib/agentc/update.lock"):
+            self.assertIn(path, paths)
+        self.assertNotIn("/var/lib/agentc/update.jsonl", paths)
+        uninstall = bash("declare -f uninstall")
+        self.assertLess(uninstall.index("remove_update"), uninstall.index("retire_account"))
+        self.assertLess(uninstall.index("remove_service agentc-run"), uninstall.index("remove_update"))
+
+    def test_remove_update_deletes_what_was_installed_and_keeps_the_results(self):
+        root = self.dir
+        for name in ("units", "etc", "bin", "state", "prefix/releases/1.0.0"):
+            (root / name).mkdir(parents=True)
+        out = bash(f"""
+          UNIT_DIR={root}/units UPDATE_ENV={root}/etc/update.env UPDATE_SCRIPT={root}/bin/agentc-update
+          STATE={root}/state PREFIX={root}/prefix
+          has_systemd() {{ false; }}
+          write_update_units "$UNIT_DIR"
+          update_env_file > "$UPDATE_ENV"; touch "$UPDATE_SCRIPT" "$STATE/update-state.json" "$STATE/update.lock" "$STATE/update.jsonl"
+          touch "$PREFIX/releases/1.0.0/marker"
+          remove_update
+        """)
+        self.assertEqual(sorted(p.name for p in root.rglob("*") if p.is_file()), ["update.jsonl"])
+        self.assertFalse((root / "prefix/releases").exists())
+        self.assertIn("kept", out)
+
+    def test_install_runs_after_the_canary_and_enables_the_timer_only_when_the_canary_is_ready(self):
+        main = bash("declare -f main")
+        self.assertLess(main.index("install_e2e"), main.index("install_update"))
+        install = bash("declare -f install_update")
+        self.assertIn("e2e_ready", install)
+        self.assertIn("UPDATE_TIMER", install)
+        self.assertIn("enable --now", install)
+
+    def test_next_steps_describe_the_updater(self):
+        self.assertIn("update_note", bash("declare -f next_steps"))
+        note = bash("update_note")
+        self.assertIn("--rollback core", note)
+        self.assertIn("gh auth login", note)
+
+    def test_the_script_parses(self):
+        subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
+
+
 if __name__ == "__main__":
     unittest.main()
