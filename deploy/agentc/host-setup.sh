@@ -33,6 +33,8 @@ AGENTS=(agentc-impl agentc-rev)
 PROXY_PORT=${PROXY_PORT:-3128}
 STAGING_PORT=${STAGING_PORT:-18080}
 REPO_URL=${REPO_URL:-https://github.com/marshallr12/agent_coordinator.git}
+# Optional: the canary project's repository, mirrored beside the main one.
+CANARY_REPO_URL=${CANARY_REPO_URL:-}
 EXTRA_EGRESS=${EXTRA_EGRESS:-agents.sithbit.com}
 # The candidate-push App (decision U17) and the one repository it writes;
 # only a missing /etc/agentc/push.toml is written from these.
@@ -636,6 +638,21 @@ refresh_mirror() {
     git config --system --add safe.directory "$STATE/mirror.git"
 }
 
+# Keeps the canary project's mirror when CANARY_REPO_URL names its repository
+# (see [run.canary_binding]); a host without a canary project skips it.
+refresh_canary_mirror() {
+  [ -n "${CANARY_REPO_URL:-}" ] || return 0
+  if [ -d "$STATE/mirror-canary.git" ]; then
+    git -C "$STATE/mirror-canary.git" fetch --prune --quiet
+  else
+    git clone --mirror --quiet "$CANARY_REPO_URL" "$STATE/mirror-canary.git"
+  fi
+  chown -R root:root "$STATE/mirror-canary.git"
+  chmod -R go-w,a+rX "$STATE/mirror-canary.git"
+  git config --system --get-all safe.directory | grep -qx "$STATE/mirror-canary.git" ||
+    git config --system --add safe.directory "$STATE/mirror-canary.git"
+}
+
 # Writes the host config: defaults shown commented, pins and extras set.
 # Everything below the KEEP marker (the host owner's verification entries)
 # survives re-runs.
@@ -709,6 +726,19 @@ EOF
 # service_url = "http://127.0.0.1:18080"
 # project_id = "<staging project id>"
 # project_name = "<credential directory>"  # optional CLI credential selector
+# A second project, normally this host's canary project (canary-setup.py),
+# claimed from first and on the same coordinator as the main one. It needs
+# its own mirror (CANARY_REPO_URL=... re-run of this script keeps
+# $STATE/mirror-canary.git current), its own candidate-push configuration
+# when its repository differs ([push_helper.project_configs]), and its own
+# integrator instance (integrator-host-setup.sh, agentc-integrator-canary@).
+# [run.canary_binding]
+# service_url = "https://agents.sithbit.com"  # must equal the main binding's
+# project_id = "<canary project id>"
+# project_name = "<credential directory>"     # optional
+# mirror = "$STATE/mirror-canary.git"         # the default
+# [push_helper.project_configs]
+# "<canary project id>" = "$ETC/push-canary.toml"
 
 # Admission before each claim (plan P3b health and cost). While the kill
 # switch file exists the loop claims nothing. A 429 marks the vendor
@@ -1466,6 +1496,7 @@ uninstall() {
   remove_service agentc-firewall
   nft delete table inet agentc 2>/dev/null || true
   git config --system --unset-all safe.directory "^$STATE/mirror.git\$" 2>/dev/null || true
+  git config --system --unset-all safe.directory "^$STATE/mirror-canary.git\$" 2>/dev/null || true
   keep_push_key
   remove_claude_tokens
   remove_own_paths
@@ -1581,7 +1612,7 @@ remove_own_paths() {
     rm -f -- "$PREFIX/bin/$name"
   done
   rm -rf -- "$PREFIX/rustup" "$PREFIX/cargo" "$PREFIX/rustup-init.sh" "$PREFIX"/suite-bin.* "$BROWSERS"
-  for name in impl rev push mirror.git shadow heartbeat.json heartbeat.tmp; do rm -rf -- "${STATE:?}/$name"; done
+  for name in impl rev push mirror.git mirror-canary.git shadow heartbeat.json heartbeat.tmp; do rm -rf -- "${STATE:?}/$name"; done
   for name in supervisor.toml cargo-config.toml agentc.nft push.toml; do
     rm -f -- "$ETC/$name"
   done
@@ -1676,6 +1707,7 @@ main() {
   install_seeds
   install_toolchain
   refresh_mirror
+  refresh_canary_mirror
   write_config
   write_push_config
   secure_push_key

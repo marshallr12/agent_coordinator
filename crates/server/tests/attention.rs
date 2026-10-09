@@ -1506,3 +1506,78 @@ async fn call(
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&bytes).unwrap())
 }
+
+#[tokio::test]
+async fn canary_tasks_are_neither_stalls_nor_progress_in_the_digest() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-canary").await;
+    let canary = json!({"admission_class":"canary","priority":0});
+    f.create_task(&f.canary, &p, "Canary", canary).await;
+
+    // A canary task that keeps ending without a submission is not a stalled
+    // task, the way an ordinary one is after three attempts.
+    for round in 0..3 {
+        let claimant = if round % 2 == 0 { &f.a } else { &f.b };
+        let attempt = f.claim_offered(claimant, &p).await;
+        f.release(claimant, &p, &attempt).await;
+    }
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(
+        (hri["count"].clone(), hri["stalled_tasks"].clone()),
+        (json!(0), json!(0)),
+        "{hri}"
+    );
+
+    // Ready canary work alone is not a stalled queue.
+    f.clock.0.fetch_add(8 * HOUR, Ordering::SeqCst);
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["count"], 0, "{hri}");
+
+    // Real work waiting is, and the canary neither counts as ready work nor
+    // keeps the clock from running by being claimed.
+    f.task(&p, "Real work").await;
+    f.clock.0.fetch_add(7 * HOUR, Ordering::SeqCst);
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["count"], 1, "{hri}");
+    assert_eq!(hri["items"][0]["rule"], "no_progress");
+    assert_eq!(hri["items"][0]["ready_tasks"], 1, "{hri}");
+    let offered = f.next(&f.a, &p).await;
+    assert_eq!(
+        offered["action"]["title"], "Canary",
+        "the canary is offered first: {offered}"
+    );
+    f.claim_offered(&f.a, &p).await;
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(
+        hri["count"], 1,
+        "claiming the canary is not progress: {hri}"
+    );
+}
+
+#[tokio::test]
+async fn a_human_report_about_a_canary_task_is_not_counted_in_the_digest() {
+    let f = Fixture::new().await;
+    let p = f.project("digest-canary-report").await;
+    let canary = f
+        .create_task(&f.canary, &p, "Canary", json!({"admission_class":"canary"}))
+        .await;
+    let real = f.task(&p, "Real work").await;
+    for (n, task) in [&canary, &real].into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO integrator_reports(id,project_id,kind,task_id,dedupe_key,details_json,\
+             requires_human,created_by,created_at) VALUES(?,?,'flaky',?,?,'{}',1,?,?)",
+        )
+        .bind(format!("report-{n}"))
+        .bind(&p)
+        .bind(task["id"].as_str().unwrap())
+        .bind(format!("key-{n}"))
+        .bind(&f.integrator.principal)
+        .bind(f.clock.0.load(Ordering::SeqCst))
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    }
+    let hri = f.digest(&p).await["hri"].clone();
+    assert_eq!(hri["count"], 1, "{hri}");
+    assert_eq!(hri["items"][0]["report"]["task_id"], real["id"], "{hri}");
+}
