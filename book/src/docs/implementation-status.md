@@ -167,8 +167,17 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   once), waits for it to reach `done` within a deadline, appends the host,
   harness, outcome and duration to a results file and pages through ntfy on
   failure or timeout; `host-setup.sh` installs an `agentc-e2e-canary@<harness>`
-  daily timer per configured harness. Tests cover it against fake servers; live
-  runs per host and harness are owner evidence and have not been recorded.
+  daily timer per configured harness. The task is created at `E2E_PRIORITY`
+  (default 0, urgent), so a canary in the shared dogfood project is claimed
+  before P1-P3 work. The supervisor can serve a second project,
+  `[run.canary_binding]`, on the same coordinator (canary project polled first,
+  own mirror, installed binding copy, reviewer side, launch record, optional
+  `[push_helper.project_configs]` entry), and `integrator-host-setup.sh`
+  installs a second integrator unit template for it. The digest and its human
+  interventions leave canary tasks out, and ledger rows of the canary project
+  are marked. Tests cover all of this against fakes; live runs per host and
+  harness, and a live second-project loop, are owner evidence and have not been
+  recorded.
   `deploy/agentc/agentc-update.py` (installed as `agentc-update` with an
   `agentc-update.timer`) is a root-owned pull updater for Linux/systemd hosts: it
   fetches the latest release, verifies the SHA256SUMS asset, the build attestation

@@ -216,15 +216,15 @@ impl LiveReviewer {
             claim.submission["candidate_revision"].as_str(),
         ) else {
             let head = format!("refs/heads/{}", self.config.run.branch);
-            return clone::git_output(&mirror, &["rev-parse", "--verify", &head]);
+            return clone::git_output(mirror, &["rev-parse", "--verify", &head]);
         };
         let refspec = format!("+{reference}:{}", review_branch(claim.session));
         clone::git_output(
-            &mirror,
+            mirror,
             &["fetch", "--no-tags", "--quiet", "origin", &refspec],
         )?;
         let commit = format!("{}^{{commit}}", review_branch(claim.session));
-        let fetched = clone::git_output(&mirror, &["rev-parse", "--verify", &commit])?;
+        let fetched = clone::git_output(mirror, &["rev-parse", "--verify", &commit])?;
         ensure!(
             fetched == revision,
             "the candidate ref moved from {revision} to {fetched}"
@@ -262,8 +262,7 @@ impl LiveReviewer {
             .as_str()
             .unwrap_or(&self.config.run.branch);
         let mirror = &self.mirror;
-        let read =
-            |name: &&str| Some(((*name).to_owned(), live::instruction(&mirror, base, name)?));
+        let read = |name: &&str| Some(((*name).to_owned(), live::instruction(mirror, base, name)?));
         super::INSTRUCTION_FILES.iter().filter_map(read).collect()
     }
 

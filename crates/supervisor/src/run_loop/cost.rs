@@ -210,7 +210,7 @@ pub fn settle(
         health::mark_exhausted(config, launch.vendor.harness, until);
     }
     let usage = priced(digest.usage, config, &launch.vendor.model);
-    if let Err(error) = append(config, &entry(launch, record, &usage, now)) {
+    if let Err(error) = append(config, &entry(config, launch, record, &usage, now)) {
         eprintln!("agentc-supervisor run: record cost: {error:#}");
     }
     note(&usage)
@@ -232,7 +232,7 @@ pub fn settle_review(config: &Config, launch: &ReviewLaunch, events: &[u8], now:
         "cached_input_tokens": usage.cached_input_tokens,
         "output_tokens": usage.output_tokens, "usd": usage.usd,
     });
-    let line = estimated(line, &usage);
+    let line = estimated(canary(config, line), &usage);
     let appended = append(config, &line);
     if let Err(error) = &appended {
         eprintln!("agentc-supervisor run: record review cost: {error:#}");
@@ -263,7 +263,13 @@ fn priced(mut usage: Usage, config: &Config, model: &str) -> Usage {
 }
 
 /// One ledger line for the launch.
-fn entry(launch: &Launch, record: &LaunchRecord, usage: &Usage, now: i64) -> Value {
+fn entry(
+    config: &Config,
+    launch: &Launch,
+    record: &LaunchRecord,
+    usage: &Usage,
+    now: i64,
+) -> Value {
     let line = json!({
         "at_ms": now, "role": Role::Implementer.slug(), "project": launch.project,
         "task": launch.suggestion.task, "session": launch.session_id,
@@ -272,7 +278,26 @@ fn entry(launch: &Launch, record: &LaunchRecord, usage: &Usage, now: i64) -> Val
         "cached_input_tokens": usage.cached_input_tokens,
         "output_tokens": usage.output_tokens, "usd": usage.usd,
     });
-    estimated(line, usage)
+    estimated(canary(config, line), usage)
+}
+
+/// `line` with `canary: true` when its `project` is the
+/// `[run.canary_binding]` one, so per-task cost figures can leave the
+/// pipeline probe out. (A canary task in a shared project is told apart by
+/// its id in the end-to-end canary's results file.)
+fn canary(config: &Config, mut line: Value) -> Value {
+    let project = line["project"].as_str();
+    if project.is_some()
+        && project
+            == config
+                .run
+                .canary_binding
+                .as_ref()
+                .map(|c| c.project_id.as_str())
+    {
+        line["canary"] = json!(true);
+    }
+    line
 }
 
 /// `line` with `usd_estimated: true` when the usage was summed from
