@@ -88,9 +88,31 @@ pub struct TaskInput {
     pub planned: bool,
     /// Marks an always-admitted fix: `revert`, `fix_target`, `deflake` or
     /// `refusal_fix`. A task without a class created by an agent counts
-    /// against the weekly admission budget.
+    /// against the weekly admission budget; an agent may set a class only
+    /// with `admission_evidence` the service can verify, or when the operator
+    /// designated it for the class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_class: Option<String>,
+    /// Records the service-verifiable reason for `admission_class`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_evidence: Option<AdmissionEvidence>,
+}
+
+/// What an agent cites to back an `admission_class`: `result_id` names an
+/// integration result of the project (a landed revision for `revert`, one with
+/// a failed check receipt for `fix_target`, optionally narrowed by
+/// `check_name`), and `report_id` names an integrator report of the project
+/// (`fix_target` or `flaky` kind, for `fix_target` and `deflake`).
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_id: Option<String>,
 }
 fn code() -> String {
     "code".into()

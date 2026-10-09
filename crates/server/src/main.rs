@@ -61,6 +61,14 @@ struct Options {
         global = true
     )]
     canary_principals: Vec<String>,
+    /// Comma-separated names of the agent principals that may set a fix admission class without verifiable evidence.
+    #[arg(
+        long,
+        env = "COORDINATOR_FIX_CLASS_PRINCIPALS",
+        value_delimiter = ',',
+        global = true
+    )]
+    fix_class_principals: Vec<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -186,6 +194,7 @@ async fn main() -> anyhow::Result<()> {
         quiet_hours: options.quiet_hours,
         agent_task_weekly_budget: options.agent_task_weekly_budget,
         canary_principals: options.canary_principals,
+        fix_class_principals: options.fix_class_principals,
     };
     let state = if matches!(&options.command, Command::Backup { .. }) {
         AppState::open_existing_read_only(config).await?

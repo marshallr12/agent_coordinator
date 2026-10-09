@@ -194,15 +194,20 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   task's own project in the current ISO week (the budget is per project, so one
   project's tasks never use another's); later ones are created `planned`, the
   response says why, and `GET .../digest` lists them as `held_agent_tasks`.
-  Human tasks and classed tasks are never held. The class is accepted from any
-  creator, so the budget is a guard rail against runaway task creation, not
-  a security boundary against an agent that sets a class. The one exception is
-  the request-only `canary` class used by `e2e-canary.py`: the service refuses it
+  Human tasks and classed tasks are never held. Humans and the service may set
+  any class; an agent may set one only with `admission_evidence` the service
+  verifies (a landed result for `revert`, a failed check receipt or
+  `fix_target` report for `fix_target`, a `flaky` report for `deflake`) or when
+  the operator names it in `--fix-class-principals`
+  (`COORDINATOR_FIX_CLASS_PRINCIPALS`, empty by default; `refusal_fix` has no
+  verifiable record). Otherwise the class is refused (403) and nothing is
+  created. The request-only `canary` class used by `e2e-canary.py`: the service refuses it
   (403) unless the creator is an agent principal named in `--canary-principals`
   (`COORDINATOR_CANARY_PRINCIPALS`), and a canary task neither uses nor is held
   by the budget (`tasks.budget_exempt`). Server tests in `tests/attention.rs`
   cover seven canary tasks in a week leaving the budget untouched, an
-  ordinary agent being refused, and two projects each admitting five tasks with
+  ordinary agent being refused, each fix class refused without evidence,
+  admitted with it and set by a human, and two projects each admitting five tasks with
   a sixth held in only one of them.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and

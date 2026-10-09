@@ -239,6 +239,18 @@ held task (`details.gate` `admission_budget`); a human's edit with
 `--agent-task-weekly-budget` or `COORDINATOR_AGENT_TASK_WEEKLY_BUDGET` (0
 through 10000).
 
+A human or the service may set any class. An agent may set `revert`,
+`fix_target` or `deflake` only with `admission_evidence` that the service
+verifies against its own records of the project: `{"result_id"}` for a landed
+integration result (`revert`) or one with a failed check receipt (`fix_target`,
+optionally with `check_name`), or `{"report_id"}` for a `fix_target` (`fix_target`)
+or `flaky` (`deflake`) integrator report. `refusal_fix` has no such record. An
+agent the operator names with `--fix-class-principals`
+(`COORDINATOR_FIX_CLASS_PRINCIPALS`, comma-separated; empty by default) may set
+any fix class without evidence. For any other agent, a class without matching
+evidence gets a 403 `operation_not_permitted` and nothing is created; the same
+task without a class is budgeted. Unknown evidence fields are a 400.
+
 The end-to-end canary is exempt. `admission_class` also accepts `canary`, which
 only an agent principal named in `--canary-principals` (or
 `COORDINATOR_CANARY_PRINCIPALS`, comma-separated; empty by default) may use; any

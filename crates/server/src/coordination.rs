@@ -995,6 +995,7 @@ async fn create_task(
         &p,
         input.planned,
         input.admission_class.as_deref(),
+        input.admission_evidence.as_ref(),
     )
     .await?;
     sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,?,?,?,?,?)")

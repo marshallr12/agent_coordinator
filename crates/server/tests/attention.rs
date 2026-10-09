@@ -885,13 +885,14 @@ async fn fixes_and_human_tasks_are_never_held_and_do_not_use_the_budget() {
     for class in ["revert", "fix_target", "deflake", "refusal_fix"] {
         let fix = f
             .create_task(
-                &f.a,
+                &f.admin,
                 &p,
                 &format!("Fix {class}"),
                 json!({"admission_class":class}),
             )
             .await;
         assert_eq!(fix["lifecycle"], "open", "{fix}");
+        assert_eq!(fix["origin"], "human");
         assert_eq!(fix["admission_class"], class);
         assert_eq!(fix["admission"]["held"], false);
     }
@@ -903,7 +904,7 @@ async fn fixes_and_human_tasks_are_never_held_and_do_not_use_the_budget() {
 
     let (status, refused) = f
         .call(
-            &f.a,
+            &f.admin,
             "POST",
             &format!("/api/v1/projects/{p}/tasks"),
             json!({"title":"Bad","acceptance_criteria":["done"],"admission_class":"urgent"}),
@@ -915,6 +916,241 @@ async fn fixes_and_human_tasks_are_never_held_and_do_not_use_the_budget() {
     let held = f.create_task(&f.a, &p, "Plain", json!({})).await;
     assert_eq!(held["lifecycle"], "planned", "{held}");
     assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+}
+
+impl Fixture {
+    /// Inserts, as the integrator would, a landed result with a failed check
+    /// receipt, a `flaky` report and a `fix_target` report in `project`.
+    /// Returns (result id, flaky report id, fix_target report id).
+    async fn integration_records(&self, project: &str) -> (String, String, String) {
+        let (result, flaky, target) = (
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+        );
+        let mut c = self.state.pool.acquire().await.unwrap();
+        // The records stand alone: no submission or attempt is needed to test admission.
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&mut *c)
+            .await
+            .unwrap();
+        let by = &self.integrator.principal;
+        sqlx::query("INSERT INTO integrator_results(id,project_id,submission_id,t0,t0_tree,c,r,r_tree,landing_range_json,roster_json,created_by,created_at) VALUES(?,?,'s','t0','t0t','c','r','rt','[]','[]',?,0)")
+            .bind(&result).bind(project).bind(by).execute(&mut *c).await.unwrap();
+        sqlx::query("INSERT INTO integrator_observations(id,result_id,tip,ancestry,disposition,evidence,observed_by,observed_at) VALUES(?,?,'r','contained','published','x',?,0)")
+            .bind(Uuid::new_v4().to_string()).bind(&result).bind(by).execute(&mut *c).await.unwrap();
+        sqlx::query("INSERT INTO integrator_receipts(result_id,check_name,run_id,run_attempt,head_sha,app_id,workflow_path,workflow_blob,conclusion,observed_at) VALUES(?,'Coordination checks',1,1,'r',1,'w.yml','b','failure',0)")
+            .bind(&result).execute(&mut *c).await.unwrap();
+        for (id, kind) in [(&flaky, "flaky"), (&target, "fix_target")] {
+            sqlx::query("INSERT INTO integrator_reports(id,project_id,kind,dedupe_key,details_json,requires_human,created_by,created_at) VALUES(?,?,?,?,'{}',0,?,0)")
+                .bind(id).bind(project).bind(kind).bind(id).bind(by).execute(&mut *c).await.unwrap();
+        }
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&mut *c)
+            .await
+            .unwrap();
+        (result, flaky, target)
+    }
+
+    async fn class_attempt(
+        &self,
+        caller: &Caller,
+        project: &str,
+        extra: Value,
+    ) -> (StatusCode, Value) {
+        let mut body = json!({"title":"Fix","acceptance_criteria":["done"],"kind":"general"});
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        self.call(
+            caller,
+            "POST",
+            &format!("/api/v1/projects/{project}/tasks"),
+            body,
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn an_agent_cannot_exempt_its_own_task_with_an_unbacked_class() {
+    let f = Fixture::new().await;
+    let (p, other) = (
+        f.project("admission-evidence").await,
+        f.project("admission-evidence-other").await,
+    );
+    let (result, flaky, target) = f.integration_records(&p).await;
+    f.admitted(&p, 5).await;
+
+    // Without evidence every class is refused and nothing is created.
+    for class in ["revert", "fix_target", "deflake", "refusal_fix"] {
+        let (status, refused) = f
+            .class_attempt(&f.a, &p, json!({"admission_class":class}))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{class}: {refused}");
+        assert_eq!(refused["error"]["code"], "operation_not_permitted");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("admission_evidence")
+        );
+    }
+    // Evidence that does not match the class, the project or any record is refused too.
+    let wrong = [
+        ("revert", json!({"result_id":"missing"})),
+        ("revert", json!({"report_id":flaky})),
+        ("revert", json!({"result_id":result,"report_id":flaky})),
+        (
+            "fix_target",
+            json!({"result_id":result,"check_name":"Other check"}),
+        ),
+        ("fix_target", json!({"report_id":flaky})),
+        ("deflake", json!({"report_id":target})),
+        ("deflake", json!({"result_id":result})),
+        ("refusal_fix", json!({"result_id":result})),
+        ("refusal_fix", json!({"report_id":flaky})),
+    ];
+    for (class, evidence) in wrong {
+        let (status, refused) = f
+            .class_attempt(
+                &f.a,
+                &p,
+                json!({"admission_class":class,"admission_evidence":evidence}),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{class} {evidence}: {refused}"
+        );
+    }
+    let (status, refused) = f
+        .class_attempt(
+            &f.a,
+            &other,
+            json!({"admission_class":"revert","admission_evidence":{"result_id":result}}),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "another project's record: {refused}"
+    );
+    let (status, refused) = f
+        .class_attempt(
+            &f.a,
+            &p,
+            json!({"admission_class":"deflake","admission_evidence":{"nope":1}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    // Evidence the service can verify admits the fix without the budget.
+    let backed = [
+        ("revert", json!({"result_id":result})),
+        ("fix_target", json!({"result_id":result})),
+        (
+            "fix_target",
+            json!({"result_id":result,"check_name":"Coordination checks"}),
+        ),
+        ("fix_target", json!({"report_id":target})),
+        ("deflake", json!({"report_id":flaky})),
+    ];
+    for (class, evidence) in backed {
+        let fix = f
+            .create_task(
+                &f.a,
+                &p,
+                &format!("Backed {class}"),
+                json!({"admission_class":class,"admission_evidence":evidence}),
+            )
+            .await;
+        assert_eq!(fix["lifecycle"], "open", "{fix}");
+        assert_eq!(fix["origin"], "agent");
+        assert_eq!(fix["admission_class"], class);
+        assert_eq!(fix["admission"]["held"], false);
+    }
+
+    // The refused attempts created nothing, and the budget is still exactly spent.
+    let held = f.create_task(&f.a, &p, "Plain", json!({})).await;
+    assert_eq!(held["lifecycle"], "planned", "{held}");
+    assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+    let tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks WHERE project_id=?")
+        .bind(&p)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(tasks, 5 + 5 + 1);
+}
+
+#[tokio::test]
+async fn a_landed_revision_needs_an_observation_and_a_failed_check_needs_a_failure() {
+    let f = Fixture::new().await;
+    let p = f.project("admission-unlanded").await;
+    let (result, _, _) = f.integration_records(&p).await;
+    sqlx::query("UPDATE integrator_observations SET disposition='not_published' WHERE result_id=?")
+        .bind(&result)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE integrator_receipts SET conclusion='success' WHERE result_id=?")
+        .bind(&result)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    for class in ["revert", "fix_target"] {
+        let (status, refused) = f
+            .class_attempt(
+                &f.a,
+                &p,
+                json!({"admission_class":class,"admission_evidence":{"result_id":result}}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{class}: {refused}");
+    }
+}
+
+#[tokio::test]
+async fn the_operator_can_designate_an_agent_for_the_fix_classes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::open(Config {
+        database_path: dir.path().join("designated.sqlite3"),
+        public_origin: "http://127.0.0.1:8080".into(),
+        allow_insecure_loopback: true,
+        fix_class_principals: vec!["attention-a".into()],
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    state.clock = Arc::new(TestClock(AtomicI64::new(1_800_000_000_000)));
+    let (admin, a, b) = (
+        seed(&state, true, "attention-admin").await,
+        seed(&state, false, "attention-a").await,
+        seed(&state, false, "attention-b").await,
+    );
+    let app = router(state);
+    let (status, created) = call(
+        app.clone(),
+        &admin,
+        "POST",
+        "/api/v1/projects",
+        &Uuid::new_v4().to_string(),
+        json!({"name":"designated","repository_url":"https://example.test/d.git","target_branch":"main"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let path = format!(
+        "/api/v1/projects/{}/tasks",
+        created["data"]["id"].as_str().unwrap()
+    );
+    let body = json!({"title":"Fix","acceptance_criteria":["done"],"kind":"general","admission_class":"refusal_fix"});
+    let key = Uuid::new_v4().to_string();
+    let (status, fix) = call(app.clone(), &a, "POST", &path, &key, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{fix}");
+    assert_eq!(fix["data"]["admission_class"], "refusal_fix");
+    let (status, refused) = call(app, &b, "POST", &path, &Uuid::new_v4().to_string(), body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
 }
 
 #[tokio::test]

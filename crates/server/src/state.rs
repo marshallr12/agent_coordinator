@@ -38,6 +38,10 @@ pub struct Config {
     /// Names of the agent principals that may create tasks in the `canary`
     /// admission class, which the weekly budget neither counts nor holds.
     pub canary_principals: Vec<String>,
+    /// Names of the agent principals that may set a fix admission class
+    /// (`revert`, `fix_target`, `deflake`, `refusal_fix`) without evidence the
+    /// service can verify. Empty by default: no agent may exempt its own task.
+    pub fix_class_principals: Vec<String>,
 }
 
 impl Default for Config {
@@ -55,6 +59,7 @@ impl Default for Config {
             quiet_hours: None,
             agent_task_weekly_budget: crate::admission::DEFAULT_WEEKLY_BUDGET,
             canary_principals: Vec::new(),
+            fix_class_principals: Vec::new(),
         }
     }
 }
@@ -86,6 +91,12 @@ impl Config {
                 .iter()
                 .all(|name| (1..=100).contains(&name.chars().count())),
             "canary_principals must be agent principal names of 1 through 100 characters."
+        );
+        anyhow::ensure!(
+            self.fix_class_principals
+                .iter()
+                .all(|name| (1..=100).contains(&name.chars().count())),
+            "fix_class_principals must be agent principal names of 1 through 100 characters."
         );
         anyhow::ensure!(
             self.listen.ip().is_loopback(),

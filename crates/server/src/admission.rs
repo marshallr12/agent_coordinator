@@ -17,7 +17,15 @@
 //!   `budget_exempt`. Only an agent principal the service names with
 //!   `--canary-principals` may use it; anyone else is refused, so the class
 //!   is no way around the budget.
+//! * The fix classes bound agent-proposed work only if an agent cannot grant
+//!   itself one. Humans and the service may set any class. An agent may set
+//!   one only with `admission_evidence` the service verifies against its own
+//!   records (see [`verify_evidence`]), or when the operator names its
+//!   principal with `--fix-class-principals`; nobody is named by default.
+//!   Otherwise the creation is refused with a 403 and no task, and the agent
+//!   can file the task without a class so that the budget counts it.
 use crate::{error::AppError, mutation::Mutation, state::Config};
+use coordinator_core::AdmissionEvidence;
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 
@@ -77,6 +85,100 @@ pub fn validate_class(class: Option<&str>) -> Result<(), AppError> {
         }
         _ => Ok(()),
     }
+}
+
+fn unbacked(class: &str, why: &str) -> AppError {
+    AppError::forbidden(&format!(
+        "An agent may set the {class} admission class only with admission_evidence the          service can verify, or when the operator designates its principal. {why} \
+         Create the task without a class to have the weekly budget count it."
+    ))
+}
+
+/// Checks that an agent's `evidence` backs `class` in `project` against the
+/// service's own records: `revert` needs a result of the project that landed
+/// (`result_id`); `fix_target` a result with a failed check receipt
+/// (`result_id`, optionally one `check_name`) or a `fix_target` integrator
+/// report (`report_id`); `deflake` a `flaky` integrator report (`report_id`).
+/// `refusal_fix` has no record to verify, so it needs the designation.
+async fn verify_evidence(
+    c: &mut SqliteConnection,
+    project: &str,
+    class: &str,
+    evidence: Option<&AdmissionEvidence>,
+) -> Result<(), AppError> {
+    let Some(evidence) = evidence else {
+        return Err(unbacked(class, "No admission_evidence was given."));
+    };
+    let backed: i64 = match (class, evidence) {
+        (
+            "revert",
+            AdmissionEvidence {
+                result_id: Some(result),
+                check_name: None,
+                report_id: None,
+            },
+        ) => {
+            sqlx::query_scalar(
+                "SELECT count(*) FROM integrator_results r WHERE r.id=? AND r.project_id=? AND EXISTS(\
+                 SELECT 1 FROM integrator_observations o WHERE o.result_id=r.id \
+                 AND o.disposition IN ('published','already_contained','published_after_reopen'))",
+            )
+            .bind(result)
+            .bind(project)
+            .fetch_one(c)
+            .await?
+        }
+        (
+            "fix_target",
+            AdmissionEvidence {
+                result_id: Some(result),
+                check_name,
+                report_id: None,
+            },
+        ) => {
+            sqlx::query_scalar(
+                "SELECT count(*) FROM integrator_results r WHERE r.id=?1 AND r.project_id=?2 AND EXISTS(\
+                 SELECT 1 FROM integrator_receipts f WHERE f.result_id=r.id \
+                 AND f.conclusion NOT IN ('success','neutral','skipped') \
+                 AND (?3 IS NULL OR f.check_name=?3))",
+            )
+            .bind(result)
+            .bind(project)
+            .bind(check_name)
+            .fetch_one(c)
+            .await?
+        }
+        (
+            "fix_target" | "deflake",
+            AdmissionEvidence {
+                result_id: None,
+                check_name: None,
+                report_id: Some(report),
+            },
+        ) => {
+            let kind = if class == "deflake" {
+                "flaky"
+            } else {
+                "fix_target"
+            };
+            sqlx::query_scalar(
+                "SELECT count(*) FROM integrator_reports WHERE id=? AND project_id=? AND kind=?",
+            )
+            .bind(report)
+            .bind(project)
+            .bind(kind)
+            .fetch_one(c)
+            .await?
+        }
+        _ => 0,
+    };
+    if backed == 0 {
+        return Err(unbacked(
+            class,
+            "The admission_evidence does not name a matching record of this project.",
+        ));
+    }
+    Ok(())
 }
 
 /// The outcome of admitting one task.
@@ -155,6 +257,7 @@ pub async fn admit(
     project: &str,
     requested_planned: bool,
     class: Option<&str>,
+    evidence: Option<&AdmissionEvidence>,
 ) -> Result<Admission, AppError> {
     let limit = config.agent_task_weekly_budget;
     let origin = Origin::of_principal(&m.actor.kind);
@@ -165,6 +268,12 @@ pub async fn admit(
         ));
     }
     let class = class.filter(|_| !exempt);
+    if let Some(class) = class
+        && origin == Origin::Agent
+        && !config.fix_class_principals.contains(&m.actor.name)
+    {
+        verify_evidence(&mut m.tx, project, class, evidence).await?;
+    }
     let start = week_start(m.now);
     let budgeted = origin == Origin::Agent && class.is_none() && !exempt;
     let admitted_this_week = if budgeted {

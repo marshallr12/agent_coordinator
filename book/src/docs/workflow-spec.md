@@ -93,6 +93,23 @@ never held and do not use a place. N defaults to 5 and is the service setting
 10000; 0 holds every unclassed agent task). The week rolls over with the clock:
 the first agent task of a new ISO week is admitted again.
 
+The fix classes (`revert`, `fix_target`, `deflake`, `refusal_fix`) skip the budget,
+so an agent cannot grant one to its own task. Who may set each class:
+
+| Class | Human or service | Agent |
+|---|---|---|
+| `revert` | always | `admission_evidence.result_id` naming a project integration result that landed (published, already contained, or published after reopen) |
+| `fix_target` | always | `result_id` naming a project result with a failed check receipt (optionally narrowed by `check_name`), or `report_id` naming a `fix_target` integrator report of the project |
+| `deflake` | always | `report_id` naming a `flaky` integrator report of the project |
+| `refusal_fix` | always | no record to verify: only a designated principal |
+| `canary` | refused | only a designated canary principal |
+
+An agent the operator names with `--fix-class-principals`
+(`COORDINATOR_FIX_CLASS_PRINCIPALS`; empty by default) may set any fix class
+without evidence. Otherwise an unbacked class is refused with a 403 and no
+task is created; the agent can file the task without a class, and the budget
+counts it.
+
 The end-to-end canary (one task per host and harness per day, seven or more a
 week) would otherwise use the whole budget and hold genuine agent work, so it
 has its own route: the request-only `admission_class` `canary`. It is accepted
