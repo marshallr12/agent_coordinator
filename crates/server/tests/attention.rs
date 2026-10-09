@@ -773,14 +773,15 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn the_sixth_agent_task_in_a_week_lands_planned_across_all_projects() {
+async fn the_sixth_agent_task_in_a_week_lands_planned_in_its_own_project_only() {
     let f = Fixture::new().await;
     let (p, q) = (
         f.project("admission-p").await,
         f.project("admission-q").await,
     );
-    f.admitted(&p, 3).await;
-    f.admitted(&q, 2).await;
+    // Each project has its own budget: ten tasks in two projects are all admitted.
+    f.admitted(&p, 5).await;
+    f.admitted(&q, 5).await;
 
     let held = f.create_task(&f.a, &p, "Sixth", json!({})).await;
     assert_eq!(held["lifecycle"], "planned", "{held}");
@@ -790,8 +791,19 @@ async fn the_sixth_agent_task_in_a_week_lands_planned_across_all_projects() {
     assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
     let reason = held["admission"]["reason"].as_str().unwrap();
     assert!(reason.contains("held as planned"), "{reason}");
+    assert!(reason.contains("in this project"), "{reason}");
     let also_held = f.create_task(&f.a, &q, "Seventh", json!({})).await;
     assert_eq!(also_held["lifecycle"], "planned", "{also_held}");
+
+    // A third project is unaffected by the two spent budgets.
+    let r = f.project("admission-r").await;
+    let fresh = f.create_task(&f.a, &r, "Other project", json!({})).await;
+    assert_eq!(fresh["lifecycle"], "open", "{fresh}");
+    assert_eq!(fresh["admission"]["weekly_budget"]["admitted_this_week"], 1);
+    assert_eq!(
+        f.digest(&r).await["agent_task_weekly_budget"]["admitted_this_week"],
+        1
+    );
 
     let fetched = f
         .ok(
@@ -813,6 +825,7 @@ async fn the_sixth_agent_task_in_a_week_lands_planned_across_all_projects() {
     assert_eq!(listed[0]["task_id"], held["id"]);
     assert_eq!(listed[0]["title"], "Sixth");
     assert_eq!(digest["agent_task_weekly_budget"]["limit"], 5);
+    assert_eq!(digest["agent_task_weekly_budget"]["admitted_this_week"], 5);
     assert_eq!(
         f.digest(&q).await["held_agent_tasks"][0]["task_id"],
         also_held["id"]
@@ -824,6 +837,36 @@ async fn the_sixth_agent_task_in_a_week_lands_planned_across_all_projects() {
         .await;
     assert_eq!(planned["lifecycle"], "planned");
     assert_eq!(planned["admission"]["held"], false, "{planned}");
+    assert_eq!(
+        f.digest(&p).await["held_agent_tasks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_held_task_in_one_project_leaves_another_project_admitting() {
+    let f = Fixture::new().await;
+    let (p, q) = (
+        f.project("admission-busy").await,
+        f.project("admission-quiet").await,
+    );
+    f.admitted(&p, 5).await;
+    let held = f.create_task(&f.a, &p, "Sixth", json!({})).await;
+    assert_eq!(held["lifecycle"], "planned", "{held}");
+
+    // The other project still has its whole budget, and no held tasks.
+    let digest = f.digest(&q).await;
+    assert_eq!(digest["agent_task_weekly_budget"]["limit"], 5);
+    assert_eq!(digest["agent_task_weekly_budget"]["admitted_this_week"], 0);
+    assert!(digest["held_agent_tasks"].as_array().unwrap().is_empty());
+    f.admitted(&q, 5).await;
+    let digest = f.digest(&q).await;
+    assert_eq!(digest["agent_task_weekly_budget"]["admitted_this_week"], 5);
+    let sixth = f.create_task(&f.a, &q, "Sixth", json!({})).await;
+    assert_eq!(sixth["lifecycle"], "planned", "{sixth}");
     assert_eq!(
         f.digest(&p).await["held_agent_tasks"]
             .as_array()

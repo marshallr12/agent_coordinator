@@ -81,7 +81,8 @@ tasks). A task may carry an `admission_class` (`revert`, `fix_target`,
 `deflake` or `refusal_fix`) that marks a fix; fixes are always admitted and do
 not use the budget. An agent-created task without a class is admitted only
 while fewer than N agent-originated tasks were admitted in the current ISO week
-(UTC, Monday 00:00 to the next Monday) across all projects together. The
+(UTC, Monday 00:00 to the next Monday) in the task's own project; the budget
+is per project, and tasks of other projects do not count against it. The
 6th such task in a week is still created, but as `planned`, and the creation
 response carries an `admission` object with `held: true` and the reason; the
 digest lists it under `held_agent_tasks`. A human releases it by editing it to

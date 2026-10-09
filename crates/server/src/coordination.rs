@@ -992,6 +992,7 @@ async fn create_task(
     let admission = crate::admission::admit(
         &mut m,
         &s.config,
+        &p,
         input.planned,
         input.admission_class.as_deref(),
     )

@@ -225,7 +225,8 @@ Every task view carries `origin` (`human`, `agent` or `service`), `admission_cla
 (or null) and `held_by_budget` (true while a budget-held task is still planned).
 An agent-created task without a class is admitted only while fewer than N
 agent-originated tasks were admitted in the current ISO week (UTC, Monday
-through Sunday) across all projects; otherwise it is created `planned`. The
+through Sunday) in the task's own project (the budget is per project);
+otherwise it is created `planned`. The
 creation response then adds `admission`: `origin`, `admission_class`, `held`,
 `weekly_budget` (`limit`, `admitted_this_week`, `week_start`) and, when held,
 `reason`. Objectives are tasks and follow the same rule. Human-created tasks,
@@ -270,7 +271,8 @@ hours such as `22-07`, removes those hours from the idle clock; they are unset
 by default. Open human-required integrator reports are the other items. The digest
 also carries `held_agent_tasks` (the project's agent-created tasks the weekly
 admission budget held as planned, oldest first: `task_id`, `title`, `priority`,
-`held_at`) and `agent_task_weekly_budget` (`limit`, `week_start`), and
+`held_at`) and `agent_task_weekly_budget` (the project's own `limit`, `admitted_this_week` and
+`week_start`), and
 `last_read_at`, when it was last read (`null` if never).
 Reads are recorded in two ways only. A human opening the digest in the dashboard
 sends `POST /api/v1/projects/{project_id}/digest/read` (`{}`, an idempotent

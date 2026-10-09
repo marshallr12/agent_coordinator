@@ -843,6 +843,8 @@ async fn digest(
         "held_agent_tasks": held,
         "agent_task_weekly_budget": {
             "limit": state.config.agent_task_weekly_budget,
+            "admitted_this_week": crate::admission::admitted_in_week(
+                &mut c, &project, crate::admission::week_start(now)).await?,
             "week_start": timestamp(crate::admission::week_start(now)),
         },
         "hri": {"count": items.len(), "stalled_tasks": stalled,

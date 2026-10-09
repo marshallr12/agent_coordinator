@@ -32,8 +32,8 @@ pub struct Config {
     pub stall_hours: i64,
     /// UTC hours excluded from the stall clock; none by default.
     pub quiet_hours: Option<crate::attention::QuietHours>,
-    /// Agent-created tasks without an admission class admitted per ISO week
-    /// across all projects; later ones are created planned.
+    /// Agent-created tasks without an admission class admitted per ISO week in
+    /// each project; later ones are created planned.
     pub agent_task_weekly_budget: i64,
     /// Names of the agent principals that may create tasks in the `canary`
     /// admission class, which the weekly budget neither counts nor holds.

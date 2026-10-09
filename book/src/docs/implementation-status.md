@@ -181,7 +181,8 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   `deflake`, `refusal_fix`); service-created reverts and revise follow-ups set
   it. An agent-created task without a class is admitted only while fewer than
   5 (`--agent-task-weekly-budget`) agent-originated tasks were admitted in the
-  current ISO week across all projects; later ones are created `planned`, the
+  task's own project in the current ISO week (the budget is per project, so one
+  project's tasks never use another's); later ones are created `planned`, the
   response says why, and `GET .../digest` lists them as `held_agent_tasks`.
   Human tasks and classed tasks are never held. The class is accepted from any
   creator, so the budget is a guard rail against runaway task creation, not
@@ -190,8 +191,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   (403) unless the creator is an agent principal named in `--canary-principals`
   (`COORDINATOR_CANARY_PRINCIPALS`), and a canary task neither uses nor is held
   by the budget (`tasks.budget_exempt`). Server tests in `tests/attention.rs`
-  cover seven canary tasks in a week leaving the budget untouched and an
-  ordinary agent being refused.
+  cover seven canary tasks in a week leaving the budget untouched, an
+  ordinary agent being refused, and two projects each admitting five tasks with
+  a sixth held in only one of them.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
   safe storage reconciliation. Native upload journals preserve exact bytes and

@@ -1,13 +1,14 @@
-//! Admission control (P6): agent-created tasks beyond a global weekly budget
-//! are held.
+//! Admission control (P6): agent-created tasks beyond a per-project weekly
+//! budget are held.
 //!
 //! * Every task records its `origin`: `human` or `agent` from the creating
 //!   principal, or `service` when the service created it.
 //! * A task may carry an `admission_class` (`revert`, `fix_target`, `deflake`
 //!   or `refusal_fix`). Fixes are always admitted and do not use the budget.
 //! * An agent-created task without a class is admitted only while fewer than
-//!   the weekly budget of such tasks were admitted in the current ISO week
-//!   (UTC, Monday through Sunday) across all projects. Beyond it the task is
+//!   the weekly budget of such tasks were admitted in the task's own project in
+//!   the current ISO week (UTC, Monday through Sunday); other projects' tasks
+//!   do not count against it. Beyond it the task is
 //!   created `planned`, the response says why, and the digest lists it.
 //!   Human-created tasks are never held.
 //! * The end-to-end canary files one task per host and harness per day, which
@@ -118,7 +119,7 @@ impl Admission {
         if self.held {
             value["reason"] = json!(format!(
                 "This agent-created task was held as planned: {} agent-originated tasks were \
-                 already admitted this ISO week (budget {}, all projects together). A human \
+                 already admitted in this project this ISO week (budget {} per project). A human \
                  can release it, or it is admitted when the week rolls over.",
                 self.admitted_this_week, self.limit
             ));
@@ -127,22 +128,31 @@ impl Admission {
     }
 }
 
-async fn admitted_in_week(c: &mut SqliteConnection, start: i64) -> Result<i64, AppError> {
+/// The tasks of `project` that used a place of the budget in the ISO week
+/// starting at `start`.
+pub(crate) async fn admitted_in_week(
+    c: &mut SqliteConnection,
+    project: &str,
+    start: i64,
+) -> Result<i64, AppError> {
     Ok(sqlx::query_scalar(
-        "SELECT count(*) FROM tasks WHERE budget_admitted_at>=? AND budget_admitted_at<?",
+        "SELECT count(*) FROM tasks WHERE project_id=? AND budget_admitted_at>=? AND budget_admitted_at<?",
     )
+    .bind(project)
     .bind(start)
     .bind(start + WEEK_MS)
     .fetch_one(c)
     .await?)
 }
 
-/// Decides whether a task created by `m`'s actor is held by the budget. Call
+/// Decides whether a task created by `m`'s actor in `project` is held by that
+/// project's budget. Call
 /// it inside the mutation, after the replay check, and then [`record`] the
 /// result on the inserted task.
 pub async fn admit(
     m: &mut Mutation,
     config: &Config,
+    project: &str,
     requested_planned: bool,
     class: Option<&str>,
 ) -> Result<Admission, AppError> {
@@ -158,7 +168,7 @@ pub async fn admit(
     let start = week_start(m.now);
     let budgeted = origin == Origin::Agent && class.is_none() && !exempt;
     let admitted_this_week = if budgeted {
-        admitted_in_week(&mut m.tx, start).await?
+        admitted_in_week(&mut m.tx, project, start).await?
     } else {
         0
     };

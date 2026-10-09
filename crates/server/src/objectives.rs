@@ -379,7 +379,8 @@ async fn create_objective(
     }
     let id = Uuid::new_v4().to_string();
     let admission =
-        crate::admission::admit(&mut mutation, &state.config, input.planned, None).await?;
+        crate::admission::admit(&mut mutation, &state.config, &project, input.planned, None)
+            .await?;
     sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,'general',?,?,?,?)")
         .bind(&id).bind(&project).bind(&input.title).bind(&input.description)
         .bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority)

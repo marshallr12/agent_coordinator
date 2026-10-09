@@ -50,7 +50,7 @@ struct Options {
     /// UTC hours excluded from the stall clock, as START-END (for example 22-07).
     #[arg(long, env = "COORDINATOR_QUIET_HOURS", global = true)]
     quiet_hours: Option<coordinator_server::attention::QuietHours>,
-    /// Agent-created tasks without an admission class admitted per ISO week across all projects.
+    /// Agent-created tasks without an admission class admitted per ISO week in each project.
     #[arg(long, env = "COORDINATOR_AGENT_TASK_WEEKLY_BUDGET", default_value_t = coordinator_server::admission::DEFAULT_WEEKLY_BUDGET, global = true)]
     agent_task_weekly_budget: i64,
     /// Comma-separated names of the agent principals that may create tasks in the `canary` admission class.
