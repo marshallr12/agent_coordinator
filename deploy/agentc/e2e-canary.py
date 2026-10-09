@@ -3,7 +3,7 @@
 
     e2e-canary.py --harness claude|codex [--url URL] [--project ID]
                   [--token-file FILE] [--ntfy-topic TOPIC] [--ntfy-url URL]
-                  [--timeout-minutes 90] [--poll-seconds 20]
+                  [--priority 0] [--timeout-minutes 90] [--poll-seconds 20]
                   [--results FILE] [--ledger FILE]
 
 Creates one trivial, harmless task in the host's canary project (see
@@ -18,6 +18,11 @@ The host's supervisor chooses the vendor (`[run] harness`, then
 `[health.fallback]`). With --ledger (the supervisor's `costs.jsonl`) the
 canary also reads which harness served the task and fails the run when it was
 not --harness, so a fallback never passes for the primary.
+
+The task is created at --priority (default 0, urgent: the highest the service
+accepts), so in a project shared with other work the supervisor's `next` hands
+it out ahead of every P1-P3 task and the --timeout-minutes clock measures the
+pipeline, not the queue.
 
 The token file holds one bearer token for an agent allowed to create tasks in
 the canary project; it is never printed. The task is created in the `canary`
@@ -53,13 +58,17 @@ DEFAULT_RESULTS = "/var/lib/agentc/e2e-canary.jsonl"
 DEFAULT_LEDGER = "/var/lib/agentc/costs.jsonl"
 DEFAULT_TIMEOUT_MINUTES = 90.0
 DEFAULT_POLL_SECONDS = 20.0
+# The coordinator takes priorities 0 (urgent) through 3 (low); `next` orders
+# ready tasks by priority, so the canary defaults to the first in line.
+PRIORITIES = (0, 1, 2, 3)
+DEFAULT_PRIORITY = PRIORITIES[0]
 CREATE_ATTEMPTS = 3
 HARNESSES = ("claude", "codex")
 # Lifecycles from which a task never reaches `done` on its own.
 DEAD_LIFECYCLES = ("canceled", "cancelled")
 
 
-def task_body(harness, host, run_id):
+def task_body(harness, host, run_id, priority=DEFAULT_PRIORITY):
     """The canary task: append one line to CANARY.md and change nothing else."""
     line = f"canary {run_id} {harness} {host}"
     return {
@@ -68,7 +77,7 @@ def task_body(harness, host, run_id):
                         f"Append exactly this line to the end of CANARY.md, keeping every earlier line:\n\n{line}\n"),
         "acceptance_criteria": [f"CANARY.md ends with the line `{line}` and no other file changed"],
         "kind": "code",
-        "priority": 3,
+        "priority": priority,
         # The coordinator exempts the task from its weekly agent-task budget
         # only for a principal it designates as a canary (--canary-principals).
         "admission_class": "canary",
@@ -154,7 +163,7 @@ def run_once(args, token, host, clock=time.monotonic, sleep=time.sleep):
     result = {"host": host, "harness": args.harness, "project": args.project, "task": None,
               "served_by": None}
     try:
-        result["task"] = create_task(args, token, task_body(args.harness, host, run_id), sleep)
+        result["task"] = create_task(args, token, task_body(args.harness, host, run_id, args.priority), sleep)
         outcome, detail = wait_done(args, token, result["task"], clock, sleep)
     except RuntimeError as error:
         outcome, detail = "failed", str(error)
@@ -219,6 +228,8 @@ def parse(argv):
     parser.add_argument("--token-file", default=env("E2E_TOKEN_FILE", DEFAULT_TOKEN_FILE))
     parser.add_argument("--ntfy-topic", default=env("E2E_NTFY_TOPIC"))
     parser.add_argument("--ntfy-url", default=env("E2E_NTFY_URL", attention.DEFAULT_NTFY))
+    parser.add_argument("--priority", type=int, choices=PRIORITIES,
+                        default=env("E2E_PRIORITY", DEFAULT_PRIORITY, int))
     parser.add_argument("--timeout-minutes", type=float,
                         default=env("E2E_TIMEOUT_MINUTES", DEFAULT_TIMEOUT_MINUTES, float))
     parser.add_argument("--poll-seconds", type=float, default=env("E2E_POLL_SECONDS", DEFAULT_POLL_SECONDS, float))

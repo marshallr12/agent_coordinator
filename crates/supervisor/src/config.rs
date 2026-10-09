@@ -187,6 +187,21 @@ mod tests {
     }
 
     #[test]
+    fn a_canary_binding_is_optional_and_checked_for_unknown_keys() {
+        assert_eq!(Config::default().run.canary_binding, None);
+        let text = "[run.canary_binding]\nservice_url = \"https://agents.example.com\"\nproject_id = \"c\"\nmirror = \"/srv/c.git\"\n";
+        let config: Config = toml::from_str(text).unwrap();
+        let canary = config.run.canary_binding.unwrap();
+        assert_eq!(canary.project_id, "c");
+        assert_eq!(
+            canary.mirror_path(&Config::default()),
+            Path::new("/srv/c.git")
+        );
+        assert!(toml::from_str::<Config>("[run.canary_binding]\nproject_id = \"c\"\n").is_err());
+        assert!(toml::from_str::<Config>(&format!("{text}repository = \"x\"\n")).is_err());
+    }
+
+    #[test]
     fn unknown_keys_are_rejected() {
         assert!(toml::from_str::<Config>("bin_dirr = '/x'").is_err());
     }
