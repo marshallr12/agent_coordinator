@@ -122,7 +122,7 @@ pub fn host_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     if spec.role == Role::Implementer {
         let helper = &config.push_helper;
         record(crate::confine::protected_executable(&helper.program).context("push helper"));
-        record(protected_config(&helper.config));
+        record(protected_config(helper.config_for(spec.project.as_deref())));
         record(
             Account::lookup(&helper.user)
                 .map(drop)
@@ -236,7 +236,10 @@ fn helper_args(plan: &Plan<'_>, directory: &LaunchDir, digests: &[String]) -> Ve
     let spec = plan.spec;
     let mut args = vec![
         OsString::from("serve"),
-        flag("config", &plan.config.push_helper.config),
+        flag(
+            "config",
+            plan.config.push_helper.config_for(spec.project.as_deref()),
+        ),
         flag("socket", directory.socket()),
         flag("task", spec.task.as_deref().unwrap_or_default()),
         flag("launch", spec.session_id.to_string()),

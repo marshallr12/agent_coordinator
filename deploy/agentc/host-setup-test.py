@@ -197,6 +197,23 @@ class AttentionUnits(unittest.TestCase):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
 
 
+class CanaryProject(unittest.TestCase):
+    """The second project binding's host side: its mirror and its config template."""
+
+    def test_the_mirror_is_only_kept_for_a_host_that_names_a_canary_repository(self):
+        with tempfile.TemporaryDirectory() as state:
+            env = {"PATH": "/usr/bin:/bin", "STATE": state}
+            self.assertEqual(bash("STATE=" + state + "; refresh_canary_mirror", env), "")
+            self.assertEqual(list(Path(state).iterdir()), [])
+
+    def test_the_config_template_shows_the_second_binding_and_its_push_configuration(self):
+        text = SCRIPT.read_text()
+        for line in ("# [run.canary_binding]", "# service_url = ", "# project_id = ", "# mirror = ",
+                     "# [push_helper.project_configs]"):
+            self.assertIn(line, text)
+        self.assertIn("mirror-canary.git", text.split("remove_own_paths() {")[1])  # uninstall removes it
+
+
 class E2EUnits(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

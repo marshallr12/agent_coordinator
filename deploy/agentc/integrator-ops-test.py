@@ -94,5 +94,40 @@ class CutoverGates(unittest.TestCase):
             self.assertEqual(counts['current_attempts'], 2)
 
 
+class HostSetup(unittest.TestCase):
+    """integrator-host-setup.sh gives the canary project an integrator instance of its own."""
+
+    def units(self):
+        text = (ROOT / 'integrator-host-setup.sh').read_text()
+        function = 'write_unit() {' + text.split('write_unit() {')[1].split('\n}\n')[0] + '\n}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            function = function.replace('/etc/systemd/system', tmp)
+            subprocess.run(['bash', '-c', function + 'write_unit agentc-integrator integrator.toml daemon.lock\n'
+                            'write_unit agentc-integrator-canary integrator-canary.toml daemon-canary.lock\n'],
+                           check=True)
+            return {p.name: p.read_text() for p in Path(tmp).iterdir()}, text
+
+    def test_each_unit_template_has_its_own_configuration_and_lock(self):
+        units, _ = self.units()
+        self.assertEqual(sorted(units), ['agentc-integrator-canary@.service', 'agentc-integrator@.service'])
+        main = next(l for l in units['agentc-integrator@.service'].splitlines() if l.startswith('ExecStart='))
+        canary = next(l for l in units['agentc-integrator-canary@.service'].splitlines() if l.startswith('ExecStart='))
+        self.assertEqual(main, 'ExecStart=/usr/bin/flock --nonblock /var/lib/agentc/integrator/daemon.lock '
+                               '/opt/agentc/bin/agentc-integrator --config /etc/agentc/integrator.toml %i')
+        self.assertEqual(canary, 'ExecStart=/usr/bin/flock --nonblock /var/lib/agentc/integrator/daemon-canary.lock '
+                                 '/opt/agentc/bin/agentc-integrator --config /etc/agentc/integrator-canary.toml %i')
+        for unit in units.values():  # everything else is shared
+            self.assertIn('User=agentc-integrator', unit)
+            self.assertIn('ReadWritePaths=/var/lib/agentc/integrator\n', unit)
+
+    def test_the_canary_configuration_keeps_its_state_and_credentials_apart(self):
+        _, text = self.units()
+        config = text.split("integrator-canary.toml <<'CONFIG'")[1].split('\nCONFIG')[0]
+        self.assertIn('projects = []', config)  # the owner inserts the canary project
+        self.assertIn('state_dir = "/var/lib/agentc/integrator/canary"', config)
+        self.assertNotIn('agentc-integrator@', config)
+        self.assertIn('agentc-integrator-canary@shadow.service', config)
+
+
 if __name__ == '__main__':
     unittest.main()
