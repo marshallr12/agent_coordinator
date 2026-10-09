@@ -116,6 +116,7 @@ class Releases:
     def __init__(self):
         self.tag = "v" + NEW
         self.assets = {}
+        self.unpublished = False
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -123,6 +124,9 @@ class Releases:
                 pass
 
             def do_GET(self):
+                if outer.unpublished and self.path == f"/repos/{REPO}/releases/latest":
+                    self.send_error(404)
+                    return
                 if self.path == f"/repos/{REPO}/releases/latest":
                     base = f"http://127.0.0.1:{outer.server.server_port}/dl/"
                     body = json.dumps({"tag_name": outer.tag, "draft": False, "prerelease": False,
@@ -319,6 +323,51 @@ class GoodAndBadReleases(Host):
         before = self.events()
         self.assertEqual(self.run_update(), 0, self.stderr)
         self.assertEqual(self.events(), before)
+
+
+class NoInstallableRelease(Host):
+    def assert_nothing_changed(self, detail):
+        self.assertEqual(self.run_update(), 0, self.stderr)
+        self.assertIn("no-release", self.stderr)
+        self.assertEqual(self.results()[-1]["outcome"], "no-release")
+        self.assertIn(detail, self.results()[-1]["detail"])
+        self.assertIn("# host", self.live("agentc-supervisor"))
+        self.assertEqual(self.events(), [])
+        self.assertFalse(self.kill_switch())
+        self.assertFalse((self.prefix / "releases").exists())
+        self.assertFalse((self.state / "update-state.json").exists())
+
+    def test_a_repository_with_no_published_release_is_not_an_error(self):
+        self.releases.unpublished = True
+        self.assert_nothing_changed("no published release")
+
+    def test_a_latest_release_without_this_hosts_bundle_is_not_an_error(self):
+        self.releases.tag = "v" + NEW
+        self.releases.assets = {"SHA256SUMS": "", "agentc-host-%s-linux-other.tar.gz" % NEW: b""}
+        self.assert_nothing_changed(update.bundle_name(NEW))
+
+    def test_check_reports_no_release_without_recording_it(self):
+        self.releases.unpublished = True
+        self.assertEqual(self.run_update("--check"), 0, self.stderr)
+        self.assertIn("no-release", self.stderr)
+        self.assertFalse((self.state / "update.jsonl").exists())
+
+    def test_a_release_with_a_bundle_but_no_checksums_still_fails(self):
+        self.releases.publish(NEW, release_files(NEW))
+        del self.releases.assets["SHA256SUMS"]
+        self.assertEqual(self.run_update(), 2, self.stderr)
+        self.assertEqual(self.results()[-1]["outcome"], "failed")
+
+    def test_a_malformed_release_answer_still_fails(self):
+        self.releases.publish(NEW, release_files(NEW))
+        self.releases.tag = None
+        self.assertEqual(self.run_update(), 2, self.stderr)
+        self.assertIn("malformed", self.stderr)
+
+    def test_other_fetch_failures_still_fail(self):
+        self.releases.close()
+        self.assertEqual(self.run_update(), 2, self.stderr)
+        self.assertEqual(self.results()[-1]["outcome"], "failed")
 
 
 class Verification(Host):

@@ -30,7 +30,8 @@ timer tick.
 the binaries (core) or the harness binaries and pins (harness) saved by the
 last update, by the same drain, and runs preflight but no canary.
 
-Exit status: 0 up to date, promoted or deferred; 1 the release was rejected and
+Exit status: 0 up to date, promoted or deferred, or no release with a bundle for this host
+exists yet (outcome no-release: the host is left untouched); 1 the release was rejected and
 rolled back; 2 the update could not be attempted (fetch, verification, host
 state) or a rollback failed. Every option defaults from an UPDATE_* environment
 variable (see parse() and host-setup.sh's update.env); an empty variable counts
@@ -96,6 +97,11 @@ class Rejected(Exception):
 
 class Failed(Exception):
     """The update could not be attempted, or could not be undone."""
+
+
+class NoRelease(Exception):
+    """The repository has no installable release for this host yet: nothing published, or the
+    latest release carries no bundle for this architecture. Not an error; nothing changes."""
 
 
 class Settings:
@@ -324,7 +330,8 @@ def check_url(url, allow_loopback):
     raise Failed("refusing a release URL that is not HTTPS")
 
 
-def http_get(settings, url, limit):
+def http_get(settings, url, limit, missing=None):
+    """The body at `url`; `missing` is raised instead of Failed when the server answers 404."""
     check_url(url, settings.allow_insecure_loopback)
     opener = urllib.request.build_opener(HttpsOnly(settings.allow_insecure_loopback))
     request = urllib.request.Request(url, headers={"User-Agent": "agentc-update", "Accept": "application/octet-stream, application/vnd.github+json"})
@@ -332,6 +339,8 @@ def http_get(settings, url, limit):
         with opener.open(request, timeout=60) as response:
             body = response.read(limit + 1)
     except (OSError, urllib.error.URLError) as error:
+        if missing and isinstance(error, urllib.error.HTTPError) and error.code == 404:
+            raise missing from None
         raise Failed(f"fetching {urllib.parse.urlsplit(url).path} failed ({type(error).__name__})") from None
     if len(body) > limit:
         raise Failed(f"{urllib.parse.urlsplit(url).path} exceeds {limit} bytes")
@@ -340,10 +349,13 @@ def http_get(settings, url, limit):
 
 def latest_release(settings):
     """(tag, {asset name: download URL}) of the project's latest published release."""
-    body = http_get(settings, f"{settings.api}/repos/{settings.repo}/releases/latest", 4 * 1024 * 1024)
+    body = http_get(settings, f"{settings.api}/repos/{settings.repo}/releases/latest", 4 * 1024 * 1024,
+                    missing=NoRelease("the repository has no published release"))
     try:
         release = json.loads(body)
         tag = release["tag_name"]
+        if not isinstance(tag, str):
+            raise TypeError
         assets = {asset["name"]: asset["browser_download_url"] for asset in release["assets"]}
     except (ValueError, KeyError, TypeError):
         raise Failed("the latest release answer is malformed") from None
@@ -840,13 +852,19 @@ def check_ready(settings):
 
 
 def run_update(settings, retry=False, check_only=False):
-    """One update attempt; returns the result dict (outcome current, would-update, ok,
-    deferred or rejected)."""
+    """One update attempt; returns the result dict (outcome current, no-release, would-update,
+    ok, deferred or rejected)."""
     state = load_state(settings)
     if retry:
         state["rejected"], state["harness_rejected"] = [], []
-    tag, assets = latest_release(settings)
+    try:
+        tag, assets = latest_release(settings)
+    except NoRelease as error:
+        return {"outcome": "no-release", "detail": str(error)}
     version = bare_version(tag)
+    if bundle_name(tag) not in assets:
+        return {"release": version, "outcome": "no-release",
+                "detail": f"release {version} has no {bundle_name(tag)} asset for this host"}
     installed = installed_core_version(settings, state)
     core_needed = version not in state["rejected"] and newer(tag, installed)
     harness_needed = (settings.harness_updates and state["harness"].get("release") != version
