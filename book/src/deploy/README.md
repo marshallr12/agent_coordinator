@@ -1030,10 +1030,41 @@ API do not):
   to the mail only; the text printed to the journal carries none. The link is an
   HMAC-signed token for one project that expires after 7 days. It can do exactly
   one thing, record a read: it is not a login, a session or an API credential,
-  and it is useless for any other project or route. Opening the link only shows
+  and it is useless for any other project or route. Only a human or the
+  project's **designated digest sender** can obtain a link: an ordinary agent
+  credential that asks for one gets the digest without it, because a read
+  silences the neglect page and agents must not be able to do that. The link
+  names the principal that minted it, and the read it records keeps that
+  principal. See [Designating the digest sender](#designating-the-digest-sender). Opening the link only shows
   a button, so a mail scanner that fetches it records nothing. Anyone holding
   the mail can use the link until it expires, so treat it as you treat the mail.
   There is no tracking pixel.
+
+#### Designating the digest sender
+
+The digest timer reads the digest as the agent principal behind
+`/etc/agentc/attention-token`, so that principal must be the project's digest
+sender or the emailed digest carries no "I read this" link (the mail then says
+so on stderr, in the journal). Designation is the owner's: no agent credential
+can set it. On the service host, as the service account, name the agent that
+owns the attention token (its principal name, shown on the dashboard's Access
+page) and the project id:
+
+```sh
+sudo -u agent-coordinator /usr/local/bin/agent-coordinator-server \
+  --database /var/lib/agent-coordinator/coordinator.sqlite3 \
+  designate-digest-sender --project PROJECT_ID --agent ATTENTION_AGENT_NAME \
+  --reason 'Digest timer credential'
+```
+
+`--clear` (instead of `--agent`) removes the designation. A project has one
+sender; designating another replaces it. A human administrator can make the
+same change through `POST /api/v1/projects/{id}/digest/sender`. Designate a
+principal used only for the digest timer, not the supervisor's or an
+implementer's: every credential of the designated principal may mint links.
+Rotating its token keeps the designation, while clearing it also voids the
+links it already mailed. Verify with `GET .../digest`, which reports
+`digest_sender`, and by checking that the next mailed digest contains the link.
 
 The canary compares `last_read_at` with the clock on every run. When the digest
 has gone unread for more than `ATTENTION_NEGLECT_DAYS` days (default 3,

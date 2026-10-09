@@ -1009,6 +1009,10 @@ $ATTENTION_ENV. Install the supervisor's coordinator token (the bare token,
 nothing else) and set ATTENTION_NTFY_TOPIC (and the SMTP entries to mail the
 digest) there, then re-run this script to enable the timers:
   sudo install -o root -g root -m 0400 /dev/stdin $ATTENTION_TOKEN
+The mailed digest has an "I read this" link only if that token's agent is the
+project's digest sender; designate it once on the service host:
+  agent-coordinator-server --database DB designate-digest-sender \\
+    --project PROJECT_ID --agent AGENT_NAME --reason 'Digest timer credential'
 A relay that needs a login takes ATTENTION_SMTP_USER and a password file
 (root:root 0400, named by ATTENTION_SMTP_PASSWORD_FILE), never the password in
 $ATTENTION_ENV.
