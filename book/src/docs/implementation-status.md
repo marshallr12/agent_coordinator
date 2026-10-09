@@ -176,6 +176,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   canary pages through ntfy once when the digest has gone unread for more than
   `ATTENTION_NEGLECT_DAYS` days (default 3) and again only after a new read and
   another lapse; `deploy/agentc/attention-test.py` covers it with a fake clock.
+  Only a human or the project's designated digest sender (one agent principal,
+  set by a human administrator through the API or on the host with
+  `designate-digest-sender`; none by default) can obtain an ack link, so an
+  ordinary agent credential cannot mark the digest read. The link names its
+  minter and a read through it records that principal.
 - Admission control (P6): tasks record their `origin` (`human`, `agent` or
   `service`) and may carry an `admission_class` (`revert`, `fix_target`,
   `deflake`, `refusal_fix`); service-created reverts and revise follow-ups set

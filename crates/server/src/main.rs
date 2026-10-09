@@ -109,6 +109,21 @@ enum Command {
         #[arg(long)]
         password_stdin: bool,
     },
+    /// Designate the agent whose credential may mint digest acknowledgement links
+    /// for a project (the digest timer's), or clear the designation.
+    DesignateDigestSender {
+        /// The project id.
+        #[arg(long)]
+        project: String,
+        /// The agent principal's name; omit with --clear to remove the designation.
+        #[arg(long, conflicts_with = "clear", required_unless_present = "clear")]
+        agent: Option<String>,
+        #[arg(long)]
+        clear: bool,
+        /// Audited reason; never include a credential.
+        #[arg(long)]
+        reason: String,
+    },
     /// Create the first local administrator in an empty installation.
     InitAdmin {
         #[arg(long)]
@@ -157,7 +172,10 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());
         }
-        Command::Backup { .. } | Command::Maintenance { .. } | Command::RecoverClock { .. } => {
+        Command::Backup { .. }
+        | Command::Maintenance { .. }
+        | Command::RecoverClock { .. }
+        | Command::DesignateDigestSender { .. } => {
             anyhow::ensure!(
                 options.database.is_file(),
                 "This operation requires an existing service database."
@@ -236,6 +254,21 @@ async fn main() -> anyhow::Result<()> {
             println!(
                 "Account recovered. All of its browser sessions have ended. Sign in with the new password."
             );
+        }
+        Command::DesignateDigestSender {
+            project,
+            agent,
+            clear: _,
+            reason,
+        } => {
+            let report = coordinator_server::attention::designate_digest_sender(
+                &state,
+                &project,
+                agent.as_deref(),
+                &reason,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Serve => {
             let listener = tokio::net::TcpListener::bind(state.config.listen).await?;
