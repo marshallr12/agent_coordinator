@@ -306,6 +306,7 @@ install_seeds() {
     chown root:root "$temp"; chmod 0444 "$temp"
     mv -fT -- "$temp" "$path/settings.json"
     temp=$(mktemp "$path/.seed.XXXXXXXX")
+    "$PREFIX/bin/agentc-supervisor" instructions --role "$name" > "$temp"
     chown root:root "$temp"; chmod 0444 "$temp"
     mv -fT -- "$temp" "$path/CLAUDE.md"
   done

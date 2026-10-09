@@ -232,7 +232,7 @@ fn state_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
 }
 
 /// A Claude launch needs its protected `claude-config` holding exactly the
-/// generated settings and the empty CLAUDE.md, and the role's token file.
+/// generated settings and CLAUDE.md, and the role's token file.
 fn claude_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     let persistent = config
         .state_dir
@@ -257,7 +257,7 @@ fn claude_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
 const CLAUDE_CONFIG_ENTRIES: [&str; 2] = ["settings.json", "CLAUDE.md"];
 
 /// The persistent settings match the role's generated settings and the
-/// persistent CLAUDE.md is empty.
+/// persistent CLAUDE.md the role's generated instructions.
 fn claude_seeds(role: Role, persistent: &Path) -> Result<()> {
     let settings = confine::read_regular(&persistent.join("settings.json"))?;
     ensure!(
@@ -265,8 +265,9 @@ fn claude_seeds(role: Role, persistent: &Path) -> Result<()> {
         "persistent Claude settings differ from the generated role settings"
     );
     ensure!(
-        confine::read_regular(&persistent.join("CLAUDE.md"))?.is_empty(),
-        "persistent CLAUDE.md must be the empty seed"
+        confine::read_regular(&persistent.join("CLAUDE.md"))?
+            == role_settings::instructions(role).as_bytes(),
+        "persistent CLAUDE.md differs from the generated role instructions"
     );
     Ok(())
 }
@@ -711,7 +712,7 @@ mod tests {
         assert!(
             state_problems(&spec, &config)
                 .join("\n")
-                .contains("CLAUDE.md must be the empty seed")
+                .contains("CLAUDE.md differs from the generated role instructions")
         );
         fs::remove_file(persistent.join("extra.json")).unwrap();
         fs::write(persistent.join(".credentials.json"), "retired login").unwrap();

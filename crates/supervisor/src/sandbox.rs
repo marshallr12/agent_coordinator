@@ -478,7 +478,11 @@ mod tests {
                 role_settings::render(role),
             )
             .unwrap();
-            fs::write(persistent.join("CLAUDE.md"), "").unwrap();
+            fs::write(
+                persistent.join("CLAUDE.md"),
+                role_settings::instructions(role),
+            )
+            .unwrap();
             fs::write(
                 profile::claude_token(role, &config),
                 "dummy-fixture-token\n",

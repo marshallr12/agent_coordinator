@@ -197,6 +197,14 @@ class AttentionUnits(unittest.TestCase):
     def test_the_script_parses(self):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
 
+    def test_each_role_gets_generated_instructions_not_an_empty_claude_md(self):
+        body = SCRIPT.read_text().split("install_seeds() {", 1)[1].split("\n}\n", 1)[0]
+        generated = 'agentc-supervisor" instructions --role "$name" > "$temp"'
+        install = 'mv -fT -- "$temp" "$path/CLAUDE.md"'
+        self.assertIn(generated, body)
+        self.assertLess(body.index(generated), body.index(install))
+        self.assertEqual(body.count("mktemp"), 3)  # settings, CLAUDE.md, Cargo seed
+
 
 class CanaryProject(unittest.TestCase):
     """The second project binding's host side: its mirror and its config template."""

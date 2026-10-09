@@ -31,6 +31,11 @@ enum Commands {
         #[arg(long, value_enum)]
         role: Role,
     },
+    /// Print the generated persistent CLAUDE.md for a role.
+    Instructions {
+        #[arg(long, value_enum)]
+        role: Role,
+    },
     /// Create a hardened per-launch clone at an exact revision.
     Clone {
         #[arg(long)]
@@ -168,6 +173,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let config = config::Config::load(cli.config.as_deref())?;
     match cli.command {
         Commands::Settings { role } => print!("{}", role_settings::render(role)),
+        Commands::Instructions { role } => print!("{}", role_settings::instructions(role)),
         Commands::Clone {
             url,
             revision,
