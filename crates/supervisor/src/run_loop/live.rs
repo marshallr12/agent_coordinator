@@ -604,7 +604,7 @@ fn install_binding(path: &Path, text: &str) -> Result<()> {
         .open(&temp)?;
     file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
     file.write_all(text.as_bytes())?;
-    std::fs::rename(&temp, &path).with_context(|| format!("replace {}", path.display()))
+    std::fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))
 }
 
 /// The implementer's coordinator credential file, relative to its role

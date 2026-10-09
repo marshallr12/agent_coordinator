@@ -1181,8 +1181,11 @@ titled "agentc e2e canary failed" and exits 1; an undelivered page exits 2.
 The run fails too when `costs.jsonl` shows a harness other than the requested
 one served the task, so a fallback vendor never passes for the primary.
 
-Each supervised host has its own canary project and its supervisor serves it,
-so the service needs no routing. The canary cannot choose the harness: the
+Each supervised host has its own canary project and its supervisor serves it
+(a second binding, below), so the service needs no routing. Until a supervisor
+serves a second project, the canary runs in the shared project instead (see
+[shared-project mode](#shared-project-mode-and-the-canary-priority)). The
+canary cannot choose the harness: the
 supervisor picks the vendor for every launch (`[run] harness`, then
 `[health.fallback]`), and the canary only reads `costs.jsonl` afterwards. The
 routing is therefore the owner's to arrange, and it is not automatic:
@@ -1197,6 +1200,87 @@ routing is therefore the owner's to arrange, and it is not automatic:
   not ...": the intended signal that the routing is missing, never a false pass.
 - While the primary vendor is exhausted and `[health.fallback]` serves the
   canary task, the primary's run pages for the same reason.
+
+#### Shared-project mode and the canary priority
+
+A host whose supervisor has no `[run.canary_binding]` points `E2E_PROJECT` at
+the project the supervisor already serves, the dogfood project. The canary task
+is then one more ready task in that project's queue, and `next` hands out ready
+tasks ordered by priority, then oldest-ready time, then id. The canary therefore
+asks for the highest priority the service accepts, `0` (urgent): `E2E_PRIORITY`
+(or `--priority`; `0` through `3`; the in-code default is `0`, shown commented in
+`e2e-canary.env`). A priority 0 canary is claimed ahead of every P1-P3 task, so
+the 90-minute `E2E_TIMEOUT_MINUTES` measures the pipeline (claim, launch, review,
+landing) and not the backlog, and it does not need the 1440-minute stopgap.
+Priority alone suffices and the supervisor needs no canary special case: the
+only work that can still go first is an older urgent task, which an owner who
+files P0 work expects to run first and which the supervisor claims one launch at
+a time anyway. If such urgent work is long-running, a canary can still wait for
+it; lower `E2E_PRIORITY` only to make the canary yield deliberately. With a
+second binding the canary project is polled before the main one, so the order is
+explicit there too.
+
+The shared mode keeps the canary out of the dogfood figures without any setup
+of its own: its task is in the `canary` admission class, which the digest (human
+interventions, stalled tasks, ready work and the progress clock; integrator
+reports about it are not listed) and the weekly agent-task budget both leave
+out. In `costs.jsonl` its rows are told apart by task id: every canary run
+records its task id in `e2e-canary.jsonl`, and a per-task cost or
+interventions-per-task report drops those ids. Rows of a dedicated canary
+project carry `"canary": true` themselves.
+
+#### A second project binding: the canary project beside the main one
+
+`[run.canary_binding]` in `/etc/agentc/supervisor.toml` makes the one `agentc-run`
+loop serve the host's canary project alongside its main project (the mirror's
+binding or `[run.binding]`):
+
+```toml
+[run.canary_binding]
+service_url = "https://agents.sithbit.com"   # must equal the main binding's
+project_id = "<canary project id>"
+# project_name = "<credential directory>"    # optional, as for [run.binding]
+# mirror = "/var/lib/agentc/mirror-canary.git"  # the default
+```
+
+Both projects live on one coordinator (the loop refuses another origin or the
+main project's id), reached with the same implementer and reviewer
+credentials. Each poll runs the reviewer side in each project, then asks `next`
+in the canary project first and the main project second, so a ready canary task
+is claimed ahead of other work whatever its priority; if the canary project has
+nothing, or its `next` fails, the main project is polled in the same pass. A
+launch still takes the loop until it ends, as before. What is per project:
+
+- the repository mirror: `refresh_canary_mirror` in `host-setup.sh` keeps
+  `/var/lib/agentc/mirror-canary.git` current when the script runs with
+  `CANARY_REPO_URL=<the canary repository>` (clones and reviews start from it);
+- the installed binding copy the CLI reads, `coordinator-binding-canary.toml`
+  beside `coordinator-binding.toml`, and the reviewer-side credential copy when
+  `project_name` is set (the loop keeps the copies of both bindings);
+- the launch record (`project`), so a crashed canary launch is released in the
+  canary project after a restart; records without it belong to the main project;
+- the candidate-push helper configuration. The helper writes one repository, so a
+  canary repository needs its own `push.toml` naming it, installed root-owned
+  like `push.toml` and listed under `[push_helper.project_configs]` by project
+  id; launches of other projects keep `[push_helper] config`;
+- the setup command and verification environment, which were already keyed by
+  project id, and the ledger rows (`project`, plus `canary: true`).
+
+Each project also needs an integrator instance. `integrator-host-setup.sh` now
+installs two unit templates, `agentc-integrator@` (`/etc/agentc/integrator.toml`,
+`daemon.lock`) and `agentc-integrator-canary@` (`/etc/agentc/integrator-canary.toml`,
+written once with `state_dir = "/var/lib/agentc/integrator/canary"` and
+credential paths under its own unit name, `daemon-canary.lock`). Put the canary
+project id into the second file's `projects`, supply the credentials as for the
+first instance, and start `agentc-integrator-canary@shadow` before `@run`, as the
+cutover runbook does for the main one. Nothing is enabled or started by the
+script. With this in place U31's per-host canary project works without
+rebinding the supervisor: set `E2E_PROJECT` to the canary project, which can
+keep a lower priority since nothing else shares its queue.
+
+`deploy/agentc/e2e-canary-test.py` covers the priority setting, the supervisor
+tests (`run_loop::tests`, `config`, `binding`) cover the second binding's
+ordering, failure isolation, recovery, installed copies and ledger marks.
 
 #### Project setup (once per host)
 
@@ -1217,8 +1301,9 @@ the seed's `.github/workflows/canary.yml` (`git diff --check`). It never pushes.
 It prints the remaining steps: push the seed, install an agent token that may
 create tasks in the project at `/etc/agentc/e2e-canary-token` (root-owned),
 name that agent's principal in the coordinator's `COORDINATOR_CANARY_PRINCIPALS`
-(see below), point the host's supervisor at the project (`[run.binding]`, reviewer launches
-on) and fill in the environment file.
+(see below), point the host's supervisor at the project (`[run.canary_binding]` beside the main
+binding, reviewer launches on; or `[run.binding]` for a supervisor dedicated to
+it) and fill in the environment file.
 
 The canary creates its task with `admission_class: "canary"`, which keeps it out
 of the coordinator's weekly agent-task budget (a daily canary alone would admit
@@ -1249,7 +1334,7 @@ The owner supplies `E2E_PROJECT` (printed by `canary-setup.py`),
 default, `E2E_HARNESSES`, in the environment file, and the token file.
 Everything else has a default in `e2e-canary.py`, shown commented in the file:
 `E2E_URL`, `E2E_TOKEN_FILE` (`/etc/agentc/e2e-canary-token`), `E2E_NTFY_URL`,
-`E2E_TIMEOUT_MINUTES` (90), `E2E_POLL_SECONDS` (20), `E2E_RESULTS`,
+`E2E_PRIORITY` (0, urgent), `E2E_TIMEOUT_MINUTES` (90), `E2E_POLL_SECONDS` (20), `E2E_RESULTS`,
 `E2E_LEDGER` (`/var/lib/agentc/costs.jsonl`) and `E2E_HOST` (the hostname).
 host-setup enables a harness's timer only once the token file, `E2E_PROJECT`
 and `E2E_NTFY_TOPIC` exist, so re-run it after filling them in (or `sudo

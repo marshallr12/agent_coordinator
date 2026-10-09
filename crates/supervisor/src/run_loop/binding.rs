@@ -398,7 +398,10 @@ mod tests {
             REPO_CONFIG_ENV.into(),
             canary_installed_path(&config).into(),
         );
-        assert_eq!(launch_env(&spec_in("canary-1"), &config), [repo.clone()]);
+        assert_eq!(
+            launch_env(&spec_in("canary-1"), &config),
+            std::slice::from_ref(&repo)
+        );
         assert!(launch_env(&spec(Role::Reviewer), &config).is_empty());
         // With a staging `[run.binding]` the main project reads its own copy.
         config.run.binding = Some(staging("https://agents.example.com"));
