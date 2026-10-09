@@ -232,10 +232,11 @@ class E2EUnits(unittest.TestCase):
         lines = bash("e2e_env_file").splitlines()
         active = [line for line in lines if line and not line.startswith("#")]
         self.assertEqual(active, ["E2E_PROJECT=", "E2E_NTFY_TOPIC="])
-        for name in ("HARNESSES", "URL", "TOKEN_FILE", "NTFY_URL", "TIMEOUT_MINUTES", "POLL_SECONDS",
-                     "RESULTS", "LEDGER", "HOST"):
+        for name in ("HARNESSES", "URL", "TOKEN_FILE", "NTFY_URL", "PRIORITY", "TIMEOUT_MINUTES",
+                     "POLL_SECONDS", "RESULTS", "LEDGER", "HOST"):
             self.assertTrue(any(line.startswith(f"# E2E_{name}=") for line in lines), name)
         self.assertIn("# E2E_TOKEN_FILE=/etc/agentc/e2e-canary-token", lines)
+        self.assertTrue(any(line.startswith("# E2E_PRIORITY=0 ") for line in lines))  # the in-code default
 
     def test_every_environment_variable_names_a_default_in_e2e_canary_py(self):
         source = (HERE / "e2e-canary.py").read_text()

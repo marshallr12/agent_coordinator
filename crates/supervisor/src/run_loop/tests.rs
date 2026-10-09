@@ -41,6 +41,17 @@ struct Fake {
     renew_fails: Option<(i64, Option<renewal::AttemptEnded>)>,
     /// The attempt's state as the task detail reports it; `None` is unreadable.
     attempt_state: Option<String>,
+    /// The projects the host serves, the main one first, and the selected one.
+    projects: Vec<&'static str>,
+    selected: &'static str,
+    /// `next` answers that differ per project (the others get `next`), and
+    /// the projects whose `next` fails.
+    nexts: Vec<(&'static str, Value)>,
+    failing: Vec<&'static str>,
+    /// The project selected at each `next`, claim and release.
+    polled: Vec<&'static str>,
+    claimed_in: Vec<String>,
+    released_in: Vec<&'static str>,
 }
 
 impl Fake {
@@ -73,7 +84,29 @@ impl Fake {
             expiry: None,
             renew_fails: None,
             attempt_state: None,
+            projects: vec!["p1"],
+            selected: "p1",
+            nexts: Vec::new(),
+            failing: Vec::new(),
+            polled: Vec::new(),
+            claimed_in: Vec::new(),
+            released_in: Vec::new(),
         }
+    }
+
+    /// A fake that also serves the project `canary`, whose `next` suggests
+    /// task `c1`.
+    fn with_canary() -> Self {
+        let mut fake = Self::new();
+        fake.projects = vec!["p1", "canary"];
+        fake.nexts = vec![("canary", fake.suggest("c1"))];
+        fake
+    }
+
+    /// A `next` answer suggesting `task`.
+    fn suggest(&self, task: &str) -> Value {
+        json!({"action": {"kind": "claim_task", "title": "Canary",
+            "call": {"body": {"task_id": task, "expected_task_revision": 1}}}})
     }
 
     /// The lease every claim grants.
@@ -89,12 +122,31 @@ impl Fake {
 
 impl Driver for Fake {
     fn project(&self) -> &str {
-        "p1"
+        self.selected
+    }
+
+    fn projects(&self) -> Vec<String> {
+        self.projects.iter().map(ToString::to_string).collect()
+    }
+
+    fn select(&mut self, project: &str) {
+        if let Some(known) = self.projects.iter().find(|p| **p == project) {
+            self.selected = known;
+        }
     }
 
     fn next(&mut self, role: Role) -> Result<Value> {
         self.steps.push(format!("next:{}", role.slug()));
-        Ok(self.next.clone())
+        self.polled.push(self.selected);
+        anyhow::ensure!(
+            !self.failing.contains(&self.selected),
+            "service unavailable"
+        );
+        let own = self
+            .nexts
+            .iter()
+            .find(|(project, _)| *project == self.selected);
+        Ok(own.map_or(&self.next, |(_, next)| next).clone())
     }
 
     fn free_bytes(&self) -> Result<u64> {
@@ -120,6 +172,7 @@ impl Driver for Fake {
 
     fn claim(&mut self, launch: &Launch) -> Result<Lease> {
         self.steps.push(format!("claim:{}", launch.suggestion.task));
+        self.claimed_in.push(launch.project.clone());
         anyhow::ensure!(!self.fail_claim, "claim_conflict");
         Ok(Self::lease())
     }
@@ -189,6 +242,7 @@ impl Driver for Fake {
 
     fn release(&mut self, _launch: &Launch, lease: &Lease, summary: &str) -> Result<()> {
         self.steps.push("release".into());
+        self.released_in.push(self.selected);
         anyhow::ensure!(!self.fail_release, "service unavailable");
         self.releases.push(format!("{}: {summary}", lease.attempt));
         Ok(())
@@ -775,3 +829,94 @@ fn a_failed_release_keeps_the_launch_for_the_next_poll() {
 mod health_tests;
 #[path = "renewal_tests.rs"]
 mod renewal_tests;
+
+#[test]
+fn a_ready_canary_task_is_claimed_ahead_of_the_main_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fake = Fake::with_canary();
+    let outcome = iterate(&mut fake, &config(dir.path()));
+    assert_eq!(
+        outcome,
+        Outcome::Launched {
+            task: "c1".into(),
+            exit_code: 0
+        }
+    );
+    // The main project's ready task waits; its `next` is not even asked.
+    assert_eq!(fake.polled, ["canary"]);
+    assert_eq!(fake.claimed_in, ["canary"]);
+    assert!(
+        fake.prompt.contains("canary"),
+        "the prompt names the project"
+    );
+    assert_eq!(fake.selected, "p1", "the loop returns to the main project");
+}
+
+#[test]
+fn an_idle_canary_project_leaves_the_main_one_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fake = Fake::with_canary();
+    fake.nexts = vec![("canary", json!({"action": null}))];
+    let outcome = iterate(&mut fake, &config(dir.path()));
+    assert!(matches!(outcome, Outcome::Launched { ref task, .. } if task == "t1"));
+    assert_eq!(fake.polled, ["canary", "p1"]);
+    assert_eq!(fake.claimed_in, ["p1"]);
+    fake.next = json!({"action": null});
+    fake.polled.clear();
+    assert_eq!(iterate(&mut fake, &config(dir.path())), Outcome::Idle);
+    assert_eq!(fake.polled, ["canary", "p1"]);
+}
+
+#[test]
+fn a_canary_project_that_cannot_be_polled_does_not_stop_the_main_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fake = Fake::with_canary();
+    fake.failing = vec!["canary"];
+    let outcome = iterate(&mut fake, &config(dir.path()));
+    assert!(matches!(outcome, Outcome::Launched { ref task, .. } if task == "t1"));
+    // With nothing to launch anywhere, the failure is still reported.
+    fake.next = json!({"action": null});
+    let outcome = iterate(&mut fake, &config(dir.path()));
+    assert!(matches!(outcome, Outcome::Failed(ref why) if why.contains("service unavailable")));
+}
+
+#[test]
+fn a_failing_main_project_still_serves_the_canary_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fake = Fake::with_canary();
+    fake.failing = vec!["p1"];
+    let outcome = iterate(&mut fake, &config(dir.path()));
+    assert!(matches!(outcome, Outcome::Launched { ref task, .. } if task == "c1"));
+}
+
+#[test]
+fn a_crashed_canary_launch_is_released_in_its_own_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    let suggestion = Suggestion {
+        task: "c1".into(),
+        revision: 1,
+        title: String::new(),
+    };
+    let launch = Launch::plan(&settings, "canary", suggestion);
+    fs::create_dir_all(&launch.clone).unwrap();
+    fs::create_dir_all(&launch.run).unwrap();
+    fs::write(launch.run.join(".state-started"), "s").unwrap();
+    let record = LaunchRecord::new(&launch, &Fake::lease(), "boot-0".into(), 0);
+    assert_eq!(record.project.as_deref(), Some("canary"));
+    record.save(&settings).unwrap();
+    let mut fake = Fake::with_canary();
+    fake.next = json!({"action": null});
+    fake.nexts.clear();
+    assert_eq!(iterate(&mut fake, &settings), Outcome::Idle);
+    assert_eq!(fake.released_in, ["canary"]);
+    assert!(LaunchRecord::load_all(&settings).is_empty());
+}
+
+#[test]
+fn records_from_before_the_second_project_belong_to_the_main_one() {
+    let text = r#"{"session_id":"00000000-0000-0000-0000-000000000000","task":"t","attempt":"a",
+        "generation":1,"boot_id":"b","pid":null,"start_ticks":null,"released":false}"#;
+    let record: LaunchRecord = serde_json::from_str(text).unwrap();
+    assert_eq!(record.project, None);
+}

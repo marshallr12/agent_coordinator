@@ -79,6 +79,65 @@ impl Binding {
     }
 }
 
+/// `[run.canary_binding]`: a second project the loop claims from alongside
+/// its main one, normally the host's canary project (decision U31). It is
+/// served by the same coordinator as the main binding (the loop refuses a
+/// different origin), with the same implementer and reviewer credentials,
+/// from its own repository mirror.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanaryBinding {
+    pub service_url: String,
+    pub project_id: String,
+    /// The CLI's per-project credential directory name, if any.
+    #[serde(default)]
+    pub project_name: Option<String>,
+    /// The read-only mirror of the canary repository clones start from;
+    /// default `<state_dir>/mirror-canary.git`.
+    #[serde(default)]
+    pub mirror: Option<PathBuf>,
+}
+
+impl CanaryBinding {
+    /// The repository binding the CLI reads for this project.
+    pub fn binding(&self) -> Binding {
+        Binding {
+            service_url: self.service_url.clone(),
+            project_id: self.project_id.clone(),
+            project_name: self.project_name.clone(),
+        }
+    }
+
+    /// The mirror clones of this project start from.
+    pub fn mirror_path(&self, config: &Config) -> PathBuf {
+        (self.mirror.clone()).unwrap_or_else(|| config.state_dir.join("mirror-canary.git"))
+    }
+
+    /// Checks the binding itself, and that it cannot be mistaken for `main`:
+    /// another project on the same coordinator.
+    pub fn check_against(&self, main: &Binding) -> Result<()> {
+        self.binding().check().context("[run.canary_binding]")?;
+        ensure!(
+            self.project_id != main.project_id,
+            "[run.canary_binding] names the main project {}; it must be another project",
+            main.project_id
+        );
+        ensure!(
+            same_origin(&self.service_url, &main.service_url),
+            "[run.canary_binding] service_url {} differs from the main binding's {}; both projects must share one coordinator",
+            self.service_url,
+            main.service_url
+        );
+        Ok(())
+    }
+}
+
+/// Whether two origins are the same, ignoring case and a trailing slash.
+fn same_origin(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.trim().trim_end_matches('/').to_ascii_lowercase();
+    norm(a) == norm(b)
+}
+
 /// Whether `name` is a single, portable directory name.
 fn plain_name(name: &str) -> bool {
     let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-');
@@ -121,20 +180,40 @@ pub fn installed_path(config: &Config) -> PathBuf {
     config.state_dir.join("coordinator-binding.toml")
 }
 
+/// The root-owned copy of the `[run.canary_binding]` binding,
+/// `<state_dir>/coordinator-binding-canary.toml`.
+pub fn canary_installed_path(config: &Config) -> PathBuf {
+    config.state_dir.join("coordinator-binding-canary.toml")
+}
+
+/// The installed binding copy for work in `project`: the canary's for the
+/// `[run.canary_binding]` project, else the main one.
+pub fn installed_path_for(config: &Config, project: &str) -> PathBuf {
+    match &config.run.canary_binding {
+        Some(canary) if canary.project_id == project => canary_installed_path(config),
+        _ => installed_path(config),
+    }
+}
+
 /// Launch environment for an implementer the loop claimed for, when
-/// `[run.binding]` overrides the clone's binding: the CLI reads the
-/// installed copy, and gets the insecure flag for a permitted loopback
-/// `http` origin only.
+/// `[run.binding]` overrides the clone's binding or the task belongs to the
+/// `[run.canary_binding]` project: the CLI reads the installed copy, and
+/// gets the insecure flag for a permitted loopback `http` origin only.
 pub fn launch_env(spec: &LaunchSpec, config: &Config) -> Vec<(String, OsString)> {
-    let Some(binding) = &config.run.binding else {
-        return Vec::new();
-    };
     if spec.role != Role::Implementer || spec.task.is_none() {
         return Vec::new();
     }
-    let mut env = vec![(REPO_CONFIG_ENV.into(), installed_path(config).into())];
+    let project = spec.project.as_deref().unwrap_or_default();
+    let canary = (config.run.canary_binding.as_ref()).filter(|c| c.project_id == project);
+    let origin = match (canary, &config.run.binding) {
+        (Some(canary), _) => &canary.service_url,
+        (None, Some(binding)) => &binding.service_url,
+        (None, None) => return Vec::new(),
+    };
+    let path = installed_path_for(config, project);
+    let mut env = vec![(REPO_CONFIG_ENV.into(), path.into())];
     if matches!(
-        insecure(&binding.service_url, config.run.allow_insecure_loopback),
+        insecure(origin, config.run.allow_insecure_loopback),
         Ok(true)
     ) {
         env.push((INSECURE_ENV.into(), "true".into()));
@@ -245,5 +324,96 @@ mod tests {
         assert!(launch_env(&spec(Role::Reviewer), &config).is_empty());
         config.run.binding = Some(staging("https://staging.example.com"));
         assert_eq!(launch_env(&spec(Role::Implementer), &config), [repo]);
+    }
+
+    /// A canary binding at `origin`.
+    fn canary(origin: &str) -> CanaryBinding {
+        CanaryBinding {
+            service_url: origin.into(),
+            project_id: "canary-1".into(),
+            project_name: None,
+            mirror: None,
+        }
+    }
+
+    /// An implementer launch of task `t1` in `project`.
+    fn spec_in(project: &str) -> LaunchSpec {
+        LaunchSpec {
+            project: Some(project.into()),
+            ..spec(Role::Implementer)
+        }
+    }
+
+    #[test]
+    fn a_canary_binding_is_another_project_on_the_same_coordinator() {
+        let main = staging("https://agents.example.com");
+        canary("https://agents.example.com")
+            .check_against(&main)
+            .unwrap();
+        canary("HTTPS://agents.example.com/")
+            .check_against(&main)
+            .unwrap();
+        let other = canary("https://elsewhere.example.com");
+        let error = other.check_against(&main).unwrap_err().to_string();
+        assert!(error.contains("share one coordinator"), "{error}");
+        let mut same = canary("https://agents.example.com");
+        same.project_id = main.project_id.clone();
+        let error = same.check_against(&main).unwrap_err().to_string();
+        assert!(error.contains("another project"), "{error}");
+        let mut named = canary("https://agents.example.com");
+        named.project_name = Some("checkouts".into());
+        assert!(named.check_against(&main).is_err());
+    }
+
+    #[test]
+    fn a_canary_binding_has_its_own_mirror_and_installed_copy() {
+        let mut config = Config::default();
+        let mut extra = canary("https://agents.example.com");
+        assert_eq!(
+            extra.mirror_path(&config),
+            config.state_dir.join("mirror-canary.git")
+        );
+        extra.mirror = Some("/srv/canary.git".into());
+        assert_eq!(extra.mirror_path(&config), PathBuf::from("/srv/canary.git"));
+        assert_eq!(
+            installed_path_for(&config, "canary-1"),
+            installed_path(&config)
+        );
+        config.run.canary_binding = Some(extra);
+        assert_eq!(
+            installed_path_for(&config, "canary-1"),
+            config.state_dir.join("coordinator-binding-canary.toml")
+        );
+        assert_eq!(installed_path_for(&config, "p1"), installed_path(&config));
+    }
+
+    #[test]
+    fn a_canary_launch_always_reads_the_installed_canary_copy() {
+        let mut config = Config::default();
+        config.run.canary_binding = Some(canary("https://agents.example.com"));
+        // No `[run.binding]`: the main project's launches keep the clone's
+        // own binding, the canary project's never do.
+        assert!(launch_env(&spec_in("p1"), &config).is_empty());
+        let repo = (
+            REPO_CONFIG_ENV.into(),
+            canary_installed_path(&config).into(),
+        );
+        assert_eq!(launch_env(&spec_in("canary-1"), &config), [repo.clone()]);
+        assert!(launch_env(&spec(Role::Reviewer), &config).is_empty());
+        // With a staging `[run.binding]` the main project reads its own copy.
+        config.run.binding = Some(staging("https://agents.example.com"));
+        let main = (REPO_CONFIG_ENV.into(), installed_path(&config).into());
+        assert_eq!(launch_env(&spec_in("p1"), &config), [main]);
+        assert_eq!(launch_env(&spec_in("canary-1"), &config), [repo]);
+    }
+
+    #[test]
+    fn a_loopback_canary_launch_gets_the_insecure_flag_only_when_allowed() {
+        let mut config = Config::default();
+        config.run.canary_binding = Some(canary("http://127.0.0.1:18080"));
+        assert_eq!(launch_env(&spec_in("canary-1"), &config).len(), 1);
+        config.run.allow_insecure_loopback = true;
+        let env = launch_env(&spec_in("canary-1"), &config);
+        assert_eq!(env[1], (INSECURE_ENV.into(), "true".into()));
     }
 }

@@ -1069,6 +1069,7 @@ E2E_NTFY_TOPIC=
 # E2E_URL=https://agents.sithbit.com
 # E2E_TOKEN_FILE=$E2E_TOKEN
 # E2E_NTFY_URL=https://ntfy.sh
+# E2E_PRIORITY=0                    # task priority, 0 (urgent) to 3 (low); 0 outranks all other work
 # E2E_TIMEOUT_MINUTES=90            # page when the task is not done by then
 # E2E_POLL_SECONDS=20
 # E2E_RESULTS=$STATE/e2e-canary.jsonl
