@@ -970,7 +970,7 @@ Record answers here.
 | U32 | P6 host updater platforms | Linux (systemd) only now; Windows deferred until a Windows host supervises | 2026-10-08: **as recommended** → task `dd95bb78` |
 | U33 | P6 e2e canary on oracle-1: a supervisor serves one project, so the landed per-host canary project needs a rebind | Run the canary in the dogfood project fe95a6c5 for now; own project later (U31 stays the target) | 2026-10-08: **as recommended** → task `e3296c30` (priority setting, second binding) |
 | U34 | Admission budget scope: global across projects, so agent tasks in other projects (sithbit etc.) use up the dogfood budget | Count the weekly agent-task budget per project | 2026-10-09: **as recommended** → task `0cba8250` (after `91d49e19`) |
-| U35 | Agent task lifecycle: may agents cancel/archive reverts (P4 S5 finding 3 made it human-only)? | (asked by owner, no recommendation) || 2026-10-10: **yes**, agents may cancel or archive reverts too. Tasks 7291451d (server, origin agent/service), 277079ed (CLI), 936fce64 (lift the revert gate; depends on both) |
+| U35 | Agent task lifecycle: may agents cancel/archive reverts (P4 S5 finding 3 made it human-only)? | (asked by owner, no recommendation) || 2026-10-10: **yes**, agents may cancel or archive reverts too. Tasks 7291451d (server, origin agent/service), 277079ed (CLI), 936fce64 (lift the revert gate; depends on both); refined same day: not the agent whose change was reverted (independence as for review), task 47027345 |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
