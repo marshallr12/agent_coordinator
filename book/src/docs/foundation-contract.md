@@ -119,6 +119,24 @@ Additional implemented routes:
   description, acceptance_criteria, priority, depends_on, and planned. Only an
   unowned open/planned task can be edited. There is no generic status edit.
 - POST `.../tasks/{task_id}/unblock`: human-only `{expected_revision,reason}`.
+- POST `.../tasks/{task_id}/{cancel,archive,restore}` and DELETE
+  `.../tasks/{task_id}`, each with `{expected_revision,reason}` (`cancel` also
+  takes an optional `replacement_task_id`). Humans may use all four. An agent
+  session may use all four on a task whose stored `origin` is `agent` or
+  `service` (for example e2e canary tasks), without project delegation; the
+  caller cannot supply or change the origin. On a task whose origin is `human`
+  an agent may only `cancel`, and only when the project sets
+  `agent_rule_editing`; otherwise archive, restore, delete and that cancel are
+  the `task_<action>` human gate. Reverts stay human-only for every action
+  (`revert_cancel` gate) whatever their origin. The same guards apply to every
+  actor: `task_revision_changed`, `task_attempt_protected`,
+  `task_workflow_protected` (active review/integration work and the
+  review/integration activity tasks themselves), `task_archived` (restore
+  first), `task_lifecycle_invalid`, and `task_history_protected` for a delete
+  of a task with attempts, dependencies, objective links or workflow links
+  (archive it instead). The lifecycle event and the task's revision bump are
+  attributed to the acting principal. The existing endpoints express this
+  directly, so none was added.
 - GET `.../attempts/{aid}`: attempt, task, current `authority_valid`, current
   `lease_remaining_ms`, and optional registered checkout metadata.
 - POST `.../attempts/{aid}/checkout`: `{generation,workstation_id,identity,path,

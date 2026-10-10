@@ -662,9 +662,10 @@ limit applies to reverts.
   it is skipped by next-eligible claims, and a revise of its candidate blocks
   it again and returns it to the queue's `reverts`. Apart from the
   integrator's candidate or not-mechanical report, its only exit is a human
-  canceling the task. Canceling or archiving any revert task is human-only:
-  an agent gets the `revert_cancel` gate even where the project delegates
-  canceling to agents. The revert task stays
+  canceling the task. Canceling, archiving, restoring or deleting any revert
+  task is human-only: an agent gets the `revert_cancel` gate even though a
+  revert's origin is `service` and even where the project delegates canceling
+  to agents. The revert task stays
   blocked while it waits for its candidate and is listed under the queue's
   `reverts`. The integrator computes the candidate
   itself on the target's current tip X, in a disposable worktree:

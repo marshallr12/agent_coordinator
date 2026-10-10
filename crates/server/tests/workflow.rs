@@ -5779,6 +5779,26 @@ async fn s5_review_only_a_human_cancels_a_revert() {
         assert_eq!(v["error"]["details"]["gate"], "revert_cancel", "{v}");
         assert_eq!(v["error"]["details"]["required_actor"], "human", "{v}");
     }
+    // Archive, restore and delete are human-only too, although a revert's origin is `service`.
+    let task = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        revert["id"].as_str().unwrap()
+    );
+    for action in ["archive", "restore", "delete"] {
+        for agent in [&f.a, &f.b] {
+            let (status, v) = if action == "delete" {
+                f.call(agent, "DELETE", &task, body.clone()).await
+            } else {
+                f.call(agent, "POST", &format!("{task}/{action}"), body.clone())
+                    .await
+            };
+            assert_eq!(status, StatusCode::FORBIDDEN, "{action}: {v}");
+            assert_eq!(
+                v["error"]["details"]["gate"], "revert_cancel",
+                "{action}: {v}"
+            );
+        }
+    }
     let (status, v) = f.call(&f.admin, "POST", &path, body).await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["data"]["lifecycle"], "canceled", "{v}");

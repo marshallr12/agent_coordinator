@@ -73,15 +73,16 @@ pub(crate) async fn ensure_not_mechanical(
     Ok(())
 }
 
-/// Refuses an agent canceling or archiving a revert task, whatever its mode,
-/// with the `revert_cancel` human gate; humans pass.
+/// Refuses an agent canceling, archiving, restoring or deleting a revert task,
+/// whatever its mode, with the `revert_cancel` human gate; humans pass. Reverts
+/// have origin `service`, so this guard, not the origin, keeps them human-only.
 pub(crate) async fn ensure_human_revert_exit(
     c: &mut SqliteConnection,
     actor: &crate::auth::Actor,
     (p, task): (&str, &str),
     action: &str,
 ) -> Result<(), AppError> {
-    if actor.kind == "human" || !matches!(action, "cancel" | "archive") {
+    if actor.kind == "human" || !matches!(action, "cancel" | "archive" | "restore" | "delete") {
         return Ok(());
     }
     let n: i64 =
@@ -95,7 +96,7 @@ pub(crate) async fn ensure_human_revert_exit(
     }
     Err(AppError::human_gate(
         "revert_cancel",
-        "Only a human cancels or archives a revert task.",
+        "Only a human cancels, archives, restores or deletes a revert task.",
     ))
 }
 

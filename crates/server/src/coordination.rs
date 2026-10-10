@@ -686,6 +686,8 @@ struct TaskLifecycleInput {
 /// Allow a lifecycle action for humans, and for agent sessions only when the project
 /// delegates it: `cancel` under `agent_rule_editing`, `unblock` under
 /// `recovery_mode=agent`. Everything else stays a labelled human gate.
+/// `cancel`, `archive`, `restore` and `delete` of a task whose stored origin is
+/// `agent` or `service` need no delegation; see `ensure_task_lifecycle_actor`.
 async fn ensure_lifecycle_actor(
     c: &mut SqliteConnection,
     actor: &crate::auth::Actor,
@@ -708,6 +710,29 @@ async fn ensure_lifecycle_actor(
         ));
     }
     session(actor).map(|_| ())
+}
+
+/// `ensure_lifecycle_actor` for the four task lifecycle actions: an agent session may
+/// also cancel, archive, restore and delete a task whose stored `origin` is `agent` or
+/// `service`, without project delegation. A `human` task keeps the delegated rules.
+async fn ensure_task_lifecycle_actor(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    (p, id): (&str, &str),
+    action: &str,
+) -> Result<(), AppError> {
+    if actor.kind != "human" {
+        let origin: Option<String> =
+            sqlx::query_scalar("SELECT origin FROM tasks WHERE project_id=? AND id=?")
+                .bind(p)
+                .bind(id)
+                .fetch_optional(&mut *c)
+                .await?;
+        if matches!(origin.as_deref(), Some("agent" | "service")) {
+            return session(actor).map(|_| ());
+        }
+    }
+    ensure_lifecycle_actor(c, actor, p, action).await
 }
 
 /// Confirm that a named replacement task exists in the same project.
@@ -751,7 +776,7 @@ async fn lifecycle_change(
     let operation = format!("POST /api/v1/projects/{p}/tasks/{id}/{action}");
     let mut m = Mutation::begin(&s, &auth, &headers, &operation, &input).await?;
     crate::revert_rules::ensure_human_revert_exit(&mut m.tx, &m.actor, (&p, &id), action).await?;
-    ensure_lifecycle_actor(&mut m.tx, &m.actor, &p, action).await?;
+    ensure_task_lifecycle_actor(&mut m.tx, &m.actor, (&p, &id), action).await?;
     if let Some(v) = m.replay {
         return Ok(response(v));
     }

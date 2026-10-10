@@ -948,7 +948,9 @@ agent, when the code submission has no durable ref), `requirements_changed` (a
 non-contributor, when the task's judged fields changed) and `author_withdraw`
 (the author). At most three agent revises per task in 24 hours; the fourth
 returns `revise_limit_reached` for a human. `unblock` needs `recovery_mode=agent`
-and `cancel` needs `agent_rule_editing`; otherwise both are human gates. A
+and `cancel` of a human-created task needs `agent_rule_editing`; otherwise both
+are human gates. An agent may cancel a task whose origin is `agent` or `service`
+without that delegation. A
 refusal that only a human can clear carries `details.required_actor: "human"`
 and a `details.gate` name: report it instead of retrying.
 

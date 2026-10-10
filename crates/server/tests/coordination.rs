@@ -33,6 +33,7 @@ async fn task_archive_restore_cancel_and_delete_are_separate_from_queue() {
     let f = Fixture::new().await;
     let p = f.project("task-archive").await;
     let task = f.task(&p, "Keep me", vec![]).await;
+    set_origin(&f, &task, "human").await;
     let path = format!(
         "/api/v1/projects/{p}/tasks/{}",
         task["id"].as_str().unwrap()
@@ -167,6 +168,239 @@ async fn task_archive_restore_cancel_and_delete_are_separate_from_queue() {
             .iter()
             .any(|item| item["id"] == task["id"])
     );
+}
+async fn set_origin(f: &Fixture, task: &Value, origin: &str) {
+    sqlx::query("UPDATE tasks SET origin=?,lifecycle='open',budget_held_at=NULL WHERE id=?")
+        .bind(origin)
+        .bind(task["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+}
+async fn task_with_origin(f: &Fixture, p: &str, title: &str, origin: &str) -> (String, Value) {
+    let task = f.task(p, title, vec![]).await;
+    set_origin(f, &task, origin).await;
+    (
+        format!(
+            "/api/v1/projects/{p}/tasks/{}",
+            task["id"].as_str().unwrap()
+        ),
+        task,
+    )
+}
+/// Put a fresh task of `origin` into the state `action` applies to; returns its path and revision.
+async fn ready_for(f: &Fixture, p: &str, action: &str, origin: &str) -> (String, i64) {
+    let (path, task) = task_with_origin(f, p, &format!("{action} {origin}"), origin).await;
+    let id = task["id"].as_str().unwrap();
+    let sql = match action {
+        "restore" => "UPDATE tasks SET archived_at=1 WHERE id=?",
+        "delete" => "UPDATE tasks SET lifecycle='canceled' WHERE id=?",
+        _ => "UPDATE tasks SET lifecycle='open' WHERE id=?",
+    };
+    sqlx::query(sql)
+        .bind(id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    (path, 1)
+}
+async fn lifecycle(
+    f: &Fixture,
+    c: &Caller,
+    action: &str,
+    (path, revision): (&str, i64),
+    key: &str,
+) -> (StatusCode, Value) {
+    let body = json!({"expected_revision":revision,"reason":"Cleaning up."});
+    if action == "delete" {
+        f.call(c, "DELETE", path, key, body).await
+    } else {
+        f.call(c, "POST", &format!("{path}/{action}"), key, body)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn agents_manage_agent_and_service_tasks_but_not_human_ones() {
+    let f = Fixture::new().await;
+    let p = f.project("lifecycle-matrix").await;
+    for action in ["cancel", "archive", "restore", "delete"] {
+        for origin in ["human", "agent", "service"] {
+            for caller in [&f.admin, &f.a] {
+                let (path, revision) = ready_for(&f, &p, action, origin).await;
+                let key = format!("{action}-{origin}-{}", caller.human);
+                let (status, v) = lifecycle(&f, caller, action, (&path, revision), &key).await;
+                if caller.human || origin != "human" {
+                    assert_eq!(status, StatusCode::OK, "{action} {origin}: {v}");
+                    let id = path.rsplit('/').next().unwrap();
+                    let (rev, deleted, archived, state): (i64, Option<i64>, Option<i64>, String) =
+                        sqlx::query_as(
+                            "SELECT revision,deleted_at,archived_at,lifecycle FROM tasks WHERE id=?",
+                        )
+                        .bind(id)
+                        .fetch_one(&f.state.pool)
+                        .await
+                        .unwrap();
+                    assert_eq!(rev, revision + 1, "{action} {origin}");
+                    match action {
+                        "cancel" => assert_eq!(state, "canceled"),
+                        "archive" => assert!(archived.is_some()),
+                        "restore" => assert!(archived.is_none()),
+                        _ => assert!(deleted.is_some()),
+                    }
+                    let actor: String = sqlx::query_scalar(
+                        "SELECT actor_id FROM events WHERE record_id=? AND kind=? ORDER BY seq DESC LIMIT 1",
+                    )
+                    .bind(id)
+                    .bind(match action {
+                        "archive" => "task.archived",
+                        "restore" => "task.restored",
+                        "cancel" => "task.canceled",
+                        _ => "task.deleted",
+                    })
+                    .fetch_one(&f.state.pool)
+                    .await
+                    .unwrap();
+                    assert_eq!(actor, caller.principal, "{action} {origin}");
+                } else {
+                    assert_eq!(status, StatusCode::FORBIDDEN, "{action} {origin}: {v}");
+                    assert_eq!(v["error"]["details"]["gate"], format!("task_{action}"));
+                    assert_eq!(v["error"]["details"]["required_actor"], "human");
+                    assert_eq!(
+                        v["error"]["message"],
+                        "This project has not delegated this task lifecycle action to agents."
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn agent_cancel_of_a_human_task_still_follows_agent_rule_editing() {
+    let f = Fixture::new().await;
+    let p = f.project("lifecycle-delegation").await;
+    let (path, revision) = ready_for(&f, &p, "cancel", "human").await;
+    let (status, _) = lifecycle(&f, &f.a, "cancel", (&path, revision), "refused").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let change = json!({"expected_revision":1,"review_mode":"agent","recovery_mode":"agent","lease_seconds":600,"rules":"Read all evidence","agent_rule_editing":true,"automatic_integration":true});
+    let (status, v) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &format!("/api/v1/projects/{p}/policy"),
+            "delegate",
+            change,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = lifecycle(&f, &f.a, "cancel", (&path, revision), "allowed").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    for action in ["archive", "restore", "delete"] {
+        let (path, revision) = ready_for(&f, &p, action, "human").await;
+        let (status, v) = lifecycle(&f, &f.a, action, (&path, revision), action).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{action}: {v}");
+    }
+}
+
+#[tokio::test]
+async fn agent_lifecycle_actions_keep_every_guard() {
+    let f = Fixture::new().await;
+    let p = f.project("lifecycle-guards").await;
+    let code = |v: &Value| v["error"]["code"].as_str().unwrap_or_default().to_owned();
+    for origin in ["agent", "service"] {
+        // A stale revision.
+        let (path, _) = ready_for(&f, &p, "cancel", origin).await;
+        let (status, v) = lifecycle(&f, &f.a, "cancel", (&path, 9), "stale").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+        assert_eq!(code(&v), "task_revision_changed");
+        // An archived task must be restored first.
+        let (path, revision) = ready_for(&f, &p, "restore", origin).await;
+        for action in ["cancel", "archive", "delete"] {
+            let (status, v) = lifecycle(&f, &f.a, action, (&path, revision), action).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{v}");
+            assert_eq!(code(&v), "task_archived");
+        }
+        // A task not in a state the action permits.
+        let (path, revision) = ready_for(&f, &p, "cancel", origin).await;
+        let (status, v) = lifecycle(&f, &f.a, "restore", (&path, revision), "restore").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+        assert_eq!(code(&v), "task_lifecycle_invalid");
+        let (status, v) = lifecycle(&f, &f.a, "delete", (&path, revision), "delete").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        // A live attempt.
+        let (path, task) = task_with_origin(&f, &p, "Claimed", origin).await;
+        f.ack(&f.b, &p).await;
+        let (status, v) = f
+            .claim(&f.b, &p, &task, &format!("claim-{origin}"), "work")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        for action in ["cancel", "archive"] {
+            let (status, v) = lifecycle(&f, &f.a, action, (&path, 1), action).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{v}");
+            assert_eq!(code(&v), "task_attempt_protected");
+        }
+        // Review or integration work.
+        let (path, task) = task_with_origin(&f, &p, "In review", origin).await;
+        let id = task["id"].as_str().unwrap();
+        let mut conn = f.state.pool.acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workflow_activities(id,project_id,subject_task_id,submission_id,activity_task_id,kind,state,created_at) VALUES(?,?,?,?,?,'agent_review','queued',1)")
+            .bind(Uuid::new_v4().to_string()).bind(&p).bind(id).bind(Uuid::new_v4().to_string()).bind(Uuid::new_v4().to_string())
+            .execute(&mut *conn).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        drop(conn);
+        for action in ["cancel", "archive"] {
+            let (status, v) = lifecycle(&f, &f.a, action, (&path, 1), action).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{v}");
+            assert_eq!(code(&v), "task_workflow_protected");
+        }
+        // A task other tasks depend on keeps its history: archive instead.
+        let (path, prerequisite) = task_with_origin(&f, &p, "Prerequisite", origin).await;
+        let dependent = f
+            .task(
+                &p,
+                "Dependent",
+                vec![prerequisite["id"].as_str().unwrap().into()],
+            )
+            .await;
+        assert!(dependent["id"].is_string());
+        sqlx::query("UPDATE tasks SET lifecycle='canceled' WHERE id=?")
+            .bind(prerequisite["id"].as_str().unwrap())
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        let (status, v) = lifecycle(&f, &f.a, "delete", (&path, 1), "history").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+        assert_eq!(code(&v), "task_history_protected");
+        let (status, v) = lifecycle(&f, &f.a, "archive", (&path, 1), "archive-history").await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+    }
+}
+
+#[tokio::test]
+async fn the_stored_origin_decides_not_the_caller() {
+    let f = Fixture::new().await;
+    let p = f.project("lifecycle-origin").await;
+    // An agent-session body cannot claim another origin for a human task.
+    let (path, revision) = ready_for(&f, &p, "archive", "human").await;
+    let body = json!({"expected_revision":revision,"reason":"Cleaning up.","origin":"agent"});
+    let (status, v) = f
+        .call(&f.a, "POST", &format!("{path}/archive"), "spoof", body)
+        .await;
+    assert_ne!(status, StatusCode::OK, "{v}");
+    let stored: String = sqlx::query_scalar("SELECT origin FROM tasks WHERE id=?")
+        .bind(path.rsplit('/').next().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, "human");
 }
 #[derive(Clone)]
 struct Caller {
