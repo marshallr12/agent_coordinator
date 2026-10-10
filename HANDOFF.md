@@ -972,6 +972,7 @@ Record answers here.
 | U34 | Admission budget scope: global across projects, so agent tasks in other projects (sithbit etc.) use up the dogfood budget | Count the weekly agent-task budget per project | 2026-10-09: **as recommended** → task `0cba8250` (after `91d49e19`) |
 | U35 | Agent task lifecycle: may agents cancel/archive reverts (P4 S5 finding 3 made it human-only)? | (asked by owner, no recommendation) || 2026-10-10: **yes**, agents may cancel or archive reverts too. Tasks 7291451d (server, origin agent/service), 277079ed (CLI), 936fce64 (lift the revert gate; depends on both); refined same day: not the agent whose change was reverted (independence as for review), task 47027345 |
 | U36 | Supervisor/integrator scope beyond the coordinator project | Owner direction: required long term (the coordinator exists to enable autonomy on projects generally) || 2026-10-10: **yes, after the P6 dogfood**; planned design task `cbb05ecb` (P1) covers topology, fairness, per-project env/egress/credentials, integrator, onboarding, decisions |
+| U37 | Supervisor hosts beyond a dedicated Linux VM | Owner goal: any workstation with Codex or Claude (sysvinit, Windows, macOS) || 2026-10-10: **yes**; planned tasks `6cc3f673` (sysvinit agentc-run, cron timers, quiet hours), `2a387d02` (Windows via WSL2), design `c2aea126` (portable containment backends and service managers; depends on cbb05ecb) |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
