@@ -65,8 +65,9 @@ behind P1 work (review/implement alternate); task `depends_on` can only be set a
 **Session handover:** background helpers of the orchestrating session run on the workstation from
 its scratchpad: `renew.sh` (renews `31af890a` gen 3 every 15 min), `watch.sh` (task-state poller
 appending to `pilot-timeline.log`), an ssh `journalctl -u agentc-run -f` appending to
-`pilot-agentc-run.journal` (2026-10-09 session `17653fa6…` scratchpad: renew.sh pid 67821, watch.sh
-3387285, journal ssh 3387286). Never wait on `pgrep -f PATTERN` over ssh: the pattern matches the
+`pilot-agentc-run.journal` (since 2026-10-09 19:10Z, session `dcc4e1fe…` scratchpad: renew.sh pid 187291
+(sleep 900; renew grants a 1 h lease), watch.sh 179866, journal ssh 179868; all `setsid`-detached, so they
+outlive the session). Daily 00:00Z checks: 2026-10-10 digest ok (HRI 0) and e2e canary 39725610 ok. Never wait on `pgrep -f PATTERN` over ssh: the pattern matches the
 remote shell's own command line (cost 3.3 h on 2026-10-09). Check
 with `ps -eo pid,args | grep -E '[r]enew.sh|[w]atch.sh|[j]ournalctl -u agentc-run|[e]2e-canary.jsonl'`;
 kill them by PID and start your own. Use `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key
