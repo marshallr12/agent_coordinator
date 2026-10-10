@@ -177,8 +177,33 @@ enum Command {
     Revise(lifecycle::ReviseArgs),
     /// Clear a task's blocker with a rationale (agents: needs recovery_mode=agent).
     Unblock(lifecycle::LifecycleArgs),
-    /// Cancel a task with a rationale and optional replacement (agents: needs agent_rule_editing).
+    /// Cancel an open or planned task with a rationale and optional replacement.
+    ///
+    /// Who may: a human always. An agent session may cancel a task whose origin
+    /// is `agent` or `service` (see `tasks show`); on a `human`-origin task it
+    /// needs the project's agent_rule_editing delegation. Reverting tasks are
+    /// human-only. Refused while an attempt or review/integration work is active.
     Cancel(lifecycle::CancelArgs),
+    /// Archive a task so it leaves the queue but keeps its records.
+    ///
+    /// Who may: a human always. An agent session may archive only a task whose
+    /// origin is `agent` or `service`; a `human`-origin task or any revert task
+    /// is a human gate. Refused while an attempt or review/integration work is
+    /// active.
+    Archive(lifecycle::LifecycleArgs),
+    /// Restore an archived task to the queue.
+    ///
+    /// Who may: a human always. An agent session may restore only a task whose
+    /// origin is `agent` or `service`; a `human`-origin task or any revert task
+    /// is a human gate.
+    Restore(lifecycle::LifecycleArgs),
+    /// Delete a canceled or planned task that has no history.
+    ///
+    /// Who may: a human always. An agent session may delete only a task whose
+    /// origin is `agent` or `service`; a `human`-origin task or any revert task
+    /// is a human gate. Refused with `task_history_protected` when the task has
+    /// attempts, dependencies, objective links or workflow links: archive it.
+    Delete(lifecycle::LifecycleArgs),
     /// Record an explicit recovery inspection and disposition.
     Recovery {
         #[command(subcommand)]
@@ -803,6 +828,20 @@ fn print_human(command: &Command, value: &Value) {
         {
             println!("OS code: {code}");
         }
+        if error
+            .pointer("/details/required_actor")
+            .and_then(Value::as_str)
+            == Some("human")
+        {
+            let gate = error
+                .pointer("/details/gate")
+                .and_then(Value::as_str)
+                .unwrap_or("human");
+            println!("Only a human can clear this ({gate}); report it instead of retrying.");
+        }
+        if let Some(hint) = lifecycle::refusal_hint(code) {
+            println!("Hint: {hint}");
+        }
         if let Some(actions) = error.get("next_actions").and_then(Value::as_array) {
             for action in actions {
                 if let Some(name) = action.get("action").and_then(Value::as_str) {
@@ -820,6 +859,9 @@ fn print_human(command: &Command, value: &Value) {
         Command::Tasks {
             command: TasksCommand::List(_),
         } => print_task_table(value),
+        Command::Tasks {
+            command: TasksCommand::Show(_),
+        } => print_task_detail(value),
         Command::Sessions { .. } => sessions::print_table(value),
         Command::Connect(_) => print_connection(value),
         Command::Claim(_) => print_claim(value),
@@ -887,6 +929,34 @@ fn print_task_table(value: &Value) {
         }
     }
     print_next_cursor(value);
+}
+
+/// A short task summary, including the origin that decides who may cancel, archive,
+/// restore or delete it, followed by the complete record.
+fn print_task_detail(value: &Value) {
+    let task = value.get("data").unwrap_or(value);
+    for line in task_summary(task) {
+        println!("{line}");
+    }
+    println!("\nResult:");
+    print_json(task, false);
+}
+
+fn task_summary(task: &Value) -> Vec<String> {
+    let mut lines = vec![
+        format!("Task: {} — {}", field(task, "id"), field(task, "title")),
+        format!("Origin: {}", field(task, "origin")),
+        format!(
+            "Lifecycle: {} (work {}), revision {}",
+            field(task, "lifecycle"),
+            field(task, "work_status"),
+            field(task, "revision")
+        ),
+    ];
+    if task.get("archived_at").is_some_and(|v| !v.is_null()) {
+        lines.push(format!("Archived: {}", field(task, "archived_at")));
+    }
+    lines
 }
 
 fn print_next_cursor(value: &Value) {
@@ -1150,6 +1220,9 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
         Command::Revise(args) => lifecycle::revise(cli, &context, args).await,
         Command::Unblock(args) => lifecycle::unblock(cli, &context, args).await,
         Command::Cancel(args) => lifecycle::cancel(cli, &context, args).await,
+        Command::Archive(args) => lifecycle::archive(cli, &context, args).await,
+        Command::Restore(args) => lifecycle::restore(cli, &context, args).await,
+        Command::Delete(args) => lifecycle::delete(cli, &context, args).await,
         Command::Recovery { command } => match command {
             RecoveryCommand::Inspect(args) => {
                 validate_segment("attempt", &args.attempt).map_err(Failure::invalid)?;

@@ -929,7 +929,7 @@ Use `integrations renew` and `integrations release` with the same argument shape
 as their review equivalents while the activity remains owned. A release never
 clears an uncertain publication hold.
 
-## Revise, unblock and cancel
+## Revise, unblock, cancel, archive, restore and delete
 
 When the project delegates them, agents move stuck work forward without a human:
 
@@ -939,6 +939,9 @@ agent-coordinator revise --task TASK_ID --submission SUBMISSION_ID \
 agent-coordinator unblock --task TASK_ID --expected-revision 7 --reason "Resource now exists"
 agent-coordinator cancel --task TASK_ID --expected-revision 7 --reason "Wrong kind" \
   --replacement NEW_TASK_ID
+agent-coordinator archive --task TASK_ID --expected-revision 7 --reason "Obsolete"
+agent-coordinator restore --task TASK_ID --expected-revision 8 --reason "Needed after all"
+agent-coordinator delete --task TASK_ID --expected-revision 7 --reason "Created by mistake"
 ```
 
 `revise` reopens the current submission through `workflow/reopen` and needs
@@ -949,8 +952,28 @@ non-contributor, when the task's judged fields changed) and `author_withdraw`
 (the author). At most three agent revises per task in 24 hours; the fourth
 returns `revise_limit_reached` for a human. `unblock` needs `recovery_mode=agent`
 and `cancel` of a human-created task needs `agent_rule_editing`; otherwise both
-are human gates. An agent may cancel a task whose origin is `agent` or `service`
-without that delegation. A
+are human gates. `cancel`, `archive`, `restore` and `delete` each take `--task`,
+`--expected-revision` and `--reason` (`cancel` also takes `--replacement`) and
+accept `--json`. They send `POST .../tasks/{id}/{cancel,archive,restore}` and
+`DELETE .../tasks/{id}` through the durable mutation journal, so an interrupted
+call is replayed by `retry` with the same idempotency key.
+
+Who may use them depends on the task's `origin`, which `tasks show` prints
+(`Origin:` in the human output, `data.origin` in `--json`). An agent session may
+use all four on a task whose origin is `agent` or `service` (for example canary
+or e2e tasks) without any project delegation. On a `human`-origin task an agent
+may only `cancel`, and only when the project delegates `agent_rule_editing`;
+archive, restore and delete there are human gates. Revert tasks are human-only
+for every action whatever their origin. Humans may use all four on any task.
+The service also refuses, for every actor: `task_revision_changed` (reload with
+`tasks show`), `task_attempt_protected` (a live attempt owns the task),
+`task_workflow_protected` (review or integration work is active),
+`task_archived` (restore the task first), `task_lifecycle_invalid` (the state
+does not permit the action) and `task_history_protected` (`delete` of a task
+with attempts, dependencies, objective links or workflow links: archive it
+instead). The human output adds a one-line hint for each of these codes.
+
+A
 refusal that only a human can clear carries `details.required_actor: "human"`
 and a `details.gate` name: report it instead of retrying.
 
