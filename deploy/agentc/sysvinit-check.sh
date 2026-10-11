@@ -109,7 +109,7 @@ check_start_and_restart() {
 # stop: drain, then the group kill takes the TERM-ignoring launch.
 check_stop() {
   "$T/agentc-run" stop
-  check "stop let the loop drain" grep -q drained "$T/drained"
+  check "stop let the loop drain" grep -qs drained "$T/drained"
   check "stop killed the leftover launch in the group" within 5 dead "$T/launch"
   check "stop removed the pidfile" test ! -e "$PIDFILE"
   check "status reports stopped" bash -c "! '$T/agentc-run' status"
@@ -124,7 +124,7 @@ check_cron() {
   printf 'AGENTC_CRON_LOG_DIR=%s\n* * * * * root %s --name check --env %s -- /bin/sh -c %s\n' \
     "$T" "$T/agentc-cron" "$T/check.env" "'echo value=\$CHECK_VALUE'" > "$CRON_CHECK"
   echo "waiting up to 70 s for cron..."
-  check "cron ran agentc-cron with the environment file" within 70 grep -q "value=from env file" "$T/agentc-check.log"
+  check "cron ran agentc-cron with the environment file" within 70 grep -qs "value=from env file" "$T/agentc-check.log"
   rm -f -- "$CRON_CHECK"
 }
 
