@@ -64,14 +64,14 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-/// Mechanical reverts of project `p` awaiting a candidate: open, unclaimed,
-/// and with no candidate in review or integration.
+/// Mechanical reverts of project `p` awaiting a candidate: open, not archived,
+/// unclaimed, and with no candidate in review or integration.
 macro_rules! pending_sql {
     () => {
         "SELECT tr.*,t.title,t.priority,r.t0,r.c,r.landing_range_json,s.repository_url,s.target_branch \
          FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id JOIN integrator_results r ON r.id=tr.result_id \
          JOIN submissions s ON s.id=tr.submission_id LEFT JOIN workflow_subjects ws ON ws.task_id=tr.task_id \
-         WHERE tr.project_id=? AND tr.mode='mechanical' AND t.lifecycle='open' AND t.current_attempt_id IS NULL \
+         WHERE tr.project_id=? AND tr.mode='mechanical' AND t.lifecycle='open' AND t.archived_at IS NULL AND t.current_attempt_id IS NULL \
          AND (ws.phase IS NULL OR ws.phase='revision_needed')"
     };
 }
@@ -124,7 +124,7 @@ pub(crate) async fn reverted_landings(
     c: &mut SqliteConnection,
     p: &str,
 ) -> Result<Vec<Value>, AppError> {
-    let rows = sqlx::query("SELECT tr.task_id,tr.result_id,r.landing_range_json,s.repository_url,s.target_branch FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id JOIN integrator_results r ON r.id=tr.result_id JOIN submissions s ON s.id=r.submission_id WHERE tr.project_id=? AND t.lifecycle!='canceled' ORDER BY tr.created_at,tr.task_id")
+    let rows = sqlx::query("SELECT tr.task_id,tr.result_id,r.landing_range_json,s.repository_url,s.target_branch FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id JOIN integrator_results r ON r.id=tr.result_id JOIN submissions s ON s.id=r.submission_id WHERE tr.project_id=? AND t.lifecycle!='canceled' AND (t.archived_at IS NULL OR t.lifecycle='done') ORDER BY tr.created_at,tr.task_id")
         .bind(p).fetch_all(&mut *c).await?;
     rows.iter()
         .map(|row| {
@@ -155,7 +155,7 @@ async fn reverted_hits(
     p: &str,
     noop: &NoOp<'_>,
 ) -> Result<Vec<(String, String)>, AppError> {
-    Ok(sqlx::query_as("SELECT DISTINCT tr.result_id,j.value FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id JOIN integrator_results r ON r.id=tr.result_id JOIN submissions s ON s.id=r.submission_id, json_each(r.landing_range_json) j WHERE tr.project_id=? AND t.lifecycle!='canceled' AND s.repository_url=? AND s.target_branch=? AND j.value IN (SELECT value FROM json_each(?)) ORDER BY tr.result_id,j.value")
+    Ok(sqlx::query_as("SELECT DISTINCT tr.result_id,j.value FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id JOIN integrator_results r ON r.id=tr.result_id JOIN submissions s ON s.id=r.submission_id, json_each(r.landing_range_json) j WHERE tr.project_id=? AND t.lifecycle!='canceled' AND (t.archived_at IS NULL OR t.lifecycle='done') AND s.repository_url=? AND s.target_branch=? AND j.value IN (SELECT value FROM json_each(?)) ORDER BY tr.result_id,j.value")
         .bind(p).bind(noop.repository_url).bind(noop.target_branch)
         .bind(serde_json::to_string(&noop.commits)?).fetch_all(&mut *c).await?)
 }
@@ -214,7 +214,7 @@ pub(crate) async fn ensure_not_reverted_in_history(
 
 /// A revert task of project `p` with its task state and subject phase.
 async fn load_revert(c: &mut SqliteConnection, p: &str, id: &str) -> Result<SqliteRow, AppError> {
-    sqlx::query("SELECT tr.*,t.title,t.lifecycle,t.current_attempt_id,t.revision,t.generation,t.acceptance_json,ws.phase,ws.current_submission_id FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id LEFT JOIN workflow_subjects ws ON ws.task_id=tr.task_id WHERE tr.task_id=? AND tr.project_id=?")
+    sqlx::query("SELECT tr.*,t.title,t.lifecycle,t.archived_at,t.current_attempt_id,t.revision,t.generation,t.acceptance_json,ws.phase,ws.current_submission_id FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id LEFT JOIN workflow_subjects ws ON ws.task_id=tr.task_id WHERE tr.task_id=? AND tr.project_id=?")
         .bind(id).bind(p).fetch_optional(&mut *c).await?.ok_or_else(AppError::not_found)
 }
 
@@ -263,7 +263,9 @@ fn retired_refusal(row: &SqliteRow) -> Option<(&'static str, &'static str)> {
     if row.get::<String, _>("mode") != "mechanical" {
         return Some(("revert_not_mechanical", NOT_MECHANICAL_MESSAGE));
     }
-    if row.get::<String, _>("lifecycle") != "open" {
+    if row.get::<String, _>("lifecycle") != "open"
+        || row.get::<Option<i64>, _>("archived_at").is_some()
+    {
         return Some(("revert_not_open", NOT_OPEN_MESSAGE));
     }
     None
@@ -672,7 +674,9 @@ async fn convert_once(
     if revert.get::<String, _>("mode") == "not_mechanical" {
         return replay_conversion(&revert, input);
     }
-    if revert.get::<String, _>("lifecycle") != "open" {
+    if revert.get::<String, _>("lifecycle") != "open"
+        || revert.get::<Option<i64>, _>("archived_at").is_some()
+    {
         return Err(AppError::conflict("revert_not_open", NOT_OPEN_MESSAGE));
     }
     withdraw_candidate(m, p, &revert).await?;

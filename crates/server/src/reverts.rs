@@ -175,10 +175,28 @@ pub(crate) async fn revert_target(
     Ok(RevertTarget { row })
 }
 
-/// The open (planned or open) revert of `result`, if one exists.
+/// The open (planned or open, not archived) revert of `result`, if one exists.
 async fn open_revert(c: &mut SqliteConnection, result: &str) -> Result<Option<String>, AppError> {
-    Ok(sqlx::query_scalar("SELECT tr.task_id FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id WHERE tr.result_id=? AND t.lifecycle IN ('planned','open') ORDER BY tr.created_at LIMIT 1")
+    Ok(sqlx::query_scalar("SELECT tr.task_id FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id WHERE tr.result_id=? AND t.lifecycle IN ('planned','open') AND t.archived_at IS NULL ORDER BY tr.created_at LIMIT 1")
         .bind(result).fetch_optional(&mut *c).await?)
+}
+
+/// Refuses restoring an archived revert task while another open revert of
+/// its result exists; other tasks pass.
+pub(crate) async fn ensure_restorable(
+    c: &mut SqliteConnection,
+    task: &str,
+) -> Result<(), AppError> {
+    let other: Option<String> = sqlx::query_scalar("SELECT o.task_id FROM task_reverts tr JOIN task_reverts o ON o.result_id=tr.result_id AND o.task_id!=tr.task_id JOIN tasks t ON t.id=o.task_id WHERE tr.task_id=? AND t.lifecycle IN ('planned','open') AND t.archived_at IS NULL ORDER BY o.created_at LIMIT 1")
+        .bind(task).fetch_optional(&mut *c).await?;
+    match other {
+        None => Ok(()),
+        Some(other) => Err(AppError::conflict(
+            "revert_exists",
+            "An open revert of this result already exists.",
+        )
+        .with_details(json!({"revert_task_id": other}))),
+    }
 }
 
 /// Refuses a second open revert of the same result.
@@ -420,9 +438,10 @@ pub(crate) async fn revert_view(c: &mut SqliteConnection, task: &str) -> Result<
     Ok(value)
 }
 
-/// The newest revert of task `task` whose task is not canceled, or null.
+/// The newest revert of task `task` whose task is not canceled and not archived
+/// before it landed, or null.
 pub(crate) async fn reverted_by(c: &mut SqliteConnection, task: &str) -> Result<Value, AppError> {
-    let id: Option<String> = sqlx::query_scalar("SELECT tr.task_id FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id WHERE tr.original_task_id=? AND t.lifecycle!='canceled' ORDER BY tr.created_at DESC,tr.task_id DESC LIMIT 1")
+    let id: Option<String> = sqlx::query_scalar("SELECT tr.task_id FROM task_reverts tr JOIN tasks t ON t.id=tr.task_id WHERE tr.original_task_id=? AND t.lifecycle!='canceled' AND (t.archived_at IS NULL OR t.lifecycle='done') ORDER BY tr.created_at DESC,tr.task_id DESC LIMIT 1")
         .bind(task).fetch_optional(&mut *c).await?;
     Ok(json!(id))
 }

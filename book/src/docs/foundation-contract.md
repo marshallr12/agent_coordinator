@@ -127,8 +127,8 @@ Additional implemented routes:
   caller cannot supply or change the origin. On a task whose origin is `human`
   an agent may only `cancel`, and only when the project sets
   `agent_rule_editing`; otherwise archive, restore, delete and that cancel are
-  the `task_<action>` human gate. Reverts stay human-only for every action
-  (`revert_cancel` gate) whatever their origin. The same guards apply to every
+  the `task_<action>` human gate. A revert task follows the same rule by its own origin
+  (its creator's, or `service` for an automatic revert). The same guards apply to every
   actor: `task_revision_changed`, `task_attempt_protected`,
   `task_workflow_protected` (active review/integration work and the
   review/integration activity tasks themselves), `task_archived` (restore

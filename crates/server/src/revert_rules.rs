@@ -9,9 +9,10 @@
 //! are recorded contributors, so they cannot review it. A review that requests changes on a mechanical revert rejects
 //! the decision to revert: the revert task is canceled with the review's
 //! rationale. Once the integrator reports it cannot revert mechanically the
-//! task is ordinary implementation work and none of these rules apply,
-//! except that, as for every revert task, only a human cancels or archives
-//! it.
+//! task is ordinary implementation work and none of these rules apply.
+//! Canceling, archiving, restoring or deleting a revert follows the origin
+//! rule for any task; the integrator ignores a revert that
+//! is canceled or archived.
 use crate::{error::AppError, mutation::Mutation, reverts::AWAITING_CANDIDATE};
 use serde_json::json;
 use sqlx::SqliteConnection;
@@ -71,33 +72,6 @@ pub(crate) async fn ensure_not_mechanical(
         ));
     }
     Ok(())
-}
-
-/// Refuses an agent canceling, archiving, restoring or deleting a revert task,
-/// whatever its mode, with the `revert_cancel` human gate; humans pass. Reverts
-/// have origin `service`, so this guard, not the origin, keeps them human-only.
-pub(crate) async fn ensure_human_revert_exit(
-    c: &mut SqliteConnection,
-    actor: &crate::auth::Actor,
-    (p, task): (&str, &str),
-    action: &str,
-) -> Result<(), AppError> {
-    if actor.kind == "human" || !matches!(action, "cancel" | "archive" | "restore" | "delete") {
-        return Ok(());
-    }
-    let n: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM task_reverts WHERE project_id=? AND task_id=?")
-            .bind(p)
-            .bind(task)
-            .fetch_one(&mut *c)
-            .await?;
-    if n == 0 {
-        return Ok(());
-    }
-    Err(AppError::human_gate(
-        "revert_cancel",
-        "Only a human cancels, archives, restores or deletes a revert task.",
-    ))
 }
 
 /// Blocks a reopened mechanical revert again until the integrator records

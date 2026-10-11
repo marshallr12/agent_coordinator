@@ -5761,47 +5761,183 @@ async fn s5_review_push_authority_waits_for_the_privilege_gate() {
     }
 }
 
-// P4 S5 review: only a human cancels a revert task, even on a project that
-// delegates canceling to agents and for the reverted task's author.
-#[tokio::test]
-async fn s5_review_only_a_human_cancels_a_revert() {
-    let f = Fixture::new().await;
-    let (p, _, result, _) = published_subject(&f, "s5-revert-cancel").await;
-    let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
-    let path = format!(
-        "/api/v1/projects/{p}/tasks/{}/cancel",
-        revert["id"].as_str().unwrap()
-    );
-    let body = json!({"expected_revision":revert["revision"],"reason":"not needed"});
-    for agent in [&f.a, &f.b] {
-        let (status, v) = f.call(agent, "POST", &path, body.clone()).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
-        assert_eq!(v["error"]["details"]["gate"], "revert_cancel", "{v}");
-        assert_eq!(v["error"]["details"]["required_actor"], "human", "{v}");
-    }
-    // Archive, restore and delete are human-only too, although a revert's origin is `service`.
+/// The path of lifecycle `action` of revert task `revert`.
+fn revert_action_path(p: &str, revert: &Value, action: &str) -> String {
     let task = format!(
         "/api/v1/projects/{p}/tasks/{}",
         revert["id"].as_str().unwrap()
     );
-    for action in ["archive", "restore", "delete"] {
-        for agent in [&f.a, &f.b] {
-            let (status, v) = if action == "delete" {
-                f.call(agent, "DELETE", &task, body.clone()).await
-            } else {
-                f.call(agent, "POST", &format!("{task}/{action}"), body.clone())
-                    .await
-            };
-            assert_eq!(status, StatusCode::FORBIDDEN, "{action}: {v}");
-            assert_eq!(
-                v["error"]["details"]["gate"], "revert_cancel",
-                "{action}: {v}"
-            );
-        }
+    match action {
+        "delete" => task,
+        _ => format!("{task}/{action}"),
     }
-    let (status, v) = f.call(&f.admin, "POST", &path, body).await;
+}
+
+/// Applies lifecycle `action` to revert task `revert` as `c` at the task's
+/// current revision.
+async fn revert_action(
+    f: &Fixture,
+    c: &Caller,
+    (p, revert): (&str, &Value),
+    action: &str,
+) -> (StatusCode, Value) {
+    let revision = fresh_task(f, p, revert).await["revision"].clone();
+    let body = json!({"expected_revision":revision,"reason":"not needed"});
+    let method = if action == "delete" { "DELETE" } else { "POST" };
+    f.call(c, method, &revert_action_path(p, revert, action), body)
+        .await
+}
+
+// An agent cancels a revert it may tidy (agent origin) without any delegation:
+// the `revert_cancel` gate is gone, the revert leaves the integrator's queue
+// and the original's `reverted_by`, and the integrator's candidate or
+// not-mechanical report is refused as not open.
+#[tokio::test]
+async fn an_agent_cancels_a_revert_and_the_integrator_drops_it() {
+    let f = Fixture::new().await;
+    let (p, t, result, i) = published_subject(&f, "revert-agent-cancel").await;
+    let revert = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+    assert_eq!(revert["origin"], "agent", "{revert}");
+    assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], revert["id"]);
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "cancel").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["data"]["lifecycle"], "canceled", "{v}");
+    assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], Value::Null);
+    assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    let expected = (StatusCode::CONFLICT, json!("revert_not_open"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let route = format!("reverts/{}/not-mechanical", revert["id"].as_str().unwrap());
+    let body = json!({"t0":R,"reason":"conflict","evidence":"CONFLICT"});
+    let (status, v) = integrator_post(&f, &i, &p, &route, body).await;
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    // A canceled revert is no longer open: the result can be reverted again,
+    // and the canceled one deleted since it never had a candidate.
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "delete").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let again = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+    assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], again["id"]);
+    assert_eq!(
+        integrator_queue(&f, &i, &p).await["reverts"][0]["task_id"],
+        again["id"]
+    );
+}
+
+// An agent archives a revert: it leaves the queue and takes no candidate, a
+// new revert of the result may be made, and restoring the archived one is
+// refused while that new one is open. Restored alone, it returns to the queue.
+#[tokio::test]
+async fn an_agent_archives_a_revert_and_it_is_not_published() {
+    let f = Fixture::new().await;
+    let (p, t, result, i) = published_subject(&f, "revert-agent-archive").await;
+    let revert = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "archive").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["archived"], true, "{v}");
+    assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], Value::Null);
+    assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    let expected = (StatusCode::CONFLICT, json!("revert_not_open"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "cancel").await;
+    let expected = (StatusCode::CONFLICT, json!("task_archived"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+
+    let again = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "restore").await;
+    let expected = (StatusCode::CONFLICT, json!("revert_exists"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    assert_eq!(v["error"]["details"]["revert_task_id"], again["id"], "{v}");
+    let (status, v) = revert_action(&f, &f.a, (&p, &again), "cancel").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "restore").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], revert["id"]);
+    let queue = integrator_queue(&f, &i, &p).await;
+    assert_eq!(queue["reverts"][0]["task_id"], revert["id"], "{queue}");
+}
+
+// A revert whose candidate was sent back is open again for a new candidate;
+// an agent canceling it (the project delegates canceling, and this revert is
+// human-origin) then ends all further work: nothing is queued and a retried
+// candidate for the same tip is refused.
+#[tokio::test]
+async fn a_canceled_sent_back_revert_takes_no_retried_candidate() {
+    let f = Fixture::new().await;
+    let (p, t, result, i) = published_subject(&f, "revert-agent-cancel-retry").await;
+    let revert = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    let body = candidate_body(R, &candidate(0xfeed));
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let first = v["data"]["candidate_submission_id"].clone();
+    // Under review the revert is protected.
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "cancel").await;
+    let expected = (StatusCode::CONFLICT, json!("task_workflow_protected"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let (status, v) = conflict_revise(&f, &i, &p, &first, None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        integrator_queue(&f, &i, &p).await["reverts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "cancel").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
+    assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], Value::Null);
+    let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
+    let expected = (StatusCode::CONFLICT, json!("revert_not_open"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
+}
+
+// Every other lifecycle guard still applies to a revert, and a human-origin
+// revert keeps the origin rule (no `revert_cancel` gate any more): an agent
+// cannot archive, restore or delete it, but may cancel it where the project
+// delegates canceling.
+#[tokio::test]
+async fn the_other_lifecycle_guards_still_apply_to_reverts() {
+    let f = Fixture::new().await;
+    let (p, _, result, _) = published_subject(&f, "revert-guards").await;
+    let human = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
+    assert_eq!(human["origin"], "human", "{human}");
+    for (action, gate) in [
+        ("archive", "task_archive"),
+        ("restore", "task_restore"),
+        ("delete", "task_delete"),
+    ] {
+        let (status, v) = revert_action(&f, &f.a, (&p, &human), action).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{action}: {v}");
+        assert_eq!(v["error"]["details"]["gate"], gate, "{action}: {v}");
+        assert_eq!(
+            v["error"]["details"]["required_actor"], "human",
+            "{action}: {v}"
+        );
+    }
+    let (status, v) = revert_action(&f, &f.a, (&p, &human), "cancel").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["lifecycle"], "canceled", "{v}");
+
+    // An agent revert: a stale revision, restoring a task that is not
+    // archived and archiving twice are refused as for any task.
+    let revert = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+    let stale = json!({"expected_revision":99,"reason":"not needed"});
+    let path = revert_action_path(&p, &revert, "cancel");
+    let (status, v) = f.call(&f.a, "POST", &path, stale).await;
+    let expected = (StatusCode::CONFLICT, json!("task_revision_changed"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "restore").await;
+    let expected = (StatusCode::CONFLICT, json!("task_lifecycle_invalid"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "archive").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "archive").await;
+    let expected = (StatusCode::CONFLICT, json!("task_archived"));
+    assert_eq!(refusal(status, &v), expected, "{v}");
 }
 
 // P4 S5 review: once a revise sends a mechanical revert's candidate back

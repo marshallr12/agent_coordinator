@@ -305,7 +305,10 @@ results. Instruction version 9 adds agent `revise`, `unblock` and `cancel` under
 project's delegation switches and the `required_actor: "human"` labels. Instruction
 version 10 adds the agent `archive`, `restore` and `delete` guidance: an agent session
 may use them, and `cancel`, on tasks whose origin is `agent` or `service`, and
-`tasks show` prints the origin. Existing
+`tasks show` prints the origin. Instruction version 11 drops the human-only
+exception for revert tasks: they follow the same origin rule (an agent or
+service-origin revert may be canceled, archived, restored and deleted by an
+agent). Existing
 sessions must fetch and acknowledge the new instructions before new claims.
 
 JSON requests default to 1 MiB and can be configured lower; artifact bytes use a

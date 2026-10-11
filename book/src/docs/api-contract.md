@@ -661,11 +661,16 @@ limit applies to reverts.
   claiming or unblocking the task is refused with `revert_awaits_integrator`,
   it is skipped by next-eligible claims, and a revise of its candidate blocks
   it again and returns it to the queue's `reverts`. Apart from the
-  integrator's candidate or not-mechanical report, its only exit is a human
-  canceling the task. Canceling, archiving, restoring or deleting any revert
-  task is human-only: an agent gets the `revert_cancel` gate even though a
-  revert's origin is `service` and even where the project delegates canceling
-  to agents. The revert task stays
+  integrator's candidate or not-mechanical report, its only exit is canceling
+  the task. A revert task follows the task lifecycle rules by its own origin
+  (its creator's, or `service` for an automatic revert): an agent session may
+  cancel, archive, restore or delete an agent- or service-origin revert under
+  the same lifecycle guards as any other task, while a human-origin revert
+  needs the human (or `agent_rule_editing` for cancel). A canceled or archived
+  revert leaves the integrator's queue and takes no candidate
+  (`revert_not_open`), and the original's `reverted_by` no longer names it;
+  restoring an archived revert is refused with `revert_exists` while another
+  open revert of the result exists. The revert task stays
   blocked while it waits for its candidate and is listed under the queue's
   `reverts`. The integrator computes the candidate
   itself on the target's current tip X, in a disposable worktree:

@@ -181,27 +181,29 @@ enum Command {
     ///
     /// Who may: a human always. An agent session may cancel a task whose origin
     /// is `agent` or `service` (see `tasks show`); on a `human`-origin task it
-    /// needs the project's agent_rule_editing delegation. Reverting tasks are
-    /// human-only. Refused while an attempt or review/integration work is active.
+    /// needs the project's agent_rule_editing delegation. A revert task follows
+    /// the same rule by its own origin (its creator's, or `service` for an
+    /// automatic revert). Refused while an attempt or review/integration work is
+    /// active.
     Cancel(lifecycle::CancelArgs),
     /// Archive a task so it leaves the queue but keeps its records.
     ///
     /// Who may: a human always. An agent session may archive only a task whose
-    /// origin is `agent` or `service`; a `human`-origin task or any revert task
-    /// is a human gate. Refused while an attempt or review/integration work is
-    /// active.
+    /// origin is `agent` or `service` (revert tasks included, by their own origin);
+    /// a `human`-origin task is a human gate. Refused while an attempt or review/integration
+    /// work is active.
     Archive(lifecycle::LifecycleArgs),
     /// Restore an archived task to the queue.
     ///
     /// Who may: a human always. An agent session may restore only a task whose
-    /// origin is `agent` or `service`; a `human`-origin task or any revert task
-    /// is a human gate.
+    /// origin is `agent` or `service` (revert tasks included); a `human`-origin
+    /// task is a human gate.
     Restore(lifecycle::LifecycleArgs),
     /// Delete a canceled or planned task that has no history.
     ///
     /// Who may: a human always. An agent session may delete only a task whose
-    /// origin is `agent` or `service`; a `human`-origin task or any revert task
-    /// is a human gate. Refused with `task_history_protected` when the task has
+    /// origin is `agent` or `service` (revert tasks included); a `human`-origin
+    /// task is a human gate. Refused with `task_history_protected` when the task has
     /// attempts, dependencies, objective links or workflow links: archive it.
     Delete(lifecycle::LifecycleArgs),
     /// Record an explicit recovery inspection and disposition.
