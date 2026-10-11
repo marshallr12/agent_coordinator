@@ -4,14 +4,22 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood running on production `60eda26` (2026-10-11 ~00:50 UTC, workflow on)
+## Current resume point — P6 dogfood running on production `aa05dcb` (2026-10-11 ~13:50 UTC, workflow on)
+
+**Deployed `aa05dcb` 2026-10-11 13:43 UTC** (release run `38122931843`, binaries-only, ~8 s down;
+rollback binaries `*-0.1.1-60eda26`, old-binary snapshot `20261011T134244.649Z-b209797f…`; carries
+6cc3f673, 277079ed, 936fce64). Workstation and oracle-1 CLIs at `aa05dcb` (oracle-1 `/opt/agentc/bin`
+supervisor `4bae4145…`, CLI `b86357fb…`; `/usr/local/bin` too). mxmini and MiniAir CLIs still at
+`60eda26` (update them at the mxmini bring-up). d513bc21 now **attempt `f156ead4`, gen 4** (renew.sh
+updated). oracle-1 non-interactive ssh has no cargo on PATH: use `~/.cargo/bin/cargo`. Reclaiming
+after a deploy needs `connect` first (`policy_changed`).
 
 **Next actions, in order — raise these with the owner before any other work:**
-1. **Release:** once task 6cc3f673 (sysvinit host-setup) is `done` on `main` and main's checks are
-   green, tell the owner to dispatch the release (`gh workflow run release.yml --ref main`), then run
-   the deploy drill below with them (release-next/PLAN-next.md; rewrite it for the new commit first).
-   If 6cc3f673 is not done yet, say where it stands (review, revision) and keep monitoring.
-2. **mxmini (U38):** after that release is deployed, bring mxmini up as the second dogfood supervisor:
+1. **Flaky CLI test (task `6db155d4`, P1):** `crates/cli/src/lifecycle.rs` `tests::service` fail ~90%
+   of full-binary runs (session lock WouldBlock, exit 7); it sent 2186dc84 back twice although that
+   task does not touch the CLI. Owner decision pending: make 2186dc84 depend on 6db155d4 (agents lack
+   `task_definition_grant`).
+2. **mxmini (U38):** bring mxmini up as the second dogfood supervisor at production `aa05dcb`:
    host-setup at the production commit with QUIET_HOURS, `[run]` + binding, credentials through the
    owner's own terminal, `sudo deploy/agentc/sysvinit-check.sh`, containment suite, opt in
    (`update-rc.d agentc-run defaults && service agentc-run start`), watch its first claim, then record
