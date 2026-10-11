@@ -973,8 +973,7 @@ does not permit the action) and `task_history_protected` (`delete` of a task
 with attempts, dependencies, objective links or workflow links: archive it
 instead). The human output adds a one-line hint for each of these codes.
 
-A
-refusal that only a human can clear carries `details.required_actor: "human"`
+A refusal that only a human can clear carries `details.required_actor: "human"`
 and a `details.gate` name: report it instead of retrying.
 
 ## Recovery inspection
