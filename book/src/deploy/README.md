@@ -1040,7 +1040,20 @@ with any other content, so to hold the host stopped through the window, write
 something else into the file (`echo owner | sudo tee /var/lib/agentc/kill-switch`).
 Re-running `host-setup.sh` without `QUIET_HOURS` keeps the current window;
 `QUIET_HOURS=` turns quiet hours off and drops a switch they set. It works
-under either init system and needs a cron daemon.
+under either init system; setup fails without a cron daemon.
+
+Two daily jobs need the loop to claim, so keep their start inside the window:
+the end-to-end canary (`E2E_CALENDAR`, default 00:00) would wait for the window
+and time out, and the updater (systemd hosts, 00:00 plus up to an hour) refuses
+to run while any kill switch is set. Setup warns when either starts outside
+`QUIET_HOURS`; `22:00-07:00` covers both. While the updater holds its own
+switch, quiet hours leave it alone, and the loop may claim for up to a minute
+after the updater removes it outside the window, until the next check.
+
+The name follows decision U6 (the host supervises in its owner's quiet hours),
+so the window is when work is allowed. The coordinator's own
+`COORDINATOR_QUIET_HOURS` (see the API contract) is different: it names hours
+removed from the stall clock.
 
 On start, the loop removes terminal runs that an earlier loop left behind,
 so do not keep evidence from hand-run implementer launches under
@@ -1060,7 +1073,8 @@ attention.py canary --url URL --project ID --token-file TOKEN \
 
 `host-setup.sh` installs the script as `/opt/agentc/bin/attention.py` and
 schedules both from systemd timers. A host without systemd runs them from
-`/etc/cron.d/agentc` instead (see [Timers without systemd](#timers-without-systemd)). The canary checks `/healthz`, the supervisor's own `next` call (10 s budget), that the
+`/etc/cron.d/agentc` instead (see [Timers without systemd](#timers-without-systemd)).
+The canary checks `/healthz`, the supervisor's own `next` call (10 s budget), that the
 heartbeat is under 300 s old, and, with `--max-hri`, the HRI count. A failing
 check sends one ntfy page and stays quiet until it recovers; a page that could
 not be delivered exits 2 and is retried by the next run. `NTFY_TOKEN`, when set,
@@ -1579,7 +1593,9 @@ sudo python3 -I /opt/agentc/bin/agentc-update --rollback harness   # claude/code
 Both drain the same way, restore what the last update saved, run preflight (no
 canary) and restart `agentc-run`, and mark the release left as rejected so the
 timer does not reinstall it. With the updater unavailable, do the same by hand:
-`sudo touch /var/lib/agentc/kill-switch`, wait for `heartbeat.json` to show no
+`echo owner | sudo tee /var/lib/agentc/kill-switch` (not `touch`: a switch that
+[quiet hours](#quiet-hours) created stays theirs and goes when the window opens),
+wait for `heartbeat.json` to show no
 `launch`, `sudo systemctl stop agentc-run`, copy each file from
 `/opt/agentc/releases/rollback-core-<time>/bin/` over the one in
 `/opt/agentc/bin` (`sudo install -o root -g root -m 0755 <saved> <live>`; for a
@@ -1708,7 +1724,7 @@ To check that the unit starts after a reboot without claiming anything,
 set the kill switch first, then reboot:
 
 ```sh
-sudo touch /var/lib/agentc/kill-switch
+echo owner | sudo tee /var/lib/agentc/kill-switch   # not touch: see Quiet hours
 sudo systemctl enable agentc-run
 sudo reboot
 # after the reboot:

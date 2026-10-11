@@ -18,15 +18,18 @@ note() {
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) agentc-$NAME: $*"
 }
 
-# Exports each KEY=VALUE line of file $1, skipping blanks and comments and
-# removing one pair of surrounding quotes, like systemd's EnvironmentFile=.
-# Values are taken literally: nothing is expanded or executed.
+# Exports each KEY=VALUE line of file $1 as systemd's EnvironmentFile= reads
+# the plain lines host-setup writes: blanks, comments and lines without "="
+# are skipped, whitespace around the line, the key and the value is trimmed,
+# and one pair of surrounding quotes is removed. Values are taken literally:
+# nothing is expanded or executed. Unlike systemd it does not join lines
+# ending in a backslash or unquote several quoted words.
 load_env() {
   local_line=
-  while IFS= read -r local_line || [ -n "$local_line" ]; do
-    case $local_line in ''|'#'*|';'*) continue ;; esac
-    local_key=${local_line%%=*}
-    local_value=${local_line#*=}
+  while read -r local_line || [ -n "$local_line" ]; do
+    case $local_line in ''|'#'*|';'*) continue ;; *=*) ;; *) note "ignoring line without = in $1"; continue ;; esac
+    local_key=$(printf '%s' "${local_line%%=*}" | sed 's/[[:space:]]*$//')
+    local_value=$(printf '%s' "${local_line#*=}" | sed 's/^[[:space:]]*//')
     case $local_key in ''|[0-9]*|*[!A-Za-z0-9_]*) note "ignoring line in $1: $local_key"; continue ;; esac
     case $local_value in \"*\"|\'*\') local_value=${local_value#?}; local_value=${local_value%?} ;; esac
     export "$local_key=$local_value"

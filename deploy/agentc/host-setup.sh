@@ -1370,9 +1370,16 @@ cron_schedule() {
     weekly) echo "0 0 * * 1" ;;
     *min) n=${value%min}; cron_step "$n" 60 && echo "*/$n * * * *" ;;
     *h) n=${value%h}; cron_step "$n" 24 && echo "0 */$n * * *" ;;
-    '*-*-* '[0-2][0-9]:[0-5][0-9]*) time=${value#'*-*-* '}; echo "$((10#${time:3:2})) $((10#${time:0:2})) * * *" ;;
+    '*-*-* '*) cron_time "${value#'*-*-* '}" ;;
     *) return 1 ;;
   esac
+}
+
+# Prints the cron fields for local time $1 (HH:MM or HH:MM:SS, hour 0-23, and
+# nothing after it: no zone, no second time), or fails.
+cron_time() {
+  [[ $1 =~ ^([01][0-9]|2[0-3]):([0-5][0-9])(:[0-5][0-9])?$ ]] || return 1
+  echo "$((10#${BASH_REMATCH[2]})) $((10#${BASH_REMATCH[1]})) * * *"
 }
 
 # Succeeds when $1 is a positive whole number dividing $2.
@@ -1447,7 +1454,7 @@ install_cron_jobs() {
 remove_cron_jobs() {
   local name
   rm -f -- "$CRON_FILE" "$CRON_RUNNER"
-  for name in canary digest e2e-canary-claude e2e-canary-codex; do rm -f -- "/var/log/agentc-$name.log"; done
+  for name in canary digest "${E2E_KNOWN_HARNESSES[@]/#/e2e-canary-}"; do rm -f -- "/var/log/agentc-$name.log"; done
 }
 
 # Installs agentc-quiet-hours, then applies QUIET_HOURS when it is set: a
@@ -1459,11 +1466,45 @@ install_quiet_hours() {
   install -o root -g root -m 0755 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/quiet-hours.sh" "$QUIET_SCRIPT"
   [ -n "${QUIET_HOURS+set}" ] || return 0
   if [ -z "$QUIET_HOURS" ]; then quiet_hours_off; return 0; fi
+  command -v cron >/dev/null || command -v crond >/dev/null ||
+    { echo "quiet hours need a cron daemon to run $QUIET_FILE; install cron first" >&2; exit 1; }
   "$QUIET_SCRIPT" "$QUIET_HOURS" "$KILL_SWITCH"
   quiet_hours_cron | install -o root -g root -m 0644 /dev/stdin "$QUIET_FILE"
-  command -v cron >/dev/null || command -v crond >/dev/null ||
-    echo "warning: no cron daemon found; quiet hours need one to run $QUIET_FILE" >&2
   echo "quiet hours: the supervisor claims only $QUIET_HOURS (local time)"
+  quiet_hours_conflicts
+}
+
+# Warns when a daily job that needs claiming starts outside the window: the
+# end-to-end canary's task would wait for the window and time out, and the
+# updater refuses to run while any kill switch is set.
+quiet_hours_conflicts() {
+  local at
+  if e2e_ready && at=$(calendar_start "$E2E_CALENDAR") && ! claims_at "$at"; then
+    echo "warning: the end-to-end canary starts at $at, outside QUIET_HOURS $QUIET_HOURS; it will time out and page (set E2E_CALENDAR inside the window)" >&2
+  fi
+  if has_systemd && [ "$UPDATE_TIMER" = 1 ] && at=$(calendar_start "$UPDATE_CALENDAR") && ! claims_at "$at"; then
+    echo "warning: the updater starts at $at (up to an hour later), outside QUIET_HOURS $QUIET_HOURS; it refuses to run while the kill switch is set" >&2
+  fi
+}
+
+# Prints the HH:MM a daily calendar ($1) starts at, or fails for other kinds.
+calendar_start() {
+  local fields minute hour rest
+  fields=$(cron_schedule "$1") || return 1
+  read -r minute hour rest <<< "$fields"
+  [[ $minute =~ ^[0-9]+$ && $hour =~ ^[0-9]+$ && $rest == "* * *" ]] || return 1
+  printf '%02d:%02d\n' "$hour" "$minute"
+}
+
+# Succeeds when local time $1 lies inside QUIET_HOURS (asked of the installed
+# script with a throwaway switch, so the window logic lives in one place).
+claims_at() {
+  local dir status=0
+  dir=$(mktemp -d)
+  QUIET_HOURS_NOW=$1 "$QUIET_SCRIPT" "$QUIET_HOURS" "$dir/switch" || status=$?
+  if [ "$status" = 0 ] && [ ! -e "$dir/switch" ]; then status=0; else status=1; fi
+  rm -rf -- "$dir"
+  return "$status"
 }
 
 # The every-minute cron entry for the configured window.
@@ -1552,9 +1593,13 @@ install_run_sysv() {
 # and stops before them. The wrapper restarts the loop 30 s after a crash and
 # passes SIGTERM on for the drain; after 120 s (systemd's TimeoutStopSec) it
 # is killed, and then whatever is left in its process group (start-stop-daemon
-# --background starts a new session for it), like KillMode=mixed.
+# --background starts a new session for it). Unlike KillMode=mixed this does
+# not reach launches, which the loop starts in their own process groups: the
+# loop stops them while draining, and the next loop start kills any left
+# behind. Every start-stop-daemon call also matches the wrapper's process
+# name, so a stale pidfile whose pid was reused never names another process.
 run_sysv_script() {
-  local pid=/run/agentc-run.pid log=/var/log/agentc-run.log
+  local pid=/run/agentc-run.pid log=/var/log/agentc-run.log match="--name agentc-run-sysv"
   cat <<EOF
 #!/bin/sh
 ### BEGIN INIT INFO
@@ -1566,21 +1611,29 @@ run_sysv_script() {
 # Short-Description: agentc-run (agentc live supervisor loop)
 ### END INIT INFO
 case "\$1" in
-  start) start-stop-daemon --start --background --make-pidfile --pidfile $pid \\
+  start) start-stop-daemon --start --oknodo --background --make-pidfile --pidfile $pid $match \\
            --startas /bin/sh -- -c 'exec $RUN_WRAPPER $PREFIX/bin/agentc-supervisor 30 >>$log 2>&1' ;;
-  stop) # The group is looked up, not assumed: start-stop-daemon's session
-        # leader is an intermediate fork, not the pid it records. It is used
-        # only when this stop found and ended the wrapper (never for a stale
-        # pidfile's recycled pid).
-        group=\$(ps -o pgid= -p "\$(cat $pid 2>/dev/null)" 2>/dev/null | tr -d ' ')
-        if start-stop-daemon --stop --pidfile $pid --retry TERM/120/KILL/5 && [ -n "\$group" ]; then
-          kill -KILL -- "-\$group" 2>/dev/null
-        fi
-        rm -f $pid ;;
+$(run_sysv_stop "$pid" "$match")
   restart|force-reload) "\$0" stop; "\$0" start ;;
-  status) start-stop-daemon --status --pidfile $pid ;;
+  status) start-stop-daemon --status --pidfile $pid $match ;;
   *) echo "usage: \$0 {start|stop|restart|status}"; exit 2 ;;
 esac
+EOF
+}
+
+# The init script's stop branch for pidfile $1 and process match $2. The
+# process group is looked up, not assumed (start-stop-daemon's session leader
+# is an intermediate fork, not the pid it records), only from a process that
+# really is the wrapper, and killed only after this stop ended the wrapper.
+run_sysv_stop() {
+  cat <<EOF
+  stop) set -- \$(ps -o pgid=,comm= -p "\$(cat $1 2>/dev/null)" 2>/dev/null)
+        group=; [ "\${2:-}" != agentc-run-sysv ] || group=\$1
+        # dash's kill takes no "--": the negative pid names the group itself.
+        if start-stop-daemon --stop --pidfile $1 $2 --retry TERM/120/KILL/5 && [ -n "\$group" ]; then
+          kill -KILL "-\$group" 2>/dev/null
+        fi
+        rm -f $1 ;;
 EOF
 }
 

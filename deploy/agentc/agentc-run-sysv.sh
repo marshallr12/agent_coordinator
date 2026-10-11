@@ -29,6 +29,8 @@ note() {
 run_once() {
   "$SUPERVISOR" run &
   CHILD=$!
+  # A stop that arrived between the fork and CHILD=$! found no child to pass on to.
+  [ -z "$STOPPING" ] || kill -TERM "$CHILD" 2>/dev/null || true
   STATUS=0
   wait "$CHILD" || STATUS=$?
   while kill -0 "$CHILD" 2>/dev/null; do

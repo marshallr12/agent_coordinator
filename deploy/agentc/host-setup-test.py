@@ -7,6 +7,7 @@ Runs without root or systemd: it sources the script (which then defines its
 functions and does nothing else) and checks the unit files it would write, the
 environment file and the --uninstall list.
 """
+import os
 import subprocess
 import tempfile
 import time
@@ -455,12 +456,52 @@ class SysvRunScript(unittest.TestCase):
             f.write(script); f.flush()
             subprocess.run(["sh", "-n", f.name], check=True)
 
-    def test_start_runs_the_wrapper_and_stop_drains_then_kills_the_group(self):
+    def test_start_runs_the_wrapper_and_every_call_matches_its_process_name(self):
         script = bash("run_sysv_script")
         self.assertIn("exec /opt/agentc/bin/agentc-run-sysv /opt/agentc/bin/agentc-supervisor 30 >>/var/log/agentc-run.log", script)
         self.assertIn("--retry TERM/120/KILL/5", script)
-        self.assertIn('group=$(ps -o pgid= -p "$(cat /run/agentc-run.pid', script)
-        self.assertIn('if start-stop-daemon --stop --pidfile /run/agentc-run.pid --retry TERM/120/KILL/5 && [ -n "$group" ]', script)
+        for action in ("--start --oknodo", "--stop", "--status"):
+            line = next(l for l in script.splitlines() if f"start-stop-daemon {action}" in l)
+            self.assertIn("--name agentc-run-sysv", line, action)
+        # dash's kill rejects "--"; the group is named by its negative pid.
+        self.assertIn('kill -KILL "-$group"', script)
+        self.assertNotIn("kill -KILL --", script)
+
+    @unittest.skipUnless(Path("/sbin/start-stop-daemon").exists(), "needs start-stop-daemon")
+    def test_the_script_drains_kills_the_leftover_group_and_ignores_a_reused_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            initd = self.simulated_init_script(d)
+            self.assertEqual(run(["sh", str(initd), "start"]).returncode, 0)
+            RunWrapper.wait_for(self, d / "launch")
+            self.assertEqual(run(["sh", str(initd), "status"]).returncode, 0)
+            self.assertEqual(run(["sh", str(initd), "start"]).returncode, 0, "a second start is not an error")
+            self.assertEqual(run(["sh", str(initd), "stop"]).returncode, 0)
+            self.assertEqual((d / "drained").read_text(), "drained\n")
+            launch = int((d / "launch").read_text())
+            RunWrapper.wait_until(self, lambda: not Path(f"/proc/{launch}").exists())
+            self.assertNotEqual(run(["sh", str(initd), "status"]).returncode, 0)
+            (d / "pid").write_text(f"{os.getpid()}\n")  # a stale pidfile naming another process
+            self.assertNotEqual(run(["sh", str(initd), "status"]).returncode, 0)
+            run(["sh", str(initd), "stop"])
+            self.assertTrue(Path(f"/proc/{os.getpid()}").exists())
+
+    def simulated_init_script(self, d):
+        """The real init script with its pidfile and log moved into `d`, running
+        the wrapper against a fake loop that drains on SIGTERM and leaves a
+        TERM-ignoring child in its process group."""
+        (d / "bin").mkdir()
+        (d / "agentc-run-sysv").write_text(WRAPPER.read_text())
+        (d / "agentc-run-sysv").chmod(0o755)
+        fake = d / "bin" / "agentc-supervisor"
+        fake.write_text(f"#!/bin/sh\nsh -c 'trap \"\" TERM; echo $$ > {d}/launch; exec sleep 600' &\n"
+                        f"trap 'sleep 1; echo drained > {d}/drained; exit 0' TERM\nwhile :; do sleep 0.1; done\n")
+        fake.chmod(0o755)
+        script = bash(f'PREFIX="{d}"; RUN_WRAPPER="{d}/agentc-run-sysv"; run_sysv_script')
+        script = (script.replace("/run/agentc-run.pid", f"{d}/pid").replace("/var/log/agentc-run.log", f"{d}/log")
+                  .replace("start-stop-daemon", "/sbin/start-stop-daemon"))
+        (d / "initd").write_text(script)
+        return d / "initd"
 
     def test_without_systemd_the_script_is_installed_but_never_enabled_or_started(self):
         self.assertIn("install_run_sysv", bash("declare -f install_run_unit"))
@@ -493,9 +534,13 @@ class RunWrapper(unittest.TestCase):
 
     def wait_for(self, path, seconds=5):
         """Waits until `path` exists, failing after `seconds`."""
+        RunWrapper.wait_until(self, path.exists, seconds)
+
+    def wait_until(self, condition, seconds=5):
+        """Waits until `condition()` is true, failing after `seconds`."""
         deadline = time.monotonic() + seconds
-        while not path.exists():
-            self.assertLess(time.monotonic(), deadline, f"{path} never appeared")
+        while not condition():
+            self.assertLess(time.monotonic(), deadline, "condition never held")
             time.sleep(0.05)
 
     def test_a_crash_restarts_the_loop_and_a_clean_exit_ends_the_wrapper(self):
@@ -540,7 +585,8 @@ class CronJobs(unittest.TestCase):
             self.assertEqual(bash(f"cron_schedule '{value}'").strip(), cron, value)
 
     def test_schedules_without_a_cron_form_fail_setup(self):
-        for value in ("7min", "0min", "5h", "Mon *-*-* 10:00", "monthly", "soon"):
+        for value in ("7min", "0min", "5h", "Mon *-*-* 10:00", "monthly", "soon",
+                      "*-*-* 25:00", "*-*-* 02:00 UTC", "*-*-* 02:00,14:00", "*-*-* 7:00"):
             result = run(["bash", "-c", f'source "$1"; cron_schedule "{value}"', "bash", str(SCRIPT)])
             self.assertNotEqual(result.returncode, 0, value)
         result = run(["bash", "-c", 'source "$1"; CANARY_INTERVAL=7min; check_cron_schedules', "bash", str(SCRIPT)])
@@ -600,13 +646,15 @@ class CronRunner(unittest.TestCase):
     def test_environment_files_load_like_systemd_without_expansion(self):
         envfile = self.dir / "job.env"
         envfile.write_text("# comment\n\nPLAIN=a b c\nQUOTED=\"x y\"\nSINGLE='z'\nLITERAL=$HOME `id`\n"
-                           "# COMMENTED=1\nbad-key=1\nEMPTY=\nLAST=no newline")
+                           "# COMMENTED=1\nbad-key=1\nLONELY\n  SPACED = trimmed  \nEMPTY=\nLAST=no newline")
         result = self.cron("--name", "job", "--env", str(envfile), "--", "env")
         self.assertEqual(result.returncode, 0)
         log = self.log("job")
-        for line in ("PLAIN=a b c", "QUOTED=x y", "SINGLE=z", "LITERAL=$HOME `id`", "EMPTY=", "LAST=no newline"):
+        for line in ("PLAIN=a b c", "QUOTED=x y", "SINGLE=z", "LITERAL=$HOME `id`", "SPACED=trimmed",
+                     "EMPTY=", "LAST=no newline"):
             self.assertIn(f"\n{line}\n", log, line)
         self.assertNotIn("COMMENTED=", log)
+        self.assertNotIn("LONELY=", log)
         self.assertIn("ignoring line", log)
 
     def test_the_exit_status_is_logged_and_returned(self):
@@ -642,12 +690,13 @@ class QuietHours(unittest.TestCase):
         """Applies `window` as if the local time were `now`."""
         return run(["sh", str(QUIET), window, str(self.switch)], env={"PATH": "/usr/bin:/bin", "QUIET_HOURS_NOW": now})
 
-    def install(self, quiet_hours):
-        """Runs install_quiet_hours with paths in self.dir and a fake install."""
+    def install(self, quiet_hours, extra=""):
+        """Runs install_quiet_hours with paths in self.dir, a fake install and
+        shell code `extra` run first."""
         setting = "unset QUIET_HOURS" if quiet_hours is None else f"QUIET_HOURS='{quiet_hours}'"
         code = (f'install() {{ local dst="${{@: -1}}" src="${{@: -2:1}}"; cat "$src" > "$dst"; chmod 0755 "$dst"; }}; '
                 f'QUIET_SCRIPT="{self.dir}/agentc-quiet-hours"; QUIET_FILE="{self.dir}/cron-quiet"; '
-                f'KILL_SWITCH="{self.switch}"; {setting}; install_quiet_hours')
+                f'KILL_SWITCH="{self.switch}"; e2e_ready() {{ false; }}; {extra}{setting}; install_quiet_hours')
         return run(["bash", "-c", f'set -euo pipefail; source "$1"; {code}', "bash", str(SCRIPT)])
 
     def test_outside_the_window_it_holds_the_switch_and_inside_it_releases_it(self):
@@ -695,6 +744,22 @@ class QuietHours(unittest.TestCase):
         self.assertEqual(self.install("").returncode, 0)
         self.assertFalse((self.dir / "cron-quiet").exists())
         self.assertFalse(self.switch.exists())
+
+    def test_install_fails_without_a_cron_daemon_before_touching_the_switch(self):
+        result = self.install("09:00-09:01", extra="command() { [ \"$2\" != cron ] && [ \"$2\" != crond ] && builtin command \"$@\"; }; ")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("need a cron daemon", result.stderr)
+        self.assertFalse(self.switch.exists())
+        self.assertFalse((self.dir / "cron-quiet").exists())
+
+    def test_jobs_that_need_claiming_outside_the_window_are_warned_about(self):
+        code = (f'QUIET_SCRIPT="{QUIET}"; e2e_ready() {{ true; }}; has_systemd() {{ true; }}; UPDATE_TIMER=1; ')
+        warned = run(["bash", "-c", f'source "$1"; {code} QUIET_HOURS=09:00-17:00; quiet_hours_conflicts', "bash", str(SCRIPT)])
+        self.assertIn("end-to-end canary starts at 00:00", warned.stderr)
+        self.assertIn("updater starts at 00:00", warned.stderr)
+        quiet = run(["bash", "-c", f'source "$1"; {code} QUIET_HOURS=22:00-07:00; quiet_hours_conflicts', "bash", str(SCRIPT)])
+        self.assertEqual(quiet.stderr, "")
+        self.assertEqual(bash('calendar_start "*-*-* 07:30"').strip(), "07:30")
 
     def test_install_refuses_a_bad_window_before_writing_anything(self):
         self.assertNotEqual(self.install("25:00-07:00").returncode, 0)
