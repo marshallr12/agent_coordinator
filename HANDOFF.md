@@ -17,8 +17,9 @@ after a deploy needs `connect` first (`policy_changed`).
 **Next actions, in order — raise these with the owner before any other work:**
 1. **Flaky CLI test (task `6db155d4`, P1):** `crates/cli/src/lifecycle.rs` `tests::service` fail ~90%
    of full-binary runs (session lock WouldBlock, exit 7); it sent 2186dc84 back twice although that
-   task does not touch the CLI. Owner decision pending: make 2186dc84 depend on 6db155d4 (agents lack
-   `task_definition_grant`).
+   task does not touch the CLI. Owner admitted 6db155d4 (ready, P1, ahead of 2186dc84) and granted
+   task-definition editing to this workstation's agent principal `250802da…` (grant `c9c6152f`), so
+   agents here can now admit/edit tasks. No 2186dc84 dependency (blocked while its submission is open).
 2. **mxmini (U38):** bring mxmini up as the second dogfood supervisor at production `aa05dcb`:
    host-setup at the production commit with QUIET_HOURS, `[run]` + binding, credentials through the
    owner's own terminal, `sudo deploy/agentc/sysvinit-check.sh`, containment suite, opt in
