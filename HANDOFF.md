@@ -6,6 +6,18 @@ execution, and links everything else.
 
 ## Current resume point — P6 dogfood running on production `60eda26` (2026-10-11 ~00:50 UTC, workflow on)
 
+**Next actions, in order — raise these with the owner before any other work:**
+1. **Release:** once task 6cc3f673 (sysvinit host-setup) is `done` on `main` and main's checks are
+   green, tell the owner to dispatch the release (`gh workflow run release.yml --ref main`), then run
+   the deploy drill below with them (release-next/PLAN-next.md; rewrite it for the new commit first).
+   If 6cc3f673 is not done yet, say where it stands (review, revision) and keep monitoring.
+2. **mxmini (U38):** after that release is deployed, bring mxmini up as the second dogfood supervisor:
+   host-setup at the production commit with QUIET_HOURS, `[run]` + binding, credentials through the
+   owner's own terminal, `sudo deploy/agentc/sysvinit-check.sh`, containment suite, opt in
+   (`update-rc.d agentc-run defaults && service agentc-run start`), watch its first claim, then record
+   HRI/cost per serving host and recommend per-host canary coverage (U31/U33).
+   Tracked as planned owner task `47dac763` (depends on 6cc3f673).
+
 **Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
 Ubuntu 26.04, `[run] reviewer = true`, harness claude, kill switch `/var/lib/agentc/kill-switch`
 absent since 18:38Z) claims ready tasks of project `fe95a6c5…` in priority order, implements,
