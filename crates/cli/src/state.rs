@@ -105,6 +105,15 @@ pub struct SessionLock {
     _file: File,
 }
 
+impl Drop for SessionLock {
+    /// Unlocks explicitly: closing the descriptor alone keeps a `flock` held
+    /// while any other process still has a duplicate of the open file
+    /// description, as a child forked by another thread does until its exec.
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self._file);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateAccessStage {
     StateDirectoryCreate,
@@ -885,6 +894,20 @@ mod tests {
         assert!(!format!("{error}").contains("secret"));
         #[cfg(windows)]
         assert!(error.raw_os_error().is_some());
+    }
+
+    #[test]
+    fn dropping_the_lock_releases_it_while_a_forked_child_still_holds_the_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions/state.json");
+        let first = lock(&path).unwrap();
+        // A process forked on another thread holds a duplicate of the open
+        // file description until its exec closes the close-on-exec descriptor.
+        let forked_child = first._file.try_clone().unwrap();
+        drop(first);
+        let relocked = lock(&path);
+        drop(forked_child);
+        assert!(relocked.is_ok(), "{:?}", relocked.err());
     }
 
     #[test]
