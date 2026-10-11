@@ -22,6 +22,10 @@ use tokio::{
 use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
 
+/// Outer bound on waits that are sequenced by notifications or gates. It only
+/// turns a hang into a failure, so it must be far above any loaded host's delay.
+const HANG_GUARD: Duration = Duration::from_secs(60);
+
 /// The `Authorization` header and parsed JSON body of one received request.
 type Received = (Option<String>, Value);
 type Reply = (StatusCode, String, Option<Arc<Semaphore>>);
@@ -79,7 +83,7 @@ impl Mock {
 
     /// Wait for a specific number of requests, failing with a bounded deadline.
     async fn wait_for_hits(&self, expected: usize) {
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(HANG_GUARD, async {
             while self.hits() < expected {
                 self.arrived.notified().await;
             }
@@ -116,23 +120,33 @@ async fn respond(State(mock): State<Mock>, headers: HeaderMap, body: String) -> 
     (status, reply, body)
 }
 
-/// A keyed reranker aimed at `endpoint` with a short test timeout.
+/// A keyed reranker aimed at `endpoint` whose client deadlines are hang guards.
 fn reranker(endpoint: String) -> ContextReranker {
+    reranker_with_timeout(endpoint, HANG_GUARD)
+}
+
+/// A keyed reranker with a chosen total client timeout, for the timeout tests.
+fn reranker_with_timeout(endpoint: String, timeout: Duration) -> ContextReranker {
     let config = ContextRerankConfig {
         api_key: ApiKey::new("test-key".into()),
         endpoint,
-        timeout: Duration::from_millis(300),
+        connect_timeout: HANG_GUARD,
+        timeout,
         ..ContextRerankConfig::default()
     };
     ContextReranker::from_config(&config).unwrap().unwrap()
 }
 
-/// A reranker with a chosen cap and enough time for controlled concurrent calls.
+/// A reranker with a chosen cap. Its client deadlines are hang guards, not
+/// behaviour under test, so a loaded host cannot turn a gated request into a
+/// timeout; only the timeout test uses a short client timeout.
 fn limited_reranker(endpoint: String, max_in_flight: usize) -> ContextReranker {
     let config = ContextRerankConfig {
         api_key: ApiKey::new("test-key".into()),
         endpoint,
         max_in_flight,
+        connect_timeout: HANG_GUARD,
+        timeout: HANG_GUARD,
         ..ContextRerankConfig::default()
     };
     ContextReranker::from_config(&config).unwrap().unwrap()
@@ -157,15 +171,15 @@ fn clocked_reranker(endpoint: String) -> (ContextReranker, ManualClock) {
     (reranker, clock)
 }
 
-/// Run a bounded test attempt over the standard candidates.
+/// Run a hang-guarded test attempt over the standard candidates.
 async fn run_attempt(reranker: &ContextReranker) -> Result<Vec<Value>, Unchanged> {
     let items = items();
     tokio::time::timeout(
-        Duration::from_secs(1),
+        HANG_GUARD,
         reranker.attempt("q", &items, &candidate_positions(&items)),
     )
     .await
-    .expect("test attempt must finish within one second")
+    .expect("test attempt must not hang")
 }
 
 fn successful_body() -> String {
@@ -317,12 +331,14 @@ async fn slow_response_times_out_and_keeps_the_original_order() {
         StatusCode::OK,
         scores_body(&[score(0.0), score(3.0), score(1.0)]),
     );
-    mock.delay = Duration::from_secs(2);
-    let reranker = reranker(mock.spawn().await);
+    // Far longer than the 300 ms client timeout and than a loaded host's
+    // scheduling delay, so only the timeout can end the request early.
+    mock.delay = HANG_GUARD;
+    let reranker = reranker_with_timeout(mock.spawn().await, Duration::from_millis(300));
     let started = Instant::now();
     let reordered = reranker.rerank("q", items()).await;
     assert_eq!(titles(&reordered), ["A", "D", "B", "C"]);
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < mock.delay);
     let items = items();
     let result = reranker
         .attempt("q", &items, &candidate_positions(&items))
@@ -373,6 +389,8 @@ async fn shared_reranker_skips_at_the_default_cap_and_resumes_after_completion()
     let config = ContextRerankConfig {
         api_key: ApiKey::new("test-key".into()),
         endpoint: mock.spawn().await,
+        connect_timeout: HANG_GUARD,
+        timeout: HANG_GUARD,
         ..ContextRerankConfig::default()
     };
     // AppState clones share this same Arc, so their requests share one cap.
@@ -396,7 +414,7 @@ async fn shared_reranker_skips_at_the_default_cap_and_resumes_after_completion()
     assert_eq!(mock.hits(), 4);
     gate.add_permits(4);
     for task in pending {
-        let reordered = tokio::time::timeout(Duration::from_secs(1), task)
+        let reordered = tokio::time::timeout(HANG_GUARD, task)
             .await
             .unwrap()
             .unwrap();
@@ -507,7 +525,7 @@ async fn capacity_is_held_until_the_response_body_finishes() {
     let reranker = Arc::new(limited_reranker(endpoint, 1));
     let shared = reranker.clone();
     let pending = tokio::spawn(async move { shared.rerank("q", items()).await });
-    tokio::time::timeout(Duration::from_secs(1), headers_sent.notified())
+    tokio::time::timeout(HANG_GUARD, headers_sent.notified())
         .await
         .unwrap();
     let items = items();
@@ -525,12 +543,12 @@ async fn capacity_is_held_until_the_response_body_finishes() {
         tokio::task::yield_now().await;
     }
     finish_body.notify_one();
-    let reordered = tokio::time::timeout(Duration::from_secs(1), pending)
+    let reordered = tokio::time::timeout(HANG_GUARD, pending)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(titles(&reordered), ["B", "D", "C", "A"]);
-    tokio::time::timeout(Duration::from_secs(1), server)
+    tokio::time::timeout(HANG_GUARD, server)
         .await
         .unwrap()
         .unwrap();
@@ -1022,6 +1040,12 @@ async fn endpoint_recovery_reorders_the_same_packet_and_logs_private_safe_skip_r
         .with_writer(move || writer.clone())
         .finish();
     let dispatch = tracing::Dispatch::new(subscriber);
+    // With a single live dispatcher, tracing recomputes a callsite's interest
+    // from the *registering thread's* default, so a parallel test registering
+    // the skip callsites without a subscriber caches "never" and drops these
+    // events. A second live dispatcher forces rebuilds to consult every
+    // registered dispatcher, including this one, for the rest of the test.
+    let _keep_registry_multi = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let shared = fixture.clone();
     let pending = tokio::spawn(
         async move { shared.packet(&shared.reranked).await }.with_subscriber(dispatch.clone()),
@@ -1037,7 +1061,7 @@ async fn endpoint_recovery_reorders_the_same_packet_and_logs_private_safe_skip_r
     assert_eq!(mock.hits(), 1);
     gate.add_permits(1);
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), pending)
+        tokio::time::timeout(HANG_GUARD, pending)
             .await
             .unwrap()
             .unwrap(),
