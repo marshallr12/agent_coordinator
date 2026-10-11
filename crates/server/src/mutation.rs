@@ -182,18 +182,38 @@ impl Mutation {
         })
     }
     pub async fn finish(
-        mut self,
+        self,
         data: Value,
         project: Option<&str>,
         kind: &str,
         record_id: &str,
     ) -> Result<Value, AppError> {
+        self.finish_with_event_data(
+            data,
+            &Value::Object(Default::default()),
+            project,
+            kind,
+            record_id,
+        )
+        .await
+    }
+
+    /// Like `finish`, but records `event_data` (small, non-secret fields) in the event.
+    pub async fn finish_with_event_data(
+        mut self,
+        data: Value,
+        event_data: &Value,
+        project: Option<&str>,
+        kind: &str,
+        record_id: &str,
+    ) -> Result<Value, AppError> {
         let encoded = serde_json::to_string(&data)?;
+        let event_encoded = serde_json::to_string(event_data)?;
         sqlx::query("INSERT INTO mutation_receipts(principal_id,operation,key,fingerprint,result_json,created_at,authority_epoch) VALUES(?,?,?,?,?,?,?)")
             .bind(&self.actor.id).bind(&self.operation).bind(&self.key).bind(&self.fingerprint).bind(&encoded).bind(self.now).bind(&self.authority_epoch).execute(&mut *self.tx).await?;
         // Keep audit payloads small and never store credential-bearing response bodies here.
         sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at,credential_class) VALUES(?,?,?,?,?,?,?)")
-            .bind(project).bind(&self.actor.id).bind(kind).bind(record_id).bind("{}").bind(self.now).bind(event_class(&self.actor)).execute(&mut *self.tx).await?;
+            .bind(project).bind(&self.actor.id).bind(kind).bind(record_id).bind(&event_encoded).bind(self.now).bind(event_class(&self.actor)).execute(&mut *self.tx).await?;
         self.tx.commit().await?;
         Ok(data)
     }

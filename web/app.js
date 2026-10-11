@@ -757,7 +757,7 @@
     $('task-attachments-card').classList.toggle('task-attachments-readonly', readOnly);
     const criteria = $('acceptance-list'); clear(criteria); const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
     if (!items.length) add(criteria, el('li', 'muted', 'No acceptance criteria recorded.')); else items.forEach((item) => add(criteria, el('li', '', item)));
-    renderTaskActions(data, task); renderLease(data, task); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
+    renderTaskActions(data, task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
     show($('task-detail-state'), false); show($('task-detail-content'), true);
     loadTaskAttachments(state.projectId, taskId);
   }
@@ -771,6 +771,27 @@
     }
     const dl = el('dl'); const remaining = taskStatus(task) === 'recovery_required' ? 'Ownership ended; recovery required' : current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
     [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]].forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, el('dd', '', value)); add(dl, line); }); add(target, dl);
+  }
+
+  // Says why the task was canceled, archived, restored or deleted, by whom and when, and links
+  // a canceled task to its replacement and a replacement back to the tasks it replaced. Events
+  // recorded before reasons were kept show no reason rather than a guessed one.
+  function renderLifecycle(data) {
+    const target = $('lifecycle-content'); clear(target);
+    const events = Array.isArray(data.lifecycle_events) ? data.lifecycle_events : []; const replaces = Array.isArray(data.replaces) ? data.replaces : [];
+    show($('lifecycle-card'), Boolean(events.length || replaces.length));
+    const verbs = {canceled: 'Canceled', archived: 'Archived', restored: 'Restored', deleted: 'Deleted'};
+    const taskLink = (id, label) => { const link = el('button', 'button text-button', label || id); link.type = 'button'; link.addEventListener('click', () => openTask(id)); return link; };
+    events.forEach((event) => {
+      const item = el('div', 'lifecycle-event');
+      add(item, el('p', '', `${verbs[event.action] || displayStatus(event.action)} by ${event.actor_name || event.actor_id || 'unknown'} on ${formatDate(event.created_at)}${event.reason ? `: ${event.reason}` : ' (no reason was recorded)'}`));
+      if (event.replacement_task_id) { const line = el('p', 'lifecycle-replacement', 'Replaced by '); add(line, taskLink(event.replacement_task_id, `task ${event.replacement_task_id}`)); add(item, line); }
+      add(target, item);
+    });
+    replaces.forEach((old) => {
+      const item = el('div', 'lifecycle-event'); const line = el('p', '', 'Replaces '); add(line, taskLink(old.task_id, old.title || old.task_id));
+      add(line, document.createTextNode(` (canceled by ${old.actor_name || old.actor_id || 'unknown'} on ${formatDate(old.canceled_at)}${old.reason ? `: ${old.reason}` : ''})`)); add(item, line); add(target, item);
+    });
   }
 
   function formatLease(expires) { const remaining = new Date(expires).getTime() - Date.now(); return `${Math.max(0, Math.round(remaining / 60000))} min remaining`; }

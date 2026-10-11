@@ -867,7 +867,43 @@ async fn lifecycle_change(
             .await?;
     }
     let result = json!({"id":id,"lifecycle":if action == "cancel" {"canceled"} else {lifecycle.as_str()},"archived":action == "archive","deleted":action == "delete","reason":input.reason,"replacement_task_id":input.replacement_task_id});
-    Ok(response(m.finish(result, Some(&p), event, &id).await?))
+    // The reason, the replacement and the acting principal stay in the event so that
+    // task history can say why a task changed state after the receipt is compacted.
+    let mut event_data = json!({"reason":input.reason,"actor_id":m.actor.id});
+    if let Some(replacement) = &input.replacement_task_id {
+        event_data["replacement_task_id"] = json!(replacement);
+    }
+    Ok(response(
+        m.finish_with_event_data(result, &event_data, Some(&p), event, &id)
+            .await?,
+    ))
+}
+
+/// The task's recorded lifecycle changes (cancel, archive, restore, delete), newest first,
+/// and the tasks it replaced. Events recorded before reasons were kept carry no data; their
+/// `reason` is null rather than reconstructed.
+async fn lifecycle_history(c: &mut SqliteConnection, p: &str, id: &str) -> Result<Value, AppError> {
+    let rows = sqlx::query("SELECT e.seq,e.kind,e.actor_id,e.data_json,e.created_at,pr.name AS actor_name FROM events e LEFT JOIN principals pr ON pr.id=e.actor_id WHERE e.project_id=? AND e.record_id=? AND e.kind IN ('task.canceled','task.archived','task.restored','task.deleted') ORDER BY e.seq DESC LIMIT 20")
+        .bind(p).bind(id).fetch_all(&mut *c).await?;
+    let mut events = Vec::new();
+    for r in &rows {
+        let data: Value = serde_json::from_str(&r.get::<String, _>("data_json"))?;
+        events.push(json!({
+            "seq":r.get::<i64,_>("seq"),
+            "action":r.get::<String,_>("kind").trim_start_matches("task.").to_owned(),
+            "actor_id":data.get("actor_id").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| r.get("actor_id")),
+            "actor_name":r.get::<Option<String>,_>("actor_name"),
+            "reason":data.get("reason").cloned().unwrap_or(Value::Null),
+            "replacement_task_id":data.get("replacement_task_id").cloned().unwrap_or(Value::Null),
+            "created_at":timestamp(r.get("created_at")),
+        }));
+    }
+    let replaced = sqlx::query("SELECT e.record_id,e.actor_id,e.created_at,json_extract(e.data_json,'$.reason') AS reason,t.title,pr.name AS actor_name FROM events e JOIN tasks t ON t.id=e.record_id LEFT JOIN principals pr ON pr.id=e.actor_id WHERE e.project_id=? AND e.kind='task.canceled' AND json_extract(e.data_json,'$.replacement_task_id')=? AND t.deleted_at IS NULL AND t.lifecycle='canceled' ORDER BY e.seq DESC LIMIT 20")
+        .bind(p).bind(id).fetch_all(&mut *c).await?;
+    Ok(json!({
+        "lifecycle_events":events,
+        "replaces":replaced.iter().map(|r| json!({"task_id":r.get::<String,_>("record_id"),"title":r.get::<String,_>("title"),"actor_id":r.get::<String,_>("actor_id"),"actor_name":r.get::<Option<String>,_>("actor_name"),"reason":r.get::<Option<String>,_>("reason"),"canceled_at":timestamp(r.get("created_at"))})).collect::<Vec<_>>(),
+    }))
 }
 async fn archive_task(
     State(s): State<AppState>,
@@ -1435,6 +1471,9 @@ async fn task_detail(
     value["workflow"] = workflow;
     value["revert"] = crate::reverts::revert_view(&mut c, &id).await?;
     value["reverted_by"] = crate::reverts::reverted_by(&mut c, &id).await?;
+    let lifecycle = lifecycle_history(&mut c, &p, &id).await?;
+    value["lifecycle_events"] = lifecycle["lifecycle_events"].clone();
+    value["replaces"] = lifecycle["replaces"].clone();
     Ok(response(value))
 }
 

@@ -38,6 +38,8 @@ const attachmentReservations = new Map();
 const attachmentBytes = new Map();
 let failFirstAttachmentPut = true;
 const attachmentUploadKeys = [];
+// Extra task details served by id, beside the main fixture task.
+const fixtureTasks = new Map();
 const archivedTask = { ...task, id: 'archived-fixture-task', title: 'Archived fixture task', lifecycle: 'canceled', archived_at: '2026-09-23T00:00:00Z' };
 const otherArchivedTask = { ...archivedTask, id: 'archived-other-task', title: 'Older retired item' };
 const fixtureActor = { id: 'fixture-operator', name: 'Fixture operator', role: 'admin', kind: 'human', session_id: 'fixture-browser' };
@@ -239,6 +241,8 @@ async function fixtureServer() {
       return json(response, task);
     }
     if (url.pathname === `/api/v1/projects/fixture-project/tasks/${archivedTask.id}`) return json(response, archivedTask);
+    const extraTask = fixtureTasks.get(decodeURIComponent(url.pathname.split('/').pop()));
+    if (extraTask && url.pathname.startsWith('/api/v1/projects/fixture-project/tasks/')) return json(response, extraTask);
     if (url.pathname === '/api/v1/admin/credentials') return json(response, { items: [] });
     if (url.pathname === '/api/v1/admin/agents' && request.method === 'POST') return json(response, { token: 'synthetic-token-for-clipboard-test', name: 'Synthetic agent' });
     const file = files[url.pathname];
@@ -477,6 +481,29 @@ async function checkAgentActorControls(page, serverPort) {
     await waitPage("document.querySelector('[data-report-id=\"agent-view-report\"]')", 'agent-actor reports');
     assert(await evaluate("![...document.querySelectorAll('#reports-list button')].some((button) => button.textContent === 'Resolve report')"), 'A non-human actor was offered report resolution.');
   } finally { fixtureActor.kind = 'human'; }
+}
+
+// A canceled task says who canceled it, when and why, and links to its replacement, which links back.
+async function checkLifecycleReasons({ evaluate, waitPage }, openFixtureTask) {
+  const replacement = { ...task, id: 'lifecycle-replacement', title: 'Replacement fixture task', lifecycle: 'open', replaces: [{ task_id: task.id, title: task.title, actor_id: 'fixture-agent', actor_name: 'Fixture agent', reason: 'Superseded by a better plan.', canceled_at: '2026-10-10T00:00:00Z' }], lifecycle_events: [] };
+  Object.assign(task, { lifecycle: 'canceled', replaces: [], lifecycle_events: [
+    { seq: 3, action: 'canceled', actor_id: 'fixture-agent', actor_name: 'Fixture agent', reason: 'Superseded by a better plan.', replacement_task_id: replacement.id, created_at: '2026-10-10T00:00:00Z' },
+    { seq: 2, action: 'archived', actor_id: 'fixture-agent', actor_name: null, reason: null, replacement_task_id: null, created_at: '2026-10-09T00:00:00Z' },
+  ] });
+  fixtureTasks.set(replacement.id, replacement);
+  await openFixtureTask();
+  await waitPage("!document.querySelector('#lifecycle-card').hidden", 'lifecycle card');
+  const text = await evaluate("document.querySelector('#lifecycle-content').textContent");
+  assert(text.includes('Canceled by Fixture agent on') && text.includes(': Superseded by a better plan.') && text.includes(`Replaced by task ${replacement.id}`), `Lifecycle card lacks the cancel reason or replacement: ${text}`);
+  assert(text.includes('Archived by fixture-agent on') && text.includes('(no reason was recorded)'), `Lifecycle card invented or hid an unrecorded reason: ${text}`);
+  await evaluate("document.querySelector('#lifecycle-content .lifecycle-replacement button').click()");
+  await waitPage("document.querySelector('#task-detail-heading').textContent === 'Replacement fixture task' && !document.querySelector('#lifecycle-card').hidden", 'replacement task');
+  const back = await evaluate("document.querySelector('#lifecycle-content').textContent");
+  assert(back.includes('Replaces') && back.includes(task.title) && back.includes('canceled by Fixture agent on') && back.includes('Superseded by a better plan.'), `The replacement does not link back: ${back}`);
+  await evaluate("document.querySelector('#lifecycle-content button').click()");
+  await waitPage(`document.querySelector('#task-detail-heading').textContent === ${JSON.stringify(task.title)}`, 'original task');
+  fixtureTasks.delete(replacement.id);
+  Object.assign(task, { lifecycle: 'open', replaces: [], lifecycle_events: [] });
 }
 
 // A human resolves a recovery whose expired attempt recorded a WIP revision: the dialog shows the
@@ -899,6 +926,7 @@ async function main() {
     await evaluate("document.querySelector('dialog[open]').close()");
 
     await checkVerifiedRecovery({ evaluate, waitPage }, openFixtureTask);
+    await checkLifecycleReasons({ evaluate, waitPage }, openFixtureTask);
     task.work_status = 'blocked'; task.workflow = { activities: [] };
     await openFixtureTask();
     // The recovery step's mutation may still be in flight; the dashboard runs one mutation at a time.
@@ -941,7 +969,7 @@ async function main() {
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
     await checkReloadedResolutionLabel(ui, serverPort);
-    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), lifecycle reasons with replacement links in both directions, saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
