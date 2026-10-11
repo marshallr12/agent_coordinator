@@ -70,7 +70,7 @@ waiting for review; exclude it from supervisor HRI/cost. Ready: 2186dc84 (lifecy
 discarded — store and show them), owner tasks b6c366fd, cf99518d. Planned (post-dogfood): cbb05ecb
 multi-project design (U36), c2aea126 portable hosts design (U37), 2a387d02 Windows via WSL2,
 1a5ffe45 → 1a3290db console Autonomy view. Canceled-task cleanup: 7 deleted, 3 archived.
-**Next for mxmini (new session, after 6cc3f673 lands and the next release deploys):** host-setup at
+**Next for mxmini (U38: joins the dogfood; new session, after 6cc3f673 lands and the next release deploys):** host-setup at
 the production commit, `[run]` + binding, credentials, opt in, QUIET_HOURS.
 
 **Watch items:** drained launches record 0 cost until oracle-1 runs a050d94a; P2 reviews wait
@@ -988,6 +988,7 @@ Record answers here.
 | U35 | Agent task lifecycle: may agents cancel/archive reverts (P4 S5 finding 3 made it human-only)? | (asked by owner, no recommendation) || 2026-10-10: **yes**, agents may cancel or archive reverts too. Tasks 7291451d (server, origin agent/service), 277079ed (CLI), 936fce64 (lift the revert gate; depends on both); refined same day: not the agent whose change was reverted (independence as for review), task 47027345 |
 | U36 | Supervisor/integrator scope beyond the coordinator project | Owner direction: required long term (the coordinator exists to enable autonomy on projects generally) || 2026-10-10: **yes, after the P6 dogfood**; planned design task `cbb05ecb` (P1) covers topology, fairness, per-project env/egress/credentials, integrator, onboarding, decisions |
 | U37 | Supervisor hosts beyond a dedicated Linux VM | Owner goal: any workstation with Codex or Claude (sysvinit, Windows, macOS) || 2026-10-10: **yes**; planned tasks `6cc3f673` (sysvinit agentc-run, cron timers, quiet hours), `2a387d02` (Windows via WSL2), design `c2aea126` (portable containment backends and service managers; depends on cbb05ecb) |
+| U38 | Bring mxmini up as a second supervisor during the P6 dogfood, or after it | During (owner direction): mxmini becomes part of the dogfood || 2026-10-11: **during** — set up once 6cc3f673 has landed and the next release is deployed; record HRI/cost per host from then on |
 
 **Impact of answers that differ from the recommendation (2026-09-25):**
 - **U3 = subscription:** `--bare` is unavailable, so P2 must prove (U11 probes) that a candidate's
