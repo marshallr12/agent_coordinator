@@ -451,7 +451,7 @@
 
   function taskMatchesSearch(task, query) {
     const needle = query.trim().toLowerCase();
-    return !needle || text(task.title).toLowerCase().includes(needle);
+    return !needle || text(task.title).toLowerCase().includes(needle) || text(task.id).toLowerCase().includes(needle);
   }
   const searchedCompletedTasks = () => state.completedTasks.filter((task) => taskMatchesSearch(task, state.taskSearch.completed));
   const searchedArchivedTasks = () => state.archivedTasks.filter((task) => taskMatchesSearch(task, $('archived-search').value));
