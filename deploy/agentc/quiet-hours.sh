@@ -56,6 +56,7 @@ apply() {
   if inside "$now" "$start" "$end"; then release "$2"; else hold "$2"; fi
 }
 
+# Applies the window, or releases our switch with --release.
 main() {
   [ $# -ge 1 ] || { echo "usage: agentc-quiet-hours WINDOW|--release [KILL_SWITCH]" >&2; exit 2; }
   switch=${2:-/var/lib/agentc/kill-switch}

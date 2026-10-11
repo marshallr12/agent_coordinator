@@ -36,7 +36,9 @@ preflight() {
   for path in "$PIDFILE" "$LOG" "$INITD" "$CRON_CHECK"; do
     [ ! -e "$path" ] || { echo "$path exists: is agentc-run installed or running? stop and remove it first" >&2; exit 2; }
   done
-  command -v start-stop-daemon insserv cron >/dev/null || { echo "needs start-stop-daemon, insserv and cron" >&2; exit 2; }
+  for tool in start-stop-daemon insserv cron; do
+    command -v "$tool" >/dev/null || { echo "needs $tool" >&2; exit 2; }
+  done
 }
 
 # Stops the fake loop and removes every file the check created.
@@ -79,7 +81,9 @@ within() {
   return 1
 }
 
+# Succeeds once the fake loop has started at least $1 times.
 runs() { [ "$(wc -l < "$T/runs" 2>/dev/null || echo 0)" -ge "$1" ]; }
+# Succeeds while the pid recorded in file $1 is alive; dead is the reverse.
 alive() { kill -0 "$(cat "$1")" 2>/dev/null; }
 dead() { ! alive "$1"; }
 
@@ -124,6 +128,7 @@ check_cron() {
   rm -f -- "$CRON_CHECK"
 }
 
+# Runs every check and exits 1, printing the logs, if any failed.
 main() {
   preflight
   trap cleanup EXIT
