@@ -1457,6 +1457,12 @@ remove_cron_jobs() {
   for name in canary digest "${E2E_KNOWN_HARNESSES[@]/#/e2e-canary-}"; do rm -f -- "/var/log/agentc-$name.log"; done
 }
 
+# Succeeds when a cron daemon (Debian cron or crond) is installed; quiet
+# hours depend on it to re-apply the window every minute.
+has_cron_daemon() {
+  command -v cron >/dev/null || command -v crond >/dev/null
+}
+
 # Installs agentc-quiet-hours, then applies QUIET_HOURS when it is set: a
 # window is checked (the script exits 2 on a bad one), applied at once and
 # re-applied every minute from $QUIET_FILE; an empty value turns quiet hours
@@ -1466,7 +1472,7 @@ install_quiet_hours() {
   install -o root -g root -m 0755 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/quiet-hours.sh" "$QUIET_SCRIPT"
   [ -n "${QUIET_HOURS+set}" ] || return 0
   if [ -z "$QUIET_HOURS" ]; then quiet_hours_off; return 0; fi
-  command -v cron >/dev/null || command -v crond >/dev/null ||
+  has_cron_daemon ||
     { echo "quiet hours need a cron daemon to run $QUIET_FILE; install cron first" >&2; exit 1; }
   "$QUIET_SCRIPT" "$QUIET_HOURS" "$KILL_SWITCH"
   quiet_hours_cron | install -o root -g root -m 0644 /dev/stdin "$QUIET_FILE"

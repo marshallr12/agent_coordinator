@@ -691,12 +691,13 @@ class QuietHours(unittest.TestCase):
         return run(["sh", str(QUIET), window, str(self.switch)], env={"PATH": "/usr/bin:/bin", "QUIET_HOURS_NOW": now})
 
     def install(self, quiet_hours, extra=""):
-        """Runs install_quiet_hours with paths in self.dir, a fake install and
-        shell code `extra` run first."""
+        """Runs install_quiet_hours with paths in self.dir, a fake install, a
+        cron daemon reported present whatever the host has, and shell code
+        `extra` run first."""
         setting = "unset QUIET_HOURS" if quiet_hours is None else f"QUIET_HOURS='{quiet_hours}'"
         code = (f'install() {{ local dst="${{@: -1}}" src="${{@: -2:1}}"; cat "$src" > "$dst"; chmod 0755 "$dst"; }}; '
                 f'QUIET_SCRIPT="{self.dir}/agentc-quiet-hours"; QUIET_FILE="{self.dir}/cron-quiet"; '
-                f'KILL_SWITCH="{self.switch}"; e2e_ready() {{ false; }}; {extra}{setting}; install_quiet_hours')
+                f'KILL_SWITCH="{self.switch}"; e2e_ready() {{ false; }}; has_cron_daemon() {{ true; }}; {extra}{setting}; install_quiet_hours')
         return run(["bash", "-c", f'set -euo pipefail; source "$1"; {code}', "bash", str(SCRIPT)])
 
     def test_outside_the_window_it_holds_the_switch_and_inside_it_releases_it(self):
@@ -746,11 +747,23 @@ class QuietHours(unittest.TestCase):
         self.assertFalse(self.switch.exists())
 
     def test_install_fails_without_a_cron_daemon_before_touching_the_switch(self):
-        result = self.install("09:00-09:01", extra="command() { [ \"$2\" != cron ] && [ \"$2\" != crond ] && builtin command \"$@\"; }; ")
+        result = self.install("09:00-09:01", extra="has_cron_daemon() { false; }; ")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("need a cron daemon", result.stderr)
         self.assertFalse(self.switch.exists())
         self.assertFalse((self.dir / "cron-quiet").exists())
+
+    def test_the_cron_daemon_check_looks_on_path_for_cron_or_crond(self):
+        bin_dir = self.dir / "bin"
+        bin_dir.mkdir()
+        check = f'source "$1"; PATH="{bin_dir}"; has_cron_daemon'
+        self.assertNotEqual(run(["bash", "-c", check, "bash", str(SCRIPT)]).returncode, 0)
+        for name in ("crond", "cron"):
+            daemon = bin_dir / name
+            daemon.write_text("#!/bin/sh\n")
+            daemon.chmod(0o755)
+            self.assertEqual(run(["bash", "-c", check, "bash", str(SCRIPT)]).returncode, 0, name)
+            daemon.unlink()
 
     def test_jobs_that_need_claiming_outside_the_window_are_warned_about(self):
         code = (f'QUIET_SCRIPT="{QUIET}"; e2e_ready() {{ true; }}; has_systemd() {{ true; }}; UPDATE_TIMER=1; ')
