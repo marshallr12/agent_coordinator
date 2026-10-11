@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood running on production `aa05dcb` (2026-10-11 ~13:50 UTC, workflow on)
+## Current resume point — P6 dogfood on production `aa05dcb`, mxmini opted in (2026-10-11 ~16:25 UTC, workflow on)
 
 **Deployed `aa05dcb` 2026-10-11 13:43 UTC** (release run `38122931843`, binaries-only, ~8 s down;
 rollback binaries `*-0.1.1-60eda26`, old-binary snapshot `20261011T134244.649Z-b209797f…`; carries
@@ -20,12 +20,20 @@ after a deploy needs `connect` first (`policy_changed`).
    task does not touch the CLI. Owner admitted 6db155d4 (ready, P1, ahead of 2186dc84) and granted
    task-definition editing to this workstation's agent principal `250802da…` (grant `c9c6152f`), so
    agents here can now admit/edit tasks. No 2186dc84 dependency (blocked while its submission is open).
-2. **mxmini (U38):** bring mxmini up as the second dogfood supervisor at production `aa05dcb`:
-   host-setup at the production commit with QUIET_HOURS, `[run]` + binding, credentials through the
-   owner's own terminal, `sudo deploy/agentc/sysvinit-check.sh`, containment suite, opt in
-   (`update-rc.d agentc-run defaults && service agentc-run start`), watch its first claim, then record
-   HRI/cost per serving host and recommend per-host canary coverage (U31/U33).
-   Tracked as planned owner task `47dac763` (depends on 6cc3f673).
+2. **mxmini (U38) — opted in 2026-10-11 16:20Z, awaiting first claim (22:00 EDT window):** binaries at
+   `aa05dcb` (supervisor `0913e36d…`, CLI `16b21b24…`, push `6e23c765…`, worktree
+   `~/src/worktrees/ac-release-aa05dcb`); host-setup rc 0 with `QUIET_HOURS=22:00-07:00` (cron
+   `agentc-quiet-hours` holds `/var/lib/agentc/kill-switch` = `quiet-hours` outside it); `[run] harness =
+   "claude", reviewer = false` (mirror binding = production fe95a6c5); own push App key
+   `SHA256:SWG4FhJ3…` at `/etc/agentc/push-app.pem`; supervised creds `agentc-impl-mxmini` (write) /
+   `agentc-rev-mxmini` (read); Claude tokens from 2026-10-07. sysvinit-check all PASS (needs the real
+   init script moved aside — it refuses after host-setup); containment suite: all containment checks
+   PASS, rc 1 only from test flakes (6db155d4 CLI lifecycle; **1b5804b5** context_rerank 1 s deadlines,
+   P2, admitted 16:3xZ). `update-rc.d agentc-run
+   defaults` + `service agentc-run start`: loop pid under `agentc-run-sysv`, log `/var/log/agentc-run.log`,
+   heartbeat world-readable. Logs: `~/.local/share/agent-coordinator-autonomy/mxmini-u38-*.log`. Next:
+   watch the first claim, then mark owner task `47dac763` done with the owner; rerun the suite after
+   6db155d4 lands; per-host HRI/cost; recommend per-host canary coverage (U31/U33).
 
 **Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
 Ubuntu 26.04, `[run] reviewer = true`, harness claude, kill switch `/var/lib/agentc/kill-switch`
@@ -101,8 +109,8 @@ behind P1 work (review/implement alternate); task `depends_on` can only be set a
 **Session handover:** background helpers of the orchestrating session run on the workstation from
 its scratchpad: `renew.sh` (renews `31af890a` gen 3 every 15 min), `watch.sh` (task-state poller
 appending to `pilot-timeline.log`), an ssh `journalctl -u agentc-run -f` appending to
-`pilot-agentc-run.journal` (since 2026-10-09 19:10Z, session `dcc4e1fe…` scratchpad: renew.sh pid 187291
-(sleep 900; renew grants a 1 h lease), watch.sh 179866, journal ssh 179868; all `setsid`-detached, so they
+`pilot-agentc-run.journal` (since 2026-10-09 19:10Z, session `d8acf6b3…` scratchpad: renew.sh pid 1997609
+(sleep 900; renew grants a 1 h lease), watch.sh 1997610, journal ssh 1997611, mxmini-watch.sh (heartbeat → timeline); all `setsid`-detached, so they
 outlive the session). Daily 00:00Z checks: 2026-10-10 digest ok (HRI 0) and e2e canary 39725610 ok. Never wait on `pgrep -f PATTERN` over ssh: the pattern matches the
 remote shell's own command line (cost 3.3 h on 2026-10-09). Check
 with `ps -eo pid,args | grep -E '[r]enew.sh|[w]atch.sh|[j]ournalctl -u agentc-run|[e]2e-canary.jsonl'`;
