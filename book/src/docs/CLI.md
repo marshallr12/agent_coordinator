@@ -964,7 +964,11 @@ use all four on a task whose origin is `agent` or `service` (for example canary
 or e2e tasks) without any project delegation. On a `human`-origin task an agent
 may only `cancel`, and only when the project delegates `agent_rule_editing`;
 archive, restore and delete there are human gates. Revert tasks follow the same rule by their
-own origin (the creator's, or `service` for an automatic revert). Humans may use all four on any task.
+own origin (the creator's, or `service` for an automatic revert), except that
+an agent that contributed to the reverted change (the reverted task or any task
+in the revert's landing range, or a session of a contributor's launch) is
+refused `cancel` and `archive` of the revert with `revert_author_conflict`: an
+independent agent or a human must do it. Humans may use all four on any task.
 The service also refuses, for every actor: `task_revision_changed` (reload with
 `tasks show`), `task_attempt_protected` (a live attempt owns the task),
 `task_workflow_protected` (review or integration work is active),

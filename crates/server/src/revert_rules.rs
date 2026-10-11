@@ -12,7 +12,8 @@
 //! task is ordinary implementation work and none of these rules apply.
 //! Canceling, archiving, restoring or deleting a revert follows the origin
 //! rule for any task; the integrator ignores a revert that
-//! is canceled or archived.
+//! is canceled or archived. An agent that is not independent of the reverted
+//! change may not cancel or archive the revert (`revert_author_conflict`).
 use crate::{error::AppError, mutation::Mutation, reverts::AWAITING_CANDIDATE};
 use serde_json::json;
 use sqlx::SqliteConnection;
@@ -70,6 +71,57 @@ pub(crate) async fn ensure_not_mechanical(
             "revert_awaits_integrator",
             "The integrator computes this revert's candidate; it cannot be claimed or unblocked.",
         ));
+    }
+    Ok(())
+}
+
+/// The tasks whose work the revert of `task` undoes: the reverted task, the
+/// task of every submission whose candidate or landing range shares a commit
+/// with the reverted result's landing range, and the other tasks the result
+/// recorded as contributors. Empty when `task` is not a revert.
+async fn reverted_tasks(
+    c: &mut SqliteConnection,
+    project: &str,
+    task: &str,
+) -> Result<Vec<String>, AppError> {
+    Ok(sqlx::query_scalar("SELECT tr.original_task_id FROM task_reverts tr WHERE tr.project_id=? AND tr.task_id=? \
+        UNION SELECT s.task_id FROM task_reverts tr JOIN integrator_results r ON r.id=tr.result_id JOIN submissions s ON s.project_id=tr.project_id \
+        WHERE tr.project_id=? AND tr.task_id=? AND (s.id=r.submission_id OR s.candidate_revision IN (SELECT value FROM json_each(r.landing_range_json)) \
+        OR s.id IN (SELECT o.submission_id FROM integrator_results o, json_each(o.landing_range_json) j \
+        WHERE o.project_id=tr.project_id AND j.value IN (SELECT value FROM json_each(r.landing_range_json)))) \
+        UNION SELECT j.value FROM task_reverts tr JOIN integrator_results r ON r.id=tr.result_id, json_each(r.contributor_tasks_json) j \
+        WHERE tr.project_id=? AND tr.task_id=? AND r.contributor_tasks_json IS NOT NULL")
+        .bind(project).bind(task).bind(project).bind(task).bind(project).bind(task)
+        .fetch_all(&mut *c).await?)
+}
+
+/// Refuses an agent canceling or archiving a revert task when it is not
+/// independent of the reverted change, with `revert_author_conflict`. It applies
+/// the checks a reviewer of the reverted work must pass: no recorded contribution
+/// to the reverted task or any task in the revert's landing range (by principal,
+/// session or shared subagent identity), and a launch no such contributor
+/// shares (`workflow::shares_launch`, fail closed). Humans, other actions and
+/// tasks that are not reverts pass.
+pub(crate) async fn ensure_independent_revert_exit(
+    c: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    (p, task): (&str, &str),
+    action: &str,
+) -> Result<(), AppError> {
+    if actor.kind == "human" || !matches!(action, "cancel" | "archive") {
+        return Ok(());
+    }
+    let tasks = reverted_tasks(c, p, task).await?;
+    let session = actor.session_id.as_deref().unwrap_or_default();
+    for reverted in &tasks {
+        if crate::workflow::contributed(c, p, reverted, &actor.id, session).await?
+            || crate::workflow::shares_launch(c, reverted, session).await?
+        {
+            return Err(AppError::conflict(
+                "revert_author_conflict",
+                "This agent contributed to the change this revert undoes, or shares a launch with a contributor. An independent agent or a human must cancel or archive the revert.",
+            ));
+        }
     }
     Ok(())
 }

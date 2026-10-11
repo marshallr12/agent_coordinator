@@ -13,7 +13,7 @@ pub use artifacts::*;
 pub mod workflow;
 pub use workflow::*;
 
-pub const INSTRUCTION_VERSION: &str = "11";
+pub const INSTRUCTION_VERSION: &str = "12";
 pub const REQUIRED_SECTION: &str = "coordination-v8";
 
 /// Immutable source and target identity embedded in every workspace binary.

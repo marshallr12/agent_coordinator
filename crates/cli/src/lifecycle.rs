@@ -146,6 +146,9 @@ pub(crate) fn refusal_hint(code: &str) -> Option<&'static str> {
         "task_history_protected" => {
             "the task has attempts, dependencies or workflow links and cannot be deleted; archive it instead"
         }
+        "revert_author_conflict" => {
+            "you contributed to the change this revert undoes, or share a launch with a contributor; an independent agent or a human must cancel or archive it"
+        }
         _ => return None,
     })
 }
@@ -294,6 +297,7 @@ mod tests {
             "task_archived",
             "task_lifecycle_invalid",
             "task_history_protected",
+            "revert_author_conflict",
         ] {
             assert!(super::refusal_hint(code).is_some(), "{code}");
         }
@@ -369,6 +373,7 @@ mod tests {
                 "archived" => error(409, "task_archived", json!({})),
                 "invalid" => error(409, "task_lifecycle_invalid", json!({})),
                 "history" => error(409, "task_history_protected", json!({})),
+                "author" => error(409, "revert_author_conflict", json!({})),
                 _ => (
                     200,
                     json!({"data":{"id":id,"deleted":action == "delete",
@@ -581,6 +586,7 @@ mod tests {
                 ("archived", "task_archived"),
                 ("invalid", "task_lifecycle_invalid"),
                 ("history", "task_history_protected"),
+                ("author", "revert_author_conflict"),
             ] {
                 for origin in ["agent", "service"] {
                     for action in ["cancel", "archive", "restore", "delete"] {

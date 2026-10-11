@@ -670,7 +670,24 @@ limit applies to reverts.
   revert leaves the integrator's queue and takes no candidate
   (`revert_not_open`), and the original's `reverted_by` no longer names it;
   restoring an archived revert is refused with `revert_exists` while another
-  open revert of the result exists. The revert task stays
+  open revert of the result exists. An agent session may cancel or archive
+  a revert only when it is independent of the reverted change; otherwise the
+  call is refused with `revert_author_conflict` (409) and an independent agent
+  or a human must do it. The reverted change is the reverted task and every
+  task of a submission in the revert's landing range: a submission whose
+  candidate or own landing range shares a commit with the result's
+  `landing_range_json`, plus the contributor tasks the result recorded. The
+  actor must pass the same contributor checks as a reviewer of that work
+  (`workflow::contributed`: no recorded contribution by principal, session or
+  shared subagent identity, including checkpoint `contributor_session_ids`)
+  and, because a cancel or archive cannot assert an independence level, the
+  `distinct_launch` check (`workflow::shares_launch`: no launch shared with a
+  contributor, failing closed beyond the 64-hop walk cap); `distinct_host` and
+  `distinct_vendor` are not enforced by the service. Humans are unaffected.
+  Restore and delete are not covered: restoring an archived revert returns it
+  to the integrator's queue and deleting a canceled one only hides a revert
+  that is already retired, so neither lets the author suppress the revert. The
+  revert task stays
   blocked while it waits for its candidate and is listed under the queue's
   `reverts`. The integrator computes the candidate
   itself on the target's current tip X, in a disposable worktree:

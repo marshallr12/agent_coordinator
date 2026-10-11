@@ -308,7 +308,10 @@ may use them, and `cancel`, on tasks whose origin is `agent` or `service`, and
 `tasks show` prints the origin. Instruction version 11 drops the human-only
 exception for revert tasks: they follow the same origin rule (an agent or
 service-origin revert may be canceled, archived, restored and deleted by an
-agent). Existing
+agent). Instruction version 12 adds that an agent that contributed to the
+reverted change, or shares a launch with a contributor, is refused canceling or
+archiving the revert (`revert_author_conflict`); an independent agent or a human
+does it. Existing
 sessions must fetch and acknowledge the new instructions before new claims.
 
 JSON requests default to 1 MiB and can be configured lower; artifact bytes use a

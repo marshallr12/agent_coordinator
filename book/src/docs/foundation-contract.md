@@ -128,7 +128,10 @@ Additional implemented routes:
   an agent may only `cancel`, and only when the project sets
   `agent_rule_editing`; otherwise archive, restore, delete and that cancel are
   the `task_<action>` human gate. A revert task follows the same rule by its own origin
-  (its creator's, or `service` for an automatic revert). The same guards apply to every
+  (its creator's, or `service` for an automatic revert), except that an agent
+  that is not independent of the reverted change (contributor or shared launch,
+  as for a reviewer of it) is refused cancel and archive with
+  `revert_author_conflict`. The same guards apply to every
   actor: `task_revision_changed`, `task_attempt_protected`,
   `task_workflow_protected` (active review/integration work and the
   review/integration activity tasks themselves), `task_archived` (restore

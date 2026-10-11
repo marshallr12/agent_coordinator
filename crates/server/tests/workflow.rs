@@ -5799,7 +5799,7 @@ async fn an_agent_cancels_a_revert_and_the_integrator_drops_it() {
     let revert = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
     assert_eq!(revert["origin"], "agent", "{revert}");
     assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], revert["id"]);
-    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "cancel").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "cancel").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["data"]["lifecycle"], "canceled", "{v}");
     assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], Value::Null);
@@ -5832,7 +5832,7 @@ async fn an_agent_archives_a_revert_and_it_is_not_published() {
     let f = Fixture::new().await;
     let (p, t, result, i) = published_subject(&f, "revert-agent-archive").await;
     let revert = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
-    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "archive").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "archive").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["data"]["archived"], true, "{v}");
     assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], Value::Null);
@@ -5841,7 +5841,7 @@ async fn an_agent_archives_a_revert_and_it_is_not_published() {
     let (status, v) = revert_candidate(&f, &i, &p, &revert, body).await;
     let expected = (StatusCode::CONFLICT, json!("revert_not_open"));
     assert_eq!(refusal(status, &v), expected, "{v}");
-    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "cancel").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "cancel").await;
     let expected = (StatusCode::CONFLICT, json!("task_archived"));
     assert_eq!(refusal(status, &v), expected, "{v}");
 
@@ -5850,7 +5850,7 @@ async fn an_agent_archives_a_revert_and_it_is_not_published() {
     let expected = (StatusCode::CONFLICT, json!("revert_exists"));
     assert_eq!(refusal(status, &v), expected, "{v}");
     assert_eq!(v["error"]["details"]["revert_task_id"], again["id"], "{v}");
-    let (status, v) = revert_action(&f, &f.a, (&p, &again), "cancel").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &again), "cancel").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     let (status, v) = revert_action(&f, &f.a, (&p, &revert), "restore").await;
     assert_eq!(status, StatusCode::OK, "{v}");
@@ -5873,7 +5873,7 @@ async fn a_canceled_sent_back_revert_takes_no_retried_candidate() {
     assert_eq!(status, StatusCode::OK, "{v}");
     let first = v["data"]["candidate_submission_id"].clone();
     // Under review the revert is protected.
-    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "cancel").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "cancel").await;
     let expected = (StatusCode::CONFLICT, json!("task_workflow_protected"));
     assert_eq!(refusal(status, &v), expected, "{v}");
     let (status, v) = conflict_revise(&f, &i, &p, &first, None).await;
@@ -5885,7 +5885,7 @@ async fn a_canceled_sent_back_revert_takes_no_retried_candidate() {
             .len(),
         1
     );
-    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "cancel").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "cancel").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(integrator_queue(&f, &i, &p).await["reverts"], json!([]));
     assert_eq!(fresh_task(&f, &p, &t).await["reverted_by"], Value::Null);
@@ -5910,7 +5910,7 @@ async fn the_other_lifecycle_guards_still_apply_to_reverts() {
         ("restore", "task_restore"),
         ("delete", "task_delete"),
     ] {
-        let (status, v) = revert_action(&f, &f.a, (&p, &human), action).await;
+        let (status, v) = revert_action(&f, &f.c, (&p, &human), action).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{action}: {v}");
         assert_eq!(v["error"]["details"]["gate"], gate, "{action}: {v}");
         assert_eq!(
@@ -5918,7 +5918,7 @@ async fn the_other_lifecycle_guards_still_apply_to_reverts() {
             "{action}: {v}"
         );
     }
-    let (status, v) = revert_action(&f, &f.a, (&p, &human), "cancel").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &human), "cancel").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["data"]["lifecycle"], "canceled", "{v}");
 
@@ -5927,17 +5927,150 @@ async fn the_other_lifecycle_guards_still_apply_to_reverts() {
     let revert = reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
     let stale = json!({"expected_revision":99,"reason":"not needed"});
     let path = revert_action_path(&p, &revert, "cancel");
-    let (status, v) = f.call(&f.a, "POST", &path, stale).await;
+    let (status, v) = f.call(&f.c, "POST", &path, stale).await;
     let expected = (StatusCode::CONFLICT, json!("task_revision_changed"));
     assert_eq!(refusal(status, &v), expected, "{v}");
     let (status, v) = revert_action(&f, &f.a, (&p, &revert), "restore").await;
     let expected = (StatusCode::CONFLICT, json!("task_lifecycle_invalid"));
     assert_eq!(refusal(status, &v), expected, "{v}");
-    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "archive").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "archive").await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "archive").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "archive").await;
     let expected = (StatusCode::CONFLICT, json!("task_archived"));
     assert_eq!(refusal(status, &v), expected, "{v}");
+}
+
+/// Asserts `c` is refused canceling and archiving `revert` with
+/// `revert_author_conflict`.
+async fn assert_revert_exit_conflict(f: &Fixture, c: &Caller, p: &str, revert: &Value) {
+    for action in ["cancel", "archive"] {
+        let (status, v) = revert_action(f, c, (p, revert), action).await;
+        let expected = (StatusCode::CONFLICT, json!("revert_author_conflict"));
+        assert_eq!(refusal(status, &v), expected, "{action}: {v}");
+    }
+}
+
+/// A published subject written by `f.a`, reverted by `f.b`, in a project that
+/// allows subagent identities. Returns the project, the result and the revert.
+async fn author_reverted_subject(f: &Fixture, name: &str) -> (String, String, Value) {
+    let (p, _, result, _) = published_subject(f, name).await;
+    sqlx::query("UPDATE projects SET allow_subagent_reviews=1 WHERE id=?")
+        .bind(&p)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let revert = reverted(f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+    (p, result, revert)
+}
+
+/// A session of `parent`'s principal on a launch of its own.
+async fn elsewhere_session(f: &Fixture, parent: &Caller) -> Caller {
+    let elsewhere = Caller {
+        session: Uuid::new_v4().to_string(),
+        proof: secret(),
+        ..parent.clone()
+    };
+    let body = json!({"session_id":elsewhere.session,"workstation_id":"elsewhere","harness":"other-launch","capabilities":[]});
+    let (status, v) = register_session(f, &elsewhere, body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    elsewhere
+}
+
+// An agent that wrote the reverted change is refused canceling or archiving
+// the revert with `revert_author_conflict`, also from a new session of the same
+// identity or a subagent of its launch; a human, and an agent that did not
+// contribute, still succeed.
+#[tokio::test]
+async fn the_author_of_a_reverted_change_cannot_cancel_or_archive_its_revert() {
+    let f = Fixture::new().await;
+    let (p, _, revert) = author_reverted_subject(&f, "revert-author").await;
+    assert_revert_exit_conflict(&f, &f.a, &p, &revert).await;
+    let new_session = elsewhere_session(&f, &f.a).await;
+    assert_revert_exit_conflict(&f, &new_session, &p, &revert).await;
+    let (child, _) = register_child(&f, &f.a, &p, "author-helper").await;
+    assert_revert_exit_conflict(&f, &child, &p, &revert).await;
+    let (status, v) = revert_action(&f, &f.admin, (&p, &revert), "archive").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = revert_action(&f, &f.admin, (&p, &revert), "restore").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "cancel").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["lifecycle"], "canceled", "{v}");
+}
+
+// Restoring an archived revert and deleting a canceled one stay open to the
+// author: neither suppresses the revert.
+#[tokio::test]
+async fn the_author_may_still_restore_or_delete_a_revert_another_retired() {
+    let f = Fixture::new().await;
+    let (p, result, revert) = author_reverted_subject(&f, "revert-author-restore").await;
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "archive").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "restore").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = revert_action(&f, &f.c, (&p, &revert), "cancel").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = revert_action(&f, &f.a, (&p, &revert), "delete").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    reverted(&f, &f.b, &p, &result, ("defect", json!("tip fails"))).await;
+}
+
+// A contributor to another task the landing range carries is refused too: by
+// the result's recorded contributor tasks, and by a submission sharing a
+// commit with the range. An agent of a distinct launch (same principal as the
+// contributor, shared-credential subagent) succeeds; one of the contributor's
+// launch is refused (`distinct_launch`).
+#[tokio::test]
+async fn a_landing_range_co_contributor_cannot_cancel_or_archive_the_revert() {
+    let f = Fixture::new().await;
+    let (p, result, revert) = author_reverted_subject(&f, "revert-co-contributor").await;
+    let stacked = f.task(&p, "general", "Stacked under the subject").await;
+    f.claim(&f.c, &p, &stacked, 3).await;
+    sqlx::query("UPDATE integrator_results SET contributor_tasks_json=json_array(?) WHERE id=?")
+        .bind(stacked["id"].as_str().unwrap())
+        .bind(&result)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_revert_exit_conflict(&f, &f.c, &p, &revert).await;
+    let (sibling, _) = register_child(&f, &f.c, &p, "co-contributor-helper").await;
+    assert_revert_exit_conflict(&f, &sibling, &p, &revert).await;
+    let elsewhere = elsewhere_session(&f, &f.c).await;
+    let (independent, _) = register_child(&f, &elsewhere, &p, "independent-launch").await;
+    let (status, v) = revert_action(&f, &independent, (&p, &revert), "archive").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = revert_action(&f, &f.admin, (&p, &revert), "restore").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, v) = revert_action(&f, &independent, (&p, &revert), "cancel").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+// A submission of another task whose candidate is a commit of the reverted
+// landing range makes that task's contributors conflicted as well.
+#[tokio::test]
+async fn a_contributor_to_a_submission_in_the_landing_range_is_conflicted() {
+    let f = Fixture::new().await;
+    let (p, _, revert) = author_reverted_subject(&f, "revert-range-submission").await;
+    let other = f.task(&p, "code", "Shares the landed commit").await;
+    let attempt = f.claim(&f.c, &p, &other, 3).await;
+    f.checkout(&f.c, &p, &attempt, BASE).await;
+    let repo = "https://example.test/revert-range-submission.git";
+    f.submit(
+        &f.c,
+        &p,
+        &other,
+        &attempt,
+        "code",
+        3,
+        Some(repo),
+        Some(BASE),
+        Some(LANDED),
+        Some("4444444444444444444444444444444444444444"),
+    )
+    .await;
+    assert_revert_exit_conflict(&f, &f.c, &p, &revert).await;
+    let (status, v) = revert_action(&f, &f.b, (&p, &revert), "cancel").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
 }
 
 // P4 S5 review: once a revise sends a mechanical revert's candidate back

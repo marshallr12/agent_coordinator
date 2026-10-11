@@ -183,15 +183,17 @@ enum Command {
     /// is `agent` or `service` (see `tasks show`); on a `human`-origin task it
     /// needs the project's agent_rule_editing delegation. A revert task follows
     /// the same rule by its own origin (its creator's, or `service` for an
-    /// automatic revert). Refused while an attempt or review/integration work is
-    /// active.
+    /// automatic revert), but an agent that contributed to the reverted change
+    /// is refused with `revert_author_conflict`. Refused while an attempt or
+    /// review/integration work is active.
     Cancel(lifecycle::CancelArgs),
     /// Archive a task so it leaves the queue but keeps its records.
     ///
     /// Who may: a human always. An agent session may archive only a task whose
-    /// origin is `agent` or `service` (revert tasks included, by their own origin);
-    /// a `human`-origin task is a human gate. Refused while an attempt or review/integration
-    /// work is active.
+    /// origin is `agent` or `service` (revert tasks included, by their own origin,
+    /// unless it contributed to the reverted change: `revert_author_conflict`);
+    /// a `human`-origin task is a human gate. Refused while an attempt or
+    /// review/integration work is active.
     Archive(lifecycle::LifecycleArgs),
     /// Restore an archived task to the queue.
     ///
