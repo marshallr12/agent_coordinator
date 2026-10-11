@@ -169,6 +169,7 @@ a.nav-item { text-decoration: none; }
 .task-created { display: block; max-width: 100%; margin: 0; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .task-queue-id { display: block; min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
 .status-badge, .meta-pill { display: inline-flex; align-items: center; min-height: 25px; padding: 4px 9px; border-radius: 999px; color: var(--navy); background: #edf1f3; font-size: 11px; font-weight: 800; white-space: nowrap; }
+.status-badge.planned { color: #3b4d5a; background: #e3e9ed; }
 .status-badge.ready { color: #176762; background: var(--teal-soft); }.status-badge.claimed, .status-badge.in_progress, .status-badge.recovery_required { color: #795218; background: var(--amber-soft); }.status-badge.blocked, .status-badge.canceled, .status-badge.superseded { color: #963d4b; background: var(--red-soft); }
 .detail-back-row { margin-bottom: 17px; }
 .detail-heading { margin-bottom: 26px; }
@@ -242,11 +243,13 @@ a.nav-item { text-decoration: none; }
   :root[data-theme="system"] body,:root[data-theme="system"] .form-dialog { background:var(--canvas);color:var(--ink); }
   :root[data-theme="system"] input,:root[data-theme="system"] textarea,:root[data-theme="system"] select,:root[data-theme="system"] .button.subtle,:root[data-theme="system"] .token-reveal code { background:#26343d;color:var(--ink);border-color:var(--line); }
   :root[data-theme="system"] .toolbar,:root[data-theme="system"] .nav-item.active,:root[data-theme="system"] .task-view-tab[aria-selected="true"] { background:#263a40; }
+  :root[data-theme="system"] .status-badge.planned { color:#d4e3e9;background:#33444f; }
 }
 :root[data-theme="dark"] { color-scheme: dark; --ink:#e5edf1; --muted:#a7b5be; --faint:#8798a3; --line:#34434d; --surface:#202c34; --canvas:#151e24; --navy:#d4e3e9; --teal:#54c2b7; --teal-soft:#203d3c; --amber:#edbd72; --amber-soft:#3a3021; --red:#f18b96; --red-soft:#3c272c; --shadow:0 10px 30px rgba(0,0,0,.2); }
 :root[data-theme="dark"] body,:root[data-theme="dark"] .form-dialog { background:var(--canvas);color:var(--ink); }
 :root[data-theme="dark"] input,:root[data-theme="dark"] textarea,:root[data-theme="dark"] select,:root[data-theme="dark"] .button.subtle,:root[data-theme="dark"] .token-reveal code { background:#26343d;color:var(--ink);border-color:var(--line); }
 :root[data-theme="dark"] .toolbar,:root[data-theme="dark"] .nav-item.active,:root[data-theme="dark"] .task-view-tab[aria-selected="true"] { background:#263a40; }
+:root[data-theme="dark"] .status-badge.planned { color:#d4e3e9;background:#33444f; }
 .shared-records details { margin-top: .8rem; }
 .shared-records .record-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
 .checkbox-label { display: flex; align-items: center; gap: .5rem; }
