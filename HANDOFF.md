@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood running on production `60eda26` (2026-10-09 ~19:10 UTC, workflow on)
+## Current resume point — P6 dogfood running on production `60eda26` (2026-10-11 ~00:50 UTC, workflow on)
 
 **Read the service, not this list.** The live supervisor `agentc-run` on **oracle-1** (aarch64
 Ubuntu 26.04, `[run] reviewer = true`, harness claude, kill switch `/var/lib/agentc/kill-switch`
@@ -57,6 +57,21 @@ fb8b2326 (renew backoff), 8634ad52 (e2e canary), 416845fc (role instructions: wa
 tools, main `0036b4f`, after 60eda26 so not yet on oracle-1), b3e68779 (updater no-release = exit 0).
 **Open:** owner-landed planned tasks 55b8a06d (release builds the agentc-host bundle) and 4540596c
 (deploy tests in CI); c744c495 optional.
+
+**2026-10-10/11 (session `dcc4e1fe`):** 7291451d landed (`d284196`: agents may cancel/archive/
+restore/delete agent- and service-origin tasks; HRI 0, $1.11) — on main only, ships with the next
+release. Chain behind it: 277079ed (CLI archive/restore/delete; review CHANGES_REQUESTED for a broken
+CLI.md sentence — first reviewer disagreement, HRI 0) → 936fce64 (agents may cancel/archive reverts,
+U35) → 47027345 (not the reverted change's own contributors). **6cc3f673** (sysvinit agentc-run,
+cron timers, QUIET_HOURS) was implemented by hand on mxmini at the owner's request (session
+`mxmini-sysv`, branch `ac/6cc3f673-sysvinit`, worktree `~/src/worktrees/ac-sysv-6cc3f673`, live
+`sudo deploy/agentc/sysvinit-check.sh` all PASS), submitted `bc5be3c7` (candidate `5835f40`),
+waiting for review; exclude it from supervisor HRI/cost. Ready: 2186dc84 (lifecycle reasons are
+discarded — store and show them), owner tasks b6c366fd, cf99518d. Planned (post-dogfood): cbb05ecb
+multi-project design (U36), c2aea126 portable hosts design (U37), 2a387d02 Windows via WSL2,
+1a5ffe45 → 1a3290db console Autonomy view. Canceled-task cleanup: 7 deleted, 3 archived.
+**Next for mxmini (new session, after 6cc3f673 lands and the next release deploys):** host-setup at
+the production commit, `[run]` + binding, credentials, opt in, QUIET_HOURS.
 
 **Watch items:** drained launches record 0 cost until oracle-1 runs a050d94a; P2 reviews wait
 behind P1 work (review/implement alternate); task `depends_on` can only be set at creation
