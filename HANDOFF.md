@@ -4,7 +4,49 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on production `aa05dcb`; mxmini paused until its fix ships (2026-10-12 08:15 UTC, workflow on)
+## Current resume point — P6 dogfood on production `ce3ddd1`; mxmini's first window opens 22:00 EDT (2026-10-12 18:15 UTC, workflow on)
+
+**Session `037ba383` (2026-10-12 day; ledger `pilot-timeline.log` has every event):**
+- **Deployed `ce3ddd1` 2026-10-12 13:35 UTC** (release run `38251735141`, ~8 s down; migration 0036
+  is data-only but **rollback needs the old-binary snapshot `20261012T133500.506Z-a90a2320`** — the
+  `aa05dcb` server refuses a DB with migration 36; rollback binaries `*-0.1.1-aa05dcb`; new snapshot
+  `20261012T133531.456Z-200a57b3`; record moved to `release-aa05dcb/`, plan in `release-next/`).
+  Workstation CLI `~/.local/bin` sha `bff3debb` (`.rollback` kept). oracle-1 host-setup at `ce3ddd1`
+  (`~/src/worktrees/agentc-pilot`; supervisor `84dd097f`, CLI `c824f154`, push `cf98c428`;
+  `/usr/local/bin` CLI updated, old `.pre-ce3ddd1`); implementer settings `sandbox.enabled=false`,
+  reviewer true; kill switch cleared 13:43Z.
+- **mxmini at `ce3ddd1`:** owner host-setup from `~/src/worktrees/ac-release-ce3ddd1` (supervisor
+  `1058e8bb`, CLI `54719e68`, push `6e23c765`). **sysvinit host-setup does not restart the loop**:
+  owner ran `service agentc-run restart` (loop pid 171714). Containment suite rc 0, **103 PASS**,
+  incl. the three new nested-sandbox checks (`mxmini-ce3ddd1-containment.log`). Owner kill switch
+  replaced by `quiet-hours` at 10:30 EDT, so the cron clears it at **22:00 EDT (02:00Z)**.
+  mxmini has claimed nothing yet. **No task is ready right now** (all open tasks planned), so mxmini
+  (and oracle-1) will idle unless the owner admits work.
+- Digest 2026-10-12: HRI 1 = stale integrator report (277079ed rerun refused on GitHub 403 "already
+  running") → filed and landed **0d5e4c10** (oracle-1, main `dee298b`; ships with the next release).
+  All open integrator reports were resolved in the console (0 open of 10). e2e canary 2d1151fc ok.
+- **Canary decision (U31/U33 follow-up, owner):** mxmini gets its own dedicated canary project via
+  `[run.canary_binding]`; oracle-1 stays shared for now → owner task **422ce01e** (planned, 7 steps).
+- **4540596c** (deploy/agentc tests in CI) done by hand: CI job *Deploy script tests* runs every
+  `deploy/agentc/*-test.py` (160 tests), roster.toml adds `deploy-scripts` (owner decision); shipped
+  via `ship.py` → **main `24a7f3d`**. Lease expired while waiting for the owner's go-ahead → recovery,
+  release, **canceled as delivered outside the workflow** (owner choice). Gap filed: **46043cbc** (P3,
+  planned) owner-delivered completion path. Optional owner step: add `deploy-scripts` to the project's
+  Required checks setting.
+- Watch items (3d2fe98a stall, `agentc-push` serve test) did not recur.
+
+**Next actions, in order:**
+1. At 22:00 EDT: confirm the kill switch cleared on mxmini; if nothing is ready, ask the owner what to
+   admit. Watch mxmini's first claim through review and integration; record cost/HRI per host; when
+   mxmini completes a task, mark owner task 47dac763 done with the owner.
+2. Daily 00:00Z checks for 2026-10-13 (digest, e2e canary); watch items as before.
+3. Next release carries 0d5e4c10 and 4540596c (`24a7f3d`).
+
+**Helpers (setsid-detached, outlive sessions):** `renew.sh` **pid 169811** in session `037ba383…`'s
+scratchpad renews d513bc21 **attempt `ba401934`, gen 5** (log `renew.log` there); `watch.sh` 1997610,
+journal ssh 1997611, `mxmini-watch.sh` 2413349 still run from the `d8acf6b3…` scratchpad.
+
+## Previous resume point — P6 dogfood on production `aa05dcb`; mxmini paused until its fix ships (2026-10-12 08:15 UTC, workflow on)
 
 **All four overnight tasks landed on main (`ce3ddd1`), none released yet** — all on oracle-1:
 
