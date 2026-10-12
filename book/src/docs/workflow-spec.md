@@ -33,7 +33,11 @@ Archiving preserves lifecycle and history. The default task endpoint excludes
 archived and soft-deleted tasks before pagination; `/tasks/archived` is a
 separate project-scoped listing. Deletion is soft and limited to canceled or
 planned tasks with no attempt, dependency, objective, or workflow history.
-Active attempts and review/integration workflows block lifecycle changes.
+Canceling a task also retires it from the queue: a task with no attempt,
+dependency, objective, or workflow history, and no replacement, is soft-deleted;
+any other canceled task is archived instead, so its history stays browsable. The
+cancel response reports which with `deleted` or `archived`. Active attempts and
+review/integration workflows block lifecycle changes.
 
 | Work status | Meaning and next action |
 | --- | --- |

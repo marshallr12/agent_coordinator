@@ -763,6 +763,14 @@ async fn ensure_replacement(
     Ok(())
 }
 
+/// True when a task has attempts, dependency or objective links, or workflow subjects, so
+/// deleting it would lose records that archiving keeps.
+async fn has_retained_history(c: &mut SqliteConnection, id: &str) -> Result<bool, AppError> {
+    let linked: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM attempts WHERE task_id=?)+(SELECT count(*) FROM task_dependencies WHERE task_id=? OR prerequisite_id=?)+(SELECT count(*) FROM objective_children WHERE child_task_id=? OR objective_task_id=?)+(SELECT count(*) FROM workflow_subjects WHERE task_id=?)")
+        .bind(id).bind(id).bind(id).bind(id).bind(id).bind(id).fetch_one(&mut *c).await?;
+    Ok(linked > 0)
+}
+
 async fn lifecycle_change(
     s: AppState,
     auth: Auth,
@@ -826,6 +834,7 @@ async fn lifecycle_change(
             "Resolve active review or integration work before changing task lifecycle.",
         ));
     }
+    let mut canceled_into = "";
     let (sql, event) = match action {
         "archive" if archived.is_none() => (
             "UPDATE tasks SET archived_at=?,revision=revision+1 WHERE id=?",
@@ -835,14 +844,25 @@ async fn lifecycle_change(
             "UPDATE tasks SET archived_at=NULL,revision=revision+1 WHERE id=?",
             "task.restored",
         ),
-        "cancel" if lifecycle == "open" || lifecycle == "planned" => (
-            "UPDATE tasks SET lifecycle='canceled',revision=revision+1 WHERE id=?",
-            "task.canceled",
-        ),
+        // A canceled task leaves the queue for good: it is deleted, or archived when its
+        // history or workflow links, or a named replacement, must be retained.
+        "cancel" if lifecycle == "open" || lifecycle == "planned" => {
+            if input.replacement_task_id.is_none() && !has_retained_history(&mut m.tx, &id).await? {
+                canceled_into = "deleted";
+                (
+                    "UPDATE tasks SET lifecycle='canceled',deleted_at=?,revision=revision+1 WHERE id=?",
+                    "task.canceled",
+                )
+            } else {
+                canceled_into = "archived";
+                (
+                    "UPDATE tasks SET lifecycle='canceled',archived_at=?,revision=revision+1 WHERE id=?",
+                    "task.canceled",
+                )
+            }
+        }
         "delete" if lifecycle == "planned" || lifecycle == "canceled" => {
-            let linked: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM attempts WHERE task_id=?)+(SELECT count(*) FROM task_dependencies WHERE task_id=? OR prerequisite_id=?)+(SELECT count(*) FROM objective_children WHERE child_task_id=? OR objective_task_id=?)+(SELECT count(*) FROM workflow_subjects WHERE task_id=?)")
-                .bind(&id).bind(&id).bind(&id).bind(&id).bind(&id).bind(&id).fetch_one(&mut *m.tx).await?;
-            if linked > 0 {
+            if has_retained_history(&mut m.tx, &id).await? {
                 return Err(AppError::conflict(
                     "task_history_protected",
                     "This task has history or workflow links. Archive it to retain its records.",
@@ -861,7 +881,7 @@ async fn lifecycle_change(
         }
         _ => return Err(AppError::bad_request("Unknown task lifecycle action.")),
     };
-    if action == "restore" || action == "cancel" {
+    if action == "restore" {
         sqlx::query(sql).bind(&id).execute(&mut *m.tx).await?;
     } else {
         sqlx::query(sql)
@@ -870,7 +890,7 @@ async fn lifecycle_change(
             .execute(&mut *m.tx)
             .await?;
     }
-    let result = json!({"id":id,"lifecycle":if action == "cancel" {"canceled"} else {lifecycle.as_str()},"archived":action == "archive","deleted":action == "delete","reason":input.reason,"replacement_task_id":input.replacement_task_id});
+    let result = json!({"id":id,"lifecycle":if action == "cancel" {"canceled"} else {lifecycle.as_str()},"archived":action == "archive" || canceled_into == "archived","deleted":action == "delete" || canceled_into == "deleted","reason":input.reason,"replacement_task_id":input.replacement_task_id});
     // The reason, the replacement and the acting principal stay in the event so that
     // task history can say why a task changed state after the receipt is compacted.
     let mut event_data = json!({"reason":input.reason,"actor_id":m.actor.id});
