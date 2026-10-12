@@ -906,6 +906,22 @@ a launch that ended while no loop watched it, before removing its run, under
 the vendor its record names; the record notes that the cost is in the ledger,
 so a retried release never counts it twice.
 
+A launch whose harness exits 0 although the agent neither submitted nor
+released its attempt (a broken shell, a refused tool, an agent that gave up)
+is counted in `/var/lib/agentc/unsubmitted.json`, per task and in total, until
+a launch submits. After `[run] empty_exit_limit` (default 2) such launches of
+one task, the loop stops claiming that task and reports `Refused: task ... is
+held`; after `[run] empty_exit_total_limit` (default 5) in a row across all
+tasks it claims nothing. `0` turns a limit off. The host stays held until the
+operator has fixed the cause and removed `unsubmitted.json`. The release
+handoff of every launch that ended without a submission carries the agent's
+final message (the Claude `result`, else its last text, or Codex's last
+`agent_message`; at most 1000 characters) and says where the launch's logs
+are kept: a tail (at most 1 MiB each) of `events.jsonl` and `stderr.log` in
+`/var/lib/agentc/unsubmitted/<session>/`, mode 0700 and 0600, owned by root,
+newest 20 kept. Nothing else from the run directory, the clone or the role's
+home is copied.
+
 A Claude launch that was killed before it wrote its `result` event (a reviewer
 that reached its time limit, an implementer stopped after its drain period)
 has no reported total. Its row instead sums the usage of the launch's

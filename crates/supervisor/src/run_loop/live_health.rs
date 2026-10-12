@@ -103,8 +103,18 @@ pub fn expiry_ms(config: &Config, harness: Harness) -> Option<i64> {
 /// The launch's `$RUN/events.jsonl`, owned by the role, read beneath the
 /// root-owned role directory.
 pub fn events(config: &Config, account: &Account, launch: &Launch) -> Option<Vec<u8>> {
+    run_file(config, account, launch, "events.jsonl")
+}
+
+/// The launch's `$RUN/stderr.log`, read the same way.
+pub fn stderr(config: &Config, account: &Account, launch: &Launch) -> Option<Vec<u8>> {
+    run_file(config, account, launch, "stderr.log")
+}
+
+/// The role-owned `$RUN/<name>`, never following a symlink.
+fn run_file(config: &Config, account: &Account, launch: &Launch, name: &str) -> Option<Vec<u8>> {
     let base = role_dir(config);
     let run = launch.run.strip_prefix(&base).ok()?;
-    let relative = Path::new(run).join("events.jsonl");
+    let relative = Path::new(run).join(name);
     rooted::read(&base, &relative, account.uid, MAX_EVENTS).ok()
 }

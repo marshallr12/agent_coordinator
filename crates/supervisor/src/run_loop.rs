@@ -28,6 +28,7 @@ pub mod review;
 pub mod review_cost;
 #[cfg(target_os = "linux")]
 mod rooted;
+pub mod unsubmitted;
 
 use crate::config::Config;
 use crate::profile::{Harness, Role};
@@ -89,6 +90,12 @@ pub struct RunConfig {
     /// On stop, how long a launch may take to exit after SIGTERM before
     /// SIGKILL.
     pub drain_seconds: u64,
+    /// Stop claiming a task after this many launches of it in a row exited
+    /// without a submission (0: never).
+    pub empty_exit_limit: u32,
+    /// Stop claiming anything after this many such launches in a row,
+    /// whatever their tasks (0: never).
+    pub empty_exit_total_limit: u32,
 }
 
 impl Default for RunConfig {
@@ -109,6 +116,8 @@ impl Default for RunConfig {
             review_attempts: 3,
             budget_minutes: 240,
             drain_seconds: 30,
+            empty_exit_limit: 2,
+            empty_exit_total_limit: 5,
         }
     }
 }
@@ -247,6 +256,10 @@ pub trait Driver {
     fn events(&self, launch: &Launch) -> Option<Vec<u8>> {
         std::fs::read(launch.run.join("events.jsonl")).ok()
     }
+    /// The launch's diagnostics, `$RUN/stderr.log`.
+    fn stderr(&self, launch: &Launch) -> Option<Vec<u8>> {
+        std::fs::read(launch.run.join("stderr.log")).ok()
+    }
 }
 
 /// What one poll did; recorded in the heartbeat.
@@ -333,6 +346,10 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
         Ok(vendor) => vendor,
         Err(reason) => return Outcome::Refused(reason),
     };
+    let strikes = unsubmitted::Strikes::load(config);
+    if let Some(reason) = strikes.total_hold(&config.run, config) {
+        return Outcome::Refused(reason);
+    }
     if config.run.reviewer {
         for project in &projects {
             driver.select(project);
@@ -340,6 +357,7 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
         }
     }
     let mut failure = None;
+    let mut held = None;
     for project in projects.iter().skip(1).chain(projects.first()) {
         driver.select(project);
         let next = match driver.next(Role::Implementer) {
@@ -352,6 +370,10 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
         let Some(suggestion) = suggestion(&next) else {
             continue;
         };
+        if let Some(reason) = strikes.task_hold(&config.run, config, &suggestion.task) {
+            held.get_or_insert(reason);
+            continue;
+        }
         let launch = Launch {
             vendor,
             ..Launch::plan(config, project, suggestion)
@@ -362,7 +384,11 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
         return outcome;
     }
     driver.select(&main);
-    failure.map_or(Outcome::Idle, Outcome::Failed)
+    match (failure, held) {
+        (Some(failure), _) => Outcome::Failed(failure),
+        (None, Some(held)) => Outcome::Refused(held),
+        (None, None) => Outcome::Idle,
+    }
 }
 
 /// Why the host must not claim now, if it must not. The disk high-water
@@ -431,8 +457,10 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
     let cost = record::settle_cost(driver, config, launch, &mut record);
     if submitted(driver, launch, &record, &result) {
         record::mark_submitted(config, &mut record);
+        unsubmitted::submitted(config, &launch.suggestion.task);
     } else {
-        let summary = handoff(&result, &cost);
+        let evidence = unsubmitted::evidence(driver, config, launch, &result);
+        let summary = handoff(&result, &cost, &evidence);
         record::release(driver, config, launch, &mut record, &summary);
     }
     result.map(|ended| ended.code)
@@ -485,8 +513,9 @@ fn run_claimed(
 }
 
 /// The handoff summary a launch's attempt is released with, carrying the
-/// launch's `cost` sentence.
-fn handoff(result: &Result<lease::Ended>, cost: &str) -> String {
+/// launch's `cost` sentence and the `evidence` of a launch that ended
+/// without a submission ([`unsubmitted::evidence`]).
+fn handoff(result: &Result<lease::Ended>, cost: &str, evidence: &str) -> String {
     let (how, why) = match result {
         Ok(ended) => (
             format!("the launch exited with code {}", ended.code),
@@ -495,7 +524,7 @@ fn handoff(result: &Result<lease::Ended>, cost: &str) -> String {
         Err(error) => (format!("the launch failed: {error:#}"), String::new()),
     };
     let text = format!(
-        "agentc-supervisor released the attempt: {how}{why}. {cost} Read the last checkpoint before resuming."
+        "agentc-supervisor released the attempt: {how}{why}. {cost}{evidence} Read the last checkpoint before resuming."
     );
     text.chars().take(4000).collect()
 }

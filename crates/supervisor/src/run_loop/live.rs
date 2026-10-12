@@ -520,6 +520,10 @@ impl Driver for LiveDriver {
     fn events(&self, launch: &Launch) -> Option<Vec<u8>> {
         super::live_health::events(&self.config, &self.account, launch)
     }
+
+    fn stderr(&self, launch: &Launch) -> Option<Vec<u8>> {
+        super::live_health::stderr(&self.config, &self.account, launch)
+    }
 }
 
 /// Whether SIGTERM or SIGINT asked the loop to stop.

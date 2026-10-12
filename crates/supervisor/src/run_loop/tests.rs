@@ -32,6 +32,8 @@ struct Fake {
     pids: std::collections::HashMap<u32, u64>,
     /// What the launch writes to `$RUN/events.jsonl` when it starts.
     events: String,
+    /// What it writes to `$RUN/stderr.log` when it starts.
+    stderr: String,
     /// Harnesses whose sign-in check fails.
     unhealthy: Vec<Harness>,
     /// When every harness credential expires, if known.
@@ -84,6 +86,7 @@ impl Fake {
             term_exit_ms: Some(1_000),
             pids: Default::default(),
             events: String::new(),
+            stderr: String::new(),
             unhealthy: Vec::new(),
             expiry: None,
             renew_fails: None,
@@ -197,6 +200,7 @@ impl Driver for Fake {
         anyhow::ensure!(!self.fail_start, "spawn launch-root: no such file");
         fs::write(launch.run.join(".state-started"), "s")?;
         fs::write(launch.run.join("events.jsonl"), &self.events)?;
+        fs::write(launch.run.join("stderr.log"), &self.stderr)?;
         self.running = Some(launch.clone());
         self.pids.insert(4242, 77);
         Ok((4242, Some(77)))
@@ -839,6 +843,8 @@ fn a_failed_release_keeps_the_launch_for_the_next_poll() {
 mod health_tests;
 #[path = "renewal_tests.rs"]
 mod renewal_tests;
+#[path = "unsubmitted_tests.rs"]
+mod unsubmitted_tests;
 
 #[test]
 fn a_ready_canary_task_is_claimed_ahead_of_the_main_projects() {
