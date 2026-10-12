@@ -4,7 +4,22 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on production `aa05dcb`; mxmini paused by a nested-sandbox defect (2026-10-12 04:15 UTC, workflow on)
+## Current resume point — P6 dogfood on production `aa05dcb`; mxmini paused until its fix ships (2026-10-12 08:15 UTC, workflow on)
+
+**All four overnight tasks landed on main (`ce3ddd1`), none released yet** — all on oracle-1:
+
+| Task | Rounds | Cost | HRI | Commits |
+|---|---|---|---|---|
+| 576f8a30 sysvinit-check usable after host-setup | 2 (1 valid reject) | $1.08 | 0 | d5e6c58, 2ed0bc4 |
+| 7bbb5993 bound exit-0-without-submission re-claims, keep evidence | 1 | $0.96 | 0 | ee299b4 |
+| 49848ccb review form kept-claim + lease-loss drop | 2 (1 valid reject) | $1.81 (+ mxmini $1.32) | 0 (mxmini 2) | 72bb236 |
+| 69279832 implementer `sandbox.enabled=false` + suite check | blocked → owner (b) → 1 drain → approved | $1.36 | 1 (decision) | ce3ddd1 |
+
+**69279832 root cause (oracle-1 agent, verified):** nested bwrap is impossible under the launch's
+`--disable-userns` on any host; Claude's sandbox was silently inactive on oracle-1 (no `socat`;
+mxmini has `/usr/bin/socat`), so oracle-1 implementers always ran Bash with only the outer bwrap.
+Owner chose (b): turn it off explicitly for implementers, outer bwrap unchanged. One attempt
+(3d2fe98a) **drained: no harness event for 15 min, exit -1** — watch item.
 
 **Night of 2026-10-11/12 (session `64c1e4a5`; ledger `pilot-timeline.log` has every event):**
 - **mxmini's first claims failed.** 49848ccb (console review form kept-claim fixtures, P2, filed for
@@ -15,7 +30,7 @@ execution, and links everything else.
   Creating new namespace failed … (ENOSPC)` — Claude's nested sandbox under the launch's
   `--disable-userns` bwrap. oracle-1 (bundled `/opt/agentc/bin/bwrap`, system bwrap 0.11.1, kernel
   7.0) works with the same role settings and Claude 2.1.296; mxmini uses Debian bwrap 0.8.0, kernel
-  6.12, no `bubblewrap` setting. Root cause not yet proven. Filed **69279832** (P1: fix + a
+  6.12, no `bubblewrap` setting (the real cause is the socat difference, see above). Filed **69279832** (P1: fix + a
   containment-suite check; the suite passed while this was broken) and **7bbb5993** (P2: supervisor
   re-claims forever on exit-0-without-submission and deletes the run's transcript). mxmini HRI 2
   (kill switch, manual run copy). **Keep mxmini's kill switch on until 69279832 ships.**
@@ -25,22 +40,25 @@ execution, and links everything else.
   host-setup or before a launch: `sudo git -C /var/lib/agentc/mirror.git fetch --prune --quiet` first.
 - **576f8a30** (sysvinit-check.sh refuses after host-setup, P2) filed 02:29Z; the weekly budget did
   not hold it; oracle-1 claimed it in 24 s. Review CHANGES_REQUESTED (valid: `main()` calls
-  `preflight` before `set_paths` → `INITD_CHECK: unbound variable`, no check runs). Back to ready.
+  `preflight` before `set_paths` → `INITD_CHECK: unbound variable`, no check runs); fixed and landed.
 - **49848ccb** then went to oracle-1 (02:56Z, attempt 41f5716c, submitted 03:28Z). Review
   CHANGES_REQUESTED 04:08Z (valid: the new 401 fixture leaves the page's retained-mutation alert
   blocking later steps; fails 3/3 on the candidate, passes on base). The reviewer also saw one
   unreproduced failure of `agentc-push` `serve::tests::a_client_outside_the_launch_is_refused_without_minting`
   (tests.rs:300; 80+ reruns pass) — watch item, file if it recurs.
-- Reviewer disagreements so far: 3, all valid. Supervisor HRI on oracle-1 tonight: 0.
+- Reviewer disagreements so far: 3, all valid (277079ed, 576f8a30, 49848ccb). HRI overnight: mxmini 2,
+  oracle-1 1 (the 69279832 design decision, correctly escalated).
 - Owner task **47dac763** stays open (mxmini has not completed a task).
 
 **Next actions, in order:**
-1. Follow 576f8a30 and 49848ccb through their second rounds on oracle-1; record cost/HRI per host.
-2. Once 69279832 lands and ships: deploy, update mxmini binaries, have the owner rerun the suite
-   (with the new nested-sandbox check), then remove mxmini's kill switch and watch its first claim.
-   Then mark 47dac763 done with the owner.
-3. Daily 00:00Z checks (e2e canary + digest), then recommend per-host canary coverage (U31/U33) —
-   tonight's defect argues for an mxmini e2e canary: the existing canary only runs on oracle-1.
+1. Release main `ce3ddd1` (carries the four tasks above): release-next PLAN/PREREQS, deploy drill,
+   oracle-1 host-setup at the production commit (role settings change → regenerated settings).
+2. mxmini: binaries + host-setup at the production commit; owner reruns the suite after a mirror
+   fetch (new check: Bash runs inside an implementer launch, `unshare -U` fails); then owner removes
+   `/var/lib/agentc/kill-switch` for the 22:00 window; watch its first claim; mark 47dac763 done.
+3. Daily 00:00Z checks for 2026-10-12 (digest not yet checked; e2e canary 2d1151fc done), then
+   recommend per-host canary coverage (U31/U33) — last night's defect only showed on mxmini.
+4. Watch items: the 3d2fe98a 15-min harness stall; the one-off `agentc-push` serve test failure.
 
 **Deployed `aa05dcb` 2026-10-11 13:43 UTC** (release run `38122931843`, binaries-only, ~8 s down;
 rollback binaries `*-0.1.1-60eda26`, old-binary snapshot `20261011T134244.649Z-b209797f…`; carries
