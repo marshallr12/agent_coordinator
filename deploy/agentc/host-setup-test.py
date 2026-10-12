@@ -562,7 +562,7 @@ class SysvinitCheck(unittest.TestCase):
     def run_check(self, code):
         script = (f'set -euo pipefail; source "{self.CHECK}"; PATH="{self.stubs}:$PATH"; '
                   f'id() {{ echo 0; }}; has_systemd() {{ false; }}; INITD_DIR="{self.root}/etc/init.d"; '
-                  f'CRON_DIR="{self.root}/etc/cron.d"; T=$(mktemp -d); set_paths; {code}')
+                  f'CRON_DIR="{self.root}/etc/cron.d"; T=$(mktemp -d); set_paths; set_temp_paths; {code}')
         return run(["bash", "-c", script])
 
     def test_it_runs_next_to_the_real_loop_and_leaves_it_untouched(self):
@@ -575,6 +575,21 @@ class SysvinitCheck(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         # insserv was asked about the fake loop's own script, not the real one.
         self.assertEqual((self.stubs / "insserv.calls").read_text(), f"-n {self.root}/etc/init.d/agentc-run-check\n")
+
+    def test_main_runs_next_to_the_real_loop_in_its_own_order(self):
+        """Runs the script's own main, which sets nothing up beforehand, with the
+        slow start/stop/cron checks replaced by markers."""
+        before = self.snapshot()
+        script = (f'set -euo pipefail; source "{self.CHECK}"; PATH="{self.stubs}:$PATH"; '
+                  f'id() {{ echo 0; }}; has_systemd() {{ false; }}; INITD_DIR="{self.root}/etc/init.d"; '
+                  f'CRON_DIR="{self.root}/etc/cron.d"; TMP_DIR="{self.root}/run"; check_start_and_restart() {{ echo ran-start; }}; '
+                  'check_stop() { echo ran-stop; }; check_cron() { echo ran-cron; }; main')
+        result = run(["bash", "-c", script])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS insserv accepts the boot order (dry run)", result.stdout)
+        for marker in ("ran-start", "ran-stop", "ran-cron", "sysvinit check: all PASS"):
+            self.assertIn(marker, result.stdout)
+        self.assertEqual(self.snapshot(), before)
 
     def test_the_fixture_shares_no_name_pidfile_or_log_with_the_real_loop(self):
         result = self.run_check('preflight; build_fixture; cat "$T/$NAME"; cleanup')

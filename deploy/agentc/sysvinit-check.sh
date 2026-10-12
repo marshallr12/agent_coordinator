@@ -23,16 +23,24 @@ HERE=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 NAME=agentc-run-check
 INITD_DIR=/etc/init.d
 CRON_DIR=/etc/cron.d
+TMP_DIR=/tmp
 T=
+PIDFILE=
+LOG=
 FAILED=0
 
-# Sets the check's paths. T is its temporary directory; the fake loop's
-# pidfile and log are inside it, never the real loop's.
+# Sets the two system paths the check creates; preflight needs them before
+# the temporary directory exists.
 set_paths() {
-  PIDFILE=$T/run.pid
-  LOG=$T/run.log
   INITD_CHECK=$INITD_DIR/$NAME
   CRON_CHECK=$CRON_DIR/agentc-sysvinit-check
+}
+
+# Sets the fake loop's pidfile and log, inside the temporary directory T and
+# never the real loop's.
+set_temp_paths() {
+  PIDFILE=$T/run.pid
+  LOG=$T/run.log
 }
 
 # Prints PASS or FAIL for check $1, decided by running the rest as a command.
@@ -151,10 +159,11 @@ check_cron() {
 
 # Runs every check and exits 1, printing the logs, if any failed.
 main() {
-  preflight
-  T=$(mktemp -d /tmp/agentc-sysvinit-check.XXXXXX)
-  trap cleanup EXIT
   set_paths
+  preflight
+  T=$(mktemp -d "$TMP_DIR/agentc-sysvinit-check.XXXXXX")
+  trap cleanup EXIT
+  set_temp_paths
   build_fixture
   check_boot_order
   check_start_and_restart
