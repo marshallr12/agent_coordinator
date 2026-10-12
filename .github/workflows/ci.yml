@@ -48,6 +48,27 @@ jobs:
       - name: Exercise live backup and reconciled fresh-directory restore
         run: python3 scripts/backup_smoke.py
 
+  deploy-scripts:
+    name: Deploy script tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # Every deploy/agentc/*-test.py runs without root; a new test file joins
+      # this job by its name alone. All of them run, then any failure fails the job.
+      - name: Run every deploy/agentc test
+        run: |
+          status=0
+          for test in deploy/agentc/*-test.py; do
+            echo "::group::$test"
+            python3 -I "$test" || { echo "::error file=$test::$test failed"; status=1; }
+            echo "::endgroup::"
+          done
+          exit "$status"
+
   windows-client:
     name: Native Windows client, CLI, and local runner tests
     runs-on: windows-latest

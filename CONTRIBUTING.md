@@ -25,7 +25,9 @@ client state against simultaneous processes and interrupted writes.
 Run cargo fmt, workspace Clippy with warnings denied, and meaningful workspace
 tests. For service/client changes, build the workspace and run scripts/smoke.py.
 For UI changes, run node --check web/app.js and verify the running page in a
-browser. For documentation changes, build with the pinned mdBook version and run
+browser. For deploy/agentc changes, run `python3 -I` on each
+deploy/agentc/*-test.py (none needs root); CI runs them all in *Deploy script
+tests*. For documentation changes, build with the pinned mdBook version and run
 the documentation link/package checks documented in the book. Edit canonical
 chapters in book/src. Keep historical records consistent with verified behavior;
 record current task progress, blockers, and completion in the service.
