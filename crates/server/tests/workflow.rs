@@ -4680,6 +4680,96 @@ async fn integrator_check_failed_needs_a_reproduced_deciding_failure() {
     assert_eq!(subject_state(&f, &t).await.0, "revision_needed");
 }
 
+/// Posts a blocking `rerun_refused` report for attempt 1 of `run` of `result`
+/// and returns its id.
+async fn rerun_refused(f: &Fixture, i: &Caller, p: &str, result: &str, run: i64) -> Value {
+    let details =
+        json!({"verdict":"rerun_refused","run_id":run,"run_attempt":1,"blocks_subject":true});
+    let key = format!("{result}:{run}:rerun_refused");
+    let (status, v) = report(f, i, p, "flaky", &key, Some(result), details).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["requires_human"], true, "{v}");
+    v["data"]["id"].clone()
+}
+
+/// The resolution note of report `id`, if it is resolved.
+async fn resolution_note(f: &Fixture, id: &Value) -> Option<String> {
+    sqlx::query_scalar("SELECT resolution_note FROM integrator_reports WHERE id=?")
+        .bind(id.as_str().unwrap())
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap()
+}
+
+// A refused rerun pages a human only until the rerun goes through: the
+// service resolves the report when it records a newer attempt of that run,
+// and leaves other blocking reports and other runs alone.
+#[tokio::test]
+async fn a_later_rerun_resolves_its_rerun_refused_report() {
+    let f = Fixture::new().await;
+    let (p, _, integration, i) = integrator_task(&f, "integrator-rerun-resolves").await;
+    let result = pinned_result(&f, &i, &p, &integration["submission_id"], T0).await;
+    let refused = rerun_refused(&f, &i, &p, &result, 900).await;
+    let other_run = rerun_refused(&f, &i, &p, &result, 901).await;
+    let blocking = json!({"verdict":"no_result","blocks_subject":true});
+    let (_, no_result) = report(&f, &i, &p, "flaky", "k-no-result", Some(&result), blocking).await;
+    receipt_attempt(&f, &i, &p, &result, (1, BLOB, "failure")).await;
+    assert_eq!(resolution_note(&f, &refused).await, None, "same attempt");
+    receipt_attempt(&f, &i, &p, &result, (2, BLOB, "success")).await;
+    let note = resolution_note(&f, &refused).await.unwrap();
+    assert!(note.contains("later rerun"), "{note}");
+    assert_eq!(resolution_note(&f, &other_run).await, None);
+    assert_eq!(resolution_note(&f, &no_result["data"]["id"]).await, None);
+    let (_, queue) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/integrator/reports?open=true"),
+            Value::Null,
+        )
+        .await;
+    let open: Vec<&Value> = queue["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["id"])
+        .collect();
+    assert!(!open.contains(&&refused), "{queue}");
+    assert_eq!(open.len(), 2, "{queue}");
+}
+
+// The same report also closes when its result is integrated, without any
+// rerun.
+#[tokio::test]
+async fn an_integrated_result_resolves_its_rerun_refused_report() {
+    let f = Fixture::new().await;
+    let (p, _, integration, i) = integrator_task(&f, "integrator-refused-integrated").await;
+    let result = authorized(&f, &i, &p, &integration["submission_id"], T0).await;
+    let refused = rerun_refused(&f, &i, &p, &result, 901).await;
+    assert_eq!(resolution_note(&f, &refused).await, None);
+    let (status, v) = observe(&f, &i, &p, &result, R, "contained").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let note = resolution_note(&f, &refused).await.unwrap();
+    assert!(note.contains("integrated or superseded"), "{note}");
+}
+
+// ... or when its submission is superseded by the integrator's revise.
+#[tokio::test]
+async fn a_superseded_result_resolves_its_rerun_refused_report() {
+    let f = Fixture::new().await;
+    let (p, _, integration, i) = integrator_task(&f, "integrator-refused-superseded").await;
+    let submission = &integration["submission_id"];
+    let result = pinned_result(&f, &i, &p, submission, T0).await;
+    let refused = rerun_refused(&f, &i, &p, &result, 901).await;
+    receipt_attempt(&f, &i, &p, &result, (1, BLOB, "failure")).await;
+    receipt_attempt(&f, &i, &p, &result, (2, BLOB, "failure")).await;
+    assert_eq!(resolution_note(&f, &refused).await, None);
+    let revise = check_failed_body(submission, json!(result));
+    let (status, v) = integrator_post(&f, &i, &p, "revise", revise).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(resolution_note(&f, &refused).await.is_some());
+}
+
 // P4 S4b: cancelled and skipped attempts are not failures; a skipped
 // deciding attempt passes the check for push authority, as on GitHub.
 #[tokio::test]

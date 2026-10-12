@@ -228,6 +228,66 @@ async fn record_report(
     ))
 }
 
+/// Why an open `rerun_refused` report no longer needs a human: its result's
+/// submission was superseded or its subject is integrated, or a newer attempt
+/// of the refused run was recorded (a later rerun went through).
+macro_rules! close_stale_sql {
+    ($reason:literal) => {
+        concat!(
+            "UPDATE integrator_reports SET resolved_at=?,resolved_by=?,resolution_note=? \
+             WHERE project_id=? AND kind='flaky' AND resolved_at IS NULL \
+             AND result_id IS NOT NULL AND json_extract(details_json,'$.verdict')='rerun_refused' \
+             AND ",
+            $reason
+        )
+    };
+}
+
+/// Resolves the project's open `rerun_refused` reports that went stale, with
+/// a note saying why. The service owns this (the integrator cannot resolve its
+/// own reports): it runs inside the mutations that make a report stale, a
+/// receipt for a newer attempt of the refused run, the integration of the
+/// subject, and the supersession of the submission, so the digest never pages
+/// for work that went through.
+pub(crate) async fn close_stale_rerun_reports(
+    c: &mut SqliteConnection,
+    p: &str,
+    actor: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    let finished = close_stale_sql!(
+        "EXISTS(SELECT 1 FROM integrator_results r JOIN submissions s ON s.id=r.submission_id \
+         LEFT JOIN workflow_subjects ws ON ws.task_id=s.task_id \
+         WHERE r.id=integrator_reports.result_id \
+         AND (s.superseded_at IS NOT NULL OR ws.phase='done'))"
+    );
+    let rerun = close_stale_sql!(
+        "EXISTS(SELECT 1 FROM integrator_receipts rc \
+         WHERE rc.result_id=integrator_reports.result_id \
+         AND rc.run_id=json_extract(details_json,'$.run_id') \
+         AND rc.run_attempt>json_extract(details_json,'$.run_attempt'))"
+    );
+    for (sql, note) in [
+        (
+            finished,
+            "Resolved automatically: the result was integrated or superseded.",
+        ),
+        (
+            rerun,
+            "Resolved automatically: a later rerun of the run went through.",
+        ),
+    ] {
+        sqlx::query(sql)
+            .bind(now)
+            .bind(actor)
+            .bind(note)
+            .bind(p)
+            .execute(&mut *c)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Refuses an unknown project.
 async fn require_project(c: &mut SqliteConnection, p: &str) -> Result<(), AppError> {
     let found: i64 = sqlx::query_scalar("SELECT count(*) FROM projects WHERE id=?")

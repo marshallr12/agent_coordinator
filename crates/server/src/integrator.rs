@@ -627,6 +627,7 @@ async fn record_receipt(
     require_integrator_project(&mut m.tx, &p).await?;
     require_receipt_head(&mut m.tx, &p, &input).await?;
     insert_receipt(&mut m, &input).await?;
+    crate::integrator_reports::close_stale_rerun_reports(&mut m.tx, &p, &m.actor.id, m.now).await?;
     let deciding = deciding_run(&mut m.tx, &input).await?;
     let value = json!({"receipt": input, "deciding_run": deciding});
     let record = input.result_id.clone();

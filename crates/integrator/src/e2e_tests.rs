@@ -785,6 +785,29 @@ async fn a_refused_rerun_blocks_and_is_asked_again() {
 }
 
 #[tokio::test]
+async fn a_rerun_refused_because_the_run_is_going_waits_without_a_report() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[PASS]);
+    h.edit_fake(|file| {
+        file.rerun_error =
+            Some("GitHub replied 403 Forbidden: This workflow is already running".into());
+    });
+    for _ in 0..2 {
+        assert_eq!(h.cycle().await, Step::ChecksPending);
+    }
+    assert!(
+        report_kinds(&h).is_empty(),
+        "a premature rerun pages no one"
+    );
+    assert_eq!(h.reruns(), 0);
+    h.edit_fake(|file| file.rerun_error = None);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    assert_eq!(h.reruns(), 1);
+    assert_eq!(h.cycle().await, Step::Revised("check_failed".into()));
+    assert!(report_kinds(&h).is_empty());
+}
+
+#[tokio::test]
 async fn a_target_run_in_progress_waits_without_a_report() {
     let (mut h, remote) = pinned_harness().await;
     script_attempts(&h, &remote, &[FAIL, FAIL], &[None]);

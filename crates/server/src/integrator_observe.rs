@@ -254,6 +254,9 @@ async fn complete_subject(m: &mut Mutation, row: &SqliteRow) -> Result<(), AppEr
         .bind(&task)
         .execute(&mut *m.tx)
         .await?;
+    let project: String = row.get("project_id");
+    crate::integrator_reports::close_stale_rerun_reports(&mut m.tx, &project, &m.actor.id, m.now)
+        .await?;
     crate::workflow::ready_dependents(&mut m.tx, &task, m.now).await
 }
 

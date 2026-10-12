@@ -1291,6 +1291,7 @@ pub(crate) async fn supersede_submission(
         .bind(r.task)
         .execute(&mut *c)
         .await?;
+    crate::integrator_reports::close_stale_rerun_reports(c, r.project, r.actor, now).await?;
     crate::revert_rules::restore_awaiting(c, r.task).await
 }
 

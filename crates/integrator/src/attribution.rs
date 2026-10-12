@@ -12,7 +12,7 @@
 //! X moves or X's check passes, and while X's run is still going the gate
 //! waits. A check that [`MAX_RERUNS`] reruns leave undecided, or a rerun
 //! request the checks source refuses, skips the subject with a `flaky`
-//! report.
+//! report; a refusal that only means the run is still going waits instead.
 //! A cycle polls R's checks once (and X's only for a reproduced failure)
 //! and never waits for a rerun: a requested rerun keeps the gate at
 //! `ChecksPending` until a newer attempt of its run appears and completes.
@@ -93,7 +93,8 @@ impl<C: ChecksSource> Integrator<C> {
     }
 
     /// Reruns the failed jobs of each deciding run, once per run, and
-    /// records each request; a refused request skips the subject instead.
+    /// records each request; a refused request skips the subject instead,
+    /// except one that only means the run is still going, which waits.
     async fn rerun(
         &mut self,
         job: &Job,
@@ -104,7 +105,16 @@ impl<C: ChecksSource> Integrator<C> {
         for (run_id, attempt) in latest_attempts(deciding) {
             let request = self.checks.rerun_failed_jobs(job.repo.as_ref(), run_id);
             if let Err(error) = request.await {
-                return Ok(self.rerun_refused(job, result, run_id, &error).await);
+                if still_running(&error) {
+                    eprintln!(
+                        "agentc-integrator: {}: run {run_id} of R {} is still running: {error:#}",
+                        job.project, result.r
+                    );
+                    return Ok(Step::ChecksPending);
+                }
+                return Ok(self
+                    .rerun_refused(job, result, (run_id, attempt), &error)
+                    .await);
             }
             self.state.record_rerun(&result.id, run_id, attempt)?;
         }
@@ -117,7 +127,7 @@ impl<C: ChecksSource> Integrator<C> {
         &self,
         job: &Job,
         result: &ResultRecord,
-        run_id: i64,
+        (run_id, attempt): (i64, i64),
         error: &anyhow::Error,
     ) -> Step {
         let reason = format!("rerun_refused: run {run_id} of R {}: {error:#}", result.r);
@@ -129,7 +139,7 @@ impl<C: ChecksSource> Integrator<C> {
             submission_id: Some(result.submission_id.clone()),
             result_id: Some(result.id.clone()),
             details: json!({"verdict": "rerun_refused", "r": result.r, "run_id": run_id,
-                "error": format!("{error:#}"), "blocks_subject": true}),
+                "run_attempt": attempt, "error": format!("{error:#}"), "blocks_subject": true}),
         };
         self.report_best_effort(&job.project, report).await;
         Step::Blocked(reason)
@@ -207,6 +217,16 @@ impl<C: ChecksSource> Integrator<C> {
             check.check.check_name, result.r, job.x
         )
     }
+}
+
+/// True when a refused rerun only means the run still has jobs going (GitHub
+/// answers `403 This workflow is already running`, or says the run is not
+/// completed), so asking again once it finishes is expected to work.
+fn still_running(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_lowercase();
+    ["already running", "not completed", "still in progress"]
+        .iter()
+        .any(|phrase| message.contains(phrase))
 }
 
 /// The checks with verdict `wanted`.
