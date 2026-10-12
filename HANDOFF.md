@@ -4,7 +4,43 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on production `aa05dcb`, mxmini opted in (2026-10-11 ~16:25 UTC, workflow on)
+## Current resume point — P6 dogfood on production `aa05dcb`; mxmini paused by a nested-sandbox defect (2026-10-12 04:15 UTC, workflow on)
+
+**Night of 2026-10-11/12 (session `64c1e4a5`; ledger `pilot-timeline.log` has every event):**
+- **mxmini's first claims failed.** 49848ccb (console review form kept-claim fixtures, P2, filed for
+  mxmini with the owner's OK) was claimed by mxmini 02:39Z and looped: 3 attempts, each exit 0 with no
+  submission ($0.50 + $0.27 + $0.55 = **$1.32**), until the owner set `/var/lib/agentc/kill-switch`
+  (owner switch, quiet-hours cron leaves it) at 02:46Z. Cause, from an owner-copied live run
+  (`~/agentc-run-c93fd074/events.jsonl`): every Claude Bash call inside the launch failed `bwrap:
+  Creating new namespace failed … (ENOSPC)` — Claude's nested sandbox under the launch's
+  `--disable-userns` bwrap. oracle-1 (bundled `/opt/agentc/bin/bwrap`, system bwrap 0.11.1, kernel
+  7.0) works with the same role settings and Claude 2.1.296; mxmini uses Debian bwrap 0.8.0, kernel
+  6.12, no `bubblewrap` setting. Root cause not yet proven. Filed **69279832** (P1: fix + a
+  containment-suite check; the suite passed while this was broken) and **7bbb5993** (P2: supervisor
+  re-claims forever on exit-0-without-submission and deletes the run's transcript). mxmini HRI 2
+  (kill switch, manual run copy). **Keep mxmini's kill switch on until 69279832 ships.**
+- **Containment suite rerun on mxmini** (owner, 23:26 EDT, mirror refreshed by hand to `b8967dd`):
+  rc 0, 100 PASS, both cargo-test legs green — 6db155d4 and 1b5804b5 flakes gone. Log
+  `mxmini-u38-containment-rerun.log`. The suite tests the **mirror** HEAD, which only refreshes at
+  host-setup or before a launch: `sudo git -C /var/lib/agentc/mirror.git fetch --prune --quiet` first.
+- **576f8a30** (sysvinit-check.sh refuses after host-setup, P2) filed 02:29Z; the weekly budget did
+  not hold it; oracle-1 claimed it in 24 s. Review CHANGES_REQUESTED (valid: `main()` calls
+  `preflight` before `set_paths` → `INITD_CHECK: unbound variable`, no check runs). Back to ready.
+- **49848ccb** then went to oracle-1 (02:56Z, attempt 41f5716c, submitted 03:28Z). Review
+  CHANGES_REQUESTED 04:08Z (valid: the new 401 fixture leaves the page's retained-mutation alert
+  blocking later steps; fails 3/3 on the candidate, passes on base). The reviewer also saw one
+  unreproduced failure of `agentc-push` `serve::tests::a_client_outside_the_launch_is_refused_without_minting`
+  (tests.rs:300; 80+ reruns pass) — watch item, file if it recurs.
+- Reviewer disagreements so far: 3, all valid. Supervisor HRI on oracle-1 tonight: 0.
+- Owner task **47dac763** stays open (mxmini has not completed a task).
+
+**Next actions, in order:**
+1. Follow 576f8a30 and 49848ccb through their second rounds on oracle-1; record cost/HRI per host.
+2. Once 69279832 lands and ships: deploy, update mxmini binaries, have the owner rerun the suite
+   (with the new nested-sandbox check), then remove mxmini's kill switch and watch its first claim.
+   Then mark 47dac763 done with the owner.
+3. Daily 00:00Z checks (e2e canary + digest), then recommend per-host canary coverage (U31/U33) —
+   tonight's defect argues for an mxmini e2e canary: the existing canary only runs on oracle-1.
 
 **Deployed `aa05dcb` 2026-10-11 13:43 UTC** (release run `38122931843`, binaries-only, ~8 s down;
 rollback binaries `*-0.1.1-60eda26`, old-binary snapshot `20261011T134244.649Z-b209797f…`; carries
@@ -14,13 +50,13 @@ supervisor `4bae4145…`, CLI `b86357fb…`; `/usr/local/bin` too). mxmini and M
 updated). oracle-1 non-interactive ssh has no cargo on PATH: use `~/.cargo/bin/cargo`. Reclaiming
 after a deploy needs `connect` first (`policy_changed`).
 
-**Next actions, in order — raise these with the owner before any other work:**
+**Earlier (2026-10-11 day) next actions, now done or superseded above:**
 1. **Flaky CLI test (task `6db155d4`, P1):** `crates/cli/src/lifecycle.rs` `tests::service` fail ~90%
    of full-binary runs (session lock WouldBlock, exit 7); it sent 2186dc84 back twice although that
    task does not touch the CLI. Owner admitted 6db155d4 (ready, P1, ahead of 2186dc84) and granted
    task-definition editing to this workstation's agent principal `250802da…` (grant `c9c6152f`), so
    agents here can now admit/edit tasks. No 2186dc84 dependency (blocked while its submission is open).
-2. **mxmini (U38) — opted in 2026-10-11 16:20Z, awaiting first claim (22:00 EDT window):** binaries at
+2. **mxmini (U38) — opted in 2026-10-11 16:20Z (first claims failed overnight; see top):** binaries at
    `aa05dcb` (supervisor `0913e36d…`, CLI `16b21b24…`, push `6e23c765…`, worktree
    `~/src/worktrees/ac-release-aa05dcb`); host-setup rc 0 with `QUIET_HOURS=22:00-07:00` (cron
    `agentc-quiet-hours` holds `/var/lib/agentc/kill-switch` = `quiet-hours` outside it); `[run] harness =
@@ -106,12 +142,14 @@ the production commit, `[run]` + binding, credentials, opt in, QUIET_HOURS.
 behind P1 work (review/implement alternate); task `depends_on` can only be set at creation
 (agents cannot edit tasks; `unblock` works for this session).
 
-**Session handover:** background helpers of the orchestrating session run on the workstation from
-its scratchpad: `renew.sh` (renews `31af890a` gen 3 every 15 min), `watch.sh` (task-state poller
-appending to `pilot-timeline.log`), an ssh `journalctl -u agentc-run -f` appending to
-`pilot-agentc-run.journal` (since 2026-10-09 19:10Z, session `d8acf6b3…` scratchpad: renew.sh pid 1997609
-(sleep 900; renew grants a 1 h lease), watch.sh 1997610, journal ssh 1997611, mxmini-watch.sh (heartbeat → timeline); all `setsid`-detached, so they
-outlive the session). Daily 00:00Z checks: 2026-10-10 digest ok (HRI 0) and e2e canary 39725610 ok. Never wait on `pgrep -f PATTERN` over ssh: the pattern matches the
+**Session handover:** background helpers run on the workstation (= mxmini) from session
+`d8acf6b3…`'s scratchpad (`/tmp/claude-1000/-home-marshall-src-agent-coordinator/d8acf6b3-…/scratchpad`):
+`renew.sh` pid 1997609 (renews d513bc21 attempt `f156ead4`, **gen 4**, every 15 min; renew grants a
+1 h lease; log `renew.log`), `watch.sh` 1997610 (task-state poller → `pilot-timeline.log`), journal ssh
+1997611 (`journalctl -u agentc-run -f` → `pilot-agentc-run.journal`), `mxmini-watch.sh` 2413349
+(heartbeat → timeline); all `setsid`-detached, so they outlive sessions. Session `64c1e4a5` kept
+them (the auto-mode classifier blocks `kill` of them and `setsid` restarts); a new session can do the
+same unless the owner kills them with `! kill …`. Daily 00:00Z checks: 2026-10-10 digest ok (HRI 0) and e2e canary 39725610 ok; 2026-10-12 e2e canary 2d1151fc done 00:34Z (digest not yet checked). Never wait on `pgrep -f PATTERN` over ssh: the pattern matches the
 remote shell's own command line (cost 3.3 h on 2026-10-09). Check
 with `ps -eo pid,args | grep -E '[r]enew.sh|[w]atch.sh|[j]ournalctl -u agentc-run|[e]2e-canary.jsonl'`;
 kill them by PID and start your own. Use `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key
