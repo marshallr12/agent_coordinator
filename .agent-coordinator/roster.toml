@@ -14,3 +14,9 @@ workflow_path = ".github/workflows/docs.yml"
 identity = "dependency-audit"
 check_name = "Audit locked dependencies"
 workflow_path = ".github/workflows/ci.yml"
+
+# Beyond the service floor: owner decision 2026-10-12 (task 4540596c).
+[[required_checks]]
+identity = "deploy-scripts"
+check_name = "Deploy script tests"
+workflow_path = ".github/workflows/ci.yml"

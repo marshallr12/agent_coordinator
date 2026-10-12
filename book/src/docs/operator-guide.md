@@ -119,7 +119,10 @@ empty or shows only sessions holding no attempts.
 
 The required-check roster is a release gate for that project, not a catalogue of
 every platform the repository can build on. The default coordinator roster uses
-Linux validation, documentation, and dependency-audit producers. Native Windows
+Linux validation, documentation, and dependency-audit producers; this
+repository's `.agent-coordinator/roster.toml` also requires the deploy script
+tests (`deploy/agentc/*-test.py`), because every entry in that file is pinned,
+not only the service's identities. Native Windows
 client coverage is retained in CI but is not a default release-blocking roster
 entry. Add a native Windows check when a task changes Windows-specific behavior,
 when releasing a Windows package, or when an operator needs that extra assurance.
