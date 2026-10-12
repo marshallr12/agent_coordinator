@@ -36,8 +36,9 @@ execution, and links everything else.
 - Watch items (3d2fe98a stall, `agentc-push` serve test) did not recur.
 
 **Next actions, in order:**
-1. At 22:00 EDT: confirm the kill switch cleared on mxmini; if nothing is ready, ask the owner what to
-   admit. Watch mxmini's first claim through review and integration; record cost/HRI per host; when
+1. At 22:00 EDT: confirm the kill switch cleared on mxmini, then admit **cbb05ecb** (multi-project
+   design doc) and **46043cbc** (owner-delivered completion) together (owner decision 2026-10-12;
+   `tasks edit` with planned=false); leave every other planned task planned. Watch mxmini's first claim through review and integration; record cost/HRI per host; when
    mxmini completes a task, mark owner task 47dac763 done with the owner.
 2. Daily 00:00Z checks for 2026-10-13 (digest, e2e canary); watch items as before.
 3. Next release carries 0d5e4c10 and 4540596c (`24a7f3d`).
