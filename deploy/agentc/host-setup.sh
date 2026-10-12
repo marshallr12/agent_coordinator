@@ -1604,12 +1604,14 @@ install_run_sysv() {
 # loop stops them while draining, and the next loop start kills any left
 # behind. Every start-stop-daemon call also matches the wrapper's process
 # name, so a stale pidfile whose pid was reused never names another process.
+# The service name, pidfile and log default to the real loop's; sysvinit-check.sh
+# passes its own so that its fixture never shares any of them with the real one.
 run_sysv_script() {
-  local pid=/run/agentc-run.pid log=/var/log/agentc-run.log match="--name agentc-run-sysv"
+  local name=${1:-agentc-run} pid=${2:-/run/agentc-run.pid} log=${3:-/var/log/agentc-run.log} match="--name agentc-run-sysv"
   cat <<EOF
 #!/bin/sh
 ### BEGIN INIT INFO
-# Provides:          agentc-run
+# Provides:          $name
 # Required-Start:    \$network \$remote_fs agentc-firewall agentc-egress
 # Required-Stop:     \$network \$remote_fs agentc-firewall agentc-egress
 # Default-Start:     2 3 4 5
