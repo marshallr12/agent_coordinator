@@ -32,6 +32,8 @@ const uploadedAttachments = new Map();
 const workflowPosts = [];
 // When true, the next review POST is refused once, to exercise the form's failure path.
 let failNextReview = false;
+// One-shot scripted answers to workflow POSTs: {action, status, code, message} refuses that action's next request; {action, generation} changes the generation its next claim returns.
+const workflowScript = [];
 // Milliseconds to hold task-detail reads, to widen the gap between a review claim and its decision.
 let detailDelay = 0;
 const attachmentReservations = new Map();
@@ -179,6 +181,12 @@ async function fixtureServer() {
     const workflowMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/workflow-activities\/([^/]+)\/(claim|review|release)$/);
     if (workflowMatch && request.method === 'POST') {
       workflowPosts.push({ activity: decodeURIComponent(workflowMatch[1]), action: workflowMatch[2], body: await readJson(request) });
+      const scripted = workflowScript.findIndex((entry) => entry.action === workflowMatch[2]);
+      if (scripted >= 0) {
+        const [entry] = workflowScript.splice(scripted, 1);
+        if (entry.status) return refuse(response, entry.status, entry.code, entry.message);
+        if (entry.generation) return json(response, { attempt: { id: 'fixture-claimed', generation: entry.generation } });
+      }
       if (workflowMatch[2] === 'review' && failNextReview) { failNextReview = false; return refuse(response, 409, 'submission_stale', 'The submission changed.'); }
       return json(response, workflowMatch[2] === 'claim' ? { attempt: { id: 'fixture-claimed', generation: 3 } } : { recorded: true });
     }
@@ -917,6 +925,79 @@ async function main() {
         assert(workflowPosts.slice(evidenceAt).map((post) => post.action).join() === 'claim,review', 'The long-summary decision was not claimed then recorded.');
         assert(recorded.summary.length === 9092 && recorded.findings[0].evidence === 'a'.repeat(8191), 'Finding evidence was not cut to 8192 bytes at a character boundary.');
         await waitPage("!document.querySelector('dialog[open] #workflow-decision')", 'review form closed after the long-summary decision');
+        // A claim the form could not give back, or whose outcome is uncertain, is kept: the retry reuses it and never claims again.
+        const startReview = async (label) => {
+          await waitPage("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review')?.disabled === false", `idle review action for ${label}`);
+          await evaluate("Array.from(document.querySelectorAll('#workflow-content button')).find(button => button.textContent === 'Start human review').click()");
+          await waitPage("document.querySelector('dialog[open] #workflow-decision')", `review dialog for ${label}`);
+          await evaluate("document.querySelector('dialog[open] #workflow-decision').value = 'approved'; document.querySelector('dialog[open] #workflow-summary').value = 'Synthetic review'");
+        };
+        const sentSince = (at) => workflowPosts.slice(at).map((post) => post.action).join();
+        const pause = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+        const failRelease = "(() => { const save = Storage.prototype.setItem; let armed = true; Storage.prototype.setItem = function (key, value) { let path = ''; try { path = JSON.parse(value).path || ''; } catch (_) {} if (armed && path.endsWith('/release')) { armed = false; throw new Error('Synthetic storage failure'); } return save.call(this, key, value); }; })()";
+        const formIdle = "document.querySelector('dialog[open] .dialog-error') && document.querySelector('dialog[open] button[type=submit]')?.disabled === false";
+        // An uncertain (5xx) answer after the form's claim gives nothing back; the retained request is retried with the same attempt.
+        let at = workflowPosts.length;
+        workflowScript.push({ action: 'claim', generation: 5 }, { action: 'review', status: 503, code: 'unavailable', message: 'The service is busy.' });
+        await startReview('the uncertain decision');
+        await submitUntilPosted();
+        await awaitPosts(at + 2);
+        await waitPage("document.querySelector('dialog[open] .dialog-error')?.textContent.includes('The service is busy.') && document.querySelector('#global-alert')?.textContent.includes('may still be processing')", 'uncertain decision reported');
+        await pause(800);
+        assert(sentSince(at) === 'claim,review', `An uncertain decision sent a release or a second request: ${sentSince(at)}`);
+        await evaluate("Array.from(document.querySelectorAll('#global-alert button')).find(button => button.textContent === 'Retry request').click()");
+        await awaitPosts(at + 3);
+        await waitPage("!document.querySelector('dialog[open] #workflow-decision')", 'review form closed after the uncertain retry');
+        assert(sentSince(at) === 'claim,review,review', `The uncertain retry claimed again or released: ${sentSince(at)}`);
+        assert(workflowPosts[at + 1].body.generation === 5 && workflowPosts[at + 2].body.generation === 5 && workflowPosts[at + 2].body.decision === 'approved', 'The uncertain retry did not record under the same attempt generation.');
+        // A release that cannot start keeps the claim; the retry records under it without a second claim.
+        at = workflowPosts.length;
+        workflowScript.push({ action: 'claim', generation: 9 });
+        failNextReview = true;
+        await startReview('the unreleasable claim');
+        await evaluate(failRelease);
+        await submitUntilPosted();
+        await awaitPosts(at + 2);
+        await waitPage(formIdle, 'refused decision reported with an idle form');
+        await pause(800);
+        assert(sentSince(at) === 'claim,review', `A release that cannot start was sent anyway: ${sentSince(at)}`);
+        await submitUntilPosted();
+        await awaitPosts(at + 3);
+        await waitPage("!document.querySelector('dialog[open] #workflow-decision')", 'review form closed after reusing the kept claim');
+        assert(sentSince(at) === 'claim,review,review', `The retry did not reuse the kept claim: ${sentSince(at)}`);
+        assert(workflowPosts[at + 2].body.generation === 9, 'The retry did not record under the kept attempt generation.');
+        // A kept attempt the service answers with lease_expired is forgotten: the error is shown and the next submit claims afresh.
+        at = workflowPosts.length;
+        workflowScript.push({ action: 'claim', generation: 11 });
+        failNextReview = true;
+        await startReview('the lost lease');
+        await evaluate(failRelease);
+        await submitUntilPosted();
+        await awaitPosts(at + 2);
+        await waitPage(formIdle, 'refused decision reported before the lease is lost');
+        workflowScript.push({ action: 'review', status: 409, code: 'lease_expired', message: 'This ownership grant is no longer valid.' }, { action: 'claim', generation: 12 });
+        await submitUntilPosted();
+        await awaitPosts(at + 3);
+        await waitPage("document.querySelector('dialog[open] .dialog-error')?.textContent.includes('This ownership grant is no longer valid.') && document.querySelector('dialog[open] button[type=submit]')?.disabled === false", 'lease loss reported in the form');
+        await pause(800);
+        assert(sentSince(at) === 'claim,review,review', `The lost lease was released or claimed too early: ${sentSince(at)}`);
+        assert(workflowPosts[at + 2].body.generation === 11, 'The first retry did not use the kept attempt.');
+        await submitUntilPosted();
+        await awaitPosts(at + 5);
+        await waitPage("!document.querySelector('dialog[open] #workflow-decision')", 'review form closed after claiming afresh');
+        assert(sentSince(at) === 'claim,review,review,claim,review', `The dead attempt was not dropped for a fresh claim: ${sentSince(at)}`);
+        assert(workflowPosts[at + 4].body.generation === 12 && workflowPosts[at + 4].body.decision === 'approved', 'The decision did not use the fresh claim generation.');
+        // An ended session (401) after the claim gives nothing back: a release would only fail again.
+        at = workflowPosts.length;
+        workflowScript.push({ action: 'review', status: 401, code: 'authentication_required', message: 'Sign in.' });
+        await startReview('the ended session');
+        await submitUntilPosted();
+        await awaitPosts(at + 2);
+        await pause(800);
+        assert(sentSince(at) === 'claim,review', `An ended session sent a release: ${sentSince(at)}`);
+        // The ended session leaves its request saved; drop it so the later steps start clean.
+        await evaluate("sessionStorage.removeItem('agent-coordinator.pending-mutation')");
+        await openFixtureTask();
       }
     }
     task.lifecycle = 'open'; task.work_status = 'waiting_review';
