@@ -48,6 +48,18 @@ fn deny(role: Role) -> Vec<&'static str> {
     rules
 }
 
+/// Whether Claude's own Bash sandbox is on for a role.
+///
+/// It is off for implementers: it starts a nested Bubblewrap, and the
+/// implementer's outer sandbox runs with `--disable-userns`, under which every
+/// further user namespace fails with ENOSPC. Left on, it either breaks every
+/// Bash command (when `socat`, one of its dependencies, is installed) or is
+/// silently inactive (when it is not). The outer sandbox is the write boundary.
+/// Reviewers' outer sandbox permits nesting, so theirs stays on.
+fn claude_sandbox(role: Role) -> bool {
+    role != Role::Implementer
+}
+
 /// The settings document for a role.
 pub fn settings(role: Role) -> Value {
     json!({
@@ -56,7 +68,7 @@ pub fn settings(role: Role) -> Value {
             "deny": deny(role),
             "defaultMode": "dontAsk"
         },
-        "sandbox": {"enabled": true}
+        "sandbox": {"enabled": claude_sandbox(role)}
     })
 }
 
@@ -113,6 +125,13 @@ mod tests {
         }
         assert!(deny(Role::Reviewer).contains(&"Edit"));
         assert!(!allow(Role::Reviewer).contains(&"Write"));
+    }
+
+    #[test]
+    fn only_implementers_turn_claudes_nested_bash_sandbox_off() {
+        assert_eq!(settings(Role::Implementer)["sandbox"]["enabled"], false);
+        assert_eq!(settings(Role::Reviewer)["sandbox"]["enabled"], true);
+        assert!(render(Role::Implementer).contains("\"enabled\": false"));
     }
 
     #[test]

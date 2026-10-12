@@ -207,6 +207,10 @@ PY
 # proxy (possible only through the supervisor's relay), must not reach the
 # network directly, and a reviewer's candidate command must reach the proxy.
 # It leaves $TMPDIR/suite-harness-token when CLAUDE_CODE_OAUTH_TOKEN is set,
+# $TMPDIR/suite-bash-ran when a shell command runs, $TMPDIR/suite-claude-sandbox-off
+# when the installed role settings turn Claude's own Bash sandbox off,
+# $TMPDIR/suite-userns-refused when it cannot create a user namespace, and
+# $TMPDIR/suite-socat when socat (a dependency of that sandbox) is installed,
 # and $TMPDIR/suite-token-hidden when a reviewer's candidate command can
 # neither read rev/claude-token nor see that variable.
 write_mock_claude() {
@@ -217,6 +221,10 @@ set -eu
 curl -sSf -o /dev/null --max-time 20 -x "\$HTTPS_PROXY" https://github.com/ || exit 3
 if curl -sS -o /dev/null --max-time 5 --noproxy '*' https://github.com/; then exit 4; fi
 [ -z "\${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || : > "\$TMPDIR/suite-harness-token"
+if /bin/sh -c 'exit 0'; then : > "\$TMPDIR/suite-bash-ran"; fi
+if grep -q '"enabled": false' "\$CLAUDE_CONFIG_DIR/settings.json"; then : > "\$TMPDIR/suite-claude-sandbox-off"; fi
+if ! /usr/bin/unshare -U /bin/true 2>/dev/null; then : > "\$TMPDIR/suite-userns-refused"; fi
+if [ -x /usr/bin/socat ]; then : > "\$TMPDIR/suite-socat"; fi
 [ -n "\${CLAUDE_CODE_SHELL_PREFIX:-}" ] || exit 0
 "\$CLAUDE_CODE_SHELL_PREFIX" "curl -sSf -o /dev/null --max-time 20 -x \$HTTPS_PROXY https://github.com/ && pwd -P >| \$TMPDIR/suite-relay-cwd" || exit 5
 if "\$CLAUDE_CODE_SHELL_PREFIX" "test ! -r $STATE/rev/claude-token && [ -z \"\\\${CLAUDE_CODE_OAUTH_TOKEN+x}\" ] && pwd -P >| \$TMPDIR/suite-token-cwd"; then
@@ -278,6 +286,23 @@ check_claude_launch() {
   as "$user" sh -c "echo containment-suite > '$run/prompt.md'"
   expect_ok_logged "$user: real Claude launch reaches the proxy only via the relay" \
     "/root/agentc-launch-${1#agentc-}.log" launch_logged "$user" "$bin/supervisor.toml" "$run"
+  [ "$user" = agentc-impl ] && check_implementer_bash "$run"
+}
+
+# In the implementer launch just made (run dir $1), the mock harness ran a
+# shell command (so no nested Claude sandbox broke it with ENOSPC), the
+# installed settings turn Claude's own Bash sandbox off, and the launch still
+# could not create a user namespace. The sandbox is off whether or not socat
+# is installed; a NOTE says when this host lacks it, since the socat-present
+# case is the one that used to fail.
+check_implementer_bash() {
+  local run=$1
+  expect_ok "agentc-impl/claude: a shell command runs inside the launch" test -e "$run/tmp/suite-bash-ran"
+  expect_ok "agentc-impl/claude: role settings turn Claude's nested Bash sandbox off" \
+    test -e "$run/tmp/suite-claude-sandbox-off"
+  expect_ok "agentc-impl/claude: unshare -U still fails inside the launch" test -e "$run/tmp/suite-userns-refused"
+  [ -e "$run/tmp/suite-socat" ] ||
+    echo "NOTE agentc-impl/claude: socat is not installed on this host; the socat-present case is not exercised"
 }
 
 # True when preflight as $1 with config $2 reports a failed relay probe.

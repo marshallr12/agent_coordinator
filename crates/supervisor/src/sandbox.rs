@@ -638,6 +638,43 @@ test ! -e "$HOME/candidate-write"
 "#;
 
     #[test]
+    fn implementer_keeps_userns_disabled_outer_sandbox_while_claudes_own_sandbox_is_off() {
+        let args: Vec<String> = base_args(Role::Implementer)
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let expected = [
+            "--unshare-user",
+            "--disable-userns",
+            "--assert-userns-disabled",
+            "--unshare-net",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--new-session",
+            "--die-with-parent",
+            "--cap-drop",
+            "ALL",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--remount-ro",
+            "/proc",
+        ];
+        assert_eq!(args, expected);
+        let reviewer = base_args(Role::Reviewer);
+        assert!(!reviewer.iter().any(|arg| arg == "--disable-userns"));
+        assert_eq!(
+            role_settings::settings(Role::Implementer)["sandbox"]["enabled"],
+            false
+        );
+    }
+
+    #[test]
     fn real_bubblewrap_refuses_cross_run_writes_and_seed_replacement_for_both_roles() {
         if skip_when_nested(
             "real_bubblewrap_refuses_cross_run_writes_and_seed_replacement_for_both_roles",
