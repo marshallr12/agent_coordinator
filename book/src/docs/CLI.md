@@ -1223,6 +1223,30 @@ attempt whose lease lapsed and needs recovery). See the
 [API contract](api-contract.md#connected-sessions-per-project) for the JSON
 shape that `--json` prints.
 
+`agent-coordinator integrator-reports` reads the integrator's reports for the
+bound project: the findings (`fix_target`, `flaky`, `privilege_gate`,
+`target_rewritten`, `ruleset_missing`, `unreviewed_landing`) that explain why a
+subject waits, such as a failing target. Any authenticated reader may use it. It
+is read-only: a human resolves a report in the console.
+
+```sh
+agent-coordinator integrator-reports list
+agent-coordinator integrator-reports list --open --task subject-task-id
+agent-coordinator integrator-reports list --limit 20 --before report-id
+agent-coordinator integrator-reports show --id report-id
+agent-coordinator --json integrator-reports show --id report-id
+```
+
+`list` prints reports newest first with the columns ID, KIND, TASK, REQUIRES
+HUMAN, CREATED, RESOLVED (`open`, or when it was resolved and the decision) and
+VERDICT / REASON (from the report's details). `--open` keeps only unresolved
+reports, `--task` only those about one task, and `--limit` is 1 to 1000
+(service default 200). A full page ends with `Next before: ID`; pass it as
+`--before` for the following page. `show` prints the same summary followed by
+the complete report. An unknown ID, or another project's report, is a
+`not_found` error. `--json` prints the complete service response; see the
+[API contract](api-contract.md#deterministic-integrator-p4-additive) for its shape.
+
 ## Operator and objective commands
 
 The native client authenticates as an agent; administrative human actions use the

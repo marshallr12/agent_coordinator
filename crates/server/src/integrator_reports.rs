@@ -48,12 +48,17 @@ const MAX_LIST_LIMIT: i64 = 1000;
 /// Open human-required reports listed per `next` call.
 const HUMAN_QUEUE_LIMIT: i64 = 50;
 
-/// The report routes: the integrator writes, readers list, humans resolve.
+/// The report routes: the integrator writes, readers list and show, humans
+/// resolve.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/v1/projects/{p}/integrator/reports",
             get(list_reports).post(record_report),
+        )
+        .route(
+            "/api/v1/projects/{p}/integrator/reports/{id}",
+            get(show_report),
         )
         .route(
             "/api/v1/projects/{p}/integrator/reports/{id}/resolve",
@@ -304,6 +309,7 @@ async fn require_project(c: &mut SqliteConnection, p: &str) -> Result<(), AppErr
 #[derive(Deserialize)]
 struct ListQuery {
     open: Option<bool>,
+    task_id: Option<String>,
     limit: Option<i64>,
     before: Option<String>,
 }
@@ -333,20 +339,24 @@ async fn cursor(c: &mut SqliteConnection, p: &str, before: Option<&str>) -> Resu
 }
 
 /// One page of project `p`'s reports, newest first, recorded before
-/// position `before`; only unresolved ones when `open`.
+/// position `before`; only unresolved ones when `open`, only those about
+/// `task_id` when given.
 async fn report_page(
     c: &mut SqliteConnection,
     p: &str,
-    open: bool,
+    (open, task_id): (bool, Option<&str>),
     before: i64,
     limit: i64,
 ) -> Result<Vec<Value>, AppError> {
     let rows = sqlx::query(
         "SELECT * FROM integrator_reports WHERE project_id=? \
-         AND (?=0 OR resolved_at IS NULL) AND rowid<? ORDER BY rowid DESC LIMIT ?",
+         AND (?=0 OR resolved_at IS NULL) AND (? IS NULL OR task_id=?) \
+         AND rowid<? ORDER BY rowid DESC LIMIT ?",
     )
     .bind(p)
     .bind(open)
+    .bind(task_id)
+    .bind(task_id)
     .bind(before)
     .bind(limit)
     .fetch_all(&mut *c)
@@ -354,8 +364,8 @@ async fn report_page(
     rows.iter().map(report_value).collect()
 }
 
-/// `GET …/integrator/reports?open=true&limit=200&before=<id>`: the
-/// project's reports, newest first, for any reader (the digest, the
+/// `GET …/integrator/reports?open=true&task_id=<id>&limit=200&before=<id>`:
+/// the project's reports, newest first, for any reader (the digest, the
 /// dashboard, agents). `next_before` is the cursor of the following page,
 /// or null when this page is the last.
 async fn list_reports(
@@ -368,7 +378,8 @@ async fn list_reports(
     let mut c = s.pool.acquire().await?;
     require_project(&mut c, &p).await?;
     let before = cursor(&mut c, &p, query.before.as_deref()).await?;
-    let items = report_page(&mut c, &p, query.open.unwrap_or(false), before, limit).await?;
+    let filter = (query.open.unwrap_or(false), query.task_id.as_deref());
+    let items = report_page(&mut c, &p, filter, before, limit).await?;
     let full = i64::try_from(items.len()).unwrap_or(i64::MAX) == limit;
     let next = full
         .then(|| items.last().map(|r| r["id"].clone()))
@@ -376,6 +387,24 @@ async fn list_reports(
     Ok(response(
         json!({"project_id": p, "items": items, "next_before": next}),
     ))
+}
+
+/// `GET …/integrator/reports/{id}`: one report in the shape of a list item,
+/// for any reader. Another project's report is as unknown as a missing one.
+async fn show_report(
+    State(s): State<AppState>,
+    _auth: Auth,
+    Path((p, id)): Path<(String, String)>,
+) -> Reply {
+    let mut c = s.pool.acquire().await?;
+    require_project(&mut c, &p).await?;
+    let row = sqlx::query("SELECT * FROM integrator_reports WHERE id=? AND project_id=?")
+        .bind(&id)
+        .bind(&p)
+        .fetch_optional(&mut *c)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    Ok(response(report_value(&row)?))
 }
 
 /// Open human-required reports as human-queue items for `next`, oldest

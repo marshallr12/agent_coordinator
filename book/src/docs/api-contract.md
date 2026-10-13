@@ -599,7 +599,14 @@ reports and only a human resolves one.
   reports, newest first, for any authenticated reader. `open=true` keeps only
   unresolved ones; `limit` is 1 to 1000 (default 200); `before=<report_id>`
   continues after that report, and each page's `next_before` is the cursor of
-  the following page (null on the last).
+  the following page (null on the last). `task_id=<task_id>` keeps only
+  reports about that task. An unknown `before` is `not_found`.
+- `GET /api/v1/projects/{project_id}/integrator/reports/{report_id}` returns one
+  report in the shape of a list item, for any authenticated reader. An unknown
+  ID, or a report of another project, is `not_found`. The native
+  `integrator-reports list` and `show` commands and the MCP tools
+  `coordinator_integrator_reports_list` and `coordinator_integrator_report_get`
+  read these two routes; none of them resolves a report.
 - `POST /api/v1/projects/{project_id}/integrator/reports/{report_id}/resolve`
   with `{note, decision?}` is human-only (other callers get the
   `integrator_report_resolution` gate). A `privilege_gate` report needs

@@ -1,6 +1,7 @@
 mod artifact_transfer;
 mod candidate_checkpoint;
 mod config;
+mod integrator_reports;
 mod job_state;
 mod lifecycle;
 mod mcp_client;
@@ -172,6 +173,11 @@ enum Command {
     Integrations {
         #[command(subcommand)]
         command: IntegrationsCommand,
+    },
+    /// List and read the integrator's reports (read-only; a human resolves them).
+    IntegratorReports {
+        #[command(subcommand)]
+        command: integrator_reports::IntegratorReportsCommand,
     },
     /// Revise (reopen) a task's current submission with a reason code and evidence.
     Revise(lifecycle::ReviseArgs),
@@ -867,6 +873,12 @@ fn print_human(command: &Command, value: &Value) {
             command: TasksCommand::Show(_),
         } => print_task_detail(value),
         Command::Sessions { .. } => sessions::print_table(value),
+        Command::IntegratorReports {
+            command: integrator_reports::IntegratorReportsCommand::List(_),
+        } => integrator_reports::print_table(value),
+        Command::IntegratorReports {
+            command: integrator_reports::IntegratorReportsCommand::Show(_),
+        } => integrator_reports::print_detail(value),
         Command::Connect(_) => print_connection(value),
         Command::Claim(_) => print_claim(value),
         Command::Export(_) => {
@@ -1221,6 +1233,9 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
         Command::Export(args) => shared::export(cli, &context, args).await,
         Command::Reviews { command } => reviews_command(cli, &context, command).await,
         Command::Integrations { command } => integrations_command(cli, &context, command).await,
+        Command::IntegratorReports { command } => {
+            integrator_reports::run(cli, &context, command).await
+        }
         Command::Revise(args) => lifecycle::revise(cli, &context, args).await,
         Command::Unblock(args) => lifecycle::unblock(cli, &context, args).await,
         Command::Cancel(args) => lifecycle::cancel(cli, &context, args).await,

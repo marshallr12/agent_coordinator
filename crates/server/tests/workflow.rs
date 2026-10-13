@@ -4608,6 +4608,79 @@ async fn integrator_reports_page_newest_first() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+// Any authenticated reader shows one report in the shape of a list item; an
+// unknown id or another project's report is not found, and the list filters
+// by task.
+#[tokio::test]
+async fn integrator_reports_show_one_and_filter_by_task() {
+    let f = Fixture::new().await;
+    let (p, t, _, i) = integrator_task(&f, "integrator-report-show").await;
+    let task = t["id"].as_str().unwrap();
+    let about_task = json!({"kind":"flaky","dedupe_key":"on-task","task_id":task,"details":{"verdict":"rerun_refused"}});
+    let (status, mine) = integrator_post(&f, &i, &p, "reports", about_task).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    let (status, other) = report(&f, &i, &p, "flaky", "no-task", None, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    let show = |p: &str, id: &Value| {
+        format!(
+            "/api/v1/projects/{p}/integrator/reports/{}",
+            id.as_str().unwrap()
+        )
+    };
+    let (status, found) = f
+        .call(&f.a, "GET", &show(&p, &mine["data"]["id"]), Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found["data"], mine["data"], "the shape of a list item");
+    let list = format!("/api/v1/projects/{p}/integrator/reports");
+    let (_, listed) = f.call(&f.a, "GET", &list, Value::Null).await;
+    assert!(
+        listed["data"]["items"]
+            .as_array()
+            .unwrap()
+            .contains(&found["data"]),
+        "{listed}"
+    );
+    let (status, v) = f
+        .call(&f.a, "GET", &show(&p, &json!("missing")), Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    let (agent_project, _, _) = integrating_code_task(&f, "report-show-other").await;
+    let (status, v) = f
+        .call(
+            &f.a,
+            "GET",
+            &show(&agent_project, &mine["data"]["id"]),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "another project's report: {v}"
+    );
+    let (status, v) = f
+        .call(
+            &f.a,
+            "GET",
+            &show("missing", &mine["data"]["id"]),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    let (status, filtered) = f
+        .call(&f.a, "GET", &format!("{list}?task_id={task}"), Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{filtered}");
+    assert_eq!(filtered["data"]["items"], json!([mine["data"]]));
+    let (status, none) = f
+        .call(&f.a, "GET", &format!("{list}?task_id=missing"), Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{none}");
+    assert_eq!(none["data"]["items"], json!([]));
+    assert!(none["data"]["next_before"].is_null(), "{none}");
+}
+
 /// Posts attempt `attempt` of run 900 of the roster check on R under `blob`.
 async fn receipt_attempt(
     f: &Fixture,

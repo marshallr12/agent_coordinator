@@ -18,6 +18,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   integration refuses the change. A per-project integrator reports page lists
   reports (open or all, paged) and lets a human resolve one with a note, plus
   allow or deny for a privilege gate.
+  Any reader can also list and show reports through the read-only
+  `integrator-reports` CLI commands and the MCP tools
+  `coordinator_integrator_reports_list` and `coordinator_integrator_report_get`.
 
 - Standalone `agent-coordinator-mcp` stdio adapter with protected, locked, atomic
   mutation journals and exact retry through the service. Native CLI installation

@@ -255,6 +255,18 @@ fn build_catalog() -> Vec<Operation> {
             "/api/v1/projects/{project}/tasks/{task}/workflow",
             json!({}),
         ),
+        read(
+            "coordinator_integrator_reports_list",
+            "List the project's integrator reports (findings such as fix_target or flaky), newest first. query.open keeps unresolved ones, query.task_id one task's; follow next_before as query.before. Read-only: only a human resolves a report.",
+            "/api/v1/projects/{project}/integrator/reports",
+            json!({"open":{"type":"boolean"},"task_id":{"type":"string","maxLength":128},"limit":{"type":"integer","minimum":1,"maximum":1000},"before":{"type":"string","maxLength":128}}),
+        ),
+        read(
+            "coordinator_integrator_report_get",
+            "Read one integrator report, including its details, requires_human and resolution state.",
+            "/api/v1/projects/{project}/integrator/reports/{report}",
+            json!({}),
+        ),
         write::<SubmissionInput>(
             "coordinator_submit",
             "Submit immutable result evidence, handoff, lessons, artifact IDs, and exact source identities. Submission is not completion; required independent review, integration, and integrated validation must pass first.",
