@@ -119,6 +119,8 @@ Additional implemented routes:
   description, acceptance_criteria, priority, depends_on, and planned. Only an
   unowned open/planned task can be edited. There is no generic status edit.
 - POST `.../tasks/{task_id}/unblock`: human-only `{expected_revision,reason}`.
+- POST `.../tasks/{task_id}/complete-external`: human-only completion of a task
+  delivered outside the coordinator; see the completion contract.
 - POST `.../tasks/{task_id}/{cancel,archive,restore}` and DELETE
   `.../tasks/{task_id}`, each with `{expected_revision,reason}` (`cancel` also
   takes an optional `replacement_task_id`; a cancel also soft-deletes the task, or

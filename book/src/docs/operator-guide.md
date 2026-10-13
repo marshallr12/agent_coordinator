@@ -92,6 +92,31 @@ Verify both URLs identify the same repository; shared or historically used bindi
 cannot be changed. New policy versions require agents to reread and
 acknowledge instructions; existing candidates may require reconciliation.
 
+### Completing a task delivered outside the coordinator
+
+A task whose owner landed the change with `scripts/ship.py` (privileged paths such as
+`.github/workflows`) has no review or integration to finish. Do not cancel it: that
+records the delivered work as `canceled`. First release or recover the owner's
+attempt, confirm on the remote that the commit is an ancestor of the target branch
+and that every required check succeeded on it, then complete the task as a human:
+
+```sh
+agent-coordinator request --method post \
+  --path /api/v1/projects/$PROJECT/tasks/$TASK/complete-external --input external.json
+```
+
+where `external.json` is
+
+```json
+{"expected_revision": 2, "delivered_revision": "<full sha>", "target_branch": "main",
+ "reason": "Landed by scripts/ship.py",
+ "checks": [{"identity": "Coordination checks", "conclusion": "success"}]}
+```
+
+The task ends `done` and its history records the revision and check results. The service
+records this attestation without verifying it, and agents cannot use it; an ordinary
+candidate still goes through review and integration. See the completion contract.
+
 ### Connected sessions
 
 Select **Connected sessions** in a project's settings to see which agent

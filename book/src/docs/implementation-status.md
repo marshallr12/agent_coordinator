@@ -298,6 +298,12 @@ again using its returned identity. Account-creation retries retain their origina
 key and require the original password, which the dashboard never persists; the
 same administrator can authenticate again to reconcile that request safely.
 
+A human can complete an open, unowned task whose change the owner landed outside the
+coordinator (`scripts/ship.py`) with `POST .../tasks/{task}/complete-external`. The
+task ends `done`, and the delivered revision, target branch and required-check
+results are recorded as the human's attestation (the service does not reach the
+repository). Agents are refused with the `task_external_completion` human gate.
+
 Instruction version 7 added clock reconciliation and receipt-retention guidance.
 Instruction version 8 clarifies automatic non-contributing subagent review,
 explicit-only scope narrowing, and mandatory parent continuation after child review
