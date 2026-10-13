@@ -4,7 +4,42 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; integrator stalled, three integrations queued (2026-10-13 05:05 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; block cleared, all three landed (2026-10-13 14:55 UTC, workflow on)
+
+**Session `e9a556c5` (2026-10-13 day; ledger lines staged in that session's scratchpad `ledger-add.txt`
+until the owner appends them):**
+- **Fix landed:** `df71ee7` (quinn-proto 0.11.18) is on main; the integrator then published
+  `2f56f58` 05:34:12Z (canary 559967ce), `7940b87` 05:41:38Z (cbb05ecb, `0704b77`), `11be3ce`
+  05:49:35Z (46043cbc, `2f665d2`). **All three done.** main = `11be3ce` (not in production).
+- **Cost/HRI:** cbb05ecb $3.36 (mxmini impl ac107b32 $3.05 — mxmini's first completed task;
+  oracle-1 rev $0.31); 46043cbc $0.95 (oracle-1); canary ≥ $0.10 (one review 8a33a929 killed,
+  unpriced). HRI 0 per task; 1 shared HRI = owner's hand fix of the target. Costs come from
+  `/var/lib/agentc/costs.jsonl` (root-only on both hosts: owner `sudo grep`).
+- **Block ~01:07Z–05:30Z (4.5 h).** Only page: e2e canary timeout 04:00:04Z (ntfy). Digest
+  2026-10-13 00:00Z: HRI 0 (predates block). **e2e canary 2026-10-13 FAILED** (timeout, cause = block).
+- **Filed:** 4f546e9b (P2, CLI `integrator-reports list/show` + `GET …/reports/{id}`; owner released
+  it, in_progress), 2a88c1f9 (P2, block invisible on task / misleading next_actions), 56662529 (P2,
+  target_failing pages only via canary timeout; owner decision on threshold), 1d5648c0 (P3, killed
+  default-model launch recorded `usd: null`). The last three are budget-held (5/5 this ISO week).
+  Unknown: whether a `fix_target` report was filed for the block — check the console's Integrator
+  reports view (or 4f546e9b's CLI once it ships); 2a88c1f9's framing assumes it was.
+- mxmini refused 08:39–08:43Z for low disk (~19.3 GiB < 20 GiB high-water) — watch item.
+- CLI writes from this workstation use session **`dogfood-orchestrator`** (connected 2026-10-13);
+  `p3b-pilot` is `watch.sh`'s.
+- Console sign-in is per tab: the owner must sign in inside the Claude tab group's tab.
+
+**Next actions, in order:**
+1. **47dac763 → done** (cbb05ecb landed; owner decision 2026-10-13): owner task, human console edit;
+   show the owner before submitting.
+2. Owner pending: append `ledger-add.txt`; remove worktree `~/src/worktrees/ac-quinn-proto-0.11.18`
+   and branch `ac/human/quinn-proto-0.11.18` (local + remote; classifier blocks it for the agent).
+3. Daily 00:00Z checks for 2026-10-14 (digest — should list the open fix_target report if one
+   exists; e2e canary). Watch items: 3d2fe98a-style 15-min stall, `agentc-push` serve test, mxmini disk.
+4. Watch 4f546e9b through review/integration.
+5. Next release carries 0d5e4c10, 4540596c, df71ee7, cbb05ecb, 46043cbc (main `11be3ce`) + 4f546e9b.
+6. Reference only (owner): sithbit 61bf19af target hold 83063e8f; 422ce01e; Required checks `deploy-scripts`.
+
+## Previous resume point — P6 dogfood on `ce3ddd1`; integrator stalled, three integrations queued (2026-10-13 05:05 UTC, workflow on)
 
 **Session `82cf3a73` (night of 2026-10-12/13; ledger `pilot-timeline.log`):**
 - **mxmini's first real window worked.** Kill switch cleared 02:00Z, loop pid 171714 polling.
