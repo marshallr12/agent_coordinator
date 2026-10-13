@@ -4,7 +4,53 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on production `ce3ddd1`; mxmini's first window opens 22:00 EDT (2026-10-12 18:15 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; integrator stalled, three integrations queued (2026-10-13 05:05 UTC, workflow on)
+
+**Session `82cf3a73` (night of 2026-10-12/13; ledger `pilot-timeline.log`):**
+- **mxmini's first real window worked.** Kill switch cleared 02:00Z, loop pid 171714 polling.
+  **cbb05ecb** (multi-project design doc, P1) admitted 02:15Z (owner ran `tasks edit`, CLI session
+  `owner-admit`, grant c9c6152f) → mxmini claimed in seconds (attempt `ac107b32`), submitted 02:40Z
+  (`planning/autonomy/multi-project-design.md`: 19 owner decisions, MP-1..MP-14 plan, SithBit
+  walkthrough; corrects premises: admission budget is per project, quiet hours exist). Nested-sandbox
+  fix held (Bash worked). Review (oracle-1, activity `aec2fd24`) completed ~03:2xZ → **waiting_integration**.
+- **46043cbc** (owner-delivered completion path, P3): agent `tasks edit` refused — `admission_budget`,
+  a human edit must release a budget-held task (api-contract.md). Released 02:27Z via the console
+  (admin, Admission → "Admit to ready queue"). oracle-1 claimed 02:28Z (attempt `d7b62cf4`), submitted
+  02:52Z (human-only `POST …/tasks/{task}/complete-external`), review `446ebf80` completed ~03:58Z →
+  **waiting_integration**.
+- **Integrator stall (open, not diagnosed):** integrations queued, unclaimed, no workflow blockers
+  (`next_actions`: "Authorize if required, then claim"): cbb05ecb `8c541d96` (since ~03:20Z), 46043cbc
+  `7eedd6d3` (since ~03:58Z), canary 559967ce `0062bb49` (since before 01:07Z). Earlier tasks landed
+  minutes after review. Not checked: `agentc-integrator@run` on oracle-1 (the auto-mode classifier
+  refused agent ssh as "Production Reads"). Nothing restarted.
+- **sithbit 30d670d5** (mail_grpc verify-absent probe): owner asked; validation reservation
+  **a2fb0282** (mxmini-validation) resolved in the console with the saved operator evidence
+  (`~/.local/state/sithbit-task-evidence/mira-grpc-integration-af1dddfb/operator-resolution.json`).
+  Its integration activity 61bf19af keeps the **target hold `83063e8f`** and an unreconciled
+  publication intent for `af1dddfb`; remote master still `67c7fd6f` (publish did not happen). Do not
+  press "Reconcile publication" without the owner. Console path: task → Submission & completion →
+  Integration → Inspect activity task and jobs → Jobs & resource holds.
+- **Permissions:** project `.claude/settings.local.json` allows read-only `agent-coordinator tasks
+  show/list`, `reviews list/status`, and Read of the heartbeat, `/var/log/agentc-run.log` and
+  `~/.local/share/agent-coordinator-autonomy/**`. Agent task edits, timeline writes and oracle-1 ssh
+  are classifier-blocked: hand them to the owner as `!` commands.
+- 00:00Z checks for 2026-10-13 (digest, e2e canary) **not done**; canary is the stuck integration.
+
+**Next actions, in order:**
+1. Diagnose the integrator (owner runs, or allows):
+   `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key ubuntu@oracle.sithbit.com 'systemctl status
+   "agentc-integrator@run" --no-pager; journalctl -u "agentc-integrator@run" --since "-6h" --no-pager -o
+   short-iso | tail -60'`. File a coordinator task for the defect; no restart without the owner.
+2. Watch cbb05ecb, 46043cbc, 559967ce to landing; record cost/HRI per host in the ledger.
+3. **When cbb05ecb lands (done), mark owner task 47dac763 done** (owner decision 2026-10-13; owner
+   task → expect a human console edit; confirm with the owner before submitting).
+4. Daily checks for 2026-10-13 (digest, e2e canary); watch items as before.
+5. Next release carries 0d5e4c10, 4540596c (`24a7f3d`) and whatever lands from 1–2.
+
+**Helpers:** `renew.sh` 169811, `watch.sh` 1997610, journal ssh 1997611, `mxmini-watch.sh` 2413349
+were alive at 02:05Z (see below for their scratchpads). Session monitors died with session `82cf3a73`.
+
+## Previous resume point — P6 dogfood on production `ce3ddd1`; mxmini's first window opens 22:00 EDT (2026-10-12 18:15 UTC, workflow on)
 
 **Session `037ba383` (2026-10-12 day; ledger `pilot-timeline.log` has every event):**
 - **Deployed `ce3ddd1` 2026-10-12 13:35 UTC** (release run `38251735141`, ~8 s down; migration 0036
