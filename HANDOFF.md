@@ -18,11 +18,16 @@ execution, and links everything else.
   (admin, Admission → "Admit to ready queue"). oracle-1 claimed 02:28Z (attempt `d7b62cf4`), submitted
   02:52Z (human-only `POST …/tasks/{task}/complete-external`), review `446ebf80` completed ~03:58Z →
   **waiting_integration**.
-- **Integrator stall (open, not diagnosed):** integrations queued, unclaimed, no workflow blockers
-  (`next_actions`: "Authorize if required, then claim"): cbb05ecb `8c541d96` (since ~03:20Z), 46043cbc
-  `7eedd6d3` (since ~03:58Z), canary 559967ce `0062bb49` (since before 01:07Z). Earlier tasks landed
-  minutes after review. Not checked: `agentc-integrator@run` on oracle-1 (the auto-mode classifier
-  refused agent ssh as "Production Reads"). Nothing restarted.
+- **Integrator blocked: target `main` fails its audit check (diagnosed 05:10Z).** Integrations queued:
+  cbb05ecb `8c541d96`, 46043cbc `7eedd6d3`, canary 559967ce `0062bb49`. `agentc-integrator@run` on
+  oracle-1 is healthy (up since 10-08) and logs every ~40 s for all three: `Blocked("target_failing:
+  Audit locked dependencies failed on R <candidate> and fails too on target 24a7f3dd…")`. Local
+  `cargo audit` 0.22.2 on main's `Cargo.lock`: **quinn-proto 0.11.17**, RUSTSEC-2026-0338/0340/0343
+  (dated 2026-09-14, new in the advisory DB) → fix: upgrade to **>= 0.11.18**
+  (`cargo update -p quinn-proto --precise 0.11.18`). Correct gate behaviour, but **two defects to
+  file**: (a) the integrator's Blocked reason never reaches the service, so the task shows no blocker
+  and `next_actions` says "Authorize if required, then claim"; (b) nothing paged — three integrations
+  sat for hours silently. One transient `coordinator request failed` at 05:01:46Z.
 - **sithbit 30d670d5** (mail_grpc verify-absent probe): owner asked; validation reservation
   **a2fb0282** (mxmini-validation) resolved in the console with the saved operator evidence
   (`~/.local/state/sithbit-task-evidence/mira-grpc-integration-af1dddfb/operator-resolution.json`).
@@ -37,10 +42,11 @@ execution, and links everything else.
 - 00:00Z checks for 2026-10-13 (digest, e2e canary) **not done**; canary is the stuck integration.
 
 **Next actions, in order:**
-1. Diagnose the integrator (owner runs, or allows):
-   `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key ubuntu@oracle.sithbit.com 'systemctl status
-   "agentc-integrator@run" --no-pager; journalctl -u "agentc-integrator@run" --since "-6h" --no-pager -o
-   short-iso | tail -60'`. File a coordinator task for the defect; no restart without the owner.
+1. Unblock the target: file a `fix_target` task (P0/P1) to bump quinn-proto to >= 0.11.18 in
+   `Cargo.lock` (admission evidence: the failed audit check receipt; ask the owner how to file and
+   whether to land it by hand), then file defects (a) and (b) above. Re-check with the owner's
+   read-only ssh: `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key ubuntu@oracle.sithbit.com
+   'journalctl -u "agentc-integrator@run" --since "-1h" --no-pager -o short-iso | tail -30'`.
 2. Watch cbb05ecb, 46043cbc, 559967ce to landing; record cost/HRI per host in the ledger.
 3. **When cbb05ecb lands (done), mark owner task 47dac763 done** (owner decision 2026-10-13; owner
    task → expect a human console edit; confirm with the owner before submitting).
