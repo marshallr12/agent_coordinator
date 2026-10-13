@@ -42,9 +42,13 @@ execution, and links everything else.
 - 00:00Z checks for 2026-10-13 (digest, e2e canary) **not done**; canary is the stuck integration.
 
 **Next actions, in order:**
-1. Unblock the target: file a `fix_target` task (P0/P1) to bump quinn-proto to >= 0.11.18 in
-   `Cargo.lock` (admission evidence: the failed audit check receipt; ask the owner how to file and
-   whether to land it by hand), then file defects (a) and (b) above. Re-check with the owner's
+1. **Fix shipped by hand (owner decision 05:2xZ):** `df71ee7` "Bump quinn-proto to 0.11.18…"
+   (`Cargo.lock` only, on `24a7f3d`; local `cargo audit` 0.22.2 clean, `cargo check --workspace
+   --all-targets --locked` green), branch `ac/human/quinn-proto-0.11.18`, worktree
+   `~/src/worktrees/ac-quinn-proto-0.11.18`. Owner ran `scripts/ship.py --name quinn-proto-0.11.18`
+   ~05:25Z (session `82cf3a73` background task `bxma33ybi`). Confirm `origin/main` == `df71ee7`
+   (if not, read the ship output and CI); then watch the three integrations land in turn, remove the
+   worktree and branches per the cleanup rules, and file defects (a) and (b) above. Re-check with the owner's
    read-only ssh: `ssh -i ~/gdrive/Development/oracle-1-key-2026-09-16.key ubuntu@oracle.sithbit.com
    'journalctl -u "agentc-integrator@run" --since "-1h" --no-pager -o short-iso | tail -30'`.
 2. Watch cbb05ecb, 46043cbc, 559967ce to landing; record cost/HRI per host in the ledger.
