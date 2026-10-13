@@ -29,10 +29,14 @@ until the owner appends them):**
 - Console sign-in is per tab: the owner must sign in inside the Claude tab group's tab.
 
 **Next actions, in order:**
-1. **47dac763 → done** (cbb05ecb landed; owner decision 2026-10-13): owner task, human console edit;
-   show the owner before submitting.
-2. Owner pending: append `ledger-add.txt`; remove worktree `~/src/worktrees/ac-quinn-proto-0.11.18`
-   and branch `ac/human/quinn-proto-0.11.18` (local + remote; classifier blocks it for the agent).
+1. **47dac763** submitted 14:5xZ (owner OK): oracle-1 kill switch set 14:48Z → admitted in console
+   (rev 2) → claimed by `dogfood-orchestrator` (attempt 9c5e82eb) → kill switch cleared → general
+   submission 0c97fa23; now **waiting_review** (`either_review`). Watch it to done. Lesson: a planned
+   general task cannot be marked done in the console (no complete control); supervisors do not filter
+   by kind, so set the kill switch before admitting an owner task. Ledger lines appended; quinn
+   worktree/branches removed. The workstation's Chrome is browser "mxmini" (select it; a Windows
+   browser is also connected).
+2. (done)
 3. Daily 00:00Z checks for 2026-10-14 (digest — should list the open fix_target report if one
    exists; e2e canary). Watch items: 3d2fe98a-style 15-min stall, `agentc-push` serve test, mxmini disk.
 4. Watch 4f546e9b through review/integration.
