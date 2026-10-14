@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489 + c2aea126 + 1a5ffe45 landed (main `e897783`); 2a88c1f9 approved, 3 tasks in review queue (2026-10-14 05:35 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489 + c2aea126 + 1a5ffe45 + 2a88c1f9 landed (main `c0db9d0`); 04b0ed64 re-revising on mxmini, 2 tasks in review queue (2026-10-14 06:20 UTC, workflow on)
 
 **Session `7a924313` evening run (started 02:04Z from `~/Downloads/prompt.txt`):**
 - **4bc09489 done** on oracle-1: impl 4dd75fdd $1.35 → rev 900b6b65 $0.25 **approved** 01:44:53Z
@@ -38,6 +38,7 @@ execution, and links everything else.
 - **mxmini costs (owner sudo):** 1a5ffe45 $2.88, 04b0ed64 $4.61, 9722697f $0.21 → $7.70, HRI 0.
   `!` commands can't sudo (no tty); the owner runs the grep in a terminal. 47dac763 untouched (blocked rev 2).
 - 05:35Z: **1a5ffe45 done** (integrated, main **`e897783`**; $3.22+ incl. unpriced hung rev, HRI 0). **2a88c1f9 approved** by oracle-1 rev 7cfa1296 ($0.19, 05:30:59Z, gate in foreground) → `waiting_integration`; $0.81, HRI 0. Queue: 04b0ed64, 1d5648c0, 9722697f. Nothing ready; disk oracle-1 61 GiB, mxmini 151 GiB; no stalls, no serve-test failures.
+- 06:20Z: **2a88c1f9 done** (main **`c0db9d0`**; $0.81, HRI 0). **04b0ed64** approved by oracle-1 rev de473ac2 ($0.12, 05:53:03Z, 2 advisories) but integration 6ad1d48a was **canceled → `revision_needed`** (likely stale base after 2a88c1f9); mxmini reclaimed it at once (attempt 220cd404, launch 77389b0e). oracle-1 reviewing 1d5648c0 or 9722697f (a05bff20, gate in foreground). Disk oracle-1 49 GiB, mxmini 138 GiB.
 - Ledger lines appended 02:05Z. Helpers 169811/1997610/1997611/2413349 alive.
 
 **Session `e9a556c5` evening run (started 00:03Z from `~/Downloads/document.txt`):**
