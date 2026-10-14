@@ -4,7 +4,41 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; all 7 admitted tasks landed (main `af81834`, all checks green); evening run ended (2026-10-14 07:50 UTC, workflow on)
+## Current resume point — production `af81834` deployed; hosts rolled out (2026-10-14 13:30 UTC, workflow on, both kill switches on)
+
+**Session `0b3c541a` daytime release (prompt `~/Downloads/prompt.txt`; ledger lines `[release af81834]`):**
+- **Release run 38550683390 green**; artifacts in `~/.local/share/agent-coordinator-autonomy/release-next`
+  (sha256 OK; RELEASE `af81834… agent-coordinator-0.1.1-linux-x86_64.tar.gz ce3ddd1`). ce3ddd1 record
+  archived to `../release-ce3ddd1`; new `PLAN-next.md` / `PREREQS-next.md`.
+- **DEPLOYED af81834 11:17Z** (full; migrations 0037 `human_delivered`, 0038 `cost_rows`/`canary_results`).
+  Preflight 0 (all projects) before and after pre. **Old-binary snapshot
+  `20261014T111624.698Z-039096f0-ebde-46ee-95d4-0ec70d4bcf79`** = the only rollback path (ce3ddd1
+  refuses 0037/0038), then `*-0.1.1-ce3ddd1` binaries. Down 11:16:50–11:17:21Z. New snapshot
+  `20261014T111721.758Z-b320e71d…` verified; keyless warnings 0; `/api/v1/info` af81834, not dirty.
+- **Integrator** redeployed on oracle-1 (`integrator-host-setup.sh` stops `@run` and does not start it;
+  started again 11:19:15Z): `75497e6d`, rollback `/opt/agentc/bin/agentc-integrator.pre-af81834`.
+- **CLIs at af81834:** workstation `~/.local/bin` (`8d9e6d4d`, upgrade_client.py); oracle-1
+  `/opt/agentc/bin` + `/usr/local/bin` (`004ee345`, `.pre-af81834`); mxmini `/opt/agentc/bin` +
+  `/usr/local/bin` (`8d9e6d4d`, `.pre-af81834`). Compatibility all true on all three. **MiniAir Windows
+  still old** (owner, release zip in release-next).
+- **Host-setup at af81834:** oracle-1 rc 0 (sup `bf23e837`, push `71fa1f3d`; agentc-run restarted
+  11:23:29Z; timers intact). mxmini owner rc 0 (QUIET_HOURS=22:00-07:00; sup `93780441`, push
+  `d5693c10`); owner `service agentc-run restart` → loop pid 4190157.
+- **Kill switches:** oracle-1 `release-af81834` (set 11:14:30Z, agent sudo -n); mxmini `quiet-hours`
+  (cron lifts it 02:00Z). **renew.sh 169811 stopped**; d513bc21 released (attempt ba401934 gen 5 → ready).
+  watch.sh 1997610, journal ssh 1997611, mxmini-watch.sh 2413349 left running.
+
+**Next actions (release steps 8–10):**
+1. Owner closes **47dac763** with `complete-external` (command in the previous section's Next action 2,
+   input `release-next/47dac763-external.json`; fallback for `required_check_missing`:
+   `release-next/47dac763-external-af81834.json`, af81834 + deploy-scripts). Confirm done.
+2. Reclaim d513bc21 (connect first, policy_changed), restart renew.sh; clear oracle-1's switch; watch
+   the next claim per host and the first e2e canary report in `canary_results`. Re-check 55b8a06d /
+   422ce01e / c744c495 for human_delivered (now shipped); leave them planned.
+3. Owner: MiniAir Windows CLI from the release zip.
+Don't admit work without the owner. Planned on purpose: 56662529, 1a3290db, 2a387d02, 97b7b62a, 693af855.
+
+## Previous resume point — P6 dogfood on `ce3ddd1`; all 7 admitted tasks landed (main `af81834`, all checks green); evening run ended (2026-10-14 07:50 UTC, workflow on)
 
 **Session `7a924313` evening run (started 02:04Z from `~/Downloads/prompt.txt`):**
 - **4bc09489 done** on oracle-1: impl 4dd75fdd $1.35 → rev 900b6b65 $0.25 **approved** 01:44:53Z
