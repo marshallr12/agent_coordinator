@@ -600,7 +600,8 @@ async function checkExternalCompletion({ evaluate, waitPage }, openFixtureTask) 
   await waitPage(`${ALERT_TEXT}.includes('task_revision_changed') && ${ALERT_TEXT}.includes('The task changed')`, 'refusal code in the alert');
   await waitPage("sessionStorage.getItem('agent-coordinator.pending-mutation') === null", 'refused completion settled');
   assert(externalPosts.length === 1 && task.lifecycle === 'open', 'The refused completion changed the task.');
-  await waitPage(`${completeButton}?.disabled === false`, 'completion control after the refusal');
+  // The refusal reloads the task; reopen the dialog only once the page shows the reloaded revision.
+  await waitPage(`document.querySelector('#detail-task-revision').textContent === ${JSON.stringify(String(saved.revision + 1))} && ${completeButton}?.disabled === false`, 'reloaded task after the refusal');
   await openDialog();
   await evaluate(`document.querySelector('#workflow-delivered_revision').value = '${EXTERNAL_SHA}'; document.querySelector('#workflow-reason').value = 'Landed by scripts/ship.py'; ${confirmAll}`);
   await waitPage(`${ALERT_TEXT}.includes('completed as delivered externally') && !${completeButton}`, 'completed task');
