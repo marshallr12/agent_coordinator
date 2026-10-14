@@ -4,7 +4,34 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; block cleared, all three landed (2026-10-13 14:55 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; 4f546e9b landed, 47dac763 bounced (2026-10-14 00:20 UTC, workflow on)
+
+**Session `e9a556c5` evening run (started 00:03Z from `~/Downloads/document.txt`):**
+- **4f546e9b done.** oracle-1 impl f7970700 submitted 15:00:41Z; review a44f440e **approved** 15:40Z
+  (2 advisories: no live-service CLI test; check_docs/mdBook not run by reviewer); integration
+  54fcddde fast-forwarded main to **`f2aef69`** ~15:46Z. main = `f2aef69` (not in production; the
+  workstation CLI at ce3ddd1 has no `integrator-reports` yet). Cost: owner `sudo grep` pending.
+- **47dac763 bounced, now `blocked`.** either_review 9e2ebeb5 (oracle-1) = **changes_requested**
+  15:03:42Z, 4 required findings: commit 1924885 not pushed at review time (it is now); no artifact for
+  CLI parity / the 6cc3f673→commit mapping; `pilot-timeline.log` in no ref; HANDOFF lacked the 05:41Z
+  landing. The task went back to ready and **oracle-1's supervisor claimed it 3 s later** (attempt
+  5b7c6bbe), which blocked it at 15:04:55Z ("owner should attach the artifacts and resubmit").
+  Filed **4bc09489** (P2, budget-held): supervisors claim owner-only general tasks, incl. after
+  changes_requested. **Owner decision needed:** attach artifacts and resubmit (kill switch on oracle-1
+  first), or close 47dac763 another way. Nothing done to it.
+- **Digest 2026-10-14 00:00Z:** HRI 1 = open **fix_target report `9d8c2171`** (created 01:19:59Z
+  10-13, `task_id: null`, still unresolved although the target is fixed) — this settles the open
+  question: a fix_target report *was* filed, so 2a88c1f9's framing holds. Owner: resolve 9d8c2171 in
+  the console. Note `task_id` null means 4f546e9b's `--task` filter won't find target_failing reports.
+  Budget-held listed: 2a88c1f9, 56662529, 1d5648c0 (and now 4bc09489).
+- **e2e canary 2026-10-14:** started 00:00:04Z; canary task 82200b16 submitted 00:01:13Z on oracle-1,
+  waiting_review at 00:15Z.
+- oracle-1: kill switch clear, 61 GiB free, two transient `next` failures (17:01Z timeout, 18:28Z).
+  The workstation journal capture (pid 1997611) is still stale; read oracle-1's journal directly.
+- mxmini: quiet hours until 22:00 EDT; 48 GiB free (the 08:39Z low-disk refusals have not recurred).
+- Helpers alive at 00:03Z: renew.sh 169811, watch.sh 1997610, journal ssh 1997611, mxmini-watch.sh 2413349.
+
+## Previous resume point — P6 dogfood on `ce3ddd1`; block cleared, all three landed (2026-10-13 14:55 UTC, workflow on)
 
 **Session `e9a556c5` (2026-10-13 day; ledger lines staged in that session's scratchpad `ledger-add.txt`
 until the owner appends them):**
