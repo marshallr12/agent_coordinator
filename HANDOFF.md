@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489 landed (main `46fea34`), mxmini on 1a5ffe45, c2aea126 in review (2026-10-14 02:05 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489 + c2aea126 landed (main `fb32190`), 1a5ffe45 in review, 2a88c1f9 on oracle-1 (2026-10-14 03:04 UTC, workflow on)
 
 **Session `7a924313` evening run (started 02:04Z from `~/Downloads/prompt.txt`):**
 - **4bc09489 done** on oracle-1: impl 4dd75fdd $1.35 → rev 900b6b65 $0.25 **approved** 01:44:53Z
@@ -13,7 +13,12 @@ execution, and links everything else.
 - **c2aea126** (design, P1): oracle-1 impl f735b12a $1.89 submitted 02:04:23Z → `waiting_review`.
 - **22:00 EDT check:** mxmini kill switch cleared 02:00Z; loop resumed and **claimed 1a5ffe45**
   (launch 06bd1ef6, attempt ad9ecee0). mxmini 47 GiB free; oracle-1 62 GiB, switch clear.
-- Still ready: 2a88c1f9, 1d5648c0, 9722697f, 04b0ed64. 47dac763 untouched (blocked rev 2).
+- **c2aea126 done**: rev a752d07a $0.22 approved 02:47:05Z → integrated d5dc013 (main **`fb32190`**).
+  $2.11 total, HRI 0.
+- **1a5ffe45**: mxmini launch 06bd1ef6 exited 0 at 03:02Z (62 min; long `cargo test --workspace`,
+  no stall) → `waiting_review`. mxmini cost needs the owner's `sudo grep` of its `costs.jsonl`.
+- **2a88c1f9** claimed by oracle-1 (attempt 9f6e3e74) ~02:05–02:47Z.
+- Still ready: 1d5648c0, 9722697f, 04b0ed64. 47dac763 untouched (blocked rev 2).
 - mxmini's `costs.jsonl` needs the owner's sudo (`sudo -n` fails locally); oracle-1's reads fine.
 - Ledger lines appended 02:05Z. Helpers 169811/1997610/1997611/2413349 alive.
 
