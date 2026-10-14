@@ -901,10 +901,28 @@ tokens and dollars (Claude's own `total_cost_usd`; Codex usage priced with the
 `[shadow.prices]` table, or "unpriced") are appended to
 `/var/lib/agentc/costs.jsonl` with the project, task, session and attempt,
 and the release handoff ends with the same figure. A launch the agent already
-submitted or released keeps only the ledger entry. Recovery does the same for
+submitted or released keeps only the ledger entry. The ledger stays the source
+of truth, and the loop also reports its rows to the coordinator (below). Recovery does the same for
 a launch that ended while no loop watched it, before removing its run, under
 the vendor its record names; the record notes that the cost is in the ledger,
 so a retried release never counts it twice.
+
+After every poll the loop sends the ledger rows the coordinator has not yet
+accepted to `POST /projects/<project>/telemetry/cost-rows` of each row's
+project (rows without a project go to the main binding's), with the
+implementer's credential, so the console can show cost per task and per day
+per project and host. A row's identity is the SHA-256 of its ledger line, so
+the coordinator stores it once per project and host however often it arrives.
+`/var/lib/agentc/costs.reported` (mode 0600) lists the identities it accepted;
+a coordinator that is down, or answers an error, leaves the rows unsent and
+the loop tries again ten minutes later, so nothing is lost and nothing is
+duplicated. A row the coordinator refuses as invalid is skipped for good (it
+stays in the ledger). Deleting `costs.reported` only makes the next pass resend
+everything, which the coordinator ignores. `sudo agentc-supervisor
+report-costs` runs one pass by hand and prints `{accepted, duplicates,
+rejected, pending}`; on a host that has run without reporting, it is the
+backfill that imports the existing ledger once. Run it with the loop stopped or
+idle: both only append to `costs.reported`.
 
 A launch whose harness exits 0 although the agent neither submitted nor
 released its attempt (a broken shell, a refused tool, an agent that gave up)
@@ -1294,7 +1312,15 @@ which needs the supervisor to claim it, launch the harness, get a review and
 have the integrator land it. Each run appends a line to
 `/var/lib/agentc/e2e-canary.jsonl` with the host, harness, `outcome` (`ok`,
 `failed`, `timeout`), `duration_seconds`, the task id and the harness the cost
-ledger shows serving it. A task that is not `done` within 90 minutes
+ledger shows serving it. The run also reports its result to the coordinator
+(`POST /projects/<project>/telemetry/canary-results`, with the canary token),
+so the console can show canary history per project and host: the results file
+stays the source, `/var/lib/agentc/e2e-canary.jsonl.reported` (`E2E_REPORTED`)
+lists the rows the coordinator accepted, every run resends the rest, and a
+failed report only logs a line and never changes the exit status. `e2e-canary.py
+--backfill --project <id>` reports an existing results file once without
+running a canary; `E2E_NO_REPORT=1` or `--no-report` turns reporting off. A
+task that is not `done` within 90 minutes
 (`E2E_TIMEOUT_MINUTES`), is canceled, or cannot be created sends an ntfy page
 titled "agentc e2e canary failed" and exits 1; an undelivered page exits 2.
 The run fails too when `costs.jsonl` shows a harness other than the requested
@@ -1454,7 +1480,8 @@ default, `E2E_HARNESSES`, in the environment file, and the token file.
 Everything else has a default in `e2e-canary.py`, shown commented in the file:
 `E2E_URL`, `E2E_TOKEN_FILE` (`/etc/agentc/e2e-canary-token`), `E2E_NTFY_URL`,
 `E2E_PRIORITY` (0, urgent), `E2E_TIMEOUT_MINUTES` (90), `E2E_POLL_SECONDS` (20), `E2E_RESULTS`,
-`E2E_LEDGER` (`/var/lib/agentc/costs.jsonl`) and `E2E_HOST` (the hostname).
+`E2E_LEDGER` (`/var/lib/agentc/costs.jsonl`), `E2E_HOST` (the hostname),
+`E2E_REPORTED` (the results path plus `.reported`) and `E2E_NO_REPORT`.
 host-setup enables a harness's timer only once the token file, `E2E_PROJECT`
 and `E2E_NTFY_TOPIC` exist, so re-run it after filling them in (or `sudo
 systemctl enable --now agentc-e2e-canary@claude.timer`). `host-setup.sh

@@ -361,7 +361,7 @@ def parse(argv):
     parser.add_argument("--ledger", default=env("E2E_LEDGER", DEFAULT_LEDGER))
     parser.add_argument("--host", default=env("E2E_HOST", socket.gethostname()))
     parser.add_argument("--reported", default=env("E2E_REPORTED"))
-    parser.add_argument("--no-report", action="store_true", default=bool(env("E2E_NO_REPORT")))
+    parser.add_argument("--no-report", action="store_true", default=env("E2E_NO_REPORT", "0").lower() not in ("0", "false", "no"))
     parser.add_argument("--backfill", action="store_true")
     args = parser.parse_args(argv)
     # A backfill runs no canary, so it needs neither a harness nor a page topic.

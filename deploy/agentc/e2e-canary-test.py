@@ -378,6 +378,12 @@ class E2ETests(unittest.TestCase):
             e2e.run(e2e.parse(argv))
         self.assertEqual(len(self.fake.reports), before)
 
+    def test_reporting_can_be_turned_off_from_the_environment(self):
+        argv = ["--harness", "claude", "--project", "p", "--ntfy-topic", "t"]
+        for value, off in (("1", True), ("true", True), ("0", False), ("", False)):
+            with mock.patch.dict(os.environ, {"E2E_NO_REPORT": value}):
+                self.assertEqual(e2e.parse(argv).no_report, off, value)
+
     def test_backfill_needs_a_project_but_no_harness_or_topic(self):
         with mock.patch.dict(os.environ, clear=True), contextlib.redirect_stderr(io.StringIO()):
             self.assertTrue(e2e.parse(["--backfill", "--project", "p"]).backfill)

@@ -1143,6 +1143,8 @@ E2E_NTFY_TOPIC=
 # E2E_POLL_SECONDS=20
 # E2E_RESULTS=$STATE/e2e-canary.jsonl
 # E2E_LEDGER=$STATE/costs.jsonl     # the supervisor's ledger; names the serving harness
+# E2E_REPORTED=$STATE/e2e-canary.jsonl.reported   # results the coordinator accepted
+# E2E_NO_REPORT=1                    # do not report results to the coordinator
 # E2E_HOST=                         # label in results (default: hostname)
 EOF
 }
