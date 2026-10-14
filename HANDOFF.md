@@ -10,14 +10,14 @@ execution, and links everything else.
 - **4f546e9b done.** oracle-1 impl f7970700 submitted 15:00:41Z; review a44f440e **approved** 15:40Z
   (2 advisories: no live-service CLI test; check_docs/mdBook not run by reviewer); integration
   54fcddde fast-forwarded main to **`f2aef69`** ~15:46Z. main = `f2aef69` (not in production; the
-  workstation CLI at ce3ddd1 has no `integrator-reports` yet). Cost: owner `sudo grep` pending.
+  workstation CLI at ce3ddd1 has no `integrator-reports` yet). Cost $0.99 (impl $0.81 + rev $0.18), HRI 0.
 - **47dac763 bounced, now `blocked`.** either_review 9e2ebeb5 (oracle-1) = **changes_requested**
   15:03:42Z, 4 required findings: commit 1924885 not pushed at review time (it is now); no artifact for
   CLI parity / the 6cc3f673→commit mapping; `pilot-timeline.log` in no ref; HANDOFF lacked the 05:41Z
   landing. The task went back to ready and **oracle-1's supervisor claimed it 3 s later** (attempt
   5b7c6bbe), which blocked it at 15:04:55Z ("owner should attach the artifacts and resubmit").
   Filed **4bc09489** (P2, budget-held): supervisors claim owner-only general tasks, incl. after
-  changes_requested. **Owner decision needed:** attach artifacts and resubmit (kill switch on oracle-1
+  changes_requested. Cost $0.33 (rev $0.15 + bounced impl $0.18). **Owner decision needed:** attach artifacts and resubmit (kill switch on oracle-1
   first), or close 47dac763 another way. Nothing done to it.
 - **Digest 2026-10-14 00:00Z:** HRI 1 = open **fix_target report `9d8c2171`** (created 01:19:59Z
   10-13, `task_id: null`, still unresolved although the target is fixed) — this settles the open
