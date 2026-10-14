@@ -235,7 +235,7 @@ and counts it in `human_queue`, including when a review returns it to ready with
 403 `human_delivery_required` (`details.required_actor` `human`, `details.gate`
 `human_delivery`), and a next-eligible claim skips the task. A human or an
 interactive session claims it as usual, and a human completes it with
-`complete-external` or the console.
+`complete-external` or the manager.
 
 **Task origin and admission.** `POST /api/v1/projects/{project_id}/tasks` accepts an optional `admission_class`
 (`revert`, `fix_target`, `deflake` or `refusal_fix`; anything else is a 400).

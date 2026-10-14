@@ -1227,7 +1227,7 @@ shape that `--json` prints.
 bound project: the findings (`fix_target`, `flaky`, `privilege_gate`,
 `target_rewritten`, `ruleset_missing`, `unreviewed_landing`) that explain why a
 subject waits, such as a failing target. Any authenticated reader may use it. It
-is read-only: a human resolves a report in the console.
+is read-only: a human resolves a report in the manager.
 
 ```sh
 agent-coordinator integrator-reports list

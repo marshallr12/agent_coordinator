@@ -106,10 +106,10 @@ existing task:
 agent-coordinator human-delivery --task $TASK --expected-revision 2 --reason "Owner delivers"
 ```
 
-In the console, a task's detail page shows a **Human-delivered** badge and a
+In the manager, a task's detail page shows a **Human-delivered** badge and a
 **Mark human-delivered** button (**Return to supervisors** clears it; only a human can
 clear the mark through the API or CLI with `--clear`). You still claim the task from an
-interactive CLI session or the console and finish it with the steps below.
+interactive CLI session or the manager and finish it with the steps below.
 
 ### Completing a task delivered outside the coordinator
 

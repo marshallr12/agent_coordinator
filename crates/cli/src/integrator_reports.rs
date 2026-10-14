@@ -1,7 +1,7 @@
 //! `integrator-reports list` and `show`: the integrator's findings (a failing
 //! target, a flaky check, a privilege gate) that otherwise reach only the
-//! console and the daily digest. Read-only: resolving a report is a human
-//! console action, so no command here writes.
+//! manager and the daily digest. Read-only: resolving a report is a human
+//! manager action, so no command here writes.
 use super::*;
 
 /// Shown when the service lists no report.

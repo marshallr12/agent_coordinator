@@ -88,7 +88,7 @@ pub struct TaskInput {
     pub planned: bool,
     /// Marks the task as delivered by a human: supervisors never receive it
     /// from `next` and cannot claim it, while an interactive CLI session or
-    /// the console still can.
+    /// the manager still can.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub human_delivered: bool,
     /// Marks an always-admitted fix: `revert`, `fix_target`, `deflake` or
