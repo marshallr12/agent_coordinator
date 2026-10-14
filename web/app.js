@@ -433,7 +433,7 @@
     if (!silent && !state.projects.length) { show($('projects-state'), true); setState($('projects-state'), 'Loading projects…', true); show($('projects-grid'), false); }
     try {
       const projects = listData((await request('/api/v1/projects')).data);
-      if (silent && refreshBlocked()) return;
+      if (silent && refreshBlocked('projects-grid')) return;
       // Unchanged data leaves every node alone, so focus and open disclosures survive a poll.
       const changed = JSON.stringify(projects) !== JSON.stringify(state.projects) || !state.projectsRendered;
       state.projects = projects;
@@ -603,7 +603,7 @@
         if (requestedProjectId !== state.projectId || state.requestSeq.tasks !== requestId) return;
         allTasks.push(...listData(page)); cursor = page?.next_cursor || null;
       } while (cursor);
-      if (silent && refreshBlocked()) return;
+      if (silent && refreshBlocked('tasks-list')) return;
       const queueTasks = allTasks.filter((task) => taskStatus(task) !== 'done');
       const changed = !state.taskQueueLoaded || JSON.stringify(state.queueTasks) !== JSON.stringify(queueTasks);
       state.taskQueueLoaded = true;
@@ -632,7 +632,7 @@
         completed.push(...listData(page).filter((task) => taskStatus(task) === 'done'));
         cursor = page?.next_cursor || null;
       } while (cursor && requestedProjectId === state.projectId);
-      if (requestedProjectId !== state.projectId || (silent && refreshBlocked())) return;
+      if (requestedProjectId !== state.projectId || (silent && refreshBlocked('tasks-list'))) return;
       const changed = !state.completedLoaded || JSON.stringify(state.completedTasks) !== JSON.stringify(completed);
       state.completedLoaded = true; state.completedTasks = completed;
       state.completedPageIndex = Math.min(state.completedPageIndex, Math.max(0, Math.ceil(completed.length / state.taskPageSize) - 1));
@@ -780,7 +780,7 @@
     try {
       const data = (await request(`/api/v1/projects/${encodeURIComponent(requestedProjectId)}/tasks/${encodeURIComponent(requestedTaskId)}`)).data;
       if (requestedProjectId !== state.projectId || requestedTaskId !== state.selectedTaskId || state.requestSeq.detail !== requestId) return;
-      if (silent && refreshBlocked()) return;
+      if (silent && refreshBlocked('task-detail-content')) return;
       state.detail = data; state.detailKey = requestKey; renderTaskDetail(silent);
     }
     catch (error) { if (requestedProjectId === state.projectId && requestedTaskId === state.selectedTaskId && state.requestSeq.detail === requestId && !silent) setState($('task-detail-state'), errorMessage(error), false, true); }
@@ -972,7 +972,7 @@
         readAttachmentBatches()
       ]);
       if (requestId !== state.attachmentRequestSeq || projectId !== state.projectId || taskId !== state.selectedTaskId || requestedActor !== actorId()) return;
-      if (quiet && refreshBlocked()) return;
+      if (quiet && refreshBlocked('task-detail-content')) return;
       const records = (history.data.items || []).map((item) => item.record).filter(Boolean);
       const pending = batches.filter((batch) => batch.project_id === projectId && batch.task_id === taskId && batch.actor_id === requestedActor);
       renderTaskAttachments(records, pending, Boolean(history.data.next_cursor));
@@ -1134,7 +1134,7 @@
     if (state.actor?.role !== 'admin' || state.fetching.has('credentials')) return; state.fetching.add('credentials'); if (!silent && !state.credentialsLoaded) { show($('credentials-list'), false); setState($('credentials-state'), 'Loading credentials…', true); }
     try {
       const credentials = listData((await request('/api/v1/admin/credentials')).data);
-      if (silent && refreshBlocked()) return;
+      if (silent && refreshBlocked('credentials-list')) return;
       if (state.credentialsLoaded && JSON.stringify(credentials) === JSON.stringify(state.credentials)) return;
       state.credentials = credentials; state.credentialsLoaded = true; renderCredentials();
     }
@@ -1168,13 +1168,14 @@
   function revokeCredential(id) { startMutation(`/api/v1/admin/credentials/${encodeURIComponent(id)}/revoke`, {}, 'credential revocation', async () => { await loadCredentials(); setGlobalAlert('Credential revoked.', 'success'); }); }
 
   // Polling and background refreshes (including the auto-refresh checkbox) share these rules: nothing
-  // refreshes while the tab is hidden, a mutation or upload is pending, a dialog is open, or a text field
-  // or menu in the current view has focus.
+  // refreshes while the tab is hidden, a mutation or upload is pending, or a dialog is open, and a region
+  // is left alone while a text field, menu or file chooser inside it has focus. Fields outside the region
+  // (the search box above a list, say) are never touched by its refresh, so they do not block it.
   const POLL_MS = 5000;
-  function refreshBlocked() {
+  function refreshBlocked(regionId = null) {
     if (document.hidden || state.mutation || state.attachmentBusy || document.querySelector('dialog[open]')) return true;
-    const focused = document.activeElement;
-    return Boolean(focused && focused.matches?.('textarea, select, input:not([type=checkbox]):not([type=radio]):not([type=button])') && focused.closest('.page-view:not([hidden])'));
+    const focused = document.activeElement, region = regionId && $(regionId);
+    return Boolean(region && focused && region.contains(focused) && focused.matches('textarea, select, input:not([type=checkbox]):not([type=radio]):not([type=button])'));
   }
   function pollTick() {
     if (!state.actor || refreshBlocked()) return;
@@ -1288,7 +1289,7 @@
       const query = append && state.resourceCursor ? `?cursor=${encodeURIComponent(state.resourceCursor)}` : '';
       const page = (await request(`/api/v1/resources${query}`)).data;
       if (!requestedActor || requestedActor !== actorId()) return;
-      if (silent && refreshBlocked()) return;
+      if (silent && refreshBlocked('resources-list')) return;
       const items = listData(page);
       state.resourcePagesExtended = append;
       state.resources = append ? [...new Map([...state.resources, ...items].map(item => [item.id, item])).values()] : items;

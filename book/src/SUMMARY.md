@@ -55,6 +55,7 @@
 # Maintain the documentation
 
 - [Building and maintaining this book](docs/documentation.md)
+- [Web UI refresh behavior](docs/web-ui-refresh.md)
 
 # Live repository records (included from root)
 
