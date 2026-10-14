@@ -21,9 +21,12 @@ pub mod live;
 #[cfg(target_os = "linux")]
 mod live_health;
 #[cfg(target_os = "linux")]
+mod live_report;
+#[cfg(target_os = "linux")]
 mod live_review;
 pub mod record;
 pub mod renewal;
+pub mod report;
 pub mod review;
 pub mod review_cost;
 #[cfg(target_os = "linux")]
@@ -252,6 +255,10 @@ pub trait Driver {
     fn credential_expiry_ms(&self, _harness: Harness) -> Option<i64> {
         None
     }
+    /// Sends the cost ledger's unsent rows to the coordinator after a poll
+    /// ([`report`]); a failure is logged and the rows stay unsent. Hosts
+    /// that do not report do nothing.
+    fn report_costs(&mut self, _config: &Config) {}
     /// The launch's harness event stream, `$RUN/events.jsonl`.
     fn events(&self, launch: &Launch) -> Option<Vec<u8>> {
         std::fs::read(launch.run.join("events.jsonl")).ok()
@@ -284,6 +291,7 @@ pub fn run(driver: &mut impl Driver, config: &Config, once: bool) -> Result<()> 
         if let Err(error) = beat(&heartbeat_path(config), iteration, &outcome) {
             eprintln!("agentc-supervisor run: heartbeat: {error:#}");
         }
+        driver.report_costs(config);
         if once || idle(driver, config.run.poll_seconds.max(5)) {
             break;
         }

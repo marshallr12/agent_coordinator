@@ -26,6 +26,8 @@ struct Fake {
     beats: Vec<(i64, String)>,
     releases: Vec<String>,
     stop_at: Option<i64>,
+    /// How often the loop asked to report the cost ledger.
+    cost_reports: u32,
     /// Exit this long after SIGTERM; `None` ignores SIGTERM.
     term_exit_ms: Option<i64>,
     /// Live pids and their start ticks, all on boot `boot-1`.
@@ -100,6 +102,7 @@ impl Fake {
             polled: Vec::new(),
             claimed_in: Vec::new(),
             released_in: Vec::new(),
+            cost_reports: 0,
         }
     }
 
@@ -130,6 +133,10 @@ impl Fake {
 }
 
 impl Driver for Fake {
+    fn report_costs(&mut self, _config: &Config) {
+        self.cost_reports += 1;
+    }
+
     fn project(&self) -> &str {
         self.selected
     }
@@ -458,6 +465,15 @@ fn run_once_writes_a_heartbeat() {
         (beat["iteration"].as_u64(), beat["outcome"].as_str()),
         (Some(1), Some("Idle"))
     );
+}
+
+#[test]
+fn every_poll_ends_by_reporting_the_cost_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fake = Fake::new();
+    fake.next = json!({"action": null});
+    run(&mut fake, &config(dir.path()), true).unwrap();
+    assert_eq!(fake.cost_reports, 1);
 }
 
 #[test]
