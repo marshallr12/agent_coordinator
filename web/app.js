@@ -2340,7 +2340,9 @@
       const checks=Array.from(rows.querySelectorAll('.external-check')).map(row=>({identity:row.querySelector('input[name=check_identity]').value.trim(),conclusion:'success'}));
       if (!checks.length) { setGlobalAlert('Cite at least one required check result.','error'); return; }
       dialog.close();
-      startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/complete-external`,{expected_revision:task.revision,delivered_revision:values.get('delivered_revision').trim(),target_branch:values.get('target_branch').trim(),reason:values.get('reason').trim(),checks},'external completion',async()=>{await loadTaskDetail(); setGlobalAlert('Task completed as delivered externally.','success');},'POST',error=>completeExternallyFailed(projectId,taskId,error),{projectId,taskId});
+      // The task may have been reloaded since the dialog opened, so the freshest revision is the one to assert.
+      const latest=state.detail?.task||state.detail, revision=latest&&text(latest.id)===taskId&&latest.revision>task.revision?latest.revision:task.revision;
+      startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/complete-external`,{expected_revision:revision,delivered_revision:values.get('delivered_revision').trim(),target_branch:values.get('target_branch').trim(),reason:values.get('reason').trim(),checks},'external completion',async()=>{await loadTaskDetail(); setGlobalAlert('Task completed as delivered externally.','success');},'POST',error=>completeExternallyFailed(projectId,taskId,error),{projectId,taskId});
     });
   }
   // Names the service's refusal code, and reloads the task when it changed under the form.
