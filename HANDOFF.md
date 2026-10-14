@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489 + c2aea126 landed (main `fb32190`); 1a5ffe45 review hung (693af855 filed), mxmini on 04b0ed64 (2026-10-14 03:35 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489 + c2aea126 landed (main `fb32190`); 3 in review queue, mxmini on 9722697f, oracle-1 on 1d5648c0 (2026-10-14 04:09 UTC, workflow on)
 
 **Session `7a924313` evening run (started 02:04Z from `~/Downloads/prompt.txt`):**
 - **4bc09489 done** on oracle-1: impl 4dd75fdd $1.35 → rev 900b6b65 $0.25 **approved** 01:44:53Z
@@ -28,7 +28,9 @@ execution, and links everything else.
   **Outcome:** stopped ~03:55Z after ~45 min (not the 15-min drain); review **Requeued** (activity
   32abc0b1). Cost row `usd: null`, `usd_estimated: true` (unpriced, like 1d5648c0). The next reviewer of
   1a5ffe45 may hit the same hang. oracle-1 then claimed **1d5648c0** (launch 58f4baaf, ~03:55Z).
-- Still ready: 9722697f. 47dac763 untouched (blocked rev 2).
+- 04:09Z: mxmini submitted **04b0ed64** 03:57Z and claimed **9722697f** (8e43dacb); oracle-1 on
+  1d5648c0 (8229c6bb). Review queue 1a5ffe45 (requeued), 2a88c1f9, 04b0ed64; no reviewer free. Nothing
+  left ready. oracle-1 49 GiB free (impl/runs 24 GiB mid-build). 47dac763 untouched (blocked rev 2).
 - mxmini's `costs.jsonl` needs the owner's sudo (`sudo -n` fails locally); oracle-1's reads fine.
 - Ledger lines appended 02:05Z. Helpers 169811/1997610/1997611/2413349 alive.
 
