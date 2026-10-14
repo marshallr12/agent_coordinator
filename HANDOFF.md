@@ -29,8 +29,8 @@ execution, and links everything else.
   Budget-held listed: 2a88c1f9, 56662529, 1d5648c0 (and now 4bc09489, 9722697f).
 - Filed **9722697f** (P3, budget-held; owner request): the web UI calls itself "Operations console";
   rename to "manager". In chat, call it the "web dashboard".
-- **e2e canary 2026-10-14:** started 00:00:04Z; canary task 82200b16 submitted 00:01:13Z on oracle-1,
-  waiting_review at 00:15Z.
+- **e2e canary 2026-10-14: ok** (claude on oracle-1, 1806 s). Canary task 82200b16 done (review
+  e6c17e61 approved 00:21Z); $0.14 (impl $0.06 + rev $0.07), HRI 0.
 - oracle-1: kill switch clear, 61 GiB free, two transient `next` failures (17:01Z timeout, 18:28Z).
   The workstation journal capture (pid 1997611) is still stale; read oracle-1's journal directly.
 - mxmini: quiet hours until 22:00 EDT; 48 GiB free (the 08:39Z low-disk refusals have not recurred).
