@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; 4f546e9b landed, 47dac763 bounced (2026-10-14 00:20 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; 4f546e9b landed, 47dac763 waits for the release, 7 tasks admitted (2026-10-14 00:55 UTC, workflow on)
 
 **Session `e9a556c5` evening run (started 00:03Z from `~/Downloads/document.txt`):**
 - **4f546e9b done.** oracle-1 impl f7970700 submitted 15:00:41Z; review a44f440e **approved** 15:40Z
@@ -53,7 +53,9 @@ execution, and links everything else.
    (all four green) and add `deploy-scripts`. If the task revision moved past 2, update `expected_revision`.
    Then confirm `done` and record in the ledger.
 3. **Admitted 00:40Z (owner request, via dashboard):** 4bc09489 (oracle-1 claimed at once, attempt
-   4dd75fdd), 2a88c1f9, 1a5ffe45, c2aea126, 1d5648c0, 9722697f. Watch them through review and
+   4dd75fdd), 2a88c1f9, 1a5ffe45, c2aea126, 1d5648c0, 9722697f; 00:50Z **04b0ed64** (P2, filed and
+   widened at the owner's request: web UI auto-refresh, site-wide, update only changed DOM; vanilla JS /
+   modern CSS / CSP-safe Alpine). Watch them through review and
    integration; record cost/HRI per host. Still planned on purpose: 56662529 (owner decision: paging
    threshold, proposed 30 min, and whether it supersedes digest-only for fix_target), 1a3290db (after
    1a5ffe45), 2a387d02 (after the c2aea126 design), 55b8a06d / 422ce01e / c744c495 (owner tasks; keep
