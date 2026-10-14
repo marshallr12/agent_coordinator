@@ -2253,8 +2253,10 @@
     const target = $('task-operator-actions'), items = [];
     const completionPending = data.workflow?.submission && data.workflow.phase !== 'revision_needed';
     const ownAttempt = (data.attempts || []).find(item => item.id === task.current_attempt_id);
+    // Eligible only when nothing could still change the task: the service refuses the rest with task_attempt_protected, task_workflow_protected or task_lifecycle_invalid.
+    const activeWorkflow = (data.workflow?.activities || []).some(activity => ['queued','active','recovery_required'].includes(activity.state)) || ['review','integration'].includes(data.workflow?.phase);
     // Every button closes over the task, so they are rebuilt together, and only when something they use changed.
-    const context = sig(pick(task, TASK_ACTION_FIELDS), pick(data, ['depends_on', 'dependencies']), Boolean(completionPending), ownAttempt && pick(ownAttempt, ['id', 'owner_id', 'session_id', 'state', 'mode', 'generation']), state.actor?.kind, actorId(), state.actor?.session_id);
+    const context = sig(pick(task, TASK_ACTION_FIELDS), pick(data, ['depends_on', 'dependencies']), Boolean(completionPending), activeWorkflow, ownAttempt && pick(ownAttempt, ['id', 'owner_id', 'session_id', 'state', 'mode', 'generation']), state.actor?.kind, actorId(), state.actor?.session_id);
     const push = (key, build) => items.push({ key, sig: context, build });
     if (state.actor?.kind === 'human' && !task.activity_kind && !task.current_attempt_id) {
       if (task.archived_at) push('restore', () => actionButton('Restore archived task', () => taskLifecycle(task,'restore','Restore this task to the main task queue? Its lifecycle state and history will be preserved.')));
@@ -2265,6 +2267,7 @@
       }
     }
     if (state.actor?.kind === 'human' && !task.activity_kind && !task.archived_at && ['open','planned'].includes(task.lifecycle)) push('human-delivery', () => actionButton(task.human_delivered ? 'Return to supervisors' : 'Mark human-delivered', () => taskHumanDelivery(task)));
+    if (state.actor?.kind === 'human' && !task.activity_kind && !task.archived_at && task.lifecycle === 'open' && !task.current_attempt_id && !completionPending && !activeWorkflow) push('complete-external', () => actionButton('Complete as delivered externally', () => completeExternally(task)));
     if (!task.archived_at && !['done', 'completed'].includes(taskStatus(task)) && !completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) push('edit', () => taskIconButton('Edit task', 'edit', () => editTask(task, data)));
     if (!completionPending && !task.activity_kind && task.lifecycle === 'open' && !task.current_attempt_id && task.blocked_reason) push('unblock', () => taskIconButton('Resolve blocker', 'resolve', () => {
       const projectId = state.projectId, taskId = task.id;
@@ -2295,6 +2298,48 @@
       dialog.close();
       startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/human-delivery`,{expected_revision:task.revision,human_delivered:mark,reason:values.get('reason')},'human delivery mark',()=>loadTaskDetail(),'POST',null,{projectId,taskId});
     });
+  }
+  // Records a human's attestation that a task's change already reached the target branch outside the coordinator.
+  async function completeExternally(task) {
+    const projectId=state.projectId, taskId=task.id, currentActor=actorId();
+    let roster;
+    try {
+      roster=(await request(`${projectPath(projectId)}/workflow-policy`).catch(error=>{
+        if (error.code==='workflow_policy_required') return {data:{required_checks:[]}};
+        throw error;
+      })).data.required_checks||[];
+    } catch (error) { setGlobalAlert(`The required-check roster could not be read: ${errorMessage(error)}`,'error'); return; }
+    if (projectId!==state.projectId||currentActor!==actorId()||taskId!==state.selectedTaskId) return;
+    const view=workflowDialog('Complete as delivered externally','Use this only for a change that was already landed on the target branch outside the coordinator, for example with scripts/ship.py. The coordinator cannot reach the repository: it records your statement that the revision is on the target branch and that its required checks succeeded, and does not verify either. Confirm both on the remote first. The task must have no current attempt and no active review or integration.');
+    const revision=view.field('delivered_revision','Delivered revision (full commit SHA on the target branch)','','input'); revision.pattern='([0-9a-fA-F]{40}|[0-9a-fA-F]{64})'; revision.maxLength=64; revision.autocomplete='off';
+    view.field('target_branch','Target branch',state.projects.find(project=>text(project.id)===projectId)?.target_branch||'','input').maxLength=255;
+    view.field('reason','How it was delivered','','textarea').maxLength=4096;
+    add(view.form,el('h3','','Required check results on the delivered revision'));
+    add(view.form,el('p','muted',roster.length?'Every check in the project roster is listed. Confirm each one succeeded on the delivered revision.':'This project has no required-check roster. Name at least one check that succeeded on the delivered revision.'));
+    const rows=el('div','external-checks'); add(view.form,rows);
+    const addCheck=(identity='',fixed=false)=>{
+      const row=el('div','external-check'), id=`external-check-${rows.children.length}`, name=el('input'), caption=el('label','','Check'), done=el('input'), doneCaption=el('label','','Succeeded');
+      name.id=id; name.name='check_identity'; name.value=identity; name.required=true; name.maxLength=255; name.readOnly=fixed; caption.htmlFor=id;
+      done.type='checkbox'; done.id=`${id}-success`; done.name='check_success'; done.required=true; doneCaption.htmlFor=done.id;
+      const checkName=el('div'); add(checkName,caption); add(checkName,name); add(row,checkName);
+      const checkDone=el('div'); add(checkDone,done); add(checkDone,doneCaption); add(row,checkDone);
+      if (!fixed) { const remove=el('button','button subtle','Remove'); remove.type='button'; remove.addEventListener('click',()=>row.remove()); add(row,remove); }
+      add(rows,row);
+    };
+    if (roster.length) roster.forEach(check=>addCheck(text(check.identity),true)); else addCheck();
+    const more=el('button','button subtle','Add another check'); more.type='button'; more.addEventListener('click',()=>{ if (rows.children.length<100) addCheck(); }); add(view.form,more);
+    view.finish('Complete task',(values,dialog)=>{
+      const checks=Array.from(rows.querySelectorAll('.external-check')).map(row=>({identity:row.querySelector('input[name=check_identity]').value.trim(),conclusion:'success'}));
+      if (!checks.length) { setGlobalAlert('Cite at least one required check result.','error'); return; }
+      dialog.close();
+      startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/complete-external`,{expected_revision:task.revision,delivered_revision:values.get('delivered_revision').trim(),target_branch:values.get('target_branch').trim(),reason:values.get('reason').trim(),checks},'external completion',async()=>{await loadTaskDetail(); setGlobalAlert('Task completed as delivered externally.','success');},'POST',error=>completeExternallyFailed(projectId,taskId,error),{projectId,taskId});
+    });
+  }
+  // Names the service's refusal code, and reloads the task when it changed under the form.
+  function completeExternallyFailed(projectId,taskId,error) {
+    if (error.uncertain) return;
+    setGlobalAlert(error.code?`Not completed (${error.code}): ${errorMessage(error)}`:errorMessage(error),'error');
+    if (['task_revision_changed','task_attempt_protected','task_workflow_protected','task_lifecycle_invalid','task_archived'].includes(error.code)&&projectId===state.projectId&&taskId===state.selectedTaskId) loadTaskDetail();
   }
   function taskLifecycle(task, action, confirmation) {
     const projectId=state.projectId, taskId=task.id;
