@@ -52,8 +52,14 @@ execution, and links everything else.
    `required_check_missing` (roster includes deploy-scripts), switch `delivered_revision` to `f2aef69`
    (all four green) and add `deploy-scripts`. If the task revision moved past 2, update `expected_revision`.
    Then confirm `done` and record in the ledger.
-3. Daily 00:00Z checks; watch items (3d2fe98a-style stall, `agentc-push` serve test, mxmini disk).
-4. Reference only (owner): sithbit 61bf19af target hold 83063e8f; 422ce01e; Required checks `deploy-scripts`.
+3. **Admitted 00:40Z (owner request, via dashboard):** 4bc09489 (oracle-1 claimed at once, attempt
+   4dd75fdd), 2a88c1f9, 1a5ffe45, c2aea126, 1d5648c0, 9722697f. Watch them through review and
+   integration; record cost/HRI per host. Still planned on purpose: 56662529 (owner decision: paging
+   threshold, proposed 30 min, and whether it supersedes digest-only for fix_target), 1a3290db (after
+   1a5ffe45), 2a387d02 (after the c2aea126 design), 55b8a06d / 422ce01e / c744c495 (owner tasks; keep
+   planned until 4bc09489 ships, or a supervisor will claim them).
+4. Daily 00:00Z checks; watch items (3d2fe98a-style stall, `agentc-push` serve test, mxmini disk).
+5. Reference only (owner): sithbit 61bf19af target hold 83063e8f; 422ce01e; Required checks `deploy-scripts`.
 
 ## Previous resume point — P6 dogfood on `ce3ddd1`; block cleared, all three landed (2026-10-13 14:55 UTC, workflow on)
 
