@@ -1329,6 +1329,13 @@
     }
     add(target, candidate);
     (workflow.blockers || []).forEach(item => add(target, el('p', 'inline-alert error', typeof item === 'string' ? item : item.message || item.code)));
+    if (workflow.integration_blocked) {
+      const blocked = workflow.integration_blocked, box = el('div', 'inline-alert error');
+      add(box, el('strong', '', 'Integration blocked'));
+      add(box, el('p', '', [`Report ${displayStatus(blocked.kind)}`, blocked.verdict && `verdict ${blocked.verdict}`, blocked.check_name && `check ${blocked.check_name}`, blocked.target_revision && `target revision ${blocked.target_revision}`].filter(Boolean).join(' · ')));
+      add(box, el('p', 'muted', `Integrator report ${blocked.report_id}`));
+      add(target, box);
+    }
     if (workflow.activities_truncated) add(target, el('p', 'muted', 'Showing the latest 100 workflow activities. Older records remain stored.'));
     (workflow.activities || []).forEach(activity => {
       const entry = el('div', 'workflow-entry'); add(entry, el('h3', '', displayStatus(activity.kind)));

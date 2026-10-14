@@ -613,6 +613,19 @@ reports and only a human resolves one.
   revert's candidate has no author: when its failure is reproduced and passes
   on the tip, the integrator reports the revert `not-mechanical` with reason
   `check_failed` instead of revising it.
+- While a subject is in integration and an open `requires_human` report blocks
+  it, the task's workflow view (`workflow` in `tasks show`, the workflow route,
+  orientation and the console task page) carries `integration_blocked`, else
+  `null`: `{report_id, kind, verdict, target_revision, result_revision,
+  check_name, repository_url, target_branch, created_at, action}`, from the
+  newest such report. A report blocks the subject when it names the current
+  submission, one of its results, or only the task; a `fix_target` report with
+  `blocks_subject` also blocks every subject of the same repository and target
+  branch, because the target is what needs fixing (`target_revision` is the
+  failing tip, `check_name` the failing check). `next_actions` then holds
+  `action` (fix the target, see the report, resolve it) instead of the claim
+  guidance. `blockers` and `work_status` are unchanged. The field is `null`
+  again once a human resolves the report or the subject integrates.
 - `GET /api/v1/projects/{project_id}/integrator/reports` lists a project's
   reports, newest first, for any authenticated reader. `open=true` keeps only
   unresolved ones; `limit` is 1 to 1000 (default 200); `before=<report_id>`

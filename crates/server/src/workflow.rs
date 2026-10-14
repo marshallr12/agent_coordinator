@@ -1084,7 +1084,9 @@ pub async fn workflow_snapshot(
     let subject = sqlx::query("SELECT current_submission_id,phase FROM workflow_subjects WHERE project_id=? AND task_id=?")
         .bind(project).bind(task_id).fetch_optional(&mut *c).await?;
     let Some(subject) = subject else {
-        return Ok(json!({"submission":null,"activities":[],"blockers":[],"next_actions":[]}));
+        return Ok(
+            json!({"submission":null,"activities":[],"blockers":[],"integration_blocked":null,"next_actions":[]}),
+        );
     };
     let submission_id: String = subject.get("current_submission_id");
     let phase: String = subject.get("phase");
@@ -1125,14 +1127,23 @@ pub async fn workflow_snapshot(
         },
         _ => "blocked",
     };
+    let integration_blocked = match phase.as_str() {
+        "integration" => {
+            crate::integrator_reports::integration_blocked(c, project, task_id, &sub).await?
+        }
+        _ => Value::Null,
+    };
     let next_actions = match phase.as_str() {
-        "review" => vec!["Claim and decide each required review activity."],
-        "integration" => vec!["Authorize if required, then claim the integration activity."],
-        "revision_needed" => vec!["Claim the subject task and prepare a new revision."],
+        "review" => vec!["Claim and decide each required review activity.".to_owned()],
+        "integration" => match integration_blocked["action"].as_str() {
+            Some(action) => vec![action.to_owned()],
+            None => vec!["Authorize if required, then claim the integration activity.".to_owned()],
+        },
+        "revision_needed" => vec!["Claim the subject task and prepare a new revision.".to_owned()],
         _ => Vec::new(),
     };
     Ok(
-        json!({"submission":sub,"activities":activities,"activities_truncated":activities_truncated,"blockers":blockers,"next_actions":next_actions,"phase":phase,"work_status":work_status}),
+        json!({"submission":sub,"activities":activities,"activities_truncated":activities_truncated,"blockers":blockers,"integration_blocked":integration_blocked,"next_actions":next_actions,"phase":phase,"work_status":work_status}),
     )
 }
 
