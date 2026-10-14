@@ -70,6 +70,10 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 - Axum HTTP service with embedded vanilla JavaScript/CSS dashboard; SQLite WAL,
   foreign keys, migrations, transactional event records and mutation receipts.
+- The dashboard refreshes in place: polls, reloads and finished mutations patch
+  only the nodes whose data changed and keep focus, selection, open disclosures
+  and scroll position; polling pauses in a hidden tab, behind a dialog and during
+  a pending mutation. See [Web UI refresh behavior](web-ui-refresh.md).
 - Local administrator initialization and password sign-in; Argon2id hashes,
   protected browser cookies, origin/CSRF checks, bounded login attempts, and
   human-admin issuance/revocation of separately named agent credentials.
