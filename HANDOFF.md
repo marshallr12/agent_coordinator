@@ -75,7 +75,7 @@ execution, and links everything else.
 
 **Next actions, in order:**
 1. **Release main (owner dispatches, daytime 2026-10-14):** `gh workflow run release.yml --ref main` at
-   `af81834` (all required checks green; also carries tonight's 7 tasks). Carries 0d5e4c10, 4540596c, df71ee7,
+   `af81834` (all required checks green; also carries tonight's 7 tasks). **Verified 10:25Z:** full release (migrations 0037 `human_delivered` column, 0038 `cost_rows`/`canary_results` tables; snapshot = only rollback); **integrator changed → rebuild**; supervisor/CLI changed → rebuild + host-setup on both hosts; no new service env names. Next session's prompt: `~/Downloads/prompt.txt`. Carries 0d5e4c10, 4540596c, df71ee7,
    cbb05ecb, 46043cbc (`complete-external`), 4f546e9b. Then the deploy drill
    (`~/.local/share/agent-coordinator-autonomy/release-next/`) and CLI rebuilds on all three hosts.
 2. **Then complete 47dac763** (owner's human CLI session; agent sessions are refused, and the
