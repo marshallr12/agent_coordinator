@@ -25,7 +25,10 @@ execution, and links everything else.
   it, gate.log stayed empty, and `until grep TEST_DONE` loops hit the 600 s Bash timeout and were moved
   to the background, which may keep the 15-min drain from firing. Watch how it ends (drain, timeout, or
   a decision without tests) and add that to 693af855.
-- Still ready: 1d5648c0, 9722697f. 47dac763 untouched (blocked rev 2).
+  **Outcome:** stopped ~03:55Z after ~45 min (not the 15-min drain); review **Requeued** (activity
+  32abc0b1). Cost row `usd: null`, `usd_estimated: true` (unpriced, like 1d5648c0). The next reviewer of
+  1a5ffe45 may hit the same hang. oracle-1 then claimed **1d5648c0** (launch 58f4baaf, ~03:55Z).
+- Still ready: 9722697f. 47dac763 untouched (blocked rev 2).
 - mxmini's `costs.jsonl` needs the owner's sudo (`sudo -n` fails locally); oracle-1's reads fine.
 - Ledger lines appended 02:05Z. Helpers 169811/1997610/1997611/2413349 alive.
 
