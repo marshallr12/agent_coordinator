@@ -21,8 +21,8 @@ execution, and links everything else.
   first), or close 47dac763 another way. Nothing done to it.
 - **Digest 2026-10-14 00:00Z:** HRI 1 = open **fix_target report `9d8c2171`** (created 01:19:59Z
   10-13, `task_id: null`, still unresolved although the target is fixed) — this settles the open
-  question: a fix_target report *was* filed, so 2a88c1f9's framing holds. Owner: resolve 9d8c2171 in
-  the console. Note `task_id` null means 4f546e9b's `--task` filter won't find target_failing reports.
+  question: a fix_target report *was* filed, so 2a88c1f9's framing holds. **Resolved 00:35Z** in the
+  console at the owner's request. Still open, not human-required: unreviewed_landing 5874bf39, 60cc5203. Note `task_id` null means 4f546e9b's `--task` filter won't find target_failing reports.
   Budget-held listed: 2a88c1f9, 56662529, 1d5648c0 (and now 4bc09489).
 - **e2e canary 2026-10-14:** started 00:00:04Z; canary task 82200b16 submitted 00:01:13Z on oracle-1,
   waiting_review at 00:15Z.
