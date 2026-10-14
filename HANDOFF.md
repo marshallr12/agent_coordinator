@@ -4,7 +4,18 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; 4f546e9b landed, 47dac763 waits for the release, 7 tasks admitted (2026-10-14 00:55 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489 landed (main `46fea34`), mxmini on 1a5ffe45, c2aea126 in review (2026-10-14 02:05 UTC, workflow on)
+
+**Session `7a924313` evening run (started 02:04Z from `~/Downloads/prompt.txt`):**
+- **4bc09489 done** on oracle-1: impl 4dd75fdd $1.35 → rev 900b6b65 $0.25 **approved** 01:44:53Z
+  (activity 6741be27) → main fast-forwarded to **`46fea34`**. $1.60, HRI 0. Not in production
+  (ce3ddd1), so keep 55b8a06d / 422ce01e / c744c495 planned until the release ships it.
+- **c2aea126** (design, P1): oracle-1 impl f735b12a $1.89 submitted 02:04:23Z → `waiting_review`.
+- **22:00 EDT check:** mxmini kill switch cleared 02:00Z; loop resumed and **claimed 1a5ffe45**
+  (launch 06bd1ef6, attempt ad9ecee0). mxmini 47 GiB free; oracle-1 62 GiB, switch clear.
+- Still ready: 2a88c1f9, 1d5648c0, 9722697f, 04b0ed64. 47dac763 untouched (blocked rev 2).
+- mxmini's `costs.jsonl` needs the owner's sudo (`sudo -n` fails locally); oracle-1's reads fine.
+- Ledger lines appended 02:05Z. Helpers 169811/1997610/1997611/2413349 alive.
 
 **Session `e9a556c5` evening run (started 00:03Z from `~/Downloads/document.txt`):**
 - **4f546e9b done.** oracle-1 impl f7970700 submitted 15:00:41Z; review a44f440e **approved** 15:40Z
