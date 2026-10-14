@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489, c2aea126, 1a5ffe45, 2a88c1f9, 1d5648c0, 04b0ed64 landed (main `6321a88`); 9722697f in review (2026-10-14 07:05 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; all 7 admitted tasks landed (main `af81834`, all checks green); evening run ended (2026-10-14 07:50 UTC, workflow on)
 
 **Session `7a924313` evening run (started 02:04Z from `~/Downloads/prompt.txt`):**
 - **4bc09489 done** on oracle-1: impl 4dd75fdd $1.35 → rev 900b6b65 $0.25 **approved** 01:44:53Z
@@ -40,6 +40,7 @@ execution, and links everything else.
 - 05:35Z: **1a5ffe45 done** (integrated, main **`e897783`**; $3.22+ incl. unpriced hung rev, HRI 0). **2a88c1f9 approved** by oracle-1 rev 7cfa1296 ($0.19, 05:30:59Z, gate in foreground) → `waiting_integration`; $0.81, HRI 0. Queue: 04b0ed64, 1d5648c0, 9722697f. Nothing ready; disk oracle-1 61 GiB, mxmini 151 GiB; no stalls, no serve-test failures.
 - 06:20Z: **2a88c1f9 done** (main **`c0db9d0`**; $0.81, HRI 0). **04b0ed64** approved by oracle-1 rev de473ac2 ($0.12, 05:53:03Z, 2 advisories) but integration 6ad1d48a was **canceled → `revision_needed`** (likely stale base after 2a88c1f9); mxmini reclaimed it at once (attempt 220cd404, launch 77389b0e). oracle-1 reviewing 1d5648c0 or 9722697f (a05bff20, gate in foreground). Disk oracle-1 49 GiB, mxmini 138 GiB.
 - 07:05Z: **1d5648c0 done** (rev a05bff20 $0.18; $0.59 total, HRI 0). **04b0ed64 done**: mxmini revision 220cd404 added `6cfdcc4` (covers 2a88c1f9's integration-blocked notice) → rev 46f9429b $0.22 approved 06:50Z → main **`6321a88`**; HRI 0; mxmini revision cost needs the owner's `sudo grep`. The 6ad1d48a cancel has **no recorded reason** in the CLI (activity `result` null, no lifecycle events): check the dashboard's Integrator reports; if none, file it. oracle-1 reviewing **9722697f**, the last admitted task.
+- 07:50Z **run end**: **9722697f done** (rev 9d69330b $0.11 approved 07:13Z; $0.32, HRI 0) → main **`af81834`**, all required checks green. **All 7 admitted tasks done, HRI 0 each.** Totals: oracle-1 $5.90 (+ unpriced hung rev 2950bb54), mxmini $7.70 + 04b0ed64 revision 220cd404 (**owner `sudo grep` pending**); $13.60+. Open question: integration 6ad1d48a's cancel has no recorded reason in the CLI; check the dashboard's Integrator reports, file if absent. Now unblocked but still planned on purpose: 1a3290db (after 1a5ffe45), 2a387d02 (after c2aea126). Nothing ready.
 - Ledger lines appended 02:05Z. Helpers 169811/1997610/1997611/2413349 alive.
 
 **Session `e9a556c5` evening run (started 00:03Z from `~/Downloads/document.txt`):**
@@ -74,7 +75,7 @@ execution, and links everything else.
 
 **Next actions, in order:**
 1. **Release main (owner dispatches, daytime 2026-10-14):** `gh workflow run release.yml --ref main` at
-   `f2aef69` or later (all four required checks green on `f2aef69`). Carries 0d5e4c10, 4540596c, df71ee7,
+   `af81834` (all required checks green; also carries tonight's 7 tasks). Carries 0d5e4c10, 4540596c, df71ee7,
    cbb05ecb, 46043cbc (`complete-external`), 4f546e9b. Then the deploy drill
    (`~/.local/share/agent-coordinator-autonomy/release-next/`) and CLI rebuilds on all three hosts.
 2. **Then complete 47dac763** (owner's human CLI session; agent sessions are refused, and the
