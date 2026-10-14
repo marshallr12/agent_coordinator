@@ -219,6 +219,24 @@ must be reopened by an operator or revised by an agent (`reason_code`
 `operation_not_permitted` and add `details.required_actor: "human"` and a
 `details.gate` name, or `required_actor: "human"` on the precondition.
 
+**Human-delivered tasks.** Every task view carries `human_delivered` (default `false`).
+`POST /api/v1/projects/{project_id}/tasks` accepts `human_delivered: true` to create a
+task a human delivers, and `POST …/tasks/{task_id}/human-delivery` with
+`{"expected_revision", "human_delivered", "reason"}` marks or unmarks an existing
+open or planned task. The mark does not change the task's revision, its judged
+fields or a submission under review. A human may set and clear it; an interactive
+agent session may only set it; a supervised or read-only credential may do neither
+(403 `operation_not_permitted`, `details.gate` `human_delivery`). Nothing infers the
+mark from a title, kind or origin, and existing tasks keep `false`. For a supervised or
+read-only (shadow) credential, a marked task has the unmet precondition
+`human_delivery_required` (`required_actor: "human"`), so `GET …/next` never offers it
+and counts it in `human_queue`, including when a review returns it to ready with
+`changes_requested` (`revision_needed`). A supervisor's explicit claim is refused with
+403 `human_delivery_required` (`details.required_actor` `human`, `details.gate`
+`human_delivery`), and a next-eligible claim skips the task. A human or an
+interactive session claims it as usual, and a human completes it with
+`complete-external` or the console.
+
 **Task origin and admission.** `POST /api/v1/projects/{project_id}/tasks` accepts an optional `admission_class`
 (`revert`, `fix_target`, `deflake` or `refusal_fix`; anything else is a 400).
 Every task view carries `origin` (`human`, `agent` or `service`), `admission_class`

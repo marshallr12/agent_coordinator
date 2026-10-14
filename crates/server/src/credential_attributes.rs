@@ -149,6 +149,15 @@ pub fn is_integrator(actor: &Actor) -> bool {
         .is_some_and(|a| a.class == CredentialClass::Integrator)
 }
 
+/// True when the caller is an unattended launcher: a supervised credential, or
+/// a read-only (shadow) credential that mirrors one. Human-delivered tasks are
+/// never offered to or claimed by these callers.
+pub fn is_supervisor(actor: &Actor) -> bool {
+    actor.credential_attributes.is_some_and(|a| {
+        a.class == CredentialClass::Supervised || a.access == CredentialAccess::Read
+    })
+}
+
 /// Keeps the integrator credential and the integrator routes paired: an
 /// integrator credential may call nothing else (not even sessions), and no
 /// other principal may call the integrator routes.

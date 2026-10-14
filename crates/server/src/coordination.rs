@@ -3,7 +3,7 @@ use crate::{auth::Auth, error::AppError, mutation::Mutation, response, state::Ap
 use axum::{
     Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     routing::{get, patch, post},
 };
 use coordinator_core::*;
@@ -97,6 +97,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/projects/{project}/tasks/{task}/complete-external",
             post(complete_task_externally),
+        )
+        .route(
+            "/api/v1/projects/{project}/tasks/{task}/human-delivery",
+            post(set_human_delivery),
         )
         .route(
             "/api/v1/projects/{project}/preconditions/{target}",
@@ -388,6 +392,7 @@ struct Task {
     admission_class: Option<String>,
     budget_exempt: Option<String>,
     budget_held_at: Option<i64>,
+    human_delivered: bool,
     attempt_state: Option<String>,
     attempt_expires: Option<i64>,
     owner_authorized: bool,
@@ -503,7 +508,7 @@ impl Task {
         "objective_children_ready":self.objective_children_ready,"decisions_ready":self.decisions_ready,
         "objective_id":self.objective_id,"parent_objective_id":self.parent_objective_id,"parent_objective_required":self.parent_objective_required,
         "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
-        "origin":self.origin,"admission_class":self.admission_class.as_ref().or(self.budget_exempt.as_ref()),"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned"});
+        "origin":self.origin,"admission_class":self.admission_class.as_ref().or(self.budget_exempt.as_ref()),"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned","human_delivered":self.human_delivered});
         if self.workflow_phase.as_deref() == Some("integration") {
             value["precondition_hints"] = json!([{
                 "code":"candidate_stale_merge_conflict_requires_preflight",
@@ -586,6 +591,9 @@ pub(crate) async fn task_preconditions_snapshot(
             unmet.push(json!({"code":"instructions_required","message":"Read and acknowledge the current coordination instructions before claiming."}));
         }
     }
+    if value["human_delivered"] == true && crate::credential_attributes::is_supervisor(actor) {
+        unmet.push(human_delivery_unmet());
+    }
     let workflow = crate::workflow::workflow_snapshot(c, project_id, id, now).await?;
     let reopened = workflow["phase"] == "revision_needed";
     if !reopened && !workflow["blockers"].as_array().is_none_or(Vec::is_empty) {
@@ -601,6 +609,9 @@ pub(crate) async fn task_preconditions_snapshot(
     value["claim_mode"] = json!(if recovering { "recovery" } else { "work" });
     value["state_token"] = json!(crate::state_wait::state_token(&value)?);
     Ok(value)
+}
+fn human_delivery_unmet() -> Value {
+    json!({"code":"human_delivery_required","message":"A human delivers this task. A supervisor never claims it; an interactive CLI session or the console does, and a human completes it."})
 }
 async fn enrich_workflow_status(
     c: &mut SqliteConnection,
@@ -1048,6 +1059,77 @@ async fn complete_task_externally(
     ))
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct HumanDeliveryInput {
+    expected_revision: i64,
+    human_delivered: bool,
+    reason: String,
+}
+
+/// `POST …/tasks/{task}/human-delivery`: marks or unmarks a task as delivered by a
+/// human. Any interactive session may mark it; only a human may clear the mark, and
+/// a supervisor may do neither. The task's revision and judged fields do not change,
+/// so a submission under review stays current.
+async fn set_human_delivery(
+    State(s): State<AppState>,
+    auth: Auth,
+    Path((p, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<HumanDeliveryInput>, JsonRejection>,
+) -> Reply {
+    let input = payload(body)?;
+    bounded(&input.reason, "reason", 4096, true)?;
+    let mut m = Mutation::begin(
+        &s,
+        &auth,
+        &headers,
+        &format!("POST /api/v1/projects/{p}/tasks/{id}/human-delivery"),
+        &input,
+    )
+    .await?;
+    if m.actor.kind != "human" {
+        session(&m.actor)?;
+        if crate::credential_attributes::is_supervisor(&m.actor) || !input.human_delivered {
+            return Err(AppError::human_gate(
+                "human_delivery",
+                "Only a human or an interactive session can mark a task human-delivered, and only a human can clear the mark.",
+            ));
+        }
+    }
+    if let Some(v) = m.replay {
+        return Ok(response(v));
+    }
+    let t = task(&mut m.tx, &p, &id, m.now).await?;
+    if t.revision != input.expected_revision {
+        return Err(AppError::conflict(
+            "revision_conflict",
+            "Read the latest task revision before changing the mark.",
+        ));
+    }
+    if t.archived_at.is_some() || !["open", "planned"].contains(&t.lifecycle.as_str()) {
+        return Err(AppError::conflict(
+            "task_not_editable",
+            "Only an open or planned task can be marked or unmarked as human-delivered.",
+        ));
+    }
+    sqlx::query("UPDATE tasks SET human_delivered=? WHERE id=?")
+        .bind(input.human_delivered)
+        .bind(&id)
+        .execute(&mut *m.tx)
+        .await?;
+    let value = task(&mut m.tx, &p, &id, m.now).await?.value(m.now);
+    Ok(response(
+        m.finish(
+            json!({"task":value,"human_delivered":input.human_delivered,"reason":input.reason}),
+            Some(&p),
+            "task.human_delivery_set",
+            &id,
+        )
+        .await?,
+    ))
+}
+
 /// The task's recorded lifecycle changes (cancel, archive, restore, delete, external
 /// completion), newest first,
 /// and the tasks it replaced. Events recorded before reasons were kept carry no data; their
@@ -1235,9 +1317,9 @@ async fn create_task(
         input.admission_evidence.as_ref(),
     )
     .await?;
-    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since,human_delivered) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&id).bind(&p).bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(&input.kind).bind(input.priority)
-        .bind(admission.lifecycle(input.planned)).bind(m.now).bind(m.now).execute(&mut *m.tx).await?;
+        .bind(admission.lifecycle(input.planned)).bind(m.now).bind(m.now).bind(input.human_delivered).execute(&mut *m.tx).await?;
     crate::admission::record(&mut m, &id, &admission).await?;
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
     let mut value = save_task_revision(&mut m, &p, &id).await?;
@@ -1912,6 +1994,9 @@ async fn first_unparked(
         if crate::revert_rules::is_mechanical(c, &t.id).await? {
             continue;
         }
+        if t.human_delivered && crate::credential_attributes::is_supervisor(actor) {
+            continue;
+        }
         let exempt = t.current_attempt_id.is_some() || actor.kind != "agent";
         if exempt || !crate::autonomy::revise_limit_reached(c, &t.id, now).await? {
             return Ok(Some(t));
@@ -2000,6 +2085,14 @@ async fn claim(
             "task_archived",
             "Restore this task before claiming work.",
         ));
+    }
+    if t.human_delivered && crate::credential_attributes::is_supervisor(&m.actor) {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "human_delivery_required",
+            "A human delivers this task; a supervisor cannot claim it. Claim it from an interactive CLI session or the console.",
+        )
+        .with_details(json!({"required_actor":"human","gate":"human_delivery"})));
     }
     crate::workflow::guard_normal_claim(&mut m.tx, &p, &t.id).await?;
     crate::revert_rules::ensure_not_mechanical(&mut m.tx, &t.id).await?;

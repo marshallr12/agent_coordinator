@@ -750,6 +750,7 @@
     setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), title); setText($('detail-task-id-value'), taskId); setText($('detail-task-revision'), task.revision || 1); setText($('detail-description'), task.description || 'No description provided.');
     $('copy-task-name').dataset.copyValue = title; $('copy-task-id').dataset.copyValue = taskId; setTaskDetailCopyFeedback('', '');
     const status = taskStatus(task); const badge = $('detail-status'); setText(badge, displayStatus(status)); badge.className = `status-badge ${status}`; setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
+    const humanDelivered = $('detail-human-delivered'); show(humanDelivered, Boolean(task.human_delivered)); humanDelivered.title = 'A human delivers this task. Supervisors never receive or claim it.';
     const readOnly = Boolean(task.archived_at || ['done', 'completed'].includes(status));
     $('task-attachment-files').disabled = readOnly || Boolean(state.mutation || state.attachmentBusy);
     $('upload-task-attachments').disabled = readOnly || Boolean(state.mutation || state.attachmentBusy);
@@ -2056,6 +2057,7 @@
         if (['planned','canceled'].includes(task.lifecycle)) add(target, actionButton('Delete task', () => taskLifecycle(task,'delete','Remove this task from task views? This is a soft delete that retains task and audit history. The service refuses if attempts, workflow, objective, or dependency history exist.')));
       }
     }
+    if (state.actor?.kind === 'human' && !task.activity_kind && !task.archived_at && ['open','planned'].includes(task.lifecycle)) add(target, actionButton(task.human_delivered ? 'Return to supervisors' : 'Mark human-delivered', () => taskHumanDelivery(task)));
     if (!task.archived_at && !['done', 'completed'].includes(taskStatus(task)) && !completionPending && !task.current_attempt_id && ['open','planned'].includes(task.lifecycle) && ['ready','planned','blocked'].includes(taskStatus(task)) && !task.activity_kind) add(target, taskIconButton('Edit task', 'edit', () => editTask(task, data)));
     if (!completionPending && !task.activity_kind && task.lifecycle === 'open' && !task.current_attempt_id && task.blocked_reason) add(target, taskIconButton('Resolve blocker', 'resolve', () => {
       const projectId = state.projectId, taskId = task.id;
@@ -2077,6 +2079,15 @@
     if (task.objective_id) add(target, actionButton('View objective children', () => showObjective(task.objective_id), false));
     if (task.parent_objective_id) add(target, actionButton('View parent objective', () => showObjective(task.parent_objective_id), false));
     renderMutationState();
+  }
+  function taskHumanDelivery(task) {
+    const projectId=state.projectId, taskId=task.id, mark=!task.human_delivered;
+    const view=workflowDialog(mark?'Mark human-delivered':'Return to supervisors',mark?'Supervisors will no longer be offered or able to claim this task, including after a review requests changes. You or an interactive CLI session can still claim it, and you can complete it as delivered externally.':'Supervisors may be offered and claim this task again.');
+    view.field('reason','Reason for this change');
+    view.finish(mark?'Mark human-delivered':'Return to supervisors',(values,dialog)=>{
+      dialog.close();
+      startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/human-delivery`,{expected_revision:task.revision,human_delivered:mark,reason:values.get('reason')},'human delivery mark',()=>loadTaskDetail(),'POST',null,{projectId,taskId});
+    });
   }
   function taskLifecycle(task, action, confirmation) {
     const projectId=state.projectId, taskId=task.id;

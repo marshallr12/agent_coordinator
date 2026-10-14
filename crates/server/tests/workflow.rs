@@ -3370,6 +3370,144 @@ async fn next_offers_a_claim_template_and_an_independent_review() {
     assert_eq!(claimed["attempt"]["state"], "active", "{claimed}");
 }
 
+/// Creates a general task the owner delivers: `human_delivered` set at creation.
+async fn human_delivered_task(f: &Fixture, p: &str, title: &str) -> Value {
+    let (status, v) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("/api/v1/projects/{p}/tasks"),
+            json!({"title":title,"description":"owner delivers","acceptance_criteria":["required behavior verified"],"kind":"general","human_delivered":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["human_delivered"], true, "{v}");
+    v["data"].clone()
+}
+
+/// Claims `t` with an explicit task claim as `c` (instructions already acknowledged).
+async fn explicit_claim(f: &Fixture, c: &Caller, p: &str, t: &Value) -> (StatusCode, Value) {
+    let body = json!({"task_id":t["id"],"expected_task_revision":t["revision"],"mode":"work","policy_revision":2,"instruction_version":coordinator_core::INSTRUCTION_VERSION});
+    f.call(c, "POST", &format!("/api/v1/projects/{p}/claims"), body)
+        .await
+}
+
+#[tokio::test]
+async fn supervisors_never_get_human_delivered_tasks_even_after_changes_requested() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("human-delivered", "https://example.test/human.git")
+        .await;
+    f.review_policy(&p, "either").await;
+    sqlx::query("UPDATE credentials SET class='supervised' WHERE id=?")
+        .bind(&f.c.credential)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let t = human_delivered_task(&f, &p, "Owner: deliver on the host").await;
+    let (_, shown) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(shown["data"]["human_delivered"], true, "{shown}");
+
+    // Admission: the supervisor is not offered the task and sees it as human queue.
+    let refused_offer = next_action(&f, &f.c, &p, "implementer").await;
+    assert!(refused_offer["action"].is_null(), "{refused_offer}");
+    assert_eq!(refused_offer["human_queue"], 1, "{refused_offer}");
+    assert_eq!(refused_offer["skipped"]["human_delivery_required"], 1);
+    // The supervisor's explicit claim is refused with a typed error.
+    f.ack(&f.c, &p, 2).await;
+    let (status, refused) = explicit_claim(&f, &f.c, &p, &t).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["error"]["code"], "human_delivery_required");
+    assert_eq!(refused["error"]["details"]["required_actor"], "human");
+    // A next-eligible claim skips it too.
+    let body = json!({"mode":"work","policy_revision":2,"instruction_version":coordinator_core::INSTRUCTION_VERSION});
+    let (status, empty) = f
+        .call(&f.c, "POST", &format!("/api/v1/projects/{p}/claims"), body)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert!(empty["data"]["claim"].is_null(), "{empty}");
+
+    // An interactive session is offered it and claims it.
+    let offered = next_action(&f, &f.a, &p, "implementer").await;
+    assert_eq!(offered["action"]["task_id"], t["id"], "{offered}");
+    let owner = f.claim(&f.a, &p, &t, 2).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 2, None, None, None, None)
+        .await;
+
+    // revision_needed: the review returns the task to ready for claiming.
+    let review = activity(&submitted, "either_review");
+    let (status, claimed) = f.claim_activity(&f.b, &p, review, 2, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let body = json!({"generation":claimed["data"]["attempt"]["generation"],"submission_id":review["submission_id"],"decision":"changes_requested","summary":"Needs live-host artifacts","findings":[{"severity":"required","remedy":"Attach the artifacts","evidence":"Review evidence"}]});
+    let (status, result) = f
+        .call(&f.b, "POST", &activity_path(&p, review, "review"), body)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["data"]["phase"], "revision_needed", "{result}");
+    let after = next_action(&f, &f.c, &p, "implementer").await;
+    assert!(after["action"].is_null(), "{after}");
+    assert_eq!(after["skipped"]["human_delivery_required"], 1, "{after}");
+    let (_, current) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    let (status, refused) = explicit_claim(&f, &f.c, &p, &current["data"]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["error"]["code"], "human_delivery_required");
+    let again = next_action(&f, &f.a, &p, "implementer").await;
+    assert_eq!(again["action"]["task_id"], t["id"], "{again}");
+    let (status, ok) = explicit_claim(&f, &f.a, &p, &current["data"]).await;
+    assert_eq!(status, StatusCode::OK, "{ok}");
+}
+
+#[tokio::test]
+async fn the_human_delivery_mark_is_set_by_interactive_sessions_and_cleared_by_humans() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("human-mark", "https://example.test/mark.git")
+        .await;
+    sqlx::query("UPDATE credentials SET class='supervised' WHERE id=?")
+        .bind(&f.c.credential)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let t = f.task(&p, "general", "Mark me").await;
+    assert_eq!(t["human_delivered"], false, "{t}");
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}/human-delivery",
+        t["id"].as_str().unwrap()
+    );
+    let body = |marked: bool| json!({"expected_revision":t["revision"],"human_delivered":marked,"reason":"Owner delivers this one"});
+    let (status, v) = f.call(&f.c, "POST", &path, body(true)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    let (status, v) = f.call(&f.a, "POST", &path, body(true)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["task"]["human_delivered"], true, "{v}");
+    assert_eq!(v["data"]["task"]["revision"], t["revision"], "{v}");
+    let (status, v) = f.call(&f.a, "POST", &path, body(false)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"]["details"]["gate"], "human_delivery");
+    let offered = next_action(&f, &f.c, &p, "implementer").await;
+    assert!(offered["action"].is_null(), "{offered}");
+    let (status, v) = f.call(&f.admin, "POST", &path, body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["task"]["human_delivered"], false, "{v}");
+    let offered = next_action(&f, &f.c, &p, "implementer").await;
+    assert_eq!(offered["action"]["task_id"], t["id"], "{offered}");
+}
+
 #[tokio::test]
 async fn next_serves_read_only_credentials_and_routes_human_gates() {
     let f = Fixture::new().await;

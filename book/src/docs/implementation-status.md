@@ -203,6 +203,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   `designate-digest-sender`; none by default) can obtain an ack link, so an
   ordinary agent credential cannot mark the digest read. The link names its
   minter and a read through it records that principal.
+- Human-delivered tasks: a task carries `human_delivered` (set at creation or with
+  `POST .../tasks/{task}/human-delivery`, `agent-coordinator human-delivery` or the
+  console). `GET .../next` never offers it to a supervised or read-only credential, a
+  supervisor's explicit claim is refused with `human_delivery_required`, and the rule
+  holds after a `changes_requested` review returns the task to ready. An interactive
+  session or a human still claims it. Existing tasks are unmarked; nothing is inferred
+  from titles.
 - Admission control (P6): tasks record their `origin` (`human`, `agent` or
   `service`) and may carry an `admission_class` (`revert`, `fix_target`,
   `deflake`, `refusal_fix`); service-created reverts and revise follow-ups set

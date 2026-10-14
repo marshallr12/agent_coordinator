@@ -92,6 +92,25 @@ Verify both URLs identify the same repository; shared or historically used bindi
 cannot be changed. New policy versions require agents to reread and
 acknowledge instructions; existing candidates may require reconciliation.
 
+### Keeping a task from supervisors
+
+Mark a task you deliver yourself (for example one that needs a host no supervisor can
+reach) as human-delivered. `GET …/next` then never offers it to a supervisor, and a
+supervisor's claim is refused with `human_delivery_required`, on every revision cycle
+including after a review returns it with `changes_requested`. Nothing is inferred from
+the title, so existing "Owner:" tasks stay claimable until you mark them. Set the mark
+when creating the task (`"human_delivered": true` in the `tasks create` JSON), or on an
+existing task:
+
+```sh
+agent-coordinator human-delivery --task $TASK --expected-revision 2 --reason "Owner delivers"
+```
+
+In the console, a task's detail page shows a **Human-delivered** badge and a
+**Mark human-delivered** button (**Return to supervisors** clears it; only a human can
+clear the mark through the API or CLI with `--clear`). You still claim the task from an
+interactive CLI session or the console and finish it with the steps below.
+
 ### Completing a task delivered outside the coordinator
 
 A task whose owner landed the change with `scripts/ship.py` (privileged paths such as

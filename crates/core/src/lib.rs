@@ -86,6 +86,11 @@ pub struct TaskInput {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub planned: bool,
+    /// Marks the task as delivered by a human: supervisors never receive it
+    /// from `next` and cannot claim it, while an interactive CLI session or
+    /// the console still can.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub human_delivered: bool,
     /// Marks an always-admitted fix: `revert`, `fix_target`, `deflake` or
     /// `refusal_fix`. A task without a class created by an agent counts
     /// against the weekly admission budget; an agent may set a class only

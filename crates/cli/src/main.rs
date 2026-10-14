@@ -214,6 +214,12 @@ enum Command {
     /// task is a human gate. Refused with `task_history_protected` when the task has
     /// attempts, dependencies, objective links or workflow links: archive it.
     Delete(lifecycle::LifecycleArgs),
+    /// Mark a task human-delivered (or clear the mark) so supervisors never claim it.
+    ///
+    /// Who may: a human or an interactive session may mark; only a human may
+    /// clear (`--clear`). A supervisor may do neither. The task's revision does
+    /// not change, so a submission under review stays current.
+    HumanDelivery(lifecycle::HumanDeliveryArgs),
     /// Record an explicit recovery inspection and disposition.
     Recovery {
         #[command(subcommand)]
@@ -972,6 +978,9 @@ fn task_summary(task: &Value) -> Vec<String> {
     if task.get("archived_at").is_some_and(|v| !v.is_null()) {
         lines.push(format!("Archived: {}", field(task, "archived_at")));
     }
+    if task.get("human_delivered").and_then(Value::as_bool) == Some(true) {
+        lines.push("Human-delivered: supervisors never receive or claim this task".to_owned());
+    }
     lines
 }
 
@@ -1241,6 +1250,7 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
         Command::Cancel(args) => lifecycle::cancel(cli, &context, args).await,
         Command::Archive(args) => lifecycle::archive(cli, &context, args).await,
         Command::Restore(args) => lifecycle::restore(cli, &context, args).await,
+        Command::HumanDelivery(args) => lifecycle::human_delivery(cli, &context, args).await,
         Command::Delete(args) => lifecycle::delete(cli, &context, args).await,
         Command::Recovery { command } => match command {
             RecoveryCommand::Inspect(args) => {

@@ -49,6 +49,16 @@ pub(crate) struct CancelArgs {
     replacement: Option<String>,
 }
 
+/// Mark a task human-delivered, or clear the mark.
+#[derive(Args)]
+pub(crate) struct HumanDeliveryArgs {
+    #[command(flatten)]
+    lifecycle: LifecycleArgs,
+    /// Clear the mark so supervisors may claim the task again (human only).
+    #[arg(long)]
+    clear: bool,
+}
+
 /// POST `workflow/reopen` with the agent revise reason.
 pub(crate) async fn revise(
     cli: &crate::Cli,
@@ -84,6 +94,18 @@ pub(crate) async fn cancel(
         validate_segment("replacement", replacement).map_err(Failure::invalid)?;
         body["replacement_task_id"] = json!(replacement);
     }
+    mutate(cli, context, &path, body, true).await
+}
+
+/// POST `human-delivery`, marking the task or (with `--clear`) clearing the mark.
+pub(crate) async fn human_delivery(
+    cli: &crate::Cli,
+    context: &ContextData,
+    args: &HumanDeliveryArgs,
+) -> Result<Value, Failure> {
+    let path = task_path(context, &args.lifecycle.task, "human-delivery")?;
+    let mut body = lifecycle_body(&args.lifecycle);
+    body["human_delivered"] = json!(!args.clear);
     mutate(cli, context, &path, body, true).await
 }
 
@@ -145,6 +167,9 @@ pub(crate) fn refusal_hint(code: &str) -> Option<&'static str> {
         "task_lifecycle_invalid" => "the task's lifecycle state does not permit this action",
         "task_history_protected" => {
             "the task has attempts, dependencies or workflow links and cannot be deleted; archive it instead"
+        }
+        "human_delivery_required" => {
+            "a human delivers this task; claim it from an interactive CLI session or the console, or leave it for its owner"
         }
         "revert_author_conflict" => {
             "you contributed to the change this revert undoes, or share a launch with a contributor; an independent agent or a human must cancel or archive it"
@@ -298,6 +323,7 @@ mod tests {
             "task_lifecycle_invalid",
             "task_history_protected",
             "revert_author_conflict",
+            "human_delivery_required",
         ] {
             assert!(super::refusal_hint(code).is_some(), "{code}");
         }
@@ -309,6 +335,22 @@ mod tests {
         let lines = crate::task_summary(&json!({"id":"t","title":"T","origin":"service",
             "lifecycle":"open","work_status":"ready","revision":4}));
         assert!(lines.contains(&"Origin: service".to_owned()), "{lines:?}");
+    }
+
+    #[test]
+    fn task_summary_shows_the_human_delivery_mark() {
+        let marked = crate::task_summary(&json!({"id":"t","title":"T","origin":"human",
+            "lifecycle":"open","work_status":"ready","revision":4,"human_delivered":true}));
+        assert!(
+            marked.iter().any(|l| l.starts_with("Human-delivered")),
+            "{marked:?}"
+        );
+        let plain = crate::task_summary(&json!({"id":"t","title":"T","origin":"human",
+            "lifecycle":"open","work_status":"ready","revision":4,"human_delivered":false}));
+        assert!(
+            !plain.iter().any(|l| l.starts_with("Human-delivered")),
+            "{plain:?}"
+        );
     }
 
     /// Tests that drive the real commands and mutation journal against a loopback

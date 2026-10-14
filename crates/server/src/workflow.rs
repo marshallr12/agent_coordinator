@@ -836,6 +836,7 @@ async fn activity_value(
 const HUMAN_PRECONDITIONS: &[&str] = &[
     "human_recovery_required",
     "human_reviewer_required",
+    "human_delivery_required",
     "integration_authorization_required",
     "revise_limit_reached",
 ];
