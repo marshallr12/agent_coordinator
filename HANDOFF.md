@@ -17,20 +17,43 @@ execution, and links everything else.
   landing. The task went back to ready and **oracle-1's supervisor claimed it 3 s later** (attempt
   5b7c6bbe), which blocked it at 15:04:55Z ("owner should attach the artifacts and resubmit").
   Filed **4bc09489** (P2, budget-held): supervisors claim owner-only general tasks, incl. after
-  changes_requested. Cost $0.33 (rev $0.15 + bounced impl $0.18). **Owner decision needed:** attach artifacts and resubmit (kill switch on oracle-1
-  first), or close 47dac763 another way. Nothing done to it.
+  changes_requested. Cost $0.33 (rev $0.15 + bounced impl $0.18). **Owner decision (00:40Z):** close it with
+  `complete-external` after the next release (see Next actions). The route (46043cbc, `2f665d2`) is
+  **not in production ce3ddd1**: the owner's call at 00:30Z returned `record_not_found`, and the task is
+  unchanged (open, blocked, revision 2). Left `blocked` meanwhile (no supervisor claims a blocked task).
 - **Digest 2026-10-14 00:00Z:** HRI 1 = open **fix_target report `9d8c2171`** (created 01:19:59Z
   10-13, `task_id: null`, still unresolved although the target is fixed) — this settles the open
   question: a fix_target report *was* filed, so 2a88c1f9's framing holds. **Resolved 00:35Z** in the
   console at the owner's request, with unreviewed_landing 5874bf39 (df71ee7) and 60cc6203 (4540596c's
   afca7cf/24a7f3d), both owner hand-ships. **0 open integrator reports.** Note `task_id` null means 4f546e9b's `--task` filter won't find target_failing reports.
-  Budget-held listed: 2a88c1f9, 56662529, 1d5648c0 (and now 4bc09489).
+  Budget-held listed: 2a88c1f9, 56662529, 1d5648c0 (and now 4bc09489, 9722697f).
+- Filed **9722697f** (P3, budget-held; owner request): the web UI calls itself "Operations console";
+  rename to "manager". In chat, call it the "web dashboard".
 - **e2e canary 2026-10-14:** started 00:00:04Z; canary task 82200b16 submitted 00:01:13Z on oracle-1,
   waiting_review at 00:15Z.
 - oracle-1: kill switch clear, 61 GiB free, two transient `next` failures (17:01Z timeout, 18:28Z).
   The workstation journal capture (pid 1997611) is still stale; read oracle-1's journal directly.
 - mxmini: quiet hours until 22:00 EDT; 48 GiB free (the 08:39Z low-disk refusals have not recurred).
 - Helpers alive at 00:03Z: renew.sh 169811, watch.sh 1997610, journal ssh 1997611, mxmini-watch.sh 2413349.
+
+**Next actions, in order:**
+1. **Release main (owner dispatches, daytime 2026-10-14):** `gh workflow run release.yml --ref main` at
+   `f2aef69` or later (all four required checks green on `f2aef69`). Carries 0d5e4c10, 4540596c, df71ee7,
+   cbb05ecb, 46043cbc (`complete-external`), 4f546e9b. Then the deploy drill
+   (`~/.local/share/agent-coordinator-autonomy/release-next/`) and CLI rebuilds on all three hosts.
+2. **Then complete 47dac763** (owner's human CLI session; agent sessions are refused, and the
+   classifier blocked the agent's call from the dashboard tab):
+   ```
+   agent-coordinator --session owner-admit request --method post \
+     --path /api/v1/projects/fe95a6c5-2aad-463f-8446-4366d9a281c7/tasks/47dac763-c52c-4134-9efb-8421998e37e5/complete-external \
+     --input ~/.local/share/agent-coordinator-autonomy/release-next/47dac763-external.json --json
+   ```
+   The body cites `ce3ddd1` with linux-validation, documentation and dependency-audit. If it returns
+   `required_check_missing` (roster includes deploy-scripts), switch `delivered_revision` to `f2aef69`
+   (all four green) and add `deploy-scripts`. If the task revision moved past 2, update `expected_revision`.
+   Then confirm `done` and record in the ledger.
+3. Daily 00:00Z checks; watch items (3d2fe98a-style stall, `agentc-push` serve test, mxmini disk).
+4. Reference only (owner): sithbit 61bf19af target hold 83063e8f; 422ce01e; Required checks `deploy-scripts`.
 
 ## Previous resume point — P6 dogfood on `ce3ddd1`; block cleared, all three landed (2026-10-13 14:55 UTC, workflow on)
 
