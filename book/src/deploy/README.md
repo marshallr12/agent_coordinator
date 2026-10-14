@@ -927,7 +927,13 @@ that reached its time limit, an implementer stopped after its drain period)
 has no reported total. Its row instead sums the usage of the launch's
 `assistant` events (a message repeated across content blocks counts once),
 prices it from the default or `[shadow.prices]` table, and carries
-`"usd_estimated": true`; `usd` stays `null` when the model has no price. The
+`"usd_estimated": true`. The price is that of the model the `assistant` events
+report (`message.model`; a dated id such as `claude-haiku-4-5-20251001` uses
+the `claude-haiku-4-5` entry), because the configured model may be `default`,
+which names no real model; the row's `priced_model` says so when that differs
+from `model`. Failing that, the configured model's entry and then a `default`
+entry of `[shadow.prices]` price it. If none has a price, `usd` stays `null`
+and the row carries `usd_unpriced_reason`, which the supervisor also logs. The
 estimate counts toward the role's daily cap like any other row, and the
 handoff's cost sentence ends "estimated". A launch with a `result` event is
 costed exactly as before and its row has no `usd_estimated` field.
