@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489 + c2aea126 landed (main `fb32190`); 3 in review queue, mxmini on 9722697f, oracle-1 on 1d5648c0 (2026-10-14 04:09 UTC, workflow on)
+## Current resume point — P6 dogfood on `ce3ddd1`; 4bc09489 + c2aea126 landed (main `fb32190`); 1a5ffe45 approved, 4 tasks in review queue (2026-10-14 04:55 UTC, workflow on)
 
 **Session `7a924313` evening run (started 02:04Z from `~/Downloads/prompt.txt`):**
 - **4bc09489 done** on oracle-1: impl 4dd75fdd $1.35 → rev 900b6b65 $0.25 **approved** 01:44:53Z
@@ -30,8 +30,13 @@ execution, and links everything else.
   1a5ffe45 may hit the same hang. oracle-1 then claimed **1d5648c0** (launch 58f4baaf, ~03:55Z).
 - 04:09Z: mxmini submitted **04b0ed64** 03:57Z and claimed **9722697f** (8e43dacb); oracle-1 on
   1d5648c0 (8229c6bb). Review queue 1a5ffe45 (requeued), 2a88c1f9, 04b0ed64; no reviewer free. Nothing
-  left ready. oracle-1 49 GiB free (impl/runs 24 GiB mid-build). 47dac763 untouched (blocked rev 2).
-- mxmini's `costs.jsonl` needs the owner's sudo (`sudo -n` fails locally); oracle-1's reads fine.
+  left ready. oracle-1 49 GiB free (impl/runs 24 GiB mid-build).
+- 04:55Z: **1a5ffe45 approved** by oracle-1 rev bfd0fb9d ($0.34, 04:50:19Z; ran the gate in the
+  foreground, so no 693af855 repeat) → `waiting_integration`. oracle-1 then started reviewing
+  2a88c1f9 (7cfa1296). 1d5648c0 (oracle-1 impl $0.41) and 9722697f (mxmini; submitted, then drained by
+  design, `lease.rs` `stop()`) submitted. Queue: 2a88c1f9 (in review), 04b0ed64, 1d5648c0, 9722697f.
+- **mxmini costs (owner sudo):** 1a5ffe45 $2.88, 04b0ed64 $4.61, 9722697f $0.21 → $7.70, HRI 0.
+  `!` commands can't sudo (no tty); the owner runs the grep in a terminal. 47dac763 untouched (blocked rev 2).
 - Ledger lines appended 02:05Z. Helpers 169811/1997610/1997611/2413349 alive.
 
 **Session `e9a556c5` evening run (started 00:03Z from `~/Downloads/document.txt`):**
