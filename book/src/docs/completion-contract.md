@@ -358,6 +358,13 @@ ordinary candidate. Use it only after confirming, from the remote, that
 `delivered_revision` is an ancestor of the target branch tip and that the required
 checks succeeded on it. An ordinary candidate still needs review and integration.
 
+The caller must be a human actor, and only a browser password sign-in is one, so the
+manager's task detail page is the way to use it: **Complete as delivered externally**
+is offered to a signed-in human on an open task with no current attempt and no active
+review or integration, prefills the target branch and the roster's check identities,
+and shows the service's refusal code. A CLI session authenticates with an agent
+credential and is refused with 403 `operation_not_permitted`.
+
 ## Local worktree cleanup after completion
 
 Every agent cleans up after its own completed tasks, in every project, so

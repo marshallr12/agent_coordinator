@@ -117,20 +117,30 @@ A task whose owner landed the change with `scripts/ship.py` (privileged paths su
 `.github/workflows`) has no review or integration to finish. Do not cancel it: that
 records the delivered work as `canceled`. First release or recover the owner's
 attempt, confirm on the remote that the commit is an ancestor of the target branch
-and that every required check succeeded on it, then complete the task as a human:
+and that every required check succeeded on it, then complete the task as a human in
+the manager. Open the task's detail page, signed in with your operator password, and
+choose **Complete as delivered externally**. The button appears only for a human
+and only while the task is open with no current attempt and no active review or
+integration; it is absent for an owned, under-review, integrating, archived or closed
+task. The form asks for:
 
-```sh
-agent-coordinator request --method post \
-  --path /api/v1/projects/$PROJECT/tasks/$TASK/complete-external --input external.json
-```
+- the **delivered revision**, the full 40 or 64 character commit that contains the change;
+- the **target branch**, prefilled with the project's and required to match it;
+- **how it was delivered**, for example `Landed by scripts/ship.py`;
+- a **result for each required check** on that revision. The form lists every
+  identity in the project's check roster, and you tick each one that succeeded; the
+  service refuses a missing one with `required_check_missing`. A project with no roster
+  asks you to name the checks you confirmed.
 
-where `external.json` is
+A refusal is shown with its code (`task_revision_changed`, `task_attempt_protected`,
+`task_workflow_protected`, `task_lifecycle_invalid`, `required_check_missing`,
+`target_branch_mismatch`), and the page reloads when the task changed underneath you.
 
-```json
-{"expected_revision": 2, "delivered_revision": "<full sha>", "target_branch": "main",
- "reason": "Landed by scripts/ship.py",
- "checks": [{"identity": "Coordination checks", "conclusion": "success"}]}
-```
+An agent-credentialed CLI session cannot do this: the route needs a human actor, and
+only a browser password sign-in is one, so `agent-coordinator request --method post
+--path …/complete-external` answers 403 `operation_not_permitted`
+(`details.gate` `task_external_completion`). The CLI has no human credential to
+present, so use the manager.
 
 The task ends `done` and its history records the revision and check results. The service
 records this attestation without verifying it, and agents cannot use it; an ordinary
