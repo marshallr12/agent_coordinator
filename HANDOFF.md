@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production `af81834` deployed; hosts rolled out (2026-10-14 13:30 UTC, workflow on, both kill switches on)
+## Current resume point — production `af81834` deployed; hosts rolled out; 47dac763 done (2026-10-14 13:35 UTC, workflow on)
 
 **Session `0b3c541a` daytime release (prompt `~/Downloads/prompt.txt`; ledger lines `[release af81834]`):**
 - **Release run 38550683390 green**; artifacts in `~/.local/share/agent-coordinator-autonomy/release-next`
@@ -28,15 +28,25 @@ execution, and links everything else.
   (cron lifts it 02:00Z). **renew.sh 169811 stopped**; d513bc21 released (attempt ba401934 gen 5 → ready).
   watch.sh 1997610, journal ssh 1997611, mxmini-watch.sh 2413349 left running.
 
-**Next actions (release steps 8–10):**
-1. Owner closes **47dac763** with `complete-external` (command in the previous section's Next action 2,
-   input `release-next/47dac763-external.json`; fallback for `required_check_missing`:
-   `release-next/47dac763-external-af81834.json`, af81834 + deploy-scripts). Confirm done.
-2. Reclaim d513bc21 (connect first, policy_changed), restart renew.sh; clear oracle-1's switch; watch
-   the next claim per host and the first e2e canary report in `canary_results`. Re-check 55b8a06d /
-   422ce01e / c744c495 for human_delivered (now shipped); leave them planned.
-3. Owner: MiniAir Windows CLI from the release zip.
-Don't admit work without the owner. Planned on purpose: 56662529, 1a3290db, 2a387d02, 97b7b62a, 693af855.
+- **47dac763 done** 13:28:14Z (`complete-external`, delivered_revision ce3ddd1, 3 checks). The owner's CLI
+  call was refused (`operation_not_permitted`, gate `task_external_completion`): only a dashboard password
+  sign-in is a human actor and the manager has no control for the route. Worked via `fetch()` from the
+  signed-in dashboard tab's DevTools console (CSRF from `/api/v1/me`, `X-CSRF-Token`, `Idempotency-Key`).
+  Filed **bb5fb219** (P2, planned).
+- **Step 9:** d513bc21 reclaimed (attempt **5c760158 gen 6**); **renew.sh pid 4194295** from scratchpad
+  `0b3c541a…` (log `renew.log` there). **oracle-1 kill switch cleared 13:29:16Z**, loop Idle; mxmini
+  `quiet-hours` until 02:00Z. Nothing ready (only d513bc21 open). e2e canary reporting on (no
+  `E2E_NO_REPORT` on either host).
+
+**Next actions:**
+1. Watch the first e2e canary report: oracle-1 `agentc-e2e-canary@claude` at **00:00Z** → a
+   `canary_results` row (new in 0038) and a supervisor cost row in `cost_rows`. Then mxmini's first
+   claim after 02:00Z (only if the owner admits work).
+2. Owner: MiniAir Windows CLI from `release-next/agent-coordinator-0.1.1-windows-x86_64.zip` (zip sha256
+   `19ca26d0…`, exe `73ccd96e…`, embeds af81834) via `upgrade_client.py --candidate`.
+3. Owner decision pending: mark 422ce01e / c744c495 / 55b8a06d `human_delivered`
+   (`agent-coordinator human-delivery --task … --expected-revision … --reason …`); left planned and unmarked.
+Don't admit work without the owner. Planned on purpose: 56662529, 1a3290db, 2a387d02, 97b7b62a, 693af855, bb5fb219.
 
 ## Previous resume point — P6 dogfood on `ce3ddd1`; all 7 admitted tasks landed (main `af81834`, all checks green); evening run ended (2026-10-14 07:50 UTC, workflow on)
 
