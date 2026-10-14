@@ -42,6 +42,11 @@ class Fake:
         self.polls = 0
         self.pages = []
         self.requests = []
+        # Canary reports: bodies, their Idempotency-Keys, and an optional
+        # `report_reply(body) -> status` standing in for the coordinator.
+        self.reports = []
+        self.report_keys = []
+        self.report_reply = None
         fake = self
 
         class Coordinator(BaseHTTPRequestHandler):
@@ -60,6 +65,14 @@ class Fake:
                 if self.path == "/api/v1/projects":
                     fake.project_input = self.body()
                     return self.reply(200, {"data": {"id": "proj-1", "policy_revision": 1, "lease_seconds": 900}})
+                if self.path.endswith("/telemetry/canary-results"):
+                    body = self.body()
+                    fake.reports.append(body)
+                    fake.report_keys.append(self.headers.get("Idempotency-Key"))
+                    status = fake.report_reply(body) if fake.report_reply else 200
+                    if status != 200:
+                        return self.reply(status, {"error": {"code": "x"}})
+                    return self.reply(200, {"data": {"accepted": len(body["rows"]), "duplicates": 0}})
                 fake.keys.append(self.headers.get("Idempotency-Key"))
                 fake.created.append(self.body())
                 if fake.create_status >= 300:
@@ -131,6 +144,16 @@ class E2ETests(unittest.TestCase):
         self.results = self.dir / "results.jsonl"
         self.ledger = self.dir / "costs.jsonl"
         self.clock = Clock()
+        # Every run ends a second later, so no two result lines are identical.
+        seconds = iter(range(10_000))
+
+        def end_time(fmt, when=None):
+            n = next(seconds)
+            return f"2027-01-15T10:{n // 60:02d}:{n % 60:02d}Z"
+
+        patch = mock.patch.object(e2e.time, "strftime", side_effect=end_time)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def canary(self, *extra, harness="claude"):
         argv = ["--harness", harness, "--url", self.fake.url, "--project", "p", "--token-file", str(self.token),
@@ -231,6 +254,135 @@ class E2ETests(unittest.TestCase):
         self.fake.polls = 0
         self.canary()
         self.assertEqual(len(self.rows()), 2)
+
+    def reported_ids(self):
+        return Path(str(self.results) + ".reported").read_text().split()
+
+    def line(self, **fields):
+        row = {"at": "2027-01-15T10:00:00Z", "detail": "done", "duration_seconds": 61.5, "harness": "claude",
+               "host": "h1", "outcome": "ok", "project": "p", "served_by": ["claude"], "task": "t-old"}
+        row.update(fields)
+        with self.results.open("a") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+    def test_a_run_reports_its_result_once_with_a_stable_identity(self):
+        self.ledger_row("claude")
+        self.assertEqual(self.canary()[0], 0)
+        [body] = self.fake.reports
+        [row] = body["rows"]
+        self.assertEqual(body["host"], "h1")
+        line = self.results.read_text().splitlines()[0]
+        self.assertEqual(row["row_id"], e2e.row_id(line))
+        self.assertEqual((row["harness"], row["outcome"], row["task_id"], row["served_by"]),
+                         ("claude", "ok", "task-1", ["claude"]))
+        self.assertEqual(row["duration_seconds"], 60.0)
+        self.assertEqual(row["occurred_at_ms"] % 1000, 0)
+        self.assertEqual(self.reported_ids(), [row["row_id"]])
+        self.fake.polls = 0
+        self.canary()  # the next run sends only its own result
+        self.assertEqual([len(b["rows"]) for b in self.fake.reports], [1, 1])
+        self.assertEqual(len(set(self.reported_ids())), 2)
+        self.assertEqual({a for _, _, a in self.fake.requests}, {f"Bearer {TOKEN}"})
+
+    def test_a_coordinator_that_is_down_never_changes_the_exit_status_and_loses_nothing(self):
+        self.fake.report_reply = lambda body: 503
+        code, err = self.canary()
+        self.assertEqual(code, 0)
+        self.assertIn("not reported (HTTP 503)", err)
+        self.assertNotIn(TOKEN, err)
+        self.assertFalse(Path(str(self.results) + ".reported").exists())
+        self.fake.polls = 0
+        self.canary()  # still down: one request, rows still unsent
+        self.assertEqual(len(self.fake.reports), 2)
+        self.fake.report_reply = None
+        self.fake.polls = 0
+        self.canary()
+        sent = self.fake.reports[-1]["rows"]
+        self.assertEqual(len(sent), 3)  # both earlier results and this one
+        self.assertEqual(len(self.rows()), 3)  # the results file was only ever appended to
+        self.assertEqual(set(self.reported_ids()), {r["row_id"] for r in sent})
+
+    def test_a_transport_failure_is_logged_and_the_rows_stay_unsent(self):
+        self.line()
+        args = e2e.parse(["--backfill", "--url", "http://127.0.0.1:9", "--project", "p", "--results", str(self.results)])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(e2e.report_results(args, TOKEN), 0)
+        self.assertIn("results not reported (URLError)", err.getvalue())
+        self.assertNotIn(TOKEN, err.getvalue())
+        self.assertFalse(Path(str(self.results) + ".reported").exists())
+
+    def test_no_report_sends_nothing(self):
+        self.assertEqual(self.canary("--no-report")[0], 0)
+        self.assertEqual(self.fake.reports, [])
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_a_retry_of_the_same_rows_reuses_its_idempotency_key(self):
+        self.line()
+        self.line(task="t-older", at="2027-01-14T10:00:00Z")
+        self.fake.report_reply = lambda body: 502
+        argv = ["--backfill", "--url", self.fake.url, "--project", "p", "--token-file", str(self.token),
+                "--results", str(self.results), "--host", "h1"]
+        for _ in range(2):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(e2e.run(e2e.parse(argv)), 0)
+        self.assertEqual(len(self.fake.report_keys), 2)
+        self.assertEqual(len(set(self.fake.report_keys)), 1)
+        self.assertLessEqual(len(self.fake.report_keys[0]), 128)
+
+    def test_backfill_imports_an_existing_results_file_once(self):
+        self.line()
+        self.line(task="t-2", outcome="failed", detail="not done", at="2027-01-14T10:00:00Z")
+        self.line(task="t-3", project=None, host=None, at="2027-01-13T10:00:00Z")  # a legacy row
+        with self.results.open("a") as handle:
+            handle.write("not json\n" + json.dumps({"outcome": "ok"}) + "\n\n")
+        argv = ["--backfill", "--url", self.fake.url, "--project", "p-default", "--token-file", str(self.token),
+                "--results", str(self.results), "--host", "host-default"]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(e2e.run(e2e.parse(argv)), 0)
+        self.assertIn("reported 3 results", err.getvalue())
+        self.assertEqual(self.fake.created, [])  # a backfill runs no canary
+        self.assertEqual(self.fake.pages, [])
+        by_host = {b["host"]: b["rows"] for b in self.fake.reports}
+        self.assertEqual({h: len(r) for h, r in by_host.items()}, {"h1": 2, "host-default": 1})
+        paths = sorted(path for _, path, _ in self.fake.requests)
+        self.assertEqual(paths, ["/api/v1/projects/p-default/telemetry/canary-results",
+                                 "/api/v1/projects/p/telemetry/canary-results"])
+        failed = [r for r in by_host["h1"] if r["outcome"] == "failed"][0]
+        self.assertEqual((failed["task_id"], failed["detail"], failed["occurred_at_ms"]),
+                         ("t-2", "not done", 1_799_920_800_000))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(e2e.run(e2e.parse(argv)), 0)  # a second import has nothing to send
+        self.assertEqual(len(self.fake.reports), 2)
+        os.remove(str(self.results) + ".reported")  # even a lost marker only resends, never duplicates
+        with contextlib.redirect_stderr(io.StringIO()):
+            e2e.run(e2e.parse(argv))
+        resent = {r["row_id"] for b in self.fake.reports[2:] for r in b["rows"]}
+        first = {r["row_id"] for b in self.fake.reports[:2] for r in b["rows"]}
+        self.assertEqual(resent, first)
+
+    def test_a_row_the_coordinator_refuses_is_skipped_and_the_rest_still_go(self):
+        self.line(task="good-1")
+        self.line(task="bad", detail="refuse me")
+        self.line(task="good-2")
+        self.fake.report_reply = lambda body: 422 if any(r["detail"] == "refuse me" for r in body["rows"]) else 200
+        argv = ["--backfill", "--url", self.fake.url, "--project", "p", "--token-file", str(self.token),
+                "--results", str(self.results), "--host", "h1"]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(e2e.run(e2e.parse(argv)), 0)
+        self.assertIn("refused (422); not resent", err.getvalue())
+        self.assertEqual(len(self.reported_ids()), 3)
+        before = len(self.fake.reports)
+        with contextlib.redirect_stderr(io.StringIO()):
+            e2e.run(e2e.parse(argv))
+        self.assertEqual(len(self.fake.reports), before)
+
+    def test_backfill_needs_a_project_but_no_harness_or_topic(self):
+        with mock.patch.dict(os.environ, clear=True), contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(e2e.parse(["--backfill", "--project", "p"]).backfill)
+            with self.assertRaises(SystemExit):
+                e2e.parse(["--backfill"])
 
     def test_options_default_from_the_environment_and_flags_win(self):
         env = {"E2E_HARNESS": "codex", "E2E_URL": self.fake.url, "E2E_PROJECT": "p",

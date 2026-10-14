@@ -4,7 +4,8 @@
     e2e-canary.py --harness claude|codex [--url URL] [--project ID]
                   [--token-file FILE] [--ntfy-topic TOPIC] [--ntfy-url URL]
                   [--priority 0] [--timeout-minutes 90] [--poll-seconds 20]
-                  [--results FILE] [--ledger FILE]
+                  [--results FILE] [--ledger FILE] [--reported FILE]
+                  [--no-report] [--backfill]
 
 Creates one trivial, harmless task in the host's canary project (see
 canary-setup.py) and waits for it to reach `done`: the host's supervisor has to
@@ -13,6 +14,16 @@ Each run appends one JSON line to --results with the host, harness, outcome
 (`ok`, `failed` or `timeout`), the duration in seconds and a detail, and a
 failed or timed-out run pages through ntfy. Exit status: 0 done in time, 1
 failed or timed out, 2 the page could not be delivered.
+
+Each run's result is also reported to the coordinator (POST
+`/projects/<project>/telemetry/canary-results`, with the same token) so the
+console shows canary history per project. The results file stays the durable
+source: --reported (default `<results>.reported`) lists the rows the
+coordinator accepted, every run resends the rows not listed there, and a
+row's identity is the SHA-256 of its line, so a lost response or a re-import
+never duplicates a result. A report that fails is logged and never changes
+the exit status. --backfill only reports the unsent rows of an existing
+results file (once, without creating a task); --no-report skips reporting.
 
 The host's supervisor chooses the vendor (`[run] harness`, then
 `[health.fallback]`). With --ledger (the supervisor's `costs.jsonl`) the
@@ -34,6 +45,8 @@ parse() and host-setup.sh's e2e-canary.env); an empty variable counts as unset
 and a command-line option wins. Standard library only.
 """
 import argparse
+import calendar
+import hashlib
 import importlib.util
 import json
 import os
@@ -63,6 +76,9 @@ DEFAULT_POLL_SECONDS = 20.0
 PRIORITIES = (0, 1, 2, 3)
 DEFAULT_PRIORITY = PRIORITIES[0]
 CREATE_ATTEMPTS = 3
+# The coordinator takes at most 200 results per report.
+REPORT_BATCH = 100
+OUTCOMES = ("ok", "failed", "timeout")
 HARNESSES = ("claude", "codex")
 # Lifecycles from which a task never reaches `done` on its own.
 DEAD_LIFECYCLES = ("canceled", "cancelled")
@@ -187,6 +203,109 @@ def record(path, result):
         print(f"e2e-canary: results not recorded ({type(error).__name__})", file=sys.stderr)
 
 
+def row_id(line):
+    """A results line's identity at the coordinator: the SHA-256 of the line."""
+    return hashlib.sha256(line.strip().encode()).hexdigest()
+
+
+def report_row(line, default_project, default_host):
+    """(project, host, coordinator row) for a results line, or None when the
+    line is not a canary result the coordinator would take."""
+    try:
+        result = json.loads(line)
+        occurred = calendar.timegm(time.strptime(result["at"], "%Y-%m-%dT%H:%M:%SZ")) * 1000
+        outcome = result["outcome"]
+        duration = float(result["duration_seconds"])
+        harness = result["harness"]
+    except (ValueError, KeyError, TypeError, OverflowError):
+        return None
+    if outcome not in OUTCOMES or not isinstance(harness, str) or not harness or duration < 0:
+        return None
+    served = result.get("served_by")
+    return (result.get("project") or default_project, result.get("host") or default_host, {
+        "row_id": row_id(line), "harness": harness, "outcome": outcome, "duration_seconds": duration,
+        "detail": str(result.get("detail") or "")[:4000], "task_id": result.get("task"),
+        "served_by": served if isinstance(served, list) else None, "occurred_at_ms": occurred,
+    })
+
+
+def post_report(args, token, project, body, key):
+    """The HTTP status of one report; a transport failure raises OSError."""
+    request = urllib.request.Request(
+        f"{args.url.rstrip('/')}/api/v1/projects/{project}/telemetry/canary-results",
+        data=json.dumps(body).encode(), method="POST")
+    request.add_header("Authorization", f"Bearer {token}")
+    request.add_header("Content-Type", "application/json")
+    request.add_header("Idempotency-Key", key)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+            return response.status
+    except urllib.error.HTTPError as error:
+        return error.code
+
+
+def report_results(args, token):
+    """Sends the results file's unsent rows to the coordinator and returns
+    how many were delivered. The file is the source and is never changed;
+    delivered rows (and rows the coordinator refused as invalid, which would
+    never be taken) are listed in --reported. Anything else leaves a row for
+    the next run, so nothing is lost while the coordinator is down, and the
+    row identity keeps a resend from duplicating it."""
+    try:
+        lines = [l for l in Path(args.results).read_text().splitlines() if l.strip()]
+    except OSError:
+        return 0
+    reported = args.reported or args.results + ".reported"
+    try:
+        done = set(Path(reported).read_text().split())
+    except OSError:
+        done = set()
+    groups = {}
+    for line in lines:
+        if row_id(line) in done:
+            continue
+        converted = report_row(line, args.project, args.host)
+        if converted:
+            groups.setdefault(converted[:2], []).append(converted[2])
+    sent = 0
+
+    def mark(rows):
+        try:
+            with open(reported, "a") as handle:
+                handle.write("".join(r["row_id"] + "\n" for r in rows))
+        except OSError as error:
+            print(f"e2e-canary: reported rows not recorded ({type(error).__name__})", file=sys.stderr)
+
+    def deliver(project, host, rows):
+        """False when the pass should stop (coordinator or credential unusable)."""
+        nonlocal sent
+        key = "canary-" + hashlib.sha256(f"{project}\n{host}\n{','.join(r['row_id'] for r in rows)}".encode()).hexdigest()[:40]
+        try:
+            status = post_report(args, token, project, {"host": host, "rows": rows}, key)
+        except OSError as error:
+            print(f"e2e-canary: results not reported ({type(error).__name__})", file=sys.stderr)
+            return False
+        if status == 200:
+            mark(rows)
+            sent += len(rows)
+            return True
+        if status in (400, 422):
+            if len(rows) == 1:
+                print(f"e2e-canary: result {rows[0]['row_id'][:12]} refused ({status}); not resent", file=sys.stderr)
+                mark(rows)
+                return True
+            return all(deliver(project, host, [row]) for row in rows)
+        print(f"e2e-canary: results not reported (HTTP {status})", file=sys.stderr)
+        return status == 404
+
+    for (project, host), rows in groups.items():
+        for start in range(0, len(rows), REPORT_BATCH):
+            if not deliver(project, host, rows[start:start + REPORT_BATCH]):
+                return sent
+    return sent
+
+
 def page(args, result):
     """One ntfy message for a failed or timed-out run."""
     body = (f"{result['harness']} on {result['host']}: {result['outcome']} after "
@@ -205,8 +324,13 @@ def page(args, result):
 
 def run(args, clock=time.monotonic, sleep=time.sleep):
     token = attention.read_token(args.token_file)
+    if args.backfill:
+        print(f"e2e-canary: reported {report_results(args, token)} results", file=sys.stderr)
+        return 0
     result = run_once(args, token, args.host, clock, sleep)
     record(args.results, result)
+    if not args.no_report:
+        report_results(args, token)
     print(f"e2e-canary: {result['harness']} on {result['host']}: {result['outcome']} "
           f"in {result['duration_seconds']:.0f}s ({result['detail']})", file=sys.stderr)
     if result["outcome"] == "ok":
@@ -236,8 +360,12 @@ def parse(argv):
     parser.add_argument("--results", default=env("E2E_RESULTS", DEFAULT_RESULTS))
     parser.add_argument("--ledger", default=env("E2E_LEDGER", DEFAULT_LEDGER))
     parser.add_argument("--host", default=env("E2E_HOST", socket.gethostname()))
+    parser.add_argument("--reported", default=env("E2E_REPORTED"))
+    parser.add_argument("--no-report", action="store_true", default=bool(env("E2E_NO_REPORT")))
+    parser.add_argument("--backfill", action="store_true")
     args = parser.parse_args(argv)
-    for name in ("harness", "project", "ntfy_topic"):
+    # A backfill runs no canary, so it needs neither a harness nor a page topic.
+    for name in ("project",) if args.backfill else ("harness", "project", "ntfy_topic"):
         if not getattr(args, name):
             parser.error(f"needs --{name.replace('_', '-')} or E2E_{name.upper()}")
     if args.timeout_minutes <= 0 or args.poll_seconds <= 0:
