@@ -41,7 +41,7 @@ const detail = {
     { id: 'cp-2', attempt_id: 'attempt-1', summary: 'Edited', current_action: 'Testing', next_step: 'Submit', blockers: [], created_at: '2026-10-13T11:00:00Z' },
   ],
   workflow: {
-    phase: 'review', blockers: [], next_actions: ['A reviewer must decide.'],
+    phase: 'review', blockers: [], integration_blocked: { report_id: 'rep-1', kind: 'check_failed', verdict: 'failed', check_name: 'Coordination checks', target_revision: 'def456' }, next_actions: ['A reviewer must decide.'],
     submission: { id: 'sub-1', task_id: 'task-1', kind: 'code', summary: 'Submitted work', candidate_revision: 'abc123', candidate_ref: 'refs/x', task_revision: 4, project_policy_revision: 3, acceptance_evidence: [{ criterion: 'First criterion', evidence: 'Seen' }], lessons: [{ id: 'lesson-1', body: 'A lesson' }] },
     activities: [{ id: 'act-1', kind: 'human_review', status: 'pending' }, { id: 'act-2', kind: 'agent_review', status: 'pending' }],
   },
@@ -412,6 +412,7 @@ async function main() {
       const tags = await evaluate(`window.__tag(${JSON.stringify(selector)}), window.__tags(${JSON.stringify(selector)})`);
       assert(tags.length > 0, `No nodes for ${selector}`);
     }
+    assert(await evaluate("document.querySelector('#workflow-content').textContent.includes('Integration blocked') && document.querySelector('#workflow-content').textContent.includes('Integrator report rep-1')"), 'The integration-blocked notice is not shown.');
     await onlyChanged('task detail one job changed', '#job-evidence-content .evidence-entry', () => { detail.job_evidence.jobs[0] = { ...detail.job_evidence.jobs[0], state: 'succeeded', exit_code: 0 }; }, pollTick('GET /api/v1/projects/p1/tasks/task-1'));
     await onlyChanged('task detail one activity changed', '#workflow-content .workflow-entry', () => { detail.workflow.activities[1] = { ...detail.workflow.activities[1], status: 'active' }; }, pollTick('GET /api/v1/projects/p1/tasks/task-1'), 1);
     // Acceptance criteria, action buttons and the lease are untouched when only a checkpoint changed.

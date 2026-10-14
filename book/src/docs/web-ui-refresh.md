@@ -80,7 +80,7 @@ is outside every view.
 | Task detail: lifecycle changes | `renderLifecycle` | Cleared and rebuilt | New lifecycle events or replacements | Keyed by event id and replaced task |
 | Task detail: checkpoint trail | `renderCheckpoints` | Cleared and rebuilt every checkpoint | New checkpoints (existing ones are immutable) | Keyed by checkpoint id |
 | Task detail: jobs and holds | `renderJobEvidence` | Cleared and rebuilt | Job state and observation, reservation state | Keyed by job and reservation id |
-| Task detail: submission and workflow | `renderWorkflow` | Cleared and rebuilt, closing open details | Submission, activity state, blockers, next actions | Candidate, each activity, blocker and next action keyed separately |
+| Task detail: submission and workflow | `renderWorkflow` | Cleared and rebuilt, closing open details | Submission, activity state, blockers, integration-blocked report, next actions | Candidate, each activity, blocker, integration-blocked notice and next action keyed separately |
 | Task detail: attachments | `loadTaskAttachments` once per task; quietly on each poll | Rebuilt on each load | Files added or finalized | Keyed by artifact id; a poll reloads quietly and keeps what is shown on error |
 | Integrator reports | `loadReports`: open, filter, **Refresh**, **Load more**, resolve | Cleared the list and showed "Loading" on every load | A report's state or resolution; new reports | Cards keyed by report id; open "Report details" survives, even for a rebuilt card |
 | Attention digest | `loadDigest`: open, **Refresh** | Cleared and rebuilt | The three section lists | Three section cards keyed by section |
