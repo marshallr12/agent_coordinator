@@ -229,9 +229,12 @@ a.nav-item { text-decoration: none; }
 .workflow-entry dd { margin: 0; overflow-wrap: anywhere; }
 .check-row { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: .5rem; align-items: end; margin: .8rem 0; }
 .check-row input { min-width: 0; }
+.external-check { display: grid; grid-template-columns: 1fr auto auto; gap: .5rem; align-items: end; margin: .6rem 0; }
+.external-check > div { min-width: 0; }
+.external-check input[type=checkbox] { width: auto; }
 .status-badge.waiting_review, .status-badge.waiting_integration { background: #eef0fd; color: #534a8d; }
 .status-badge.integrating, .status-badge.validating { background: #e6f2fb; color: #24597a; }
-@media (max-width: 650px) { .check-row { grid-template-columns: 1fr; } .workflow-entry dl { grid-template-columns: 1fr; } }
+@media (max-width: 650px) { .check-row, .external-check { grid-template-columns: 1fr; } .workflow-entry dl { grid-template-columns: 1fr; } }
 
 /* Shared records use prose-sized columns; imported text is always plain text. */
 .shared-records { display: grid; gap: 1rem; }

@@ -63,6 +63,10 @@ const reports = [
   fixtureReport('privilege-report', 'privilege_gate', { requires_human: true, details: { paths: ['.github/workflows/ci.yml'] } }),
 ];
 const reportQueries = [];
+// The project's check roster, and the complete-external POSTs with one-shot scripted refusals.
+const checkRoster = [{ identity: 'Coordination checks', version: '1', environment: 'ci' }, { identity: 'Documentation checks', version: '1', environment: 'ci' }];
+const externalPosts = [];
+const externalRefusals = [];
 let failNextReportPage = false;
 // While set, the project list waits on this promise (a slow load after a reload).
 let projectsGate = null;
@@ -178,6 +182,15 @@ async function fixtureServer() {
     if (url.pathname === '/api/v1/projects/fixture-project/policy' && request.method === 'PATCH') return policyRoute(request, response);
     if (url.pathname === '/api/v1/projects/fixture-project/integrator/reports') return reportListRoute(url, response);
     if (url.pathname === '/api/v1/projects/fixture-project/sessions') return agentSessionsRoute(url, response);
+    if (url.pathname === '/api/v1/projects/fixture-project/workflow-policy') return json(response, { revision: 3, canonical_repository_key: 'fixture/repo', required_checks: checkRoster });
+    if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}/complete-external` && request.method === 'POST') {
+      assert(request.headers['x-csrf-token'] === 'fixture-csrf', 'External completion omitted the browser CSRF token.');
+      externalPosts.push(await readJson(request));
+      const refusal = externalRefusals.shift();
+      if (refusal) { refusal.change?.(); return refuse(response, 409, refusal.code, refusal.message); }
+      Object.assign(task, { lifecycle: 'done', work_status: 'done', revision: task.revision + 1 });
+      return json(response, { id: task.id, lifecycle: 'done', completed_externally: true });
+    }
     const workflowMatch = url.pathname.match(/^\/api\/v1\/projects\/fixture-project\/workflow-activities\/([^/]+)\/(claim|review|release)$/);
     if (workflowMatch && request.method === 'POST') {
       workflowPosts.push({ activity: decodeURIComponent(workflowMatch[1]), action: workflowMatch[2], body: await readJson(request) });
@@ -539,6 +552,64 @@ async function checkVerifiedRecovery({ evaluate, waitPage }, openFixtureTask) {
   // The service has only received the request; wait for the page to settle it, or the next reload would restore it as a retained request.
   await waitPage("sessionStorage.getItem('agent-coordinator.pending-mutation') === null", 'recovery request settled');
   Object.assign(task, { current_attempt_id: null, attempts: [], checkpoints: [] });
+}
+
+const EXTERNAL_SHA = 'fedcba9876543210fedcba9876543210fedcba98';
+const completeButton = "Array.from(document.querySelectorAll('#task-operator-actions button')).find(button => button.textContent === 'Complete as delivered externally')";
+
+// A human completes an open task delivered outside the coordinator: the control is offered only
+// when the task is eligible, prefilled from the roster, and shows the service's refusal code.
+async function checkExternalCompletion({ evaluate, waitPage }, openFixtureTask) {
+  const saved = { lifecycle: task.lifecycle, work_status: task.work_status, current_attempt_id: task.current_attempt_id, workflow: task.workflow, archived_at: task.archived_at, revision: task.revision };
+  const ineligible = async (description, change) => {
+    Object.assign(task, saved, change);
+    await openFixtureTask();
+    await waitPage(`document.querySelector('#task-detail-heading').textContent === ${JSON.stringify(task.title)} && document.querySelector('#detail-task-id-value').textContent === ${JSON.stringify(task.id)}`, `${description} detail`);
+    assert(await evaluate(`!${completeButton}`), `The completion control was offered for ${description}.`);
+  };
+  await ineligible('a task with a current attempt', { current_attempt_id: 'fixture-attempt' });
+  await ineligible('a task under review', { workflow: { phase: 'review', activities: [] } });
+  await ineligible('a task with an active integration activity', { workflow: { activities: [{ id: 'fixture-integration', kind: 'integration', state: 'active' }] } });
+  await ineligible('an archived task', { archived_at: '2026-09-23T00:00:00Z' });
+  await ineligible('a closed task', { lifecycle: 'done', work_status: 'done' });
+  fixtureActor.kind = 'agent';
+  try { await ineligible('an agent actor', {}); } finally { fixtureActor.kind = 'human'; }
+
+  Object.assign(task, saved, { lifecycle: 'open', work_status: 'ready', current_attempt_id: null, workflow: { activities: [] }, archived_at: null });
+  await openFixtureTask();
+  await waitPage(`${completeButton}?.disabled === false`, 'idle completion control');
+  const openDialog = async () => {
+    await evaluate(`${completeButton}.click()`);
+    await waitPage("document.querySelector('dialog[open] #workflow-delivered_revision')", 'completion dialog');
+  };
+  await openDialog();
+  const dialog = await evaluate(`(() => { const d = document.querySelector('dialog[open]'); return {
+    identities: [...d.querySelectorAll('input[name=check_identity]')].map(input => input.value), readOnly: [...d.querySelectorAll('input[name=check_identity]')].every(input => input.readOnly),
+    branch: d.querySelector('#workflow-target_branch').value, text: d.textContent }; })()`);
+  assert(dialog.identities.join('|') === 'Coordination checks|Documentation checks' && dialog.readOnly, `Completion dialog did not offer the roster identities: ${dialog.identities}`);
+  assert(dialog.branch === 'main', 'Completion dialog did not prefill the target branch.');
+  assert(dialog.text.includes('does not verify either'), 'Completion dialog overclaims what the service verifies.');
+  await evaluate("document.querySelector('#workflow-delivered_revision').value = 'not-a-sha'; document.querySelector('#workflow-reason').value = 'Landed by scripts/ship.py'; document.querySelector('dialog[open] form').requestSubmit()");
+  assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && document.querySelector('#workflow-delivered_revision').validity.patternMismatch") && externalPosts.length === 0, 'A malformed revision was submitted.');
+  await evaluate(`document.querySelector('#workflow-delivered_revision').value = '${EXTERNAL_SHA}'; document.querySelector('dialog[open] form').requestSubmit()`);
+  assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && document.querySelector('dialog[open] input[name=check_success]').validity.valueMissing") && externalPosts.length === 0, 'Completion was sent without every check confirmed.');
+  const confirmAll = "document.querySelectorAll('dialog[open] input[name=check_success]').forEach(box => { box.checked = true; }); document.querySelector('dialog[open] form').requestSubmit()";
+  // A stale revision is refused: the code is shown and the task reloaded.
+  externalRefusals.push({ code: 'task_revision_changed', message: 'The task changed. Reload it before applying this lifecycle action.', change: () => { task.revision += 1; } });
+  await evaluate(confirmAll);
+  await waitPage(`${ALERT_TEXT}.includes('task_revision_changed') && ${ALERT_TEXT}.includes('The task changed')`, 'refusal code in the alert');
+  await waitPage("sessionStorage.getItem('agent-coordinator.pending-mutation') === null", 'refused completion settled');
+  assert(externalPosts.length === 1 && task.lifecycle === 'open', 'The refused completion changed the task.');
+  await waitPage(`${completeButton}?.disabled === false`, 'completion control after the refusal');
+  await openDialog();
+  await evaluate(`document.querySelector('#workflow-delivered_revision').value = '${EXTERNAL_SHA}'; document.querySelector('#workflow-reason').value = 'Landed by scripts/ship.py'; ${confirmAll}`);
+  await waitPage(`${ALERT_TEXT}.includes('completed as delivered externally') && !${completeButton}`, 'completed task');
+  const [first, second] = externalPosts;
+  assert(first.expected_revision === saved.revision && second.expected_revision === saved.revision + 1, 'The retry did not use the reloaded task revision.');
+  const expected = { delivered_revision: EXTERNAL_SHA, target_branch: 'main', reason: 'Landed by scripts/ship.py', checks: [{ identity: 'Coordination checks', conclusion: 'success' }, { identity: 'Documentation checks', conclusion: 'success' }] };
+  assert(Object.keys(second).length === 5 && Object.entries(expected).every(([key, value]) => JSON.stringify(second[key]) === JSON.stringify(value)), `External completion posted the wrong body: ${JSON.stringify(second)}`);
+  await waitPage("sessionStorage.getItem('agent-coordinator.pending-mutation') === null", 'completion settled');
+  Object.assign(task, saved);
 }
 
 async function typeSearch({ evaluate }, id, value) {
@@ -1018,6 +1089,7 @@ async function main() {
 
     await checkVerifiedRecovery({ evaluate, waitPage }, openFixtureTask);
     await checkLifecycleReasons({ evaluate, waitPage }, openFixtureTask);
+    await checkExternalCompletion({ evaluate, waitPage }, openFixtureTask);
     task.work_status = 'blocked'; task.workflow = { activities: [] };
     await openFixtureTask();
     // The recovery step's mutation may still be in flight; the dashboard runs one mutation at a time.
@@ -1060,7 +1132,7 @@ async function main() {
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
     await checkReloadedResolutionLabel(ui, serverPort);
-    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), lifecycle reasons with replacement links in both directions, saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), lifecycle reasons with replacement links in both directions, the human-only external-completion control (eligibility, roster-prefilled checks, request body, refusal codes), saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {
