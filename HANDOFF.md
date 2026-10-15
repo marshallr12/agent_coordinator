@@ -4,12 +4,17 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — bb5fb219 done on main `fc3f424`; release accepted/staged; swap waiting; production still `af81834` (2026-10-15 18:56 UTC, workflow on)
+## Current resume point — production `fc3f424`; oracle upgraded; mxmini root install pending (2026-10-15 20:36 UTC, workflow on)
 
 **Mira daytime P6 run (ledger tag `[daytime P6 Mira]`):**
-- **Owner dispatched release 38783852315 at 18:13:35Z; all three jobs passed. No deployment yet.**
-  Production was reverified clean
-  `af81834759724a3c6ae5324a967da1de66a58fb1`; all installed CLIs/host binaries remain at af81834.
+- **DEPLOYED fc3f4244ce89a7f85956df3ae9aa2bca3d59f824.** Owner dispatched release 38783852315;
+  all three jobs passed. Global preflights were all zero before pre and again after service stop.
+  Old-binary snapshot **20261015T202958.864Z-b0972372-6bec-4afd-86dc-cd0b4e407edf** and new-binary
+  snapshot **20261015T203033.152Z-530a687a-6df2-4f9b-9664-8501376b8bb6** both verified.
+  Service stopped **20:30:28Z**, started **20:30:29Z**, first successful health **20:30:33Z**.
+  Anonymous HTTPS info is clean/exact fc3f424; all three installed GCP binary hashes match accepted
+  artifacts. Backup/maintenance/transfer returned success, timers restored, keyless warnings **0**.
+  Deployment log: `~/.local/share/agent-coordinator-autonomy/p6-deploy-fc3f424.log` (exit 0).
 - **bb5fb219 done.** The first counted revise expired at **15:52:59.689Z**; eligibility was confirmed
   at 15:53:55Z. The owner approved raising P2 to P1 (task revision 3), making it next after the active
   56662529 review. Oracle-1 claimed **f07a303d-91cf-41cd-b790-632712683bef, generation 5**, at
@@ -35,12 +40,17 @@ execution, and links everything else.
   Both CLI identities are clean/exact fc3f424; all four binaries per host have SHA-256 manifests
   `p6-mxmini-build-fc3f424-manifest.json` and `p6-oracle-build-fc3f424-manifest.json` in the local
   autonomy state directory. Oracle retains `/home/ubuntu/agentc-p6-build-fc3f424-manifest.json`.
-  No new binaries installed.
+  **Oracle upgrade completed 20:32:05Z** (prepared helper exit 0): both CLI copies, supervisor,
+  integrator and push match their manifests. Host-setup used APPARMOR_BWRAP=1 UPDATE_TIMER=0;
+  integrator explicitly restarted, both daemons active, fresh supervisor heartbeat and integrator Idle.
+  Oracle compatibility checks all true. User workstation CLI `~/.local/bin` installed via
+  `upgrade_client.py --candidate`, hash `5c45dbfa`, compatibility all true; use this explicit new path
+  until `/usr/local/bin` is upgraded. **mxmini root binaries remain at af81834**, pending the step below.
 - **af81834 archived** to `~/.local/share/agent-coordinator-autonomy/release-af81834`; both package
   archive checksums pass. Verified installed-host rollback copies and SHA-256 manifests are in its
   `host-mxmini` and `host-oracle-1` directories (all CLI copies, supervisor/push, oracle integrator).
   Oracle also keeps `/home/ubuntu/agentc-p6-rollback-af81834`.
-  `release-next/RELEASE` and packages now stage **fc3f424**, previous **af81834**, locally and on GCP.
+  `release-next/RELEASE` records **fc3f424**, previous **af81834**, deployed from these verified packages.
   GCP retains its prior staging files in `/home/marshall/release-p6-prior-af81834`.
 - **Acceptance verified:** Linux and Windows reproducible package jobs and the 1800-second load job
   passed. The report confirms full baseline acceptance, **90,000 requests**, metadata **p95 20.578ms**,
@@ -51,24 +61,25 @@ execution, and links everything else.
   server `05a23d383b39dd40d5d8f5029fce4a242e8f614f6fb226bd40006cd307abf9a1`.
   Ubuntu's packaged binaries require glibc 2.39; MX has 2.36. Full package runtime/internal validation
   passed on GCP Ubuntu; use the already verified native source builds for MX and oracle-1.
-- **Drain state:** oracle-1 holds `release-fc3f424`. mxmini still holds `quiet-hours`; the owner was
-  given `printf '%s\n' 'release-fc3f424' | sudo tee /var/lib/agentc/kill-switch` for a regular terminal,
-  and confirmation is pending. Claims are allowed only **22:00-07:00 local time**; preserve that policy.
-  Old pilot renew **4194295 was stopped**, gen6 checkpoint/release succeeded, and fresh read confirms
-  **d513bc21 ready/no current attempt**. Keep it unclaimed until after service/client/host upgrades.
-  Read-only helpers **1997610**, **1997611** (stale journal SSH), **2413349** remain.
-- **Global preflight is NOT clear:** at 18:55Z it still showed one active integration/current attempt,
-  hold, publication intent, job and reservation, recovery 0. The unrelated SithBit integration is
-  **4043883b-b3ed-4697-873d-b3f4161bf19a**, subject **d6fe3451**, activity task **f608367f**,
-  attempt **67cbd817**, hold **722e4c19**, job **94eb38c3**. It had a valid lease/fresh heartbeat when
-  inspected. Leave it untouched and wait for natural completion. Do not stop/swap production until
-  all seven global counts are zero. Oracle integrator remains active; after authority drains, pause
-  it before the final zero check/pre/swap to prevent a new publication between check and stop.
+- **Release switches held on both hosts:** `release-fc3f424`; mxmini owner step was confirmed and
+  independently verified. Preserve its **22:00-07:00 local claim window** when restoring quiet-hours.
+  Old pilot renew **4194295 was stopped**, gen6 checkpoint/release succeeded; pilot remains ready,
+  unclaimed until the remaining host upgrade. Read-only helpers **1997610**, **1997611** (stale journal
+  SSH), **2413349** remain.
+- **Earlier SithBit authority drained naturally** by 20:29Z; all seven global counts zero before
+  deploy-pre, after stop, and in post-deploy verification. No SithBit work was mutated. Oracle
+  integrator was paused while idle before the final zero check, then upgraded/restarted.
+- **Sudo authorization updated by owner at 20:29Z:** Mira may run sudo steps wherever available.
+  GCP/oracle steps completed directly. **Local `sudo -n` requires a password**, a technical terminal
+  requirement. Owner was given the concrete mxmini command below and async confirmation is pending:
+  `sudo bash /home/marshall/.local/share/agent-coordinator-autonomy/p6-mxmini-upgrade-fc3f424.sh`.
+  It installs root CLI copies/supervisor/push, runs host-setup and restarts SysVinit, keeping release
+  flag set. Do not ask for sudo permission again or alter sudo policy/ownership to avoid the password.
 - **Prepared install helpers** in the local autonomy state directory:
   `p6-mxmini-upgrade-fc3f424.sh` (owner sudo, hash/service checks, rollback copies, host-setup with
   QUIET_HOURS=22:00-07:00 and sysvinit restart); `p6-oracle-upgrade-fc3f424.sh` (also copied to
   `/home/ubuntu/`, agent sudo -n, APPARMOR_BWRAP=1 UPDATE_TIMER=0, explicit integrator start).
-  Both passed bash syntax checks and must run only after service identity is clean fc3f424.
+  Both passed bash syntax checks; oracle helper has completed, mxmini helper awaits terminal execution.
   `p6-pilot-renew/{renew.sh,renew.py}` is prepared, **not configured/running**. After a fresh claim,
   write `claim.json` with the returned `attempt`, `generation`, `task`, `session_id`, then launch it.
   It immediately renews, verifies fresh live ownership/expiry, logs actual time and checks again after
@@ -77,7 +88,7 @@ execution, and links everything else.
   `e0c5ed896ea565222c4ba5f1c71b2a1733ebb9576d0cd2db048ccef8939d9d84` and EXE
   `1f9d48dac6c324ab6981cc769621f128f89e690d8ffe0ca66de47b22d31d7ba1`.
   It requires production at the matching source before installing via `upgrade_client.py --candidate`;
-  Windows installation has not been performed or claimed by this run.
+  Service prerequisite is now satisfied. Windows installation has not been performed or claimed here.
 - **Owner decisions resolved:** 335b6713 and 5ad83ff3 had already been opened at 14:38/14:37Z by a
   different actor; the owner explicitly said **keep both admitted**. Other existing admissions were
   left alone. Oracle started previously admitted **693af855** after the BB review; it is now waiting for review
@@ -93,25 +104,28 @@ execution, and links everything else.
   by one micro-USD. Evidence: `p6-oracle-task-costs.jsonl`, `p6-cost-telemetry-comparison.json` under
   the local autonomy state directory. Digest HRI was 0; no host/task recovery intervention occurred.
   **One shared owner scheduling decision** (P1 priority) is recorded separately from that digest zero.
+  Post-deploy digest **20:34Z HRI 1** is `stalled_task/repeated_attempt_failures` for the pilot: its last
+  three ended attempts are planned deployment releases. Source explicitly counts released attempts;
+  fresh task read is **ready/eligible, no unmet preconditions**, so it does not block reclaim. Preserve
+  history; no recovery mutation performed. Recheck digest after the new claim, rather than reporting
+  the earlier HRI zero as current.
 - Preserve the pre-existing uncommitted `.claude/decisions-pending.md` edit. This run edits only
   HANDOFF.md in the parent checkout; build worktrees remain clean and detached.
 
-**Next actions (release accepted; owner marker and global drain remain):**
-1. Confirm the mxmini owner release-marker step in the regular terminal; verify its content. Do not
-   dispatch another workflow. All accepted artifacts and exact-source host binaries are prepared.
-2. Wait for the unrelated SithBit authority to drain without mutating that work. Fresh global
-   preflight must have all seven counts zero; pause the idle oracle integrator before the final check.
-3. Continue the authorized drill in PLAN-next: preflight, deploy-pre, fresh preflight, deploy-swap;
-   record verified old/new snapshot IDs and real UTC downtime. Verify API exact clean fc3f424,
-   install/start oracle integrator and hosts, upgrade workstation user CLI with the verified local
-   candidate and hash, and give the owner the prepared mxmini sudo script. Use the explicit new user
-   CLI until the root PATH copy is upgraded. Preserve credentials, journals and rollback copies.
-4. Reconnect p3b-pilot, fresh-read and claim the pilot revision, configure/start/verify the new renew
-   helper. Clear the oracle release flag; on mxmini restore/apply quiet-hours without a daytime gap
-   (owner root step). Verify runtime/compatibility/heartbeats. MiniAir prompt is ready as above.
-5. Refresh this handoff and `~/Downloads/prompt.txt`, docs gate, commit/push only HANDOFF on autonomy-plan.
+**Next actions (do not redeploy or dispatch again):**
+1. Verify completion of the pending mxmini root helper (terminal password required); root selected
+   CLI/supervisor/push hashes must match the prepared manifest, supervisor restarted with fresh
+   heartbeat and compatibility all true. Server/oracle/user-CLI upgrades are already done.
+2. Reconnect existing p3b-pilot with harness `claude` and the same session identity (a9c40947); fresh-read
+   pilot revision, claim it, configure/start the new renew helper from the actual returned attempt,
+   generation and session ID. Verify immediate successful renew and fresh live ownership.
+3. Clear oracle release flag only after the pilot claim/renew succeeds. Restore/apply mxmini's
+   quiet-hours marker without opening a daytime gap (sudo technically needs owner's terminal here).
+   Verify runtime/heartbeats, selected executables, all compatibility booleans and digest HRI.
+4. MiniAir prompt is ready and its service prerequisite is now satisfied; owner runs it on MiniAir.
+   Refresh this handoff and `~/Downloads/prompt.txt`, docs gate, commit/push only HANDOFF on autonomy-plan.
    If past 00:00Z 10-16, check digest HRI, `/telemetry/canaries` and open integrator reports.
-   Keep be6d39af planned; no new admissions.
+   Keep be6d39af planned; no new admissions. Preserve the unrelated dirty parent file.
 
 ## Previous resume point — main `57029d8` (rustls fix landed); release after bb5fb219; canary ok (2026-10-15 03:30 UTC, workflow on)
 
