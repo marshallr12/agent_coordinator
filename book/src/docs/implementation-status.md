@@ -218,6 +218,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   `designate-digest-sender`; none by default) can obtain an ack link, so an
   ordinary agent credential cannot mark the digest read. The link names its
   minter and a read through it records that principal.
+- Target-block page: the canary reads the open integrator reports and pages
+  through ntfy once when a `fix_target` report with `blocks_subject`
+  (`target_failing` or `target_unverified`) has stayed open longer than
+  `ATTENTION_TARGET_BLOCK_MINUTES` (default 30). The page names the project, the
+  target revision, the failing check and the number of subjects waiting behind
+  the block; it repeats only after `ATTENTION_TARGET_REPAGE_MINUTES` (default
+  360), and a resolved report sends one recovered note instead of a page. The
+  digest still lists the report. `deploy/agentc/attention-test.py` covers it with
+  a fake clock.
 - Human-delivered tasks: a task carries `human_delivered` (set at creation or with
   `POST .../tasks/{task}/human-delivery`, `agent-coordinator human-delivery` or the
   console). `GET .../next` never offers it to a supervised or read-only credential, a

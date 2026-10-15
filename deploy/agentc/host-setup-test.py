@@ -85,7 +85,8 @@ class AttentionUnits(unittest.TestCase):
         active = [line for line in lines if line and not line.startswith("#")]
         self.assertEqual(active, ["ATTENTION_NTFY_TOPIC=", "ATTENTION_SMTP_HOST=", "ATTENTION_MAIL_TO="])
         for name in ("URL", "PROJECT", "TOKEN_FILE", "HEARTBEAT", "HEARTBEAT_MAX_AGE", "NTFY_URL",
-                     "STATE", "MAX_HRI", "HOURS", "SMTP_PORT", "MAIL_FROM", "SMTP_TLS", "SMTP_USER",
+                     "STATE", "MAX_HRI", "HOURS", "NEGLECT_DAYS", "TARGET_BLOCK_MINUTES",
+                     "TARGET_REPAGE_MINUTES", "SMTP_PORT", "MAIL_FROM", "SMTP_TLS", "SMTP_USER",
                      "SMTP_PASSWORD_FILE"):
             self.assertTrue(any(line.startswith(f"# ATTENTION_{name}=") for line in lines), name)
         self.assertIn("# ATTENTION_TOKEN_FILE=/etc/agentc/attention-token", lines)

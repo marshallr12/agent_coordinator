@@ -9,6 +9,7 @@
                         --heartbeat /var/lib/agentc/heartbeat.json
                         --ntfy-topic TOPIC [--ntfy-url https://ntfy.sh]
                         [--state FILE] [--max-hri N] [--neglect-days N]
+                        [--target-block-minutes N] [--target-repage-minutes N]
 
 `digest` reads `GET /api/v1/projects/ID/digest` and prints what the attention
 budget did: reversible decisions that proceeded on their recommendation after
@@ -35,7 +36,19 @@ digest has not gone unread for more than --neglect-days days (default 3; 0
 turns the check off). A digest never read counts from the canary's first run. A
 failing check pages once; it pages again only after it has recovered and
 failed again, or when a different check starts failing. The paged set lives
-in --state (default: next to the heartbeat). Exit status: 0 healthy, 1 an SLO
+in --state (default: next to the heartbeat).
+
+A red target branch stops all integration, so the canary also reads the open
+integrator reports: a `fix_target` report with `details.blocks_subject`
+(verdict `target_failing` or `target_unverified`) that has stayed open for more
+than --target-block-minutes minutes (default 30; 0 turns the check off) fails a
+`target:REPORT` check. The page names the project, the target revision, the
+failing check and how many subjects wait behind the block. It does not repeat
+until --target-repage-minutes minutes (default 360) have passed since the last
+page for that report; a different report pages at once. When the report is
+resolved the canary sends one low-priority "recovered" note instead of a page
+and the check clears (the digest still lists the report as before). Exit
+status: 0 healthy, 1 an SLO
 failed, 2 the page could not be delivered (the next run retries it).
 
 The token files hold one bearer token (and nothing else); tokens are never
@@ -72,6 +85,11 @@ DEFAULT_MAIL_FROM = "agentc@localhost"
 SMTP_TLS_MODES = ("starttls", "tls", "none")
 SMTP_PORTS = {"starttls": 587, "tls": 465, "none": 25}
 DEFAULT_NEGLECT_DAYS = 3
+DEFAULT_TARGET_BLOCK_MINUTES = 30.0
+DEFAULT_TARGET_REPAGE_MINUTES = 360.0
+TARGET_PREFIX = "target:"
+TARGET_BLOCK_VERDICTS = ("target_failing", "target_unverified")
+SUBJECT_LIST_PAGES = 10
 DAY_SECONDS = 86400.0
 
 
@@ -295,8 +313,57 @@ def digest_baseline(args):
     return state["digest_baseline"]
 
 
+def blocked_subjects(args, token, report_id):
+    """How many subjects wait behind report `report_id`, or None when that cannot be counted."""
+    count, cursor = 0, None
+    for _ in range(SUBJECT_LIST_PAGES):
+        query = "tasks?exclude_done=true&limit=200" + (f"&cursor={cursor}" if cursor else "")
+        status, body, _ = fetch(project_url(args, query), token)
+        if status != 200 or not body or "data" not in body:
+            return None
+        for task in body["data"]["items"]:
+            if task.get("work_status") != "waiting_integration":
+                continue
+            status, flow, _ = fetch(project_url(args, f"tasks/{task['id']}/workflow"), token)
+            if status != 200 or not flow or "data" not in flow:
+                return None
+            if (flow["data"].get("integration_blocked") or {}).get("report_id") == report_id:
+                count += 1
+        cursor = body["data"].get("next_cursor")
+        if not cursor:
+            return count
+    return None
+
+
+def probe_target(args, token):
+    """{`target:REPORT`: text} for each blocking fix_target report open longer than the threshold."""
+    if not args.target_block_minutes:
+        return None
+    status, body, _ = fetch(project_url(args, "integrator/reports?open=true&limit=1000"), token)
+    if status != 200 or not body or "data" not in body:
+        return {"target": f"integrator reports answered {status}"}
+    failures = {}
+    for report in body["data"]["items"]:
+        details = report.get("details") or {}
+        if (report.get("kind") != "fix_target" or report.get("resolved_at")
+                or details.get("blocks_subject") is not True
+                or details.get("verdict") not in TARGET_BLOCK_VERDICTS):
+            continue
+        minutes = (now() - parse_time(report["created_at"])) / 60.0
+        if minutes <= args.target_block_minutes:
+            continue
+        waiting = blocked_subjects(args, token, report["id"])
+        failures[TARGET_PREFIX + report["id"]] = (
+            f"project {args.project}: target {details.get('target_branch')} at "
+            f"{str(details.get('x'))[:12]} fails check {details.get('check_name')} "
+            f"({details.get('verdict')}), blocked {minutes:.0f} min, "
+            f"{'unknown' if waiting is None else waiting} blocked subjects (report {report['id']})")
+    return failures
+
+
 PROBES = {"service": probe_service, "next": probe_next,
-          "supervisor": probe_heartbeat, "hri": probe_hri, "digest": probe_digest}
+          "supervisor": probe_heartbeat, "hri": probe_hri, "digest": probe_digest,
+          "target": probe_target}
 
 
 def run_probes(args, token):
@@ -307,7 +374,9 @@ def run_probes(args, token):
             failure = probe(args, token)
         except (OSError, SystemExit) as error:
             failure = f"{name} probe failed ({type(error).__name__})"
-        if failure:
+        if isinstance(failure, dict):
+            failures.update(failure)
+        elif failure:
             failures[name] = failure
     return failures
 
@@ -320,7 +389,11 @@ def state_path(args):
 
 
 def load_state(path):
-    """The canary state: {"paged": [...], "digest_baseline": seconds}, or {} when unreadable."""
+    """The canary state, or {} when unreadable.
+
+    {"paged": [...], "digest_baseline": seconds,
+     "target_pages": {"target:REPORT": {"at": seconds, "what": text}}}
+    """
     try:
         state = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -339,14 +412,12 @@ def load_paged(path):
     return set(paged) if isinstance(paged, list) else set()
 
 
-def page(args, failures):
-    """One ntfy message naming every failing check."""
-    body = "\n".join(f"{name}: {text}" for name, text in sorted(failures.items()))
+def send_ntfy(args, title, body, priority, tags):
     request = urllib.request.Request(
         f"{args.ntfy_url.rstrip('/')}/{args.ntfy_topic}", data=body.encode(), method="POST")
-    request.add_header("Title", "agentc canary failed")
-    request.add_header("Priority", "high")
-    request.add_header("Tags", "rotating_light")
+    request.add_header("Title", title)
+    request.add_header("Priority", priority)
+    request.add_header("Tags", tags)
     ntfy_token = os.environ.get("NTFY_TOKEN")
     if ntfy_token:
         request.add_header("Authorization", f"Bearer {ntfy_token}")
@@ -354,23 +425,69 @@ def page(args, failures):
         response.read()
 
 
+def page(args, failures):
+    """One ntfy message naming every failing check."""
+    body = "\n".join(f"{name}: {text}" for name, text in sorted(failures.items()))
+    send_ntfy(args, "agentc canary failed", body, "high", "rotating_light")
+
+
+def clear(args, notes):
+    """One low-priority ntfy note that the paged target blocks have cleared."""
+    send_ntfy(args, "agentc target recovered", "\n".join(sorted(notes)), "default",
+              "white_check_mark")
+
+
+def due(args, name, paged, target_pages):
+    """Whether failing check `name` pages now: new, or a target block past the re-page interval."""
+    if name not in paged:
+        return True
+    if not name.startswith(TARGET_PREFIX):
+        return False
+    paged_at = (target_pages.get(name) or {}).get("at")
+    return paged_at is None or now() - paged_at >= args.target_repage_minutes * 60.0
+
+
 def run_canary(args):
     token = read_token(args.token_file)
     failures = run_probes(args, token)
     path = state_path(args)
+    state = load_state(path)
     paged = load_paged(path)
+    target_pages = state.get("target_pages")
+    target_pages = target_pages if isinstance(target_pages, dict) else {}
     for name, text in sorted(failures.items()):
         print(f"canary: {name}: {text}", file=sys.stderr)
-    fresh = {name: text for name, text in failures.items() if name not in paged}
+    fresh = {name for name in failures if due(args, name, paged, target_pages)}
     if fresh:
         try:
             page(args, failures)
         except (OSError, urllib.error.URLError) as error:
             print(f"canary: ntfy page not delivered ({type(error).__name__})", file=sys.stderr)
             return 2
-    state = load_state(path)
-    state["paged"] = sorted(failures)
+    for name in fresh:
+        if name.startswith(TARGET_PREFIX):
+            target_pages[name] = {"at": now(), "what": failures[name]}
+    # A paged target block that is gone has recovered: note it once, keeping it
+    # in the state until the note is delivered. A failed target probe says
+    # nothing about the blocks, so they stay paged (and un-noted) then.
+    gone = {name for name in paged - set(failures) if name.startswith(TARGET_PREFIX)}
+    recovered = set() if "target" in failures else gone
+    notes = [f"recovered: {(target_pages.get(name) or {}).get('what', name)}" for name in recovered]
+    sent = True
+    if notes:
+        try:
+            clear(args, notes)
+        except (OSError, urllib.error.URLError) as error:
+            print(f"canary: ntfy recovery note not delivered ({type(error).__name__})",
+                  file=sys.stderr)
+            sent = False
+    kept = gone - recovered if sent else gone
+    state["paged"] = sorted(set(failures) | kept)
+    state["target_pages"] = {name: v for name, v in target_pages.items()
+                             if name in failures or name in kept}
     save_state(path, state)
+    if not sent:
+        return 2
     return 1 if failures else 0
 
 
@@ -410,6 +527,12 @@ def parse(argv):
     canary.add_argument("--max-hri", type=int, default=env("ATTENTION_MAX_HRI", None, int))
     canary.add_argument("--neglect-days", type=float,
                         default=env("ATTENTION_NEGLECT_DAYS", DEFAULT_NEGLECT_DAYS, float))
+    canary.add_argument("--target-block-minutes", type=float,
+                        default=env("ATTENTION_TARGET_BLOCK_MINUTES",
+                                    DEFAULT_TARGET_BLOCK_MINUTES, float))
+    canary.add_argument("--target-repage-minutes", type=float,
+                        default=env("ATTENTION_TARGET_REPAGE_MINUTES",
+                                    DEFAULT_TARGET_REPAGE_MINUTES, float))
     args = parser.parse_args(argv)
     if args.command == "canary" and not args.ntfy_topic:
         parser.error("canary needs --ntfy-topic or ATTENTION_NTFY_TOPIC")
