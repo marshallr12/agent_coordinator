@@ -4,10 +4,11 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — bb5fb219 done on main `fc3f424`; preparing release; production still `af81834` (2026-10-15 18:10 UTC, workflow on)
+## Current resume point — bb5fb219 done on main `fc3f424`; release accepted/staged; swap waiting; production still `af81834` (2026-10-15 18:56 UTC, workflow on)
 
 **Mira daytime P6 run (ledger tag `[daytime P6 Mira]`):**
-- **No release dispatched or deployment performed in this run yet.** Production was reverified clean
+- **Owner dispatched release 38783852315 at 18:13:35Z; all three jobs passed. No deployment yet.**
+  Production was reverified clean
   `af81834759724a3c6ae5324a967da1de66a58fb1`; all installed CLIs/host binaries remain at af81834.
 - **bb5fb219 done.** The first counted revise expired at **15:52:59.689Z**; eligibility was confirmed
   at 15:53:55Z. The owner approved raising P2 to P1 (task revision 3), making it next after the active
@@ -18,7 +19,7 @@ execution, and links everything else.
   and done was confirmed **17:55:49Z**. Main is **fc3f4244ce89a7f85956df3ae9aa2bca3d59f824**.
 - Integration CI **38780071763** and documentation **38780071792** passed. The separate main runs
   **38781391084** (Coordination checks) and **38781391076** (Documentation checks) both completed successfully on
-  the same fc3f424 source. Main is green; the owner may dispatch the release.
+  the same fc3f424 source. The dispatched release head is exactly fc3f424; do not dispatch again.
   In-launch candidate/review gates reported 993 tests passed, 0 failed and 30 explicit nested-sandbox
   skips, plus passing browser tests; docs were deferred to required CI, which passed for integration.
 - **Release scope af81834 -> fc3f424 verified:** rustls **0.23.46**, the complete-external manager
@@ -39,46 +40,78 @@ execution, and links everything else.
   archive checksums pass. Verified installed-host rollback copies and SHA-256 manifests are in its
   `host-mxmini` and `host-oracle-1` directories (all CLI copies, supervisor/push, oracle integrator).
   Oracle also keeps `/home/ubuntu/agentc-p6-rollback-af81834`.
-  `release-next/PLAN-next.md` and `PREREQS-next.md` describe the pending drill; **RELEASE/packages still
-  name the old af81834 deployment** until new accepted artifacts are downloaded and verified.
-- **Pilot healthy:** renew.sh pid **4194295** still owns d513bc21 attempt **5c760158**, gen **6**.
-  Its existing log prints lease expiry, not the time the renew ran. Stop it and release during drain;
-  reconnect/reclaim with a fresh revision after upgrade, and start a new renew.sh. Read-only helpers
-  **1997610**, **1997611** (stale journal SSH), **2413349** remain. Oracle switch was clear; mxmini
-  correctly holds `quiet-hours` during daytime: claims are allowed only **22:00-07:00 local time**.
+  `release-next/RELEASE` and packages now stage **fc3f424**, previous **af81834**, locally and on GCP.
+  GCP retains its prior staging files in `/home/marshall/release-p6-prior-af81834`.
+- **Acceptance verified:** Linux and Windows reproducible package jobs and the 1800-second load job
+  passed. The report confirms full baseline acceptance, **90,000 requests**, metadata **p95 20.578ms**,
+  and the exact accepted server hash. All archive/internal hashes and clean source identities pass.
+  Evidence under `~/.local/share/agent-coordinator-autonomy/release-fc3f424-run38783852315`, including
+  `verified-release.json` and `load/load-acceptance.json`:
+  Linux archive `a82377a483ef7caa13a1be7e8da7c069974e3874534ebab7a444800444fd3300`;
+  server `05a23d383b39dd40d5d8f5029fce4a242e8f614f6fb226bd40006cd307abf9a1`.
+  Ubuntu's packaged binaries require glibc 2.39; MX has 2.36. Full package runtime/internal validation
+  passed on GCP Ubuntu; use the already verified native source builds for MX and oracle-1.
+- **Drain state:** oracle-1 holds `release-fc3f424`. mxmini still holds `quiet-hours`; the owner was
+  given `printf '%s\n' 'release-fc3f424' | sudo tee /var/lib/agentc/kill-switch` for a regular terminal,
+  and confirmation is pending. Claims are allowed only **22:00-07:00 local time**; preserve that policy.
+  Old pilot renew **4194295 was stopped**, gen6 checkpoint/release succeeded, and fresh read confirms
+  **d513bc21 ready/no current attempt**. Keep it unclaimed until after service/client/host upgrades.
+  Read-only helpers **1997610**, **1997611** (stale journal SSH), **2413349** remain.
+- **Global preflight is NOT clear:** at 18:55Z it still showed one active integration/current attempt,
+  hold, publication intent, job and reservation, recovery 0. The unrelated SithBit integration is
+  **4043883b-b3ed-4697-873d-b3f4161bf19a**, subject **d6fe3451**, activity task **f608367f**,
+  attempt **67cbd817**, hold **722e4c19**, job **94eb38c3**. It had a valid lease/fresh heartbeat when
+  inspected. Leave it untouched and wait for natural completion. Do not stop/swap production until
+  all seven global counts are zero. Oracle integrator remains active; after authority drains, pause
+  it before the final zero check/pre/swap to prevent a new publication between check and stop.
+- **Prepared install helpers** in the local autonomy state directory:
+  `p6-mxmini-upgrade-fc3f424.sh` (owner sudo, hash/service checks, rollback copies, host-setup with
+  QUIET_HOURS=22:00-07:00 and sysvinit restart); `p6-oracle-upgrade-fc3f424.sh` (also copied to
+  `/home/ubuntu/`, agent sudo -n, APPARMOR_BWRAP=1 UPDATE_TIMER=0, explicit integrator start).
+  Both passed bash syntax checks and must run only after service identity is clean fc3f424.
+  `p6-pilot-renew/{renew.sh,renew.py}` is prepared, **not configured/running**. After a fresh claim,
+  write `claim.json` with the returned `attempt`, `generation`, `task`, `session_id`, then launch it.
+  It immediately renews, verifies fresh live ownership/expiry, logs actual time and checks again after
+  any exact-journal retry; it stops on uncertainty rather than inventing ownership.
+- **MiniAir-only prompt ready:** `~/Downloads/miniair-upgrade-fc3f424.txt`, using accepted ZIP
+  `e0c5ed896ea565222c4ba5f1c71b2a1733ebb9576d0cd2db048ccef8939d9d84` and EXE
+  `1f9d48dac6c324ab6981cc769621f128f89e690d8ffe0ca66de47b22d31d7ba1`.
+  It requires production at the matching source before installing via `upgrade_client.py --candidate`;
+  Windows installation has not been performed or claimed by this run.
 - **Owner decisions resolved:** 335b6713 and 5ad83ff3 had already been opened at 14:38/14:37Z by a
   different actor; the owner explicitly said **keep both admitted**. Other existing admissions were
-  left alone. Oracle started previously admitted **693af855** after the BB review. Do not admit more.
+  left alone. Oracle started previously admitted **693af855** after the BB review; it is now waiting for review
+  with no current attempt. The release switch holds new claims. Do not admit more.
 - **New defect be6d39af (P3, planned, NOT admitted):** cost backfill retries two old 10-07 rows for
   missing project b4423f23 forever with a generic 404; unsupported older servers also return 404, so
   the fix must distinguish/quarantine safely and preserve the ledger. Current task rows upload.
   No ledger/marker files were changed in diagnosis; the two orphaned rows total $0.2307784.
 - **Cost/HRI:** oracle-1 BB lifetime **5 impl + 5 review, $2.9149326 raw** (all priced, none estimated);
   mxmini **0 rows/$0**, confirmed by the owner in a regular terminal. The latest impl/review round is
-  $0.4063697 raw. 56662529 cost **$1.175874** (1 impl/1 review), HRI 0. Cost telemetry matches raw
-  launch/token counts and per-row integer-micro-USD sums; rounding the raw aggregate once can differ
+  $0.4063697 raw. 56662529 cost **$1.175874** (1 impl/1 review), HRI 0. Settled comparison refreshed at 18:48Z: BB service total **$2.914932**, matching all ten rows.
+  Cost telemetry matches raw launch/token counts and per-row integer-micro-USD sums; rounding the raw aggregate once can differ
   by one micro-USD. Evidence: `p6-oracle-task-costs.jsonl`, `p6-cost-telemetry-comparison.json` under
   the local autonomy state directory. Digest HRI was 0; no host/task recovery intervention occurred.
   **One shared owner scheduling decision** (P1 priority) is recorded separately from that digest zero.
 - Preserve the pre-existing uncommitted `.claude/decisions-pending.md` edit. This run edits only
   HANDOFF.md in the parent checkout; build worktrees remain clean and detached.
 
-**Next actions (release condition bb5fb219 landed is now satisfied):**
-1. Main checks and both exact-source builds are green and verified. The owner dispatches
-   `gh workflow run release.yml --ref main` from the repository; this owner action is the next input.
-   Inspect existing release runs first if resuming, so an owner dispatch is never duplicated.
-2. Pin to the actual release run's source commit; if main moved, refresh scope/checks and build that
-   exact commit. Download accepted Linux/Windows artifacts, verify archive/internal checksums and
-   source identities; write RELEASE with previous `af81834` only after verification.
-3. Continue the authorized drill in PLAN-next: host release switches, drain, stop old renew/release
-   pilot, global preflight all zero, pre/swap, API identity, integrator rebuild/start, all Linux CLI
-   copies and host-setup, fresh pilot claim/renew, clear release switches while preserving mxmini's
-   quiet-hours window. Oracle root steps are agent-run; mxmini sudo steps belong in the owner's
-   regular terminal. Copyable commands go in chat, not in question prompts.
-4. Write MiniAir's upgrade prompt using exact new Windows zip/exe hashes from the accepted run and
-   `upgrade_client.py --candidate`; it remains client_upgrade_required until upgraded. Refresh this
-   handoff and `~/Downloads/prompt.txt` at the next checkpoint/end. If past 00:00Z 10-16, check digest
-   HRI, `/telemetry/canaries` (canary_results) and open integrator reports. Keep be6d39af planned.
+**Next actions (release accepted; owner marker and global drain remain):**
+1. Confirm the mxmini owner release-marker step in the regular terminal; verify its content. Do not
+   dispatch another workflow. All accepted artifacts and exact-source host binaries are prepared.
+2. Wait for the unrelated SithBit authority to drain without mutating that work. Fresh global
+   preflight must have all seven counts zero; pause the idle oracle integrator before the final check.
+3. Continue the authorized drill in PLAN-next: preflight, deploy-pre, fresh preflight, deploy-swap;
+   record verified old/new snapshot IDs and real UTC downtime. Verify API exact clean fc3f424,
+   install/start oracle integrator and hosts, upgrade workstation user CLI with the verified local
+   candidate and hash, and give the owner the prepared mxmini sudo script. Use the explicit new user
+   CLI until the root PATH copy is upgraded. Preserve credentials, journals and rollback copies.
+4. Reconnect p3b-pilot, fresh-read and claim the pilot revision, configure/start/verify the new renew
+   helper. Clear the oracle release flag; on mxmini restore/apply quiet-hours without a daytime gap
+   (owner root step). Verify runtime/compatibility/heartbeats. MiniAir prompt is ready as above.
+5. Refresh this handoff and `~/Downloads/prompt.txt`, docs gate, commit/push only HANDOFF on autonomy-plan.
+   If past 00:00Z 10-16, check digest HRI, `/telemetry/canaries` and open integrator reports.
+   Keep be6d39af planned; no new admissions.
 
 ## Previous resume point — main `57029d8` (rustls fix landed); release after bb5fb219; canary ok (2026-10-15 03:30 UTC, workflow on)
 
