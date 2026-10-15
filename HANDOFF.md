@@ -4,7 +4,83 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — main `57029d8` (rustls fix landed); release after bb5fb219; canary ok (2026-10-15 03:30 UTC, workflow on)
+## Current resume point — bb5fb219 done on main `fc3f424`; preparing release; production still `af81834` (2026-10-15 18:10 UTC, workflow on)
+
+**Mira daytime P6 run (ledger tag `[daytime P6 Mira]`):**
+- **No release dispatched or deployment performed in this run yet.** Production was reverified clean
+  `af81834759724a3c6ae5324a967da1de66a58fb1`; all installed CLIs/host binaries remain at af81834.
+- **bb5fb219 done.** The first counted revise expired at **15:52:59.689Z**; eligibility was confirmed
+  at 15:53:55Z. The owner approved raising P2 to P1 (task revision 3), making it next after the active
+  56662529 review. Oracle-1 claimed **f07a303d-91cf-41cd-b790-632712683bef, generation 5**, at
+  **16:40:59.661Z**, cherry-picked the two approved fb62c9b commits onto 16b05b9 without conflicts,
+  and submitted **6d5730202d17bb30ee40cdf6f8c0f4fdff08c31b** at **16:59:21.138Z**.
+  Review **4f8d5855** approved **17:45:33.826Z**, `distinct_launch`; integration **89fd82b0** completed,
+  and done was confirmed **17:55:49Z**. Main is **fc3f4244ce89a7f85956df3ae9aa2bca3d59f824**.
+- Integration CI **38780071763** and documentation **38780071792** passed. The separate main runs
+  **38781391084** (Coordination checks) and **38781391076** (Documentation checks) both completed successfully on
+  the same fc3f424 source. Main is green; the owner may dispatch the release.
+  In-launch candidate/review gates reported 993 tests passed, 0 failed and 30 explicit nested-sandbox
+  skips, plus passing browser tests; docs were deferred to required CI, which passed for integration.
+- **Release scope af81834 -> fc3f424 verified:** rustls **0.23.46**, the complete-external manager
+  control/docs, canary line, **032ef331** (digest task names, 16b05b9), and **56662529** (target-block
+  paging, e8fd8fc). **No migrations or new service environment names.** Two optional host settings:
+  `ATTENTION_TARGET_BLOCK_MINUTES=30`, `ATTENTION_TARGET_REPAGE_MINUTES=360`. Rebuild CLI,
+  supervisor, integrator and push for the locked dependency/source identity; run host-setup for scripts.
+- **Final builds verified.** Clean fc3f424 release builds completed successfully on the workstation in
+  `/home/marshall/src/worktrees/ac-release-p6-20261015` and on oracle-1 in
+  `/home/ubuntu/src/worktrees/agentc-pilot`, each with its own `target`. Build logs:
+  `~/.local/share/agent-coordinator-autonomy/p6-local-build-fc3f424.log` and
+  oracle-1 `/home/ubuntu/agentc-p6-build-fc3f424.log`. Repeat locked build confirmations exited 0.
+  Both CLI identities are clean/exact fc3f424; all four binaries per host have SHA-256 manifests
+  `p6-mxmini-build-fc3f424-manifest.json` and `p6-oracle-build-fc3f424-manifest.json` in the local
+  autonomy state directory. Oracle retains `/home/ubuntu/agentc-p6-build-fc3f424-manifest.json`.
+  No new binaries installed.
+- **af81834 archived** to `~/.local/share/agent-coordinator-autonomy/release-af81834`; both package
+  archive checksums pass. Verified installed-host rollback copies and SHA-256 manifests are in its
+  `host-mxmini` and `host-oracle-1` directories (all CLI copies, supervisor/push, oracle integrator).
+  Oracle also keeps `/home/ubuntu/agentc-p6-rollback-af81834`.
+  `release-next/PLAN-next.md` and `PREREQS-next.md` describe the pending drill; **RELEASE/packages still
+  name the old af81834 deployment** until new accepted artifacts are downloaded and verified.
+- **Pilot healthy:** renew.sh pid **4194295** still owns d513bc21 attempt **5c760158**, gen **6**.
+  Its existing log prints lease expiry, not the time the renew ran. Stop it and release during drain;
+  reconnect/reclaim with a fresh revision after upgrade, and start a new renew.sh. Read-only helpers
+  **1997610**, **1997611** (stale journal SSH), **2413349** remain. Oracle switch was clear; mxmini
+  correctly holds `quiet-hours` during daytime: claims are allowed only **22:00-07:00 local time**.
+- **Owner decisions resolved:** 335b6713 and 5ad83ff3 had already been opened at 14:38/14:37Z by a
+  different actor; the owner explicitly said **keep both admitted**. Other existing admissions were
+  left alone. Oracle started previously admitted **693af855** after the BB review. Do not admit more.
+- **New defect be6d39af (P3, planned, NOT admitted):** cost backfill retries two old 10-07 rows for
+  missing project b4423f23 forever with a generic 404; unsupported older servers also return 404, so
+  the fix must distinguish/quarantine safely and preserve the ledger. Current task rows upload.
+  No ledger/marker files were changed in diagnosis; the two orphaned rows total $0.2307784.
+- **Cost/HRI:** oracle-1 BB lifetime **5 impl + 5 review, $2.9149326 raw** (all priced, none estimated);
+  mxmini **0 rows/$0**, confirmed by the owner in a regular terminal. The latest impl/review round is
+  $0.4063697 raw. 56662529 cost **$1.175874** (1 impl/1 review), HRI 0. Cost telemetry matches raw
+  launch/token counts and per-row integer-micro-USD sums; rounding the raw aggregate once can differ
+  by one micro-USD. Evidence: `p6-oracle-task-costs.jsonl`, `p6-cost-telemetry-comparison.json` under
+  the local autonomy state directory. Digest HRI was 0; no host/task recovery intervention occurred.
+  **One shared owner scheduling decision** (P1 priority) is recorded separately from that digest zero.
+- Preserve the pre-existing uncommitted `.claude/decisions-pending.md` edit. This run edits only
+  HANDOFF.md in the parent checkout; build worktrees remain clean and detached.
+
+**Next actions (release condition bb5fb219 landed is now satisfied):**
+1. Main checks and both exact-source builds are green and verified. The owner dispatches
+   `gh workflow run release.yml --ref main` from the repository; this owner action is the next input.
+   Inspect existing release runs first if resuming, so an owner dispatch is never duplicated.
+2. Pin to the actual release run's source commit; if main moved, refresh scope/checks and build that
+   exact commit. Download accepted Linux/Windows artifacts, verify archive/internal checksums and
+   source identities; write RELEASE with previous `af81834` only after verification.
+3. Continue the authorized drill in PLAN-next: host release switches, drain, stop old renew/release
+   pilot, global preflight all zero, pre/swap, API identity, integrator rebuild/start, all Linux CLI
+   copies and host-setup, fresh pilot claim/renew, clear release switches while preserving mxmini's
+   quiet-hours window. Oracle root steps are agent-run; mxmini sudo steps belong in the owner's
+   regular terminal. Copyable commands go in chat, not in question prompts.
+4. Write MiniAir's upgrade prompt using exact new Windows zip/exe hashes from the accepted run and
+   `upgrade_client.py --candidate`; it remains client_upgrade_required until upgraded. Refresh this
+   handoff and `~/Downloads/prompt.txt` at the next checkpoint/end. If past 00:00Z 10-16, check digest
+   HRI, `/telemetry/canaries` (canary_results) and open integrator reports. Keep be6d39af planned.
+
+## Previous resume point — main `57029d8` (rustls fix landed); release after bb5fb219; canary ok (2026-10-15 03:30 UTC, workflow on)
 
 **Session `118f53c8` evening run (prompt `~/Downloads/prompt.txt`; ledger lines `[evening 118f53c8]`):**
 - **bb5fb219 parked** (`revise_limit_reached`, human-only) since 18:11Z 10-14. Cause: RUSTSEC-2026-0346..0349
