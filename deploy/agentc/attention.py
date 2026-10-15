@@ -134,14 +134,37 @@ def project_url(args, route):
 # ------------------------------------------------------------------- digest
 
 
+def task_ref(title, task_id):
+    """A task as its name with the id after it, `Name (task ID)`; the id alone if unnamed."""
+    return f"{title} (task {task_id})" if title else f"task {task_id}"
+
+
+def hri_line(item):
+    """One human-required intervention: the code, then the task name with its id when it has one."""
+    code = item.get("code")
+    report = item.get("report") or {}
+    task_id = item.get("task_id") or report.get("task_id")
+    title = item.get("title") or item.get("task_title")
+    if task_id:
+        what = task_ref(title, task_id)
+        if item.get("gate"):
+            what = f"{item['gate']} on {what}"
+        return f"{code}: {what}"
+    return f"{code}: {title or item.get('summary') or item.get('gate') or '(no description)'}"
+
+
 def render_digest(data, ack_url=None):
     """The digest body as plain text, with the acknowledgement link when given."""
     hri = data["hri"]
     lines = [f"Attention digest, last {data['window_hours']}h (until {data['until']})", ""]
     lines.append(f"Proceeded on their recommendation ({len(data['proceeded_decisions'])}):")
     for item in data["proceeded_decisions"]:
+        tasks = [task_ref(task.get("title"), task["task_id"])
+                 for task in item.get("affected_tasks") or []]
+        affected = f"; affects {', '.join(tasks)}" if tasks else ""
         lines.append(f"  - {item['question']} -> {item['proceeded_with']} "
-                     f"at {item['proceeded_at']} (decision {item['decision_id']}; reopen it to undo)")
+                     f"at {item['proceeded_at']} (decision {item['decision_id']}; "
+                     f"reopen it to undo{affected})")
     lines += ["", f"Will proceed on their own ({len(data['pending_reversible_decisions'])}):"]
     for item in data["pending_reversible_decisions"]:
         lines.append(f"  - {item['question']} -> {item['recommendation']} "
@@ -154,7 +177,7 @@ def render_digest(data, ack_url=None):
     lines += ["", f"Human-required interventions: {hri['count']} "
                   f"({hri['stalled_tasks']} stalled tasks)"]
     for item in hri["items"]:
-        lines.append(f"  - {item.get('code')}: {item.get('title') or item.get('summary') or item}")
+        lines.append(f"  - {hri_line(item)}")
     if ack_url:
         lines += ["", f"I read this (records the read; it does nothing else): {ack_url}"]
     return "\n".join(lines) + "\n"

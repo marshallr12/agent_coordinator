@@ -31,10 +31,13 @@ START = 1_790_000_000.0
 DIGEST = {"project_id": "p", "window_hours": 24, "since": "a", "until": "2026-10-08T00:00:00.000Z",
           "proceeded_decisions": [{"decision_id": "d1", "question": "Rename the flag?",
                                    "proceeded_with": "Rename", "proceeded_at": "x",
-                                   "affected_task_ids": ["t1"]}],
+                                   "affected_task_ids": ["t1"],
+                                   "affected_tasks": [{"task_id": "t1", "title": "Rename work"}]}],
           "pending_reversible_decisions": [],
-          "hri": {"count": 1, "stalled_tasks": 1,
-                  "items": [{"code": "stalled_task", "title": "Stubborn task"}]}}
+          "hri": {"count": 2, "stalled_tasks": 1,
+                  "items": [{"code": "stalled_task", "task_id": "t2", "title": "Stubborn task"},
+                            {"code": "integrator_report", "gate": "flaky", "task_title": "Flaky work",
+                             "report": {"task_id": "t3", "details": {"log": "RAW-LOG"}}}]}}
 
 
 class Fake:
@@ -440,9 +443,9 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(len(self.fake.pages), 1)
 
     def test_hri_over_the_limit_fails_the_canary(self):
-        self.assertEqual(self.canary("--max-hri", "1")[0], 0)
-        self.assertEqual(self.canary("--max-hri", "0")[0], 1)
-        self.assertIn("1 human-required interventions", self.fake.pages[0][1])
+        self.assertEqual(self.canary("--max-hri", "2")[0], 0)
+        self.assertEqual(self.canary("--max-hri", "1")[0], 1)
+        self.assertIn("2 human-required interventions", self.fake.pages[0][1])
 
     def test_the_digest_lists_proceeded_decisions_and_hri(self):
         out = io.StringIO()
@@ -452,8 +455,11 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(code, 0)
         text = out.getvalue()
         self.assertIn("Rename the flag? -> Rename", text)
-        self.assertIn("Human-required interventions: 1 (1 stalled tasks)", text)
-        self.assertIn("Stubborn task", text)
+        self.assertIn("Human-required interventions: 2 (1 stalled tasks)", text)
+        self.assertIn("affects Rename work (task t1)", text)
+        self.assertIn("stalled_task: Stubborn task (task t2)", text)
+        self.assertIn("integrator_report: flaky on Flaky work (task t3)", text)
+        self.assertNotIn("RAW-LOG", text)
         self.assertNotIn(TOKEN, text)
         self.assertEqual(set(self.fake.coordinator_tokens), {f"Bearer {TOKEN}"})
 

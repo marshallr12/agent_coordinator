@@ -294,6 +294,11 @@ async fn an_unanswered_reversible_decision_proceeds_after_a_day_and_is_in_the_di
     assert_eq!(listed["decision_id"], decision["id"], "{digest}");
     assert_eq!(listed["proceeded_with"], "Rename");
     assert_eq!(listed["affected_task_ids"][0], task["id"]);
+    assert_eq!(
+        listed["affected_tasks"],
+        json!([{"task_id": task["id"], "title": "Rename the flag"}]),
+        "{digest}"
+    );
     assert_eq!(digest["pending_reversible_decisions"], json!([]));
 }
 
@@ -416,6 +421,8 @@ async fn a_task_that_keeps_ending_without_a_submission_counts_as_a_human_interve
     assert_eq!(hri["stalled_tasks"], 1);
     assert_eq!(hri["items"][0]["code"], "stalled_task", "{hri}");
     assert_eq!(hri["items"][0]["rule"], "repeated_attempt_failures");
+    assert_eq!(hri["items"][0]["title"], "Stubborn task");
+    assert!(hri["items"][0]["task_id"].is_string(), "{hri}");
     assert_eq!(hri["stalled_queue"], 0);
 }
 
@@ -1580,4 +1587,5 @@ async fn a_human_report_about_a_canary_task_is_not_counted_in_the_digest() {
     let hri = f.digest(&p).await["hri"].clone();
     assert_eq!(hri["count"], 1, "{hri}");
     assert_eq!(hri["items"][0]["report"]["task_id"], real["id"], "{hri}");
+    assert_eq!(hri["items"][0]["task_title"], "Real work", "{hri}");
 }

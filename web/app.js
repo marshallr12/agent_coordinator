@@ -2062,6 +2062,14 @@
       catch (error) { if (seq === state.digestSeq) setState($('digest-state'), `Showing the digest, but recording the read failed: ${errorMessage(error)}`, false, true); }
     } catch (error) { if (seq === state.digestSeq && projectId === state.projectId) setState($('digest-state'), errorMessage(error), false, true); }
   }
+  // A task as its name with the id after it; the id alone when the digest carries no name.
+  const digestTaskRef = (title, id) => title ? `${text(title)} (task ${text(id)})` : `task ${text(id)}`;
+  // One human-required intervention: its code, then the task name and id when it names a task.
+  function digestHriLine(item) {
+    const taskId = item.task_id || item.report?.task_id;
+    if (!taskId) return `${text(item.code)}: ${text(item.title || item.summary || item.gate)}`;
+    return `${text(item.code)}: ${item.gate ? `${text(item.gate)} on ` : ''}${digestTaskRef(item.title || item.task_title, taskId)}`;
+  }
   function renderDigest(digest) {
     const hri = digest.hri || {}, proceeded = digest.proceeded_decisions || [], pending = digest.pending_reversible_decisions || [];
     const section = (key, title, items, line) => ({ key, sig: sig(title, items), build: () => {
@@ -2071,9 +2079,9 @@
       return card;
     } });
     reconcile($('digest-content'), [
-      section('proceeded', `Proceeded on their recommendation in the last ${digest.window_hours} hours`, proceeded, item => `${text(item.question)} → ${text(item.proceeded_with)} at ${formatDate(item.proceeded_at)}. Reopen decision ${text(item.decision_id)} to undo.`),
+      section('proceeded', `Proceeded on their recommendation in the last ${digest.window_hours} hours`, proceeded, item => `${text(item.question)} → ${text(item.proceeded_with)} at ${formatDate(item.proceeded_at)}. Reopen decision ${text(item.decision_id)} to undo.${(item.affected_tasks || []).length ? ` Affects ${item.affected_tasks.map(task => digestTaskRef(task.title, task.task_id)).join(', ')}.` : ''}`),
       section('pending', 'Will proceed on their own', pending, item => `${text(item.question)} → ${text(item.recommendation)} at ${formatDate(item.proceeds_at)}`),
-      section('hri', 'Human-required interventions', hri.items || [], item => `${text(item.code)}: ${text(item.title || item.summary)}`)
+      section('hri', 'Human-required interventions', hri.items || [], digestHriLine)
     ]);
     setState($('digest-state'), digest.last_read_at ? `Last read ${formatDate(digest.last_read_at)} (before this visit).` : 'This digest had not been read before this visit.');
   }

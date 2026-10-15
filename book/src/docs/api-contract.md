@@ -282,7 +282,8 @@ and integrator reports about them are not listed among the human interventions.
 
 `GET /api/v1/projects/{project_id}/digest?hours=N` (default 24, at most 336)
 is the attention-budget summary: `proceeded_decisions` (reversible decisions the
-service answered with their recommendation in the window),
+service answered with their recommendation in the window; each lists
+`affected_task_ids` and `affected_tasks`, the same tasks as `task_id` and `title`),
 `pending_reversible_decisions` (with `proceeds_at`), and `hri`, the
 human-required interventions: `count`, `stalled_tasks`, `stalled_queue` and
 `items`. Two stall rules exist, and each stall item names the rule that fired in
@@ -301,7 +302,10 @@ one item, with `ready_tasks`, `idle_hours`, `threshold_hours`,
 defaults to 6 hours and is set with `--stall-hours` or `COORDINATOR_STALL_HOURS`
 (1 through 336). `--quiet-hours START-END` or `COORDINATOR_QUIET_HOURS`, in UTC
 hours such as `22-07`, removes those hours from the idle clock; they are unset
-by default. Open human-required integrator reports are the other items. The digest
+by default. Open human-required integrator reports are the other items; each
+carries `task_title`, the title of the task its report names (`null` when it names
+none). Wherever the digest text mentions a task, the title comes first and the id
+follows in parentheses. The digest
 also carries `held_agent_tasks` (the project's agent-created tasks the weekly
 admission budget held as planned, oldest first: `task_id`, `title`, `priority`,
 `held_at`) and `agent_task_weekly_budget` (the project's own `limit`, `admitted_this_week` and

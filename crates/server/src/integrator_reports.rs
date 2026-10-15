@@ -447,11 +447,25 @@ async fn open_human_items(
         .iter()
         .map(report_value)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(reports.into_iter().map(|r| human_item(p, r)).collect())
+    let mut items = Vec::with_capacity(reports.len());
+    for report in reports {
+        let title = match report["task_id"].as_str() {
+            Some(task) => {
+                sqlx::query_scalar("SELECT title FROM tasks WHERE id=? AND project_id=?")
+                    .bind(task)
+                    .bind(p)
+                    .fetch_optional(&mut *c)
+                    .await?
+            }
+            None => None,
+        };
+        items.push(human_item(p, report, title));
+    }
+    Ok(items)
 }
 
-/// One open report as a human-queue item.
-fn human_item(p: &str, report: Value) -> Value {
+/// One open report as a human-queue item, with the title of the task it names.
+fn human_item(p: &str, report: Value, task_title: Option<String>) -> Value {
     let path = format!(
         "/api/v1/projects/{p}/integrator/reports/{}/resolve",
         report["id"].as_str().unwrap_or_default()
@@ -460,6 +474,7 @@ fn human_item(p: &str, report: Value) -> Value {
         "code": "integrator_report",
         "required_actor": "human",
         "gate": report["kind"],
+        "task_title": task_title,
         "report": report,
         "call": {"method": "POST", "path": path},
     })

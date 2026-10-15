@@ -964,6 +964,28 @@ async fn stalled_queue(
     })))
 }
 
+/// `{task_id, title}` for each of the project's tasks among `ids`, in order;
+/// an id the project has no task for is left out.
+async fn named_tasks(
+    c: &mut SqliteConnection,
+    project: &str,
+    ids: &[String],
+) -> Result<Vec<Value>, AppError> {
+    let mut tasks = Vec::with_capacity(ids.len());
+    for id in ids {
+        let title: Option<String> =
+            sqlx::query_scalar("SELECT title FROM tasks WHERE id=? AND project_id=?")
+                .bind(id)
+                .bind(project)
+                .fetch_optional(&mut *c)
+                .await?;
+        if let Some(title) = title {
+            tasks.push(json!({"task_id": id, "title": title}));
+        }
+    }
+    Ok(tasks)
+}
+
 /// Agent-created tasks of the project that the weekly admission budget
 /// holds as planned, oldest first.
 async fn held_agent_tasks(c: &mut SqliteConnection, project: &str) -> Result<Vec<Value>, AppError> {
@@ -1017,6 +1039,15 @@ async fn digest(
     .bind(DIGEST_LIMIT)
     .fetch_all(&mut *c)
     .await?;
+    let mut proceeded_tasks = Vec::with_capacity(proceeded.len());
+    for row in &proceeded {
+        let ids = row
+            .get::<Option<String>, _>("tasks")
+            .map(|ids| ids.split(',').map(str::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let tasks = named_tasks(&mut c, &project, &ids).await?;
+        proceeded_tasks.push((ids, tasks));
+    }
     let upcoming = sqlx::query(
         "SELECT d.id,d.question,d.recommendation,c.created_at FROM decisions d \
          JOIN decision_cycles c ON c.decision_id=d.id AND c.generation=d.current_generation \
@@ -1077,14 +1108,13 @@ async fn digest(
         "window_hours": hours,
         "since": timestamp(since),
         "until": timestamp(now),
-        "proceeded_decisions": proceeded.iter().map(|row| json!({
+        "proceeded_decisions": proceeded.iter().zip(proceeded_tasks).map(|(row, (ids, tasks))| json!({
             "decision_id": row.get::<String, _>("id"),
             "question": row.get::<String, _>("question"),
             "proceeded_with": row.get::<String, _>("answer"),
             "proceeded_at": timestamp(row.get("created_at")),
-            "affected_task_ids": row.get::<Option<String>, _>("tasks")
-                .map(|ids| ids.split(',').map(str::to_owned).collect::<Vec<_>>())
-                .unwrap_or_default(),
+            "affected_task_ids": ids,
+            "affected_tasks": tasks,
         })).collect::<Vec<_>>(),
         "pending_reversible_decisions": upcoming.iter().map(|row| json!({
             "decision_id": row.get::<String, _>("id"),
