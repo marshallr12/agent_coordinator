@@ -4,7 +4,55 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production `af81834` deployed; hosts rolled out; 47dac763 done (2026-10-14 13:35 UTC, workflow on)
+## Current resume point — main `57029d8` (rustls fix landed); release after bb5fb219; canary ok (2026-10-15 03:30 UTC, workflow on)
+
+**Session `118f53c8` evening run (prompt `~/Downloads/prompt.txt`; ledger lines `[evening 118f53c8]`):**
+- **bb5fb219 parked** (`revise_limit_reached`, human-only) since 18:11Z 10-14. Cause: RUSTSEC-2026-0346..0349
+  (rustls 0.23.45, published 10-14, fixed in 0.23.46) made the required `dependency-audit` fail on every run,
+  main included. The integrator (`crates/integrator/src/attribution.rs`) blamed the author because target
+  af81834's only audit result was a 07:21Z pass from before the advisories. So three approved candidates
+  (985194d, b68fa87, fb62c9b) were canceled → `revision_needed` → re-applied unchanged. The three
+  `check_failed` revises count for 24 h (they are not "serialized after a landing", so new landings don't
+  clear them): **unparks ~15:52Z 10-15 with no human action.** $2.51 so far (oracle-1 impl 4 $1.69 + rev 4
+  $0.82), HRI 0. Open flaky report 27f99b21 (linux-validation on b68fa87; rerun passed).
+- **d4d34008 done** (P1, filed 00:18Z, owner-admitted 00:33Z): rustls 0.23.46 → main **`a125742`** ~02:47Z;
+  main CI green. oracle-1 impl a9e0aa23 $0.17 + rev ca7c766e $0.09 = **$0.26, HRI 0**.
+- **Canary 10-15: ok** 03:23:47Z after 12223 s. Two cycles failed the audit before a125742 landed; mxmini
+  claimed cycle 3 at 02:01Z (its first poll after quiet hours on the af81834 supervisor). Landed `CANARY.md`
+  → main **`57029d8`**. **$0.585** (oracle-1 impl 2 + rev 3 $0.465, mxmini impl $0.120), HRI 0.
+  oracle-1's canary timeout is 240 min (`E2E_TIMEOUT_MINUTES` in `/etc/agentc/e2e-canary.env`), not 90.
+- **Telemetry (new in af81834) works.** `canary_results` got its first report at 03:23:48Z with a backfill
+  (8 rows = the 8 lines of oracle-1's `e2e-canary.jsonl`). `cost_rows` (`GET …/telemetry/cost`) match
+  oracle-1's `costs.jsonl` exactly for bb5fb219 and d4d34008 (USD to $0.000001, tokens, launch counts).
+  Canary cost rows are hidden unless `include_canary=true`, but the CLI `request` refuses query strings and
+  no client reads telemetry yet (1a3290db is the dashboard view), so they can't be checked from the CLI.
+- **MiniAir CLI upgraded** by the owner: af81834, exe `73ccd96e…`, rollback `9bad8bef…` (60eda26) kept as
+  `.pre-af81834` and `.rollback`. All known CLIs are at af81834.
+- **Owner decisions:** 422ce01e, 55b8a06d and c744c495 marked `human_delivered`; **c744c495 canceled**
+  (P3b go/no-go done in 47d4403d; observed costs now in `cost_rows`).
+- **Filed (planned):** 335b6713 (P2) the integrator trusts a stale target pass and blames the author;
+  5ad83ff3 (P2) a task parked by the revise limit appears in no human surface (the 00:40Z digest showed
+  HRI 0 while bb5fb219 waited for a human).
+- Digest 00:40Z: HRI 0, stalled 0; budget-held 56662529. Helpers alive 03:30Z: renew.sh 4194295
+  (d513bc21 attempt 5c760158 gen 6), watch.sh 1997610, journal ssh 1997611 (stale), mxmini-watch.sh 2413349.
+
+**Next actions:**
+1. **Release timing (owner concurred, 2026-10-15): release after bb5fb219 lands, not before.** One release
+   then ships rustls 0.23.46 and the complete-external manager control. Clients must match the service's
+   commit exactly (`source_commit_matches`), so each release means upgrading every CLI, MiniAir included;
+   one round instead of two. Exposure meanwhile is low: rustls is client-side only (reqwest), built
+   without brotli (0348 unreachable), no ECH configured (0347 unreachable). Since af81834, main has only
+   `Cargo.lock` and `CANARY.md`, and bb5fb219's candidate is web, docs and a browser test: no migrations,
+   so a binaries-only deploy (check again at release time). The owner dispatches `release.yml`.
+2. Watch bb5fb219 unpark (~15:52Z): a supervisor reclaims it, re-applies fb62c9b's two commits on main,
+   then review and integration (the audit now passes). Record cost and HRI per host.
+3. Then the release drill (`release-next`), CLI upgrades on all four hosts, host-setup on both hosts and
+   the integrator rebuild, as in the af81834 rollout below.
+4. Owner: admit 335b6713 / 5ad83ff3? Left planned.
+Don't admit work without the owner. Planned on purpose: 56662529, 1a3290db, 2a387d02, 97b7b62a, 693af855,
+d2ca0225, 335b6713, 5ad83ff3; human-delivered and planned: 422ce01e, 55b8a06d.
+
+## Previous resume point — production `af81834` deployed; hosts rolled out; 47dac763 done (2026-10-14 13:35 UTC, workflow on)
 
 **Session `0b3c541a` daytime release (prompt `~/Downloads/prompt.txt`; ledger lines `[release af81834]`):**
 - **Release run 38550683390 green**; artifacts in `~/.local/share/agent-coordinator-autonomy/release-next`
