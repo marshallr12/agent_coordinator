@@ -915,12 +915,12 @@
   function renderLifecycle(data) {
     const events = Array.isArray(data.lifecycle_events) ? data.lifecycle_events : []; const replaces = Array.isArray(data.replaces) ? data.replaces : [];
     show($('lifecycle-card'), Boolean(events.length || replaces.length));
-    const verbs = {canceled: 'Canceled', archived: 'Archived', restored: 'Restored', deleted: 'Deleted'};
+    const verbs = {canceled: 'Canceled', activity_canceled: 'Integration canceled', archived: 'Archived', restored: 'Restored', deleted: 'Deleted'};
     const taskLink = (id, label) => { const link = el('button', 'button text-button', label || id); link.type = 'button'; link.addEventListener('click', () => openTask(id)); return link; };
     reconcile($('lifecycle-content'), [
       ...events.map((event, index) => ({ key: `event:${event.id ?? `${index}:${event.action}:${event.created_at}`}`, sig: sig(event), build: () => {
         const item = el('div', 'lifecycle-event');
-        add(item, el('p', '', `${verbs[event.action] || displayStatus(event.action)} by ${event.actor_name || event.actor_id || 'unknown'} on ${formatDate(event.created_at)}${event.reason ? `: ${event.reason}` : ' (no reason was recorded)'}`));
+        add(item, el('p', '', `${verbs[event.action] || displayStatus(event.action)} by ${event.actor_name || event.actor_id || 'unknown'} on ${formatDate(event.created_at)}${event.reason_code ? ` (${displayStatus(event.reason_code)})` : ''}${event.reason ? `: ${event.reason}` : ' (no reason was recorded)'}`));
         if (event.replacement_task_id) { const line = el('p', 'lifecycle-replacement', 'Replaced by '); add(line, taskLink(event.replacement_task_id, `task ${event.replacement_task_id}`)); add(item, line); }
         return item;
       } })),
@@ -1539,6 +1539,12 @@
       if (activity.intent) add(entry, el('p', 'muted', `Publication intent: ${activity.intent.observed_target_revision} → ${activity.intent.result_revision}`));
       if (activity.result) add(entry, el('p', '', `Publication: ${displayStatus(activity.result.publication_state)}`));
       if (activity.hold) add(entry, el('p', '', `Target hold: ${displayStatus(activity.hold.state)} · ${activity.hold.canonical_repository_key} · ${activity.hold.target_branch}`));
+      if (activity.cancel_reason) {
+        const cancel = activity.cancel_reason; const context = cancel.context || {};
+        add(entry, el('p', 'inline-alert error', `Canceled (${displayStatus(cancel.code)})${cancel.detail ? `: ${cancel.detail}` : ''}`));
+        const revisions = [['Submission base', context.submission_base_revision], ['Target', context.target_revision], ['Candidate', context.candidate_revision]].filter(([, value]) => value).map(([label, value]) => `${label} ${value}`);
+        if (revisions.length) add(entry, el('p', 'muted', revisions.join(' · ')));
+      }
       if (activity.publication_reconciliation) add(entry, el('p', '', `Reconciled ${displayStatus(activity.publication_reconciliation.disposition)}: ${activity.publication_reconciliation.evidence}`));
       (activity.result?.check_job_ids || []).forEach(id => add(entry, el('p', 'muted', `Check producer: ${id}`)));
       if (activity.authorization) add(entry, el('p', '', `${activity.authorization.valid === false ? 'Invalidated authorization' : 'Human authorization'}: ${activity.authorization.summary}`));

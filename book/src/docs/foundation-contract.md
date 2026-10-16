@@ -153,6 +153,19 @@ Additional implemented routes:
   `reason`, `canceled_at`). Migration 36 copied the reason and replacement into
   events recorded earlier only where their original mutation receipt had not
   been compacted; other earlier events keep empty data and a null `reason`.
+  A canceled workflow activity records why: the activity view carries
+  `cancel_reason` (`code`, `detail`, `context` with `submission_base_revision`,
+  `candidate_revision`, `target_branch`, `target_revision` and any `evidence`,
+  and `canceled_at`; null for an activity canceled before migration 40 or one
+  not canceled). Codes: `target_advanced` and `merge_conflict` (an integrator
+  `conflict` revise with and without `moved_by_result_id`), `check_failed`,
+  `manual` (a reopen without a code), other revise codes as given,
+  `revert_not_mechanical`, `released`, `publication_reconciled`,
+  `changes_requested` and `review_not_needed`. Canceling an integration
+  activity also records a `workflow.activity_canceled` event on the subject
+  task, shown in its `lifecycle_events` as action `activity_canceled` with
+  `reason_code`, `reason` (the detail), `context` and `activity_id`; a subject
+  in `revision_needed` adds the reason to its workflow `next_actions`.
 - GET `.../attempts/{aid}`: attempt, task, current `authority_valid`, current
   `lease_remaining_ms`, and optional registered checkout metadata.
 - POST `.../attempts/{aid}/checkout`: `{generation,workstation_id,identity,path,
