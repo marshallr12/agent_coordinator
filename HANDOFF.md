@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — Linux rollout complete at `fc3f424`; pilot gen7 renewing; quiet-hours restored (2026-10-16 00:50 UTC, workflow on)
+## Current resume point — Linux rollout complete at `fc3f424`; pilot gen7 renewing; nightly canary passed (2026-10-16 01:37 UTC, workflow on)
 
 **Mira daytime P6 run (ledger tag `[daytime P6 Mira]`):**
 - **DEPLOYED fc3f4244ce89a7f85956df3ae9aa2bca3d59f824.** Owner dispatched release 38783852315;
@@ -21,7 +21,7 @@ execution, and links everything else.
   **16:40:59.661Z**, cherry-picked the two approved fb62c9b commits onto 16b05b9 without conflicts,
   and submitted **6d5730202d17bb30ee40cdf6f8c0f4fdff08c31b** at **16:59:21.138Z**.
   Review **4f8d5855** approved **17:45:33.826Z**, `distinct_launch`; integration **89fd82b0** completed,
-  and done was confirmed **17:55:49Z**. Main is **fc3f4244ce89a7f85956df3ae9aa2bca3d59f824**.
+  and done was confirmed **17:55:49Z**. Its integrated main was **fc3f4244ce89a7f85956df3ae9aa2bca3d59f824**.
 - Integration CI **38780071763** and documentation **38780071792** passed. The separate main runs
   **38781391084** (Coordination checks) and **38781391076** (Documentation checks) both completed successfully on
   the same fc3f424 source. The dispatched release head is exactly fc3f424; do not dispatch again.
@@ -113,19 +113,23 @@ execution, and links everything else.
   history; no recovery mutation performed. At 00:39Z 10-16 the prolonged deployment hold also
   produced `stalled_queue` (HRI2). **After the fresh pilot claim, digest at 00:41:30Z is HRI0**, no stalled
   tasks or queue; these advisory flags cleared without a human recovery mutation.
-- **Midnight checks performed:** `/telemetry/canaries` latest completed row remains **10-15 03:23:47Z,
-  outcome ok**, oracle/claude; the **10-16 canary unit is still running**, no terminal row yet.
-  Open integrator reports contain only historical **27f99b21**, flaky, `requires_human=false`.
-  Oracle release is restored so the scheduled canary and already-admitted work can progress.
+- **10-16 nightly canary PASSED:** oracle-1/claude terminal `outcome=ok`, detail `done`, at
+  **2026-10-16T01:18:52.000Z** (duration **4727.2 seconds**). Service telemetry row
+  **8906f6cd-71ab-48c6-afda-31c4c2769592**, task **c28853fe-d542-45fa-8ec0-09c6711a3e6b**. Verified from the live
+  `/telemetry/canaries` response; snapshot `p6-canary-terminal-session-boundary.json` under local
+  autonomy state. Earlier pending-canary checkpoint is superseded. Open-report check at rollout
+  completion contained only historical **27f99b21**, flaky, `requires_human=false`.
+- **Session-boundary refresh:** production remains clean **fc3f4244ce89a7f85956df3ae9aa2bca3d59f824**;
+  fetched `origin/main` is now **e6fd69dceb47a9432fdb2d5d82f363803c2abe83** from subsequent autonomous work.
+  This does not authorize another release or client upgrade; use live state for any later work.
 - Preserve the pre-existing uncommitted `.claude/decisions-pending.md` edit. This run edits only
   HANDOFF.md in the parent checkout; build worktrees remain clean and detached.
 
 **Next session (release work is complete; no pending Linux terminal step):**
 1. Inspect the existing pilot renew pid778271/log and fresh ownership; keep gen7 active. Do not start
    duplicate helpers, claim again or repeat this release. Respect the mxmini night claim window.
-2. Observe tonight's canary to its terminal outcome when available and check digest/open reports.
-   The 10-16 run is still in progress; do not report the 10-15 result as tonight's PASS. Oracle is
-   processing already-admitted work, including 693af855 review; no new admissions are authorized.
+2. Tonight's 10-16 canary is already a verified terminal PASS; no need to wait for it. Inspect current
+   digest/open reports and already-admitted work as needed. No new admissions are authorized.
 3. Owner follows `~/Downloads/miniair-upgrade-fc3f424.txt` on MiniAir; this session only prepared that
    verified Windows upgrade prompt. Human-delivered/planned tasks and d2ca0225 retirement remain
    owner decisions. Keep be6d39af planned. Preserve unrelated edits/worktrees and rollback records.
