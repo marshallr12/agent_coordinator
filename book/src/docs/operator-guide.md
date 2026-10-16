@@ -258,6 +258,39 @@ recovery authority until the inspection is resolved. Renew before the displayed
 expiry and release with a handoff when pausing; release does not complete work.
 If inspection is incomplete, release as blocked with the reason.
 
+## Keeping a pilot attempt alive with `scripts/pilot_renew.py`
+
+`scripts/pilot_renew.py` is an optional, external observation helper that renews one
+attempt you name and checks ownership after every renewal. It is not installed or
+started by the service. Run one per attempt, with an existing session, a repository
+binding and a claim file kept outside the repository:
+
+```sh
+python3 scripts/pilot_renew.py --cli /path/to/agent-coordinator \
+  --repo-config /path/to/.agent-coordinator.toml --session pilot-session \
+  --claim-config /private/dir/claim.json
+```
+
+The claim file is JSON with `attempt`, `generation`, `task`, `session_id` and an
+optional `renew_after_seconds` (default 900). The helper never prints it. Tuning
+options (`--min-remaining-seconds`, `--read-retry-seconds`, `--read-retry-max-seconds`,
+`--startup-read-seconds`, `--lock-file`) are listed by `--help`.
+
+- It first reads the task fresh; then each cycle runs `renew` and reads the task fresh
+  again. The renewal receipt is never authority: the read must show the same task,
+  attempt, generation and session, state `active`, an expiry no earlier than before,
+  and at least `--min-remaining-seconds` of lease left.
+- A failed renewal gets one `retry` of the client's saved mutation and key. The helper
+  never makes a new key, and never claims, recovers or releases anything.
+- A failed fresh read is retried read-only with a doubling delay, but only until the
+  lease deadline that the last successful fresh read verified. A changed owner,
+  attempt, generation, session or state, or an expired lease, stops it immediately.
+- A held producer lock (`<claim file>.lock` by default) refuses a second helper.
+- Every terminal stop prints `STOPPED: <reason>; inspect pilot and journal; no new
+  claim attempted` to standard output and standard error and exits 1. Diagnostics hold
+  only exit codes and service error codes, never client output. After a stop, inspect
+  the session's journal before any further mutation; recovery is a separate decision.
+
 ## Objectives and history
 
 **Objectives** groups existing tasks under a general task with its own acceptance
