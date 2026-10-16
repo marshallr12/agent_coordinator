@@ -410,6 +410,94 @@ pub(crate) async fn revise_limit_reached(
         || agent_revise_count(c, task, now).await? >= SERIALIZED_REVISE_CAP)
 }
 
+/// The open, non-canary tasks of project `p` that the revise limit holds from
+/// agents right now, as human-queue items ordered by task id: code
+/// `revise_limit_reached`, the task, why it is parked, the revises counted in
+/// the last 24 hours (`park_reason` as the revise refusal names it), when it parked (the revise that reached the limit) and
+/// when the oldest counted revise leaves the window (`oldest_revise_leaves_window_at`)
+/// and the task is released (`unparks_at`, when no further revise is made).
+/// A task leaves the list as soon as [`revise_limit_reached`] is false.
+pub(crate) async fn parked_items(
+    c: &mut SqliteConnection,
+    p: &str,
+    now: i64,
+    limit: usize,
+) -> Result<Vec<Value>, AppError> {
+    let candidates: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT t.id,t.title FROM events e JOIN submissions s ON s.id=e.record_id \
+         JOIN tasks t ON t.id=s.task_id WHERE e.kind='submission.reopened' AND t.project_id=? \
+         AND e.created_at>? AND t.lifecycle='open' AND t.budget_exempt IS NULL ORDER BY t.id",
+    )
+    .bind(p)
+    .bind(now - DAY_MS)
+    .fetch_all(&mut *c)
+    .await?;
+    let mut items = Vec::new();
+    for (id, title) in candidates {
+        if items.len() >= limit {
+            break;
+        }
+        if revise_limit_reached(c, &id, now).await? {
+            items.push(parked_item(c, &id, &title, now).await?);
+        }
+    }
+    Ok(items)
+}
+
+/// One parked task as a human-queue item.
+async fn parked_item(
+    c: &mut SqliteConnection,
+    task: &str,
+    title: &str,
+    now: i64,
+) -> Result<Value, AppError> {
+    // Every agent revise in the window, oldest first, with whether the
+    // integrator recorded it as serialized after a landing.
+    let revises: Vec<(i64, i64)> = sqlx::query_as("SELECT e.created_at,EXISTS(SELECT 1 FROM integrator_revises ir WHERE ir.submission_id=e.record_id AND ir.serialized_after IS NOT NULL) FROM events e JOIN principals pr ON pr.id=e.actor_id JOIN submissions s ON s.id=e.record_id WHERE e.kind='submission.reopened' AND pr.kind='agent' AND s.task_id=? AND e.created_at>? ORDER BY e.created_at,e.seq")
+        .bind(task).bind(now - DAY_MS).fetch_all(&mut *c).await?;
+    let counted: Vec<i64> = revises
+        .iter()
+        .filter(|(_, serialized)| *serialized == 0)
+        .map(|(at, _)| *at)
+        .collect();
+    let all: Vec<i64> = revises.iter().map(|(at, _)| *at).collect();
+    // A limit holds while its window holds that many revises: it lets go when
+    // the revise that leaves the count one short of it ages out.
+    let mut holds = Vec::new();
+    let mut parked_at = None;
+    let mut reasons = Vec::new();
+    for (reason, times, limit) in [
+        ("subject_parked", &counted, REVISE_LIMIT),
+        ("serialized_cap", &all, SERIALIZED_REVISE_CAP),
+    ] {
+        let limit = limit as usize;
+        if times.len() >= limit {
+            reasons.push(reason);
+            holds.push(times[times.len() - limit] + DAY_MS);
+            let reached = times[limit - 1];
+            parked_at = Some(parked_at.map_or(reached, |at: i64| at.min(reached)));
+        }
+    }
+    let oldest = if counted.len() >= REVISE_LIMIT as usize {
+        counted[0]
+    } else {
+        all[0]
+    };
+    Ok(json!({
+        "code": "revise_limit_reached",
+        "required_actor": "human",
+        "task_id": task,
+        "title": title,
+        "park_reason": reasons.last(),
+        "revise_count": if counted.len() >= REVISE_LIMIT as usize { counted.len() } else { all.len() },
+        "counted_revises_24h": counted.len(),
+        "agent_revises_24h": all.len(),
+        "parked_at": coordinator_core::timestamp(parked_at.unwrap_or(now)),
+        "oldest_revise_leaves_window_at": coordinator_core::timestamp(oldest + DAY_MS),
+        "unparks_at": coordinator_core::timestamp(holds.into_iter().max().unwrap_or(now)),
+    }))
+}
+
 /// The human-coded refusal for an agent revise or claim of a parked task.
 pub(crate) fn revise_limit_refusal() -> AppError {
     human_coded(

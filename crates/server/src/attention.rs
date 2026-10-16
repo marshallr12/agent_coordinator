@@ -1069,6 +1069,10 @@ async fn digest(
     let queue = stalled_queue(&mut c, &project, now, &state.config).await?;
     let stalled_queue = usize::from(queue.is_some());
     items.extend(queue);
+    let parked =
+        crate::autonomy::parked_items(&mut c, &project, now, DIGEST_LIMIT as usize).await?;
+    let parked_tasks = parked.len();
+    items.extend(parked);
     items.extend(
         crate::integrator_reports::human_queue_items_without_canary(&mut c, &project).await?,
     );
@@ -1130,7 +1134,8 @@ async fn digest(
             "week_start": timestamp(crate::admission::week_start(now)),
         },
         "hri": {"count": items.len(), "stalled_tasks": stalled,
-                "stalled_queue": stalled_queue, "items": items},
+                "stalled_queue": stalled_queue, "parked_tasks": parked_tasks,
+                "items": items},
     })))
 }
 
