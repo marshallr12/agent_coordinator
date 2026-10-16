@@ -84,6 +84,8 @@ is outside every view.
 | Task detail: attachments | `loadTaskAttachments` once per task; quietly on each poll | Rebuilt on each load | Files added or finalized | Keyed by artifact id; a poll reloads quietly and keeps what is shown on error |
 | Integrator reports | `loadReports`: open, filter, **Refresh**, **Load more**, resolve | Cleared the list and showed "Loading" on every load | A report's state or resolution; new reports | Cards keyed by report id; open "Report details" survives, even for a rebuilt card |
 | Attention digest | `loadDigest`: open, **Refresh** | Cleared and rebuilt | The three section lists | Three section cards keyed by section |
+| Autonomy | `loadAutonomy`: open, window select, **Refresh** | Cleared and rebuilt | Any figure of a card; a source that fails shows its error in its own card | Cards keyed by section; signature is the card's source data |
+| Project card autonomy summary | `loadAutonomySummary` after each project load, at most once a minute per project | Not shown | Counts, last canary, today's cost | Text patched in place; the card is not rebuilt |
 | Connected sessions | `loadAgentSessions`: open, window select, **Refresh** | Cleared and rebuilt | A session's activity and held attempts | Cards keyed by session id |
 | Knowledge & evidence | `loadShared`: open, selects, **Refresh**, **Load more**, search, post-mutation | Cleared and rebuilt, discarding history a person had expanded | Record fields; the rules text of a context search | Cards keyed by kind and record id; expanded history survives while the record is unchanged |
 | Resources | `loadResources`: open, **Refresh**, poll, **Load more**, create | Cleared and rebuilt every card | Held units, description; resources added | Cards keyed by resource id |

@@ -439,6 +439,7 @@
       const changed = JSON.stringify(projects) !== JSON.stringify(state.projects) || !state.projectsRendered;
       state.projects = projects;
       if (changed) { state.projectsRendered = true; renderProjects(); fillProjectSelect(); }
+      state.projects.forEach(loadAutonomySummary);
       renderSummary(); if (state.currentView === 'reports') setReportsProjectLabel(); if (state.currentView === 'agent-sessions') setAgentSessionsProjectLabel(); if (state.currentView === 'digest') setDigestProjectLabel(); if (state.currentView === 'autonomy') setAutonomyProjectLabel();
     }
     catch (error) { if (!silent) { setState($('projects-state'), errorMessage(error), false, true); } }
@@ -483,13 +484,14 @@
       if (selection && !selection.isCollapsed && (card.contains(selection.anchorNode) || card.contains(selection.focusNode))) return;
       openProject(project.id);
     });
-    const summary = el('div', 'autonomy-summary project-meta'); summary.dataset.projectId = projectId;
+    const summary = el('div', 'autonomy-summary project-meta');
     const autonomy = el('button', 'project-open', 'Autonomy →'); autonomy.type = 'button';
     autonomy.setAttribute('aria-label', `Autonomy view for ${project.name || projectId}`);
     autonomy.addEventListener('click', () => openAutonomy(project.id));
-    add(summary, el('span', 'muted', ''));
+    const summaryText = add(summary, el('span', 'autonomy-summary-text')); summaryText.dataset.projectId = projectId;
+    summaryText.title = 'From the project\'s telemetry records and workflow records; open the Autonomy view for each figure\'s source.';
     add(footer, open); add(card, header); add(card, repo); add(card, idLabel); add(card, summary); add(summary, autonomy); add(card, footer);
-    fillAutonomySummary(project, summary);
+    fillAutonomySummary(project, summaryText);
     return card;
   }
 
@@ -2263,7 +2265,7 @@
       state.autonomySummaries.set(id, { at: Date.now(), hri: autonomy.human_required.count, perFinished: autonomy.human_required.per_finished_task, canary: (canaries.items || [])[0] || null, today: day ? (day.day === utcDay() ? day.total_usd : 0) : null });
     } catch (error) { state.autonomySummaries.set(id, { at: Date.now(), error: errorMessage(error) }); }
     finally { state.fetching.delete(`autonomy-summary-${id}`); }
-    document.querySelectorAll('.autonomy-summary').forEach(container => { if (container.dataset.projectId === id) fillAutonomySummary(project, container); });
+    document.querySelectorAll('.autonomy-summary-text').forEach(container => { if (container.dataset.projectId === id) fillAutonomySummary(project, container); });
   }
   function openAgentSessions() {
     if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
