@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production `fc3f424`; oracle upgraded; mxmini root install pending (2026-10-15 20:36 UTC, workflow on)
+## Current resume point — production `fc3f424`; Linux upgraded; pilot gen7 renewed; mxmini quiet-hours restore pending (2026-10-16 00:43 UTC, workflow on)
 
 **Mira daytime P6 run (ledger tag `[daytime P6 Mira]`):**
 - **DEPLOYED fc3f4244ce89a7f85956df3ae9aa2bca3d59f824.** Owner dispatched release 38783852315;
@@ -45,7 +45,10 @@ execution, and links everything else.
   integrator explicitly restarted, both daemons active, fresh supervisor heartbeat and integrator Idle.
   Oracle compatibility checks all true. User workstation CLI `~/.local/bin` installed via
   `upgrade_client.py --candidate`, hash `5c45dbfa`, compatibility all true; use this explicit new path
-  until `/usr/local/bin` is upgraded. **mxmini root binaries remain at af81834**, pending the step below.
+  until `/usr/local/bin` is upgraded. **mxmini root upgrade is now verified** (00:38Z 10-16): both
+  root CLI copies `5c45dbfa`, supervisor `91edf6dd`, push `2270e998` match the source manifests;
+  SysVinit restarted supervisor **pid777161**, fresh heartbeat, selected PATH compatibility all true.
+  The selected `/usr/local/bin/agent-coordinator` now works against production.
 - **af81834 archived** to `~/.local/share/agent-coordinator-autonomy/release-af81834`; both package
   archive checksums pass. Verified installed-host rollback copies and SHA-256 manifests are in its
   `host-mxmini` and `host-oracle-1` directories (all CLI copies, supervisor/push, oracle integrator).
@@ -61,29 +64,27 @@ execution, and links everything else.
   server `05a23d383b39dd40d5d8f5029fce4a242e8f614f6fb226bd40006cd307abf9a1`.
   Ubuntu's packaged binaries require glibc 2.39; MX has 2.36. Full package runtime/internal validation
   passed on GCP Ubuntu; use the already verified native source builds for MX and oracle-1.
-- **Release switches held on both hosts:** `release-fc3f424`; mxmini owner step was confirmed and
-  independently verified. Preserve its **22:00-07:00 local claim window** when restoring quiet-hours.
-  Old pilot renew **4194295 was stopped**, gen6 checkpoint/release succeeded; pilot remains ready,
-  unclaimed until the remaining host upgrade. Read-only helpers **1997610**, **1997611** (stale journal
-  SSH), **2413349** remain.
+- **Pilot reclaimed and new renew running:** existing p3b-pilot session **a9c40947** resumed with
+  harness `claude`, same identity. Fresh revision2 claim returned **28480679-700b-4dd1-a82e-0e8706a9a3e3,
+  generation7**, at **00:40:05.919Z 10-16**. New renew pid **778271** uses the prepared
+  `~/.local/share/agent-coordinator-autonomy/p6-pilot-renew/{renew.sh,renew.py,claim.json,renew.log}`.
+  It renewed immediately at **00:40:44Z**, fresh ownership verified, then continued at **60 seconds**
+  per the actual claim guidance. Subsequent renews verified; no retry/recovery was needed.
+  Old renew4194295 remains stopped. Read-only helpers1997610,1997611,2413349 left unchanged.
+- **Oracle release flag cleared 00:41:30Z**, only after fresh pilot claim/renew. **mxmini still holds
+  `release-fc3f424`**, waiting for the local password step below. Preserve its **22:00-07:00 local
+  claim window** when restoring quiet-hours; no daytime gap should open.
 - **Earlier SithBit authority drained naturally** by 20:29Z; all seven global counts zero before
   deploy-pre, after stop, and in post-deploy verification. No SithBit work was mutated. Oracle
   integrator was paused while idle before the final zero check, then upgraded/restarted.
-- **Sudo authorization updated by owner at 20:29Z:** Mira may run sudo steps wherever available.
-  GCP/oracle steps completed directly. **Local `sudo -n` requires a password**, a technical terminal
-  requirement. Owner was given the concrete mxmini command below and async confirmation is pending:
-  `sudo bash /home/marshall/.local/share/agent-coordinator-autonomy/p6-mxmini-upgrade-fc3f424.sh`.
-  It installs root CLI copies/supervisor/push, runs host-setup and restarts SysVinit, keeping release
-  flag set. Do not ask for sudo permission again or alter sudo policy/ownership to avoid the password.
-- **Prepared install helpers** in the local autonomy state directory:
-  `p6-mxmini-upgrade-fc3f424.sh` (owner sudo, hash/service checks, rollback copies, host-setup with
-  QUIET_HOURS=22:00-07:00 and sysvinit restart); `p6-oracle-upgrade-fc3f424.sh` (also copied to
-  `/home/ubuntu/`, agent sudo -n, APPARMOR_BWRAP=1 UPDATE_TIMER=0, explicit integrator start).
-  Both passed bash syntax checks; oracle helper has completed, mxmini helper awaits terminal execution.
-  `p6-pilot-renew/{renew.sh,renew.py}` is prepared, **not configured/running**. After a fresh claim,
-  write `claim.json` with the returned `attempt`, `generation`, `task`, `session_id`, then launch it.
-  It immediately renews, verifies fresh live ownership/expiry, logs actual time and checks again after
-  any exact-journal retry; it stops on uncertainty rather than inventing ownership.
+- **Sudo authorization granted by owner:** Mira may run sudo wherever available; server steps
+  completed directly. Local `sudo -n` still needs a password, so the mxmini owner ran the root install
+  helper. Install/host-setup is now verified; do not rerun it. The **only remaining local step** is:
+  `sudo bash /home/marshall/.local/share/agent-coordinator-autonomy/p6-mxmini-restore-quiet-hours.sh`.
+  This prepared helper passed bash syntax checks; it requires our release marker, retags the existing
+  file to `quiet-hours`, and applies the installed claim-window helper without removing the file first.
+  Command printed in chat; async terminal-completion confirmation pending. Do not ask for permission
+  again, change sudo policy, or solicit the password through chat/askpass/-S.
 - **MiniAir-only prompt ready:** `~/Downloads/miniair-upgrade-fc3f424.txt`, using accepted ZIP
   `e0c5ed896ea565222c4ba5f1c71b2a1733ebb9576d0cd2db048ccef8939d9d84` and EXE
   `1f9d48dac6c324ab6981cc769621f128f89e690d8ffe0ca66de47b22d31d7ba1`.
@@ -91,8 +92,9 @@ execution, and links everything else.
   Service prerequisite is now satisfied. Windows installation has not been performed or claimed here.
 - **Owner decisions resolved:** 335b6713 and 5ad83ff3 had already been opened at 14:38/14:37Z by a
   different actor; the owner explicitly said **keep both admitted**. Other existing admissions were
-  left alone. Oracle started previously admitted **693af855** after the BB review; it is now waiting for review
-  with no current attempt. The release switch holds new claims. Do not admit more.
+  left alone. Oracle started previously admitted **693af855** after the BB review. After its release flag
+  cleared, review resumed with active attempt **09869840** (valid lease observed 00:45Z 10-16).
+  No additional admission was needed. Do not admit more.
 - **New defect be6d39af (P3, planned, NOT admitted):** cost backfill retries two old 10-07 rows for
   missing project b4423f23 forever with a generic 404; unsupported older servers also return 404, so
   the fix must distinguish/quarantine safely and preserve the ledger. Current task rows upload.
@@ -107,25 +109,26 @@ execution, and links everything else.
   Post-deploy digest **20:34Z HRI 1** is `stalled_task/repeated_attempt_failures` for the pilot: its last
   three ended attempts are planned deployment releases. Source explicitly counts released attempts;
   fresh task read is **ready/eligible, no unmet preconditions**, so it does not block reclaim. Preserve
-  history; no recovery mutation performed. Recheck digest after the new claim, rather than reporting
-  the earlier HRI zero as current.
+  history; no recovery mutation performed. At 00:39Z 10-16 the prolonged deployment hold also
+  produced `stalled_queue` (HRI2). **After the fresh pilot claim, digest at 00:41:30Z is HRI0**, no stalled
+  tasks or queue; these advisory flags cleared without a human recovery mutation.
+- **Midnight checks performed:** `/telemetry/canaries` latest completed row remains **10-15 03:23:47Z,
+  outcome ok**, oracle/claude; the **10-16 canary unit is still running**, no terminal row yet.
+  Open integrator reports contain only historical **27f99b21**, flaky, `requires_human=false`.
+  Oracle release is restored so the scheduled canary and already-admitted work can progress.
 - Preserve the pre-existing uncommitted `.claude/decisions-pending.md` edit. This run edits only
   HANDOFF.md in the parent checkout; build worktrees remain clean and detached.
 
-**Next actions (do not redeploy or dispatch again):**
-1. Verify completion of the pending mxmini root helper (terminal password required); root selected
-   CLI/supervisor/push hashes must match the prepared manifest, supervisor restarted with fresh
-   heartbeat and compatibility all true. Server/oracle/user-CLI upgrades are already done.
-2. Reconnect existing p3b-pilot with harness `claude` and the same session identity (a9c40947); fresh-read
-   pilot revision, claim it, configure/start the new renew helper from the actual returned attempt,
-   generation and session ID. Verify immediate successful renew and fresh live ownership.
-3. Clear oracle release flag only after the pilot claim/renew succeeds. Restore/apply mxmini's
-   quiet-hours marker without opening a daytime gap (sudo technically needs owner's terminal here).
-   Verify runtime/heartbeats, selected executables, all compatibility booleans and digest HRI.
-4. MiniAir prompt is ready and its service prerequisite is now satisfied; owner runs it on MiniAir.
-   Refresh this handoff and `~/Downloads/prompt.txt`, docs gate, commit/push only HANDOFF on autonomy-plan.
-   If past 00:00Z 10-16, check digest HRI, `/telemetry/canaries` and open integrator reports.
-   Keep be6d39af planned; no new admissions. Preserve the unrelated dirty parent file.
+**Next actions (do not redeploy, reinstall or claim again):**
+1. Verify completion of the pending mxmini quiet-hours helper (local terminal password required).
+   It should hold `quiet-hours` outside 22:00-07:00 local and permit claims inside that window.
+   Do not clear an unexpected owner marker. Linux binaries and new pilot claim/renew are already done.
+2. Verify marker/window, fresh supervisor heartbeat, oracle runtime and new pilot renew remain healthy.
+   Refresh handoff and `~/Downloads/prompt.txt`, docs gate, commit/push only HANDOFF on autonomy-plan.
+   Preserve the unrelated dirty parent file and other worktrees. No new admissions; keep be6d39af planned.
+3. MiniAir prompt is ready and service prerequisite satisfied; owner runs it on MiniAir. The new nightly
+   canary is in progress, not yet a terminal PASS; record its actual outcome when available rather than
+   treating the previous day's row as tonight's result. No new human-required integrator reports.
 
 ## Previous resume point — main `57029d8` (rustls fix landed); release after bb5fb219; canary ok (2026-10-15 03:30 UTC, workflow on)
 
