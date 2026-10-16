@@ -1159,6 +1159,74 @@ async fn credentials_default_to_interactive_write() {
     assert_eq!(item["access"], "write");
 }
 
+/// Only a revoked credential can be deleted; deleting hides it from the list
+/// but keeps the row for the sessions and attempts that reference it.
+#[tokio::test]
+async fn deleting_a_revoked_credential_hides_it_from_the_list() {
+    let fixture = Fixture::new().await;
+    let browser = fixture.login().await;
+    let (_, credential) = fixture.issue(&browser, "deletable-agent").await;
+    let path = format!("/api/v1/admin/credentials/{credential}/delete");
+    fixture
+        .call(
+            "POST",
+            &path,
+            &browser.headers("delete-active"),
+            Some(json!({})),
+        )
+        .await
+        .error(StatusCode::CONFLICT, "credential_not_revoked");
+    fixture
+        .call(
+            "POST",
+            &format!("/api/v1/admin/credentials/{credential}/revoke"),
+            &browser.headers("revoke-deletable"),
+            Some(json!({})),
+        )
+        .await
+        .ok();
+    fixture
+        .call(
+            "POST",
+            &path,
+            &browser.headers("delete-revoked"),
+            Some(json!({})),
+        )
+        .await
+        .ok();
+    let listed = fixture
+        .call(
+            "GET",
+            "/api/v1/admin/credentials",
+            &browser.headers("list")[..2],
+            None,
+        )
+        .await;
+    listed.ok();
+    assert!(
+        !listed.body["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == credential.as_str())
+    );
+    let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM credentials WHERE id=?")
+        .bind(&credential)
+        .fetch_one(&fixture.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 1);
+    fixture
+        .call(
+            "POST",
+            &path,
+            &browser.headers("delete-again"),
+            Some(json!({})),
+        )
+        .await
+        .error(StatusCode::NOT_FOUND, "record_not_found");
+}
+
 /// Issues a credential for an existing agent principal with the given body and
 /// returns the response data (token plus credential attributes).
 async fn reissue(
