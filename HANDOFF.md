@@ -45,16 +45,21 @@ execution, and links everything else.
   the new Planned defect; no task admissions. **be6d39af remains P3 Planned**; human-delivered
   55b8a06d and other owner choices remain untouched. No SithBit task mutations.
 - Nightly **10-16 canary remains PASS**, oracle-1/claude,01:18:52Z,4727.2seconds,row8906f6cd.
-  Only open report remains historical27f99b21,flaky,requires_human=false. Browser observation
-  **blocked in this harness**: no enabled browser surfaces; creating iab returned
-  `Browser is not available: iab`. Do not claim a new visible dashboard verification.
+  Only open report remains historical27f99b21,flaky,requires_human=false. **External browser verified
+  at13:15Z:** Brave Work extension became available after the initial no-browser check. Existing
+  authenticated dashboard visibly shows pilot In Progress, generation8,60min lease,expiry10:15AM EDT,
+  recovery checkpoints and no jobs/holds;3453a676 andbe6d39af Planned;1a3290db Done in Completed tasks.
+  No dashboard task mutations. The earlier browser availability blocker is resolved.
 - Fetch succeeded; **origin/main7ca0eec80ced1bc2219bf03334cd1342f1ee1a7b**. autonomy-plan matched
   upstream before this refresh. Unrelated dirty `.claude/decisions-pending.md`, all other worktrees,
   credentials, journals, proofs and rollback evidence preserved. No new release, upgrade or daemon
   restart. MiniAir installation remains owner follow-up; no Windows install claimed here.
+  Its referenced Downloads instruction file was missing and has been reconstructed after rechecking
+  accepted Windows ZIP/internal EXE hashes. Verify MiniAir first; if already clean/exact fc3f424 and
+  compatible, record completion without reinstalling. Its current installed state is unverified.
 - Evidence: `~/.local/share/agent-coordinator-autonomy/p6-observe-20261016T130602Z-*`,
   `p6-observe-startup-guide-20261016.md`, both renew directories and appended `pilot-timeline.log`.
-  Documentation check uses mdBook0.5.4; browser verification remains unavailable.
+  Documentation check uses mdBook0.5.4; external dashboard verification now succeeded.
 
 **Next session:** inspect existing gen8 helper/lease first, then digest/host heartbeats; do not
 reclaim, release, finish or start a duplicate helper while ownership is valid. If authority is lost,
