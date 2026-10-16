@@ -1172,8 +1172,10 @@
         if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`));
         add(row, info);
         if (!credential.revoked_at) {
-          add(row, actionButton('Rotate', () => rotateCredential(credential)));
-          const revoke = actionButton('Revoke', () => revokeCredential(credential.id)); revoke.className = 'button danger'; add(row, revoke);
+          const actions = el('div', 'credential-actions');
+          add(actions, taskIconButton('Rotate credential', 'rotate', () => rotateCredential(credential)));
+          const revoke = actionButton('Revoke', () => revokeCredential(credential.id)); revoke.className = 'button danger'; add(actions, revoke);
+          add(row, actions);
         } else {
           if (offer) add(row, actionButton('New token for this agent', () => replaceAgentCredential(credential)));
           add(row, taskIconButton('Delete revoked credential', 'delete', () => confirmDeleteCredential(credential)));
@@ -1954,7 +1956,8 @@
       cancel: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
       edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z"/>',
       delete: '<path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
-      resolve: '<path d="m5 12 4 4L19 6"/><circle cx="12" cy="12" r="9"/>'
+      resolve: '<path d="m5 12 4 4L19 6"/><circle cx="12" cy="12" r="9"/>',
+      rotate: '<path d="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4"/>'
     };
     button.classList.add('task-action-icon'); button.title = label; button.setAttribute('aria-label', label);
     button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[icon]}</svg>`;
