@@ -168,6 +168,12 @@ class FakeChecks:
         """Scripts the per-attempt conclusions of the roster check on `sha`."""
         self.edit(lambda d: d.setdefault("scripts", {}).__setitem__(sha, {CHECK: outcomes}))
 
+    def start_at(self, sha, seconds):
+        """Starts the first synthetic attempt on `sha` `seconds` after the Unix
+        epoch (R's default is 0); a target pass counts only when it started
+        after R's first failure."""
+        self.edit(lambda d: d.setdefault("started", {}).__setitem__(sha, seconds))
+
     def reruns(self):
         """Reruns recorded over all synthetic runs."""
         return sum(self.load().get("reruns", {}).values())
@@ -849,6 +855,7 @@ def reproduced_failure(soak, deadline):
     task_id, result = pending_subject(soak, "impl-b", "rev-2", "reproduced failure",
                                       {"soak/checks/broken.txt": "broken\n"}, deadline)
     soak.fake.script(result["t0"], ["success"])
+    soak.fake.start_at(result["t0"], 1000)
     soak.fake.script(result["r"], ["failure", "failure"])
     wait_revised(soak, task_id, "check_failed", 1, deadline)
     soak.fake.default("success")

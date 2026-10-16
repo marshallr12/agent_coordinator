@@ -657,14 +657,36 @@ const FAIL: Option<&str> = Some("failure");
 const PASS: Option<&str> = Some("success");
 
 /// Scripts "Linux tests" on the latest R and on the remote's `main` (X);
-/// "Lint" passes once on R.
-fn script_attempts(h: &Harness, remote: &Remote, on_r: &[Option<&str>], on_x: &[Option<&str>]) {
+/// "Lint" passes once on R. R's first attempts start at the epoch and X's
+/// at `x_started` seconds after it, so X's first attempt is fresh when
+/// positive and stale when negative; a rerun is always newer than R's start.
+fn script_attempts_at(
+    h: &Harness,
+    remote: &Remote,
+    on_r: &[Option<&str>],
+    (on_x, x_started): (&[Option<&str>], i64),
+) {
     let r = h.latest_r();
     h.script(&r, "Linux tests", on_r);
     h.script(&r, "Lint", &[PASS]);
     if !on_x.is_empty() {
-        h.script(&remote_main(remote), "Linux tests", on_x);
+        let x = remote_main(remote);
+        h.script(&x, "Linux tests", on_x);
+        h.edit_fake(|file| {
+            file.started.insert(x, x_started);
+        });
     }
+}
+
+/// [`script_attempts_at`] with X's first attempt after R's.
+fn script_attempts(h: &Harness, remote: &Remote, on_r: &[Option<&str>], on_x: &[Option<&str>]) {
+    script_attempts_at(h, remote, on_r, (on_x, 1000));
+}
+
+/// [`script_attempts_at`] with X's first attempt before R's, as when X last
+/// ran before an advisory database changed.
+fn script_stale_target(h: &Harness, remote: &Remote, on_x: &[Option<&str>]) {
+    script_attempts_at(h, remote, &[FAIL, FAIL], (on_x, -1000));
 }
 
 /// A harness whose first cycle pinned R with no check runs yet.
@@ -845,6 +867,93 @@ async fn a_failure_on_the_target_too_blocks_and_reports_fix_target_once() {
     advance_main(&remote, "fix.txt");
     assert_eq!(h.cycle().await, Step::ChecksPending, "a new X re-evaluates");
     assert_eq!(h.peek(|m| m.results.len()), 2);
+}
+
+/// A harness whose R failed twice and whose stale target pass `on_x` was
+/// polled once, so the integrator has asked X's job to run again; returns
+/// after the cycle that asked.
+async fn stale_target_rerun(on_x: &[Option<&str>]) -> (Harness, Remote) {
+    let (mut h, remote) = pinned_harness().await;
+    script_stale_target(&h, &remote, on_x);
+    assert_eq!(h.cycle().await, Step::ChecksPending, "R's rerun");
+    assert_eq!(h.reruns(), 1);
+    assert_eq!(h.cycle().await, Step::ChecksPending, "X's rerun");
+    assert_eq!(h.reruns(), 2, "the stale pass on X is rerun");
+    assert!(h.peek(|m| m.revises.is_empty()));
+    (h, remote)
+}
+
+#[tokio::test]
+async fn a_stale_target_pass_that_fails_when_rerun_blocks_without_blaming_the_author() {
+    let (mut h, _remote) = stale_target_rerun(&[PASS, FAIL]).await;
+    let blocked = h.cycle().await;
+    assert!(
+        matches!(&blocked, Step::Blocked(r) if r.starts_with("target_failing")),
+        "{blocked:?}"
+    );
+    assert!(
+        h.peek(|m| m.revises.is_empty()),
+        "the author is not revised"
+    );
+    assert_eq!(report_kinds(&h), ["fix_target"]);
+    let details = h.peek(|m| m.reports[0]["details"].clone());
+    assert_eq!(details["verdict"], "target_failing");
+    let relied_on = &details["target_result"];
+    assert_eq!(relied_on["run_attempt"], 2, "the fresh result is recorded");
+    assert_eq!(relied_on["conclusion"], "failure");
+    assert_eq!(relied_on["stale"], false);
+    assert!(relied_on["run_id"].is_i64() && relied_on["completed_at"].is_string());
+    assert_eq!(h.reruns(), 2, "X is not rerun again");
+}
+
+#[tokio::test]
+async fn a_stale_target_pass_that_passes_when_rerun_blames_the_author() {
+    let (mut h, _remote) = stale_target_rerun(&[PASS, PASS]).await;
+    assert_eq!(h.cycle().await, Step::Revised("check_failed".into()));
+    let evidence = h.peek(|m| m.revises[0]["evidence"].as_str().unwrap().to_owned());
+    assert!(
+        evidence.contains("passed on target") && evidence.contains("attempt 2 completed"),
+        "the fresh X result is named: {evidence}"
+    );
+    assert!(report_kinds(&h).is_empty());
+    assert_eq!(h.reruns(), 2);
+}
+
+#[tokio::test]
+async fn a_stale_target_pass_is_rerun_once_and_awaited() {
+    let (mut h, _remote) = stale_target_rerun(&[PASS]).await;
+    for _ in 0..2 {
+        assert_eq!(h.cycle().await, Step::ChecksPending, "no new attempt yet");
+    }
+    assert_eq!(h.reruns(), 2, "an awaited rerun is not requested again");
+    assert!(report_kinds(&h).is_empty());
+    assert!(h.peek(|m| m.revises.is_empty()));
+}
+
+#[tokio::test]
+async fn a_target_pass_after_the_first_failure_needs_no_rerun() {
+    let (mut h, remote) = pinned_harness().await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[PASS]);
+    assert_eq!(h.cycle().await, Step::ChecksPending);
+    assert_eq!(h.cycle().await, Step::Revised("check_failed".into()));
+    assert_eq!(h.reruns(), 1, "only R was rerun");
+}
+
+#[tokio::test]
+async fn a_refused_rerun_of_a_stale_target_pass_leaves_the_target_unverified() {
+    let (mut h, remote) = pinned_harness().await;
+    script_stale_target(&h, &remote, &[PASS]);
+    assert_eq!(h.cycle().await, Step::ChecksPending, "R's rerun");
+    h.edit_fake(|file| file.rerun_error = Some("403 actions: write".into()));
+    let blocked = h.cycle().await;
+    assert!(
+        matches!(&blocked, Step::Blocked(r) if r.starts_with("target_unverified")),
+        "{blocked:?}"
+    );
+    assert!(h.peek(|m| m.revises.is_empty()));
+    let details = h.peek(|m| m.reports[0]["details"].clone());
+    assert_eq!(details["verdict"], "target_unverified");
+    assert_eq!(details["target_result"]["stale"], true);
 }
 
 #[tokio::test]

@@ -609,11 +609,20 @@ reports and only a human resolves one.
   verdict (a refused rerun by result and run). A failure is reproduced once
   the deciding attempt and at least one earlier attempt failed; it revises
   the author with `check_failed` only when the same check's latest attempt
-  with a result on the target tip passed, and waits while the tip's run is
-  still going. When that attempt failed, or the tip has no result for the
-  check, the integrator raises `fix_target` with `verdict` `target_failing`
-  or `target_unverified` (one per target, tip, verdict and check) and skips
-  the subject until the tip moves or the check passes there. A mechanical
+  with a result on the target tip passed and started after the check's first
+  failure on `r`, and waits while the tip's run is still going. A pass that
+  started earlier may predate a change outside the commit (an advisory
+  database, a toolchain or runner image), so it does not attribute: the
+  integrator reruns that one job on the tip (`POST …/actions/jobs/{job_id}/rerun`,
+  at most twice per result; a refusal that only means the run is going waits)
+  and waits for the new attempt. When the latest attempt failed, or the tip
+  has no result for the check (or its only pass is still stale after the
+  reruns or the rerun is refused), the integrator raises `fix_target` with
+  `verdict` `target_failing` or `target_unverified` (one per target, tip,
+  verdict and check) whose details carry `target_result` (`run_id`,
+  `run_attempt`, `conclusion`, `started_at`, `completed_at`, `stale`) and skips
+  the subject until the tip moves or the check passes there. A `check_failed`
+  revise names the tip's run, attempt and completion time it relied on. A mechanical
   revert's candidate has no author: when its failure is reproduced and passes
   on the tip, the integrator reports the revert `not-mechanical` with reason
   `check_failed` instead of revising it.

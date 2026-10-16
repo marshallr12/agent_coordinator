@@ -33,6 +33,15 @@ pub struct CheckRun {
     pub workflow_path: String,
     /// `None` while the run is queued or in progress.
     pub conclusion: Option<String>,
+    /// The job's id, which names it for a single-job rerun.
+    #[serde(default)]
+    pub job_id: Option<i64>,
+    /// RFC 3339 time the job started; `None` while it is queued.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// RFC 3339 time the job completed; `None` while it is going.
+    #[serde(default)]
+    pub completed_at: Option<String>,
 }
 
 /// Source of check runs and branch rules for one forge.
@@ -58,6 +67,15 @@ pub trait ChecksSource {
         &self,
         repo: Option<&RepoId>,
         run_id: i64,
+    ) -> impl Future<Output = Result<()>> + Send;
+
+    /// Starts a new attempt of the one job `run` belongs to, whatever its
+    /// conclusion, so a pass that is out of date can be redone. Errors when
+    /// the source cannot rerun a single job or the run is still going.
+    fn rerun_job(
+        &self,
+        repo: Option<&RepoId>,
+        run: &CheckRun,
     ) -> impl Future<Output = Result<()>> + Send;
 }
 
@@ -104,6 +122,17 @@ impl ChecksSource for GithubChecks<'_> {
         let repo = repo.context("GitHub reruns need a github.com repository URL")?;
         let path = format!(
             "/repos/{}/{}/actions/runs/{run_id}/rerun-failed-jobs",
+            repo.owner, repo.name
+        );
+        self.app.post(&path).await.map(|_| ())
+    }
+
+    /// `POST …/actions/jobs/{job_id}/rerun`; the App needs `actions: write`.
+    async fn rerun_job(&self, repo: Option<&RepoId>, run: &CheckRun) -> Result<()> {
+        let repo = repo.context("GitHub reruns need a github.com repository URL")?;
+        let job_id = run.job_id.context("the check run has no job id")?;
+        let path = format!(
+            "/repos/{}/{}/actions/jobs/{job_id}/rerun",
             repo.owner, repo.name
         );
         self.app.post(&path).await.map(|_| ())
@@ -160,6 +189,11 @@ fn job_run(job: &Value, run_id: i64, workflow_path: &str, sha: &str) -> Option<C
         conclusion: completed
             .then(|| job["conclusion"].as_str().map(str::to_owned))
             .flatten(),
+        job_id: job["id"].as_i64(),
+        started_at: job["started_at"].as_str().map(str::to_owned),
+        completed_at: completed
+            .then(|| job["completed_at"].as_str().map(str::to_owned))
+            .flatten(),
     })
 }
 
@@ -181,7 +215,12 @@ const MAX_PAGES: usize = 100;
 /// entry (`null` = in progress; the default conclusion never runs out). The
 /// attempt appears only once every rerun job has an entry for it. A rerun
 /// of a run whose jobs all passed, or any rerun while `rerun_error` is set,
-/// is refused; an accepted rerun is recorded in the file.
+/// is refused; an accepted rerun is recorded in the file. A single-job
+/// rerun (which also redoes a passed job) takes that job's next entry and
+/// copies the others. Synthetic attempts start at `started[sha]` seconds
+/// after the Unix epoch (default 0) plus a day per earlier attempt, so a
+/// rerun is always newer than the attempt it redoes, and complete a minute
+/// later.
 pub struct FakeChecks {
     pub path: PathBuf,
 }
@@ -196,6 +235,11 @@ pub struct FakeFile {
     pub scripts: BTreeMap<String, BTreeMap<String, Vec<Option<String>>>>,
     /// Reruns requested per synthetic run id.
     pub reruns: BTreeMap<i64, i64>,
+    /// Per synthetic run id, the job each rerun redid in order (empty for a
+    /// rerun of the failed jobs).
+    pub job_reruns: BTreeMap<i64, Vec<String>>,
+    /// Seconds since the Unix epoch at which the first attempt per SHA starts.
+    pub started: BTreeMap<String, i64>,
     /// When set, every rerun request fails with this message.
     pub rerun_error: Option<String>,
     pub default_conclusion: Option<String>,
@@ -237,12 +281,13 @@ impl ChecksSource for FakeChecks {
         let mut runs = file.runs.get(sha).cloned().unwrap_or_default();
         let names = wanted.iter().map(|check| check.check_name.clone());
         let jobs = file.simulate(sha, names.collect());
+        let base = file.started.get(sha).copied().unwrap_or(0);
         for check in wanted {
             if runs.iter().any(|run| run.check_name == check.check_name) {
                 continue;
             }
             let job = jobs.iter().find(|job| job.name == check.check_name);
-            runs.extend(job.into_iter().flat_map(|job| job.runs(check, sha)));
+            runs.extend(job.into_iter().flat_map(|job| job.runs(check, sha, base)));
         }
         Ok(runs)
     }
@@ -257,12 +302,45 @@ impl ChecksSource for FakeChecks {
             bail!("rerun refused: {error}");
         }
         ensure!(!file.all_passed(run_id), "run {run_id} has no failed jobs");
-        *file.reruns.entry(run_id).or_default() += 1;
+        file.record_rerun(run_id, "");
+        self.store(&file)
+    }
+
+    async fn rerun_job(&self, _repo: Option<&RepoId>, run: &CheckRun) -> Result<()> {
+        let mut file = self.load()?;
+        if let Some(error) = &file.rerun_error {
+            bail!("rerun refused: {error}");
+        }
+        let jobs = file.simulate(&run.head_sha, vec![run.check_name.clone()]);
+        let job = jobs.iter().find(|job| job.name == run.check_name);
+        let last = job.and_then(|job| job.conclusions.last());
+        ensure!(
+            last.is_some(),
+            "no scripted job {} to rerun",
+            run.check_name
+        );
+        ensure!(
+            last != Some(&None),
+            "run {} is still running: job {} is not completed",
+            run.run_id,
+            run.check_name
+        );
+        file.record_rerun(run.run_id, &run.check_name);
         self.store(&file)
     }
 }
 
 impl FakeFile {
+    /// Records one more rerun of `run_id` that redoes only `job` (every
+    /// failed job when empty).
+    fn record_rerun(&mut self, run_id: i64, job: &str) {
+        let done = self.reruns.entry(run_id).or_default();
+        let forced = self.job_reruns.entry(run_id).or_default();
+        forced.resize((*done).max(0) as usize, String::new());
+        forced.push(job.to_owned());
+        *done += 1;
+    }
+
     /// The jobs of the synthetic run on `sha`: the scripted checks and,
     /// with a default conclusion, `names`, each with its visible attempts.
     fn simulate(&self, sha: &str, names: Vec<String>) -> Vec<FakeJob> {
@@ -270,8 +348,10 @@ impl FakeFile {
         let mut jobs: Vec<FakeJob> = names.filter_map(|n| self.first(sha, n)).collect();
         let run_id = synthetic_run_id(sha);
         let reruns = self.reruns.get(&run_id).copied().unwrap_or(0);
-        for _ in 0..reruns {
-            if !self.advance(sha, &mut jobs) {
+        let forced = self.job_reruns.get(&run_id);
+        for index in 0..reruns as usize {
+            let only = forced.and_then(|forced| forced.get(index));
+            if !self.advance(sha, &mut jobs, only.map_or("", String::as_str)) {
                 break;
             }
         }
@@ -288,11 +368,12 @@ impl FakeFile {
         names
     }
 
-    /// Adds the next attempt to every job; false (and no change) when some
-    /// rerun job has no entry for it yet.
-    fn advance(&self, sha: &str, jobs: &mut [FakeJob]) -> bool {
+    /// Adds the next attempt to every job, where `only` (when not empty)
+    /// names the single job redone; false (and no change) when some rerun
+    /// job has no entry for it yet.
+    fn advance(&self, sha: &str, jobs: &mut [FakeJob], only: &str) -> bool {
         let next: Option<Vec<(Option<String>, usize)>> =
-            jobs.iter().map(|job| self.next(sha, job)).collect();
+            jobs.iter().map(|job| self.next(sha, job, only)).collect();
         let Some(next) = next else { return false };
         for (job, (conclusion, used)) in jobs.iter_mut().zip(next) {
             job.conclusions.push(conclusion);
@@ -320,11 +401,18 @@ impl FakeFile {
     }
 
     /// A job's conclusion in the next attempt and the script entries it
-    /// uses: a passed job is copied, any other takes its next entry.
-    fn next(&self, sha: &str, job: &FakeJob) -> Option<(Option<String>, usize)> {
-        match job.conclusions.last() {
-            Some(Some(c)) if outcome(c) == Outcome::Pass => Some((Some(c.clone()), 0)),
-            _ => self.entry(sha, &job.name, job.used).map(|entry| (entry, 1)),
+    /// uses: a job that is not redone is copied, and a redone job takes its
+    /// next entry. Without a named job, a passed job is copied and any
+    /// other is redone.
+    fn next(&self, sha: &str, job: &FakeJob, only: &str) -> Option<(Option<String>, usize)> {
+        let last = job.conclusions.last().cloned().flatten();
+        let redo = match only.is_empty() {
+            true => !last.as_deref().is_some_and(|c| outcome(c) == Outcome::Pass),
+            false => job.name == only,
+        };
+        match redo {
+            true => self.entry(sha, &job.name, job.used).map(|entry| (entry, 1)),
+            false => Some((last, 0)),
         }
     }
 
@@ -348,16 +436,18 @@ impl FakeFile {
 }
 
 impl FakeJob {
-    /// This job's attempts as check runs of `check` on `sha`.
+    /// This job's attempts as check runs of `check` on `sha`, the first
+    /// starting `base` seconds after the Unix epoch.
     fn runs<'a>(
         &'a self,
         check: &'a RosterCheck,
         sha: &'a str,
+        base: i64,
     ) -> impl Iterator<Item = CheckRun> + 'a {
         let conclusions = self.conclusions.iter().cloned();
         (1..)
             .zip(conclusions)
-            .map(move |(attempt, c)| synthetic_run(check, sha, attempt, c))
+            .map(move |(attempt, c)| synthetic_run(check, sha, attempt, c, base))
     }
 }
 
@@ -368,13 +458,30 @@ fn synthetic_run_id(sha: &str) -> i64 {
         .max(1)
 }
 
-/// One Actions-style attempt of `check` on `sha` (`None` = in progress).
+/// Seconds between the starts of successive synthetic attempts.
+const ATTEMPT_GAP: i64 = 86_400;
+/// Seconds a synthetic attempt takes.
+const ATTEMPT_SECONDS: i64 = 60;
+
+/// `seconds` after the Unix epoch as an RFC 3339 time.
+fn rfc3339(seconds: i64) -> String {
+    let time = chrono::DateTime::from_timestamp(seconds, 0).unwrap_or_default();
+    time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// One Actions-style attempt of `check` on `sha` (`None` = in progress)
+/// whose first attempt starts `base` seconds after the Unix epoch.
 fn synthetic_run(
     check: &RosterCheck,
     sha: &str,
     run_attempt: i64,
     conclusion: Option<String>,
+    base: i64,
 ) -> CheckRun {
+    let started = base + (run_attempt - 1) * ATTEMPT_GAP;
+    let completed = conclusion
+        .as_ref()
+        .map(|_| rfc3339(started + ATTEMPT_SECONDS));
     CheckRun {
         check_name: check.check_name.clone(),
         run_id: synthetic_run_id(sha),
@@ -383,6 +490,9 @@ fn synthetic_run(
         head_sha: sha.to_owned(),
         workflow_path: check.workflow_path.clone(),
         conclusion,
+        job_id: Some(synthetic_run_id(sha)),
+        started_at: Some(rfc3339(started)),
+        completed_at: completed,
     }
 }
 
