@@ -4,7 +4,49 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — Linux rollout complete at `fc3f424`; pilot gen7 renewing; nightly canary passed (2026-10-16 01:37 UTC, workflow on)
+## Current resume point — P6 observation refreshed; mxmini night window open (2026-10-16 02:00 UTC, workflow on)
+
+- Observation only; Linux rollout remains complete. Anonymous HTTPS discovery (redirects disabled)
+  and the selected `/usr/local/bin/agent-coordinator` are clean/exact **fc3f424**; every compatibility
+  check passes. Local and oracle installed binary hashes match the retained fc3f424 manifests.
+  Fetch succeeded; `origin/main` remains **e6fd69dceb47a9432fdb2d5d82f363803c2abe83**.
+  The autonomy-plan branch matched its upstream before this HANDOFF refresh. No release or upgrade
+  was dispatched, and no service, supervisor, integrator or renew helper was restarted.
+- Existing renew **pid778271** is alive. Fresh independent task read at **01:59Z** confirms pilot
+  **d513bc21**, attempt **28480679-700b-4dd1-a82e-0e8706a9a3e3**, **generation7**, session
+  **a9c40947-f8fc-4491-ba59-9f4880e88f7f**, active/in_progress; heartbeat **01:58:24.952Z**,
+  expiry **02:58:24.952Z**. The renew log continues verifying ownership every60 seconds.
+  Keep this existing helper and lease; do not reclaim, release or mark the ongoing pilot Done.
+- Fresh digest at **01:59:35Z**: **HRI0**, stalled_tasks0, stalled_queue0, no pending reversible
+  decisions. Decisions list has no pending human decision. Preserve the historical temporary
+  deployment HRI2 and the separate owner P1 scheduling decision described below.
+- The nightly **10-16 canary remains terminal PASS**, oracle-1/claude, outcome `ok`, detail `done`,
+  **01:18:52Z**, duration **4727.2seconds**, row **8906f6cd**. No rerun or waiting required.
+  Open reports still contain only historical **27f99b21**, flaky, `requires_human=false`.
+- Oracle exact units **agentc-run.service** and **agentc-integrator@run.service** are active/running,
+  **NRestarts0**; fresh heartbeat at **02:00:18Z**, integrator logging Idle, release marker absent.
+  **693af855 is now Done**. Already-admitted **1a3290db** (Autonomy console) is being reviewed:
+  activity **05060241-694e-466a-ab82-1868854ea00f**, active attempt **544f77e9**, generation1,
+  expiry **02:45:16.433Z** at the observation. Leave processing to the supervisor/integrator.
+- mxmini supervisor **pid777161** is alive with fresh heartbeat. The `quiet-hours` marker was
+  present at **21:59 local** and absent at **22:00:18 local** after the existing every-minute cron
+  opened the **22:00-07:00 local night claim window**. Heartbeat then identified an implementation
+  launch for already-admitted **97b7b62a**. The cron configuration was not changed; outside the
+  window, the marker should be present. No manual claim or scheduling intervention occurred.
+- Browser check: authenticated web dashboard displayed the Agent Coordinator queue with pilot
+  In Progress, Autonomy console Waiting Review and **be6d39af P3 Planned**. No admission or other
+  task mutations were made. Both task-list pages were read; no additional admissions are authorized.
+- Evidence: `~/.local/share/agent-coordinator-autonomy/p6-resume-20261016-*.json`, the saved served
+  startup guide, existing renew log and appended `pilot-timeline.log`. MiniAir installation remains
+  owner follow-up via `~/Downloads/miniair-upgrade-fc3f424.txt`; it was not performed here.
+  The unrelated dirty `.claude/decisions-pending.md`, other worktrees and all journals are preserved.
+
+**Next session:** inspect the same renewer/lease and current digest, canaries, reports and host
+heartbeats; observe already-admitted work without new admissions or redeployment. Respect the
+night claim window, keep be6d39af P3 Planned, and leave human-delivered work, branch retirement,
+MiniAir upgrade and other owner decisions with the owner. The detailed release evidence follows.
+
+## Previous resume point — Linux rollout complete at `fc3f424`; pilot gen7 renewing; nightly canary passed (2026-10-16 01:37 UTC, workflow on)
 
 **Mira daytime P6 run (ledger tag `[daytime P6 Mira]`):**
 - **DEPLOYED fc3f4244ce89a7f85956df3ae9aa2bca3d59f824.** Owner dispatched release 38783852315;
