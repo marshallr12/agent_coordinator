@@ -10,6 +10,13 @@
 //! (or refused for good), one per line, so only unsent rows are sent. Losing
 //! that file only costs a resend. A batch's Idempotency-Key derives from its
 //! row identities, so a retry of the same rows reuses it.
+//!
+//! `<state_dir>/costs.quarantined` holds one JSON line per row the pass set
+//! aside, with the reason: the coordinator said the row's project does not
+//! exist (`project_not_found`), or refused the row itself (`rejected`). The
+//! rows are not reported, so they are neither delivered nor discarded; the
+//! ledger keeps them. A quarantined row is not sent again until the operator
+//! removes its line, which is how rows are released once the project exists.
 use super::cost;
 use crate::config::Config;
 use serde_json::{Value, json};
@@ -30,6 +37,10 @@ pub enum Delivery {
     Retry { stop: bool, reason: String },
     /// The coordinator refused the rows as invalid (HTTP 400 or 422).
     Rejected(String),
+    /// The coordinator answered that the rows' project does not exist
+    /// (`project_not_found`): not an unsupported route, so retrying cannot
+    /// help until the project exists.
+    MissingProject(String),
 }
 
 /// What one pass did.
@@ -41,6 +52,9 @@ pub struct Summary {
     pub duplicates: u64,
     /// Rows it refused for good.
     pub rejected: u64,
+    /// Rows set aside in [`quarantine_path`] because their project is
+    /// missing on the coordinator.
+    pub quarantined: u64,
     /// Rows still unsent: retried by a later pass.
     pub pending: u64,
 }
@@ -48,6 +62,11 @@ pub struct Summary {
 /// `<state_dir>/costs.reported`.
 pub fn reported_path(config: &Config) -> PathBuf {
     config.state_dir.join("costs.reported")
+}
+
+/// `<state_dir>/costs.quarantined`.
+pub fn quarantine_path(config: &Config) -> PathBuf {
+    config.state_dir.join("costs.quarantined")
 }
 
 /// The identity of a ledger line.
@@ -98,26 +117,100 @@ fn done(config: &Config) -> HashSet<String> {
     text.lines().map(|l| l.trim().to_owned()).collect()
 }
 
-/// Records `ids` as delivered (mode 0600, created on first use).
-fn mark_done(config: &Config, ids: &[&str]) {
+/// Appends `text` to `path` (mode 0600, created on first use).
+fn append(path: PathBuf, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.append(true).create(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+}
+
+/// Records `ids` as delivered (mode 0600, created on first use).
+fn mark_done(config: &Config, ids: &[&str]) {
     let text: String = ids.iter().map(|id| format!("{id}\n")).collect();
-    let written = options
-        .open(reported_path(config))
-        .and_then(|mut file| file.write_all(text.as_bytes()));
-    if let Err(error) = written {
+    if let Err(error) = append(reported_path(config), &text) {
         eprintln!("agentc-supervisor run: record reported costs: {error}");
     }
+}
+
+/// The identities set aside in [`quarantine_path`].
+fn quarantined(config: &Config) -> HashSet<String> {
+    let text = std::fs::read_to_string(quarantine_path(config)).unwrap_or_default();
+    let entries = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok());
+    entries
+        .filter_map(|entry| entry["row_id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Records each of `batch` in [`quarantine_path`] with `kind` and `reason`,
+/// keeping the project, task and attempt the operator needs to find the
+/// ledger row. False when the record could not be written (nothing is then
+/// set aside).
+fn quarantine(config: &Config, project: &str, batch: &[&Unsent], kind: &str, reason: &str) -> bool {
+    let at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    let lines: Vec<String> = batch
+        .iter()
+        .map(|r| {
+            json!({"row_id": r.id, "project": project, "kind": kind, "reason": reason,
+                "task_id": r.row["task_id"], "attempt_id": r.row["attempt_id"],
+                "role": r.row["role"], "usd": r.row["usd"],
+                "occurred_at_ms": r.row["occurred_at_ms"], "quarantined_at_ms": at_ms})
+            .to_string()
+                + "\n"
+        })
+        .collect();
+    match append(quarantine_path(config), &lines.concat()) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("agentc-supervisor run: record quarantined costs: {error}");
+            false
+        }
+    }
+}
+
+/// Names a batch's project and rows for a diagnostic: the row identity
+/// (a prefix), task and attempt of the first few rows.
+fn describe(project: &str, batch: &[&Unsent]) -> String {
+    const SHOWN: usize = 5;
+    let rows: Vec<String> = batch
+        .iter()
+        .take(SHOWN)
+        .map(|r| {
+            let field = |key: &str| r.row[key].as_str().unwrap_or("-").to_owned();
+            let id = &r.id[..r.id.len().min(12)];
+            format!(
+                "{id} (task {}, attempt {})",
+                field("task_id"),
+                field("attempt_id")
+            )
+        })
+        .collect();
+    let more = batch.len().saturating_sub(SHOWN);
+    let more = if more > 0 {
+        format!(", +{more} more")
+    } else {
+        String::new()
+    };
+    format!(
+        "project {project}, {} row(s): {}{more}",
+        batch.len(),
+        rows.join("; ")
+    )
 }
 
 /// The ledger rows not yet delivered, in ledger order.
 fn unsent(config: &Config, default_project: Option<&str>) -> Vec<Unsent> {
     let text = std::fs::read_to_string(cost::ledger(config)).unwrap_or_default();
-    let done = done(config);
+    let mut done = done(config);
+    done.extend(quarantined(config));
     let rows = text.lines().filter(|l| !l.trim().is_empty());
     let rows = rows.map(|l| (identity(l), l));
     let fresh = rows.filter(|(id, _)| !done.contains(id));
@@ -136,7 +229,8 @@ fn batch_key(project: &str, ids: &[&str]) -> String {
 /// one request per project and batch of [`BATCH`] rows. A batch the
 /// coordinator refuses as invalid is resent row by row so one bad row never
 /// holds the others back; a single row refused is skipped for good (it stays
-/// in the ledger). `default_project` names the project of rows that carry
+/// in the ledger, and [`quarantine_path`] records why). Rows of a project the
+/// coordinator says does not exist are quarantined there instead. `default_project` names the project of rows that carry
 /// none. Delivered rows are recorded in [`reported_path`] as they go.
 pub fn flush(
     config: &Config,
@@ -210,15 +304,34 @@ fn deliver(
         }
         Delivery::Rejected(reason) => {
             eprintln!(
-                "agentc-supervisor run: report costs: row {} refused: {reason}",
-                ids[0]
+                "agentc-supervisor run: report costs: row {} refused: {reason} ({})",
+                ids[0],
+                describe(project, batch)
             );
+            quarantine(config, project, batch, "rejected", &reason);
             mark_done(config, &ids);
             summary.rejected += 1;
             Flow::Go
         }
+        Delivery::MissingProject(reason) => {
+            eprintln!(
+                "agentc-supervisor run: report costs: {reason}; quarantined in {}: {}",
+                quarantine_path(config).display(),
+                describe(project, batch)
+            );
+            if quarantine(config, project, batch, "project_not_found", &reason) {
+                summary.quarantined += batch.len() as u64;
+                Flow::Go
+            } else {
+                summary.pending += batch.len() as u64;
+                Flow::SkipProject
+            }
+        }
         Delivery::Retry { stop, reason } => {
-            eprintln!("agentc-supervisor run: report costs: {reason}");
+            eprintln!(
+                "agentc-supervisor run: report costs: {reason}; {}",
+                describe(project, batch)
+            );
             summary.pending += batch.len() as u64;
             if stop { Flow::Stop } else { Flow::SkipProject }
         }
@@ -375,6 +488,102 @@ mod tests {
         };
         let summary = flush(&config, "h", None, &mut send);
         assert_eq!((summary.accepted, summary.pending), (2, 2));
+    }
+
+    #[test]
+    fn rows_of_a_missing_project_are_quarantined_and_the_others_still_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        ledger(&config, "gone", 0, 2);
+        ledger(&config, "p2", 100, 2);
+        let text = std::fs::read_to_string(cost::ledger(&config)).unwrap();
+        let mut send = |p: &str, body: &Value, _: &str| {
+            if p == "gone" {
+                Delivery::MissingProject("no such project".into())
+            } else {
+                Delivery::Stored(body["rows"].as_array().unwrap().len() as u64, 0)
+            }
+        };
+        let summary = flush(&config, "h", None, &mut send);
+        assert_eq!(
+            summary,
+            Summary {
+                accepted: 2,
+                quarantined: 2,
+                ..Summary::default()
+            }
+        );
+        // The reason is durable and names the project and the rows.
+        let kept = std::fs::read_to_string(quarantine_path(&config)).unwrap();
+        let entries: Vec<Value> = kept
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["project"], "gone");
+        assert_eq!(entries[0]["kind"], "project_not_found");
+        assert_eq!(entries[0]["reason"], "no such project");
+        assert_eq!(entries[0]["task_id"], "t0");
+        assert_eq!(entries[1]["attempt_id"], "a");
+        // The quarantined rows are neither marked delivered nor dropped from
+        // the ledger, and no later pass sends them.
+        assert_eq!(done(&config).len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(cost::ledger(&config)).unwrap(),
+            text
+        );
+        let mut never = |_: &str, _: &Value, _: &str| -> Delivery { panic!("nothing is unsent") };
+        assert_eq!(flush(&config, "h", None, &mut never), Summary::default());
+        // Removing the quarantine record releases the rows for a resend.
+        std::fs::remove_file(quarantine_path(&config)).unwrap();
+        let mut found = |_: &str, body: &Value, _: &str| {
+            Delivery::Stored(body["rows"].as_array().unwrap().len() as u64, 0)
+        };
+        assert_eq!(flush(&config, "h", None, &mut found).accepted, 2);
+    }
+
+    #[test]
+    fn a_missing_project_is_quarantined_in_every_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        ledger(&config, "gone", 0, 150);
+        let mut send = |_: &str, _: &Value, _: &str| Delivery::MissingProject("gone".into());
+        let summary = flush(&config, "h", None, &mut send);
+        assert_eq!((summary.quarantined, summary.pending), (150, 0));
+    }
+
+    #[test]
+    fn an_unsupported_route_leaves_rows_unsent_and_unquarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        ledger(&config, "p1", 0, 2);
+        let mut older = |_: &str, _: &Value, _: &str| Delivery::Retry {
+            stop: false,
+            reason: "HTTP 404 record_not_found".into(),
+        };
+        let summary = flush(&config, "h", None, &mut older);
+        assert_eq!(
+            summary,
+            Summary {
+                pending: 2,
+                ..Summary::default()
+            }
+        );
+        assert!(!quarantine_path(&config).exists() && !reported_path(&config).exists());
+    }
+
+    #[test]
+    fn a_refused_row_keeps_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        ledger(&config, "p1", 0, 1);
+        let mut send = |_: &str, _: &Value, _: &str| Delivery::Rejected("HTTP 422 bad".into());
+        assert_eq!(flush(&config, "h", None, &mut send).rejected, 1);
+        let kept = std::fs::read_to_string(quarantine_path(&config)).unwrap();
+        let entry: Value = serde_json::from_str(kept.trim()).unwrap();
+        assert_eq!(entry["kind"], "rejected");
+        assert_eq!(entry["reason"], "HTTP 422 bad");
+        assert_eq!(entry["project"], "p1");
     }
 
     #[test]

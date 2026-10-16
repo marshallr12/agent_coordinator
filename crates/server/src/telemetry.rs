@@ -19,7 +19,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -230,14 +230,21 @@ impl CanaryResult {
     }
 }
 
-/// Refuses an unknown project.
+/// Refuses an unknown project with `project_not_found`, so a host can tell
+/// a missing project from a coordinator that has no telemetry routes (whose
+/// 404 carries `record_not_found`, or no JSON error at all).
 async fn require_project(c: &mut SqliteConnection, p: &str) -> Result<(), AppError> {
     let found: i64 = sqlx::query_scalar("SELECT count(*) FROM projects WHERE id=?")
         .bind(p)
         .fetch_one(&mut *c)
         .await?;
     if found == 0 {
-        return Err(AppError::not_found());
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            "project_not_found",
+            "The project does not exist on this coordinator.",
+        )
+        .with_details(json!({"project_id": p})));
     }
     Ok(())
 }

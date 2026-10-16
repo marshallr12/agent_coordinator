@@ -300,7 +300,8 @@ fn report_costs(config: &config::Config, path: Option<&std::path::Path>) -> Resu
     println!(
         "{}",
         serde_json::json!({"accepted": summary.accepted, "duplicates": summary.duplicates,
-                           "rejected": summary.rejected, "pending": summary.pending})
+                           "rejected": summary.rejected, "quarantined": summary.quarantined,
+                           "pending": summary.pending})
     );
     Ok(())
 }

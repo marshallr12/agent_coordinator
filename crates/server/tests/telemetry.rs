@@ -372,7 +372,9 @@ async fn only_a_write_agent_credential_reports_and_anyone_signed_in_reads() {
 
     // An unknown project is unknown to reporters and readers alike.
     let missing = Uuid::new_v4();
-    let (status, _) = f
+    // The 404 names the missing project, so a host can tell it from a
+    // coordinator without telemetry routes (`record_not_found`).
+    let (status, body) = f
         .keyed(
             &f.host,
             &costs_path(&missing.to_string()),
@@ -381,13 +383,16 @@ async fn only_a_write_agent_credential_reports_and_anyone_signed_in_reads() {
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _) = f
+    assert_eq!(body["error"]["code"], "project_not_found", "{body}");
+    assert_eq!(body["error"]["details"]["project_id"], missing.to_string());
+    let (status, body) = f
         .get(
             &f.host,
             &format!("/api/v1/projects/{missing}/telemetry/canaries"),
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "project_not_found", "{body}");
 }
 
 #[tokio::test]

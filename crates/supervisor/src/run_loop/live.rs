@@ -561,7 +561,13 @@ impl Driver for LiveDriver {
         if summary.pending > 0 {
             self.report_after_ms = now.saturating_add(super::live_report::RETRY_AFTER_MS);
         }
-        if summary.accepted + summary.duplicates + summary.rejected + summary.pending > 0 {
+        if summary.accepted
+            + summary.duplicates
+            + summary.rejected
+            + summary.quarantined
+            + summary.pending
+            > 0
+        {
             eprintln!("agentc-supervisor run: report costs: {summary:?}");
         }
     }

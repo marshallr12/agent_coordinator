@@ -28,9 +28,11 @@ pub(super) fn host_name() -> String {
 }
 
 /// How the coordinator's answer to a batch is acted on: stored on a 200; a
-/// 400 or 422 refuses the rows themselves; a 401 or 403 means this
-/// credential cannot report, which every project shares; anything else
-/// (including a 404, which an older coordinator also answers) is retried.
+/// 400 or 422 refuses the rows themselves; a 404 coded `project_not_found`
+/// says the rows' project does not exist; a 401 or 403 means this credential
+/// cannot report, which every project shares; anything else (including any
+/// other 404, which an older coordinator without the route also answers) is
+/// retried.
 fn delivery(status: u16, body: &Value) -> Delivery {
     let data = &body["data"];
     let code = body["error"]["code"].as_str().unwrap_or("unknown");
@@ -44,6 +46,12 @@ fn delivery(status: u16, body: &Value) -> Delivery {
             stop: true,
             reason: format!("HTTP {status} {code}"),
         },
+        404 if code == "project_not_found" => Delivery::MissingProject(format!(
+            "HTTP {status} {code}: the coordinator has no project {}",
+            body["error"]["details"]["project_id"]
+                .as_str()
+                .unwrap_or("with this id")
+        )),
         404 => Delivery::Retry {
             stop: false,
             reason: format!("HTTP {status} {code}"),
@@ -157,6 +165,17 @@ mod tests {
             delivery(404, &missing),
             Delivery::Retry { stop: false, .. }
         ));
+        // An older coordinator's 404 may not even be a JSON error.
+        assert!(matches!(
+            delivery(404, &json!(null)),
+            Delivery::Retry { stop: false, .. }
+        ));
+        let gone = json!({"error": {"code": "project_not_found",
+            "details": {"project_id": "p1"}}});
+        match delivery(404, &gone) {
+            Delivery::MissingProject(reason) => assert!(reason.contains("p1"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
         for status in [401, 403, 409, 429, 500, 502] {
             assert!(matches!(
                 delivery(status, &json!({})),

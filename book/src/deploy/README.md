@@ -933,9 +933,30 @@ duplicated. A row the coordinator refuses as invalid is skipped for good (it
 stays in the ledger). Deleting `costs.reported` only makes the next pass resend
 everything, which the coordinator ignores. `sudo agentc-supervisor
 report-costs` runs one pass by hand and prints `{accepted, duplicates,
-rejected, pending}`; on a host that has run without reporting, it is the
-backfill that imports the existing ledger once. Run it with the loop stopped or
-idle: both only append to `costs.reported`.
+rejected, quarantined, pending}`; on a host that has run without reporting, it
+is the backfill that imports the existing ledger once. Run it with the loop
+stopped or idle: both only append to `costs.reported` and `costs.quarantined`.
+
+Diagnosing rows that stay `pending`: every failed batch logs `report costs:
+<reason>; project <id>, <n> row(s): <row id prefix> (task <id>, attempt <id>);
+…`, so the log names the project and the rows. A 404 coded `record_not_found`
+is retried every ten minutes, because a coordinator that predates the
+telemetry routes answers it too; if the project is known to exist, check the
+coordinator's version. A coordinator that has the routes but not the project
+answers 404 `project_not_found` (with `details.project_id`). Those rows are
+quarantined, not retried: the pass appends one JSON line per row to
+`/var/lib/agentc/costs.quarantined` (mode 0600) with the `project`, `task_id`,
+`attempt_id`, `role`, `usd`, `occurred_at_ms`, `quarantined_at_ms`, and the
+`reason`, logs `quarantined in …/costs.quarantined`, and counts the rows as
+`quarantined` instead of `pending`. The rows are not added to `costs.reported`
+and stay in `costs.jsonl`, so nothing is marked delivered or discarded. A row
+the coordinator refused as invalid gets a line there too (`kind` `rejected`),
+recording why. To recover, first find out why the project is missing (removed
+for good, a coordinator restored from an older backup, or a row from another
+coordinator). If the rows are orphaned, leave the file as it is: they are
+never sent again. If the project is back, delete the lines of that project
+from `costs.quarantined` (or the file) and run `sudo agentc-supervisor
+report-costs`; the coordinator stores each row once however often it arrives.
 
 A launch whose harness exits 0 although the agent neither submitted nor
 released its attempt (a broken shell, a refused tool, an agent that gave up)

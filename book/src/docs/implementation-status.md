@@ -29,7 +29,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   (see the [API contract](api-contract.md#supervisor-telemetry-cost-and-canary)).
   `agentc-supervisor` sends unsent `costs.jsonl` rows after every poll and
   `e2e-canary.py` sends each run's result, with the host files kept as the source
-  and unsent rows retried; `agentc-supervisor report-costs` and
+  and unsent rows retried (rows of a project the service reports as
+  `project_not_found` are quarantined in `costs.quarantined`, with the reason,
+  instead of retried); `agentc-supervisor report-costs` and
   `e2e-canary.py --backfill` import existing files once. The supervisor also
   reports its per-role daily spend caps (`POST .../telemetry/caps`), and
   `GET .../telemetry/autonomy` counts finished tasks, human-required

@@ -827,6 +827,10 @@ only what hosts report, per project, attributed to the reporting principal and
   `canary` marks a row of the host's canary project, and `task_id`,
   `session_id` and `attempt_id` are the host's claims, not checked against the
   service's records. Unknown fields are refused.
+- Every telemetry route answers `404 project_not_found` with
+  `details.project_id` for a project the service does not have, so a host can
+  tell a missing project (rows are quarantined, not retried) from a
+  coordinator without the route (a 404 with another code, retried).
 - `POST /canary-results` with `{host, rows}` records end-to-end canary runs. A
   row is `{row_id, harness, outcome, duration_seconds, detail, task_id,
   served_by, occurred_at_ms}`: `outcome` is `ok`, `failed` or `timeout`, and
