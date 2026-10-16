@@ -52,6 +52,8 @@ pub struct LiveDriver {
     /// Not before this time (ms since the epoch) does a pass that left cost
     /// rows unsent run again ([`live_report::RETRY_AFTER_MS`]).
     report_after_ms: i64,
+    /// When the daily caps are next reported (they change only with the config).
+    caps_after_ms: i64,
 }
 
 /// One project the loop works on: its binding, the mirror its clones start
@@ -143,6 +145,7 @@ impl LiveDriver {
             revision: String::new(),
             child: None,
             report_after_ms: 0,
+            caps_after_ms: 0,
         })
     }
 
@@ -537,6 +540,19 @@ impl Driver for LiveDriver {
 
     fn report_costs(&mut self, config: &Config) {
         let now = self.now_ms();
+        if now >= self.caps_after_ms {
+            let projects: Vec<&str> = (self.slots.iter())
+                .map(|slot| slot.binding.project_id.as_str())
+                .collect();
+            let sent =
+                super::live_report::caps_pass(config, &self.runtime, &self.client, &projects);
+            let wait = if sent {
+                super::live_report::CAPS_EVERY_MS
+            } else {
+                super::live_report::RETRY_AFTER_MS
+            };
+            self.caps_after_ms = now.saturating_add(wait);
+        }
         if now < self.report_after_ms {
             return;
         }
