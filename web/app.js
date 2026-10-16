@@ -485,7 +485,7 @@
       openProject(project.id);
     });
     const summary = el('div', 'autonomy-summary project-meta');
-    const autonomy = el('button', 'project-open', 'Autonomy →'); autonomy.type = 'button';
+    const autonomy = el('button', 'autonomy-open', 'Autonomy →'); autonomy.type = 'button';
     autonomy.setAttribute('aria-label', `Autonomy view for ${project.name || projectId}`);
     autonomy.addEventListener('click', () => openAutonomy(project.id));
     const summaryText = add(summary, el('span', 'autonomy-summary-text')); summaryText.dataset.projectId = projectId;
@@ -2157,10 +2157,11 @@
     keys.forEach((key, index) => { sources[key] = settled[index].status === 'fulfilled' ? { data: settled[index].value.data, path: paths[key] } : { error: errorMessage(settled[index].reason), path: paths[key] }; });
     state.autonomyLoaded = true; renderAutonomy(projectId, sources, days);
   }
-  // One card of the view: its title, a note when its source failed, else its content, then its sources.
-  function autonomyCard(key, title, needs, sources, build, ...links) {
+  // One card of the view: its title, a note when a source it needs failed, else its content, then its sources.
+  // `used` is the part of the data the card shows, so a change elsewhere leaves the card alone.
+  function autonomyCard(key, title, needs, used, sources, build, ...links) {
     const failed = needs.map(name => sources[name]).find(source => source.error);
-    return { key, sig: sig(title, needs.map(name => sources[name].data ?? sources[name].error)), build: () => {
+    return { key, sig: sig(title, failed?.error, used), build: () => {
       const card = el('article', 'card report-card autonomy-card'); add(card, el('h2', '', title));
       if (failed) add(card, el('p', 'inline-alert error', `This figure is unavailable: ${failed.error}`));
       else build(card);
@@ -2174,7 +2175,7 @@
     const caps = autonomy.caps || [], dayItems = costDays.items || [], canaryItems = canaries.items || [];
     const noSupervisor = sources.autonomy.data && sources.costDays.data && sources.canaries.data && !caps.length && !dayItems.length && !canaryItems.length;
     reconcile($('autonomy-content'), [
-      autonomyCard('hri', `Human-required interventions, last ${days} days`, ['autonomy', 'digest'], sources, card => {
+      autonomyCard('hri', `Human-required interventions, last ${days} days`, ['autonomy', 'digest'], [autonomy.human_required, autonomy.finished, (digest.hri || {}).count, (digest.hri || {}).stalled_tasks, (digest.hri || {}).stalled_queue], sources, card => {
         const hri = autonomy.human_required || {}, now = digest.hri || {}, finished = autonomy.finished || {};
         add(card, factList([['Interventions', text(hri.count)], ['Finished tasks', text(finished.count)], ['Per finished task', hri.per_finished_task === null || hri.per_finished_task === undefined ? 'No task finished in this window' : Number(hri.per_finished_task).toFixed(2)],
           ['Of which', `${text(hri.integrator_reports)} integrator reports needing a person, ${text(hri.parked_subjects)} subjects parked by the revise limit`], ['Stalled now', `${text((now.stalled_tasks || 0) + (now.stalled_queue || 0))} (not counted above: a stall has no start time in the records)`], ['Waiting for a person now', text(now.count)]]));
@@ -2183,7 +2184,7 @@
         else add(card, el('p', 'muted', 'Nothing finished and no intervention in this window.'));
         add(card, el('p', 'muted', 'Decisions reserved for a person are not counted; the attention digest reports them separately.'));
       }, ['Workflow, report and revise records', 'autonomy'], ['Attention digest', 'digest']),
-      autonomyCard('parked', 'Parked and human-required items', ['autonomy', 'digest'], sources, card => {
+      autonomyCard('parked', 'Parked and human-required items', ['autonomy', 'digest'], [autonomy.parked, (digest.hri || {}).items], sources, card => {
         const parked = (autonomy.parked || {}).items || [], waiting = (digest.hri || {}).items || [];
         add(card, el('h3', '', `Parked by the revise limit (${parked.length})`));
         if (!parked.length) add(card, el('p', 'muted', 'No task is parked. A task parks when agents revised it three times (not serialized after a landing) or six times in 24 hours.'));
@@ -2192,13 +2193,13 @@
         if (!waiting.length) add(card, el('p', 'muted', 'Nothing waits for a person.'));
         waiting.forEach(item => add(card, el('p', '', digestHriLine(item))));
       }, ['Task and revise records', 'autonomy'], ['Attention digest', 'digest']),
-      autonomyCard('cost', `Cost against the daily caps, last ${days} days`, ['autonomy', 'costDays', 'costTasks'], sources, card => renderAutonomyCost(card, projectId, caps, costDays, costTasks), ['Reported cost per day', 'costDays'], ['Reported cost per task', 'costTasks'], ['Reported caps', 'autonomy']),
-      autonomyCard('reviews', `Review outcomes, last ${days} days`, ['autonomy'], sources, card => {
+      autonomyCard('cost', `Cost against the daily caps, last ${days} days`, ['autonomy', 'costDays', 'costTasks'], [caps, costDays, costTasks], sources, card => renderAutonomyCost(card, projectId, caps, costDays, costTasks), ['Reported cost per day', 'costDays'], ['Reported cost per task', 'costTasks'], ['Reported caps', 'autonomy']),
+      autonomyCard('reviews', `Review outcomes, last ${days} days`, ['autonomy'], autonomy.reviews, sources, card => {
         const reviews = autonomy.reviews || {};
         if (!reviews.submissions_reviewed) { add(card, el('p', 'muted', 'No submission was reviewed in this window.')); return; }
         add(card, factList([['Submissions reviewed', text(reviews.submissions_reviewed)], ['Approved first pass', `${text(reviews.approved_first_pass)} (a task's first submission with no change requested)`], ['Needed revision', `${text(reviews.revised)} (a reviewer requested changes)`], ['Reviewer disagreements', `${text(reviews.disagreements)} (one reviewer approved, another requested changes)`], ['Review decisions', text(reviews.decisions)]]));
       }, ['Review decisions', 'autonomy']),
-      autonomyCard('canaries', 'End-to-end canary history', ['canaries'], sources, card => {
+      autonomyCard('canaries', 'End-to-end canary history', ['canaries'], canaries, sources, card => {
         const latest = canaries.latest || [];
         if (!canaryItems.length) { add(card, el('p', 'muted', 'No canary result has been reported for this project. A supervisor host reports each end-to-end canary run.')); return; }
         add(card, el('h3', '', 'Latest per host and harness'));
@@ -2207,7 +2208,7 @@
         add(card, dataTable(['When', 'Outcome', 'Harness', 'Host', 'Duration', 'Task'], canaryItems.map(item => [formatDate(item.occurred_at), outcomeBadge(item.outcome), item.harness, item.host, `${Math.round(item.duration_seconds)} s`, taskButton(projectId, item.task_id)])));
         if (canaries.next_before) add(card, el('p', 'muted', 'Older runs are available from the source.'));
       }, ['Reported canary results', 'canaries']),
-      autonomyCard('digest', 'Digest status', ['digest'], sources, card => {
+      autonomyCard('digest', 'Digest status', ['digest'], [digest.last_read_at, digest.digest_sender, digest.held_agent_tasks, digest.agent_task_weekly_budget], sources, card => {
         add(card, factList([['Last read', digest.last_read_at ? formatDate(digest.last_read_at) : 'Never read'], ['Designated sender', digest.digest_sender || 'None designated'], ['Last sent', 'Not recorded: the service sees when the digest is read, not when it is sent'], ['Held agent tasks', text((digest.held_agent_tasks || []).length)], ['Weekly agent-task budget', digest.agent_task_weekly_budget ? `${text(digest.agent_task_weekly_budget.admitted_this_week)} of ${text(digest.agent_task_weekly_budget.limit)} admitted this week` : '']]));
         const open = el('button', 'button subtle', 'Open the attention digest'); open.type = 'button'; open.addEventListener('click', openDigest); add(card, open);
       }, ['Attention digest', 'digest']),

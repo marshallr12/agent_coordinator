@@ -125,7 +125,7 @@ a.nav-item { text-decoration: none; }
 .binding-content .button { width: 100%; margin-top: 8px; }
 .project-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 17px; }
 .project-meta { color: var(--muted); font-size: 11px; }
-.project-open { padding: 0; border: 0; background: transparent; color: var(--teal); font-size: 12px; font-weight: 800; }
+.project-open, .autonomy-open { padding: 0; border: 0; background: transparent; color: var(--teal); font-size: 12px; font-weight: 800; }
 .project-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .project-settings-button { flex-shrink: 0; width: 40px; height: 40px; padding: 0; font-size: 22px; background: var(--surface); color: var(--teal); }
 .project-binding-card { margin-top: 24px; }
