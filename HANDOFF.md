@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production `fc3f424`; Linux upgraded; pilot gen7 renewed; mxmini quiet-hours restore pending (2026-10-16 00:43 UTC, workflow on)
+## Current resume point — Linux rollout complete at `fc3f424`; pilot gen7 renewing; quiet-hours restored (2026-10-16 00:50 UTC, workflow on)
 
 **Mira daytime P6 run (ledger tag `[daytime P6 Mira]`):**
 - **DEPLOYED fc3f4244ce89a7f85956df3ae9aa2bca3d59f824.** Owner dispatched release 38783852315;
@@ -71,20 +71,21 @@ execution, and links everything else.
   It renewed immediately at **00:40:44Z**, fresh ownership verified, then continued at **60 seconds**
   per the actual claim guidance. Subsequent renews verified; no retry/recovery was needed.
   Old renew4194295 remains stopped. Read-only helpers1997610,1997611,2413349 left unchanged.
-- **Oracle release flag cleared 00:41:30Z**, only after fresh pilot claim/renew. **mxmini still holds
-  `release-fc3f424`**, waiting for the local password step below. Preserve its **22:00-07:00 local
-  claim window** when restoring quiet-hours; no daytime gap should open.
+- **Oracle release flag cleared 00:41:30Z**, only after fresh pilot claim/renew. **mxmini held
+  `release-fc3f424`** until the final owner step; **quiet-hours restoration is now verified at 00:49Z
+  10-16**. The marker is `quiet-hours` and the every-minute cron rule remains **22:00-07:00 local**.
+  Outside that night claim window, holding this marker is correct; the restore helper kept the file
+  present while retagging it, so no daytime claim gap opened.
 - **Earlier SithBit authority drained naturally** by 20:29Z; all seven global counts zero before
   deploy-pre, after stop, and in post-deploy verification. No SithBit work was mutated. Oracle
   integrator was paused while idle before the final zero check, then upgraded/restarted.
-- **Sudo authorization granted by owner:** Mira may run sudo wherever available; server steps
-  completed directly. Local `sudo -n` still needs a password, so the mxmini owner ran the root install
-  helper. Install/host-setup is now verified; do not rerun it. The **only remaining local step** is:
-  `sudo bash /home/marshall/.local/share/agent-coordinator-autonomy/p6-mxmini-restore-quiet-hours.sh`.
-  This prepared helper passed bash syntax checks; it requires our release marker, retags the existing
-  file to `quiet-hours`, and applies the installed claim-window helper without removing the file first.
-  Command printed in chat; async terminal-completion confirmation pending. Do not ask for permission
-  again, change sudo policy, or solicit the password through chat/askpass/-S.
+- **All Linux root steps completed:** owner authorization allows Mira to run sudo wherever available.
+  GCP/oracle steps ran directly; local sudo required a terminal password, so the owner ran the mxmini
+  install and final `p6-mxmini-restore-quiet-hours.sh` helper. Both were independently verified.
+  No password was passed through chat, no sudo policy/credential/journal change or workaround used.
+  Final checks: both hosts' compatibility all true, fresh supervisor heartbeats; oracle supervisor and
+  integrator active; pilot ownership active and repeated renews verified. Final snapshots under the
+  local autonomy state directory: `p6-final-{pilot,digest,canaries,open-reports}.json`.
 - **MiniAir-only prompt ready:** `~/Downloads/miniair-upgrade-fc3f424.txt`, using accepted ZIP
   `e0c5ed896ea565222c4ba5f1c71b2a1733ebb9576d0cd2db048ccef8939d9d84` and EXE
   `1f9d48dac6c324ab6981cc769621f128f89e690d8ffe0ca66de47b22d31d7ba1`.
@@ -119,16 +120,17 @@ execution, and links everything else.
 - Preserve the pre-existing uncommitted `.claude/decisions-pending.md` edit. This run edits only
   HANDOFF.md in the parent checkout; build worktrees remain clean and detached.
 
-**Next actions (do not redeploy, reinstall or claim again):**
-1. Verify completion of the pending mxmini quiet-hours helper (local terminal password required).
-   It should hold `quiet-hours` outside 22:00-07:00 local and permit claims inside that window.
-   Do not clear an unexpected owner marker. Linux binaries and new pilot claim/renew are already done.
-2. Verify marker/window, fresh supervisor heartbeat, oracle runtime and new pilot renew remain healthy.
-   Refresh handoff and `~/Downloads/prompt.txt`, docs gate, commit/push only HANDOFF on autonomy-plan.
-   Preserve the unrelated dirty parent file and other worktrees. No new admissions; keep be6d39af planned.
-3. MiniAir prompt is ready and service prerequisite satisfied; owner runs it on MiniAir. The new nightly
-   canary is in progress, not yet a terminal PASS; record its actual outcome when available rather than
-   treating the previous day's row as tonight's result. No new human-required integrator reports.
+**Next session (release work is complete; no pending Linux terminal step):**
+1. Inspect the existing pilot renew pid778271/log and fresh ownership; keep gen7 active. Do not start
+   duplicate helpers, claim again or repeat this release. Respect the mxmini night claim window.
+2. Observe tonight's canary to its terminal outcome when available and check digest/open reports.
+   The 10-16 run is still in progress; do not report the 10-15 result as tonight's PASS. Oracle is
+   processing already-admitted work, including 693af855 review; no new admissions are authorized.
+3. Owner follows `~/Downloads/miniair-upgrade-fc3f424.txt` on MiniAir; this session only prepared that
+   verified Windows upgrade prompt. Human-delivered/planned tasks and d2ca0225 retirement remain
+   owner decisions. Keep be6d39af planned. Preserve unrelated edits/worktrees and rollback records.
+4. This handoff and `~/Downloads/prompt.txt` were refreshed for the completed Linux rollout; future
+   changes need current live evidence and the applicable gate. Do not redispatch/deploy fc3f424.
 
 ## Previous resume point — main `57029d8` (rustls fix landed); release after bb5fb219; canary ok (2026-10-15 03:30 UTC, workflow on)
 
