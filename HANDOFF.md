@@ -4,7 +4,65 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 observation refreshed; mxmini night window open (2026-10-16 02:00 UTC, workflow on)
+## Current resume point — P6 pilot recovered to gen8 after renewer stopped (2026-10-16 13:10 UTC, workflow on)
+
+- **Actual failure and owner-authorized recovery:** old renew **pid778271** stopped at **10:12:21Z**
+  after `fresh ownership read failed after renew`. Service history confirms its final successful
+  heartbeat **10:11:51.330Z**, expiry **11:11:51.330Z**. At **13:06Z**, pilot **d513bc21** was
+  `recovery_required`, `authority_valid=false`, lease0. The attempt row still said `active`;
+  that did not grant authority. No expired-lease renewal or old-receipt replay was attempted.
+- The owner explicitly answered **"Authorize guarded pilot recovery"** in this session. Same
+  **p3b-pilot** session **a9c40947-f8fc-4491-ba59-9f4880e88f7f**, harness `claude`, resumed.
+  Saved checkpoints, helper/process state and protected session diagnosis were inspected:
+  no pilot checkout, jobs, reservations or pending mutation. Guarded recovery claim at
+  **13:08:42.367Z** returned **7ec05f84-4c36-4e5f-93b2-ddc7b69a3dbb, generation8**;
+  explicit recovery resolution `resume` succeeded and changed its mode to `work`.
+- Exactly one replacement helper **pid1723789** runs from
+  `~/.local/share/agent-coordinator-autonomy/p6-pilot-renew-gen8/`, cadence **60seconds**.
+  Its `renew.py` is an unchanged copy of the original. Initial and next scheduled renewals verified; fresh heartbeat
+  **2026-10-16T13:10:13.855Z**, expiry **2026-10-16T14:10:13.855Z**, independently confirmed through
+  **dogfood-orchestrator**. All original gen7 files/logs and other helpers remain preserved.
+  Serialize calls sharing p3b-pilot; use dogfood-orchestrator for independent observations.
+  The helper's transient-read failure behavior remains a limitation; no fix is claimed.
+- **One actual pilot recovery intervention** is now recorded, separately from the earlier
+  planned deployment releases and owner P1 scheduling decision. Digest **13:06Z HRI1** was
+  `stalled_queue` (one ready task; last progress05:42:50.995Z). After recovery, digest is
+  **HRI0, stalled_tasks0, stalled_queue0**. No pending human decisions.
+- **3453a676-d15a-4172-bf0a-300d0596b08e** filed **P2 Planned**, without admission: the local pilot
+  helper exits permanently after a failed post-renew read, with no bounded read retry or dedicated
+  stop alert. This differs from supervisor retry task fb8b2326. Independent timeline records a
+  separate **HTTP522 at10:14:14Z**, followed by Idle10:15:14Z; correlation only, not a proven cause
+  of the helper read failure. GCP service is active/running, NRestarts0, since10-15 20:30:29Z;
+  its10:10-10:14Z journal had no entries. No service restart/redeployment performed.
+- Linux rollout remains complete at clean/exact **fc3f4244ce89a7f85956df3ae9aa2bca3d59f824**.
+  Anonymous no-redirect HTTPS startup/auth help read; selected CLI compatibility all true.
+  Both hosts' installed binaries match retained fc3f424 manifests. Oracle exact units
+  **agentc-run.service** and **agentc-integrator@run.service** active/running, NRestarts0,
+  fresh heartbeat, integratorIdle, release marker absent. mxmini **pid777161** fresh heartbeat,
+  `quiet-hours` marker correctly present outside its **22:00-07:00 local** window; cron untouched.
+- Previously admitted **1a3290db,335b6713,5ad83ff3,97b7b62a** are now **Done**;693af855 remains Done.
+  Let daemons process already-admitted work. All119 tasks read in one200-item page before filing
+  the new Planned defect; no task admissions. **be6d39af remains P3 Planned**; human-delivered
+  55b8a06d and other owner choices remain untouched. No SithBit task mutations.
+- Nightly **10-16 canary remains PASS**, oracle-1/claude,01:18:52Z,4727.2seconds,row8906f6cd.
+  Only open report remains historical27f99b21,flaky,requires_human=false. Browser observation
+  **blocked in this harness**: no enabled browser surfaces; creating iab returned
+  `Browser is not available: iab`. Do not claim a new visible dashboard verification.
+- Fetch succeeded; **origin/main7ca0eec80ced1bc2219bf03334cd1342f1ee1a7b**. autonomy-plan matched
+  upstream before this refresh. Unrelated dirty `.claude/decisions-pending.md`, all other worktrees,
+  credentials, journals, proofs and rollback evidence preserved. No new release, upgrade or daemon
+  restart. MiniAir installation remains owner follow-up; no Windows install claimed here.
+- Evidence: `~/.local/share/agent-coordinator-autonomy/p6-observe-20261016T130602Z-*`,
+  `p6-observe-startup-guide-20261016.md`, both renew directories and appended `pilot-timeline.log`.
+  Documentation check uses mdBook0.5.4; browser verification remains unavailable.
+
+**Next session:** inspect existing gen8 helper/lease first, then digest/host heartbeats; do not
+reclaim, release, finish or start a duplicate helper while ownership is valid. If authority is lost,
+stop ownership-dependent work and report the new blocker; this session's recovery authorization
+covered this specific gen7 incident. No new admissions or deployment. Keep both new defects Planned,
+respect the night window and leave MiniAir, human-delivered work and branch retirement to the owner.
+
+## Previous resume point — P6 observation refreshed; mxmini night window open (2026-10-16 02:00 UTC, workflow on)
 
 - Observation only; Linux rollout remains complete. Anonymous HTTPS discovery (redirects disabled)
   and the selected `/usr/local/bin/agent-coordinator` are clean/exact **fc3f424**; every compatibility
