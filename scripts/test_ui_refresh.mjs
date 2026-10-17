@@ -519,14 +519,14 @@ async function main() {
 
     // ---- 11. Resources ----------------------------------------------------------------------------
     await goTo('.nav-item[data-view=resources]', 'resources');
-    await waitPage("document.querySelectorAll('#resources-list article').length === 2", 'resources');
+    await waitPage("document.querySelectorAll('#resources-list tr').length === 2", 'resources');
     await quiet('resources refresh button', 'resources', clickAndWait('#refresh-resources', '/api/v1/resources'));
     await quiet('resources poll', 'resources', pollTick('GET /api/v1/resources'));
-    await onlyChanged('resources one changed', '#resources-list article', () => { resources[0] = { ...resources[0], held_units: 1 }; }, pollTick('GET /api/v1/resources'));
+    await onlyChanged('resources one changed', '#resources-list tr', () => { resources[0] = { ...resources[0], held_units: 1 }; }, pollTick('GET /api/v1/resources'));
     await evaluate("document.querySelector('#resource-description').focus()");
     resources[1] = { ...resources[1], held_units: 0 };
     await pollTick('GET /api/v1/resources')(); await settle();
-    assert(await evaluate("document.activeElement.id === 'resource-description' && document.querySelectorAll('#resources-list article')[1].textContent.includes('0 held')"), 'The resource form lost focus or the list did not refresh beside it.');
+    assert(await evaluate("document.activeElement.id === 'resource-description' && document.querySelectorAll('#resources-list tr')[1].children[3].textContent === '0'"), 'The resource form lost focus or the list did not refresh beside it.');
     await evaluate("document.querySelector('#resource-description').blur()");
 
     // ---- 12. Access & credentials -----------------------------------------------------------------

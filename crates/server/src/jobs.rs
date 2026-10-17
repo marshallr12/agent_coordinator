@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
     extract::{FromRequestParts, Path, Query, State, rejection::JsonRejection},
     http::{HeaderMap, header, request::Parts},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use coordinator_core::timestamp;
 use serde::{Deserialize, Serialize};
@@ -157,6 +157,10 @@ impl FromRequestParts<AppState> for ReporterAuth {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/resources", get(resources).post(create_resource))
+        .route(
+            "/api/v1/resources/{resource}",
+            patch(update_resource).delete(delete_resource),
+        )
         .route(
             "/api/v1/projects/{project}/attempts/{attempt}/reservations",
             get(attempt_reservations).post(create_reservation),
@@ -306,6 +310,150 @@ async fn create_resource(
     Ok(response(
         mutation
             .finish(value, None, "resource.created", &id)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceUpdate {
+    key: Option<String>,
+    capacity: Option<i64>,
+    description: Option<String>,
+}
+
+const RESOURCE_SELECT: &str = "SELECT x.id,x.key,x.capacity,x.description,x.created_at, \
+     COALESCE((SELECT sum(ri.units) FROM reservation_items ri \
+       JOIN reservations r ON r.id=ri.reservation_id \
+       WHERE ri.resource_id=x.id AND r.state='held'),0) AS held_units FROM resources x WHERE x.id=?";
+
+async fn update_resource(
+    State(state): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Path(resource): Path<String>,
+    body: Result<Json<ResourceUpdate>, JsonRejection>,
+) -> Reply {
+    let input = payload(body)?;
+    uuid(&resource, "resource")?;
+    if input.key.is_none() && input.capacity.is_none() && input.description.is_none() {
+        return Err(AppError::bad_request(
+            "Provide at least one of key, capacity, or description.",
+        ));
+    }
+    if let Some(key) = &input.key {
+        resource_key(key)?;
+    }
+    if let Some(description) = &input.description {
+        bounded(description, "description", 4096, false)?;
+    }
+    if input.capacity.is_some_and(|c| !(1..=1000).contains(&c)) {
+        return Err(AppError::bad_request(
+            "capacity must be between 1 and 1000.",
+        ));
+    }
+    let operation = format!("PATCH /api/v1/resources/{resource}");
+    let mut mutation = Mutation::begin(&state, &auth, &headers, &operation, &input).await?;
+    if mutation.actor.kind != "human" {
+        return Err(AppError::human_gate(
+            "resource_update",
+            "A human operator updates globally shared resources.",
+        ));
+    }
+    if let Some(value) = mutation.replay {
+        return Ok(response(value));
+    }
+    let current = sqlx::query(RESOURCE_SELECT)
+        .bind(&resource)
+        .fetch_optional(&mut *mutation.tx)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    if let Some(capacity) = input.capacity
+        && capacity < current.get::<i64, _>("held_units")
+    {
+        return Err(AppError::conflict(
+            "resource_capacity_below_holds",
+            "Capacity cannot be lower than the units currently held by reservations.",
+        ));
+    }
+    if let Some(key) = &input.key
+        && sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resources WHERE key=? AND id<>?")
+            .bind(key)
+            .bind(&resource)
+            .fetch_one(&mut *mutation.tx)
+            .await?
+            > 0
+    {
+        return Err(AppError::conflict(
+            "resource_exists",
+            "A resource already uses this canonical key.",
+        ));
+    }
+    sqlx::query(
+        "UPDATE resources SET key=COALESCE(?,key),capacity=COALESCE(?,capacity),\
+         description=COALESCE(?,description) WHERE id=?",
+    )
+    .bind(&input.key)
+    .bind(input.capacity)
+    .bind(&input.description)
+    .bind(&resource)
+    .execute(&mut *mutation.tx)
+    .await?;
+    let row = sqlx::query(RESOURCE_SELECT)
+        .bind(&resource)
+        .fetch_one(&mut *mutation.tx)
+        .await?;
+    let value = resource_value(&row);
+    Ok(response(
+        mutation
+            .finish(value, None, "resource.updated", &resource)
+            .await?,
+    ))
+}
+
+async fn delete_resource(
+    State(state): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Path(resource): Path<String>,
+) -> Reply {
+    uuid(&resource, "resource")?;
+    let operation = format!("DELETE /api/v1/resources/{resource}");
+    let mut mutation =
+        Mutation::begin(&state, &auth, &headers, &operation, &json!({"id":resource})).await?;
+    if mutation.actor.kind != "human" {
+        return Err(AppError::human_gate(
+            "resource_delete",
+            "A human operator deletes globally shared resources.",
+        ));
+    }
+    if let Some(value) = mutation.replay {
+        return Ok(response(value));
+    }
+    let current = sqlx::query(RESOURCE_SELECT)
+        .bind(&resource)
+        .fetch_optional(&mut *mutation.tx)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    if sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reservation_items WHERE resource_id=?")
+        .bind(&resource)
+        .fetch_one(&mut *mutation.tx)
+        .await?
+        > 0
+    {
+        return Err(AppError::conflict(
+            "resource_in_use",
+            "Reservation history references this resource, so it cannot be deleted.",
+        ));
+    }
+    sqlx::query("DELETE FROM resources WHERE id=?")
+        .bind(&resource)
+        .execute(&mut *mutation.tx)
+        .await?;
+    let value = json!({"id":resource,"key":current.get::<String,_>("key"),"deleted":true});
+    Ok(response(
+        mutation
+            .finish(value, None, "resource.deleted", &resource)
             .await?,
     ))
 }

@@ -190,7 +190,11 @@ a.nav-item { text-decoration: none; }
 .resource-form input { min-width: 0; }
 .resource-form > div > p { margin: 4px 0 0; font-size: 12px; }
 .resource-form > button { margin-top: 24px; white-space: nowrap; }
-#resources-list { margin-top: 20px; }
+#resources-table { margin-top: 20px; }
+.table-wrap { overflow-x: auto; }
+.resource-table td code { font-size: 12px; }
+.resource-table .row-actions { white-space: nowrap; }
+.resource-table .row-actions .button + .button { margin-left: 6px; }
 #load-more-resources { margin-top: 20px; }
 .job-evidence-card { margin-top: 15px; }
 .task-attachments-card { margin-top: 15px; }

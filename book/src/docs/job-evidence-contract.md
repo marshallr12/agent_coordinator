@@ -9,7 +9,12 @@ perform automatic remote execution.
 ## HTTP interface (successes use the existing envelope)
 
 GET/POST `/api/v1/resources`: globally shared canonical `key`, `capacity` (1–1000),
-`description`; creation human-only, uniqueness by key, immutable initial capacity.
+`description`; creation human-only, uniqueness by key.
+PATCH `/api/v1/resources/{r}` (human-only; any of `key`, `capacity`, `description`):
+capacity may not drop below the units currently held and a key may not duplicate
+another resource's. DELETE `/api/v1/resources/{r}` (human-only) is refused with
+`resource_in_use` once any reservation has referenced the resource, so reservation
+history stays intact.
 GET/POST `/api/v1/projects/{p}/attempts/{a}/reservations`: create
 `{generation,items:[{resource_id,units}]}` atomically, one active reservation per
 attempt; same resource identity blocks across projects. All-or-none admission.

@@ -220,9 +220,9 @@
                 <div><label for="resource-capacity">Capacity units</label><input id="resource-capacity" type="number" required min="1" max="1000" value="1" aria-describedby="resource-capacity-help"><p id="resource-capacity-help" class="muted">Use 1 when work must be exclusive; use a larger number only for interchangeable concurrent units.</p></div>
                 <div><label for="resource-description">Description</label><input id="resource-description" maxlength="2000" placeholder="What consumes this capacity?" aria-describedby="resource-description-help"><p id="resource-description-help" class="muted">Describe what it is, who uses it, and any access constraint that matters.</p></div>
                 <button class="button primary" type="submit">Create resource</button>
-              </form><p class="muted">Capacity is fixed when created.</p></article>
+              </form><p class="muted">Use Edit in the table to change a resource, or Delete to remove one that no reservation has used.</p></article>
               <div id="resources-state" class="state-panel" role="status">Loading resources…</div>
-              <div id="resources-list" class="project-grid"></div>
+              <div class="table-wrap"><table class="data-table resource-table" id="resources-table"><thead><tr><th scope="col">Key</th><th scope="col">Description</th><th scope="col">Capacity</th><th scope="col">Held</th><th scope="col">ID</th><th scope="col">Actions</th></tr></thead><tbody id="resources-list"></tbody></table></div>
               <button id="load-more-resources" class="button subtle" type="button" hidden>Load more resources</button>
             </section>
 
