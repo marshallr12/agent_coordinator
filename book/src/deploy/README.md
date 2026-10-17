@@ -758,6 +758,145 @@ named by `NODE=`. The installer downloads the pinned reviewer
 A host prepared this way can run `agentc-supervisor launch-root` by hand, or
 claim work unattended with the live loop below.
 
+## Windows supervisor through WSL2
+
+The WSL bring-up helpers are `deploy/agentc/wsl-host.py` (Linux) and
+`deploy/agentc/wsl-host.ps1` (Windows). They use the existing Linux host installer
+and supervisor, with no native Windows containment alternative. **Workstation
+acceptance is pending:** the MINIAIR probe on 2026-10-17 found Ubuntu 24.04.5,
+WSL2 kernel 6.18.54.1, systemd, nftables, network namespaces and Bubblewrap working,
+but AppArmor inactive, Windows interop enabled, and no Linux Codex or installed
+supervisor. The full containment suite and Windows reboot/shutdown rehearsal have
+not run. Do not enable unattended work on that configuration.
+
+Use a **dedicated Ubuntu 24.04 WSL2 distro**, owned by the Windows account that
+will run the Scheduled Task (example name `AgentcUbuntu`). Keep ordinary Ubuntu,
+Docker Desktop and their data intact. Install a current Microsoft WSL release
+and the distro through the owner's terminal; confirm its version is 2 with
+`wsl --list --verbose`. A distro belongs to its Windows user, so a task running
+as SYSTEM cannot substitute for that user. The provided task starts at that
+user's next logon after reboot; it does not promise work before anyone signs in.
+
+1. Inside the dedicated distro, install the usual Linux build dependencies,
+   Python 3, Bubblewrap 0.8+, nftables, AppArmor tools, and both owner-pinned
+   Linux harnesses (`~/.local/bin/claude` and `~/.local/bin/codex`). Clone and
+   build the repository on the distro's Linux filesystem, for example
+   `~/src/agent_coordinator`, using the clean-revision build above. Never use
+   `/mnt/c`, a Windows Git executable, Windows harness binaries or Windows
+   credential directories. Logins and the push key remain the existing manual
+   per-role Linux provisioning steps above; do not copy workstation secrets.
+2. Merge `deploy/agentc/wsl.conf.example` into the dedicated distro's
+   `/etc/wsl.conf`. It enables systemd, gives it 180 seconds for startup/shutdown,
+   and disables Windows executable interop, Windows PATH imports, drive
+   automounts and fstab mounts. Disable Docker Desktop integration for this
+   distro. Foreign/shared mounts (including `/mnt/wsl` and WSLg) are refused:
+   remove them in the dedicated distro's owner-controlled boot configuration,
+   without changing other distros. Verify that no Windows drive, WSLg or Docker
+   socket remains available to the role accounts. Disabling interop is necessary
+   because a Linux uid must not launch a Windows process as the Windows owner.
+3. Review and merge `deploy/agentc/wslconfig.example` into
+   `%UserProfile%\.wslconfig`. Its **global VM settings affect every WSL2 distro**,
+   including Docker Desktop. The example caps memory at 6 GiB, CPUs at two and
+   swap at 2 GiB; select caps appropriate to the host and keep the supervisor's
+   own resource limits. It chooses NAT, disables DNS tunneling, automatic Windows
+   proxy import, localhost forwarding and WSLg, and enables AppArmor at kernel
+   boot. Preserve existing required kernel arguments. NAT alone is not an egress
+   boundary: the unchanged Linux uid firewall, per-launch network namespace and
+   allowlisted proxy remain mandatory. DNS tunneling and mirrored networking are
+   outside this acceptance profile; rerun all containment checks after any change.
+   Arrange a quiet point before `wsl --shutdown`, which stops **all** distros.
+   Never restart another active distro just to apply these settings.
+4. After restart, run the read-only prerequisites check from the clean Linux
+   checkout as the owner:
+
+   ```sh
+   sudo python3 deploy/agentc/wsl-host.py check
+   ```
+
+   This prints each failure and refuses unsafe configuration. An inactive
+   AppArmor module is a failure even when the kernel was compiled with support.
+   Do not disable AppArmor, remove firewall rules, grant privileged agent uids,
+   or skip namespace checks to proceed. Options are to enable the required
+   features in a supported WSL kernel and repeat the probes, use a dedicated
+   Linux VM with those features, or keep serving work on an accepted Linux host.
+5. Run the existing installer through the wrapper, passing its normal binary
+   paths and workstation quiet hours. Root steps remain owner-run:
+
+   ```sh
+   sudo SUPERVISOR="$PWD/target/release/agentc-supervisor" \
+     CLI="$PWD/target/release/agent-coordinator" QUIET_HOURS=22:00-07:00 \
+     python3 deploy/agentc/wsl-host.py install --source "$PWD"
+   ```
+
+   It forces the existing agentc-only AppArmor profile and installs a root-owned
+   controller at `/opt/agentc/bin/agentc-wsl-host`. Complete every printed manual
+   login, credential, push-key and staging step. Confirm the required services
+   and per-role logins inside Linux. Quiet hours use the distro's local timezone;
+   set and inspect it explicitly. Keep `agentc-run` disabled at boot: the Windows
+   task starts it only after admission checks. The firewall/proxy services retain
+   their ordinary systemd boot ordering.
+6. Run the **whole** containment suite, including the Cargo legs:
+
+   ```sh
+   sudo /opt/agentc/bin/agentc-wsl-host verify --source "$PWD"
+   ```
+
+   It runs the unchanged `containment-suite.sh --cargo-test`, keeps a private
+   `/var/log/agentc-wsl-containment.log`, and creates a root-owned admission
+   receipt only for exit zero with no `FAIL` or `SKIP`. Configure staging so its
+   browser leg runs. The documented nested-Codex Cargo notes remain part of the
+   unchanged suite; this wrapper does not alter its tests. Before another run,
+   preserve and move the previous log; an unsuccessful rerun invalidates the
+   old receipt. Record the source revision, kernel, package/harness identities,
+   suite results and any failing checks in the task's artifacts. The startup
+   gate checks the receipt's kernel, binaries, controller and distro configuration;
+   rerun verification after configuration, toolchain or firewall changes too.
+7. From the owning Windows account, use the trusted source copy of
+   `deploy/agentc/wsl-host.ps1`:
+
+   ```powershell
+   .\deploy\agentc\wsl-host.ps1 -Action Install -Distribution AgentcUbuntu
+   Start-ScheduledTask -TaskName Agentc-WSL-Supervisor
+   ```
+
+   Install checks Linux admission first, copies its script outside the checkout
+   into `%LOCALAPPDATA%\Agentc\WSL`, and registers an interactive-user logon task
+   without a stored password. It does not start the task. The hidden foreground
+   `wsl.exe` call keeps the distro alive, uses systemd to start the unchanged
+   supervisor, and exits if that service fails. The task allows one instance and
+   retries failures three times. It survives closing terminals and starts again
+   at the next logon. Inspect the task's result and `journalctl -u agentc-run`.
+8. **Drain before shutdown or restart.** The wrapper's `Stop` action waits for
+   `systemctl stop agentc-run` and checks the systemd result before stopping the
+   Windows keepalive task. `Shutdown` and `Restart` do that first and request
+   Windows shutdown only after success. Use the installed script:
+
+   ```powershell
+   & "$env:LOCALAPPDATA\Agentc\WSL\wsl-host.ps1" -Action Stop -Distribution AgentcUbuntu
+   ```
+
+   Ordinary Windows shutdown relies on WSL/systemd to stop the enabled Linux
+   services, with `initTimeout=180000` allowing more than the existing
+   `agentc-run` unit's 120-second stop timeout. This **requires a host rehearsal**:
+   start a disposable mock launch, perform normal Windows shutdown/reboot, then
+   verify its drain/release, terminal producer observations and resource holds
+   in the service and journal. Repeat with explicit Stop and logon recovery.
+   Record measured timing and the exact WSL version. A failed or truncated drain
+   blocks acceptance; use the explicit drain actions or an accepted Linux host
+   until resolved. Task Scheduler's forced stop and `wsl --terminate` are not
+   substitutes for a drain. Power loss or forced termination still needs the
+   existing inspected recovery procedure; never infer that resources are free.
+
+`-Action Uninstall` drains before unregistering the Windows task and preserves
+Linux configuration, credentials and evidence. Disable unattended startup until
+all acceptance evidence, including normal Windows shutdown, is recorded.
+
+Microsoft documents [WSL configuration and VM-wide resource/network settings](https://learn.microsoft.com/en-us/windows/wsl/wsl-config),
+[systemd behavior](https://learn.microsoft.com/en-us/windows/wsl/systemd/),
+and the [interop/automount security model](https://wsl.dev/technical-documentation/security/).
+The WSL maintainer's [shutdown-timeout clarification](https://github.com/microsoft/WSL/issues/41596)
+explains why the default 10-second distro timeout cannot be assumed sufficient.
+
 ## Live supervisor loop
 
 `agentc-supervisor run` (as root) is the P3b pilot-core loop for one host.

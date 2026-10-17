@@ -1,0 +1,12 @@
+# Merge deliberately into %UserProfile%\.wslconfig; this affects ALL WSL2 distros.
+[wsl2]
+memory=6GB
+processors=2
+swap=2GB
+networkingMode=nat
+dnsTunneling=false
+autoProxy=false
+localhostForwarding=false
+guiApplications=false
+# Preserve any required existing kernel parameters when merging.
+kernelCommandLine=apparmor=1 security=apparmor
