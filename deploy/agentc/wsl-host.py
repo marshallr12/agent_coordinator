@@ -45,6 +45,13 @@ def configuration_errors(config):
     return errors
 
 
+def networking_errors(mode, returncode=0):
+    if returncode or mode.strip().lower() != 'nat':
+        return ['actual WSL networking mode must be NAT (wslinfo --networking-mode); '
+                'a configured NAT value does not prove that WSL avoided fallback']
+    return []
+
+
 def preflight():
     errors = []
     if os.geteuid() != 0:
@@ -56,6 +63,11 @@ def preflight():
     config = configparser.ConfigParser()
     config.read('/etc/wsl.conf')
     errors.extend(configuration_errors(config))
+    if shutil.which('wslinfo') is None:
+        errors.append('wslinfo is required to verify the actual WSL networking mode')
+    else:
+        mode = command(['wslinfo', '--networking-mode'])
+        errors.extend(networking_errors(mode.stdout, mode.returncode))
     interop = Path('/proc/sys/fs/binfmt_misc/WSLInterop')
     if interop.exists() and interop.read_text().startswith('enabled'):
         errors.append('Windows executable interop is still enabled; restart the distro')

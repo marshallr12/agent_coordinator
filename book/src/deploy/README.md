@@ -766,7 +766,10 @@ and supervisor, with no native Windows containment alternative. **Workstation
 acceptance is pending:** the MINIAIR probe on 2026-10-17 found Ubuntu 24.04.5,
 WSL2 kernel 6.18.54.1, systemd, nftables, network namespaces and Bubblewrap working,
 but AppArmor inactive, Windows interop enabled, and no Linux Codex or installed
-supervisor. The full containment suite and Windows reboot/shutdown rehearsal have
+supervisor. Its VM was explicitly configured for Consomme networking. Three
+unchanged supervisor tests observed closed loopback ports as reachable/reset
+instead of refused in that mode; the CLI smoke's health check also disconnected.
+The full containment suite and Windows reboot/shutdown rehearsal have
 not run. Do not enable unattended work on that configuration.
 
 Use a **dedicated Ubuntu 24.04 WSL2 distro**, owned by the Windows account that
@@ -802,7 +805,10 @@ user's next logon after reboot; it does not promise work before anyone signs in.
    proxy import, localhost forwarding and WSLg, and enables AppArmor at kernel
    boot. Preserve existing required kernel arguments. NAT alone is not an egress
    boundary: the unchanged Linux uid firewall, per-launch network namespace and
-   allowlisted proxy remain mandatory. DNS tunneling and mirrored networking are
+   allowlisted proxy remain mandatory. Preflight also checks the actual mode
+   with `wslinfo --networking-mode`: WSL may fall back from a requested NAT mode,
+   so a configuration file alone is insufficient. Consomme/virtioproxy fallback,
+   DNS tunneling and mirrored networking are
    outside this acceptance profile; rerun all containment checks after any change.
    Arrange a quiet point before `wsl --shutdown`, which stops **all** distros.
    Never restart another active distro just to apply these settings.
