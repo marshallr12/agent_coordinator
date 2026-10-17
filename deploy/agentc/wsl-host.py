@@ -136,6 +136,7 @@ def require_preflight():
 def fingerprint():
     return {'kernel': os.uname().release,
             'controller': digest(INSTALLED),
+            'mount_guard': digest(Path('/usr/local/sbin/agentc-wsl-isolate')),
             'wsl_conf': digest(Path('/etc/wsl.conf')),
             'role_uids': digest(UID_RESERVATION),
             'binaries': {name: digest(Path('/opt/agentc/bin') / name) for name in BINARIES}}
