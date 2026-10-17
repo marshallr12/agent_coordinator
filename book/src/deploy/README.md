@@ -792,9 +792,17 @@ user's next logon after reboot; it does not promise work before anyone signs in.
    `/etc/wsl.conf`. It enables systemd, gives it 180 seconds for startup/shutdown,
    and disables Windows executable interop, Windows PATH imports, drive
    automounts and fstab mounts. Disable Docker Desktop integration for this
-   distro. Foreign/shared mounts (including `/mnt/wsl` and WSLg) are refused:
-   remove them in the dedicated distro's owner-controlled boot configuration,
-   without changing other distros. Verify that no Windows drive, WSLg or Docker
+   distro. Install the mount guard from the trusted Linux checkout:
+
+   ```sh
+   sudo bash deploy/agentc/wsl-isolate.sh --install
+   ```
+
+   After the distro restarts, `agentc-wsl-isolation.service` makes its mount
+   namespace private before removing shared WSL/WSLg, drive and injected runtime
+   mounts. Other distros retain their own mounts. Stacked mounts are removed
+   without force or lazy unmounts; a busy mount fails closed. A required systemd
+   dependency blocks `agentc-run` unless the guard succeeds. Verify that no Windows drive, WSLg or Docker
    socket remains available to the role accounts. Disabling interop is necessary
    because a Linux uid must not launch a Windows process as the Windows owner.
 3. Review and merge `deploy/agentc/wslconfig.example` into
@@ -812,7 +820,22 @@ user's next logon after reboot; it does not promise work before anyone signs in.
    outside this acceptance profile; rerun all containment checks after any change.
    Arrange a quiet point before `wsl --shutdown`, which stops **all** distros.
    Never restart another active distro just to apply these settings.
-4. After restart, run the read-only prerequisites check from the clean Linux
+4. WSL distros share a kernel and network namespace. Reserve role UIDs across
+   the entire Windows host **before** running host-setup: enumerate numeric
+   account and process UIDs in every installed distro, including Docker Desktop,
+   and choose four unused high UIDs (for example 600001 through 600004).
+   Precreate `agentc-impl`, `agentc-rev`, `agentc-egress` and `agentc-push` with
+   those UIDs, their own groups and nologin shells, using the same home paths as
+   host-setup. Keep the push account's home `/nonexistent` and no extra groups.
+   Record the mapping as a root-owned, non-writable-by-others
+   `/etc/agentc/wsl-uids.json`, for example
+   `{"agentc-impl":600001,"agentc-rev":600002,"agentc-egress":600003,"agentc-push":600004}`.
+   The Windows owner must keep this range reserved in all current and future
+   distros and containers. Distro-default system UIDs can collide, causing the
+   uid firewall to affect unrelated processes. Other distro roots and the
+   Windows owner remain trusted; a WSL distro is not a separate security boundary.
+
+   After restart, run the read-only prerequisites check from the clean Linux
    checkout as the owner:
 
    ```sh
