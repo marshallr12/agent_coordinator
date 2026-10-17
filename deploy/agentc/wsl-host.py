@@ -9,7 +9,6 @@ import pwd
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import time
 
 INSTALLED = Path('/opt/agentc/bin/agentc-wsl-host')
@@ -146,7 +145,7 @@ def verify(source):
     # root opens a new file exclusively; never follow a planted symlink.
     if log.exists() or log.is_symlink():
         raise SystemExit(f'preserve and move the previous {log} before rerunning')
-    with log.open('x', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+    with open(log, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
         result = subprocess.run(['bash', str(suite), '--cargo-test'], cwd=source,
                                 stdout=output, stderr=subprocess.STDOUT, check=False)
     text = log.read_text()
@@ -156,7 +155,7 @@ def verify(source):
     receipt = {'fingerprint': fingerprint(), 'source_revision': revision.stdout.strip(),
                'suite_sha256': digest(suite), 'log_sha256': digest(log),
                'verified_at': int(time.time())}
-    with RECEIPT.open('x', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+    with open(RECEIPT, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
         json.dump(receipt, output, indent=2)
     print(f'PASS full containment; receipt={RECEIPT}')
 
