@@ -16,6 +16,12 @@ SPEC.loader.exec_module(HOST)
 
 
 class Admission(unittest.TestCase):
+    def test_configured_nat_cannot_mask_a_fallback_runtime(self):
+        self.assertEqual(HOST.networking_errors('nat\n'), [])
+        for mode, code in (('consomme', 0), ('virtioproxy', 0), ('mirrored', 0), ('nat', 1)):
+            with self.subTest(mode=mode, code=code):
+                self.assertTrue(HOST.networking_errors(mode, code))
+
     def test_example_is_admissible_but_default_wsl_is_not(self):
         config = configparser.ConfigParser()
         config.read(HERE / 'wsl.conf.example')
