@@ -1,0 +1,13 @@
+# Dedicated supervisor distro only. Restart it before preflight.
+[boot]
+systemd=true
+# WSL uses this timeout for systemd startup AND distro shutdown.
+initTimeout=180000
+
+[automount]
+enabled=false
+mountFsTab=false
+
+[interop]
+enabled=false
+appendWindowsPath=false
