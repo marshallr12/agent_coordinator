@@ -940,6 +940,7 @@ async fn create_decision(
     if let Some(value) = m.replay {
         return Ok(response(value));
     }
+    repair_decision_task_revisions(&mut m, &project, &input.affected_tasks).await?;
     let id = Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO decisions(id,project_id,question,options_json,rationale,required_actor,created_by,created_at,recommendation,reversible) VALUES(?,?,?,?,?,?,?,?,?,?)")
         .bind(&id).bind(&project).bind(&input.question).bind(serde_json::to_string(&input.options)?).bind(&input.rationale).bind(&input.required_actor).bind(&m.actor.id).bind(m.now).bind(&input.recommendation).bind(input.reversible).execute(&mut *m.tx).await?;
@@ -951,6 +952,33 @@ async fn create_decision(
         m.finish(value, Some(&project), "decision.created", &id)
             .await?,
     ))
+}
+
+/// Older lifecycle actions advanced tasks.revision without saving its snapshot.
+/// After validating the exact current scope, materialize only missing current
+/// snapshots in this writer transaction. Do not invent intermediate history.
+async fn repair_decision_task_revisions(
+    m: &mut Mutation,
+    project: &str,
+    tasks: &[DecisionTaskInput],
+) -> Result<(), AppError> {
+    for task in tasks {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE task_id=? AND revision=?)",
+        )
+        .bind(&task.task_id)
+        .bind(task.task_revision)
+        .fetch_one(&mut *m.tx)
+        .await?;
+        if !exists {
+            crate::coordination::save_task_revision(m, project, &task.task_id).await?;
+            // The actor/time describe this observation, not the earlier action.
+            sqlx::query("UPDATE task_revisions SET data_json=json_set(data_json,'$.snapshot_repair',?) WHERE task_id=? AND revision=?")
+                .bind("Missing current revision observed while recording decision scope.")
+                .bind(&task.task_id).bind(task.task_revision).execute(&mut *m.tx).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn insert_decision_tasks(
@@ -1309,6 +1337,9 @@ async fn reopen_decision(
         &input,
     )
     .await?;
+    if let Some(value) = m.replay {
+        return Ok(response(value));
+    }
     if input.expires_at.is_some_and(|value| value <= m.now) {
         return Err(AppError::bad_request("expires_at must be in the future."));
     }
@@ -1334,9 +1365,7 @@ async fn reopen_decision(
         &input.affected_tasks,
     )
     .await?;
-    if let Some(value) = m.replay {
-        return Ok(response(value));
-    }
+    repair_decision_task_revisions(&mut m, &project, &input.affected_tasks).await?;
     let next = generation + 1;
     sqlx::query("INSERT INTO decision_cycles(decision_id,generation,policy_revision,environment,conditions,expires_at,rationale,opened_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
         .bind(&id).bind(next).bind(input.policy_revision).bind(&input.environment).bind(&input.conditions).bind(input.expires_at).bind(&input.rationale).bind(&m.actor.id).bind(m.now).execute(&mut *m.tx).await?;

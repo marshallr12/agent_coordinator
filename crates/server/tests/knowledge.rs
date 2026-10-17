@@ -764,3 +764,94 @@ async fn call(
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&bytes).unwrap())
 }
+
+#[tokio::test]
+async fn lifecycle_changes_save_revisions_for_decision_scopes() {
+    let f = Fixture::new().await;
+    let project = f.project("lifecycle-decision-history").await;
+    let task = f.task(&project, "Retain lifecycle snapshots").await;
+    for (action, revision) in [("archive", 1), ("restore", 2)] {
+        let (status, result) = f
+            .call(
+                &f.admin,
+                "POST",
+                &format!(
+                    "/api/v1/projects/{project}/tasks/{}/{action}",
+                    task["id"].as_str().unwrap()
+                ),
+                json!({"expected_revision":revision,"reason":"Exercise lifecycle history."}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM task_revisions WHERE task_id=? AND revision=?",
+        )
+        .bind(task["id"].as_str().unwrap())
+        .bind(revision + 1)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "{action} must save its current revision");
+    }
+}
+
+#[tokio::test]
+async fn reopening_repairs_legacy_missing_current_snapshot_and_replays_once() {
+    let f = Fixture::new().await;
+    let project = f.project("legacy-decision-reopen").await;
+    let task = f.task(&project, "Already delivered prerequisite").await;
+    let (status, created) = f.call(&f.agent, "POST", &format!("/api/v1/projects/{project}/decisions"),
+        json!({"question":"Proceed?","options":["Go","Stop"],"rationale":"Human gate.","required_actor":"human",
+            "affected_tasks":[{"task_id":task["id"],"task_revision":1}],"policy_revision":1})).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let decision = created["data"]["id"].as_str().unwrap();
+    let (status, answer) = f.call(&f.admin, "POST", &format!("/api/v1/projects/{project}/decisions/{decision}/answer"),
+        json!({"expected_generation":1,"disposition":"allow","answer":"Go","rationale":"Owner approval.","conditions_confirmed":true})).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    // Reproduce the pre-fix archive state without a matching task_revisions row.
+    sqlx::query("UPDATE tasks SET lifecycle='done',archived_at=?,revision=2 WHERE id=?")
+        .bind(f.state.now())
+        .bind(task["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/projects/{project}/decisions/{decision}/reopen");
+    let body = json!({"expected_generation":1,"rationale":"Rebind after archive.",
+        "affected_tasks":[{"task_id":task["id"],"task_revision":2}],"policy_revision":1});
+    let key = Uuid::new_v4().to_string();
+    let (status, reopened) = call(f.app.clone(), &f.admin, "POST", &path, &key, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["data"]["generation"], 2);
+    assert_eq!(reopened["data"]["status"], "pending");
+    assert_eq!(reopened["data"]["history"][1]["answer"], "Go");
+    let saved: String =
+        sqlx::query_scalar("SELECT data_json FROM task_revisions WHERE task_id=? AND revision=2")
+            .bind(task["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    let saved: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["lifecycle"], "done");
+    assert!(saved["snapshot_repair"].is_string());
+    let (status, replayed) = call(f.app.clone(), &f.admin, "POST", &path, &key, body).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(reopened["data"], replayed["data"]);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM decision_cycles WHERE decision_id=?")
+        .bind(decision)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2, "retry must not open a second cycle");
+    let mut c = f.state.pool.acquire().await.unwrap();
+    assert!(
+        ensure_decisions_resolved(
+            &mut c,
+            &project,
+            task["id"].as_str().unwrap(),
+            f.state.now()
+        )
+        .await
+        .is_err(),
+        "reopening must still require a fresh human answer"
+    );
+}

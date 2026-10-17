@@ -905,6 +905,9 @@ async fn lifecycle_change(
             .execute(&mut *m.tx)
             .await?;
     }
+    if action != "delete" && canceled_into != "deleted" {
+        save_task_revision(&mut m, &p, &id).await?;
+    }
     let result = json!({"id":id,"lifecycle":if action == "cancel" {"canceled"} else {lifecycle.as_str()},"archived":action == "archive" || canceled_into == "archived","deleted":action == "delete" || canceled_into == "deleted","reason":input.reason,"replacement_task_id":input.replacement_task_id});
     // The reason, the replacement and the acting principal stay in the event so that
     // task history can say why a task changed state after the receipt is compacted.
@@ -1045,6 +1048,7 @@ async fn complete_task_externally(
         .execute(&mut *m.tx)
         .await?;
     crate::workflow::ready_dependents(&mut m.tx, &id, m.now).await?;
+    save_task_revision(&mut m, &p, &id).await?;
     let result = json!({"id":id,"lifecycle":"done","completed_externally":true,"delivered_revision":input.delivered_revision,"target_branch":input.target_branch,"checks":input.checks,"reason":input.reason});
     let event_data = json!({"reason":input.reason,"actor_id":m.actor.id,"delivered_revision":input.delivered_revision,"target_branch":input.target_branch,"checks":input.checks});
     Ok(response(
