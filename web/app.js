@@ -1949,14 +1949,16 @@
     if (mutation) button.dataset.mutation = 'true';
     button.addEventListener('click', action); return button;
   }
-  function taskIconButton(label, icon, action) {
-    const button = actionButton('', action);
+  function taskIconButton(label, icon, action, mutation = true) {
+    const button = actionButton('', action, mutation);
     const paths = {
       archive: '<rect x="4" y="5" width="16" height="4" rx="1"/><path d="M6 9v10h12V9m-8 4h4"/>',
       cancel: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
       edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z"/>',
       delete: '<path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
       resolve: '<path d="m5 12 4 4L19 6"/><circle cx="12" cy="12" r="9"/>',
+      access: '<path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6Z"/><path d="m9 12 2 2 4-4"/>',
+      sessions: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8m-4-4v4"/>',
       rotate: '<path d="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4"/>'
     };
     button.classList.add('task-action-icon'); button.title = label; button.setAttribute('aria-label', label);
@@ -2724,13 +2726,14 @@
       state.operators = append ? [...state.operators, ...(page.items || [])] : (page.items || []);
       const items = state.operators.map(operator => ({ key: `operator:${operator.id}`, sig: sig(operator), build: () => {
         const row = el('div','credential-row'); add(row,el('span','',`${operator.name} · ${displayStatus(operator.role)} · ${operator.enabled ? 'Enabled' : 'Disabled'}`));
-        add(row,actionButton('Change access', () => {
+        const actions = el('div','credential-actions'); add(row,actions);
+        add(actions,taskIconButton('Browser sessions', 'sessions', () => browserSessions(operator.id,operator.name),false));
+        add(actions,taskIconButton('Change access', 'access', () => {
           const view = workflowDialog(`Access for ${operator.name}`, 'Access changes end this account’s existing browser sessions. The last enabled administrator must remain enabled with administrator access.');
           selectField(view,'role','Role',operator.role,[['operator','Operator'],['admin','Administrator']]);
           selectField(view,'enabled','Account access',operator.enabled,[['true','Enabled'],['false','Disabled']]);
           view.finish('Save access', (values, dialog) => { dialog.close(); startMutation(`/api/v1/admin/operators/${encodeURIComponent(operator.id)}/access`, {expected_revision:operator.revision,role:values.get('role'),enabled:values.get('enabled') === 'true'},'account access',async data => { if (operator.id === actorId() && data.sessions_revoked) { signOutLocal(); showLoginError('Access updated. Sign in again if your account remains enabled.'); } else await loadOperators(); }); });
         }));
-        add(row,actionButton('Browser sessions', () => browserSessions(operator.id,operator.name),false));
         return row;
       } }));
       if (page.next_cursor) items.push({ key: 'more', sig: sig(page.next_cursor), build: () => { const more = actionButton('Load more accounts', () => { more.disabled = true; loadOperators(true,page.next_cursor); },false); more.dataset.moreOperators = 'true'; return more; } });

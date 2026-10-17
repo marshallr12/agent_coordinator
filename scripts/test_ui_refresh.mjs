@@ -541,7 +541,7 @@ async function main() {
     await onlyChanged('restore requirement changed', '#restore-requirements .shared-card', () => { restore.items[0] = { ...restore.items[0], inspected: true }; }, clickAndWait('#refresh-restore', 'admin/restore'));
 
     // ---- 13. Dialog lists -------------------------------------------------------------------------
-    await evaluate("[...document.querySelectorAll('#operators-list button')].find((button) => button.textContent === 'Browser sessions').click()");
+    await evaluate("[...document.querySelectorAll('#operators-list button')].find((button) => button.title === 'Browser sessions').click()");
     await waitPage("document.querySelectorAll('dialog[open] .shared-card').length === 3", 'browser sessions dialog');
     await evaluate("window.__tag('dialog[open] .shared-card')");
     await evaluate("[...document.querySelectorAll('dialog[open] .shared-card')][1].querySelector('button').click()");
