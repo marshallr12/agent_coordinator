@@ -348,7 +348,7 @@ jobs:
 
   publish-host-release:
     name: Publish verified host updater assets
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [linux-package, windows-package, linux-load, host-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 10

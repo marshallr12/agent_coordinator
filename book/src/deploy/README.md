@@ -1610,9 +1610,12 @@ Nothing live changes until the release has passed all three checks (the asset
 SHA256SUMS line, the attestation, and the bundle's own manifest) and unpacked
 into `/opt/agentc/releases/<version>/`, next to the previous releases. The
 unpacker takes only regular files and directories, refuses paths that leave the
-directory and bounds the member count and size. **The repository's release
-workflow does not yet build or attest this bundle**; until it does, the updater
-finds no matching asset and refuses to change anything.
+directory and bounds the member count and size. The repository's release
+workflow builds and attests native x86-64 and aarch64 core bundles and publishes
+them for version-tag pushes after release acceptance; manual dispatch runs do
+not publish. See the [host updater release contract](../docs/build-release-package.md#host-updater-release-contract).
+These bundles contain no vendor harness binaries. With no published matching
+asset the updater reports `no-release` and leaves the host unchanged.
 
 #### One run
 
