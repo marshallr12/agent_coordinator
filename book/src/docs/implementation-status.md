@@ -212,9 +212,12 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   runs preflight and the end-to-end canary and rolls back by itself on failure;
   harness binaries are staged and promoted only when preflight, the canary and
   `containment-suite.sh` pass. `agentc-update-test.py` covers it end to end
-  against fakes. The release workflow does not yet build or attest the host
-  bundle it expects, so no host has been updated by it; a Windows host updater
-  is deferred.
+  against fakes. The release workflow builds native x86-64 and aarch64 core host
+  bundles with internal and release checksums and GitHub build provenance, and
+  publishes them only for version tags after release acceptance. `--check`
+  verifies an available bundle in temporary storage without installing it. See
+  the [host release contract](build-release-package.md#host-updater-release-contract).
+  A live host promotion has not been recorded; a Windows host updater is deferred.
 - Digest read tracking and the neglect page: the service stores a per-project
   `last_read_at` for the digest (`digest_reads`), set by a human opening the
   digest page in the dashboard or by the signed, expiring "I read this" link in

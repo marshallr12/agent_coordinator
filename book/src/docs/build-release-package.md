@@ -68,3 +68,38 @@ Both cloud chapters copy `dist/agent-coordinator-VERSION-linux-x86_64.tar.gz`
 and its `.sha256` to the virtual machine, then verify and extract there exactly
 as [Linux release installation](linux-installation.md#verify-and-inspect-the-archive)
 describes. Never extract an unverified archive with elevated privileges.
+
+## Host updater release contract
+
+The release workflow also builds native host bundles on Ubuntu 24.04 for
+`x86_64` and `aarch64`. These are separate from the server installation archive:
+`agentc-host-VERSION-linux-ARCH.tar.gz` contains one top directory of the same
+name (without `.tar.gz`), with `bin/agentc-supervisor`, `bin/agent-coordinator`,
+`bin/agentc-push`, `BUILD-IDENTITY.json`, and an internal `SHA256SUMS` covering
+every other file. The binaries are executable regular files; the archive contains
+no links, host configuration, credentials, or vendor harness binaries. Therefore
+these releases update only the core binaries; they do not promote a harness.
+
+`scripts/package_host.py` checks the clean source revision, workspace and binary
+versions, ELF architecture, and embedded CLI build identity. Fixed timestamps,
+file order and metadata produce identical archives from identical inputs.
+Each matrix job packages twice and compares the bytes. The producer/consumer
+regression extracts each architecture's archive using the updater's verifier.
+
+Non-PR workflow runs attest the archives with GitHub build provenance. For a
+`vVERSION` tag matching the workspace version, after both host builds and the
+existing Linux installation, load and Windows acceptance jobs succeed, the
+workflow verifies each attestation and creates a GitHub release containing both
+host archives and a combined `SHA256SUMS` asset. It refuses to overwrite an
+existing release. Dispatch and PR runs retain CI artifacts without publishing a
+release; PR runs do not request an attestation. A workflow artifact alone is not
+a published updater release.
+
+On a host with the updater installed, run `agentc-update --check` before applying
+a new release. For an available update, it downloads into temporary storage and
+verifies the release checksum, GitHub build attestation and internal manifest,
+then reports `would-update` with `verified: true`. It does not stage a release,
+drain the supervisor or replace installed files. The host must have `gh` and
+the authentication needed by `gh attestation verify`. No published release, or
+no bundle for the host architecture, reports `no-release` without an update.
+The normal canary and rollback requirements still apply to installation.

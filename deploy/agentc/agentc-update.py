@@ -495,14 +495,23 @@ def fetch_release(settings, tag, assets):
     elif target.exists():
         shutil.rmtree(target)
     with tempfile.TemporaryDirectory(prefix=".fetch.", dir=settings.releases) as work:
-        archive = Path(work) / name
-        archive.write_bytes(http_get(settings, assets[name], MAX_DOWNLOAD_BYTES))
-        sums = http_get(settings, assets["SHA256SUMS"], 1024 * 1024).decode("utf-8", "replace")
-        verify_sums(sums, name, archive)
-        verify_attestation(settings, archive)
-        unpack(archive, Path(work) / "unpacked")
+        verify_release(settings, tag, assets, Path(work))
         os.replace(Path(work) / "unpacked", target)
     return target
+
+
+def verify_release(settings, tag, assets, work):
+    """Verify a release in scratch space, without changing installed or staged files."""
+    name = bundle_name(tag)
+    for needed in (name, "SHA256SUMS"):
+        if needed not in assets:
+            raise Failed(f"the release has no {needed} asset")
+    archive = work / name
+    archive.write_bytes(http_get(settings, assets[name], MAX_DOWNLOAD_BYTES))
+    sums = http_get(settings, assets["SHA256SUMS"], 1024 * 1024).decode("utf-8", "replace")
+    verify_sums(sums, name, archive)
+    verify_attestation(settings, archive)
+    unpack(archive, work / "unpacked")
 
 
 # --- supervisor control -------------------------------------------------------------------------
@@ -873,7 +882,10 @@ def run_update(settings, retry=False, check_only=False):
     if not core_needed and not harness_needed:
         return {**result, "outcome": "current", "detail": f"{installed or 'unknown'} is current for release {version}"}
     if check_only:
-        return {**result, "outcome": "would-update", "detail": f"would update to {version}"}
+        with tempfile.TemporaryDirectory(prefix="agentc-check.") as work:
+            verify_release(settings, tag, assets, Path(work))
+        return {**result, "outcome": "would-update", "verified": True,
+                "detail": f"would update to {version} (bundle, checksums and build attestation verified)"}
     check_ready(settings)
     release_dir = fetch_release(settings, tag, assets)
     window = Window(settings)

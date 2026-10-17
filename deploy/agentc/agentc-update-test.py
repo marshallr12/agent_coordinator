@@ -309,7 +309,22 @@ class GoodAndBadReleases(Host):
         self.releases.publish(NEW, release_files(NEW))
         self.assertEqual(self.run_update("--check"), 0, self.stderr)
         self.assertIn("would update", self.stderr)
+        self.assertIn("build attestation verified", self.stderr)
         self.assertIn("# host", self.live("agentc-supervisor"))
+        self.assertEqual(self.events(), [])
+        self.assertFalse((self.prefix / "releases").exists())
+
+    def test_check_refuses_a_bad_checksum_without_switching(self):
+        self.releases.publish(NEW, release_files(NEW))
+        self.releases.assets["SHA256SUMS"] = "0" * 64 + "  " + update.bundle_name(NEW) + "\n"
+        self.assertEqual(self.run_update("--check"), 2, self.stderr)
+        self.assertIn("SHA256SUMS", self.stderr)
+        self.assertEqual(self.events(), [])
+
+    def test_check_requires_real_attestation_verification(self):
+        self.releases.publish(NEW, release_files(NEW))
+        self.assertEqual(self.run_update("--check", attest="false {file} {repo}"), 2, self.stderr)
+        self.assertIn("attestation", self.stderr)
         self.assertEqual(self.events(), [])
 
     def test_a_manual_rollback_restores_the_saved_binaries(self):

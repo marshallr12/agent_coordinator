@@ -282,3 +282,105 @@ jobs:
           path: load-acceptance.json
           if-no-files-found: error
           retention-days: 14
+
+  host-package:
+    name: Linux ${{ matrix.arch }} host updater bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Build and verify the native host bundle
+        shell: bash
+        env:
+          HOST_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo '::error::Release tag must match the workspace version'; exit 1
+          fi
+          epoch="$(git show -s --format=%ct HEAD)"
+          build_commit="$(git rev-parse HEAD)"
+          COORDINATOR_BUILD_COMMIT="$build_commit" COORDINATOR_SOURCE_REPOSITORY=https://github.com/marshallr12/agent_coordinator \
+            cargo build --release --locked -p coordinator-cli -p agentc-supervisor -p agentc-integrator \
+            --bin agent-coordinator --bin agentc-supervisor --bin agentc-push
+          for output in first second; do
+            python3 scripts/package_host.py --bin-dir target/release --arch "$HOST_ARCH" --version "$version" \
+              --source-commit "$build_commit" --source-date-epoch "$epoch" --output-dir "dist/$output"
+          done
+          cmp "dist/first/agentc-host-$version-linux-$HOST_ARCH.tar.gz" "dist/second/agentc-host-$version-linux-$HOST_ARCH.tar.gz"
+          cmp dist/first/SHA256SUMS dist/second/SHA256SUMS
+          (cd dist/first && sha256sum --check --strict SHA256SUMS)
+          python3 -I deploy/agentc/package-host-test.py
+      - name: Attest the host bundle
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: dist/first/agentc-host-*.tar.gz
+      - name: Upload the host bundle and checksum
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agentc-host-linux-${{ matrix.arch }}
+          path: |
+            dist/first/agentc-host-*.tar.gz
+            dist/first/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-host-release:
+    name: Publish verified host updater assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux-package, windows-package, linux-load, host-package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - name: Download both host bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: agentc-host-linux-*
+          path: dist
+      - name: Verify and publish the release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          mkdir publish
+          for arch in x86_64 aarch64; do
+            directory="dist/agentc-host-linux-$arch"
+            name="agentc-host-$version-linux-$arch.tar.gz"
+            (cd "$directory" && sha256sum --check --strict SHA256SUMS)
+            gh attestation verify "$directory/$name" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml"
+            cp "$directory/$name" publish/
+            cat "$directory/SHA256SUMS" >> publish/SHA256SUMS
+          done
+          (cd publish && sha256sum --check --strict SHA256SUMS)
+          # A new tag creates one release only after all release acceptance jobs pass.
+          # Never overwrite an existing release's assets or redirect an old tag.
+          gh release create "$RELEASE_TAG" publish/* --repo "$GH_REPO" --verify-tag \
+            --title "$RELEASE_TAG" --notes 'Verified Linux host updater bundles for x86_64 and aarch64. Each archive has an internal manifest and GitHub build provenance; SHA256SUMS covers both archives. No vendor harness binaries are included.'
