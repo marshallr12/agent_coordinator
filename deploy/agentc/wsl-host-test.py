@@ -16,6 +16,15 @@ SPEC.loader.exec_module(HOST)
 
 
 class Admission(unittest.TestCase):
+    def test_shared_kernel_role_uids_cannot_collide_or_change(self):
+        reserved = dict(zip(HOST.ROLES, range(600001, 600005)))
+        self.assertEqual(HOST.role_uid_errors(reserved, reserved), [])
+        self.assertTrue(HOST.role_uid_errors(reserved, {}))
+        duplicate = dict.fromkeys(HOST.ROLES, 600001)
+        self.assertTrue(HOST.role_uid_errors(duplicate, duplicate))
+        low = dict(zip(HOST.ROLES, range(990, 994)))
+        self.assertTrue(HOST.role_uid_errors(low, low))
+
     def test_configured_nat_cannot_mask_a_fallback_runtime(self):
         self.assertEqual(HOST.networking_errors('nat\n'), [])
         for mode, code in (('consomme', 0), ('virtioproxy', 0), ('mirrored', 0), ('nat', 1)):

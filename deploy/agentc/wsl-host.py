@@ -14,6 +14,8 @@ import time
 
 INSTALLED = Path('/opt/agentc/bin/agentc-wsl-host')
 RECEIPT = Path('/etc/agentc/wsl-containment.json')
+UID_RESERVATION = Path('/etc/agentc/wsl-uids.json')
+ROLES = ('agentc-impl', 'agentc-rev', 'agentc-egress', 'agentc-push')
 BINARIES = ('agentc-supervisor', 'agent-coordinator', 'agentc-push', 'claude', 'codex')
 
 
@@ -52,6 +54,17 @@ def networking_errors(mode, returncode=0):
     return []
 
 
+def role_uid_errors(reserved, observed):
+    if not isinstance(reserved, dict) or set(reserved) != set(ROLES):
+        return ['reserve all four agentc role UIDs for this Windows host']
+    values = list(reserved.values())
+    if any(type(value) is not int or value < 100000 or value >= 2**32 - 1 for value in values):
+        return ['use explicitly reserved high role UIDs, not distro-default system UIDs']
+    if len(set(values)) != len(values) or reserved != observed:
+        return ['role accounts must match four distinct Windows-host-wide reserved UIDs']
+    return []
+
+
 def preflight():
     errors = []
     if os.geteuid() != 0:
@@ -68,6 +81,24 @@ def preflight():
     else:
         mode = command(['wslinfo', '--networking-mode'])
         errors.extend(networking_errors(mode.stdout, mode.returncode))
+    if command(['systemctl', 'is-active', '--quiet', 'agentc-wsl-isolation.service']).returncode:
+        errors.append('install and start the WSL mount-isolation boot guard before admission')
+    try:
+        metadata = UID_RESERVATION.lstat()
+        if (UID_RESERVATION.is_symlink() or not UID_RESERVATION.is_file()
+                or metadata.st_uid != 0 or metadata.st_mode & 0o022
+                or metadata.st_nlink != 1 or metadata.st_size > 16384):
+            raise ValueError('unsafe reservation')
+        reserved = json.loads(UID_RESERVATION.read_text())
+        observed = {}
+        for role in ROLES:
+            try:
+                observed[role] = pwd.getpwnam(role).pw_uid
+            except KeyError:
+                pass
+        errors.extend(role_uid_errors(reserved, observed))
+    except (OSError, ValueError):
+        errors.append('reserve unused role UIDs across all WSL distros; record root-owned /etc/agentc/wsl-uids.json')
     interop = Path('/proc/sys/fs/binfmt_misc/WSLInterop')
     if interop.exists() and interop.read_text().startswith('enabled'):
         errors.append('Windows executable interop is still enabled; restart the distro')
@@ -106,6 +137,7 @@ def fingerprint():
     return {'kernel': os.uname().release,
             'controller': digest(INSTALLED),
             'wsl_conf': digest(Path('/etc/wsl.conf')),
+            'role_uids': digest(UID_RESERVATION),
             'binaries': {name: digest(Path('/opt/agentc/bin') / name) for name in BINARIES}}
 
 
