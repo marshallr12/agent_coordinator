@@ -111,3 +111,14 @@ Chrome against a fixture server and, per view, requires:
 
 Run it with `CHROME_BIN=/path/to/chrome node scripts/test_ui_refresh.mjs`. Set
 `CHROME_ARGS=--no-sandbox` where Chrome's sandbox is unavailable.
+
+## Address history
+
+Showing a view records its route in the address hash with `history.pushState`,
+unless the hash already names it. A `hashchange` (Back, Forward, or an edited
+link) applies the route without recording another entry. After sign-in the
+current hash is applied once projects load; a route naming an unknown project
+or page falls back to the overview and replaces the hash. Dialog state is not
+part of the route. `scripts/test_deep_links.mjs` clicks through ten views,
+walks back and forward through them, and opens a task link directly; it runs
+the same way as `scripts/test_ui_refresh.mjs`.

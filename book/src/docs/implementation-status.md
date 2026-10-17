@@ -81,6 +81,12 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   only the nodes whose data changed and keep focus, selection, open disclosures
   and scroll position; polling pauses in a hidden tab, behind a dialog and during
   a pending mutation. See [Web UI refresh behavior](web-ui-refresh.md).
+- Each main dashboard view has an address (`#/projects/<id>/tasks`, `/completed`,
+  `/archived`, `/task/<task id>`, `/settings`, `/reports`, `/sessions`, `/digest`,
+  `/autonomy`, and `#/shared`, `#/resources`, `#/admin`), so the browser's Back
+  and Forward buttons walk the views visited and a link opens its view after
+  sign-in. Open dialogs are not part of the address. See
+  [Web UI refresh behavior](web-ui-refresh.md#address-history).
 - Local administrator initialization and password sign-in; Argon2id hashes,
   protected browser cookies, origin/CSRF checks, bounded login attempts, and
   human-admin issuance/revocation of separately named agent credentials.

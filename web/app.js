@@ -364,7 +364,7 @@
   }
 
   async function restoreSession() {
-    try { const result = await request('/api/v1/me'); applySession(result.data); restorePendingMutation(); await loadProjects(); startPolling(); }
+    try { const result = await request('/api/v1/me'); applySession(result.data); restorePendingMutation(); await loadProjects(); applyRoute(location.hash); startPolling(); }
     catch (error) { show($('loading-view'), false); show($('dashboard-view'), false); show($('login-view'), true); if (error.status && error.status !== 401) showLoginError(errorMessage(error)); }
   }
 
@@ -372,12 +372,65 @@
 
   function showView(view) {
     state.currentView = view;
+    syncHistory();
     ['overview', 'project', 'reports', 'agent-sessions', 'digest', 'autonomy', 'tasks', 'archived', 'task-detail', 'resources', 'admin', 'shared'].forEach((name) => show($(`${name}-view`), name === view));
     show($('task-view-tabs'), view === 'tasks' || view === 'archived');
     updateTaskViewTabs();
     document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view || (['project', 'reports', 'agent-sessions', 'digest', 'autonomy'].includes(view) && button.dataset.view === 'overview') || (view === 'task-detail' && button.dataset.view === 'tasks')));
     if (view === 'tasks') { fillProjectSelect(); setProp($('new-task-button'), 'disabled', !state.projectId); setProp($('refresh-tasks'), 'disabled', !state.projectId); $('project-select')?.focus(); }
   }
+
+  // Address history: every main view has a hash route, so the browser's back and forward buttons walk the
+  // views visited. showView records the route; a hash change (back, forward, or an edited link) applies it.
+  const PROJECT_PAGES = { project: 'settings', reports: 'reports', 'agent-sessions': 'sessions', digest: 'digest', autonomy: 'autonomy', archived: 'archived' };
+  let routing = false;
+  function currentRoute() {
+    const view = state.currentView, project = state.projectId ? `#/projects/${encodeURIComponent(state.projectId)}` : '';
+    if (view === 'tasks') return project ? `${project}/${state.taskView === 'completed' ? 'completed' : 'tasks'}` : '#/tasks';
+    if (view === 'task-detail') return project && state.selectedTaskId ? `${project}/task/${encodeURIComponent(state.selectedTaskId)}` : '#/tasks';
+    if (PROJECT_PAGES[view]) return project ? `${project}/${PROJECT_PAGES[view]}` : view === 'archived' ? '#/archived' : '';
+    return ['shared', 'resources', 'admin'].includes(view) ? `#/${view}` : '';
+  }
+  function routeUrl(route) { return `${location.pathname}${location.search}${route}`; }
+  function syncHistory() {
+    if (routing || !state.actor) return;
+    const route = currentRoute();
+    if (location.hash !== route) history.pushState(null, '', routeUrl(route));
+  }
+  // The loads a top-level view needs when it is opened.
+  function enterTopLevel(view) {
+    showView(view);
+    if (view === 'tasks' && state.projectId) loadTasks();
+    if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); loadClock(); }
+    if (view === 'resources') loadResources();
+    if (view === 'shared') { fillSharedProject(); loadShared(); }
+  }
+  // Shows the view a hash names. An unknown project or page falls back to the overview.
+  function applyRoute(hash) {
+    let parts;
+    try { parts = text(hash).replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent); } catch { parts = []; }
+    const [head, id, page, extra] = parts;
+    routing = true;
+    try {
+      if (head === 'projects' && state.projects.some((project) => text(project.id) === id)) {
+        if (state.projectId !== id) { resetTaskPages(); state.projectId = id; }
+        state.selectedTaskId = ''; state.taskView = 'queue';
+        if (page === 'settings') openProjectSettings(id);
+        else if (page === 'reports') openReports();
+        else if (page === 'sessions') openAgentSessions();
+        else if (page === 'digest') openDigest();
+        else if (page === 'autonomy') openAutonomy(id);
+        else if (page === 'archived') selectTaskView('archived');
+        else if (page === 'completed') selectTaskView('completed');
+        else if (page === 'task' && extra) openTask(extra);
+        else { updateTaskViewTabs(); showView('tasks'); loadTasks(); }
+      } else if (head === 'archived') selectTaskView('archived');
+      else if (head === 'tasks' || head === 'shared' || head === 'resources' || (head === 'admin' && state.actor?.role === 'admin')) enterTopLevel(head);
+      else showView('overview');
+    } finally { routing = false; }
+    if (location.hash !== currentRoute()) history.replaceState(null, '', routeUrl(currentRoute()));
+  }
+  window.addEventListener('hashchange', () => { if (state.actor && location.hash !== currentRoute()) applyRoute(location.hash); });
 
   function issuedCredentialFeedback(data) {
     const credentialId = data?.credential_id || data?.id || 'the issued credential';
@@ -1218,8 +1271,8 @@
     if (state.actor) { startPolling(); pollTick(); }
   });
 
-  $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
-  document.querySelectorAll('button.nav-item').forEach((button) => button.addEventListener('click', () => { const view = button.dataset.view; showView(view); if (view === 'tasks' && state.projectId) loadTasks(); if (view === 'admin') { loadCredentials(); loadOperators(); loadRestore(); loadClock(); } if (view === 'resources') loadResources(); if (view === 'shared') { fillSharedProject(); loadShared(); } }));
+  $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); applyRoute(location.hash); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
+  document.querySelectorAll('button.nav-item').forEach((button) => button.addEventListener('click', () => { enterTopLevel(button.dataset.view); }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks());
   $('tasks-auto-refresh').checked = state.taskAutoRefresh;
@@ -1248,7 +1301,7 @@
   $('archived-last-page').addEventListener('click', () => { state.archivedPageIndex = Math.max(0, Math.ceil(searchedArchivedTasks().length / state.taskPageSize) - 1); renderArchivedTasks(); });
   $('archived-page-size').addEventListener('change', (event) => { state.taskPageSize = Number(event.target.value); $('tasks-page-size').value = String(state.taskPageSize); state.archivedPageIndex = 0; renderArchivedTasks(); });
   $('tasks-page-size').addEventListener('change', (event) => { $('archived-page-size').value = event.target.value; if (state.archivedTasks.length) renderArchivedTasks(); });
-  $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; resetTaskPages(); state.taskView = 'queue'; updateTaskViewTabs(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; loadTasks(); });
+  $('project-select').addEventListener('change', (event) => { state.projectId = event.target.value; resetTaskPages(); state.taskView = 'queue'; updateTaskViewTabs(); $('new-task-button').disabled = !state.projectId; $('refresh-tasks').disabled = !state.projectId; syncHistory(); loadTasks(); });
   $('tasks-search').addEventListener('input', (event) => {
     if (state.taskView === 'completed') { state.taskSearch.completed = event.target.value; showTaskPage(0); }
     else { state.taskSearch.queue = event.target.value; rebuildQueuePages(); showTaskPage(0); }
