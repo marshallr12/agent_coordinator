@@ -852,7 +852,11 @@ user's next logon after reboot; it does not promise work before anyone signs in.
    gate checks the receipt's kernel, binaries, controller and distro configuration;
    rerun verification after configuration, toolchain or firewall changes too.
 7. From the owning Windows account, use the trusted source copy of
-   `deploy/agentc/wsl-host.ps1`:
+   `deploy/agentc/wsl-host.ps1` from an allowed PowerShell host. On MINIAIR,
+   PowerShell 7 (`pwsh`) permits these local scripts; Windows PowerShell 5.1
+   requires signed scripts. The task retains the installing host's executable;
+   no execution-policy bypass is added. Where signing is required, have the
+   owner sign the reviewed installed script before enabling it:
 
    ```powershell
    .\deploy\agentc\wsl-host.ps1 -Action Install -Distribution AgentcUbuntu

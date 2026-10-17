@@ -76,7 +76,13 @@ switch ($Action) {
             -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
             -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
         $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -File "{0}" -Action Run -Distribution {1} -TaskName {2}' -f $installed, $Distribution, $TaskName
-        $taskAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $arguments
+        # Keep the installing host's policy/runtime. Windows PowerShell and
+        # PowerShell 7 can have different signing policies on one workstation.
+        $hostExecutable = (Get-Process -Id $PID).Path
+        if ([IO.Path]::GetFileNameWithoutExtension($hostExecutable) -notin @('pwsh', 'powershell')) {
+            throw 'Install from powershell.exe or pwsh.exe, not an embedded host.'
+        }
+        $taskAction = New-ScheduledTaskAction -Execute $hostExecutable -Argument $arguments
         Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $trigger `
             -Principal $principal -Settings $settings -Description "Accepted agentc supervisor in $Distribution; drain with wsl-host.ps1 -Action Stop." | Out-Null
         Write-Output "Registered $TaskName for $identity at logon. Start with Start-ScheduledTask -TaskName $TaskName."
