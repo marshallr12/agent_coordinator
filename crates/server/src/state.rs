@@ -165,6 +165,8 @@ pub struct AppState {
     pub config: Config,
     pub clock: Arc<dyn Clock>,
     pub(crate) login_limits: Arc<Mutex<LoginLimits>>,
+    /// Bounds password-reset requests apart from sign-ins, so neither starves the other.
+    pub(crate) reset_limits: Arc<Mutex<LoginLimits>>,
     pub(crate) password_workers: Arc<Semaphore>,
     pub(crate) dummy_password_hash: Arc<String>,
     pub(crate) context_reranker: Option<Arc<ContextReranker>>,
@@ -605,6 +607,7 @@ impl AppState {
             config,
             clock: Arc::new(SystemClock),
             login_limits: Arc::new(Mutex::new(LoginLimits::default())),
+            reset_limits: Arc::new(Mutex::new(LoginLimits::default())),
             password_workers: Arc::new(Semaphore::new(2)),
             dummy_password_hash: Arc::new(dummy_password_hash),
             context_reranker,

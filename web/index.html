@@ -24,6 +24,14 @@
             <input id="password" name="password" type="password" autocomplete="current-password" required>
             <button class="button primary full-width" type="submit">Sign in</button>
           </form>
+          <p class="login-alt"><button id="forgot-link" class="link-button" type="button">Forgot password?</button></p>
+          <form id="forgot-form" novalidate hidden>
+            <p class="muted">Enter the email address on your account. If it is verified, we send a link that works once for one hour.</p>
+            <label for="forgot-email">Email address</label>
+            <input id="forgot-email" name="email" type="email" autocomplete="email" maxlength="254" required>
+            <button class="button primary full-width" type="submit">Send reset link</button>
+            <p class="login-alt"><button id="forgot-back" class="link-button" type="button">Back to sign in</button></p>
+          </form>
           <p class="login-footnote">Agent credentials are shown once and never saved by this dashboard.</p>
         </div>
       </section>

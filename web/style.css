@@ -67,6 +67,8 @@ h2 { color: var(--navy); font-size: 19px; line-height: 1.25; }
 h3 { margin: 25px 0 10px; color: var(--navy); font-size: 13px; text-transform: uppercase; letter-spacing: .07em; }
 .muted { color: var(--muted); }
 .login-copy { margin-bottom: 28px; }
+.login-alt { margin: 14px 0 0; text-align: center; font-size: 13px; }
+.link-button { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
 .login-footnote { margin: 22px 0 0; color: var(--faint); font-size: 12px; }
 label { display: block; margin: 16px 0 7px; color: var(--navy); font-size: 13px; font-weight: 700; }
 input, textarea, select { width: 100%; border: 1px solid #cbd6dd; background: #fff; color: var(--ink); border-radius: 7px; padding: 10px 12px; }

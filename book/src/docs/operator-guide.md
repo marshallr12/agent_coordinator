@@ -77,11 +77,18 @@ token must remain active temporarily. Copy the replacement token while it is
 shown; replay returns its identity without its secret. If the token was lost,
 rotate the new replacement credential itself. Do not revoke it before rotation.
 
-For lost human passwords, the service host's local `recover-operator-password`
-command replaces the password, enables the existing account, and revokes its
-browser sessions. It requires an audit reason and accepts a hidden prompt or
-standard input for the password. See [the CLI guide](CLI.md). There is no remote
-password-recovery or public enrollment endpoint.
+A person who forgot their password selects **Forgot password?** under **Sign in**
+and enters the email address on their account. When that address is verified, the
+service mails a link that works once for one hour and opens a page to choose a new
+password; the reply is the same for unknown addresses. The reset signs the account
+out everywhere. It needs the mail relay configured and a verified address; the
+page never says whether an account exists.
+
+When email recovery is unavailable (no relay, or no verified address), the service
+host's local `recover-operator-password` command replaces the password, enables the
+existing account, and revokes its browser sessions. It requires an audit reason and
+accepts a hidden prompt or standard input for the password. See
+[the CLI guide](CLI.md). There is no public enrollment endpoint.
 
 ## Project policy and tasks
 
