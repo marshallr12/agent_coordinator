@@ -580,7 +580,7 @@ async fn compacted_receipts_remain_reserved_when_raw_time_moves_backward() {
         .execute(&fixture.state.pool)
         .await
         .unwrap();
-    let operator_input = json!({"name":"must-not-hash-or-create","role":"operator","password":"a private compacted password"});
+    let operator_input = json!({"name":"must-not-hash-or-create","role":"operator","email":"compacted@example.test","password":"a private compacted password"});
     let (status, compacted) = fixture
         .call_with_key(
             &fixture.admin,

@@ -128,7 +128,7 @@ impl Fixture {
             "POST",
             "/api/v1/admin/operators",
             &browser.headers(key),
-            Some(json!({"name":name,"role":role,"password":password})),
+            Some(json!({"name":name,"role":role,"email":format!("{name}@example.test"),"password":password})),
         )
         .await
     }

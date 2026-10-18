@@ -38,6 +38,7 @@ rmcp = { version = "=3.2.0", default-features = false, features = ["server", "tr
 schemars = "1"
 tower.workspace = true
 reqwest.workspace = true
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1", "tokio1-rustls-tls", "hostname"] }
 [dev-dependencies]
 http-body-util.workspace = true
 tempfile.workspace = true

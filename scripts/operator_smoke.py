@@ -42,7 +42,7 @@ def exercise_operator(api, cli, owner, server_options):
     assert policy['policy_revision'] == 1
     assert cli(owner, 'policy', 'history', project_id=project)['data']['items']
     operator = api('/api/v1/admin/operators', {'name': 'additional-operator', 'role': 'operator',
-        'password': secrets.token_hex(24)})['operator']
+        'email': 'additional-operator@example.invalid', 'password': secrets.token_hex(24)})['operator']
     disabled = api(f"/api/v1/admin/operators/{operator['id']}/access", {
         'expected_revision': operator['revision'], 'role': 'operator', 'enabled': False})
     assert not disabled['operator']['enabled']

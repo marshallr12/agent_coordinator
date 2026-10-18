@@ -667,6 +667,13 @@ async fn either_review_migration_preserves_old_reviews_and_foreign_key_enforceme
             "INSERT INTO main.credentials SELECT id,principal_id,token_hash,created_at,
                 revoked_at,expires_at,name,issued_by FROM original.credentials"
                 .to_owned()
+        } else if table == "principals" {
+            // Later migrations add the account email columns the old schema lacks.
+            "INSERT INTO main.principals(id,name,kind,role,password_hash,disabled_at,
+                created_at,revision)
+                SELECT id,name,kind,role,password_hash,disabled_at,created_at,revision
+                FROM original.principals"
+                .to_owned()
         } else if table == "projects" {
             // Later migrations add the integration owner the old schema lacks.
             "INSERT INTO main.projects(id,name,repository_url,target_branch,policy_revision,

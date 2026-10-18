@@ -89,6 +89,50 @@ browser cookie. If the response is lost, sign in with the new password and inspe
 `GET /api/v1/auth/account`; a revoked old session cannot use a receipt as renewed
 authority.
 
+## Account email addresses
+
+Every human account carries an email address. `POST /api/v1/admin/operators`
+requires an `email` field, and a first administrator or an account that predates
+this feature may have none until its owner sets one. An address is `unverified`
+until its owner opens the mailed link; `GET /api/v1/auth/account` returns the
+account's `email`, `email_verified`, `email_verified_at`, an `email_verification`
+object (`status` is `missing`, `unverified` or `verified`; while unverified it also
+has `sent_at`, `send_error`, `link_expires_at` and `resend_available_at`), and
+`mail_configured`. The migration that added the column recorded
+`marshall.rosenstein@gmail.com` as verified on every administrator that already
+existed.
+
+- `POST /api/v1/auth/email` (human browser session) takes
+  `{"expected_revision":N,"email":"name@example.com"}`, makes the address
+  unverified, and mails a link. Submitting the address already on the account is
+  `email_unchanged`.
+- `POST /api/v1/auth/email/resend` (human browser session, body `{}`) mails a new
+  link when the address is unverified and the previous link is at least one minute
+  old; otherwise it returns `verification_resend_too_soon`,
+  `email_already_verified` or `email_missing`. Issuing a link, by either
+  operation or by account creation, invalidates every earlier unused link for the
+  account at once.
+- `GET /api/v1/auth/email/verify?token=` needs no credential and shows a page with
+  one button, so mail scanners that fetch the link do not verify it. The button
+  `POST`s the form field `token` to the same path, which marks the address
+  verified. An unknown, used, replaced or expired token (links last 24 hours)
+  produces an "expired" page.
+
+Tokens are 256 random bits, stored only as a SHA-256 hash, and appear only in the
+email. The message is sent after the database transaction commits; the outcome is
+recorded as `sent_at` or a short `send_error` code (`mail_not_configured`,
+`send_failed`), never relay output. A failed send is retried by asking for another
+link. The address is never used to sign in or to recover a password; recovery stays
+with the host command until a later task adds it.
+
+The service sends through an SMTP relay it is configured with:
+`COORDINATOR_SMTP_HOST`, `COORDINATOR_SMTP_PORT` (587 for `starttls`, the default,
+or 465 for `tls`), `COORDINATOR_SMTP_TLS`, `COORDINATOR_SMTP_USER`,
+`COORDINATOR_SMTP_PASSWORD_FILE` (a file only its owner can access) and
+`COORDINATOR_MAIL_FROM`. For Gmail use `smtp.gmail.com`, the account's address as
+user and sender, and an app password in the file. Without a relay the service runs
+normally and verification emails are recorded as not sent.
+
 ## Browser sessions
 
 `GET /api/v1/browser-sessions?cursor=...` lists the caller's sessions. An

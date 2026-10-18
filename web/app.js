@@ -212,6 +212,7 @@
     if (method === 'POST' && /\/admin\/credentials\/[^/]+\/rotate$/.test(path)) return 'rotate_credential';
     if (method === 'POST' && path === '/api/v1/admin/operators') return 'create_operator';
     if (method === 'POST' && path === '/api/v1/auth/password') return 'change_password';
+    if (method === 'POST' && (path === '/api/v1/auth/email' || path === '/api/v1/auth/email/resend')) return 'account_email';
     if (method === 'POST' && path === '/api/v1/admin/clock/reconcile') return 'clock_change';
     if (method === 'POST' && path.startsWith('/api/v1/admin/restore/')) return 'restore_change';
     if (method === 'POST' && /\/admin\/agents\/[^/]+\/credentials$/.test(path)) return 'rotate_credential';
@@ -426,7 +427,8 @@
         else if (page === 'completed') selectTaskView('completed');
         else if (page === 'task' && extra) openTask(extra);
         else { updateTaskViewTabs(); showView('tasks'); loadTasks(); }
-      } else if (head === 'archived') selectTaskView('archived');
+      } else if (head === 'account') { showView('overview'); myAccount(); }
+      else if (head === 'archived') selectTaskView('archived');
       else if (head === 'tasks' || head === 'shared' || head === 'resources' || (head === 'admin' && state.actor?.role === 'admin')) enterTopLevel(head);
       else showView('overview');
     } finally { routing = false; }
@@ -445,6 +447,7 @@
     if (operation === 'clock_change') return async () => { await loadClock(); setGlobalAlert('Clock reconciliation recorded. Expired work still requires recovery.', 'success'); };
     if (operation === 'restore_change') return async () => { await loadRestore(); setGlobalAlert('Restore reconciliation recorded.', 'success'); };
     if (operation === 'create_operator') return async () => { await loadOperators(); setGlobalAlert('Operator account created.', 'success'); };
+    if (operation === 'account_email') return async () => { setGlobalAlert('Verification email requested. Open the newest message in your inbox; older links no longer work.', 'success'); };
     if (operation === 'change_password') return async () => { signOutLocal(); showLoginError('Password changed. Sign in with your new password.'); };
     if (operation === 'operator_work') return async () => { state.projectId = context.projectId || state.projectId; state.selectedTaskId = context.taskId || ''; if (state.selectedTaskId) { showView('task-detail'); await loadTaskDetail(); } else { showView('tasks'); await loadTasks(); } setGlobalAlert('Update recorded. Inspect the current task and ownership.', 'success'); };
     if (operation === 'operator_access') return async () => { await loadOperators(); setGlobalAlert('Account access updated.', 'success'); };
@@ -2806,7 +2809,7 @@
       if (actorId() !== currentActor || state.actor?.role !== 'admin') return;
       state.operators = append ? [...state.operators, ...(page.items || [])] : (page.items || []);
       const items = state.operators.map(operator => ({ key: `operator:${operator.id}`, sig: sig(operator), build: () => {
-        const row = el('div','credential-row'); add(row,el('span','',`${operator.name} · ${displayStatus(operator.role)} · ${operator.enabled ? 'Enabled' : 'Disabled'}`));
+        const row = el('div','credential-row'); add(row,el('span','',`${operator.name} · ${displayStatus(operator.role)} · ${operator.enabled ? 'Enabled' : 'Disabled'} · ${operator.email ? `${operator.email} (${operator.email_verified ? 'verified' : 'requires verification'})` : 'No email address'}`));
         const actions = el('div','credential-actions'); add(row,actions);
         add(actions,taskIconButton('Browser sessions', 'sessions', () => browserSessions(operator.id,operator.name),false));
         add(actions,taskIconButton('Change access', 'access', () => {
@@ -2826,18 +2829,19 @@
     const view = workflowDialog('Add operator', 'All authenticated people and agents can access every project. Administrators also manage operator accounts and agent credentials.');
     view.field('name','Username','','input').maxLength = 100;
     selectField(view,'role','Role','operator',[['operator','Operator'],['admin','Administrator']]);
+    const email = view.field('email','Email address (a verification link is sent here)','','input'); email.type = 'email'; email.autocomplete = 'off'; email.maxLength = 254;
     const password = view.field('password','Initial password (at least 12 characters)','','input'); password.type = 'password'; password.autocomplete = 'new-password'; password.maxLength = 1024; password.minLength = 12;
     const confirmation = view.field('confirmation','Confirm initial password','','input'); confirmation.type = 'password'; confirmation.autocomplete = 'new-password';
     view.finish('Create account', (values, dialog) => {
       if (values.get('password') !== values.get('confirmation')) { confirmation.setCustomValidity('Passwords must match.'); confirmation.reportValidity(); confirmation.addEventListener('input', () => confirmation.setCustomValidity(''),{once:true}); return; }
-      const body = {name:values.get('name'),role:values.get('role'),password:values.get('password')};
+      const body = {name:values.get('name'),role:values.get('role'),email:values.get('email').trim(),password:values.get('password')};
       dialog.close(); startMutation('/api/v1/admin/operators',body,'operator creation',async () => { await loadOperators(); setGlobalAlert('Operator account created.', 'success'); });
     });
   }
   async function myAccount() {
     const currentActor = actorId();
     try {
-      const operator = (await request('/api/v1/auth/account')).data.operator;
+      const account = (await request('/api/v1/auth/account')).data, operator = account.operator, verification = account.email_verification || {};
       if (actorId() !== currentActor) return;
       const view = workflowDialog('My account', `${operator.name} · ${displayStatus(operator.role)}. Changing your password signs out every browser session for this account.`);
       const themeGroup = el('fieldset', 'theme-selector'); add(themeGroup, el('legend', '', 'Website theme'));
@@ -2847,6 +2851,28 @@
         radio.addEventListener('change', () => applyTheme(value)); add(choice, radio); add(choice, el('span', '', label)); add(themeGroup, choice);
       });
       add(view.form, themeGroup);
+      const emailBox = el('fieldset', 'email-settings'); add(emailBox, el('legend', '', 'Email address'));
+      const emailStatus = operator.email ? `${operator.email} · ${operator.email_verified ? 'Verified' : 'Requires verification'}` : 'No email address is set.';
+      add(emailBox, el('p', '', emailStatus));
+      if (operator.email && !operator.email_verified) {
+        const failed = verification.send_error ? (verification.send_error === 'mail_not_configured' ? 'This server is not set up to send email.' : 'The last verification email could not be sent.') : '';
+        if (failed) add(emailBox, el('p', 'error', failed));
+        else if (!verification.sent_at) add(emailBox, el('p', 'muted', 'Verification email is being sent.'));
+        else add(emailBox, el('p', 'muted', 'A verification email was sent. Open the link in the newest message.'));
+        const resend = actionButton('Resend verification email', () => { resend.disabled = true; view.dialog.close(); startMutation('/api/v1/auth/email/resend', {}, 'verification email', restoredMutationCallbacks('account_email'), 'POST', error => setGlobalAlert(errorMessage(error), 'error', error.uncertain)); });
+        const wait = Date.parse(verification.resend_available_at || '') - Date.now();
+        if (wait > 0) { resend.disabled = true; add(emailBox, el('p', 'muted', 'Another verification email can be requested after one minute. Reopen this dialog then.')); setTimeout(() => { if (resend.isConnected) resend.disabled = false; }, wait + 250); }
+        add(emailBox, resend);
+      }
+      const emailCaption = el('label', '', operator.email ? 'Change email address' : 'Email address'); emailCaption.htmlFor = 'account-email';
+      const emailInput = el('input'); emailInput.id = 'account-email'; emailInput.type = 'email'; emailInput.autocomplete = 'email'; emailInput.maxLength = 254;
+      add(emailBox, emailCaption); add(emailBox, emailInput);
+      add(emailBox, actionButton('Save email and send verification', () => {
+        if (!emailInput.value.trim() || !emailInput.reportValidity()) return;
+        const body = {expected_revision:operator.revision,email:emailInput.value.trim()};
+        view.dialog.close(); startMutation('/api/v1/auth/email', body, 'email address', restoredMutationCallbacks('account_email'), 'POST', error => setGlobalAlert(errorMessage(error), 'error', error.uncertain));
+      }));
+      add(view.form, emailBox);
       add(view.form,actionButton('View my browser sessions', () => { view.dialog.close(); browserSessions(operator.id,operator.name); },false));
       add(view.form,actionButton('Sign out', () => { view.dialog.close(); startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()); }));
       const current = view.field('current_password','Current password','','input'); current.type = 'password'; current.autocomplete = 'current-password'; current.maxLength = 1024;

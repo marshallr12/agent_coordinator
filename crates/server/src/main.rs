@@ -69,6 +69,44 @@ struct Options {
         global = true
     )]
     fix_class_principals: Vec<String>,
+    /// SMTP relay host for account verification email (for Gmail, smtp.gmail.com). Mail is off without it.
+    #[arg(
+        long,
+        env = "COORDINATOR_SMTP_HOST",
+        global = true,
+        requires = "mail_from"
+    )]
+    smtp_host: Option<String>,
+    /// SMTP port; defaults to 587 for starttls and 465 for tls.
+    #[arg(long, env = "COORDINATOR_SMTP_PORT", global = true)]
+    smtp_port: Option<u16>,
+    /// Transport security: starttls or tls. The relay is never used without TLS.
+    #[arg(
+        long,
+        env = "COORDINATOR_SMTP_TLS",
+        default_value = "starttls",
+        global = true
+    )]
+    smtp_tls: coordinator_server::account_email::SmtpTls,
+    /// SMTP account name (for Gmail, the full address). Needs --smtp-password-file.
+    #[arg(
+        long,
+        env = "COORDINATOR_SMTP_USER",
+        global = true,
+        requires = "smtp_password_file"
+    )]
+    smtp_user: Option<String>,
+    /// File holding the SMTP password (for Gmail, an app password); readable only by its owner.
+    #[arg(
+        long,
+        env = "COORDINATOR_SMTP_PASSWORD_FILE",
+        global = true,
+        requires = "smtp_user"
+    )]
+    smtp_password_file: Option<PathBuf>,
+    /// Sender address of verification email, such as agentc@example.com.
+    #[arg(long, env = "COORDINATOR_MAIL_FROM", global = true)]
+    mail_from: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -199,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {}
     }
+    let mail = mail_config(&options)?;
     let config = Config {
         database_path: options.database,
         listen: options.listen,
@@ -213,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
         agent_task_weekly_budget: options.agent_task_weekly_budget,
         canary_principals: options.canary_principals,
         fix_class_principals: options.fix_class_principals,
+        mail,
     };
     let state = if matches!(&options.command, Command::Backup { .. }) {
         AppState::open_existing_read_only(config).await?
@@ -304,6 +344,46 @@ async fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
+/// The mail relay settings, with the password read from its private file.
+fn mail_config(
+    options: &Options,
+) -> anyhow::Result<Option<coordinator_server::account_email::MailConfig>> {
+    use coordinator_server::account_email::{MailConfig, SmtpTls};
+    let (Some(host), Some(from)) = (&options.smtp_host, &options.mail_from) else {
+        return Ok(None);
+    };
+    let password = match &options.smtp_password_file {
+        Some(path) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(path)?.permissions().mode();
+                anyhow::ensure!(
+                    mode & 0o077 == 0,
+                    "The SMTP password file must not be accessible to group or others."
+                );
+            }
+            let text = std::fs::read_to_string(path)
+                .map_err(|_| anyhow::anyhow!("The SMTP password file could not be read."))?;
+            let password = text.trim_end().to_owned();
+            anyhow::ensure!(!password.is_empty(), "The SMTP password file is empty.");
+            Some(password)
+        }
+        None => None,
+    };
+    Ok(Some(MailConfig {
+        host: host.clone(),
+        port: options.smtp_port.unwrap_or(match options.smtp_tls {
+            SmtpTls::StartTls => 587,
+            SmtpTls::Tls => 465,
+        }),
+        tls: options.smtp_tls,
+        username: options.smtp_user.clone(),
+        password,
+        from: from.clone(),
+    }))
+}
+
 /// Answers reversible decisions that waited 24 hours, every few minutes.
 async fn sweep_decision_timeouts(state: AppState) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));

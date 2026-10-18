@@ -1329,8 +1329,8 @@ own work and completion evidence; optional children remain visible. The objectiv
 is a general task with its own review, never an automatic done rollup.
 
 Use the dashboard's **Access** page for human accounts, agent token rotation, and
-browser session revocation. **My account** changes the current operator's password
-and ends all their browser sessions. An administrator with local host access can
+browser session revocation. **My account** sets and verifies the operator's email
+address, changes the operator's password, and ends all their browser sessions. An administrator with local host access can
 recover a lost password without publishing a recovery endpoint:
 
 ```sh
