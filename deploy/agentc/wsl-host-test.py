@@ -16,6 +16,18 @@ SPEC.loader.exec_module(HOST)
 
 
 class Admission(unittest.TestCase):
+    def test_shared_handler_and_exposed_sockets_each_refuse_admission(self):
+        self.assertEqual(HOST.interop_errors(None, []), [])
+        self.assertEqual(HOST.interop_errors('disabled\n', []), [])
+        errors = HOST.interop_errors('enabled\ninterpreter /init\n', [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn('VM-wide', errors[0])
+        # Removing binfmt alone cannot hide direct access to the interop service.
+        errors = HOST.interop_errors(None, ['/run/WSL/1_interop'])
+        self.assertEqual(len(errors), 1)
+        self.assertIn('timeout is not a containment pass', errors[0])
+        self.assertEqual(len(HOST.interop_errors('enabled\n', ['socket'])), 2)
+
     def test_shared_kernel_role_uids_cannot_collide_or_change(self):
         reserved = dict(zip(HOST.ROLES, range(600001, 600005)))
         self.assertEqual(HOST.role_uid_errors(reserved, reserved), [])

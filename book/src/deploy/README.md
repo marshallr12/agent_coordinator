@@ -772,6 +772,32 @@ instead of refused in that mode; the CLI smoke's health check also disconnected.
 The full containment suite and Windows reboot/shutdown rehearsal have
 not run. Do not enable unattended work on that configuration.
 
+The follow-up on 2026-10-18 tested the dedicated `AgentcUbuntu` distro after
+the approved VM restart: actual networking was NAT, AppArmor was active, the
+mount guard was active, and the configured role UIDs were 600001–600004.
+The prerequisite check still refused admission. WSL2's VM-wide `WSLInterop`
+handler remained enabled, and `/run/WSL/1_interop` and `2_interop` were present
+with mode 0777 despite the distro's `interop=false` setting. Nine benign Windows
+command probes (owner, implementer and reviewer, with automatic and explicit
+socket selection) returned `UtilAcceptVsock` transport timeouts. No successful
+Windows execution was observed, but those failures do not prove a security
+boundary. The eight saved host-helper tests and three mount-guard tests passed;
+they are not the full containment suite. The Linux harnesses and supervisor
+were not installed, and unattended startup remains unaccepted.
+
+WSL2 registers its executable handler at VM scope; restarting a distro is not
+an adequate remedy for that observation. Preflight reports both the shared
+handler and exposed sockets and continues to refuse admission. Do not disable
+the shared handler globally to get a green result: that can change other
+distros. Do not count a missing executable, transport error, or timeout as an
+isolation test pass. Microsoft's WSL security model also says that interop and
+automount configuration are product settings, not sandbox boundaries. This
+profile therefore requires further reviewed isolation work and full acceptance
+before it can host agents. Options are to develop and verify that additional
+isolation, use a separately managed Linux VM with restricted host access, or
+continue on an accepted Linux host. No weakening of the existing containment
+suite is an acceptable workaround.
+
 Use a **dedicated Ubuntu 24.04 WSL2 distro**, owned by the Windows account that
 will run the Scheduled Task (example name `AgentcUbuntu`). Keep ordinary Ubuntu,
 Docker Desktop and their data intact. Install a current Microsoft WSL release

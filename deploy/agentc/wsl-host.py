@@ -65,6 +65,26 @@ def role_uid_errors(reserved, observed):
     return []
 
 
+def interop_errors(handler, sockets):
+    """An enabled VM handler is not proof of execution, or a safe admission.
+
+    WSL2 registers binfmt at VM scope. Distro configuration and failed Windows
+    launches (including transport timeouts) cannot attest a kernel boundary.
+    Keep refusing admission until the execution path has been isolated and the
+    complete containment profile reviewed. Never unregister another distro's
+    shared handler as a side effect of checking this one.
+    """
+    errors = []
+    if handler is not None and handler.startswith('enabled'):
+        errors.append('WSL VM-wide Windows executable handler remains enabled; '
+                      'interop=false and restarting this distro do not prove containment')
+    if sockets:
+        errors.append('WSL interop sockets remain exposed under /run/WSL; '
+                      'Windows execution isolation is unverified (a failed launch or '
+                      'transport timeout is not a containment pass)')
+    return errors
+
+
 def preflight():
     errors = []
     if os.geteuid() != 0:
@@ -100,8 +120,8 @@ def preflight():
     except (OSError, ValueError):
         errors.append('reserve unused role UIDs across all WSL distros; record root-owned /etc/agentc/wsl-uids.json')
     interop = Path('/proc/sys/fs/binfmt_misc/WSLInterop')
-    if interop.exists() and interop.read_text().startswith('enabled'):
-        errors.append('Windows executable interop is still enabled; restart the distro')
+    errors.extend(interop_errors(interop.read_text() if interop.exists() else None,
+                                 list(Path('/run/WSL').glob('*_interop'))))
     # Windows files and Docker Desktop sockets must not be reachable by either uid.
     mounts = command(['findmnt', '--json', '--list', '-o', 'TARGET,FSTYPE,OPTIONS'])
     if mounts.returncode:
