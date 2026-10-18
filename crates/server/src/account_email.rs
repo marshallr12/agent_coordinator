@@ -507,9 +507,11 @@ pub(crate) mod tests {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mailer = SmtpMailer {
-            transport: lettre::AsyncSmtpTransport::builder_dangerous("127.0.0.1")
-                .port(listener.local_addr().unwrap().port())
-                .build(),
+            transport: lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::builder_dangerous(
+                "127.0.0.1",
+            )
+            .port(listener.local_addr().unwrap().port())
+            .build(),
             from: "sender@example.test".parse().unwrap(),
         };
         let subject = mail.subject.clone();
