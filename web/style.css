@@ -176,9 +176,8 @@ a.nav-item { text-decoration: none; }
 .detail-back-row { margin-bottom: 17px; }
 .detail-heading { margin-bottom: 26px; }
 .detail-heading h1 { max-width: 760px; }
-.detail-heading h1, #detail-task-id-value { cursor: text; user-select: text; }
-.task-identity-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; }
-.task-identity-actions .button { min-height: 32px; padding: 5px 10px; }
+.detail-heading .copy-target { cursor: copy; }
+.detail-heading .copy-target:hover { text-decoration: underline dotted; text-underline-offset: 4px; }
 .task-detail-copy-feedback { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .task-detail-copy-feedback.success { color: #176762; }
 .task-detail-copy-feedback.fallback { color: #795218; }
