@@ -1,3 +1,4 @@
+pub mod account_email;
 pub mod admission;
 pub mod artifacts;
 pub mod attention;
@@ -65,6 +66,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(workflow::routes())
         .merge(next::routes())
         .merge(attention::routes())
+        .merge(account_email::routes())
         .merge(integrator::routes())
         .merge(integrator_authority::routes())
         .merge(integrator_observe::routes())
@@ -143,6 +145,7 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
             ));
     let login = parts.method == Method::POST && parts.uri.path() == "/api/v1/auth/login";
     let ack_link = attention::is_ack_link(&parts.method, parts.uri.path());
+    let verify_link = account_email::is_verify_link(&parts.method, parts.uri.path());
     let mut result = if parts.uri.path().starts_with("/api/v1/reporters/") {
         match jobs::ReporterAuth::authenticate(&parts, &state).await {
             Ok(auth) => {
@@ -151,7 +154,7 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
             }
             Err(error) => error.into_response(),
         }
-    } else if !public_read && !login && !ack_link {
+    } else if !public_read && !login && !ack_link && !verify_link {
         match auth::Auth::authenticate(&parts, &state).await {
             Ok(auth) => {
                 parts.extensions.insert(auth);

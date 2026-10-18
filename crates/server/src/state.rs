@@ -42,6 +42,9 @@ pub struct Config {
     /// (`revert`, `fix_target`, `deflake`, `refusal_fix`) without evidence the
     /// service can verify. Empty by default: no agent may exempt its own task.
     pub fix_class_principals: Vec<String>,
+    /// Outgoing mail relay for account email verification; none by default, in
+    /// which case verification emails cannot be sent.
+    pub mail: Option<crate::account_email::MailConfig>,
 }
 
 impl Default for Config {
@@ -60,6 +63,7 @@ impl Default for Config {
             agent_task_weekly_budget: crate::admission::DEFAULT_WEEKLY_BUDGET,
             canary_principals: Vec::new(),
             fix_class_principals: Vec::new(),
+            mail: None,
         }
     }
 }
@@ -102,6 +106,9 @@ impl Config {
             self.listen.ip().is_loopback(),
             "The service listener must be loopback; expose HTTPS through the reverse proxy."
         );
+        if let Some(mail) = &self.mail {
+            mail.validate()?;
+        }
         let origin = url::Url::parse(&self.public_origin)?;
         anyhow::ensure!(
             origin.username().is_empty()
@@ -161,6 +168,8 @@ pub struct AppState {
     pub(crate) password_workers: Arc<Semaphore>,
     pub(crate) dummy_password_hash: Arc<String>,
     pub(crate) context_reranker: Option<Arc<ContextReranker>>,
+    /// Sends account verification email. Tests may replace it.
+    pub mailer: Arc<dyn crate::account_email::Mailer>,
     clock_runtime: Arc<Mutex<ClockRuntime>>,
     authoritative_clock_gate: Arc<AsyncMutex<AuthoritativeClockGate>>,
 }
@@ -590,6 +599,7 @@ impl AppState {
             incident_active: clock_row.get::<String, _>("status") == "clock_reconciliation",
         };
         let context_reranker = ContextReranker::from_config(&config.context_rerank)?.map(Arc::new);
+        let mailer = crate::account_email::mailer_for(&config.mail)?;
         Ok(Self {
             pool,
             config,
@@ -598,6 +608,7 @@ impl AppState {
             password_workers: Arc::new(Semaphore::new(2)),
             dummy_password_hash: Arc::new(dummy_password_hash),
             context_reranker,
+            mailer,
             clock_runtime: Arc::new(Mutex::new(clock_runtime)),
             authoritative_clock_gate: Arc::new(AsyncMutex::new(AuthoritativeClockGate::default())),
         })

@@ -242,7 +242,8 @@ revive an expired attempt.
 
 Initial-admin creation and lost-password recovery use a documented command on
 the service host in the first-release proposal. This avoids requiring email
-delivery as infrastructure. The browser supports password changes, session
+delivery as infrastructure; account email addresses are verified for a later
+email-based recovery task and do not yet gate sign-in or recover passwords. The browser supports password changes, session
 revocation, and token issuance/revocation for authorized people. Password changes
 invalidate existing browser sessions; agent-token revocation is a separate,
 explicit operation.

@@ -57,7 +57,11 @@ commit the file to a repository. If the issuance response was lost, a retry cann
 recover its token: revoke the unused credential and issue a replacement with a
 new agent name, as the page explains.
 
-**My account** changes your password and lists your browser sessions. A password
+**My account** shows your email address and whether it is verified, sets or
+changes it (a verification link is mailed automatically), and offers **Resend
+verification email** a minute after the last message; a newer link cancels every
+older one. It also changes your password and lists your browser sessions. An
+administrator enters an email address when adding an operator. A password
 change invalidates every browser session for your account. If its response is
 lost, sign in with the new password and inspect your account; an old session
 cannot retry a password change to regain access. Passwords are never saved in

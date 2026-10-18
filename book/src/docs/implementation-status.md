@@ -290,6 +290,14 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 - Human account creation, revision-checked access changes, self-service password
   changes, browser-session inspection/revocation, and audited host password recovery.
   Agent credential rotation preserves the agent principal and returns the new secret once.
+- Account email addresses: required when an administrator adds an account, set or
+  changed in **My account**, verified through a single-use 24-hour link sent by
+  the configured SMTP relay, with a resend action (one minute apart) that
+  invalidates earlier links. Existing administrators were recorded as verified
+  with `marshall.rosenstein@gmail.com` by migration 42. Not yet implemented:
+  email-based password reset, and sign-in is not gated on verification. Live
+  delivery through Gmail has not been exercised from CI; it needs the relay
+  settings in `service.env.example` and a human-delivered check.
 - Full policy editing, planned-task admission, inspected human recovery and blocker
   resolution, with matching native task, policy, objective, and history commands.
 - Objectives with required/optional children, revisioned membership frozen once work

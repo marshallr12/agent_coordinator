@@ -345,6 +345,7 @@ async fn restore_revokes_authority_preserves_holds_and_requires_complete_reconci
             Some(json!({
                 "name":"restored-operator",
                 "role":"operator",
+                "email":"restored@example.test",
                 "password":"restored operator original password"
             })),
         )
@@ -497,6 +498,7 @@ async fn restore_revokes_authority_preserves_holds_and_requires_complete_reconci
             Some(json!({
                 "name":"restored-operator",
                 "role":"operator",
+                "email":"restored@example.test",
                 "password":"restored operator original password"
             })),
         )

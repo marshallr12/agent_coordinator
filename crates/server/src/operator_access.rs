@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use sqlx::Row;
 
 use crate::{
+    account_email::{RESEND_COOLDOWN_MS, deliver_verification, issue_verification, validate_email},
     auth::{
         Auth, admin, clear_browser_cookie, digest, hash_password_bounded, secret, timestamp,
         valid_id, validate_name, verify_password,
@@ -35,6 +36,8 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/v1/auth/account", get(get_own_account))
         .route("/api/v1/auth/password", post(change_password))
+        .route("/api/v1/auth/email", post(set_email))
+        .route("/api/v1/auth/email/resend", post(resend_verification))
         .route("/api/v1/browser-sessions", get(list_browser_sessions))
         .route(
             "/api/v1/browser-sessions/{id}/revoke",
@@ -208,6 +211,9 @@ fn operator_value(row: &sqlx::sqlite::SqliteRow) -> Value {
         "revision":row.get::<i64,_>("revision"),
         "created_at":timestamp(row.get("created_at")),
         "disabled_at":row.get::<Option<i64>,_>("disabled_at").map(timestamp),
+        "email":row.get::<Option<String>,_>("email"),
+        "email_verified":row.get::<Option<i64>,_>("email_verified_at").is_some(),
+        "email_verified_at":row.get::<Option<i64>,_>("email_verified_at").map(timestamp),
     })
 }
 
@@ -216,7 +222,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     sqlx::query(
-        "SELECT id,name,role,disabled_at,created_at,revision FROM principals WHERE id=? AND kind='human'",
+        "SELECT id,name,role,disabled_at,created_at,revision,email,email_verified_at FROM principals WHERE id=? AND kind='human'",
     )
     .bind(id)
     .fetch_optional(executor)
@@ -239,7 +245,7 @@ async fn list_operators(
     if page.cursor.as_ref().is_some_and(|value| !valid_id(value)) {
         return Err(AppError::bad_request("Invalid cursor."));
     }
-    let rows = sqlx::query("SELECT id,name,role,disabled_at,created_at,revision FROM principals WHERE kind='human' AND id>? ORDER BY id LIMIT 201")
+    let rows = sqlx::query("SELECT id,name,role,disabled_at,created_at,revision,email,email_verified_at FROM principals WHERE kind='human' AND id>? ORDER BY id LIMIT 201")
         .bind(page.cursor.unwrap_or_default())
         .fetch_all(&state.pool)
         .await?;
@@ -270,8 +276,15 @@ async fn get_own_account(
     auth: Auth,
 ) -> Result<Json<Value>, AppError> {
     auth.require_browser()?;
-    let row = operator_row(&state.pool, &auth.actor.id).await?;
-    Ok(response(json!({"operator":operator_value(&row)})))
+    let mut c = state.pool.acquire().await?;
+    let row = operator_row(&mut *c, &auth.actor.id).await?;
+    let email_verification =
+        crate::account_email::verification_state(&mut c, &auth.actor.id, state.now()).await?;
+    Ok(response(json!({
+        "operator":operator_value(&row),
+        "email_verification":email_verification,
+        "mail_configured":state.mailer.configured(),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -279,6 +292,7 @@ async fn get_own_account(
 struct CreateOperatorInput {
     name: String,
     role: String,
+    email: String,
     password: String,
 }
 
@@ -286,6 +300,7 @@ struct CreateOperatorInput {
 struct CreateOperatorReceipt<'a> {
     name: &'a str,
     role: &'a str,
+    email: &'a str,
     password_verifier: String,
 }
 
@@ -306,6 +321,7 @@ struct CreatedOperatorRetry {
     password_hash: String,
     original_name: String,
     original_role: String,
+    original_email: Option<String>,
 }
 
 async fn created_operator_retry(
@@ -363,6 +379,10 @@ async fn created_operator_retry(
         .and_then(Value::as_str)
         .ok_or_else(AppError::internal)?
         .to_owned();
+    let original_email = result
+        .pointer("/operator/email")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let password_hash =
         sqlx::query_scalar("SELECT password_hash FROM principals WHERE id=? AND kind='human'")
             .bind(id)
@@ -373,6 +393,7 @@ async fn created_operator_retry(
         password_hash,
         original_name,
         original_role,
+        original_email,
     }))
 }
 
@@ -386,6 +407,7 @@ async fn create_operator(
     validate_name(&input.name)?;
     validate_human_role(&input.role)?;
     validate_password(&input.password)?;
+    let email = validate_email(&input.email)?;
     let mut receipt_already_exists = false;
     let mut password_matches = true;
     let existing_retry = created_operator_retry(&state, &auth.actor.id, &headers).await?;
@@ -404,6 +426,7 @@ async fn create_operator(
     let mut receipt = CreateOperatorReceipt {
         name: &input.name,
         role: &input.role,
+        email: &email,
         // Hashing the already slow, uniquely salted verifier binds a retry
         // without retaining another password-checking oracle.
         password_verifier: digest(&password_hash),
@@ -441,7 +464,9 @@ async fn create_operator(
         }
         Err(error) if error.code == "idempotency_conflict" => {
             if let Some(existing) = &existing_retry
-                && (existing.original_name != input.name || existing.original_role != input.role)
+                && (existing.original_name != input.name
+                    || existing.original_role != input.role
+                    || existing.original_email.as_deref() != Some(email.as_str()))
             {
                 return Err(error);
             }
@@ -490,19 +515,21 @@ async fn create_operator(
         ));
     }
     let id = uuid::Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO principals(id,name,kind,role,password_hash,created_at,revision) VALUES(?,?,'human',?,?,?,1)")
+    sqlx::query("INSERT INTO principals(id,name,kind,role,password_hash,created_at,revision,email) VALUES(?,?,'human',?,?,?,1,?)")
         .bind(&id)
         .bind(&input.name)
         .bind(&input.role)
         .bind(password_hash)
         .bind(mutation.now)
+        .bind(&email)
         .execute(&mut *mutation.tx)
         .await?;
+    let issued = issue_verification(&mut mutation.tx, &id, &email, mutation.now).await?;
     let row = operator_row(&mut *mutation.tx, &id).await?;
     let data = json!({"operator":operator_value(&row)});
-    Ok(response(
-        mutation.finish(data, None, "operator_created", &id).await?,
-    ))
+    let data = mutation.finish(data, None, "operator_created", &id).await?;
+    deliver_verification(&state, input.name, issued);
+    Ok(response(data))
 }
 
 #[derive(Deserialize, Serialize)]
@@ -694,6 +721,146 @@ async fn change_password(
         .headers_mut()
         .insert(header::SET_COOKIE, clear_browser_cookie(&state));
     Ok(result)
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SetEmailInput {
+    expected_revision: i64,
+    email: String,
+}
+
+/// `POST /api/v1/auth/email`: the signed-in person sets or changes their own
+/// address. It becomes unverified, earlier links stop working, and a new
+/// verification email is sent.
+async fn set_email(
+    State(state): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Json(input): Json<SetEmailInput>,
+) -> Result<Json<Value>, AppError> {
+    auth.require_browser()?;
+    if input.expected_revision < 1 {
+        return Err(AppError::bad_request(
+            "Provide a positive expected_revision.",
+        ));
+    }
+    let email = validate_email(&input.email)?;
+    let receipt = SetEmailInput {
+        expected_revision: input.expected_revision,
+        email: email.clone(),
+    };
+    let mut mutation =
+        Mutation::begin(&state, &auth, &headers, "POST /api/v1/auth/email", &receipt).await?;
+    let id = mutation.actor.id.clone();
+    if let Some(replay) = &mutation.replay {
+        let _ = replay;
+        let current = operator_row(&mut *mutation.tx, &id).await?;
+        return Ok(response(json!({"operator":operator_value(&current)})));
+    }
+    let current = operator_row(&mut *mutation.tx, &id).await?;
+    if current.get::<i64, _>("revision") != input.expected_revision {
+        return Err(AppError::conflict(
+            "revision_conflict",
+            "The account changed. Reload it before changing the email address.",
+        ));
+    }
+    if current
+        .get::<Option<String>, _>("email")
+        .is_some_and(|existing| existing.eq_ignore_ascii_case(&email))
+    {
+        return Err(AppError::conflict(
+            "email_unchanged",
+            "That is already the email address on this account.",
+        ));
+    }
+    sqlx::query(
+        "UPDATE principals SET email=?,email_verified_at=NULL,revision=revision+1 WHERE id=?",
+    )
+    .bind(&email)
+    .bind(&id)
+    .execute(&mut *mutation.tx)
+    .await?;
+    let issued = issue_verification(&mut mutation.tx, &id, &email, mutation.now).await?;
+    let name = mutation.actor.name.clone();
+    let row = operator_row(&mut *mutation.tx, &id).await?;
+    let data = mutation
+        .finish(
+            json!({"operator":operator_value(&row)}),
+            None,
+            "operator_email_changed",
+            &id,
+        )
+        .await?;
+    deliver_verification(&state, name, issued);
+    Ok(response(data))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResendInput {}
+
+/// `POST /api/v1/auth/email/resend`: send another verification email once the
+/// previous one is at least a minute old. The new link replaces every earlier one.
+async fn resend_verification(
+    State(state): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    Json(input): Json<ResendInput>,
+) -> Result<Json<Value>, AppError> {
+    auth.require_browser()?;
+    let mut mutation = Mutation::begin(
+        &state,
+        &auth,
+        &headers,
+        "POST /api/v1/auth/email/resend",
+        &input,
+    )
+    .await?;
+    let id = mutation.actor.id.clone();
+    if mutation.replay.is_some() {
+        let current = operator_row(&mut *mutation.tx, &id).await?;
+        return Ok(response(json!({"operator":operator_value(&current)})));
+    }
+    let current = operator_row(&mut *mutation.tx, &id).await?;
+    let Some(email) = current.get::<Option<String>, _>("email") else {
+        return Err(AppError::conflict(
+            "email_missing",
+            "Set an email address before requesting verification.",
+        ));
+    };
+    if current.get::<Option<i64>, _>("email_verified_at").is_some() {
+        return Err(AppError::conflict(
+            "email_already_verified",
+            "This email address is already verified.",
+        ));
+    }
+    let last_issued: Option<i64> =
+        sqlx::query_scalar("SELECT max(created_at) FROM email_verifications WHERE principal_id=?")
+            .bind(&id)
+            .fetch_one(&mut *mutation.tx)
+            .await?;
+    if let Some(last_issued) = last_issued
+        && last_issued + RESEND_COOLDOWN_MS > mutation.now
+    {
+        return Err(AppError::conflict(
+            "verification_resend_too_soon",
+            "A verification email was sent less than a minute ago. Wait a minute before requesting another.",
+        )
+        .with_details(json!({"resend_available_at":timestamp(last_issued + RESEND_COOLDOWN_MS)})));
+    }
+    let issued = issue_verification(&mut mutation.tx, &id, &email, mutation.now).await?;
+    let name = mutation.actor.name.clone();
+    let data = mutation
+        .finish(
+            json!({"operator":operator_value(&current)}),
+            None,
+            "operator_email_verification_resent",
+            &id,
+        )
+        .await?;
+    deliver_verification(&state, name, issued);
+    Ok(response(data))
 }
 
 #[derive(Deserialize)]

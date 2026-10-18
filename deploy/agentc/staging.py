@@ -249,6 +249,7 @@ def create_verifier(st, api, project):
     """Creates the staging-only operator login for UI verification (plan M2)."""
     password = secrets.token_urlsafe(24)
     api.call("/api/v1/admin/operators", {"name": "staging-verifier", "role": "operator",
+                                         "email": "staging-verifier@example.invalid",
                                          "password": password})
     Api(st.origin, "staging-verifier", password)  # proves the login works
     write_private(st.path("secrets", "verification.json"), json.dumps(
