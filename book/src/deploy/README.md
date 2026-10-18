@@ -781,7 +781,10 @@ with mode 0777 despite the distro's `interop=false` setting. Nine benign Windows
 command probes (owner, implementer and reviewer, with automatic and explicit
 socket selection) returned `UtilAcceptVsock` transport timeouts. No successful
 Windows execution was observed, but those failures do not prove a security
-boundary. The eight saved host-helper tests and three mount-guard tests passed;
+boundary. A separate probe with cleared environments and supplementary groups
+confirmed that both agent role UIDs could connect to both interop sockets.
+No protocol messages or credentials were sent by that socket probe.
+The eight saved host-helper tests and three mount-guard tests passed;
 they are not the full containment suite. The Linux harnesses and supervisor
 were not installed, and unattended startup remains unaccepted.
 
