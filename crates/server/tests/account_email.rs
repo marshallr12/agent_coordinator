@@ -76,6 +76,8 @@ struct Reply {
     body: Value,
     text: String,
     cookie: Option<String>,
+    cache_control: Option<String>,
+    referrer_policy: Option<String>,
 }
 
 #[derive(Clone)]
@@ -110,6 +112,14 @@ impl Fixture {
     async fn raw(&self, request: Request<Body>) -> Reply {
         let result = router(self.state.clone()).oneshot(request).await.unwrap();
         let status = result.status();
+        let cache_control = result
+            .headers()
+            .get("cache-control")
+            .map(|v| v.to_str().unwrap().to_owned());
+        let referrer_policy = result
+            .headers()
+            .get("referrer-policy")
+            .map(|v| v.to_str().unwrap().to_owned());
         let cookie = result.headers().get("set-cookie").map(|value| {
             value
                 .to_str()
@@ -134,6 +144,8 @@ impl Fixture {
             body: serde_json::from_str(&text).unwrap_or(Value::Null),
             text,
             cookie,
+            cache_control,
+            referrer_policy,
         }
     }
 
@@ -330,24 +342,26 @@ async fn resending_invalidates_the_earlier_link_and_the_later_one_verifies() {
         false
     );
 
-    // Opening a link does not verify; only the button's POST does.
-    let page = f.open_link(&second).await;
-    assert!(page.text.contains("<form"), "{}", page.text);
-    assert_eq!(
-        f.account(&tester).await["operator"]["email_verified"],
-        false
-    );
-    let done = f.click_verify(&second).await;
+    // The first GET verifies: no form, script, redirect, or second action.
+    let done = f.open_link(&second).await;
     assert_eq!(done.status, StatusCode::OK);
     assert!(
         done.text.contains("Email address verified"),
         "{}",
         done.text
     );
+    assert!(!done.text.contains("<form"));
+    assert!(!done.text.contains("<button"));
+    assert!(!done.text.contains("<script"));
+    assert!(!done.text.contains(&second));
+    assert!(done.text.contains("href=\"/#account\""));
+    assert_eq!(done.cache_control.as_deref(), Some("no-store"));
+    assert_eq!(done.referrer_policy.as_deref(), Some("no-referrer"));
     let data = f.account(&tester).await;
     assert_eq!(data["operator"]["email_verified"], true);
     assert_eq!(data["email_verification"]["status"], "verified");
     // The link works once.
+    assert!(f.open_link(&second).await.text.contains("has expired"));
     assert!(f.click_verify(&second).await.text.contains("has expired"));
     let again = f
         .call(
@@ -358,6 +372,107 @@ async fn resending_invalidates_the_earlier_link_and_the_later_one_verifies() {
         )
         .await;
     assert_eq!(again.body["error"]["code"], "email_already_verified");
+}
+
+#[tokio::test]
+async fn concurrent_verification_gets_commit_only_one_effect() {
+    let f = Fixture::new().await;
+    let admin = f.login("admin", PASSWORD).await;
+    let created = create_operator(&f, &admin, "tester", "tester@example.test").await;
+    let id = created.body["data"]["operator"]["id"].as_str().unwrap();
+    let (_, token) = f.inbox.token(0).await;
+    let (one, two) = tokio::join!(f.open_link(&token), f.open_link(&token));
+    assert_eq!(
+        usize::from(one.text.contains("Email address verified"))
+            + usize::from(two.text.contains("Email address verified")),
+        1
+    );
+    assert_eq!(
+        usize::from(one.text.contains("has expired"))
+            + usize::from(two.text.contains("has expired")),
+        1
+    );
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE kind='operator_email_verified' AND record_id=?",
+    )
+    .bind(id)
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
+}
+
+#[tokio::test]
+async fn head_does_not_consume_the_link_and_legacy_post_still_verifies() {
+    let f = Fixture::new().await;
+    let admin = f.login("admin", PASSWORD).await;
+    create_operator(&f, &admin, "tester", "tester@example.test").await;
+    let tester = f.login("tester", "operator test password").await;
+    let (_, token) = f.inbox.token(0).await;
+    let head = f
+        .raw(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/api/v1/auth/email/verify?token={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert!(head.text.is_empty());
+    assert_eq!(
+        f.account(&tester).await["operator"]["email_verified"],
+        false
+    );
+    assert!(
+        f.click_verify(&token)
+            .await
+            .text
+            .contains("Email address verified")
+    );
+    assert_eq!(f.account(&tester).await["operator"]["email_verified"], true);
+    assert!(f.open_link(&token).await.text.contains("has expired"));
+}
+
+#[tokio::test]
+async fn disabled_accounts_and_active_clock_incidents_cannot_be_verified_by_get() {
+    let f = Fixture::new().await;
+    let admin = f.login("admin", PASSWORD).await;
+    let created = create_operator(&f, &admin, "tester", "tester@example.test").await;
+    let id = created.body["data"]["operator"]["id"].as_str().unwrap();
+    let (_, token) = f.inbox.token(0).await;
+    sqlx::query("UPDATE principals SET disabled_at=? WHERE id=?")
+        .bind(BASE)
+        .bind(id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert!(f.open_link(&token).await.text.contains("has expired"));
+    sqlx::query("UPDATE principals SET disabled_at=NULL WHERE id=?")
+        .bind(id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    f.time.store(BASE - 60_000, Ordering::SeqCst);
+    let detected = f.open_link(&token).await;
+    assert_eq!(
+        detected.body["error"]["code"],
+        "clock_reconciliation_required"
+    );
+    // Moving the clock forward does not clear a persisted incident.
+    f.time.store(BASE + 60_000, Ordering::SeqCst);
+    let active = f.open_link(&token).await;
+    assert_eq!(
+        active.body["error"]["code"],
+        "clock_reconciliation_required"
+    );
+    let verified: Option<i64> =
+        sqlx::query_scalar("SELECT email_verified_at FROM principals WHERE id=?")
+            .bind(id)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert!(verified.is_none());
 }
 
 #[tokio::test]

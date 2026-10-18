@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection};
 
 use crate::{
-    account_email::{OutgoingMail, RESEND_COOLDOWN_MS, validate_email},
+    account_email::{OutgoingMail, RESEND_COOLDOWN_MS, escape_html as escape, validate_email},
     auth::{digest, hash_password_bounded, require_origin, secret},
     error::AppError,
     response,
@@ -150,39 +150,55 @@ async fn request_reset(
 fn deliver(state: &AppState, to: String, issued: Vec<IssuedReset>) {
     let state = state.clone();
     tokio::spawn(async move {
-        let links = issued
-            .iter()
-            .map(|reset| {
-                format!(
-                    "Account {}:\n{}/api/v1/auth/password/reset?token={}\n",
-                    reset.name, state.config.public_origin, reset.token
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mail = OutgoingMail {
-            to,
-            subject: "Reset your password".into(),
-            body: format!(
-                "Someone asked to reset the password of an Agent Coordinator account with this email address. Open the link for your account to choose a new password:\n\n{links}\nEach link works once and expires in 1 hour. Resetting a password signs that account out everywhere.\n\nIf you did not ask for this, ignore this message; your password has not changed.\n"
-            ),
-        };
+        let mail = reset_mail(to, &state.config.public_origin, &issued);
         if let Err(error) = state.mailer.send(mail).await {
             tracing::warn!(%error, "Password reset email was not sent");
         }
     });
 }
 
+fn reset_mail(to: String, origin: &str, issued: &[IssuedReset]) -> OutgoingMail {
+    let links = issued
+        .iter()
+        .map(|reset| {
+            format!(
+                "Account {}:\n{}/api/v1/auth/password/reset?token={}\n",
+                reset.name, origin, reset.token
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let html_links = issued
+        .iter()
+        .map(|reset| {
+            let link = format!("{origin}/api/v1/auth/password/reset?token={}", reset.token);
+            format!(
+                "<li>Account <strong>{}</strong>: <a href=\"{}\">Reset password</a></li>",
+                escape(&reset.name),
+                escape(&link)
+            )
+        })
+        .collect::<String>();
+    OutgoingMail {
+        to,
+        subject: "Reset your password".into(),
+        body: format!(
+            "Someone asked to reset the password of an Agent Coordinator account with this email address. Open the link for your account to choose a new password:\n\n{links}\nEach link works once and expires in 1 hour. Resetting a password signs that account out everywhere.\n\nIf you did not ask for this, ignore this message; your password has not changed.\n"
+        ),
+        html_body: format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+                 <title>Reset your password</title></head><body>\
+                 <p>Someone asked to reset the password of an Agent Coordinator account with this email address. Open the link for your account to choose a new password:</p>\
+                 <ul>{html_links}</ul>\
+                 <p>Each link works once and expires in 1 hour. Resetting a password signs that account out everywhere.</p>\
+                 <p>If you did not ask for this, ignore this message; your password has not changed.</p></body></html>"
+        ),
+    }
+}
+
 #[derive(Deserialize)]
 struct ResetQuery {
     token: String,
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn page(heading: &str, body: &str) -> Response {
@@ -228,6 +244,40 @@ fn form_page(token: &str, name: &str, problem: Option<&str>) -> Response {
 
 fn token_shaped(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod mail_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn password_reset_smtp_mime_preserves_each_account_link_and_escapes_names() {
+        let issued = vec![
+            IssuedReset {
+                name: "Renée & <img src=x onerror=\"alert('x')\">".into(),
+                token: "0123456789abcdef".repeat(4),
+            },
+            IssuedReset {
+                name: "Second account".into(),
+                token: "fedcba9876543210".repeat(4),
+            },
+        ];
+        let origin = "https://coordinator.example.test";
+        let mail = reset_mail("reader@example.test".into(), origin, &issued);
+        let (text, html) = crate::account_email::tests::smtp_bodies(mail).await;
+        for reset in &issued {
+            let link = format!("{origin}/api/v1/auth/password/reset?token={}", reset.token);
+            assert!(text.contains(&format!("Account {}:\n{link}", reset.name)));
+            assert!(html.contains(&format!("<a href=\"{link}\">Reset password</a>")));
+        }
+        assert_eq!(html.matches("<a href=").count(), 2);
+        assert!(
+            html.contains("Renée &amp; &lt;img src=x onerror=&quot;alert(&#39;x&#39;)&quot;&gt;")
+        );
+        assert!(!html.contains("<img"));
+        assert!(!text.contains("token=3D"));
+        assert!(!html.contains("token=3D"));
+    }
 }
 
 struct UsableReset {

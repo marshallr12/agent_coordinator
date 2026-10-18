@@ -112,17 +112,26 @@ existed.
   `email_already_verified` or `email_missing`. Issuing a link, by either
   operation or by account creation, invalidates every earlier unused link for the
   account at once.
-- `GET /api/v1/auth/email/verify?token=` needs no credential and shows a page with
-  one button, so mail scanners that fetch the link do not verify it. The button
-  `POST`s the form field `token` to the same path, which marks the address
-  verified. An unknown, used, replaced or expired token (links last 24 hours)
-  produces an "expired" page.
+- `GET /api/v1/auth/email/verify?token=` needs no credential and immediately
+  marks the address verified, then shows the success page with a link to
+  **My account**. There is no second verification button. A mail scanner that
+  opens the URL also performs this verification; `HEAD` does not consume the
+  link. The legacy `POST` form field `token` remains supported. Both methods
+  perform the same writer-locked, single-use transition. An unknown, used,
+  replaced or expired token (links last 24 hours) produces an "expired" page.
 
 Tokens are 256 random bits, stored only as a SHA-256 hash, and appear only in the
 email. The message is sent after the database transaction commits; the outcome is
 recorded as `sent_at` or a short `send_error` code (`mail_not_configured`,
 `send_failed`), never relay output. A failed send is retried by asking for another
 link. The address is never used to sign in.
+
+Verification and password-reset messages are MIME `multipart/alternative`
+emails with UTF-8 plain-text and HTML bodies. HTML uses anchor links with the
+complete token in `href`; mail readers decode the declared transfer encoding
+before presenting either body. Account names and link attributes are escaped
+in HTML. Password-reset links still open the new-password form and change the
+password only when that form is submitted.
 
 ### Password recovery by email
 

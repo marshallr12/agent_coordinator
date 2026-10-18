@@ -293,7 +293,10 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 - Account email addresses: required when an administrator adds an account, set or
   changed in **My account**, verified through a single-use 24-hour link sent by
   the configured SMTP relay, with a resend action (one minute apart) that
-  invalidates earlier links. Existing administrators were recorded as verified
+  invalidates earlier links. Opening a verification link verifies the address
+  on the initial request, without a confirmation button. Verification and
+  password-reset emails include HTML anchor links and plain-text alternatives
+  in a MIME multipart message. Existing administrators were recorded as verified
   with `marshall.rosenstein@gmail.com` by migration 42. Sign-in is not
   gated on verification. A **Forgot password?** link on the sign-in page mails a
   single-use link, valid for one hour, to a verified address; it opens a page that

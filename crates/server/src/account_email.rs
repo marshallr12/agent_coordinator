@@ -79,6 +79,7 @@ pub struct OutgoingMail {
     pub to: String,
     pub subject: String,
     pub body: String,
+    pub html_body: String,
 }
 
 pub type MailFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
@@ -146,7 +147,10 @@ impl Mailer for SmtpMailer {
                     .parse()
                     .map_err(|_| "invalid recipient".to_owned())?)
                 .subject(mail.subject)
-                .body(mail.body)
+                .multipart(lettre::message::MultiPart::alternative_plain_html(
+                    mail.body,
+                    mail.html_body,
+                ))
                 .map_err(|error| error.to_string())?;
             self.transport
                 .send(message)
@@ -237,19 +241,43 @@ fn verification_link(state: &AppState, token: &str) -> String {
     )
 }
 
+/// Escape both text and double-quoted attributes in an HTML message.
+pub(crate) fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn verification_mail(name: &str, email: String, link: &str) -> OutgoingMail {
+    OutgoingMail {
+        to: email,
+        subject: "Verify your email address".into(),
+        body: format!(
+            "Hello {name},\n\nOpen this link to verify the email address on your Agent Coordinator account:\n\n{link}\n\nThe link works once and expires in 24 hours. Requesting another verification email cancels this link.\n\nIf you did not expect this message, ignore it.\n"
+        ),
+        html_body: format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <title>Verify your email address</title></head><body>\
+             <p>Hello {},</p>\
+             <p>Verify the email address on your Agent Coordinator account:</p>\
+             <p><a href=\"{}\">Verify email address</a></p>\
+             <p>The link works once and expires in 24 hours. Requesting another verification email cancels this link.</p>\
+             <p>If you did not expect this message, ignore it.</p></body></html>",
+            escape_html(name),
+            escape_html(link),
+        ),
+    }
+}
+
 /// Send the message for `issued` in the background and record the outcome. Call
 /// only after the transaction that issued it has committed.
 pub fn deliver_verification(state: &AppState, name: String, issued: IssuedVerification) {
     let state = state.clone();
     tokio::spawn(async move {
         let link = verification_link(&state, &issued.token);
-        let mail = OutgoingMail {
-            to: issued.email.clone(),
-            subject: "Verify your email address".into(),
-            body: format!(
-                "Hello {name},\n\nOpen this link to verify the email address on your Agent Coordinator account:\n\n{link}\n\nThe link works once and expires in 24 hours. Requesting another verification email cancels this link.\n\nIf you did not expect this message, ignore it.\n"
-            ),
-        };
+        let mail = verification_mail(&name, issued.email.clone(), &link);
         let outcome = match state.mailer.send(mail).await {
             Ok(()) => None,
             Err(error) => {
@@ -328,15 +356,19 @@ pub async fn verification_state(
 pub fn routes() -> Router<AppState> {
     Router::new().route(
         "/api/v1/auth/email/verify",
-        get(verify_page).post(verify_email),
+        get(verify_page)
+            .post(verify_email)
+            .head(|| async { StatusCode::OK }),
     )
 }
 
-/// True for the two requests the mailed link makes. They carry no credential:
+/// True for verification requests. They carry no credential:
 /// the token in the link is the whole authority.
 pub(crate) fn is_verify_link(method: &axum::http::Method, path: &str) -> bool {
-    matches!(*method, axum::http::Method::GET | axum::http::Method::POST)
-        && path == "/api/v1/auth/email/verify"
+    matches!(
+        *method,
+        axum::http::Method::GET | axum::http::Method::POST | axum::http::Method::HEAD
+    ) && path == "/api/v1/auth/email/verify"
 }
 
 #[derive(Deserialize)]
@@ -368,33 +400,12 @@ fn token_shaped(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// `GET /api/v1/auth/email/verify?token=`: a page with one button. Mail scanners
-/// and link previews fetch links without clicking, so only the POST verifies.
+/// Opening the mailed link verifies its address without another action.
 async fn verify_page(
     State(state): State<AppState>,
     Query(query): Query<VerifyQuery>,
 ) -> Result<Response, AppError> {
-    if !token_shaped(&query.token) {
-        return Ok(expired_page());
-    }
-    let mut c = state.pool.acquire().await?;
-    if usable_verification(&mut c, &query.token, state.now())
-        .await?
-        .is_none()
-    {
-        return Ok(expired_page());
-    }
-    // A token is 64 hexadecimal digits, so it needs no escaping.
-    Ok(page(
-        StatusCode::OK,
-        "Verify your email address",
-        &format!(
-            "<form method=\"post\" action=\"/api/v1/auth/email/verify\">\
-             <input type=\"hidden\" name=\"token\" value=\"{}\">\
-             <button type=\"submit\">Verify email address</button></form>",
-            query.token
-        ),
-    ))
+    consume_verification(&state, &query.token).await
 }
 
 struct UsableVerification {
@@ -433,14 +444,22 @@ async fn verify_email(State(state): State<AppState>, body: Bytes) -> Result<Resp
         .find(|(name, _)| name == "token")
         .map(|(_, value)| value.into_owned())
         .ok_or_else(|| AppError::bad_request("The form needs a token field."))?;
+    consume_verification(&state, &token).await
+}
+
+/// GET and legacy POST share the writer-locked, single-use transition.
+async fn consume_verification(state: &AppState, token: &str) -> Result<Response, AppError> {
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
     let clock = state.sample_clock(&mut tx).await?;
     if clock.incident_detected {
         tx.commit().await?;
         return Err(crate::state::clock_reconciliation_error());
     }
-    let usable = if token_shaped(&token) {
-        usable_verification(&mut tx, &token, clock.now).await?
+    if clock.incident_active {
+        return Err(crate::state::clock_reconciliation_error());
+    }
+    let usable = if token_shaped(token) {
+        usable_verification(&mut tx, token, clock.now).await?
     } else {
         None
     };
@@ -479,8 +498,139 @@ async fn verify_email(State(state): State<AppState>, body: Bytes) -> Result<Resp
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Exercise the real SMTP sender, including its wire encoding, without an
+    /// external relay. Both futures are bounded and dropped together on timeout.
+    pub(crate) async fn smtp_bodies(mail: OutgoingMail) -> (String, String) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mailer = SmtpMailer {
+            transport: lettre::AsyncSmtpTransport::builder_dangerous("127.0.0.1")
+                .port(listener.local_addr().unwrap().port())
+                .build(),
+            from: "sender@example.test".parse().unwrap(),
+        };
+        let subject = mail.subject.clone();
+        let expected_text = mail.body.clone();
+        let expected_html = mail.html_body.clone();
+        let capture = async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            stream
+                .get_mut()
+                .write_all(b"220 localhost test\r\n")
+                .await
+                .unwrap();
+            let mut raw = Vec::new();
+            let mut data = false;
+            loop {
+                let mut line = Vec::new();
+                if stream.read_until(b'\n', &mut line).await.unwrap() == 0 {
+                    break;
+                }
+                assert!(
+                    raw.len() + line.len() < 128 * 1024,
+                    "SMTP fixture size bound"
+                );
+                let reply: &[u8] = if data {
+                    if line == b".\r\n" {
+                        data = false;
+                        b"250 message accepted\r\n"
+                    } else {
+                        raw.extend_from_slice(if line.starts_with(b"..") {
+                            &line[1..]
+                        } else {
+                            &line
+                        });
+                        continue;
+                    }
+                } else if line.starts_with(b"EHLO ") {
+                    b"250-localhost\r\n250 8BITMIME\r\n"
+                } else if line.starts_with(b"MAIL FROM:")
+                    || line.starts_with(b"RCPT TO:")
+                    || line == b"RSET\r\n"
+                {
+                    b"250 ok\r\n"
+                } else if line == b"DATA\r\n" {
+                    data = true;
+                    b"354 send message\r\n"
+                } else if line == b"QUIT\r\n" {
+                    stream.get_mut().write_all(b"221 bye\r\n").await.unwrap();
+                    break;
+                } else {
+                    panic!("unexpected SMTP fixture command");
+                };
+                stream.get_mut().write_all(reply).await.unwrap();
+            }
+            assert!(!data, "SMTP DATA must complete");
+            raw
+        };
+        let (sent, raw) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(mailer.send(mail), capture)
+        })
+        .await
+        .expect("SMTP send/capture must finish within five seconds");
+        sent.unwrap();
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(parsed.subject(), Some(subject.as_str()));
+        assert_eq!(parsed.header_raw("MIME-Version").unwrap().trim(), "1.0");
+        assert!(
+            parsed
+                .header_raw("Content-Type")
+                .unwrap()
+                .trim()
+                .starts_with("multipart/alternative")
+        );
+        assert_eq!(parsed.text_body.len(), 1);
+        assert_eq!(parsed.html_body.len(), 1);
+        assert!(matches!(
+            &parsed.text_part(0).unwrap().body,
+            mail_parser::PartType::Text(_)
+        ));
+        assert!(matches!(
+            &parsed.html_part(0).unwrap().body,
+            mail_parser::PartType::Html(_)
+        ));
+        let text = parsed.body_text(0).unwrap().replace("\r\n", "\n");
+        let html = parsed.body_html(0).unwrap().replace("\r\n", "\n");
+        assert_eq!(text, expected_text);
+        assert_eq!(html, expected_html);
+        (text, html)
+    }
+
+    #[tokio::test]
+    async fn verification_smtp_mime_preserves_the_link_and_escapes_html() {
+        let token = "0123456789abcdef".repeat(4);
+        let link =
+            format!("https://coordinator.example.test/api/v1/auth/email/verify?token={token}");
+        let name = "Renée & <img src=x onerror=\"alert('x')\">";
+        let (text, html) =
+            smtp_bodies(verification_mail(name, "reader@example.test".into(), &link)).await;
+        assert!(text.contains(&link));
+        assert!(text.contains(name));
+        assert!(html.contains(&format!("<a href=\"{link}\">Verify email address</a>")));
+        assert!(
+            html.contains("Renée &amp; &lt;img src=x onerror=&quot;alert(&#39;x&#39;)&quot;&gt;")
+        );
+        assert!(!html.contains("<img"));
+        assert!(!text.contains("token=3D"));
+        assert!(!html.contains("token=3D"));
+    }
+
+    #[test]
+    fn mail_attribute_escaping_preserves_quoted_and_ampersand_characters() {
+        let mail = verification_mail(
+            "reader",
+            "reader@example.test".into(),
+            "https://example.test/?a=1&b=\"'<> ",
+        );
+        assert!(
+            mail.html_body
+                .contains("href=\"https://example.test/?a=1&amp;b=&quot;&#39;&lt;&gt; \"")
+        );
+    }
 
     #[test]
     fn addresses_are_checked_and_trimmed() {
