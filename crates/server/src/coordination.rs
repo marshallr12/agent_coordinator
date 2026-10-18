@@ -406,6 +406,8 @@ struct Task {
     workflow_activity_kind: Option<String>,
     #[sqlx(default)]
     workflow_status: Option<String>,
+    #[sqlx(skip)]
+    processing: Option<Value>,
 }
 macro_rules! task_sql {($suffix:literal)=>{concat!(
     "WITH visible AS (SELECT t.*, a.state AS attempt_state,a.expires_at AS attempt_expires, ",
@@ -508,7 +510,7 @@ impl Task {
         "objective_children_ready":self.objective_children_ready,"decisions_ready":self.decisions_ready,
         "objective_id":self.objective_id,"parent_objective_id":self.parent_objective_id,"parent_objective_required":self.parent_objective_required,
         "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
-        "origin":self.origin,"admission_class":self.admission_class.as_ref().or(self.budget_exempt.as_ref()),"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned","human_delivered":self.human_delivered});
+        "origin":self.origin,"admission_class":self.admission_class.as_ref().or(self.budget_exempt.as_ref()),"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned","human_delivered":self.human_delivered,"processing":self.processing});
         if self.workflow_phase.as_deref() == Some("integration") {
             value["precondition_hints"] = json!([{
                 "code":"candidate_stale_merge_conflict_requires_preflight",
@@ -628,8 +630,104 @@ async fn enrich_workflow_status(
     {
         let snapshot = crate::workflow::workflow_snapshot(c, p, &task.id, now).await?;
         task.workflow_status = snapshot["work_status"].as_str().map(str::to_owned);
+        if task.workflow_status.as_deref() == Some("waiting_review") {
+            task.processing = review_processing(c, &snapshot).await?;
+        }
+    } else if task.status(now) == "in_progress" {
+        task.processing = work_processing(c, task).await?;
     }
     Ok(())
+}
+/// Who holds a lease, as far as the service recorded it. A browser session has
+/// no harness or workstation, so those stay null instead of being guessed.
+async fn lease_holder(
+    c: &mut SqliteConnection,
+    owner_id: &str,
+    session_id: &str,
+    expires_at: Option<Value>,
+    role: &str,
+) -> Result<Value, AppError> {
+    let row = sqlx::query("SELECT (SELECT name FROM principals WHERE id=?1) AS name, (SELECT harness FROM agent_sessions WHERE id=?2) AS harness, (SELECT workstation_id FROM agent_sessions WHERE id=?2) AS workstation")
+        .bind(owner_id).bind(session_id).fetch_one(&mut *c).await?;
+    Ok(
+        json!({"role":role,"name":row.get::<Option<String>,_>("name"),"harness":row.get::<Option<String>,_>("harness"),"workstation":row.get::<Option<String>,_>("workstation"),"lease_expires_at":expires_at}),
+    )
+}
+/// The stage of a submitted task's required reviews, derived from the linked
+/// review activities. A live lease means a reviewer claimed the activity, not
+/// that the reviewer's process is running.
+async fn review_processing(
+    c: &mut SqliteConnection,
+    snapshot: &Value,
+) -> Result<Option<Value>, AppError> {
+    let reviews: Vec<&Value> = snapshot["activities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| {
+            matches!(
+                a["kind"].as_str(),
+                Some("agent_review" | "human_review" | "either_review")
+            ) && !matches!(a["status"].as_str(), Some("completed" | "canceled"))
+        })
+        .collect();
+    let live = |a: &&Value| {
+        a["status"] == "active"
+            && a["current_attempt"]["valid_by_time"] == true
+            && a["current_attempt"]["owner_authorized"] == true
+    };
+    let (stage, active, chosen): (&str, bool, Vec<&Value>) = if reviews.iter().any(&live) {
+        (
+            "in_review",
+            true,
+            reviews.iter().copied().filter(|a| live(a)).collect(),
+        )
+    } else if reviews.iter().any(|a| a["status"] == "recovery_required") {
+        ("review_lease_expired", false, Vec::new())
+    } else if !reviews.is_empty() {
+        ("awaiting_reviewer", false, Vec::new())
+    } else {
+        return Ok(None);
+    };
+    let mut holders = Vec::new();
+    for review in chosen {
+        let attempt = &review["current_attempt"];
+        holders.push(
+            lease_holder(
+                c,
+                attempt["owner_id"].as_str().unwrap_or_default(),
+                attempt["session_id"].as_str().unwrap_or_default(),
+                Some(attempt["expires_at"].clone()),
+                "reviewer",
+            )
+            .await?,
+        );
+    }
+    Ok(Some(
+        json!({"kind":"review","stage":stage,"active":active,"holders":holders,"pending_reviews":reviews.len()}),
+    ))
+}
+/// The live lease on a task that an agent owns and has not lost.
+async fn work_processing(c: &mut SqliteConnection, task: &Task) -> Result<Option<Value>, AppError> {
+    let Some(attempt) = &task.current_attempt_id else {
+        return Ok(None);
+    };
+    let row = sqlx::query("SELECT owner_id,session_id,expires_at FROM attempts WHERE id=?")
+        .bind(attempt)
+        .fetch_optional(&mut *c)
+        .await?;
+    let Some(row) = row else { return Ok(None) };
+    let holder = lease_holder(
+        c,
+        &row.get::<String, _>("owner_id"),
+        &row.get::<String, _>("session_id"),
+        Some(json!(timestamp(row.get("expires_at")))),
+        "owner",
+    )
+    .await?;
+    Ok(Some(
+        json!({"kind":"work","stage":"in_progress","active":true,"holders":[holder]}),
+    ))
 }
 async fn task_list(
     c: &mut SqliteConnection,

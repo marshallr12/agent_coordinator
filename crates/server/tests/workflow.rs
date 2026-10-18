@@ -924,6 +924,81 @@ async fn general_submission_requires_an_independent_reviewer_and_then_completes(
     assert_eq!(lifecycle, "done");
 }
 
+#[tokio::test]
+async fn task_processing_distinguishes_queued_active_and_lapsed_review_and_live_work() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("processing-stage", "https://example.test/processing.git")
+        .await;
+    let t = f.task(&p, "general", "Show processing stages").await;
+    let id = t["id"].as_str().unwrap();
+    let show = |c: &Caller| {
+        let path = format!("/api/v1/projects/{p}/tasks/{id}");
+        let list = format!("/api/v1/projects/{p}/tasks");
+        let f = &f;
+        let c = c.clone();
+        async move {
+            let (_, one) = f.call(&c, "GET", &path, Value::Null).await;
+            let (_, all) = f.call(&c, "GET", &list, Value::Null).await;
+            let listed = all["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["id"] == one["data"]["id"])
+                .cloned()
+                .unwrap();
+            assert_eq!(
+                one["data"]["processing"], listed["processing"],
+                "{one} {all}"
+            );
+            (one["data"].clone(), listed)
+        }
+    };
+    let (ready, _) = show(&f.a).await;
+    assert!(ready["processing"].is_null(), "{ready}");
+    let owner = f.claim(&f.a, &p, &t, 1).await;
+    let (working, _) = show(&f.a).await;
+    assert_eq!(working["work_status"], "in_progress");
+    assert_eq!(working["processing"]["kind"], "work");
+    assert_eq!(working["processing"]["stage"], "in_progress");
+    assert_eq!(working["processing"]["active"], true);
+    assert!(working["processing"]["holders"][0]["name"].is_string());
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
+        .await;
+    let (queued, _) = show(&f.a).await;
+    assert_eq!(queued["work_status"], "waiting_review");
+    assert_eq!(
+        queued["processing"]["stage"], "awaiting_reviewer",
+        "{queued}"
+    );
+    assert_eq!(queued["processing"]["active"], false);
+    assert_eq!(queued["processing"]["holders"], json!([]));
+    let review = activity(&submitted, "agent_review");
+    let (status, claimed) = f.claim_activity(&f.b, &p, review, 1, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let (active, _) = show(&f.a).await;
+    assert_eq!(active["work_status"], "waiting_review");
+    assert_eq!(active["processing"]["kind"], "review");
+    assert_eq!(active["processing"]["stage"], "in_review", "{active}");
+    assert_eq!(active["processing"]["active"], true);
+    assert_eq!(active["processing"]["holders"][0]["role"], "reviewer");
+    assert!(active["processing"]["holders"][0]["name"].is_string());
+    sqlx::query("UPDATE attempts SET expires_at=? WHERE id=?")
+        .bind(f.state.now() - 1)
+        .bind(claimed["data"]["attempt"]["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (lapsed, _) = show(&f.a).await;
+    assert_eq!(
+        lapsed["processing"]["stage"], "review_lease_expired",
+        "{lapsed}"
+    );
+    assert_eq!(lapsed["processing"]["active"], false);
+    assert_eq!(lapsed["processing"]["holders"], json!([]));
+}
+
 const BASE: &str = "1111111111111111111111111111111111111111";
 
 async fn register_child(f: &Fixture, parent: &Caller, p: &str, name: &str) -> (Caller, Value) {

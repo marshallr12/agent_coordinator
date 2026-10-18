@@ -122,3 +122,11 @@ or page falls back to the overview and replaces the hash. Dialog state is not
 part of the route. `scripts/test_deep_links.mjs` clicks through ten views,
 walks back and forward through them, and opens a task link directly; it runs
 the same way as `scripts/test_ui_refresh.mjs`.
+
+## Status indicators
+
+`scripts/test_status_indicators.mjs` verifies the task status badges in a
+fixture-backed browser: queued, active and lapsed reviews and live In Progress
+work in both the task list and the task detail, live updates without a reload,
+tooltips on focus, and reduced motion. Run it with
+`CHROME_BIN=/path/to/chrome node scripts/test_status_indicators.mjs`.
