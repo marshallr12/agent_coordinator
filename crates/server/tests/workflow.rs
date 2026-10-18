@@ -999,6 +999,144 @@ async fn task_processing_distinguishes_queued_active_and_lapsed_review_and_live_
     assert_eq!(lapsed["processing"]["holders"], json!([]));
 }
 
+#[tokio::test]
+async fn a_pending_scoped_decision_keeps_a_task_blocked_while_its_review_lease_is_live() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("blocked-live-review", "https://example.test/blocked.git")
+        .await;
+    let t = f.task(&p, "general", "Blocked while reviewed").await;
+    let id = t["id"].as_str().unwrap();
+    let owner = f.claim(&f.a, &p, &t, 1).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
+        .await;
+    let review = activity(&submitted, "agent_review");
+    let review_task = review["activity_task_id"].as_str().unwrap();
+    let (status, claimed) = f.claim_activity(&f.b, &p, review, 1, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    // The detail and the list must agree for the subject and for the review activity's task.
+    let show = |task: String| {
+        let f = &f;
+        let p = p.clone();
+        async move {
+            let (_, one) = f
+                .call(
+                    &f.a,
+                    "GET",
+                    &format!("/api/v1/projects/{p}/tasks/{task}"),
+                    Value::Null,
+                )
+                .await;
+            let (_, all) = f
+                .call(
+                    &f.a,
+                    "GET",
+                    &format!("/api/v1/projects/{p}/tasks"),
+                    Value::Null,
+                )
+                .await;
+            // Review activity tasks are not listed; the subject must agree in both views.
+            if let Some(listed) = all["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["id"] == one["data"]["id"])
+            {
+                assert_eq!(one["data"]["work_status"], listed["work_status"]);
+                assert_eq!(
+                    one["data"]["processing"], listed["processing"],
+                    "{one} {all}"
+                );
+            }
+            one["data"].clone()
+        }
+    };
+    let live = show(id.to_owned()).await;
+    assert_eq!(live["work_status"], "waiting_review");
+    assert_eq!(live["processing"]["stage"], "in_review", "{live}");
+    assert_eq!(live["processing"]["active"], true);
+    let live_review = show(review_task.to_owned()).await;
+    assert_eq!(live_review["work_status"], "in_progress", "{live_review}");
+    assert_eq!(live_review["processing"]["kind"], "work");
+
+    for (scoped, label) in [
+        (&t, "subject"),
+        (
+            &json!({"id":review_task,"revision":live_review["revision"]}),
+            "review activity",
+        ),
+    ] {
+        let (status, decision) = f.call(&f.a, "POST", &format!("/api/v1/projects/{p}/decisions"), json!({
+            "question":format!("May the {label} proceed?"),"options":["Proceed","Wait"],"rationale":"Confirm the environment first",
+            "required_actor":"human","affected_tasks":[{"task_id":scoped["id"],"task_revision":scoped["revision"]}],
+            "policy_revision":1,"environment":"test","conditions":"Operator checked the target","expires_at":null
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{decision}");
+        let blocked = show(id.to_owned()).await;
+        let blocked_review = show(review_task.to_owned()).await;
+        // The live lease stays recorded in the workflow evidence but is not processing.
+        let expected = if label == "subject" {
+            [&blocked]
+        } else {
+            [&blocked_review]
+        };
+        for task in expected {
+            assert_eq!(task["work_status"], "blocked", "{label}: {task}");
+            assert!(task["processing"].is_null(), "{label}: {task}");
+        }
+        let lease = blocked["workflow"]["activities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == review["id"])
+            .unwrap();
+        assert_eq!(lease["status"], "active", "{label}: {blocked}");
+        assert_eq!(lease["current_attempt"]["valid_by_time"], true);
+        let answer_path = format!(
+            "/api/v1/projects/{p}/decisions/{}/answer",
+            decision["data"]["id"].as_str().unwrap()
+        );
+        let answer = json!({"expected_generation":1,"disposition":"allow","answer":"Proceed","rationale":"Target inspected","conditions_confirmed":true});
+        let (status, answered) = f.call(&f.admin, "POST", &answer_path, answer).await;
+        assert_eq!(status, StatusCode::OK, "{answered}");
+        // Resolving it while the same lease is valid restores the review processing.
+        let restored = show(id.to_owned()).await;
+        assert_eq!(
+            restored["work_status"], "waiting_review",
+            "{label}: {restored}"
+        );
+        assert_eq!(
+            restored["processing"]["stage"], "in_review",
+            "{label}: {restored}"
+        );
+        assert_eq!(restored["processing"]["active"], true);
+        let restored_review = show(review_task.to_owned()).await;
+        assert_eq!(
+            restored_review["work_status"], "in_progress",
+            "{label}: {restored_review}"
+        );
+        assert_eq!(restored_review["processing"]["kind"], "work");
+    }
+
+    // A pending decision and an expired lease: blocked, never an active review.
+    let (status, decision) = f.call(&f.a, "POST", &format!("/api/v1/projects/{p}/decisions"), json!({
+        "question":"May this proceed again?","options":["Proceed","Wait"],"rationale":"Confirm again",
+        "required_actor":"human","affected_tasks":[{"task_id":t["id"],"task_revision":t["revision"]}],
+        "policy_revision":1,"environment":"test","conditions":"Operator checked the target","expires_at":null
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{decision}");
+    sqlx::query("UPDATE attempts SET expires_at=? WHERE id=?")
+        .bind(f.state.now() - 1)
+        .bind(claimed["data"]["attempt"]["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let expired = show(id.to_owned()).await;
+    assert_eq!(expired["work_status"], "blocked", "{expired}");
+    assert!(expired["processing"].is_null(), "{expired}");
+}
+
 const BASE: &str = "1111111111111111111111111111111111111111";
 
 async fn register_child(f: &Fixture, parent: &Caller, p: &str, name: &str) -> (Caller, Value) {

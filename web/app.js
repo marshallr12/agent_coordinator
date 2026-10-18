@@ -77,16 +77,17 @@
   };
   // What a task's status badge shows. `work_status` stays the filterable status; the server's `processing`
   // object says whether anyone is acting on it. A live lease shows a claim, never that a process is running,
-  // so the tooltip says so, and a stage the service has no live claim for is never animated.
+  // so the tooltip says so, and a stage the service has no live claim for is never animated. A stage only applies
+  // to the work_status it belongs to, so blocked, recovery and terminal statuses are never overridden.
   const STAGE_COPY = {
-    in_progress: { label: 'In Progress', icon: 'working', note: 'An agent holds a live lease on this task.' },
-    in_review: { label: 'In Review', icon: 'reviewing', note: 'A reviewer has claimed a required review and holds a live lease.' },
-    awaiting_reviewer: { label: 'Awaiting Reviewer', icon: 'queued', note: 'The review is queued and no reviewer has claimed it yet.' },
-    review_lease_expired: { label: 'Review Lease Expired', icon: 'lapsed', note: 'A reviewer claimed a review but the lease ended; it needs recovery before anyone is reviewing.' },
+    in_progress: { status: 'in_progress', label: 'In Progress', icon: 'working', note: 'An agent holds a live lease on this task.' },
+    in_review: { status: 'waiting_review', label: 'In Review', icon: 'reviewing', note: 'A reviewer has claimed a required review and holds a live lease.' },
+    awaiting_reviewer: { status: 'waiting_review', label: 'Awaiting Reviewer', icon: 'queued', note: 'The review is queued and no reviewer has claimed it yet.' },
+    review_lease_expired: { status: 'waiting_review', label: 'Review Lease Expired', icon: 'lapsed', note: 'A reviewer claimed a review but the lease ended; it needs recovery before anyone is reviewing.' },
   };
   const statusIndicator = (task) => {
     const status = taskStatus(task), processing = task?.processing, copy = processing && STAGE_COPY[processing.stage];
-    if (!copy || (processing.stage === 'in_progress') !== (status === 'in_progress')) return { status, label: displayStatus(status), icon: null, active: false, lines: [] };
+    if (!copy || copy.status !== status) return { status, label: displayStatus(status), icon: null, active: false, lines: [] };
     const lines = [copy.note];
     if (processing.active) lines.push('The lease proves a claim, not that the process is running right now.');
     if (processing.stage === 'awaiting_reviewer' && processing.pending_reviews > 1) lines.push(`${processing.pending_reviews} reviews are pending.`);
@@ -992,7 +993,7 @@
     let view;
     if (!current) {
       const status = taskStatus(task);
-      view = { message: task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : task.processing?.stage === 'in_review' ? 'A reviewer holds a live review lease. The review activities below show who claimed it.' : task.processing?.stage === 'awaiting_reviewer' ? 'No lease. The review is queued and waiting for a reviewer to claim it.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.' };
+      view = { message: task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : statusIndicator(task).stage === 'in_review' ? 'A reviewer holds a live review lease. The review activities below show who claimed it.' : statusIndicator(task).stage === 'awaiting_reviewer' ? 'No lease. The review is queued and waiting for a reviewer to claim it.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.' };
     } else {
       const remaining = taskStatus(task) === 'recovery_required' ? 'Ownership ended; recovery required' : current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
       view = { rows: [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]] };
