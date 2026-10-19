@@ -9,6 +9,12 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
 
+- Reviewer candidate shells accept both flat harness cwd files and the bounded
+  `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
+  isolated tmpfs; the host harness directory stays hidden. Invalid paths,
+  symlinks and nonregular cwd targets are refused before candidate execution,
+  and the host target is checked again before resetting the tracked directory.
+
 - The integrator has a pre-cutover shadow command and queue view, with host
   setup and local evidence gates described in the [cutover runbook](integrator-cutover.md).
   These are source behavior; the production shadow day, rulesets and ownership

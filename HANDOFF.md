@@ -1,5 +1,21 @@
 # Core hardening wave — 2026-10-02
 
+## Nested reviewer cwd layout — 2026-10-18
+
+Task `ba9b2fb4` addresses the second mxmini canary blocker under owner task
+`422ce01e`: a real reviewer `pwd` call ends in `tmp/claude-997/cwd-ID`, which
+the old flat-only guard refuses with status 126. The same failure reproduced
+with signed Claude 2.1.300, so the temporary version pin was rolled back to
+2.1.303. The fix accepts only the observed bounded nested grammar, requires
+its existing nonsymlink host directory, recreates the parent only inside the
+masked tmpfs, and checks the host target again before resetting cwd. It does
+not bind harness temp into the candidate sandbox. Flat paths, command status,
+timeouts, stopped-command accounting and descendant cleanup remain enforced.
+Exact-source validation, independent review and a real contained reviewer
+proof are required before installing the new supervisor. CLI publication fix
+`48802dc5` is independently tracked and still requires its matching service
+and CLI rollout; installing either fix alone does not clear the canary hold.
+
 ## Private-repository helper checkpoints — 2026-10-18
 
 Task `48802dc5` fixes the blocked mxmini canary discovered under owner task
