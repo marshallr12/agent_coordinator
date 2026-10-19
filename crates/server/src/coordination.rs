@@ -2294,6 +2294,12 @@ async fn claim(
         v["replayed"] = json!(true);
         return Ok(response(v));
     }
+    if proj.archived_at.is_some() {
+        return Err(AppError::conflict(
+            "project_archived",
+            "This project is archived. Restore it before claiming work.",
+        ));
+    }
     if proj.policy_revision != input.policy_revision
         || input.instruction_version != INSTRUCTION_VERSION
     {

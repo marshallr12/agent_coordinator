@@ -70,6 +70,7 @@ async fn project_archive_hides_blocks_work_and_restores() {
             .1["error"]["code"],
         "project_not_archived"
     );
+    let waiting = f.task(&p, "Still waiting", vec![]).await;
     // A claimed task keeps the project from being archived.
     f.ack(&f.a, &p).await;
     let (status, _) = f.claim(&f.a, &p, &task, "archive-live-claim", "work").await;
@@ -99,6 +100,12 @@ async fn project_archive_hides_blocks_work_and_restores() {
             .1["error"]["code"],
         "project_archived"
     );
+    // A session that acknowledged before the archive still cannot claim.
+    let (status, refused) = f
+        .claim(&f.a, &p, &waiting, "claim-in-archived", "work")
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "project_archived");
     // An archived project takes no new tasks.
     let (status, refused) = f
         .call(
