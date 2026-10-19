@@ -220,7 +220,7 @@ a.nav-item { text-decoration: none; }
 .table-wrap { overflow-x: auto; }
 .resource-table td code { font-size: 12px; }
 .resource-table .row-actions { white-space: nowrap; }
-.resource-table .row-actions .button + .button { margin-left: 6px; }
+.resource-table .row-actions .task-action-icon + .task-action-icon { margin-left: 6px; }
 #load-more-resources { margin-top: 20px; }
 .job-evidence-card { margin-top: 15px; }
 .task-attachments-card { margin-top: 15px; }

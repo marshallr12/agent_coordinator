@@ -1435,10 +1435,8 @@
         add(row, el('td', '', text(resource.held_units ?? 0)));
         add(add(row, el('td')), el('code', '', resource.id));
         const actions = add(row, el('td', 'row-actions'));
-        const edit = el('button', 'button subtle', 'Edit'); edit.type = 'button'; edit.dataset.mutation = 'true'; edit.setAttribute('aria-label', `Edit resource ${resource.key}`);
-        edit.addEventListener('click', () => openResourceEditor(resource)); add(actions, edit);
-        const remove = el('button', 'button subtle', 'Delete'); remove.type = 'button'; remove.dataset.mutation = 'true'; remove.setAttribute('aria-label', `Delete resource ${resource.key}`);
-        remove.addEventListener('click', () => openResourceDeletion(resource)); add(actions, remove);
+        add(actions, taskIconButton(`Edit resource ${resource.key}`, 'edit', () => openResourceEditor(resource)));
+        add(actions, taskIconButton(`Delete resource ${resource.key}`, 'delete', () => openResourceDeletion(resource)));
         return row;
       } })));
       if (state.resources.length) show($('resources-state'), false);
