@@ -691,7 +691,10 @@ exec "$@"
     #[test]
     fn a_command_that_exits_124_by_itself_is_not_counted_as_stopped() {
         let shell = Shell::tuned(|_| Tuning {
-            call_seconds: 1,
+            // This tests an explicit exit status, not a deadline. A one-second
+            // budget can trip Bash's integer-second accounting even for a
+            // fast command; the dedicated timeout tests keep their short limit.
+            call_seconds: 30,
             stuck_calls: 1,
             ..Tuning::default()
         });
