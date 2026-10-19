@@ -207,11 +207,13 @@
               <div class="toolbar">
                 <label class="select-label" for="shared-project">Project<select id="shared-project"><option value="">Choose a project</option></select></label>
                 <label class="select-label" for="shared-kind">Records<select id="shared-kind"><option value="knowledge">Lessons & facts</option><option value="decisions">Decisions</option><option value="artifacts">Artifacts</option><option value="context">Search context</option></select></label>
-                <button id="refresh-shared" class="button subtle" type="button">Refresh</button>
-                <button id="new-lesson" class="button primary" type="button" data-mutation="true">Add lesson</button>
-                <button id="binding-rules" class="button subtle" type="button">Binding rules</button>
-                <button id="import-markdown" class="button subtle" type="button" data-mutation="true">Import Markdown</button>
-                <button id="export-markdown" class="button subtle" type="button">Export snapshot</button>
+                <div class="toolbar-actions">
+                  <button id="refresh-shared" class="button subtle task-action-icon" type="button" aria-label="Refresh the records" title="Refresh the records"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg></button>
+                  <button id="new-lesson" class="button primary task-action-icon" type="button" data-mutation="true" aria-label="Add a lesson" title="Add a lesson"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+                  <button id="binding-rules" class="button subtle task-action-icon" type="button" aria-label="View or edit the binding project rules" title="View or edit the binding project rules"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg></button>
+                  <button id="import-markdown" class="button subtle task-action-icon" type="button" data-mutation="true" aria-label="Preview and import tasks and context from Markdown" title="Preview and import tasks and context from Markdown"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 21h14"/></svg></button>
+                  <button id="export-markdown" class="button subtle task-action-icon" type="button" aria-label="Export a Markdown snapshot of project records" title="Export a Markdown snapshot of project records"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m-4 4 4-4 4 4M5 21h14"/></svg></button>
+                </div>
               </div>
               <form id="context-search" class="toolbar" hidden><label for="context-query">Search text<input id="context-query" maxlength="256" placeholder="A task, component, or lesson"></label><label class="checkbox-label"><input id="context-shared" type="checkbox">Include explicitly shared lessons from other projects</label><button class="button primary" type="submit">Search</button></form>
               <p id="shared-freshness" class="muted" aria-live="polite"></p>

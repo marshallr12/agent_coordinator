@@ -1946,22 +1946,23 @@
     }
     recordDetails(card, 'Source and applicability', {id:record.id, provenance:record.provenance, scope:record.scope, source:record.source, conditions:record.conditions, affected_tasks:record.affected_tasks, expires_at:record.expires_at});
     const actions = el('div', 'record-actions');
-    const button = (label, run, mutation = false) => { const node = el('button', 'button subtle', label); node.type = 'button'; if (mutation) node.dataset.mutation = 'true'; node.addEventListener('click', run); add(actions, node); };
+    const button = (label, icon, run, mutation = false) => add(actions, taskIconButton(label, icon, run, mutation));
+    const iconLink = (label, icon, href) => { const link = iconize(el('a', 'button subtle'), label, icon); link.href = href; add(actions, link); return link; };
     const ownProject = !record.project_id || record.project_id === state.projectId;
-    if (['knowledge','decisions','artifacts'].includes(kind)) button('Inspect history & details', async () => {
+    if (['knowledge','decisions','artifacts'].includes(kind)) button('Inspect history and details of this record', 'history', async () => {
       const projectId = state.projectId, currentActor = actorId();
       try { const data = (await request(`${projectPath(projectId)}/${kind}/${encodeURIComponent(record.id)}`)).data; if (projectId === state.projectId && currentActor === actorId()) { recordDetails(card, 'Full record and history', data); card.lastElementChild.open = true; } }
       catch (error) { setGlobalAlert(errorMessage(error)); }
     });
     if (kind === 'knowledge' && ownProject) {
-      button('Correct lesson', () => lessonDialog(record), true);
-      button('This helped', () => sharedWrite(`${projectPath()}/knowledge/${encodeURIComponent(record.id)}/feedback`, {expected_revision:record.revision,useful:true,comment:'Marked helpful by an operator.'}, 'lesson feedback'), true);
+      button('Correct this lesson', 'edit', () => lessonDialog(record), true);
+      button('Mark this lesson as helpful', 'helpful', () => sharedWrite(`${projectPath()}/knowledge/${encodeURIComponent(record.id)}/feedback`, {expected_revision:record.revision,useful:true,comment:'Marked helpful by an operator.'}, 'lesson feedback'), true);
     }
-    if (kind === 'decisions' && ownProject && record.required_actor !== 'agent' && record.status === 'pending') button('Record answer', () => decisionAnswer(record), true);
-    if (kind === 'decisions' && ownProject && record.status !== 'pending') button('Reopen with current scope', () => reopenDecision(record), true);
+    if (kind === 'decisions' && ownProject && record.required_actor !== 'agent' && record.status === 'pending') button('Record an answer to this decision', 'resolve', () => decisionAnswer(record), true);
+    if (kind === 'decisions' && ownProject && record.status !== 'pending') button('Reopen this decision with the current scope', 'reopen', () => reopenDecision(record), true);
     if (kind === 'artifacts') {
-      if (record.availability === 'available' && record.kind === 'upload') { const link = el('a', 'button subtle', 'Download attachment'); link.href = `${projectPath()}/artifacts/${encodeURIComponent(record.id)}/content`; link.download = ''; add(actions, link); }
-      if (record.external_url) { try { const url = new URL(record.external_url); if (url.protocol === 'https:' && !url.username && !url.password) { const link = el('a', 'button subtle', 'Open external evidence'); link.href = url.href; link.rel = 'noopener noreferrer'; link.target = '_blank'; add(actions, link); } } catch (_) { /* Show unusable links as metadata only. */ } }
+      if (record.availability === 'available' && record.kind === 'upload') iconLink('Download this attachment', 'download', `${projectPath()}/artifacts/${encodeURIComponent(record.id)}/content`).download = '';
+      if (record.external_url) { try { const url = new URL(record.external_url); if (url.protocol === 'https:' && !url.username && !url.password) { const link = iconLink('Open the external evidence in a new tab', 'external', url.href); link.rel = 'noopener noreferrer'; link.target = '_blank'; } } catch (_) { /* Show unusable links as metadata only. */ } }
       add(card, el('p', 'muted', `${record.size_bytes ?? 'Unknown'} bytes · ${record.sha256 || 'No content digest'}${record.kind === 'external_link' ? ' · External availability is not verified by the service.' : ''}`));
     }
     add(card, actions);
@@ -2080,21 +2081,29 @@
     if (mutation) button.dataset.mutation = 'true';
     button.addEventListener('click', action); return button;
   }
+  const ICON_PATHS = {
+    archive: '<rect x="4" y="5" width="16" height="4" rx="1"/><path d="M6 9v10h12V9m-8 4h4"/>',
+    cancel: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z"/>',
+    delete: '<path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+    resolve: '<path d="m5 12 4 4L19 6"/><circle cx="12" cy="12" r="9"/>',
+    access: '<path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6Z"/><path d="m9 12 2 2 4-4"/>',
+    sessions: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8m-4-4v4"/>',
+    rotate: '<path d="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4"/>',
+    history: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    helpful: '<path d="M7 11v9H4v-9Z"/><path d="m7 11 4-8c1.5 0 2.5 1 2.5 2.5V9H19a2 2 0 0 1 2 2.3l-1 7a2 2 0 0 1-2 1.7H7"/>',
+    reopen: '<path d="M4 4v5h5"/><path d="M5.5 9A8 8 0 1 1 4 13"/>',
+    download: '<path d="M12 3v12m-4-4 4 4 4-4M5 21h14"/>',
+    external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'
+  };
+  // Labels an icon-only control: the tooltip and the accessible name are the same description.
+  function iconize(node, label, icon) {
+    node.classList.add('task-action-icon'); node.title = label; node.setAttribute('aria-label', label);
+    node.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON_PATHS[icon]}</svg>`;
+    return node;
+  }
   function taskIconButton(label, icon, action, mutation = true) {
-    const button = actionButton('', action, mutation);
-    const paths = {
-      archive: '<rect x="4" y="5" width="16" height="4" rx="1"/><path d="M6 9v10h12V9m-8 4h4"/>',
-      cancel: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
-      edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z"/>',
-      delete: '<path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
-      resolve: '<path d="m5 12 4 4L19 6"/><circle cx="12" cy="12" r="9"/>',
-      access: '<path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6Z"/><path d="m9 12 2 2 4-4"/>',
-      sessions: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8m-4-4v4"/>',
-      rotate: '<path d="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4"/>'
-    };
-    button.classList.add('task-action-icon'); button.title = label; button.setAttribute('aria-label', label);
-    button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[icon]}</svg>`;
-    return button;
+    return iconize(actionButton('', action, mutation), label, icon);
   }
   function selectField(view, name, label, value, choices) {
     const select = view.field(name, label, '', 'select');

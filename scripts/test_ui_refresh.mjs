@@ -86,6 +86,14 @@ const lessons = [
   { id: 'lesson-b', kind: 'lesson', title: 'Lesson B', body: 'Body B', status: 'observed', revision: 1, project_id: 'p1' },
   { id: 'lesson-c', kind: 'lesson', title: 'Lesson C', body: 'Body C', status: 'observed', revision: 1, project_id: 'p1' },
 ];
+const decisions = [
+  { id: 'decision-a', question: 'Pending question', status: 'pending', generation: 1, project_id: 'p1', options: ['yes'] },
+  { id: 'decision-b', question: 'Answered question', status: 'answered', generation: 2, project_id: 'p1' },
+];
+const artifacts = [
+  { id: 'art-up', display_name: 'upload.txt', kind: 'upload', availability: 'available', size_bytes: 3, project_id: 'p1' },
+  { id: 'art-link', display_name: 'link', kind: 'external_link', availability: 'unverified', external_url: 'https://example.invalid/evidence', project_id: 'p1' },
+];
 const contextRules = { text: 'Binding rules text.' };
 
 // ---- Fixture server -------------------------------------------------------------------------------
@@ -143,8 +151,8 @@ async function route(request, response) {
     if (rest === '/digest') return json(response, digest);
     if (rest === '/sessions') return json(response, { items: sessions, truncated: false });
     if (rest === '/knowledge') return json(response, { items: lessons, next_cursor: null });
-    if (rest === '/decisions') return json(response, { items: [], next_cursor: null });
-    if (rest === '/artifacts') return json(response, { items: [], next_cursor: null });
+    if (rest === '/decisions') return json(response, { items: decisions, next_cursor: null });
+    if (rest === '/artifacts') return json(response, { items: artifacts, next_cursor: null });
     if (rest === '/context') return json(response, { items: [], policy: { rules: contextRules.text } });
     if (rest === '/objectives') return json(response, { items: [], next_cursor: null });
   }
@@ -517,6 +525,23 @@ async function main() {
     await evaluate("document.querySelector('#context-search').requestSubmit()");
     await waitPage("document.querySelector('#shared-list details')", 'context rules');
     await quiet('shared context refresh button', 'shared', clickAndWait('#refresh-shared', '/context'));
+
+    // The toolbar and every record action are icon buttons: an icon, no visible text, and a hover tooltip
+    // (title) that describes the function and doubles as the accessible name.
+    const iconControls = "(() => { const nodes = [...document.querySelectorAll('#shared-view .toolbar-actions button, #shared-list .record-actions > *')]; return nodes.map(node => ({ id: node.id, title: node.title, label: node.getAttribute('aria-label'), text: node.textContent.trim(), icon: Boolean(node.querySelector('svg path, svg rect, svg circle')) })); })()";
+    const expectIcons = async (kind, expected) => {
+      await evaluate(`(() => { const select = document.querySelector('#shared-kind'); select.value = '${kind}'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      await waitPage(`document.querySelectorAll('#shared-list article').length > 0 && document.querySelector('#shared-list .record-actions')`, `${kind} records`);
+      const controls = await evaluate(iconControls);
+      for (const control of controls) assert(control.icon && control.text === '' && control.title.length >= 12 && control.title === control.label, `${kind}: control "${control.title || control.id}" is not an icon button with a descriptive tooltip.`);
+      const titles = controls.filter(control => !control.id).map(control => control.title);
+      for (const title of expected) assert(titles.includes(title), `${kind}: missing icon button "${title}"; found ${JSON.stringify(titles)}.`);
+    };
+    const toolbar = await evaluate(iconControls);
+    assert(toolbar.filter(control => control.id).length === 5, 'The Knowledge & evidence toolbar does not have its five icon buttons.');
+    await expectIcons('knowledge', ['Inspect history and details of this record', 'Correct this lesson', 'Mark this lesson as helpful']);
+    await expectIcons('decisions', ['Record an answer to this decision', 'Reopen this decision with the current scope']);
+    await expectIcons('artifacts', ['Download this attachment', 'Open the external evidence in a new tab']);
 
     // ---- 11. Resources ----------------------------------------------------------------------------
     await goTo('.nav-item[data-view=resources]', 'resources');
