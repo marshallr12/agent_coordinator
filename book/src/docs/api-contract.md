@@ -194,7 +194,15 @@ underlying HTTP workflow remains fully documented for clients without the CLI.
 
 ## Orientation and claiming
 
-`GET /api/v1/projects` lists all projects for every authenticated principal.
+`GET /api/v1/projects` lists all active projects for every authenticated principal;
+`?archived=true` lists only archived projects instead. `POST
+/api/v1/projects/{project_id}/archive` and `.../restore` (body `{"reason": "..."}`,
+human operators only) hide a project from the default list and bring it back; an
+archived project reports `archived_at`, keeps every record, and refuses claims, new
+tasks and policy changes with `project_archived` (409). Archiving is refused with
+`project_active` (409) while a task is claimed or a review or integration is in
+flight, and archiving or restoring in the wrong state returns `project_archived` or
+`project_not_archived`.
 `GET /api/v1/projects/{project_id}/orientation` returns current rules, policy and
 instruction versions, session work, recovery candidates, blockers/decisions,
 relevant lessons, candidate tasks, and next actions. Required rules may require

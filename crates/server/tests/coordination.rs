@@ -29,6 +29,102 @@ impl Clock for TestClock {
 }
 
 #[tokio::test]
+async fn project_archive_hides_blocks_work_and_restores() {
+    let f = Fixture::new().await;
+    let p = f.project("project-archive").await;
+    let task = f.task(&p, "Finished before archive", vec![]).await;
+    let list = |archived: bool| {
+        let query = if archived { "?archived=true" } else { "" };
+        format!("/api/v1/projects{query}")
+    };
+    let ids = |body: &Value| -> Vec<String> {
+        body["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|project| project["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let archive = format!("/api/v1/projects/{p}/archive");
+    let restore = format!("/api/v1/projects/{p}/restore");
+    let input = json!({"reason":"Operator retired this project."});
+    assert_eq!(
+        f.call(
+            &f.a,
+            "POST",
+            &archive,
+            "agent-cannot-archive",
+            input.clone()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, active) = f.call(&f.admin, "GET", &list(false), "", json!({})).await;
+    assert!(ids(&active).contains(&p));
+    let (_, none) = f.call(&f.admin, "GET", &list(true), "", json!({})).await;
+    assert!(!ids(&none).contains(&p));
+    assert_eq!(
+        f.call(&f.admin, "POST", &restore, "restore-active", input.clone())
+            .await
+            .1["error"]["code"],
+        "project_not_archived"
+    );
+    // A claimed task keeps the project from being archived.
+    f.ack(&f.a, &p).await;
+    let (status, _) = f.claim(&f.a, &p, &task, "archive-live-claim", "work").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = f
+        .call(&f.admin, "POST", &archive, "archive-live", input.clone())
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "project_active");
+    sqlx::query("UPDATE tasks SET current_attempt_id=NULL,lifecycle='done' WHERE project_id=?")
+        .bind(&p)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (status, archived) = f
+        .call(&f.admin, "POST", &archive, "archive-project", input.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    assert!(archived["data"]["archived_at"].is_string());
+    let (_, active) = f.call(&f.admin, "GET", &list(false), "", json!({})).await;
+    assert!(!ids(&active).contains(&p));
+    let (_, shown) = f.call(&f.admin, "GET", &list(true), "", json!({})).await;
+    assert!(ids(&shown).contains(&p));
+    assert_eq!(
+        f.call(&f.admin, "POST", &archive, "archive-again", input.clone())
+            .await
+            .1["error"]["code"],
+        "project_archived"
+    );
+    // An archived project takes no new tasks.
+    let (status, refused) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("/api/v1/projects/{p}/tasks"),
+            "task-in-archived",
+            json!({"title":"Too late","description":"","acceptance_criteria":["Never runs"],"kind":"code","priority":2}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "project_archived");
+    assert_eq!(
+        f.call(&f.admin, "POST", &restore, "restore-project", input.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (_, active) = f.call(&f.admin, "GET", &list(false), "", json!({})).await;
+    assert!(ids(&active).contains(&p));
+    let (_, none) = f.call(&f.admin, "GET", &list(true), "", json!({})).await;
+    assert!(!ids(&none).contains(&p));
+    f.task(&p, "Ready after restore", vec![]).await;
+}
+
+#[tokio::test]
 async fn task_archive_restore_cancel_and_delete_are_separate_from_queue() {
     let f = Fixture::new().await;
     let p = f.project("task-archive").await;
