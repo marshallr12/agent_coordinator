@@ -278,26 +278,103 @@ fn caller_credential_is_refused_before_anything_is_sent() {
     assert_eq!(fixture.remote_candidates(), "");
 }
 
+/// Deny every client-side Git transport, while the trusted helper uses its
+/// own independent repository and authenticated remote. Neither scan nor
+/// receipt validation may try to read the private remote from this checkout.
 #[test]
-fn helper_receipt_is_verified_by_reading_the_ref_back() {
-    for planted in [false, true] {
+fn helper_candidate_and_wip_work_without_client_remote_access() {
+    for wip in [false, true] {
         let fixture = fixture("feature\n");
-        if planted {
-            fixture.plant(HELPER_REF, &fixture.base);
-        }
-        let receipt = PushReceipt {
-            reference: HELPER_REF.to_owned(),
-            revision: fixture.candidate.clone(),
-            tree: fixture.candidate_tree(),
-            previous: None,
+        let helper = fixture.helper();
+        let private_remote = "https://github.invalid/private/repository.git";
+        git(
+            &fixture.checkout,
+            &["remote", "set-url", "origin", private_remote],
+        );
+        git(&fixture.checkout, &["config", "protocol.allow", "never"]);
+        let request = CheckpointRequest {
+            repository: private_remote,
+            ..fixture.request(None)
         };
-        let reply = PushReply::Accepted(receipt);
-        let helper = FakeHelper::spawn(&fixture, move |s| reply_without_pushing(s, reply));
-        let socket = helper.socket.clone();
-        let failure = checkpoint(&fixture.request(None), Some(&socket)).unwrap_err();
-        assert_eq!(code(&failure), "invalid_client_input", "planted: {planted}");
-        assert!(matches!(helper.finish(), Some(PushReply::Accepted(_))));
+        let checkpointed = if wip {
+            checkpoint_wip(&request, Some(&helper.socket))
+        } else {
+            checkpoint(&request, Some(&helper.socket))
+        }
+        .unwrap();
+        assert_eq!(checkpointed.revision, fixture.candidate);
+        assert_eq!(checkpointed.tree, fixture.candidate_tree());
+        let expected_ref = if wip {
+            format!(
+                "refs/agent-coordinator/candidates/wip/task-1/launch-1/{}",
+                fixture.candidate
+            )
+        } else {
+            HELPER_REF.to_owned()
+        };
+        assert_eq!(checkpointed.reference, expected_ref);
+        let Some(PushReply::Accepted(receipt)) = helper.finish() else {
+            panic!("trusted helper did not confirm its remote readback");
+        };
+        assert_eq!(receipt.revision, fixture.candidate);
+        assert_eq!(
+            fixture.remote_candidates(),
+            format!("{expected_ref} {}", fixture.candidate)
+        );
     }
+}
+
+#[test]
+fn changing_the_checkout_during_the_helper_exchange_is_refused() {
+    let fixture = fixture("feature\n");
+    let receipt = PushReceipt {
+        reference: HELPER_REF.to_owned(),
+        revision: fixture.candidate.clone(),
+        tree: fixture.candidate_tree(),
+        previous: None,
+    };
+    let checkout = fixture.checkout.clone();
+    let helper = FakeHelper::spawn(&fixture, move |stream| {
+        std::fs::write(checkout.join("file.txt"), "changed during publication\n").unwrap();
+        reply_without_pushing(stream, PushReply::Accepted(receipt))
+    });
+    let failure = checkpoint(&fixture.request(None), Some(&helper.socket)).unwrap_err();
+    assert_eq!(code(&failure), "invalid_client_input");
+    assert!(
+        failure.output["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("dirty")
+    );
+    helper.finish();
+}
+
+#[test]
+fn credential_removed_from_the_tip_is_still_refused_without_remote_access() {
+    let fixture = fixture(&format!("token {}\n", token()));
+    commit(&fixture.checkout, "file.txt", "secret removed\n");
+    git(&fixture.checkout, &["config", "protocol.allow", "never"]);
+    let helper = fixture.helper();
+    let failure = checkpoint(&fixture.request(None), Some(&helper.socket)).unwrap_err();
+    assert_eq!(code(&failure), "invalid_client_input");
+    assert!(
+        failure.output["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("coordinator_credential")
+    );
+    assert!(!matches!(helper.finish(), Some(PushReply::Accepted(_))));
+    assert_eq!(fixture.remote_candidates(), "");
+}
+
+#[test]
+fn dirty_checkout_is_refused_before_contacting_the_helper() {
+    let fixture = fixture("feature\n");
+    std::fs::write(fixture.checkout.join("file.txt"), "uncommitted\n").unwrap();
+    let helper = fixture.helper();
+    let failure = checkpoint(&fixture.request(None), Some(&helper.socket)).unwrap_err();
+    assert_eq!(code(&failure), "invalid_client_input");
+    assert!(!matches!(helper.finish(), Some(PushReply::Accepted(_))));
 }
 
 #[test]
@@ -445,7 +522,16 @@ fn mismatched_receipt_is_a_non_retryable_protocol_violation() {
     let receipts = [
         (HELPER_REF, fixture.base.clone(), candidate_tree.clone()),
         (HELPER_REF, fixture.candidate.clone(), fixture.base.clone()),
-        ("refs/heads/main", fixture.candidate.clone(), candidate_tree),
+        (
+            "refs/heads/main",
+            fixture.candidate.clone(),
+            candidate_tree.clone(),
+        ),
+        (
+            "refs/agent-coordinator/candidates/task/../main",
+            fixture.candidate.clone(),
+            candidate_tree,
+        ),
     ];
     for (reference, revision, tree) in receipts {
         let receipt = PushReceipt {

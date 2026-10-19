@@ -1,5 +1,18 @@
 # Core hardening wave — 2026-10-02
 
+## Private-repository helper checkpoints — 2026-10-18
+
+Task `48802dc5` fixes the blocked mxmini canary discovered under owner task
+`422ce01e`. Candidate and WIP helper routes scan the bundle locally, use the
+trusted host helper's authenticated remote confirmation, validate its exact
+receipt, and recheck the clean snapshot. They perform no client remote reads;
+the helper retains the authoritative full outgoing-history scan and create-only
+publication. Direct checkpoints retain their independent remote verification.
+Verification, integration and compatible CLI rollout evidence belongs in those
+tasks. Resume the existing Ready canary only after deploying the verified CLI
+and clearing its task-specific unsubmitted-launch hold; successful setup still
+requires an actual `outcome=ok` and the ntfy failure-path exercise.
+
 ## S6 required-check stability sample — 2026-10-05 (workflow off): PASS
 
 Per `book/src/docs/integrator-cutover.md` "Required-check stability evidence". Pinned

@@ -322,6 +322,28 @@ pub fn scan_clean_candidate(
     Ok(snapshot)
 }
 
+/// Scans the commits carried by a helper-bound bundle without contacting the
+/// remote. This is a client-side credential check, not the authoritative
+/// outgoing scan: the trusted helper independently scans against the refs its
+/// authenticated remote advertises, including any omitted prerequisite history
+/// that the push would send.
+pub fn scan_candidate_bundle(
+    snapshot: &CleanSnapshot,
+    base_revision: &str,
+    known_digests: &[&str],
+) -> Result<()> {
+    let base = resolve_exact_commit(&snapshot.checkout, base_revision)?;
+    let revisions = format!("{}\n^{base}\n", snapshot.revision);
+    let findings =
+        secret_findings_for_revisions(&snapshot.checkout, revisions.as_bytes(), known_digests)?;
+    ensure!(
+        findings.is_empty(),
+        "{}",
+        crate::secret_scan::describe(&findings)
+    );
+    Ok(())
+}
+
 /// Verifies a candidate another route published at `reference` with the
 /// readback [`checkpoint_candidate`] performs: fetches the ref into a private
 /// verification namespace, requires its commit, tree and advertised value to
@@ -1346,14 +1368,22 @@ pub(crate) fn outgoing_secret_findings(
     environment: &[(&str, &str)],
 ) -> Result<Vec<crate::secret_scan::Finding>> {
     let revisions = outgoing_revisions(checkout, remote, revision, environment)?;
-    let patch = scan_log(checkout, &revisions, &["-p", "--text"])?;
+    secret_findings_for_revisions(checkout, &revisions, known_digests)
+}
+
+fn secret_findings_for_revisions(
+    checkout: &Path,
+    revisions: &[u8],
+    known_digests: &[&str],
+) -> Result<Vec<crate::secret_scan::Finding>> {
+    let patch = scan_log(checkout, revisions, &["-p", "--text"])?;
     let paths = scan_log(
         checkout,
-        &revisions,
+        revisions,
         &["--name-only", "-z", "--diff-filter=AMRC"],
     )?;
     let patch = String::from_utf8_lossy(&patch);
-    let messages = raw_commit_listing(checkout, &revisions)?;
+    let messages = raw_commit_listing(checkout, revisions)?;
     let mut findings = crate::secret_scan::scan_patch(&patch, known_digests);
     findings.extend(crate::secret_scan::scan_paths(&paths));
     findings.extend(crate::secret_scan::scan_messages(&messages, known_digests));

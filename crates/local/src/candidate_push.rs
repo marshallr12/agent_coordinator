@@ -396,7 +396,10 @@ pub fn send_push<S: Read + Write>(
     let sent = send_request(stream, &revision, &tree, kind, &bundle.path);
     let reply = read_line(stream, MAX_REPLY_LINE).and_then(|line| PushReply::parse(&line));
     match (sent, reply) {
-        (_, Ok(PushReply::Accepted(receipt))) => check_receipt(receipt, &revision, &tree, kind),
+        (_, Ok(PushReply::Accepted(receipt))) => {
+            git_ok(&checkout, ["check-ref-format", receipt.reference.as_str()])?;
+            check_receipt(receipt, &revision, &tree, kind)
+        }
         (_, Ok(PushReply::Refused(refusal))) => Err(refusal.into()),
         (Err(error), Err(_)) | (Ok(()), Err(error)) => Err(error),
     }

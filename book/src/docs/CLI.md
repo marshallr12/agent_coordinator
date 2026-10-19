@@ -648,7 +648,7 @@ only when it already names the exact same commit; the CLI never moves a prior
 candidate ref.
 
 Before creating the ref, the CLI scans the patch of every commit it would push
-(reachable from the candidate but not from any remote-tracking ref) for likely
+(reachable from the candidate but not from the remote's advertised commits) for likely
 secrets: common cloud, GitHub, model-provider and chat token shapes, private key
 blocks, credential files such as `credentials.toml`, `.env` or `*.pem`, and the
 caller's own coordinator token. A match refuses the push and names each rule,
@@ -661,15 +661,22 @@ not push itself: a per-launch candidate push helper listening on that socket
 holds the push credential and writes only its own fixed candidate ref. The value
 is trimmed; an unset, empty or whitespace-only value keeps the direct push, and
 any other value must be an absolute UTF-8 path (exit `2` otherwise). Setting it on a
-platform without Unix sockets is also invalid input. The CLI still captures the
-clean snapshot and runs the secret scan above, including the caller's own
-coordinator token, which the helper cannot recognise, before sending anything;
-the scan lists the remote's refs read-only. The launch's base commit must exist
-in the checkout, since the CLI sends only the commits after it. The CLI then
-sends the candidate commit to the helper, records the ref the helper reports as
-the submission's candidate ref, and fetches that ref back to compare its commit
-and tree with the worktree exactly as a direct push is verified. The helper
-chooses the ref, so `--candidate-ref` is refused with
+platform without Unix sockets is also invalid input. The CLI captures the clean
+snapshot and scans every commit carried by the bundle, including intermediate
+commits and the caller's own coordinator token, before sending anything. The
+launch's base commit must exist locally: it bounds that preliminary scan and is
+the bundle prerequisite. The trusted helper independently scans the complete
+outgoing history against the authenticated remote's advertised refs; the
+client's base cannot exclude history from that authoritative scan.
+
+The helper confirms the published remote ref names the requested commit, whose
+tree it verified when importing the bundle, and returns the exact commit, tree
+and ref in its receipt. The CLI validates that receipt and rechecks the unchanged
+clean local snapshot before recording it. The host-managed per-launch socket is
+the trust boundary for this remote evidence. Neither candidate nor WIP helper
+checkpoints contact the remote from the sandbox or require GitHub credentials
+there. Direct checkpoints retain their own remote scan and fetch verification.
+The helper chooses the ref, so `--candidate-ref` is refused with
 `candidate_ref_fixed_by_helper` before anything is sent.
 
 Helper failures use these codes:

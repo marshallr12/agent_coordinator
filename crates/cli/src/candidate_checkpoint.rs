@@ -1,16 +1,17 @@
 //! The candidate checkpoint a code submission records: either a direct push
 //! from the prepared checkout, or, when [`CANDIDATE_PUSH_SOCKET_ENV`] names a
 //! socket, a push through the per-launch candidate push helper listening on
-//! it. Both routes end with the same readback verification.
+//! it. The trusted helper performs authenticated remote readback; the client
+//! checks its exact receipt and the unchanged local snapshot without network.
 
 use std::path::{Path, PathBuf};
 
-use coordinator_local::candidate_push::PushKind;
+use coordinator_local::candidate_push::{PushKind, PushReceipt};
 #[cfg(unix)]
 use coordinator_local::candidate_push::{PushRefusal, RefusalCode};
 use coordinator_local::git_workflow::{
-    CandidateCheckpoint, CleanSnapshot, checkpoint_candidate, scan_clean_candidate,
-    verify_published_candidate,
+    CandidateCheckpoint, CleanSnapshot, capture_clean_snapshot, checkpoint_candidate,
+    scan_candidate_bundle, verify_clean_snapshot,
 };
 #[cfg(unix)]
 use serde_json::json;
@@ -102,7 +103,7 @@ fn checkpoint_directly(request: &CheckpointRequest<'_>) -> Result<CandidateCheck
 
 /// Scans the clean snapshot with the caller's credential digest, checks the
 /// base commit, sends the candidate to the helper, and verifies the ref the
-/// helper reports by reading it back. A caller-selected ref is refused before
+/// helper reports in its verified receipt. A caller-selected ref is refused before
 /// anything is read or sent.
 fn checkpoint_through_helper(
     request: &CheckpointRequest<'_>,
@@ -113,21 +114,34 @@ fn checkpoint_through_helper(
 }
 
 /// The helper route shared by candidate and WIP pushes: scan, check the base
-/// commit, send a push of `kind`, and read back the ref the helper reports.
+/// commit, send a push of `kind`, and validate the helper's readback receipt.
+/// The host-managed helper socket is the trust boundary for remote evidence;
+/// neither credentials nor remote access are needed in the implementer sandbox.
 fn publish_through_helper(
     request: &CheckpointRequest<'_>,
     socket: &Path,
     kind: PushKind,
 ) -> Result<CandidateCheckpoint, Failure> {
-    let snapshot = scan_clean_candidate(
-        request.checkout,
-        request.repository,
+    let snapshot =
+        capture_clean_snapshot(request.checkout, request.repository).map_err(Failure::invalid)?;
+    require_base_commit(&snapshot, request.base_revision)?;
+    scan_candidate_bundle(
+        &snapshot,
+        request.base_revision,
         &[request.credential_digest],
     )
     .map_err(Failure::invalid)?;
-    require_base_commit(&snapshot, request.base_revision)?;
-    let reference = send_to_helper(socket, &snapshot, request.base_revision, kind)?;
-    verify_published_candidate(&snapshot, request.repository, &reference).map_err(Failure::invalid)
+    verify_clean_snapshot(request.checkout, request.repository, &snapshot)
+        .map_err(Failure::invalid)?;
+    let receipt = send_to_helper(socket, &snapshot, request.base_revision, kind)?;
+    verify_clean_snapshot(request.checkout, request.repository, &snapshot)
+        .map_err(Failure::invalid)?;
+    Ok(CandidateCheckpoint {
+        remote: snapshot.remote,
+        reference: receipt.reference,
+        revision: receipt.revision,
+        tree: receipt.tree,
+    })
 }
 
 /// The helper fixes the ref, so any `--candidate-ref` is refused.
@@ -166,7 +180,7 @@ fn send_to_helper(
     snapshot: &CleanSnapshot,
     base_revision: &str,
     kind: PushKind,
-) -> Result<String, Failure> {
+) -> Result<PushReceipt, Failure> {
     let stream = std::os::unix::net::UnixStream::connect(socket).map_err(|error| {
         Failure::local(
             7,
@@ -183,7 +197,6 @@ fn send_to_helper(
         &[base_revision],
         kind,
     )
-    .map(|receipt| receipt.reference)
     .map_err(|error| send_failure(&error, &stream))
 }
 
@@ -194,7 +207,7 @@ fn send_to_helper(
     _snapshot: &CleanSnapshot,
     _base_revision: &str,
     _kind: PushKind,
-) -> Result<String, Failure> {
+) -> Result<PushReceipt, Failure> {
     Err(unsupported_platform())
 }
 
