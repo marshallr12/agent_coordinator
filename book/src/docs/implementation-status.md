@@ -87,9 +87,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   only the nodes whose data changed and keep focus, selection, open disclosures
   and scroll position; polling pauses in a hidden tab, behind a dialog and during
   a pending mutation. See [Web UI refresh behavior](web-ui-refresh.md).
+- A human operator can archive a project from its settings page or with
+  `agent-coordinator projects archive`, and restore it from the Archived projects
+  view or `projects restore`. Archived projects leave the project list, keep their
+  records and refuse new claims, tasks and policy changes until restored.
 - Each main dashboard view has an address (`#/projects/<id>/tasks`, `/completed`,
   `/archived`, `/task/<task id>`, `/settings`, `/reports`, `/sessions`, `/digest`,
-  `/autonomy`, and `#/shared`, `#/resources`, `#/admin`), so the browser's Back
+  `/autonomy`, and `#/archived-projects`, `#/shared`, `#/resources`, `#/admin`), so the browser's Back
   and Forward buttons walk the views visited and a link opens its view after
   sign-in. Open dialogs are not part of the address. See
   [Web UI refresh behavior](web-ui-refresh.md#address-history).

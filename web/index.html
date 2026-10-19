@@ -77,7 +77,7 @@
                 <button id="new-project-button" class="button primary" data-mutation="true" type="button"><span aria-hidden="true">＋</span> New project</button>
               </div>
               <div id="overview-summary" class="summary-grid" aria-label="Workspace summary"></div>
-              <div class="section-heading"><div><h2>Projects</h2><p class="muted">Open tasks to manage work. Use a project's gear button for settings and repository binding.</p></div><button id="refresh-projects" class="button subtle refresh-icon-button" type="button" aria-label="Refresh projects" title="Refresh projects"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg></button></div>
+              <div class="section-heading"><div><h2>Projects</h2><p class="muted">Open tasks to manage work. Use a project's gear button for settings and repository binding.</p></div><button id="archived-projects-button" class="button subtle" type="button">Archived projects</button><button id="refresh-projects" class="button subtle refresh-icon-button" type="button" aria-label="Refresh projects" title="Refresh projects"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg></button></div>
               <div id="projects-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Loading projects…</span></div>
               <div id="projects-grid" class="project-grid" hidden></div>
             </section>
@@ -96,7 +96,16 @@
                 <article class="card"><h3>Autonomy</h3><p class="muted">Human-required interventions, parked items, cost against the daily caps, review outcomes, canary history and digest status, each with its source.</p><button id="autonomy-button" class="button subtle" type="button">Autonomy</button></article>
                 <article class="card"><h3>Connected sessions</h3><p class="muted">Agent sessions still working in this project. Check them before a test, preflight or cutover.</p><button id="agent-sessions-button" class="button subtle" type="button">Connected sessions</button></article>
               </div>
+              <article class="card project-archive-card"><h3>Archive project</h3><p class="muted">Hide this project from the project list while keeping its tasks and records. Restore it later from Archived projects. Claimed work, reviews and integrations must finish first.</p><button id="archive-project-button" class="button subtle" data-mutation="true" type="button" hidden>Archive project</button></article>
               <article class="card project-binding-card"><h2>Repository binding</h2><p class="muted">Download this non-secret file, then place <code>.agent-coordinator.toml</code> in the root of your repository so agents connect to this project.</p><div id="project-binding-content" class="binding-content"></div></article>
+            </section>
+
+            <section id="archived-projects-view" class="page-view" aria-labelledby="archived-projects-heading" hidden>
+              <div class="detail-back-row"><button id="archived-projects-back" class="button text-button" type="button">← All projects</button></div>
+              <div class="page-heading"><div><p class="eyebrow">Workspace</p><h1 id="archived-projects-heading" tabindex="-1">Archived projects</h1><p class="muted">Archived projects keep their tasks and records but are hidden from the project list and cannot take new work. Restore one to bring it back.</p></div></div>
+              <div class="toolbar"><button id="refresh-archived-projects" class="button subtle" type="button">Refresh</button></div>
+              <div id="archived-projects-state" class="state-panel" role="status"></div>
+              <div id="archived-projects-list" class="project-grid" hidden></div>
             </section>
 
             <section id="reports-view" class="page-view" aria-labelledby="reports-heading" hidden>

@@ -330,6 +330,16 @@ agent-coordinator tasks list --limit 50
 agent-coordinator tasks list --limit 50 --cursor opaque-cursor-from-the-response
 ```
 
+Human operators can archive a project, which hides it from `projects list` while
+keeping its tasks and records, and restore it later. Archiving is refused while a task is
+claimed or a review or integration is in flight; `--project` defaults to the bound project.
+
+```sh
+agent-coordinator projects archive --reason "Retired" [--project PROJECT_ID]
+agent-coordinator projects list --archived
+agent-coordinator projects restore --project PROJECT_ID --reason "Needed again"
+```
+
 Create requests read JSON from a file, which avoids shell-specific quoting.
 Project creation requires an authorized operator role and is normally performed
 through the human web interface; an ordinary agent credential receives a clear

@@ -600,8 +600,31 @@ struct ConnectArgs {
 
 #[derive(Subcommand)]
 enum ProjectsCommand {
-    List(ListArgs),
+    /// List projects; --archived lists only the archived ones.
+    List(ProjectListArgs),
     Create(InputArgs),
+    /// Archive a project so it leaves the project list but keeps its records (humans only).
+    Archive(ProjectArchiveArgs),
+    /// Restore an archived project to the project list (humans only).
+    Restore(ProjectArchiveArgs),
+}
+
+#[derive(Args)]
+struct ProjectListArgs {
+    #[command(flatten)]
+    page: ListArgs,
+    /// List archived projects instead of active ones.
+    #[arg(long)]
+    archived: bool,
+}
+
+#[derive(Args)]
+struct ProjectArchiveArgs {
+    /// Project id; defaults to the bound project.
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long)]
+    reason: String,
 }
 
 #[derive(Subcommand)]
@@ -1131,12 +1154,32 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
         Command::Compatibility => unreachable!("handled before authenticated context"),
         Command::ClientInfo => unreachable!("handled before authenticated context"),
         Command::Projects { command } => match command {
-            ProjectsCommand::List(args) => finish(
-                context
-                    .client
-                    .get_query("/api/v1/projects", &list_query(args), None)
-                    .await,
-            ),
+            ProjectsCommand::List(args) => {
+                let mut query = list_query(&args.page);
+                if args.archived {
+                    query.push(("archived", "true".into()));
+                }
+                finish(
+                    context
+                        .client
+                        .get_query("/api/v1/projects", &query, None)
+                        .await,
+                )
+            }
+            ProjectsCommand::Archive(args) | ProjectsCommand::Restore(args) => {
+                let action = if matches!(command, ProjectsCommand::Archive(_)) {
+                    "archive"
+                } else {
+                    "restore"
+                };
+                let project = args
+                    .project
+                    .as_deref()
+                    .unwrap_or(&context.binding.project_id);
+                validate_segment("project", project).map_err(Failure::invalid)?;
+                let path = format!("/api/v1/projects/{project}/{action}");
+                mutate(cli, &context, &path, json!({"reason": args.reason}), true).await
+            }
             ProjectsCommand::Create(input) => {
                 let body = read_json(&input.input).map_err(Failure::invalid)?;
                 mutate(cli, &context, "/api/v1/projects", body, true).await
