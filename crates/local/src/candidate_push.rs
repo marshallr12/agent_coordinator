@@ -53,7 +53,8 @@ use uuid::Uuid;
 use crate::git_workflow::{
     canonical_git_root, git_ok, git_raw, git_raw_from_file, git_remote_argument, git_text,
     observe_remote_reference_with, outgoing_secret_findings, protect_directory,
-    protected_create_new, resolve_exact_commit, validate_full_oid, validate_remote_argument,
+    protected_create_new, resolve_exact_commit, validate_candidate_reference, validate_full_oid,
+    validate_remote_argument,
 };
 
 /// The protocol version a client sends and a helper accepts.
@@ -397,7 +398,7 @@ pub fn send_push<S: Read + Write>(
     let reply = read_line(stream, MAX_REPLY_LINE).and_then(|line| PushReply::parse(&line));
     match (sent, reply) {
         (_, Ok(PushReply::Accepted(receipt))) => {
-            git_ok(&checkout, ["check-ref-format", receipt.reference.as_str()])?;
+            validate_candidate_reference(&checkout, &receipt.reference)?;
             check_receipt(receipt, &revision, &tree, kind)
         }
         (_, Ok(PushReply::Refused(refusal))) => Err(refusal.into()),

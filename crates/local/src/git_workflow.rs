@@ -304,8 +304,8 @@ pub fn checkpoint_candidate(
 
 /// Captures the clean snapshot of `checkout` and runs the outgoing secret scan
 /// [`checkpoint_candidate`] runs before pushing, refusing likely secrets and
-/// tokens matching `known_digests`. For a caller that publishes the candidate
-/// through another route, such as a candidate push helper; it pushes nothing.
+/// tokens matching `known_digests`. This requires remote read access and pushes
+/// nothing. Sandboxed helper clients instead use [`scan_candidate_bundle`].
 pub fn scan_clean_candidate(
     checkout: &Path,
     configured_remote: &str,
@@ -1542,7 +1542,7 @@ pub(crate) fn validate_full_oid(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_candidate_reference(checkout: &Path, reference: &str) -> Result<()> {
+pub(crate) fn validate_candidate_reference(checkout: &Path, reference: &str) -> Result<()> {
     ensure!(
         reference.starts_with("refs/agent-coordinator/candidates/"),
         "candidate refs must use refs/agent-coordinator/candidates/"

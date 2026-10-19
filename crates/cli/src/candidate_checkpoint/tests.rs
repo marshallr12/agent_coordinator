@@ -519,6 +519,7 @@ fn missing_base_commit_is_refused_before_sending_and_not_retryable() {
 fn mismatched_receipt_is_a_non_retryable_protocol_violation() {
     let fixture = fixture("feature\n");
     let candidate_tree = fixture.candidate_tree();
+    let long_reference = format!("refs/agent-coordinator/candidates/{}", "a".repeat(220));
     let receipts = [
         (HELPER_REF, fixture.base.clone(), candidate_tree.clone()),
         (HELPER_REF, fixture.candidate.clone(), fixture.base.clone()),
@@ -529,6 +530,11 @@ fn mismatched_receipt_is_a_non_retryable_protocol_violation() {
         ),
         (
             "refs/agent-coordinator/candidates/task/../main",
+            fixture.candidate.clone(),
+            candidate_tree.clone(),
+        ),
+        (
+            long_reference.as_str(),
             fixture.candidate.clone(),
             candidate_tree,
         ),
