@@ -812,6 +812,8 @@ async function main() {
     await back();
     await evaluate("document.querySelector('.project-settings-button').focus()");
     await press('Tab', 'Tab', 9);
+    assert(await evaluate("document.activeElement.classList.contains('autonomy-open')"), 'Autonomy is not reachable by Tab.');
+    await press('Tab', 'Tab', 9);
     assert(await evaluate("document.activeElement.classList.contains('project-open')"), 'Open tasks is not reachable by Tab.');
     assert(await evaluate("getComputedStyle(document.activeElement).outlineStyle !== 'none' && parseFloat(getComputedStyle(document.activeElement).outlineWidth) > 0"), 'Open tasks has no visible keyboard focus.');
     await press('Enter', 'Enter', 13);
