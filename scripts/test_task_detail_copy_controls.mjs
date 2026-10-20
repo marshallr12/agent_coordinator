@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -14,6 +14,7 @@ const task = {
   description: 'Synthetic browser-fixture task.',
   revision: 7,
   kind: 'code',
+  priority: 2,
   lifecycle: 'open',
   work_status: 'ready',
   acceptance_criteria: [],
@@ -691,12 +692,16 @@ async function removeProfile(profile) {
 }
 
 // Exercise the real edit dialog in Chrome and verify both kind directions.
-async function checkTaskKind({ evaluate, waitPage }) {
+async function checkTaskKind({ evaluate, waitPage, send }) {
   for (const [before, after] of [['code', 'general'], ['general', 'code']]) {
     const revision = task.revision;
     await evaluate(`document.querySelector('button[aria-label="Edit task"]').click()`);
     await waitPage("document.querySelector('dialog[open] #workflow-kind')", 'task kind dialog');
     assert(await evaluate("document.querySelector('#workflow-kind').value") === before, 'Kind select did not preserve the current kind.');
+    if (before === 'code' && process.env.TASK_KIND_SCREENSHOT) {
+      const { data } = await send('Page.captureScreenshot', { format: 'png' });
+      await writeFile(process.env.TASK_KIND_SCREENSHOT, Buffer.from(data, 'base64'));
+    }
     await evaluate(`(() => {
       document.querySelector('#workflow-kind').value = ${JSON.stringify(after)};
       document.querySelector('#workflow-criteria').value = 'Verify kind correction';
