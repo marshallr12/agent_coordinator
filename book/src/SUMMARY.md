@@ -51,6 +51,7 @@
 # Adoption review
 
 - [Self-hosting review](docs/self-hosting-review.md)
+- [Codex reviewer isolation evaluation](docs/codex-reviewer-isolation.md)
 
 # Maintain the documentation
 
