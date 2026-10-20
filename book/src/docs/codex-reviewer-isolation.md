@@ -31,6 +31,15 @@ nested sandbox where `codex sandbox` cannot start, so the sandbox rows below
 remain untested until the probe is rerun on the owner host. A reviewer launch
 will need the same two grants.
 
+A second implementer launch, in the same kind of nested sandbox, reran the
+probe after the fix (`codex-cli 0.162.1`): `config` mode gave the same 4 pass, 1
+fail and 3 info, and every sandbox probe skipped again, because the kernel
+refuses a further user namespace (`unshare -U` fails with `No space left on
+device`). That launch could not reach a host where user namespaces work, so the
+read grants are still unverified and the sandbox rows still have no result. The
+documentation check (`scripts/check_docs.py`) was run there with the pinned
+mdBook `v0.5.4` and passed.
+
 ## Conclusions
 
 | Question | Conclusion |
