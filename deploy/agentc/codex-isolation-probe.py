@@ -109,7 +109,21 @@ def fresh_home(work, name, config=""):
     return home
 
 
-def profile_toml(clone):
+def runtime_reads(codex, home):
+    """Paths the sandbox must still read for `codex sandbox` to start.
+
+    `:root = "deny"` hides the directory the Codex binary was installed in
+    (a standalone install lives under ~/.codex/packages) and the helper
+    symlinks Codex makes under CODEX_HOME/tmp/arg0, so bubblewrap fails with
+    `execvp codex-linux-sandbox: No such file or directory`. Grant read to
+    exactly those two places, never to CODEX_HOME itself.
+    """
+    binary = shutil.which(codex) or codex
+    return [str(Path(binary).resolve().parent), str(Path(home) / "tmp" / "arg0")]
+
+
+def profile_toml(clone, reads=()):
+    grants = "".join(f'"{path}" = "read"\n' for path in reads)
     return f"""default_permissions = "{PROFILE}"
 [permissions.{PROFILE}]
 extends = ":workspace"
@@ -118,7 +132,7 @@ extends = ":workspace"
 ":minimal" = "read"
 ":tmpdir" = "deny"
 ":slash_tmp" = "deny"
-[permissions.{PROFILE}.filesystem.":workspace_roots"]
+{grants}[permissions.{PROFILE}.filesystem.":workspace_roots"]
 "." = "write"
 [permissions.{PROFILE}.network]
 enabled = false
@@ -294,7 +308,9 @@ def sandbox_checks(codex, work):
     (clone / "alias-write").symlink_to(home / "config.toml")
     (clone / ".codex").mkdir()
     (clone / ".codex" / "config.toml").write_text("# guarded\n")
-    home_config = fresh_home(work, "codex-home", profile_toml(clone) + f'\n[projects."{clone}"]\ntrust_level = "untrusted"\n')
+    home_dir = work / "codex-home"
+    reads = runtime_reads(codex, home_dir)
+    home_config = fresh_home(work, "codex-home", profile_toml(clone, reads) + f'\n[projects."{clone}"]\ntrust_level = "untrusted"\n')
     guarded = [home_config / "config.toml", clone / ".git" / "config", clone / ".codex" / "config.toml",
                state / "auth.json", coordinator / "token"]
     before = {path: path.read_bytes() for path in guarded}

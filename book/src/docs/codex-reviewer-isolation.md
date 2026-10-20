@@ -8,7 +8,28 @@ billed API access. Current behavior is in
 [Current implementation and limits](implementation-status.md) and the
 service deployment examples chapter.
 
-Evaluated on 2026-10-20 for task `d303ba50-0f62-4994-bb3b-52bedb95bb86`.
+Evaluated on 2026-10-20 for task `4b7f3594-7780-4964-87ba-c375645bead2`, which
+replaces `d303ba50-0f62-4994-bb3b-52bedb95bb86`.
+
+## Owner-host run and probe fix
+
+The owner ran `codex-isolation-probe.py` on a real host (`codex-cli 0.163.0`,
+Linux 6.12.29, user namespaces available). `config` mode gave 4 pass, 1 fail
+(`exec --ignore-user-config` rewrote an `untrusted` pin to `trusted`, the same
+result as on `0.162.1`) and 3 info. Every sandbox probe was skipped with
+`bwrap: execvp codex-linux-sandbox: No such file or directory`, not `ENOSPC`.
+The cause is the probe's own profile: a standalone Codex lives under
+`~/.codex/packages`, and Codex puts its `codex-linux-sandbox` helper symlinks
+under `CODEX_HOME/tmp/arg0`; `":root" = "deny"` hid both from the sandbox. So
+those skips said nothing about the boundaries.
+
+The probe now adds a read grant for exactly two paths, the directory of the
+resolved Codex binary and `CODEX_HOME/tmp/arg0`, and never for `CODEX_HOME`
+itself (`runtime_reads`, covered by `codex-isolation-probe-test.py`). The
+grants are **not yet verified**: the launch that produced this change runs in a
+nested sandbox where `codex sandbox` cannot start, so the sandbox rows below
+remain untested until the probe is rerun on the owner host. A reviewer launch
+will need the same two grants.
 
 ## Conclusions
 
