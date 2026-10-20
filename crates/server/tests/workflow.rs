@@ -6629,6 +6629,17 @@ async fn the_other_lifecycle_guards_still_apply_to_reverts() {
     let (p, _, result, _) = published_subject(&f, "revert-guards").await;
     let human = reverted(&f, &f.admin, &p, &result, ("human", Value::Null)).await;
     assert_eq!(human["origin"], "human", "{human}");
+    let definition = fresh_task(&f, &p, &human).await;
+    let edit = json!({"expected_revision":definition["revision"],"title":definition["title"],"description":definition["description"],"acceptance_criteria":definition["acceptance_criteria"],"priority":definition["priority"],"depends_on":[],"planned":false,"kind":"general"});
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        human["id"].as_str().unwrap()
+    );
+    let (status, refused) = f.call(&f.admin, "PATCH", &path, edit).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "task_kind_fixed");
+    assert_eq!(fresh_task(&f, &p, &human).await["kind"], "code");
+
     for (action, gate) in [
         ("archive", "task_archive"),
         ("restore", "task_restore"),

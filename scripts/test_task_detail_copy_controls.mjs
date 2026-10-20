@@ -27,6 +27,7 @@ const tasks = Array.from({ length: 30 }, (_, index) => ({
   id: index ? `task-copy-id-${index}` : task.id,
   title: index ? `Fixture task ${index + 1}` : task.title,
 }));
+const kindPatches = [];
 const uploadedAttachments = new Map();
 // Workflow activity POSTs (claim/review), so the review test can prove a dismissed form claims nothing.
 const workflowPosts = [];
@@ -257,6 +258,14 @@ async function fixtureServer() {
       return;
     }
     if (url.pathname === '/api/v1/projects/fixture-project/tasks/archived') return json(response, { items: [archivedTask, otherArchivedTask], next_cursor: null });
+    if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}` && request.method === 'PATCH') {
+      assert(request.headers['x-csrf-token'] === 'fixture-csrf', 'Task edit omitted CSRF protection.');
+      const body = await readJson(request);
+      assert(body.expected_revision === task.revision, 'Task edit used a stale revision.');
+      kindPatches.push(body);
+      Object.assign(task, body, { revision: task.revision + 1 });
+      return json(response, task);
+    }
     if (url.pathname === `/api/v1/projects/fixture-project/tasks/${task.id}`) {
       if (detailDelay) await new Promise((resolveDelay) => setTimeout(resolveDelay, detailDelay));
       return json(response, task);
@@ -681,6 +690,24 @@ async function removeProfile(profile) {
   }
 }
 
+// Exercise the real edit dialog in Chrome and verify both kind directions.
+async function checkTaskKind({ evaluate, waitPage }) {
+  for (const [before, after] of [['code', 'general'], ['general', 'code']]) {
+    const revision = task.revision;
+    await evaluate(`document.querySelector('button[aria-label="Edit task"]').click()`);
+    await waitPage("document.querySelector('dialog[open] #workflow-kind')", 'task kind dialog');
+    assert(await evaluate("document.querySelector('#workflow-kind').value") === before, 'Kind select did not preserve the current kind.');
+    await evaluate(`(() => {
+      document.querySelector('#workflow-kind').value = ${JSON.stringify(after)};
+      document.querySelector('#workflow-criteria').value = 'Verify kind correction';
+      document.querySelector('dialog[open] form').requestSubmit();
+    })()`);
+    await waitPage(`document.querySelector('#detail-task-revision').textContent === ${JSON.stringify(String(revision + 1))}`, 'saved kind correction');
+    assert(kindPatches.at(-1).kind === after && kindPatches.at(-1).expected_revision === revision, 'Task kind save omitted the selection or revision.');
+    assert(task.kind === after, 'Task kind was not saved.');
+  }
+}
+
 async function main() {
   const server = await fixtureServer();
   const serverPort = server.address().port;
@@ -880,6 +907,7 @@ async function main() {
     await press('Enter', 'Enter', 13);
     await waitPage("document.querySelector('#task-detail-content') && !document.querySelector('#task-detail-content').hidden", 'task detail');
 
+    await checkTaskKind(ui);
     assert(await evaluate("document.querySelector('#task-detail-heading').textContent") === task.title, 'Task name was not rendered exactly.');
     assert(await evaluate("document.querySelector('#detail-task-id-value').textContent") === task.id, 'Task ID was not rendered exactly.');
     assert(await evaluate("(() => { const labels = Array.from(document.querySelectorAll('#task-operator-actions button'), button => (button.getAttribute('aria-label') || button.textContent)); return labels.includes('Archive task') && labels.includes('Cancel task'); })()"), 'Open task did not expose labeled archive and cancellation controls.');
@@ -1137,7 +1165,7 @@ async function main() {
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
     await checkReloadedResolutionLabel(ui, serverPort);
-    console.log('PASS: headless Chrome verified project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), lifecycle reasons with replacement links in both directions, the human-only external-completion control (eligibility, roster-prefilled checks, request body, refusal codes), saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified task kind prefill and revision-checked saves in both directions, project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), lifecycle reasons with replacement links in both directions, the human-only external-completion control (eligibility, roster-prefilled checks, request body, refusal codes), saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {

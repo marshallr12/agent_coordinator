@@ -1721,6 +1721,21 @@ async fn edit_task(
     let current = task(&mut m.tx, &p, &id, m.now).await?;
     let kind = input.kind.as_deref().unwrap_or(&current.kind);
     if kind != current.kind
+        && (current.objective_id.is_some()
+            || sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM task_reverts WHERE task_id=?)",
+            )
+            .bind(&id)
+            .fetch_one(&mut *m.tx)
+            .await?)
+    {
+        return Err(AppError::conflict(
+            "task_kind_fixed",
+            "Objectives must remain general and revert tasks must remain code.",
+        ));
+    }
+
+    if kind != current.kind
         && sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM submissions s JOIN attempts a ON a.id=s.attempt_id \
              WHERE s.project_id=? AND s.task_id=? AND a.generation=?",
@@ -1827,7 +1842,7 @@ async fn edit_task(
         sqlx::query("INSERT INTO task_definition_revision_grants(project_id,task_id,revision,grant_id) VALUES(?,?,?,?)")
             .bind(&p).bind(&id).bind(current.revision + 1).bind(grant_id).execute(&mut *m.tx).await?;
     }
-    let event_data = json!({"actor_id":m.actor.id,"old_kind":current.kind,"new_kind":kind});
+    let event_data = json!({"actor_id":m.actor.id,"old_kind":current.kind,"new_kind":kind,"previous_revision":current.revision,"revision":current.revision + 1});
     Ok(response(
         m.finish_with_event_data(value, &event_data, Some(&p), "task.edited", &id)
             .await?,

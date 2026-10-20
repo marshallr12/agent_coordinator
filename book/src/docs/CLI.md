@@ -1300,7 +1300,8 @@ agent contributor restrictions. A changed kind is refused with
 `task_kind_workflow_protected` if a submission (including one reopened for
 revision), review, or integration exists for the current task generation.
 Preserve that workflow's evidence rather than changing its delivery contract.
-An accepted edit increments the revision and records the actor and old/new kind
+Objectives remain General and revert tasks remain Code; changing these fixed
+contracts returns `task_kind_fixed` (409). An accepted edit increments the revision and records the actor and old/new kind
 in task history. Blocked work remains blocked until separately resolved.
 
 ### Inspect blockers and wait for a state change

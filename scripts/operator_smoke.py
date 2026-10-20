@@ -20,6 +20,7 @@ def exercise_operator(api, cli, owner, server_options):
         'description': task['description'], 'acceptance_criteria': task['acceptance_criteria'],
         'priority': 2, 'depends_on': [], 'planned': False})['data']
     assert updated['title'] == 'Admitted child'
+    assert updated['kind'] == 'general', 'Omitted edit kind must be preserved.'
     assert cli(owner, 'tasks', 'show', '--id', task['id'], project_id=project)['data']['revision'] == 2
     history = cli(owner, 'tasks', 'history', '--id', task['id'], '--kind', 'task_revisions',
                   '--limit', '1', project_id=project)['data']
@@ -27,6 +28,12 @@ def exercise_operator(api, cli, owner, server_options):
     second = cli(owner, 'tasks', 'history', '--id', task['id'], '--kind', 'task_revisions',
                  '--limit', '1', '--cursor', history['next_cursor'], project_id=project)['data']
     assert len(second['items']) == 1 and second['items'] != history['items']
+    for revision, kind in [(2, 'code'), (3, 'general')]:
+        updated = cli(editor, 'tasks', 'edit', '--id', task['id'], project_id=project, body={
+            'expected_revision': revision, 'title': updated['title'],
+            'description': updated['description'], 'acceptance_criteria': updated['acceptance_criteria'],
+            'priority': 2, 'depends_on': [], 'planned': False, 'kind': kind})['data']
+        assert updated['kind'] == kind and updated['revision'] == revision + 1
     objective = cli(owner, 'objectives', 'create', project_id=project, body={
         'title': 'Complete the objective', 'acceptance_criteria': ['Review the complete outcome'],
         'children': [{'task_id': task['id'], 'required': True}]})['data']

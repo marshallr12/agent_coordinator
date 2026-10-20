@@ -227,6 +227,19 @@ must be reopened by an operator or revised by an agent (`reason_code`
 `operation_not_permitted` and add `details.required_actor: "human"` and a
 `details.gate` name, or `required_actor: "human"` on the precondition.
 
+**Task kind corrections.** `PATCH /api/v1/projects/{project_id}/tasks/{task_id}`
+accepts optional `kind` (`code` or `general`) with the existing `TaskEdit`
+definition and `expected_revision`. Omission preserves the kind and old saved
+request fingerprints. The same unowned open/planned/blocked eligibility,
+delegated editing rights, and agent contributor restrictions apply. A kind
+change is refused with `task_kind_workflow_protected` (409) while a submission
+or its review/integration activities exist for the current attempt generation,
+even if reopened for revision. Objectives remain General and revert tasks remain Code; changing these fixed
+contracts returns `task_kind_fixed` (409). The accepted transaction increments the task
+revision, saves its definition and actor, and records `old_kind`, `new_kind`,
+and `actor_id` in the `task.edited` event. Correct a misclassified task through
+this edit path instead of canceling it and creating a replacement.
+
 **Human-delivered tasks.** Every task view carries `human_delivered` (default `false`).
 `POST /api/v1/projects/{project_id}/tasks` accepts `human_delivered: true` to create a
 task a human delivers, and `POST …/tasks/{task_id}/human-delivery` with

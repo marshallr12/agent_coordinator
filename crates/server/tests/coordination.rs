@@ -2238,8 +2238,11 @@ async fn task_kind_edits_preserve_replay_history_and_edit_authority() {
         .iter()
         .find(|v| v.to_string().contains("old_kind") && v.to_string().contains("general"))
         .unwrap();
-    assert!(event.to_string().contains(&f.b.principal), "{event}");
-    assert!(event.to_string().contains("code"), "{event}");
+    assert_eq!(event["record"]["actor_id"], f.b.principal);
+    assert_eq!(
+        event["record"]["data"],
+        json!({"actor_id":f.b.principal,"old_kind":"code","new_kind":"general","previous_revision":2,"revision":3})
+    );
     edit["expected_revision"] = json!(3);
     edit["kind"] = json!("invalid");
     assert_eq!(
@@ -2303,4 +2306,35 @@ async fn task_kind_edits_preserve_replay_history_and_edit_authority() {
     let (status, contributor) = f.call(&f.b, "PATCH", &path, "contributor-kind", edit).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{contributor}");
     assert_eq!(contributor["error"]["code"], "operation_not_permitted");
+}
+
+#[tokio::test]
+async fn task_kind_cannot_change_an_objectives_general_contract() {
+    let f = Fixture::new().await;
+    let p = f.project("fixed objective kind").await;
+    let (status, objective) = f.call(&f.admin, "POST", &format!("/api/v1/projects/{p}/objectives"), "objective-kind", json!({"title":"General objective","description":"Group child work","acceptance_criteria":["Done"],"children":[]})).await;
+    assert_eq!(status, StatusCode::OK, "{objective}");
+    let task = &objective["data"];
+    let path = format!(
+        "/api/v1/projects/{p}/tasks/{}",
+        task["id"].as_str().unwrap()
+    );
+    let mut edit = json!({"expected_revision":task["revision"],"title":task["title"],"description":task["description"],"acceptance_criteria":task["acceptance_criteria"],"priority":task["priority"],"depends_on":[],"planned":false,"kind":"code"});
+    let (status, refused) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &path,
+            "objective-kind-deny",
+            edit.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "task_kind_fixed");
+    edit["kind"] = json!("general");
+    let (status, same) = f
+        .call(&f.admin, "PATCH", &path, "objective-kind-unchanged", edit)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{same}");
+    assert_eq!(same["data"]["kind"], "general");
 }
