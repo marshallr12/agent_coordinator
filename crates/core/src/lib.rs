@@ -263,6 +263,9 @@ pub struct TaskEdit {
     pub priority: i64,
     pub depends_on: Vec<String>,
     pub planned: bool,
+    /// Omission preserves the current kind and older idempotent request payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// Human-managed authority for an agent principal or role to edit task definitions.

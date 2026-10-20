@@ -635,7 +635,7 @@ enum TasksCommand {
     Show(operator::RecordArgs),
     /// Page through complete task and workflow evidence by record kind.
     History(operator::HistoryArgs),
-    /// Edit an unowned task using its expected revision.
+    /// Edit an unowned task using its expected revision. Optional JSON kind (code/general) changes its kind; omission preserves it.
     Edit(operator::RecordInput),
 }
 

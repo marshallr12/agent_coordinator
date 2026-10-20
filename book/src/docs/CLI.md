@@ -1286,6 +1286,23 @@ agent-coordinator objectives show --id OBJECTIVE_ID
 agent-coordinator objectives children --id OBJECTIVE_ID --input membership.json
 ```
 
+### Correct a task's kind
+
+`tasks edit` accepts an optional `"kind": "code"` or `"kind": "general"` in
+its JSON input alongside the existing definition fields and `expected_revision`.
+Omitting `kind` preserves it. The REST task PATCH and MCP `coordinator_task_edit`
+use the same field; the dashboard's **Edit task** dialog preselects the current
+Kind. Use this to correct a misclassified, unowned open, planned, or blocked
+task instead of canceling it and creating a replacement.
+
+The usual revision and task-definition editing permissions apply, including
+agent contributor restrictions. A changed kind is refused with
+`task_kind_workflow_protected` if a submission (including one reopened for
+revision), review, or integration exists for the current task generation.
+Preserve that workflow's evidence rather than changing its delivery contract.
+An accepted edit increments the revision and records the actor and old/new kind
+in task history. Blocked work remains blocked until separately resolved.
+
 ### Inspect blockers and wait for a state change
 
 Task detail exposes service-known preconditions. For an exact task or workflow

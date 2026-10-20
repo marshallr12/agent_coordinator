@@ -155,7 +155,7 @@ fn build_catalog() -> Vec<Operation> {
         ),
         write::<TaskEdit>(
             "coordinator_task_edit",
-            "Edit an eligible task using its current expected_revision; active or completed work remains protected.",
+            "Edit an eligible task using its current expected_revision. Optional kind (code/general) changes its kind; omission preserves it. Active or completed work remains protected.",
             "PATCH",
             "/api/v1/projects/{project}/tasks/{task}",
         ),

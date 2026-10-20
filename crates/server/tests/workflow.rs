@@ -6874,3 +6874,33 @@ async fn s5_review_a_rejected_revert_is_a_new_task_revision() {
             .unwrap();
     assert!(saved.contains(r#""lifecycle":"canceled""#), "{saved}");
 }
+
+#[tokio::test]
+async fn task_kind_change_protects_current_submission_even_after_reopening() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("kind workflow", "https://example.test/kind.git")
+        .await;
+    let t = f.task(&p, "general", "Workflow kind protection").await;
+    let owner = f.claim(&f.a, &p, &t, 1).await;
+    let submitted = f
+        .submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
+        .await;
+    let path = format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let mut edit = json!({"expected_revision":1,"title":t["title"],"description":t["description"],"acceptance_criteria":t["acceptance_criteria"],"priority":t["priority"],"depends_on":[],"planned":false,"kind":"code"});
+    let (status, refused) = f.call(&f.admin, "PATCH", &path, edit.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "task_kind_workflow_protected");
+    let review = activity(&submitted, "agent_review");
+    let (status, reopened) = f.call(&f.admin, "POST", &format!("{path}/workflow/reopen"), json!({"submission_id":review["submission_id"],"reason":"Inspect kind protection after reopening"})).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    let (_, fresh) = f.call(&f.admin, "GET", &path, json!({})).await;
+    edit["expected_revision"] = fresh["data"]["revision"].clone();
+    let (status, refused) = f.call(&f.admin, "PATCH", &path, edit.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "task_kind_workflow_protected");
+    // Unchanged kinds still permit the existing requirement-revision path.
+    edit["kind"] = json!("general");
+    let (status, unchanged) = f.call(&f.admin, "PATCH", &path, edit).await;
+    assert_eq!(status, StatusCode::OK, "{unchanged}");
+}

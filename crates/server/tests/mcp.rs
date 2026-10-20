@@ -497,6 +497,19 @@ async fn modern_and_legacy_discovery_expose_only_the_fixed_safe_catalog() {
     assert_eq!(modern.status, StatusCode::OK);
     let tools = modern.body["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 65);
+    let edit = tools
+        .iter()
+        .find(|tool| tool["name"] == "coordinator_task_edit")
+        .unwrap();
+    let body = &edit["inputSchema"]["properties"]["body"];
+    assert!(body["properties"]["kind"].is_object());
+    assert!(
+        !body["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("kind"))
+    );
+
     let names: Vec<_> = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())

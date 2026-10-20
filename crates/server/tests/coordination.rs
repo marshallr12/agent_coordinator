@@ -2173,3 +2173,134 @@ async fn lifecycle_reason_backfill_copies_only_from_surviving_receipts() {
     assert_eq!(data[2], json!({}), "a compacted receipt is not used");
     assert_eq!(data[3], json!({}), "no receipt, no invented data");
 }
+
+#[tokio::test]
+async fn task_kind_edits_preserve_replay_history_and_edit_authority() {
+    let f = Fixture::new().await;
+    let p = f.project("kind edits").await;
+    let t = f.task(&p, "Kind correction", vec![]).await;
+    let id = t["id"].as_str().unwrap();
+    let path = format!("/api/v1/projects/{p}/tasks/{id}");
+    let mut edit = json!({"expected_revision":1,"title":t["title"],"description":t["description"],"acceptance_criteria":t["acceptance_criteria"],"priority":t["priority"],"depends_on":[],"planned":false});
+    // An old payload still serializes identically for its saved receipt hash.
+    let typed: coordinator_core::TaskEdit = serde_json::from_value(edit.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), edit);
+    let (status, omitted) = f
+        .call(&f.admin, "PATCH", &path, "old-edit", edit.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{omitted}");
+    assert_eq!(omitted["data"]["kind"], "code");
+    edit["expected_revision"] = json!(2);
+    edit["kind"] = json!("general");
+    let (status, denied) = f
+        .call(&f.b, "PATCH", &path, "denied-kind", edit.clone())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let grants = format!("/api/v1/projects/{p}/task-definition-grants");
+    let (status, grant) = f
+        .call(
+            &f.admin,
+            "POST",
+            &grants,
+            "grant-kind",
+            json!({"target_kind":"principal","agent_principal_id":f.b.principal}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{grant}");
+    let (status, changed) = f
+        .call(&f.b, "PATCH", &path, "change-kind", edit.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(changed["data"]["kind"], "general");
+    assert_eq!(changed["data"]["revision"], 3);
+    let (status, replay) = f
+        .call(&f.b, "PATCH", &path, "change-kind", edit.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["data"], changed["data"]);
+    let (status, stale) = f
+        .call(&f.admin, "PATCH", &path, "stale-kind", edit.clone())
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_eq!(stale["error"]["code"], "revision_conflict");
+    let (_, history) = f
+        .call(
+            &f.admin,
+            "GET",
+            &format!("{path}/history?kind=events"),
+            "",
+            json!({}),
+        )
+        .await;
+    let event = history["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v.to_string().contains("old_kind") && v.to_string().contains("general"))
+        .unwrap();
+    assert!(event.to_string().contains(&f.b.principal), "{event}");
+    assert!(event.to_string().contains("code"), "{event}");
+    edit["expected_revision"] = json!(3);
+    edit["kind"] = json!("invalid");
+    assert_eq!(
+        f.call(&f.admin, "PATCH", &path, "invalid-kind", edit.clone())
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    // Planned and blocked tasks retain the ordinary edit behavior.
+    edit["kind"] = json!("code");
+    edit["planned"] = json!(true);
+    assert_eq!(
+        f.call(&f.admin, "PATCH", &path, "planned-kind", edit.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    sqlx::query("UPDATE tasks SET lifecycle='open',blocked_reason='Preserve blocker' WHERE id=?")
+        .bind(id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    edit["expected_revision"] = json!(4);
+    edit["planned"] = json!(false);
+    edit["kind"] = json!("general");
+    let (status, blocked) = f
+        .call(&f.admin, "PATCH", &path, "blocked-kind", edit.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{blocked}");
+    assert_eq!(blocked["data"]["blocked_reason"], "Preserve blocker");
+    sqlx::query("UPDATE tasks SET blocked_reason=NULL WHERE id=?")
+        .bind(id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let (_, fresh) = f.call(&f.admin, "GET", &path, "", json!({})).await;
+    f.ack(&f.b, &p).await;
+    let (status, claim) = f
+        .claim(&f.b, &p, &fresh["data"], "kind-claim", "work")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    edit["expected_revision"] = json!(5);
+    edit["kind"] = json!("code");
+    assert_eq!(
+        f.call(&f.admin, "PATCH", &path, "owned-kind", edit.clone())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let (a, g) = attempt(&claim);
+    let (status, released) = f
+        .call(
+            &f.b,
+            "POST",
+            &format!("/api/v1/projects/{p}/attempts/{a}/release"),
+            "kind-release",
+            json!({"generation":g,"summary":"Saved"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{released}");
+    let (status, contributor) = f.call(&f.b, "PATCH", &path, "contributor-kind", edit).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{contributor}");
+    assert_eq!(contributor["error"]["code"], "operation_not_permitted");
+}

@@ -2782,6 +2782,7 @@
   function editTask(task, data) {
     const projectId = state.projectId, taskId = task.id;
     const view = workflowDialog('Edit task', 'Only unowned work can be edited. Admitting planned work makes it eligible when its dependencies and other requirements are satisfied.');
+    selectField(view,'kind','Kind',task.kind,[['code','Code'],['general','General']]);
     view.field('title','Title',task.title,'input').maxLength = 300;
     const description = view.field('description','Description',task.description); description.required = false; description.maxLength = 32768;
     view.field('criteria','Acceptance criteria — one per line',(task.acceptance_criteria || []).join('\n')).maxLength = 205000;
@@ -2790,7 +2791,7 @@
     const priority = view.field('priority','Priority (0 highest, 3 lowest)',task.priority,'input'); priority.type = 'number'; priority.min = '0'; priority.max = '3';
     selectField(view,'planned','Admission',task.lifecycle === 'planned',[['true','Keep planned'],['false','Admit to ready queue']]);
     view.finish('Save task', (values, dialog) => {
-      dialog.close(); startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}`, {expected_revision:task.revision,title:values.get('title'),description:values.get('description'),acceptance_criteria:lines(values.get('criteria')),depends_on:lines(values.get('depends_on')),priority:Number(values.get('priority')),planned:values.get('planned') === 'true'}, 'task edit', () => loadTaskDetail(), 'PATCH', null, {projectId,taskId});
+      dialog.close(); startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}`, {expected_revision:task.revision,kind:values.get('kind'),title:values.get('title'),description:values.get('description'),acceptance_criteria:lines(values.get('criteria')),depends_on:lines(values.get('depends_on')),priority:Number(values.get('priority')),planned:values.get('planned') === 'true'}, 'task edit', () => loadTaskDetail(), 'PATCH', null, {projectId,taskId});
     });
   }
   async function claimRecovery(task) {

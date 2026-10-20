@@ -1702,6 +1702,11 @@ async fn edit_task(
     if !(0..=3).contains(&input.priority) {
         return Err(AppError::bad_request("priority must be between 0 and 3."));
     }
+    if let Some(kind) = &input.kind
+        && !["code", "general"].contains(&kind.as_str())
+    {
+        return Err(AppError::bad_request("kind must be code or general."));
+    }
     let mut m = Mutation::begin(
         &s,
         &auth,
@@ -1714,6 +1719,24 @@ async fn edit_task(
         return Ok(response(v));
     }
     let current = task(&mut m.tx, &p, &id, m.now).await?;
+    let kind = input.kind.as_deref().unwrap_or(&current.kind);
+    if kind != current.kind
+        && sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM submissions s JOIN attempts a ON a.id=s.attempt_id \
+             WHERE s.project_id=? AND s.task_id=? AND a.generation=?",
+        )
+        .bind(&p)
+        .bind(&id)
+        .bind(current.generation)
+        .fetch_one(&mut *m.tx)
+        .await?
+            > 0
+    {
+        return Err(AppError::conflict(
+            "task_kind_workflow_protected",
+            "A submission or its review/integration workflow exists for this task generation; preserve its kind.",
+        ));
+    }
     crate::workflow::guard_subject_mutation(&mut m.tx, &p, &id).await?;
     if current.revision != input.expected_revision {
         return Err(AppError::conflict(
@@ -1759,7 +1782,8 @@ async fn edit_task(
         ).bind(&id).fetch_all(&mut *m.tx).await?;
         let mut requested_dependencies = input.depends_on.clone();
         requested_dependencies.sort();
-        let definition_changed = current.title != input.title
+        let definition_changed = kind != current.kind
+            || current.title != input.title
             || serde_json::from_str::<Vec<String>>(&current.acceptance_json)?
                 != input.acceptance_criteria
             || current.description != input.description
@@ -1783,8 +1807,8 @@ async fn edit_task(
         }
     }
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
-    sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,revision=revision+1 WHERE id=?")
-        .bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority).bind(if input.planned{"planned"}else{"open"}).bind(&id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,kind=?,revision=revision+1 WHERE id=?")
+        .bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority).bind(if input.planned{"planned"}else{"open"}).bind(kind).bind(&id).execute(&mut *m.tx).await?;
     if !input.planned {
         sqlx::query("UPDATE tasks SET budget_held_at=NULL WHERE id=?")
             .bind(&id)
@@ -1803,8 +1827,10 @@ async fn edit_task(
         sqlx::query("INSERT INTO task_definition_revision_grants(project_id,task_id,revision,grant_id) VALUES(?,?,?,?)")
             .bind(&p).bind(&id).bind(current.revision + 1).bind(grant_id).execute(&mut *m.tx).await?;
     }
+    let event_data = json!({"actor_id":m.actor.id,"old_kind":current.kind,"new_kind":kind});
     Ok(response(
-        m.finish(value, Some(&p), "task.edited", &id).await?,
+        m.finish_with_event_data(value, &event_data, Some(&p), "task.edited", &id)
+            .await?,
     ))
 }
 async fn unblock_task(
