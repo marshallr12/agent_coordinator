@@ -105,7 +105,14 @@ pub fn hardening_problems(clone: &Path) -> Result<Vec<String>> {
 /// Runs hardened Git in `cwd` and returns its trimmed stdout; `run` uses it
 /// on the root-owned mirror.
 pub fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
-    text(run(Some(cwd), args)?)
+    // Mirror data is deliberately readable by both role UIDs, but only root
+    // may write it. A supervisor's private-state umask (often 0077) must not
+    // turn newly fetched refs/objects into unreadable clone inputs. Keep this
+    // override local to mirror Git; changing the process umask would also
+    // expose credentials and per-launch state.
+    let mut mirror_args = vec!["-c", "core.sharedRepository=0644"];
+    mirror_args.extend_from_slice(args);
+    text(run(Some(cwd), &mirror_args)?)
 }
 
 /// Runs Git with hooks and fsmonitor disabled for this invocation too.
@@ -298,5 +305,93 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hardening_problems(&dest).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn mirror_fetch_keeps_updated_and_new_refs_readable_without_worker_writes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _) = remote(dir.path());
+        let mirror = dir.path().join("mirror.git");
+        run(
+            None,
+            &[
+                "clone",
+                "--mirror",
+                "--quiet",
+                &url,
+                mirror.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        // This enforces restrictive creation modes independent of the test
+        // runner's umask, without mutating process-global state in parallel
+        // tests. The production failure is the equivalent umask 0077 case.
+        run(Some(&mirror), &["config", "core.sharedRepository", "0600"]).unwrap();
+        let work = Path::new(&url);
+        fs::write(work.join("a.txt"), "new mirror content\n").unwrap();
+        run(
+            Some(work),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qam",
+                "update",
+            ],
+        )
+        .unwrap();
+        run(Some(work), &["branch", "ac/results/new-result"]).unwrap();
+        let head = text(run(Some(work), &["rev-parse", "HEAD"]).unwrap()).unwrap();
+        git_output(&mirror, &["fetch", "--prune", "--quiet"]).unwrap();
+
+        for name in ["refs/heads/main", "refs/heads/ac/results/new-result"] {
+            let path = mirror.join(name);
+            assert_eq!(fs::read_to_string(&path).unwrap().trim(), head);
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+        for name in ["refs/heads/ac", "refs/heads/ac/results"] {
+            assert_eq!(
+                fs::metadata(mirror.join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
+        let mut pending = vec![mirror.join("objects")];
+        while let Some(path) = pending.pop() {
+            let metadata = fs::metadata(&path).unwrap();
+            let mode = metadata.permissions().mode();
+            assert_eq!(mode & 0o022, 0, "worker-writeable mirror path {path:?}");
+            assert_eq!(mode & 0o044, 0o044, "unreadable mirror path {path:?}");
+            if metadata.is_dir() {
+                assert_eq!(mode & 0o011, 0o011, "unsearchable mirror path {path:?}");
+                pending.extend(
+                    fs::read_dir(path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            }
+        }
+        // Invocation-only: do not change the repository's persisted settings.
+        assert_eq!(
+            text(
+                run(
+                    Some(&mirror),
+                    &["config", "--local", "--get", "core.sharedRepository"]
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            "0600"
+        );
     }
 }
