@@ -358,6 +358,26 @@ a.nav-item { text-decoration: none; }
 .status-tip-line { display: block; overflow-wrap: anywhere; }
 .status-tip-line + .status-tip-line { margin-top: 2px; }
 .status-badge:hover .status-tip, .status-badge:focus .status-tip, .status-badge:focus-within .status-tip, .task-row:focus-visible .status-tip { display: block; }
+/* Narrow screens: the same page reflows instead of switching to a separate mobile site. */
+@media (max-width: 900px) {
+  .sidebar nav { grid-template-columns: repeat(5, 1fr); gap: 4px; }
+}
+@media (max-width: 620px) {
+  .topbar-inner { flex-wrap: wrap; gap: 8px 12px; padding: 10px 0; }
+  .topbar-brand-group { flex: 1 1 100%; flex-wrap: wrap; justify-content: space-between; gap: 8px 14px; }
+  .topbar-actions { flex: 1 1 100%; justify-content: space-between; }
+  .topbar-link { display: inline-flex; align-items: center; min-height: 36px; }
+  .topbar-actions .button { min-height: 36px; }
+  .link-button, .autonomy-open, .project-open { min-height: 36px; }
+  #task-operator-actions { flex-direction: row; flex-wrap: wrap; align-items: center; }
+  #task-operator-actions .button:not(.task-action-icon) { width: auto; }
+  .dialog-header .icon-button { width: 36px; height: 36px; }
+  .source-link { display: inline-block; padding: 8px 0; }
+  .detail-grid, .admin-grid { grid-template-columns: minmax(0, 1fr); }
+  .detail-description, .criteria-list li { overflow-wrap: anywhere; }
+  .table-wrap > .data-table { min-width: 620px; }
+  .data-table th { overflow-wrap: normal; white-space: nowrap; }
+}
 @media (prefers-reduced-motion: reduce) {
   .status-icon.working, .status-icon.reviewing { animation: none; }
   .status-icon.reviewing { border-color: currentColor; }
