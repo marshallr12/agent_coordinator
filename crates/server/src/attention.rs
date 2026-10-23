@@ -871,7 +871,10 @@ async fn ack_digest(
 
 /// Open tasks whose last [`STALL_ATTEMPTS`] attempts all ended without a
 /// submission, with the stalled attempt count.
-async fn stalled_tasks(c: &mut SqliteConnection, project: &str) -> Result<Vec<Value>, AppError> {
+pub(crate) async fn stalled_tasks(
+    c: &mut SqliteConnection,
+    project: &str,
+) -> Result<Vec<Value>, AppError> {
     let rows = sqlx::query(
         "SELECT t.id,t.title,t.priority FROM tasks t WHERE t.project_id=? AND t.lifecycle='open' \
          AND t.budget_exempt IS NULL AND t.archived_at IS NULL AND (SELECT count(*) FROM (SELECT state FROM attempts a \

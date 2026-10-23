@@ -31,6 +31,7 @@ impl Clock for TestClock {
 /// 2027-01-15T00:00:00Z.
 const DAY_1: i64 = 1_800_000_000_000;
 const DAY_MS: i64 = 86_400_000;
+const HOUR_MS: i64 = 3_600_000;
 
 #[derive(Clone)]
 struct Caller {
@@ -1096,4 +1097,447 @@ async fn call(
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// Records the exact-window read counts, on top of those [`Records`] seeds.
+impl Records {
+    /// An audit event `ms` after [`DAY_1`] by `actor` through a credential of `class`.
+    async fn event(&mut self, kind: &str, record: &str, actor: &str, class: Option<&str>, ms: i64) {
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at,credential_class) VALUES(?,?,?,?,'{}',?,?)")
+            .bind(&self.project).bind(actor).bind(kind).bind(record).bind(DAY_1 + ms).bind(class)
+            .execute(&mut *self.conn).await.unwrap();
+    }
+
+    /// An attempt of `task` that began and ended `ms` after [`DAY_1`] in `state`.
+    async fn attempt(&mut self, task: &str, generation: i64, state: &str, ms: i64, ended: bool) {
+        sqlx::query("INSERT INTO attempts(id,project_id,task_id,owner_id,session_id,generation,state,mode,expires_at,last_heartbeat_at,last_progress_at,created_at,ended_at) VALUES(?,?,?,?,'s',?,?,'work',?,?,?,?,?)")
+            .bind(format!("{task}-{generation}")).bind(&self.project).bind(task).bind(&self.agent)
+            .bind(generation).bind(state).bind(DAY_1 + ms).bind(DAY_1 + ms).bind(DAY_1 + ms)
+            .bind(DAY_1 + ms - 10).bind(ended.then_some(DAY_1 + ms))
+            .execute(&mut *self.conn).await.unwrap();
+    }
+
+    /// An integrator result for `submission` with one observation `ms` after [`DAY_1`].
+    async fn observation(&mut self, submission: &str, disposition: &str, ms: i64) {
+        let result = format!("result-{submission}");
+        sqlx::query("INSERT INTO integrator_results(id,project_id,submission_id,t0,t0_tree,c,r,r_tree,landing_range_json,roster_json,created_by,created_at) VALUES(?,?,?,'t0','t0t','c','r','rt','[]','[]',?,?)")
+            .bind(&result).bind(&self.project).bind(submission).bind(&self.agent).bind(DAY_1 + ms - 5)
+            .execute(&mut *self.conn).await.unwrap();
+        sqlx::query("INSERT INTO integrator_observations(id,result_id,tip,ancestry,disposition,evidence,observed_by,observed_at) VALUES(?,?,'tip','contained',?,'e',?,?)")
+            .bind(format!("obs-{submission}")).bind(&result).bind(disposition).bind(&self.agent).bind(DAY_1 + ms)
+            .execute(&mut *self.conn).await.unwrap();
+    }
+
+    /// The integrator parked `submission` of `task` `ms` after [`DAY_1`].
+    async fn park(&mut self, submission: &str, task: &str, ms: i64) {
+        sqlx::query("INSERT INTO integrator_revises(submission_id,task_id,reason_code,park_reason,revised_at) VALUES(?,?,'conflict','too many revises',?)")
+            .bind(submission).bind(task).bind(DAY_1 + ms)
+            .execute(&mut *self.conn).await.unwrap();
+    }
+}
+
+/// Sets the columns of `task` a window read looks at.
+async fn shape(f: &Fixture, task: &str, kind: &str, origin: &str, created_ms: i64) {
+    sqlx::query("UPDATE tasks SET kind=?,origin=?,created_at=? WHERE id=?")
+        .bind(kind)
+        .bind(origin)
+        .bind(DAY_1 + created_ms)
+        .bind(task)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+}
+
+fn window_url(project: &str, start: i64, end: i64) -> String {
+    format!(
+        "/api/v1/projects/{project}/telemetry/autonomy/window?start_ms={}&end_ms={}",
+        DAY_1 + start,
+        DAY_1 + end
+    )
+}
+
+#[tokio::test]
+async fn a_window_needs_both_bounds_and_must_be_closed_and_bounded() {
+    let f = Fixture::new().await;
+    let p = f.project("telemetry-window-bounds").await;
+    f.clock.0.store(DAY_1 + 200 * DAY_MS, Ordering::SeqCst);
+    let base = format!("/api/v1/projects/{p}/telemetry/autonomy/window");
+    for (query, code) in [
+        ("", "invalid_request"),
+        (&format!("?start_ms={DAY_1}"), "invalid_request"),
+        (&format!("?end_ms={DAY_1}"), "invalid_request"),
+        (
+            &format!("?start_ms={}&end_ms={DAY_1}", DAY_1 + 1),
+            "invalid_request",
+        ),
+        ("?start_ms=-1&end_ms=5", "invalid_request"),
+        (
+            &format!("?start_ms={DAY_1}&end_ms={}", DAY_1 + 93 * DAY_MS),
+            "invalid_request",
+        ),
+        (
+            &format!(
+                "?start_ms={}&end_ms={}",
+                DAY_1 + 190 * DAY_MS,
+                DAY_1 + 201 * DAY_MS
+            ),
+            "window_not_closed",
+        ),
+    ] {
+        let (status, value) = f.get(&f.other, &format!("{base}{query}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {value}");
+        assert_eq!(value["error"]["code"], code, "{query}: {value}");
+    }
+    // The bounds are inclusive: a window of one instant, and one of exactly 92 days, are fine.
+    for (start, end) in [(DAY_1, DAY_1), (DAY_1, DAY_1 + 92 * DAY_MS)] {
+        let (status, value) = f
+            .get(&f.other, &format!("{base}?start_ms={start}&end_ms={end}"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["data"]["window"]["bounds"], "both inclusive");
+        assert_eq!(value["data"]["window"]["start_ms"], start);
+        assert_eq!(value["data"]["window"]["end_ms"], end);
+    }
+    let (status, _) = f
+        .get(
+            &f.other,
+            "/api/v1/projects/no-such-project/telemetry/autonomy/window?start_ms=0&end_ms=1",
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let anonymous = Request::builder().uri(&base).body(Body::empty()).unwrap();
+    let response = f.app.clone().oneshot(anonymous).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_window_includes_both_bounds_and_does_not_depend_on_the_query_time() {
+    let f = Fixture::new().await;
+    let p = f.project("telemetry-window-fixture").await;
+    let tasks = [
+        f.task(&p, "Just before").await,
+        f.task(&p, "At start").await,
+        f.task(&p, "At end").await,
+        f.task(&p, "Just after").await,
+    ];
+    let mut r = Records::new(&f, &p).await;
+    for (n, (task, at)) in tasks.iter().zip([999, 1000, 5000, 5001]).enumerate() {
+        shape(
+            &f,
+            task,
+            "general",
+            if n == 1 { "agent" } else { "human" },
+            0,
+        )
+        .await;
+        let submission = format!("sub-{n}");
+        r.submission(&submission, task, 10, false).await;
+        r.finished(task, &submission, at).await;
+    }
+    r.event("task.edited", &tasks[0], &f.admin.principal, None, 999)
+        .await;
+    r.event("task.edited", &tasks[1], &f.admin.principal, None, 1000)
+        .await;
+    r.event("task.edited", &tasks[2], &f.admin.principal, None, 5000)
+        .await;
+    r.event("task.edited", &tasks[3], &f.admin.principal, None, 5001)
+        .await;
+    drop(r);
+    let url = window_url(&p, 1000, 5000);
+
+    f.clock.0.store(DAY_1 + HOUR_MS, Ordering::SeqCst);
+    let (status, first) = f.get(&f.other, &url).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let data = &first["data"];
+    assert_eq!(data["value"]["completed"]["count"], 2, "{data}");
+    assert_eq!(data["value"]["completed"]["by_origin"]["agent"], 1);
+    assert_eq!(data["value"]["completed"]["by_origin"]["human"], 1);
+    assert_eq!(data["value"]["human_origin"]["count"], 1);
+    assert_eq!(data["attention_events"]["by_class"]["human_session"], 2);
+    assert_eq!(data["attention_events"]["interventions"]["events"], 2);
+
+    // Asking again days later, after unrelated activity, reproduces every windowed section.
+    f.clock.0.store(DAY_1 + 3 * HOUR_MS, Ordering::SeqCst);
+    let late = f.task(&p, "Created after the window").await;
+    let (_, second) = f.get(&f.other, &url).await;
+    let (mut a, mut b) = (first["data"].clone(), second["data"].clone());
+    assert_ne!(a["current_state"]["as_of"], b["current_state"]["as_of"]);
+    a.as_object_mut().unwrap().remove("current_state");
+    b.as_object_mut().unwrap().remove("current_state");
+    assert_eq!(a, b);
+    assert!(!late.is_empty());
+}
+
+#[tokio::test]
+async fn interactive_events_are_kept_apart_from_supervised_and_integrator_ones() {
+    let f = Fixture::new().await;
+    let p = f.project("telemetry-window-classes").await;
+    let task = f.task(&p, "Recovered by a person").await;
+    let probe = f.task(&p, "Canary probe").await;
+    sqlx::query("UPDATE tasks SET budget_exempt='canary' WHERE id=?")
+        .bind(&probe)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let mut r = Records::new(&f, &p).await;
+    let agent = r.agent.clone();
+    r.event("attempt.claimed", &task, &agent, Some("interactive"), 2000)
+        .await;
+    r.event("task.edited", &task, &agent, Some("interactive"), 2100)
+        .await;
+    r.event("attempt.claimed", &task, &agent, Some("supervised"), 2200)
+        .await;
+    r.event(
+        "integrator.result_recorded",
+        &task,
+        &agent,
+        Some("integrator"),
+        2300,
+    )
+    .await;
+    r.event("task.canceled", &task, &f.admin.principal, None, 2400)
+        .await;
+    r.event("job.observed", "job-1", &agent, None, 2500).await;
+    // A canary task's events are counted apart, under the reserved exclusions.
+    r.event("attempt.claimed", &probe, &agent, Some("interactive"), 2600)
+        .await;
+    // Reports and parks the integrator raised: one needs a person, one about the probe does not count.
+    r.report("rep-1", Some(&task), true, 3000).await;
+    r.report("rep-2", Some(&probe), true, 3000).await;
+    r.submission("sub-park", &task, 10, false).await;
+    r.park("sub-park", &task, 3500).await;
+    drop(r);
+
+    f.clock.0.store(DAY_1 + DAY_MS, Ordering::SeqCst);
+    let (status, value) = f.get(&f.other, &window_url(&p, 1000, 9000)).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let data = &value["data"];
+    let events = &data["attention_events"];
+    assert_eq!(events["by_class"]["interactive"], 2, "{events}");
+    assert_eq!(events["by_class"]["supervised"], 1);
+    assert_eq!(events["by_class"]["integrator"], 1);
+    assert_eq!(events["by_class"]["human_session"], 1);
+    assert_eq!(events["by_class"]["job_reporter"], 1);
+    assert_eq!(events["by_class"]["unclassified"], 0);
+    assert_eq!(events["interventions"]["events"], 3);
+    assert_eq!(events["classification"]["status"], "complete");
+    let kinds = events["by_kind"].as_array().unwrap();
+    assert!(
+        kinds.iter().any(|k| k["kind"] == "attempt.claimed"
+            && k["class"] == "supervised"
+            && k["events"] == 1)
+    );
+    let reserved = &data["reserved_exclusions"]["canary_tasks"];
+    assert_eq!(reserved["attention_events"], 1);
+    assert_eq!(reserved["human_required_reports"], 1);
+    assert_eq!(data["integrator_signals"]["human_required_reports"], 1);
+    assert_eq!(data["episodes"]["parks"]["count"], 1);
+    assert_eq!(
+        data["episodes"]["parks"]["items"][0]["reason_code"],
+        "conflict"
+    );
+    // Every source was available, so the total is stated: 3 events + 1 report + 1 park.
+    let hri = &data["hri"];
+    assert_eq!(hri["status"], "complete", "{hri}");
+    assert_eq!(hri["count"], 5);
+    assert_eq!(hri["outcome"], "recorded");
+    assert_eq!(hri["components"]["interactive_and_human_events"], 3);
+}
+
+#[tokio::test]
+async fn missing_evidence_withholds_the_total_instead_of_reporting_zero() {
+    let f = Fixture::new().await;
+    let p = f.project("telemetry-window-unknown").await;
+    let task = f.task(&p, "Quiet task").await;
+    f.clock.0.store(DAY_1 + DAY_MS, Ordering::SeqCst);
+
+    // A quiet window with full evidence is a recorded zero.
+    let (_, quiet) = f.get(&f.other, &window_url(&p, 1000, 9000)).await;
+    assert_eq!(quiet["data"]["hri"]["status"], "complete");
+    assert_eq!(quiet["data"]["hri"]["count"], 0);
+    assert_eq!(quiet["data"]["hri"]["outcome"], "none_recorded");
+
+    // An agent event with no recorded class cannot be split, so the total is unknown.
+    let mut r = Records::new(&f, &p).await;
+    let agent = r.agent.clone();
+    r.event("task.edited", &task, &agent, None, 2000).await;
+    drop(r);
+    let (_, partial) = f.get(&f.other, &window_url(&p, 1000, 9000)).await;
+    let hri = &partial["data"]["hri"];
+    assert_eq!(hri["status"], "partial", "{hri}");
+    assert_eq!(hri["count"], Value::Null);
+    assert_eq!(hri["outcome"], "unknown");
+    assert_eq!(hri["lower_bound"], 0);
+    assert_eq!(hri["unavailable_sources"][0]["source"], "credential_class");
+    assert_eq!(
+        partial["data"]["attention_events"]["classification"]["status"],
+        "partial"
+    );
+
+    // A window that begins before the project's first audit event is also unknown.
+    let (_, early) = f.get(&f.other, &window_url(&p, -500, 100)).await;
+    // (-500 is before DAY_1 but not negative as an epoch time.)
+    let sources: Vec<_> = early["data"]["hri"]["unavailable_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["source"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(sources.contains(&"audit_events".to_owned()), "{early}");
+    assert_eq!(early["data"]["hri"]["count"], Value::Null);
+    assert_eq!(
+        early["data"]["attention_events"]["audit_log"]["covers_window_start"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn stall_episodes_are_reconstructed_from_attempt_history() {
+    let f = Fixture::new().await;
+    let p = f.project("telemetry-window-stalls").await;
+    let (stalled, recovered, old, fine) = (
+        f.task(&p, "Stalls and stays stalled").await,
+        f.task(&p, "Stalls then submits").await,
+        f.task(&p, "Stalled before the window").await,
+        f.task(&p, "Two failures only").await,
+    );
+    let probe = f.task(&p, "Canary probe").await;
+    sqlx::query("UPDATE tasks SET budget_exempt='canary' WHERE id=?")
+        .bind(&probe)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let mut r = Records::new(&f, &p).await;
+    for (n, ms) in [2000, 2100, 2200, 2300].into_iter().enumerate() {
+        r.attempt(&stalled, n as i64 + 1, "expired", ms, true).await;
+    }
+    for (n, ms) in [3000, 3100, 3200].into_iter().enumerate() {
+        r.attempt(&recovered, n as i64 + 1, "released", ms, true)
+            .await;
+    }
+    r.attempt(&recovered, 4, "submitted", 3500, true).await;
+    for (n, ms) in [10, 20, 30].into_iter().enumerate() {
+        r.attempt(&old, n as i64 + 1, "blocked", ms, true).await;
+    }
+    r.attempt(&fine, 1, "released", 4000, true).await;
+    r.attempt(&fine, 2, "released", 4100, true).await;
+    r.attempt(&fine, 3, "active", 4200, false).await;
+    for (n, ms) in [5000, 5100, 5200].into_iter().enumerate() {
+        r.attempt(&probe, n as i64 + 1, "expired", ms, true).await;
+    }
+    drop(r);
+
+    f.clock.0.store(DAY_1 + DAY_MS, Ordering::SeqCst);
+    let (status, value) = f.get(&f.other, &window_url(&p, 1000, 9000)).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let stalls = &value["data"]["episodes"]["stalls"];
+    // One episode per task however many nightly readings saw it.
+    assert_eq!(stalls["started_in_window"], 2, "{stalls}");
+    let items = stalls["items"].as_array().unwrap();
+    let find = |task: &str| items.iter().find(|i| i["task_id"] == task).unwrap();
+    assert_eq!(find(&stalled)["failed_attempts"], 4);
+    assert_eq!(find(&stalled)["resolved_at"], Value::Null);
+    assert_eq!(find(&recovered)["failed_attempts"], 3);
+    assert_ne!(find(&recovered)["resolved_at"], Value::Null);
+    assert_eq!(
+        stalls["carried_in"], 1,
+        "the pre-window stall has no submit"
+    );
+    assert_eq!(
+        value["data"]["reserved_exclusions"]["canary_tasks"]["stall_episodes"],
+        1
+    );
+    assert_eq!(
+        value["data"]["hri"]["components"]["stall_episodes_started"],
+        2
+    );
+
+    // The same window ending before the third failure of `stalled` does not see it,
+    // whatever attempts were recorded afterwards.
+    let (_, early) = f.get(&f.other, &window_url(&p, 1000, 2150)).await;
+    assert_eq!(early["data"]["episodes"]["stalls"]["started_in_window"], 0);
+    // The digest's current view still lists the task, as current state.
+    let now = &value["data"]["current_state"];
+    assert_eq!(now["depends_on_query_time"], true);
+}
+
+#[tokio::test]
+async fn value_and_direct_push_coverage_state_their_denominators() {
+    let f = Fixture::new().await;
+    let p = f.project("telemetry-window-push").await;
+    let names = ["pushed", "agent", "contained", "bare", "general"];
+    let mut tasks = Vec::new();
+    for name in names {
+        tasks.push(f.task(&p, name).await);
+    }
+    let mut r = Records::new(&f, &p).await;
+    for (n, task) in tasks.iter().enumerate() {
+        let submission = format!("sub-{n}");
+        shape(
+            &f,
+            task,
+            if n == 4 { "general" } else { "code" },
+            if n == 0 { "human" } else { "agent" },
+            1000,
+        )
+        .await;
+        r.submission(&submission, task, 10, false).await;
+        r.finished(task, &submission, 4000 + n as i64 * 100).await;
+    }
+    r.observation("sub-0", "published", 3900).await;
+    r.observation("sub-2", "already_contained", 4150).await;
+    sqlx::query("INSERT INTO workflow_activities(id,project_id,subject_task_id,submission_id,activity_task_id,kind,slot,state,created_at) VALUES('act-int',?,?,?,?,'integration',1,'completed',?)")
+        .bind(&p).bind(&tasks[1]).bind("sub-1").bind(&tasks[4]).bind(DAY_1)
+        .execute(&mut *r.conn).await.unwrap();
+    sqlx::query("INSERT INTO integration_results(activity_id,submission_id,attempt_id,publication_state,observed_target_revision,result_revision,result_tree,check_job_ids_json,summary,reported_by,created_at) VALUES('act-int','sub-1','att','published','a','b','c','[]','s',?,?)")
+        .bind(&r.agent).bind(DAY_1 + 4050)
+        .execute(&mut *r.conn).await.unwrap();
+    drop(r);
+
+    f.clock.0.store(DAY_1 + DAY_MS, Ordering::SeqCst);
+    let (status, value) = f.get(&f.other, &window_url(&p, 3000, 6000)).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let data = &value["data"];
+    assert_eq!(data["value"]["completed"]["count"], 5);
+    assert_eq!(data["value"]["completed"]["by_origin"]["human"], 1);
+    assert_eq!(data["value"]["human_origin"]["count"], 1);
+    // Human-origin latency: created 1000 ms and done 4000 ms after DAY_1.
+    assert_eq!(
+        data["value"]["latency"]["human_origin"]["median_seconds"],
+        3.0
+    );
+    assert_eq!(data["value"]["latency"]["all"]["count"], 5);
+    let push = &data["direct_push"];
+    assert_eq!(push["denominator"]["completed_code_tasks"], 4, "{push}");
+    assert_eq!(push["denominator"]["not_applicable_general_tasks"], 1);
+    assert_eq!(push["integrator_direct_push"]["count"], 1);
+    assert_eq!(push["integrator_direct_push"]["ratio"], 0.25);
+    assert_eq!(push["agent_integration_published"]["count"], 1);
+    assert_eq!(push["already_contained_only"]["count"], 1);
+    assert_eq!(push["no_publication_evidence"]["count"], 1);
+    assert_eq!(push["status"], "partial");
+    assert_eq!(push["timestamps"]["push_time"], "unavailable");
+    assert!(
+        push["timestamps"]["commit_times"]
+            .as_str()
+            .unwrap()
+            .contains("neither stored nor used")
+    );
+
+    // An observation recorded after the window's end is not evidence for it.
+    let (_, narrow) = f.get(&f.other, &window_url(&p, 3000, 4020)).await;
+    assert_eq!(
+        narrow["data"]["direct_push"]["denominator"]["completed_code_tasks"],
+        1
+    );
+    assert_eq!(
+        narrow["data"]["direct_push"]["integrator_direct_push"]["count"],
+        1
+    );
+    let (_, empty) = f.get(&f.other, &window_url(&p, 7000, 8000)).await;
+    assert_eq!(
+        empty["data"]["direct_push"]["integrator_direct_push"]["ratio"],
+        Value::Null
+    );
+    assert_eq!(empty["data"]["direct_push"]["status"], "complete");
 }

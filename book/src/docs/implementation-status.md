@@ -42,9 +42,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   reports its per-role daily spend caps (`POST .../telemetry/caps`), and
   `GET .../telemetry/autonomy` counts finished tasks, human-required
   interventions, review outcomes and parked tasks from the service's own
-  records. The console's per-project **Autonomy** view (opened from the project
-  settings or the summary on each project card) shows these with the digest, and
-  links every figure to the record it comes from.
+  records, and `GET .../telemetry/autonomy/window` answers the same question for
+  an exact `[start_ms, end_ms]` window (both bounds included, independent of query
+  time) with interactive versus supervised and integrator events, reserved canary
+  exclusions, historical stall and park episodes, human-origin throughput and
+  latency, direct-push coverage with its denominator, and a human-required total
+  withheld whenever a source is unavailable. The console's per-project
+  **Autonomy** view (opened from the project settings or the summary on each
+  project card) shows the rolling figures with the digest, and links every figure
+  to the record it comes from; it does not yet show the exact-window read.
 
 - Standalone `agent-coordinator-mcp` stdio adapter with protected, locked, atomic
   mutation journals and exact retry through the service. Native CLI installation

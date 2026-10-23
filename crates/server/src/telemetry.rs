@@ -74,6 +74,10 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/projects/{p}/telemetry/autonomy",
             get(read_autonomy),
         )
+        .route(
+            "/api/v1/projects/{p}/telemetry/autonomy/window",
+            get(crate::autonomy_window::read_window),
+        )
 }
 
 /// One launch's cost, as a host's `costs.jsonl` row.
@@ -233,7 +237,7 @@ impl CanaryResult {
 /// Refuses an unknown project with `project_not_found`, so a host can tell
 /// a missing project from a coordinator that has no telemetry routes (whose
 /// 404 carries `record_not_found`, or no JSON error at all).
-async fn require_project(c: &mut SqliteConnection, p: &str) -> Result<(), AppError> {
+pub(crate) async fn require_project(c: &mut SqliteConnection, p: &str) -> Result<(), AppError> {
     let found: i64 = sqlx::query_scalar("SELECT count(*) FROM projects WHERE id=?")
         .bind(p)
         .fetch_one(&mut *c)
@@ -816,7 +820,11 @@ fn merge_days(parts: &[&[Value]]) -> Vec<Value> {
 
 /// The open tasks the revise limit parks for agents right now, each with the
 /// revises that count in the last 24 hours.
-async fn parked_now(c: &mut SqliteConnection, p: &str, now: i64) -> Result<Vec<Value>, AppError> {
+pub(crate) async fn parked_now(
+    c: &mut SqliteConnection,
+    p: &str,
+    now: i64,
+) -> Result<Vec<Value>, AppError> {
     let candidates: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT t.id,t.title FROM events e JOIN submissions s ON s.id=e.record_id \
          JOIN tasks t ON t.id=s.task_id WHERE e.kind='submission.reopened' AND e.project_id=? \

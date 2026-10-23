@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod attention;
 pub mod auth;
 pub mod autonomy;
+mod autonomy_window;
 pub mod backup;
 pub mod context_rerank;
 pub mod coordination;

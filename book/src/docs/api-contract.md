@@ -906,6 +906,71 @@ only what hosts report, per project, attributed to the reporting principal and
   `caps`, the latest report of each host. Stalls have no recorded start, so
   they are not part of `human_required`; the digest reports the current ones.
   Reads accept any authenticated reader.
+- `GET /autonomy/window?start_ms=&end_ms=` returns exact fixed-window autonomy
+  metrics for the interval `[start_ms, end_ms]` in milliseconds since the
+  epoch. Both parameters are required and **both bounds are included**: a record
+  stamped exactly at either bound counts. The window is at most 92 days wide and
+  must be closed; an `end_ms` after the service's clock is refused with
+  `400 window_not_closed`, and a missing, reversed or too wide window with
+  `400 invalid_request`. Every section except `current_state` is computed only
+  from the window and from records stamped no later than `end_ms`, so the same
+  query returns the same figures whenever it is asked (a retained audit fixture
+  reproduces); it never reads the clock. The rolling `GET /autonomy` read is
+  unchanged. The reply (`schema: "autonomy-window-v1"`) keeps its sources apart:
+  - `value`: tasks that reached done in the window (`workflow_subjects.updated_at`
+    where the phase is done, plus `task.completed_externally` events for tasks
+    not already counted), as `completed` (`count`, `by_origin` human, agent and
+    service, `completed_externally`, `by_day`); `human_origin` (`count`,
+    `per_day` over the exact window width); and `latency` (task `created_at` to
+    completion; `count`, `median_seconds`, `p90_seconds`, `max_seconds`, nearest
+    rank) for all tasks and for human-origin ones.
+  - `direct_push`: coverage over an explicit denominator, the non-canary code
+    tasks completed in the window (general tasks and external completions are
+    reported separately as not applicable). Each of `integrator_direct_push`
+    (integrator observations `published` or `published_after_reopen`),
+    `agent_integration_published`, `already_contained_only` and
+    `no_publication_evidence` has `count`, `ratio` (null with an empty
+    denominator) and its `evidence`. `status` is `partial` while any completed
+    task has no publication evidence. Push time is `unavailable`: the service
+    records when the integrator or an agent reported the observation, and git
+    author or commit timestamps are neither stored nor used as push times.
+    Evidence recorded after `end_ms` is ignored.
+  - `attention_events`: the project's audit events in the window by the class of
+    the credential behind each (`by_class`: `interactive`, `human_session`,
+    `supervised`, `integrator`, `job_reporter` and `unclassified`, an agent
+    credential with no recorded class, such as an event from before classes were
+    recorded), and `by_kind` with each kind's events and distinct records.
+    `interventions.events` is the raw count of interactive and human-session
+    events, not a count of distinct interventions. `classification.status` is
+    `partial` while `unclassified` events exist; `audit_log` gives the earliest
+    event and whether it precedes the window start.
+  - `integrator_signals`: human-required integrator reports opened in the window.
+  - `episodes.stalls`: stall episodes reconstructed from attempt history, three
+    or more consecutive attempts of a task that ended without a submission,
+    one episode however many nightly digest readings saw it. An episode starts
+    when the third attempt ends and ends when an attempt submits; attempts that
+    ended after `end_ms` count as running. `started_in_window` counts them,
+    `items` lists up to 100 (`truncated` says more exist), `carried_in` counts
+    those that started earlier and had no submitting attempt before the window
+    (a task canceled meanwhile is still counted), and `attempts_without_end_time`
+    counts attempts whose end was not recorded. `episodes.parks` lists subjects
+    an integrator revise parked, by revise time.
+  - `reserved_exclusions`: canary (budget-exempt) tasks are left out of every
+    figure above and counted here by section (`completions`, `attention_events`,
+    `human_required_reports`, `parked_subjects`, `stall_episodes`). Events are
+    attributed to a canary task when their record is the task, or a submission
+    or attempt of it.
+  - `hri`: the human-required total as recorded attention, never a bare
+    success label. `components` lists the sources (interactive and human events,
+    human-required reports, parked subjects, stall episodes started). `status` is
+    `complete` only when every source was available; otherwise it is `partial`,
+    `count` is null, `lower_bound` is what the available sources recorded,
+    `outcome` is `unknown` and `unavailable_sources` names each missing source
+    (the audit log not reaching the window start, unclassified events, attempts
+    without an end time). A complete zero reads `outcome: "none_recorded"`.
+  - `current_state`: the only query-time section. `as_of` is the clock, and
+    `stalled_tasks` and `parked` are the digest's current views of tasks that
+    stalled or are parked now. Do not compare it with the windowed sections.
 
 ## Attempt operations
 
