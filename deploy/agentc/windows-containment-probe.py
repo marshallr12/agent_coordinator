@@ -171,7 +171,11 @@ class Native:
         return path.value
 
     def run(self, sid, argv, root, windows, lpac, seconds=60):
-        """Atomic job assignment; no uncontained retry, inherited handles or environment."""
+        """Atomic jobs with no inherited handles/environment.
+
+        sid=None is used ONLY for the fixed trusted fixture's positive control,
+        never as a retry/fallback for a contained workload.
+        """
         job = self.kernel.CreateJobObjectW(None, None)
         self.require(job, "CreateJobObjectW")
         attributes = None
@@ -186,7 +190,7 @@ class Native:
             self.require(self.kernel.SetInformationJobObject(job, 9, c.byref(limits),
                                                              c.sizeof(limits)), "job limits")
             size = c.c_size_t()
-            count = 3 if lpac else 2
+            count = 1 + int(sid is not None) + int(lpac)
             self.kernel.InitializeProcThreadAttributeList(None, count, 0, c.byref(size))
             attributes = c.create_string_buffer(size.value)
             self.require(self.kernel.InitializeProcThreadAttributeList(attributes, count, 0,
@@ -195,7 +199,9 @@ class Native:
             capabilities = SecurityCapabilities(sid, None, 0, 0)
             jobs = (w.HANDLE * 1)(job)
             optout = w.DWORD(1)
-            entries = [(0x20009, capabilities), (0x2000d, jobs)]
+            entries = [(0x2000d, jobs)]
+            if sid is not None:
+                entries.append((0x20009, capabilities))
             if lpac:
                 entries.append((0x2000e, optout))
             for attribute, value in entries:
@@ -269,8 +275,10 @@ def experiment(root, windows, rows, lpac):
         expected = {"appcontainer", "own_write", "host_read_denied", "host_write_denied",
                     "host_process_denied", "child_contained"}
         baseline = work / "baseline.txt"
-        checked(work / "fixture.exe", [str(baseline), str(root / "host-canary.txt"), str(os.getpid())],
-                log=work / "baseline.log", environment=environment)
+        control_code = native.run(None, [work / "fixture.exe", baseline, root / "host-canary.txt",
+                                        str(os.getpid())], work, windows, False)
+        if control_code != 0:
+            raise RuntimeError(f"uncontained positive control exited {control_code}; no denial proven")
         controls = parse_results(baseline.read_text(encoding="utf-8-sig"), expected)
         if controls != {key: key == "own_write" for key in expected}:
             raise RuntimeError("uncontained positive control failed; no security denial proven")
