@@ -29,7 +29,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 argon2 = "0.5"
 subtle = "2"
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 base64 = "0.22"
 rpassword = "7"
 url = "2"
