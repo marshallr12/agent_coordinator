@@ -135,6 +135,7 @@ class Native:
         self.bind(self.kernel, "ResumeThread", w.DWORD, [w.HANDLE])
         self.bind(self.kernel, "WaitForSingleObject", w.DWORD, [w.HANDLE, w.DWORD])
         self.bind(self.kernel, "GetExitCodeProcess", w.BOOL, [w.HANDLE, c.POINTER(w.DWORD)])
+        self.bind(self.kernel, "OpenProcess", w.HANDLE, [w.DWORD, w.BOOL, w.DWORD])
 
     @staticmethod
     def bind(library, name, result, arguments):
@@ -171,11 +172,9 @@ class Native:
         return path.value
 
     def run(self, sid, argv, root, windows, lpac, seconds=60):
-        """Atomic jobs with no inherited handles/environment.
-
-        sid=None is used ONLY for the fixed trusted fixture's positive control,
-        never as a retry/fallback for a contained workload.
-        """
+        """Atomic jobs with no uncontained fallback or inherited handles/environment."""
+        if sid is None:
+            raise RuntimeError("a contained launch requires a package SID")
         job = self.kernel.CreateJobObjectW(None, None)
         self.require(job, "CreateJobObjectW")
         attributes = None
@@ -190,7 +189,7 @@ class Native:
             self.require(self.kernel.SetInformationJobObject(job, 9, c.byref(limits),
                                                              c.sizeof(limits)), "job limits")
             size = c.c_size_t()
-            count = 1 + int(sid is not None) + int(lpac)
+            count = 3 if lpac else 2
             self.kernel.InitializeProcThreadAttributeList(None, count, 0, c.byref(size))
             attributes = c.create_string_buffer(size.value)
             self.require(self.kernel.InitializeProcThreadAttributeList(attributes, count, 0,
@@ -199,9 +198,7 @@ class Native:
             capabilities = SecurityCapabilities(sid, None, 0, 0)
             jobs = (w.HANDLE * 1)(job)
             optout = w.DWORD(1)
-            entries = [(0x2000d, jobs)]
-            if sid is not None:
-                entries.append((0x20009, capabilities))
+            entries = [(0x2000d, jobs), (0x20009, capabilities)]
             if lpac:
                 entries.append((0x2000e, optout))
             for attribute, value in entries:
@@ -274,16 +271,16 @@ def experiment(root, windows, rows, lpac):
         checked(compiler, argv[1:], environment=environment)
         expected = {"appcontainer", "own_write", "host_read_denied", "host_write_denied",
                     "host_process_denied", "child_contained"}
-        baseline = work / "baseline.txt"
-        control_code = native.run(None, [work / "fixture.exe", baseline, root / "host-canary.txt",
-                                        str(os.getpid())], work, windows, False)
-        if control_code != 0:
-            raise RuntimeError(f"uncontained positive control exited {control_code}; no denial proven")
-        controls = parse_results(baseline.read_text(encoding="utf-8-sig"), expected)
-        if controls != {key: key == "own_write" for key in expected}:
-            raise RuntimeError("uncontained positive control failed; no security denial proven")
+        # Check the actual target resources with the unrestricted host token.
+        # This does not assert that an uncontained fixture executable ran.
+        with (root / "host-canary.txt").open("r+b") as target:
+            if target.read() != b"synthetic, not a credential":
+                raise RuntimeError("synthetic host-file positive control failed")
+        target_process = native.kernel.OpenProcess(0x10 | 0x20, False, os.getpid())
+        native.require(target_process, "host process positive control")
+        native.require(native.kernel.CloseHandle(target_process), "close positive-control process")
         rows.append({"check": label + ".positive_control", "status": "pass",
-                     "detail": "same compiler and fixture succeed; host file/process accessible outside container"})
+                     "detail": "host compiler succeeds; target file read/write and process access succeed with host token"})
         (work / "fixture.exe").unlink()
         code = native.run(sid, argv, work, windows, lpac)
         if code != 0 or not (work / "fixture.exe").is_file():
