@@ -228,7 +228,7 @@ the host process opened for VM read/write with the host token.
 | Experiment | Observation | Interpretation |
 | --- | --- | --- |
 | Ordinary AppContainer, no capabilities | Contained C# compile succeeded; fixture exit 0; own write, AppContainer token, child token inheritance and synthetic host file/process denials passed | The initial subset works on this host; no network, role, harness or lifecycle acceptance follows |
-| LPAC, no capabilities | Compiler exited 3221225794 (`0xC0000142`) before producing the test executable | Required LPAC build compatibility is not demonstrated; its dependency/access failure needs diagnosis |
+| LPAC, no capabilities | Compiler exited 3221225794 (`0xC0000142`) before producing the test executable | This stricter experimental profile is not yet usable; its dependency/access failure needs diagnosis |
 | Job/profile cleanup | Job quiescence verified; generated profiles deleted successfully | The experiment ended; temporary evidence directories are retained |
 | Privileged host operations | Invoking MiniAir token was not elevated | SCM installation, separate service identities and privileged network policy were not exercised |
 
@@ -239,10 +239,12 @@ experiment instead checks the **actual target resources** directly with the host
 token and the same access rights, plus a successful uncontained compiler run. It
 does not assert that an uncontained fixture process ran successfully.
 
-The disposition is **NO-GO for Windows supervised execution**. An ordinary
-AppContainer is not a fallback for an unproven LPAC configuration. Diagnose the
-exact required runtime/capability grants without broad host access, then expand
-the adversarial matrix and obtain independent design review. Service, broker,
+The disposition is **NO-GO for Windows supervised execution** because the full
+acceptance matrix has not passed. The ordinary AppContainer is a separate
+candidate that still needs every applicable acceptance row; LPAC is an optional
+stricter candidate, not a task-mandated mechanism. Diagnose its exact required
+runtime/capability grants without broad host access, expand the adversarial
+matrix and obtain independent design review. Service, broker,
 installer and full acceptance phases remain incomplete. No real provider login,
 SCM service, firewall policy, WSL configuration or production admission changed.
 
