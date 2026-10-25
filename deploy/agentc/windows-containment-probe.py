@@ -94,6 +94,9 @@ class Native:
         self.kernel = c.WinDLL("kernel32", use_last_error=True)
         self.userenv = c.WinDLL("userenv", use_last_error=True)
         self.advapi = c.WinDLL("advapi32", use_last_error=True)
+        self.shell = c.WinDLL("shell32", use_last_error=True)
+        self.bind(self.shell, "SHGetFolderPathW", c.c_long,
+                  [w.HWND, c.c_int, w.HANDLE, w.DWORD, w.LPWSTR])
         self.bind(self.userenv, "CreateAppContainerProfile", c.c_long,
                   [w.LPCWSTR, w.LPCWSTR, w.LPCWSTR, c.c_void_p, w.DWORD, c.POINTER(c.c_void_p)])
         self.bind(self.userenv, "DeleteAppContainerProfile", c.c_long, [w.LPCWSTR])
@@ -181,7 +184,11 @@ class Native:
             command = c.create_unicode_buffer(subprocess.list2cmdline([str(value) for value in argv]))
             # CreateProcess resolves the package profile using LOCALAPPDATA.
             # This path is not a filesystem grant and carries no credential.
-            environment = c.create_unicode_buffer(environment_block(root, windows, os.environ["LOCALAPPDATA"]))
+            local_appdata = c.create_unicode_buffer(260)
+            folder_result = self.shell.SHGetFolderPathW(None, 0x1c, None, 0, local_appdata)
+            if folder_result != 0:
+                raise OSError(folder_result & 0xffffffff, "resolve LocalAppData")
+            environment = c.create_unicode_buffer(environment_block(root, windows, local_appdata.value))
             self.require(self.kernel.CreateProcessW(str(argv[0]), command, None, None, False,
                          0x80000 | 0x400 | 0x4 | 0x8000000, environment, str(root),
                          c.byref(startup), c.byref(process)), "CreateProcessW")
