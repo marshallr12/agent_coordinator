@@ -945,8 +945,10 @@ async function main() {
     assert(await evaluate("document.querySelector('#task-attachments-state').textContent.includes('saved bytes and request keys')"), 'Uncertain attachment upload did not explain safe retry.');
     await evaluate("document.querySelector('#retry-task-attachments').click()");
     await waitPage("document.querySelector('#task-attachments-list').textContent.includes('palette.svg') && document.querySelector('#task-attachments-list a')", 'uploaded task attachment');
-    const downloadedAttachment = await evaluate("(async () => { const link = document.querySelector('#task-attachments-list a'); const response = await fetch(link.href); return { ok: response.ok, filename: link.download, body: await response.text() }; })()");
+    const downloadedAttachment = await evaluate("(async () => { const link = document.querySelector('#task-attachments-list .task-attachment-heading a'); const response = await fetch(link.href); return { ok: response.ok, filename: link.download, label: link.getAttribute('aria-label'), iconOnly: link.textContent === '' && Boolean(link.querySelector('svg')), besideName: link.previousElementSibling?.textContent === 'palette.svg', type: response.headers.get('content-type'), body: await response.text() }; })()");
     assert(downloadedAttachment.ok && downloadedAttachment.filename === 'palette.svg' && downloadedAttachment.body === palette, 'The attachment download did not preserve the uploaded image context.');
+    assert(downloadedAttachment.iconOnly && downloadedAttachment.besideName && downloadedAttachment.label === 'Download palette.svg', 'The attachment download is not an icon button beside the attachment name.');
+    assert(downloadedAttachment.type === 'image/svg+xml', `The attachment downloaded as ${downloadedAttachment.type}, not its image/svg+xml media type.`);
     assert(attachmentUploadKeys.length === 2 && attachmentUploadKeys[0] === attachmentUploadKeys[1], 'Retry did not reuse the exact binary upload idempotency key.');
     task.lifecycle = 'canceled';
     task.work_status = 'canceled';
