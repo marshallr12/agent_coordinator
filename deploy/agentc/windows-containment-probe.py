@@ -21,12 +21,16 @@ import time
 import uuid
 
 
-def environment_block(root, windows, local_appdata):
+def environment_values(root, windows, local_appdata):
     """Do not copy the invoking harness's credential-bearing environment."""
-    values = {"SystemRoot": str(windows), "WINDIR": str(windows),
+    return {"SystemRoot": str(windows), "WINDIR": str(windows),
               "TEMP": str(root), "TMP": str(root),
               "PATH": str(windows / "System32"), "LOCALAPPDATA": str(local_appdata)}
-    return "\0".join(f"{key}={value}" for key, value in sorted(values.items())) + "\0\0"
+
+
+def environment_block(root, windows, local_appdata):
+    return "\0".join(f"{key}={value}" for key, value in
+                     sorted(environment_values(root, windows, local_appdata).items())) + "\0\0"
 
 
 def verdict(rows):
@@ -39,10 +43,10 @@ def verdict(rows):
                            "SCM lifecycle and recovery", "native Rust toolchain"]}
 
 
-def checked(program, arguments, log=None):
+def checked(program, arguments, log=None, environment=None):
     with open(log, "wb") if log else open(os.devnull, "wb") as output:
         result = subprocess.run([str(program), *arguments], stdin=subprocess.DEVNULL,
-                                stdout=output, stderr=output, timeout=60, check=False)
+                                stdout=output, stderr=output, timeout=60, check=False, env=environment)
     if result.returncode:
         raise RuntimeError(f"{Path(program).name} exited {result.returncode}")
 
@@ -103,6 +107,8 @@ class Native:
         self.shell = c.WinDLL("shell32", use_last_error=True)
         self.bind(self.shell, "SHGetFolderPathW", c.c_long,
                   [w.HWND, c.c_int, w.HANDLE, w.DWORD, w.LPWSTR])
+        self.bind(self.kernel, "SetErrorMode", w.UINT, [w.UINT])
+        self.kernel.SetErrorMode(0x1 | 0x2 | 0x8000)
         self.bind(self.userenv, "CreateAppContainerProfile", c.c_long,
                   [w.LPCWSTR, w.LPCWSTR, w.LPCWSTR, c.c_void_p, w.DWORD, c.POINTER(c.c_void_p)])
         self.bind(self.userenv, "DeleteAppContainerProfile", c.c_long, [w.LPCWSTR])
@@ -157,6 +163,13 @@ class Native:
         finally:
             self.kernel.LocalFree(c.cast(value, c.c_void_p))
 
+    def local_appdata(self):
+        path = c.create_unicode_buffer(260)
+        result = self.shell.SHGetFolderPathW(None, 0x1c, None, 0, path)
+        if result != 0:
+            raise OSError(result & 0xffffffff, "resolve LocalAppData")
+        return path.value
+
     def run(self, sid, argv, root, windows, lpac, seconds=60):
         """Atomic job assignment; no uncontained retry, inherited handles or environment."""
         job = self.kernel.CreateJobObjectW(None, None)
@@ -194,11 +207,7 @@ class Native:
             command = c.create_unicode_buffer(subprocess.list2cmdline([str(value) for value in argv]))
             # CreateProcess resolves the package profile using LOCALAPPDATA.
             # This path is not a filesystem grant and carries no credential.
-            local_appdata = c.create_unicode_buffer(260)
-            folder_result = self.shell.SHGetFolderPathW(None, 0x1c, None, 0, local_appdata)
-            if folder_result != 0:
-                raise OSError(folder_result & 0xffffffff, "resolve LocalAppData")
-            environment = c.create_unicode_buffer(environment_block(root, windows, local_appdata.value))
+            environment = c.create_unicode_buffer(environment_block(root, windows, self.local_appdata()))
             self.require(self.kernel.CreateProcessW(str(argv[0]), command, None, None, False,
                          0x80000 | 0x400 | 0x4 | 0x8000000, environment, str(root),
                          c.byref(startup), c.byref(process)), "CreateProcessW")
@@ -255,12 +264,13 @@ def experiment(root, windows, rows, lpac):
         argv = [compiler, "/nologo", "/target:exe", "/out:" + str(work / "fixture.exe"),
                 str(work / "fixture.cs")]
         # Positive control: the exact compiler/source must work before a denial counts.
-        checked(compiler, argv[1:])
+        environment = environment_values(work, windows, native.local_appdata())
+        checked(compiler, argv[1:], environment=environment)
         expected = {"appcontainer", "own_write", "host_read_denied", "host_write_denied",
                     "host_process_denied", "child_contained"}
         baseline = work / "baseline.txt"
         checked(work / "fixture.exe", [str(baseline), str(root / "host-canary.txt"), str(os.getpid())],
-                log=work / "baseline.log")
+                log=work / "baseline.log", environment=environment)
         controls = parse_results(baseline.read_text(encoding="utf-8-sig"), expected)
         if controls != {key: key == "own_write" for key in expected}:
             raise RuntimeError("uncontained positive control failed; no security denial proven")
