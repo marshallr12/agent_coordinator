@@ -84,6 +84,13 @@ password; the reply is the same for unknown addresses. The reset signs the accou
 out everywhere. It needs the mail relay configured and a verified address; the
 page never says whether an account exists.
 
+To sign in without typing a password, open **My account**, choose **Create a
+passkey** and approve the browser's prompt. Afterwards the sign-in page's **Sign in
+with a passkey** button signs in with the same prompt, and a browser that created
+one offers it when the page opens signed out. A passkey works only at the service's
+configured HTTPS origin. **Remove** in **My account** deletes it; the password still
+works.
+
 When email recovery is unavailable (no relay, or no verified address), the service
 host's local `recover-operator-password` command replaces the password, enables the
 existing account, and revokes its browser sessions. It requires an audit reason and

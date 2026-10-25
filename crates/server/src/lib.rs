@@ -28,6 +28,7 @@ pub mod mutation;
 pub mod next;
 pub mod objectives;
 pub mod operator_access;
+pub mod passkey;
 pub mod password_reset;
 pub mod project_sessions;
 mod recovery_evidence;
@@ -70,6 +71,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(attention::routes())
         .merge(account_email::routes())
         .merge(password_reset::routes())
+        .merge(passkey::routes())
         .merge(integrator::routes())
         .merge(integrator_authority::routes())
         .merge(integrator_observe::routes())
@@ -149,7 +151,8 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
     let login = parts.method == Method::POST && parts.uri.path() == "/api/v1/auth/login";
     let ack_link = attention::is_ack_link(&parts.method, parts.uri.path());
     let verify_link = account_email::is_verify_link(&parts.method, parts.uri.path())
-        || password_reset::is_recovery_request(&parts.method, parts.uri.path());
+        || password_reset::is_recovery_request(&parts.method, parts.uri.path())
+        || passkey::is_sign_in_request(&parts.method, parts.uri.path());
     let mut result = if parts.uri.path().starts_with("/api/v1/reporters/") {
         match jobs::ReporterAuth::authenticate(&parts, &state).await {
             Ok(auth) => {
@@ -237,7 +240,7 @@ async fn info() -> Json<Value> {
         "client_compatibility":coordinator_core::service_client_compatibility(),
         "implementation_stage":"mcp","authentication_help":"/api/v1/help/authentication",
         "mcp":{"path":"/mcp","transport":"Streamable HTTP","stateless":true},
-        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","precondition_inspection","state_change_long_poll","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events","submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","operator_accounts","password_change","browser_session_revocation","agent_token_rotation","objectives","task_history","backup_restore","restore_reconciliation","clock_reconciliation","storage_maintenance","mcp"],
+        "available_features":["local_admin_login","agent_credentials","agent_sessions","projects","project_policy","tasks","task_dependencies","orientation","precondition_inspection","state_change_long_poll","claims","renewals","checkpoints","release","checkout_registration","recovery_inspection","resources","reservations","jobs","scoped_reporters","events","submission","review","integration","artifacts","knowledge","decisions","markdown_import_export","operator_accounts","password_change","passkeys","browser_session_revocation","agent_token_rotation","objectives","task_history","backup_restore","restore_reconciliation","clock_reconciliation","storage_maintenance","mcp"],
         "unavailable_features":[],
         "agent_startup":discovery::agent_startup()}),
     )

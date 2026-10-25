@@ -168,6 +168,42 @@ or 465 for `tls`), `COORDINATOR_SMTP_TLS`, `COORDINATOR_SMTP_USER`,
 user and sender, and an app password in the file. Without a relay the service runs
 normally and verification emails are recorded as not sent.
 
+## Passkeys
+
+A human account may hold up to ten passkeys (WebAuthn credentials) and sign in
+with one instead of its password. The relying party id is the host of the
+configured public origin, and every ceremony checks that origin. Only ES256 is
+accepted, no attestation is requested, user presence and user verification are
+required, and the service stores only the credential id, public key and signature
+counter. A synced passkey whose counter stays zero is accepted; a counter that
+fails to advance is refused.
+
+- `POST /api/v1/auth/passkeys/options {}` (browser session) returns
+  `challenge_id` and WebAuthn creation options with a random challenge valid for
+  five minutes.
+- `POST /api/v1/auth/passkeys {challenge_id,name?,credential}` (browser session,
+  `Idempotency-Key`) verifies the browser's attestation and saves the passkey.
+  `credential` is `{id, response:{clientDataJSON, attestationObject}}`, base64url.
+  It records `passkey_registered`.
+- `GET /api/v1/auth/passkeys` lists the caller's passkeys (`id`, `name`,
+  `created_at`, `last_used_at`); `POST /api/v1/auth/passkeys/{id}/delete {}`
+  removes one and records `passkey_deleted`.
+- `POST /api/v1/auth/passkey-login/options {}` needs no credential, only the
+  service origin, and returns `challenge_id` and request options with no
+  `allowCredentials`, so the browser offers whichever passkey it holds for the
+  site and the reply discloses nothing about accounts.
+- `POST /api/v1/auth/passkey-login {challenge_id,credential}` verifies the signed
+  challenge and answers like `POST /api/v1/auth/login`, with the session cookie
+  and CSRF token, and records `browser_signed_in` with `method: passkey`. A
+  challenge allows one attempt; an unknown credential, wrong signature, wrong
+  origin, spent or expired challenge, or disabled account returns
+  `authentication_required`.
+
+The sign-in page shows **Sign in with a passkey**. If this browser has not
+created a passkey it also offers to sign in with the password and then create
+one; if it has, opening the page signed out starts the passkey prompt itself.
+Removing a passkey does not end sessions it started.
+
 ## Browser sessions
 
 `GET /api/v1/browser-sessions?cursor=...` lists the caller's sessions. An

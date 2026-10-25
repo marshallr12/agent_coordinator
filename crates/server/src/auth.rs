@@ -507,7 +507,29 @@ async fn login(
     // password change raced the deliberately off-thread password calculation.
     let row = sqlx::query("SELECT name,role FROM principals WHERE id=? AND password_hash=? AND disabled_at IS NULL AND kind='human'")
         .bind(&id).bind(original_hash).fetch_optional(&mut *tx).await?.ok_or_else(AppError::auth_required)?;
-    let now = clock.now;
+    let (actor, token) = issue_browser_session(
+        &mut tx,
+        id,
+        row.get("name"),
+        row.get("role"),
+        clock.now,
+        json!({}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(signed_in_response(&state, actor, &token))
+}
+
+/// Starts a browser session for an account whose credential the caller has
+/// just verified under the writer lock. The caller commits.
+pub(crate) async fn issue_browser_session(
+    tx: &mut SqliteConnection,
+    id: String,
+    name: String,
+    role: String,
+    now: i64,
+    event_data: Value,
+) -> Result<(Actor, String), AppError> {
     let token = secret();
     let session_id = uuid::Uuid::new_v4().to_string();
     // Bound retained session verifiers and active sign-ins for each account.
@@ -525,24 +547,27 @@ async fn login(
     .bind(now)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO events(actor_id,kind,record_id,data_json,created_at) VALUES(?,'browser_signed_in',?,'{}',?)")
-        .bind(&id).bind(&session_id).bind(now).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO events(actor_id,kind,record_id,data_json,created_at) VALUES(?,'browser_signed_in',?,?,?)")
+        .bind(&id).bind(&session_id).bind(event_data.to_string()).bind(now).execute(&mut *tx).await?;
     let actor = Actor {
         id,
-        name: row.get("name"),
+        name,
         kind: "human".into(),
-        role: row.get("role"),
+        role,
         credential_id: None,
         session_id: Some(session_id),
         credential_attributes: None,
     };
-    tx.commit().await?;
+    Ok((actor, token))
+}
+
+pub(crate) fn signed_in_response(state: &AppState, actor: Actor, token: &str) -> Response {
     let mut result =
-        response(json!({"actor":actor,"csrf_token":csrf_token(&token)})).into_response();
+        response(json!({"actor":actor,"csrf_token":csrf_token(token)})).into_response();
     result
         .headers_mut()
-        .insert(header::SET_COOKIE, cookie_header(&state, &token, false));
-    Ok(result)
+        .insert(header::SET_COOKIE, cookie_header(state, token, false));
+    result
 }
 
 async fn me(auth: Auth) -> Json<Value> {

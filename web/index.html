@@ -24,6 +24,10 @@
             <input id="password" name="password" type="password" autocomplete="current-password" required>
             <button class="button primary full-width" type="submit">Sign in</button>
           </form>
+          <div id="passkey-login" hidden>
+            <button id="passkey-signin" class="button subtle full-width" type="button">Sign in with a passkey</button>
+            <p id="passkey-setup-row" class="login-alt"><button id="passkey-setup" class="link-button" type="button">No passkey yet? Sign in with your password and set one up</button></p>
+          </div>
           <p class="login-alt"><button id="forgot-link" class="link-button" type="button">Forgot password?</button></p>
           <form id="forgot-form" novalidate hidden>
             <p class="muted">Enter the email address on your account. If it is verified, we send a link that works once for one hour.</p>

@@ -402,12 +402,12 @@
     setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('restore-status')); clear($('clock-status')); clear($('restore-requirements')); clear($('task-operator-actions')); show($('credentials-list'), false);
     stopPolling();
     show($('dashboard-view'), false); show($('loading-view'), false); show($('login-view'), true);
-    $('login-form')?.reset(); $('username')?.focus();
+    $('login-form')?.reset(); showPasskeyLogin(); $('username')?.focus();
   }
 
   async function restoreSession() {
     try { const result = await request('/api/v1/me'); applySession(result.data); restorePendingMutation(); await loadProjects(); applyRoute(location.hash); startPolling(); }
-    catch (error) { show($('loading-view'), false); show($('dashboard-view'), false); show($('login-view'), true); if (error.status && error.status !== 401) showLoginError(errorMessage(error)); }
+    catch (error) { show($('loading-view'), false); show($('dashboard-view'), false); show($('login-view'), true); if (error.status && error.status !== 401) showLoginError(errorMessage(error)); else if (passkeysSupported() && passkeyHinted()) signInWithPasskey(true); }
   }
 
   function showLoginError(message, kind = 'error') { const target = $('login-error'); target.classList.toggle('error', kind === 'error'); target.classList.toggle('success', kind === 'success'); setText(target, message); show(target, Boolean(message)); }
@@ -1399,7 +1399,57 @@
     catch (error) { showLoginError(errorMessage(error)); }
     finally { if (button) button.disabled = false; }
   });
-  $('login-form').addEventListener('submit', (event) => { event.preventDefault(); const username = $('username').value.trim(); const password = $('password').value; if (!username || !password) { showLoginError('Enter your username and password.'); return; } showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); applyRoute(location.hash); startPolling(); }, 'POST', (error) => showLoginError(errorMessage(error))); });
+  function passwordSignIn(afterSignIn = null) {
+    const username = $('username').value.trim(); const password = $('password').value;
+    if (!username || !password) { showLoginError('Enter your username and password.'); return; }
+    showLoginError(''); startMutation('/api/v1/auth/login', { username, password }, 'sign-in', async (data) => { applySession(data); $('password').value = ''; restorePendingMutation(); await loadProjects(); applyRoute(location.hash); startPolling(); if (afterSignIn) await afterSignIn(); }, 'POST', (error) => showLoginError(errorMessage(error)));
+  }
+  $('login-form').addEventListener('submit', (event) => { event.preventDefault(); passwordSignIn(); });
+
+  // Passkeys: WebAuthn credentials that replace the password at sign-in. The service verifies; this code only moves bytes between it and the browser.
+  const PASSKEY_HINT_KEY = 'agent-coordinator.passkey';
+  const passkeysSupported = () => Boolean(window.PublicKeyCredential && navigator.credentials);
+  const passkeyHinted = () => { try { return localStorage.getItem(PASSKEY_HINT_KEY) === 'true'; } catch { return false; } };
+  const rememberPasskey = () => { try { localStorage.setItem(PASSKEY_HINT_KEY, 'true'); } catch { /* The sign-in page still offers the passkey button. */ } };
+  const b64uToBytes = (value) => { const padded = value.replace(/-/g, '+').replace(/_/g, '/'); return Uint8Array.from(atob(padded + '='.repeat((4 - padded.length % 4) % 4)), (character) => character.charCodeAt(0)); };
+  const bytesToB64u = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const ceremonyCancelled = (error) => error instanceof DOMException && ['NotAllowedError', 'AbortError'].includes(error.name);
+  function showPasskeyLogin() {
+    show($('passkey-login'), passkeysSupported());
+    show($('passkey-setup-row'), !passkeyHinted());
+  }
+  async function signInWithPasskey(automatic = false) {
+    if (state.passkeyBusy || state.mutation) return;
+    state.passkeyBusy = true; showLoginError(''); setProp($('passkey-signin'), 'disabled', true);
+    try {
+      const options = (await request('/api/v1/auth/passkey-login/options', { method: 'POST', body: {} })).data;
+      const credential = await navigator.credentials.get({ publicKey: { ...options.public_key, challenge: b64uToBytes(options.public_key.challenge) } });
+      const answer = credential.response;
+      const body = { challenge_id: options.challenge_id, credential: { id: credential.id, response: { clientDataJSON: bytesToB64u(answer.clientDataJSON), authenticatorData: bytesToB64u(answer.authenticatorData), signature: bytesToB64u(answer.signature), userHandle: answer.userHandle ? bytesToB64u(answer.userHandle) : null } } };
+      applySession((await request('/api/v1/auth/passkey-login', { method: 'POST', body })).data);
+      rememberPasskey(); restorePendingMutation(); await loadProjects(); applyRoute(location.hash); startPolling();
+    } catch (error) {
+      if (ceremonyCancelled(error)) { if (!automatic) { show($('passkey-setup-row'), true); showLoginError('No passkey was used. If you have not set one up on this device, sign in with your password and create one, or use the link below.'); } }
+      else if (error instanceof ApiError) showLoginError(error.status === 401 ? 'That passkey was not accepted. Try again or sign in with your password.' : errorMessage(error));
+      else showLoginError('The passkey could not be used on this device.');
+    } finally { state.passkeyBusy = false; setProp($('passkey-signin'), 'disabled', false); }
+  }
+  // Asks this browser for a new passkey on the signed-in account and saves it. Resolves once the request is on its way.
+  async function createPasskey(name = '') {
+    try {
+      const options = (await request('/api/v1/auth/passkeys/options', { method: 'POST', body: {} })).data, key = options.public_key;
+      const credential = await navigator.credentials.create({ publicKey: { ...key, challenge: b64uToBytes(key.challenge), user: { ...key.user, id: b64uToBytes(key.user.id) }, excludeCredentials: (key.excludeCredentials || []).map((item) => ({ ...item, id: b64uToBytes(item.id) })) } });
+      const body = { challenge_id: options.challenge_id, credential: { id: credential.id, response: { clientDataJSON: bytesToB64u(credential.response.clientDataJSON), attestationObject: bytesToB64u(credential.response.attestationObject) } } };
+      if (name) body.name = name;
+      startMutation('/api/v1/auth/passkeys', body, 'passkey', async () => { rememberPasskey(); setGlobalAlert('Passkey created. You can now sign in with it.', 'success'); }, 'POST', (error) => setGlobalAlert(errorMessage(error), 'error', error.uncertain));
+    } catch (error) {
+      if (ceremonyCancelled(error)) setGlobalAlert('No passkey was created. The request was cancelled or this device could not make one.');
+      else setGlobalAlert(error instanceof ApiError ? errorMessage(error) : 'A passkey could not be created on this device.');
+    }
+  }
+  $('passkey-signin').addEventListener('click', () => signInWithPasskey(false));
+  $('passkey-setup').addEventListener('click', () => passwordSignIn(() => createPasskey()));
+  showPasskeyLogin();
   document.querySelectorAll('button.nav-item').forEach((button) => button.addEventListener('click', () => { enterTopLevel(button.dataset.view); }));
   $('brand-button').addEventListener('click', () => showView('overview')); $('new-project-button').addEventListener('click', () => openDialog('project')); $('new-task-button').addEventListener('click', () => openDialog('task'));
   $('refresh-projects').addEventListener('click', () => loadProjects()); $('refresh-tasks').addEventListener('click', () => loadTasks());
@@ -3003,6 +3053,25 @@
         view.dialog.close(); startMutation('/api/v1/auth/email', body, 'email address', restoredMutationCallbacks('account_email'), 'POST', error => setGlobalAlert(errorMessage(error), 'error', error.uncertain));
       }));
       add(view.form, emailBox);
+      const passkeyBox = el('fieldset', 'passkey-settings'); add(passkeyBox, el('legend', '', 'Passkeys'));
+      if (!passkeysSupported()) add(passkeyBox, el('p', 'muted', 'This browser does not support passkeys.'));
+      else {
+        const passkeys = await request('/api/v1/auth/passkeys').then((result) => result.data.items || []).catch(() => null);
+        if (actorId() !== currentActor) return;
+        add(passkeyBox, el('p', 'muted', 'Sign in with this device instead of your password. A passkey never leaves your device.'));
+        if (passkeys === null) add(passkeyBox, el('p', 'error', 'Your passkeys could not be loaded.'));
+        else if (!passkeys.length) add(passkeyBox, el('p', '', 'No passkeys are set up for this account.'));
+        passkeys?.forEach((passkey) => {
+          const row = el('div', 'passkey-row'); add(row, el('span', '', `${passkey.name} · Added ${formatDate(passkey.created_at)} · ${passkey.last_used_at ? `Last used ${formatDate(passkey.last_used_at)}` : 'Never used'}`));
+          add(row, actionButton('Remove', () => { view.dialog.close(); startMutation(`/api/v1/auth/passkeys/${encodeURIComponent(passkey.id)}/delete`, {}, 'passkey removal', async () => setGlobalAlert('Passkey removed.', 'success'), 'POST', (error) => setGlobalAlert(errorMessage(error), 'error', error.uncertain)); }));
+          add(passkeyBox, row);
+        });
+        const passkeyCaption = el('label', '', 'Passkey name (optional)'); passkeyCaption.htmlFor = 'account-passkey-name';
+        const passkeyName = el('input'); passkeyName.id = 'account-passkey-name'; passkeyName.maxLength = 100; passkeyName.autocomplete = 'off';
+        add(passkeyBox, passkeyCaption); add(passkeyBox, passkeyName);
+        add(passkeyBox, actionButton('Create a passkey', () => { const name = passkeyName.value.trim(); view.dialog.close(); createPasskey(name); }));
+      }
+      add(view.form, passkeyBox);
       add(view.form,actionButton('View my browser sessions', () => { view.dialog.close(); browserSessions(operator.id,operator.name); },false));
       add(view.form,actionButton('Sign out', () => { view.dialog.close(); startMutation('/api/v1/auth/logout', {}, 'sign-out', async () => signOutLocal()); }));
       const current = view.field('current_password','Current password','','input'); current.type = 'password'; current.autocomplete = 'current-password'; current.maxLength = 1024;

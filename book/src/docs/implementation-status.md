@@ -319,6 +319,18 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   sets a new password and signs the account out everywhere (migration 43). Live
   delivery through Gmail has not been exercised from CI; it needs the relay
   settings in `service.env.example` and a human-delivered check.
+- Passkey sign-in for human accounts (migration 45). **My account** lists an
+  account's passkeys, creates one through the browser's WebAuthn prompt, and
+  removes one. The sign-in page has **Sign in with a passkey**, which starts the
+  same browser session as a password sign-in, and offers to sign in with the
+  password and then set a passkey up; a browser that already created one starts
+  the passkey prompt when the page opens signed out. The service accepts ES256
+  credentials with user verification, requests no attestation, keeps only the
+  public key, and uses a one-time challenge valid for five minutes. It needs the
+  configured public origin's host to be the relay party id, so a browser must open
+  the service at that origin. Verified by `crates/server/tests/passkey.rs` and by
+  `scripts/passkey_smoke.mjs` in headless Chrome with a virtual authenticator;
+  hardware and synced-passkey providers have not been exercised.
 - Full policy editing, planned-task admission, inspected human recovery and blocker
   resolution, with matching native task, policy, objective, and history commands.
 - Objectives with required/optional children, revisioned membership frozen once work
