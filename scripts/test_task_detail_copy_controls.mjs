@@ -224,7 +224,7 @@ async function fixtureServer() {
       for await (const chunk of request) body += chunk;
       const input = JSON.parse(body);
       const id = `fixture-artifact-${attachmentReservations.size + 1}`;
-      const artifact = { id, project_id: 'fixture-project', task_id: input.task_id, kind: 'upload', display_name: input.filename, media_type: input.media_type, size_bytes: input.size_bytes, sha256: input.sha256, state: 'reserved', availability: 'pending' };
+      const artifact = { id, project_id: 'fixture-project', task_id: input.task_id, kind: 'upload', display_name: input.filename, media_type: input.media_type, size_bytes: input.size_bytes, sha256: input.sha256, state: 'reserved', pinned: false, retention_until: null, deleted_at: null };
       attachmentReservations.set(id, { artifact, input });
       return json(response, { artifact, upload_path: `/api/v1/projects/fixture-project/artifacts/${id}/content` });
     }
@@ -247,7 +247,7 @@ async function fixtureServer() {
       assert(reservation, 'Binary upload had no task artifact reservation.');
       assert(bytes.length === reservation.input.size_bytes, 'Uploaded bytes differ from the reservation size.');
       assert(createHash('sha256').update(bytes).digest('hex') === reservation.input.sha256, 'Uploaded bytes differ from the reserved digest.');
-      const artifact = { ...reservation.artifact, state: 'finalized', availability: 'available', finalized_at: new Date().toISOString() };
+      const artifact = { ...reservation.artifact, state: 'finalized', finalized_at: new Date().toISOString() };
       uploadedAttachments.set(id, artifact); attachmentBytes.set(id, bytes);
       return json(response, { artifact });
     }
