@@ -10,6 +10,7 @@ import argparse
 import ctypes as c
 from ctypes import wintypes as w
 import json
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -87,6 +88,11 @@ class ExtendedLimit(c.Structure):
                 ("peak_process", c.c_size_t), ("peak_job", c.c_size_t)]
 
 
+class Accounting(c.Structure):
+    _fields_ = [(name, c.c_int64) for name in ("user", "kernel", "period_user", "period_kernel")] + [
+        (name, w.DWORD) for name in ("faults", "total", "active", "terminated")]
+
+
 class Native:
     def __init__(self):
         if sys.platform != "win32":
@@ -109,6 +115,8 @@ class Native:
         self.bind(self.kernel, "SetInformationJobObject", w.BOOL,
                   [w.HANDLE, c.c_int, c.c_void_p, w.DWORD])
         self.bind(self.kernel, "TerminateJobObject", w.BOOL, [w.HANDLE, w.UINT])
+        self.bind(self.kernel, "QueryInformationJobObject", w.BOOL,
+                  [w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c.c_void_p])
         self.bind(self.kernel, "InitializeProcThreadAttributeList", w.BOOL,
                   [c.c_void_p, w.DWORD, w.DWORD, c.POINTER(c.c_size_t)])
         self.bind(self.kernel, "UpdateProcThreadAttribute", w.BOOL,
@@ -154,6 +162,7 @@ class Native:
         job = self.kernel.CreateJobObjectW(None, None)
         self.require(job, "CreateJobObjectW")
         attributes = None
+        initialized = False
         process = ProcessInfo()
         try:
             limits = ExtendedLimit()
@@ -169,6 +178,7 @@ class Native:
             attributes = c.create_string_buffer(size.value)
             self.require(self.kernel.InitializeProcThreadAttributeList(attributes, count, 0,
                                                                        c.byref(size)), "attribute list")
+            initialized = True
             capabilities = SecurityCapabilities(sid, None, 0, 0)
             jobs = (w.HANDLE * 1)(job)
             optout = w.DWORD(1)
@@ -202,14 +212,28 @@ class Native:
         finally:
             # Also kills descendants after a normal root exit; no detached producer survives.
             terminated = self.kernel.TerminateJobObject(job, 1)
+            quiescent = False
+            if terminated:
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    accounting = Accounting()
+                    if not self.kernel.QueryInformationJobObject(job, 1, c.byref(accounting),
+                                                                 c.sizeof(accounting), None):
+                        break
+                    if accounting.active == 0:
+                        quiescent = True
+                        break
+                    time.sleep(0.02)
             if process.thread:
                 self.kernel.CloseHandle(process.thread)
             if process.process:
                 self.kernel.CloseHandle(process.process)
-            if attributes is not None:
+            if initialized:
                 self.kernel.DeleteProcThreadAttributeList(attributes)
             self.kernel.CloseHandle(job)
             self.require(terminated, "TerminateJobObject")
+            if not quiescent:
+                raise RuntimeError("job quiescence not verified; retained experiment is not acceptance")
 
 
 def experiment(root, windows, rows, lpac):
@@ -232,6 +256,15 @@ def experiment(root, windows, rows, lpac):
                 str(work / "fixture.cs")]
         # Positive control: the exact compiler/source must work before a denial counts.
         checked(compiler, argv[1:])
+        expected = {"appcontainer", "own_write", "host_read_denied", "host_write_denied",
+                    "host_process_denied", "child_contained"}
+        baseline = work / "baseline.txt"
+        checked(work / "fixture.exe", [str(baseline), str(root / "host-canary.txt"), str(os.getpid())])
+        controls = parse_results(baseline.read_text(encoding="utf-8-sig"), expected)
+        if controls != {key: key == "own_write" for key in expected}:
+            raise RuntimeError("uncontained positive control failed; no security denial proven")
+        rows.append({"check": label + ".positive_control", "status": "pass",
+                     "detail": "same compiler and fixture succeed; host file/process accessible outside container"})
         (work / "fixture.exe").unlink()
         code = native.run(sid, argv, work, windows, lpac)
         if code != 0 or not (work / "fixture.exe").is_file():
@@ -240,8 +273,6 @@ def experiment(root, windows, rows, lpac):
         result = work / "result.txt"
         code = native.run(sid, [work / "fixture.exe", result, root / "host-canary.txt",
                                str(os.getpid())], work, windows, lpac)
-        expected = {"appcontainer", "own_write", "host_read_denied", "host_write_denied",
-                    "host_process_denied", "child_contained"}
         observed = parse_results(result.read_text(encoding="utf-8-sig"), expected) if result.is_file() else {}
         for check in sorted(expected):
             rows.append({"check": label + "." + check,
@@ -287,6 +318,8 @@ def main():
             rows.append({"check": "setup", "status": "fail", "detail": str(error)})
         report = {"schema_version": 1, "recorded_at_unix": time.time(),
                   "host": platform.platform(), "work_directory": str(root),
+                  "source_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                    for path in (Path(__file__), Path(__file__).with_name("windows-probe-fixture.cs"))},
                   "scope": "primitive experiment only; no services or provider harness",
                   "checks": rows, **verdict(rows)}
         json.dump(report, output, indent=2)
