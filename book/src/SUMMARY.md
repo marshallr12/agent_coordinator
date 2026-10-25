@@ -52,6 +52,7 @@
 
 - [Self-hosting review](docs/self-hosting-review.md)
 - [Codex reviewer isolation evaluation](docs/codex-reviewer-isolation.md)
+- [Native Windows host design and prototype](docs/windows-host-design.md)
 
 # Maintain the documentation
 

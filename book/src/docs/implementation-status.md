@@ -9,6 +9,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 
 ## Working now
 
+- The [native Windows host design and prototype](windows-host-design.md) defines
+  a proposed containment/service architecture and an initial disposable native
+  AppContainer/LPAC build/test experiment. No Windows supervised harness or
+  service is admitted; the experiment cannot issue a host acceptance receipt.
+
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
   isolated tmpfs; the host harness directory stays hidden. Invalid paths,
