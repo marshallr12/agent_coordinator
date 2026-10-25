@@ -39,10 +39,10 @@ def verdict(rows):
                            "SCM lifecycle and recovery", "native Rust toolchain"]}
 
 
-def checked(program, arguments):
-    result = subprocess.run([str(program), *arguments], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            timeout=60, check=False)
+def checked(program, arguments, log=None):
+    with open(log, "wb") if log else open(os.devnull, "wb") as output:
+        result = subprocess.run([str(program), *arguments], stdin=subprocess.DEVNULL,
+                                stdout=output, stderr=output, timeout=60, check=False)
     if result.returncode:
         raise RuntimeError(f"{Path(program).name} exited {result.returncode}")
 
@@ -259,7 +259,8 @@ def experiment(root, windows, rows, lpac):
         expected = {"appcontainer", "own_write", "host_read_denied", "host_write_denied",
                     "host_process_denied", "child_contained"}
         baseline = work / "baseline.txt"
-        checked(work / "fixture.exe", [str(baseline), str(root / "host-canary.txt"), str(os.getpid())])
+        checked(work / "fixture.exe", [str(baseline), str(root / "host-canary.txt"), str(os.getpid())],
+                log=work / "baseline.log")
         controls = parse_results(baseline.read_text(encoding="utf-8-sig"), expected)
         if controls != {key: key == "own_write" for key in expected}:
             raise RuntimeError("uncontained positive control failed; no security denial proven")
