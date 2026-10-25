@@ -134,6 +134,17 @@ impl Fixture {
     }
 
     async fn reserve(&self, project: &str, bytes: &[u8], name: &str) -> (String, String) {
+        self.reserve_typed(project, bytes, name, "application/octet-stream")
+            .await
+    }
+
+    async fn reserve_typed(
+        &self,
+        project: &str,
+        bytes: &[u8],
+        name: &str,
+        media_type: &str,
+    ) -> (String, String) {
         let sha = hex::encode(Sha256::digest(bytes));
         let reply = self
             .json(
@@ -141,7 +152,7 @@ impl Fixture {
                 "POST",
                 &format!("/api/v1/projects/{project}/artifacts/uploads"),
                 &Uuid::new_v4().to_string(),
-                json!({"filename":name,"media_type":"application/octet-stream","size_bytes":bytes.len(),"sha256":sha}),
+                json!({"filename":name,"media_type":media_type,"size_bytes":bytes.len(),"sha256":sha}),
             )
             .await;
         reply.ok();
@@ -450,6 +461,51 @@ async fn uploads_are_streamed_digest_bound_replayable_and_safe_to_download() {
         .await;
     assert_eq!(still_original.body[0], b'x');
     assert_eq!(still_original.body[1], b'x');
+}
+
+#[tokio::test]
+async fn downloads_are_served_with_the_media_type_each_file_was_uploaded_with() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("media-types").await;
+    let files: [(&str, &str, &[u8]); 5] = [
+        (
+            "palette.svg",
+            "image/svg+xml",
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        ),
+        ("pixel.png", "image/png", b"\x89PNG\r\n\x1a\n\x00\x01"),
+        ("notes.txt", "text/plain", b"plain notes\n"),
+        ("brief.pdf", "application/pdf", b"%PDF-1.4\n%%EOF\n"),
+        ("data.json", "application/json", b"{\"ok\":true}"),
+    ];
+    for (name, media_type, bytes) in files {
+        let (_, path) = fixture
+            .reserve_typed(&project, bytes, name, media_type)
+            .await;
+        fixture
+            .bytes(
+                &fixture.a,
+                "PUT",
+                &path,
+                &format!("upload-{name}"),
+                bytes.to_vec(),
+            )
+            .await
+            .ok();
+        let downloaded = fixture
+            .bytes(&fixture.b, "GET", &path, "", Vec::new())
+            .await;
+        assert_eq!(downloaded.status, StatusCode::OK, "{name}");
+        assert_eq!(downloaded.body, bytes, "{name}");
+        assert_eq!(downloaded.headers["content-type"], media_type, "{name}");
+        assert_eq!(downloaded.headers["x-content-type-options"], "nosniff");
+        let disposition = downloaded.headers["content-disposition"].to_str().unwrap();
+        assert!(disposition.starts_with("attachment; filename=\""), "{name}");
+        assert!(
+            disposition.ends_with(&format!("-{name}\"")),
+            "{name}: {disposition}"
+        );
+    }
 }
 
 #[tokio::test]
