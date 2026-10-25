@@ -83,7 +83,7 @@ impl Authenticator {
         B64.encode(&self.credential_id)
     }
     fn cose_key(&self) -> Vec<u8> {
-        let point = self.key.verifying_key().to_encoded_point(false);
+        let point = self.key.verifying_key().to_sec1_point(false);
         let mut key = vec![0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01];
         key.extend([vec![0x21], cbor_bytes(point.x().unwrap())].concat());
         key.extend([vec![0x22], cbor_bytes(point.y().unwrap())].concat());
