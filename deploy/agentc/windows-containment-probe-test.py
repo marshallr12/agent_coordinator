@@ -10,6 +10,11 @@ spec.loader.exec_module(probe)
 
 
 class ResultTests(unittest.TestCase):
+    def test_no_uncontained_fallback(self):
+        native = object.__new__(probe.Native)
+        with self.assertRaisesRegex(RuntimeError, "package SID"):
+            native.run(None, [], Path("C:/probe"), Path("C:/Windows"), False)
+
     def test_missing_and_malformed_observations_fail(self):
         for body in ("", "a=true\na=false", "a=timeout", "other=true", "a=true\nnoise"):
             with self.subTest(body=body), self.assertRaises(RuntimeError):

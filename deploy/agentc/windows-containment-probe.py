@@ -43,10 +43,10 @@ def verdict(rows):
                            "SCM lifecycle and recovery", "native Rust toolchain"]}
 
 
-def checked(program, arguments, log=None, environment=None):
-    with open(log, "wb") if log else open(os.devnull, "wb") as output:
-        result = subprocess.run([str(program), *arguments], stdin=subprocess.DEVNULL,
-                                stdout=output, stderr=output, timeout=60, check=False, env=environment)
+def checked(program, arguments, environment=None):
+    result = subprocess.run([str(program), *arguments], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=60, check=False, env=environment)
     if result.returncode:
         raise RuntimeError(f"{Path(program).name} exited {result.returncode}")
 
