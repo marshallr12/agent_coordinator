@@ -1114,14 +1114,18 @@
     const list = $('task-attachments-list');
     const items = records.map((record) => ({ key: `record:${record.id}`, sig: sig(record), build: () => {
       const entry = el('div', 'task-attachment-entry');
-      add(entry, el('strong', '', record.display_name || 'Attachment'));
-      add(entry, el('p', 'muted', `${record.media_type || 'Unknown type'} · ${record.size_bytes ?? 'Unknown'} bytes · ${displayStatus(record.availability || record.state || 'unknown')}`));
-      if (record.availability === 'available' && record.kind === 'upload') {
-        const link = el('a', 'button subtle', 'Download attachment');
+      const heading = el('div', 'task-attachment-heading');
+      add(heading, el('strong', '', record.display_name || 'Attachment'));
+      const downloadable = record.availability === 'available' && record.kind === 'upload';
+      if (downloadable) {
+        const link = iconize(el('a', 'button subtle'), `Download ${record.display_name || 'attachment'}`, 'download');
         link.href = `${projectPath(state.projectId)}/artifacts/${encodeURIComponent(record.id)}/content`;
         link.download = record.display_name || 'attachment';
-        add(entry, link);
-      } else if (record.external_url) {
+        add(heading, link);
+      }
+      add(entry, heading);
+      add(entry, el('p', 'muted', `${record.media_type || 'Unknown type'} · ${record.size_bytes ?? 'Unknown'} bytes · ${displayStatus(record.availability || record.state || 'unknown')}`));
+      if (!downloadable && record.external_url) {
         try {
           const url = new URL(record.external_url);
           if (url.protocol === 'https:' && !url.username && !url.password) {

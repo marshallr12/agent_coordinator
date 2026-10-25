@@ -430,6 +430,10 @@ async fn uploads_are_streamed_digest_bound_replayable_and_safe_to_download() {
         .await;
     assert_eq!(downloaded.status, StatusCode::OK);
     assert_eq!(downloaded.body, bytes);
+    assert_eq!(
+        downloaded.headers["content-type"],
+        "application/octet-stream"
+    );
     assert_eq!(downloaded.headers["x-content-type-options"], "nosniff");
     let disposition = downloaded.headers["content-disposition"].to_str().unwrap();
     assert!(disposition.starts_with(&format!("attachment; filename=\"{}-", &id[..8])));
