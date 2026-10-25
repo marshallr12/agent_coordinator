@@ -26,6 +26,11 @@ class Fixture {
     }
 
     static int Main(string[] args) {
+        try { return Run(args); }
+        catch (Exception error) { Console.Error.WriteLine(error.GetType().FullName); return 3; }
+    }
+
+    static int Run(string[] args) {
         if (args.Length == 1 && args[0] == "child") return Contained() ? 0 : 1;
         if (args.Length != 3) return 2;
         var rows = new List<string>();
