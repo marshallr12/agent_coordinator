@@ -20,11 +20,11 @@ import time
 import uuid
 
 
-def environment_block(root, windows):
+def environment_block(root, windows, local_appdata):
     """Do not copy the invoking harness's credential-bearing environment."""
     values = {"SystemRoot": str(windows), "WINDIR": str(windows),
               "TEMP": str(root), "TMP": str(root),
-              "PATH": str(windows / "System32")}
+              "PATH": str(windows / "System32"), "LOCALAPPDATA": str(local_appdata)}
     return "\0".join(f"{key}={value}" for key, value in sorted(values.items())) + "\0\0"
 
 
@@ -179,7 +179,9 @@ class Native:
             startup.startup.cb = c.sizeof(startup)
             startup.attributes = c.cast(attributes, c.c_void_p)
             command = c.create_unicode_buffer(subprocess.list2cmdline([str(value) for value in argv]))
-            environment = c.create_unicode_buffer(environment_block(root, windows))
+            # CreateProcess resolves the package profile using LOCALAPPDATA.
+            # This path is not a filesystem grant and carries no credential.
+            environment = c.create_unicode_buffer(environment_block(root, windows, os.environ["LOCALAPPDATA"]))
             self.require(self.kernel.CreateProcessW(str(argv[0]), command, None, None, False,
                          0x80000 | 0x400 | 0x4 | 0x8000000, environment, str(root),
                          c.byref(startup), c.byref(process)), "CreateProcessW")

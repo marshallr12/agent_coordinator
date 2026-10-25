@@ -27,10 +27,10 @@ class ResultTests(unittest.TestCase):
         self.assertFalse(probe.verdict([{"status": "fail"}])["experiment_passed"])
 
     def test_environment_does_not_inherit_caller_values(self):
-        block = probe.environment_block(Path("C:/probe"), Path("C:/Windows"))
+        block = probe.environment_block(Path("C:/probe"), Path("C:/Windows"), Path("C:/profile/Local"))
         self.assertTrue(block.endswith("\0\0"))
         self.assertEqual({entry.partition("=")[0] for entry in block.split("\0") if entry},
-                         {"PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"})
+                         {"PATH", "SystemRoot", "WINDIR", "TEMP", "TMP", "LOCALAPPDATA"})
 
 
 if __name__ == "__main__":
