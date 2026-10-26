@@ -1379,7 +1379,9 @@ failed report only logs a line and never changes the exit status. `e2e-canary.py
 running a canary; `E2E_NO_REPORT=1` or `--no-report` turns reporting off. A
 task that is not `done` within 90 minutes
 (`E2E_TIMEOUT_MINUTES`), is canceled, or cannot be created sends an ntfy page
-titled "agentc e2e canary failed" and exits 1; an undelivered page exits 2.
+titled "agentc e2e canary failed" and exits 1; an undelivered page exits 2. The
+page names the project and the task by name and id, so the task is easy to find
+in the web UI (the project id alone when its name cannot be read).
 The run fails too when `costs.jsonl` shows a harness other than the requested
 one served the task, so a fallback vendor never passes for the primary.
 

@@ -177,9 +177,11 @@ def run_once(args, token, host, clock=time.monotonic, sleep=time.sleep):
     run_id = uuid.uuid4().hex[:8]
     started = clock()
     result = {"host": host, "harness": args.harness, "project": args.project, "task": None,
-              "served_by": None}
+              "task_title": None, "served_by": None}
     try:
-        result["task"] = create_task(args, token, task_body(args.harness, host, run_id, args.priority), sleep)
+        body = task_body(args.harness, host, run_id, args.priority)
+        result["task_title"] = body["title"]
+        result["task"] = create_task(args, token, body, sleep)
         outcome, detail = wait_done(args, token, result["task"], clock, sleep)
     except RuntimeError as error:
         outcome, detail = "failed", str(error)
@@ -306,10 +308,24 @@ def report_results(args, token):
     return sent
 
 
-def page(args, result):
-    """One ntfy message for a failed or timed-out run."""
+def project_name(args, token):
+    """The project's name from its orientation, or None when it cannot be read."""
+    try:
+        status, body, _ = attention.fetch(project_url(args, "orientation"), token)
+    except OSError:
+        return None
+    name = ((body or {}).get("data") or {}).get("project", {}).get("name") if status == 200 else None
+    return name if isinstance(name, str) and name else None
+
+
+def page(args, result, token=None):
+    """One ntfy message for a failed or timed-out run: the project and task by name and id."""
+    name = project_name(args, token) if token else None
+    project = f"{name} ({args.project})" if name else args.project
+    title = result.get("task_title")
+    task = f"{title} ({result['task']})" if title else f"{result['task']}"
     body = (f"{result['harness']} on {result['host']}: {result['outcome']} after "
-            f"{result['duration_seconds']:.0f}s\n{result['detail']}\ntask {result['task']}")
+            f"{result['duration_seconds']:.0f}s\n{result['detail']}\nproject {project}\ntask {task}")
     request = urllib.request.Request(
         f"{args.ntfy_url.rstrip('/')}/{args.ntfy_topic}", data=body.encode(), method="POST")
     request.add_header("Title", "agentc e2e canary failed")
@@ -336,7 +352,7 @@ def run(args, clock=time.monotonic, sleep=time.sleep):
     if result["outcome"] == "ok":
         return 0
     try:
-        page(args, result)
+        page(args, result, token)
     except (OSError, urllib.error.URLError) as error:
         print(f"e2e-canary: ntfy page not delivered ({type(error).__name__})", file=sys.stderr)
         return 2

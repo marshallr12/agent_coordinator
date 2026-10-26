@@ -90,6 +90,8 @@ class Fake:
             def do_GET(self):
                 fake.requests.append(("GET", self.path, self.headers.get("Authorization")))
                 lifecycle = fake.script[min(fake.polls, len(fake.script) - 1)]
+                if self.path.endswith("/orientation"):
+                    return self.reply(200, {"data": {"project": {"id": "p", "name": "Project Name"}}})
                 fake.polls += 1
                 self.reply(200, {"data": {"id": "task-1", "lifecycle": lifecycle, "work_status": "ready"}})
 
@@ -201,6 +203,8 @@ class E2ETests(unittest.TestCase):
         [(path, title, body)] = self.fake.pages
         self.assertEqual((path, title), ("/alerts", "agentc e2e canary failed"))
         self.assertIn("claude on h1: timeout", body)
+        self.assertIn("project Project Name (", body)
+        self.assertRegex(body, r"task Canary claude on h1 \([0-9a-f]{8}\) \(task-1\)")
         self.assertNotIn(TOKEN, body)
 
     def test_a_canceled_task_fails_and_pages(self):
