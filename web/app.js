@@ -2743,7 +2743,7 @@
     const completionPending = data.workflow?.submission && data.workflow.phase !== 'revision_needed';
     const ownAttempt = (data.attempts || []).find(item => item.id === task.current_attempt_id);
     // Eligible only when nothing could still change the task: the service refuses the rest with task_attempt_protected, task_workflow_protected or task_lifecycle_invalid.
-    const activeWorkflow = (data.workflow?.activities || []).some(activity => ['queued','active','recovery_required'].includes(activity.state)) || ['review','integration'].includes(data.workflow?.phase);
+    const activeWorkflow = (data.workflow?.activities || []).some(activity => ['queued','active','recovery_required'].includes(activity.status)) || ['review','integration'].includes(data.workflow?.phase);
     // Every button closes over the task, so they are rebuilt together, and only when something they use changed.
     const context = sig(pick(task, TASK_ACTION_FIELDS), pick(data, ['depends_on', 'dependencies']), Boolean(completionPending), activeWorkflow, ownAttempt && pick(ownAttempt, ['id', 'owner_id', 'session_id', 'state', 'mode', 'generation']), state.actor?.kind, actorId(), state.actor?.session_id);
     const push = (key, build) => items.push({ key, sig: context, build });
