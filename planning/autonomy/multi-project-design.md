@@ -186,7 +186,7 @@ exhaust the reviewer cap for the others.
   host cap unchanged is a conservative first value.
 - **Attempt duration:** `budget_minutes` (240) becomes overridable per slot, because a heavy gate
   (§13.1) needs a different budget than the coordinator's.
-- **Agent-originated task admission** stays per project and server-side (5/week default). D-14 asks
+- **Agent-originated task admission** stays per project and server-side (5/week default when this was written; the owner raised it to 14/week on 2026-10-30, 2 per day). D-14 asks
   whether to keep that; recommendation is yes, plus a per-project override on the project record only
   if a project demonstrates it needs one.
 
@@ -742,7 +742,7 @@ root-owned `0600`.
    through review (owner reviews per D-13) and integration; record cost and HRI per host.
 10. **Cutover:** `integrator-flip-rate.py` on the real workflow (≥ 20 reruns, each check < 2 %),
     `integrator-preflight.py --project …` zero (both scripts need MP-9's changes), flip `integration_owner=integrator` for this project only.
-11. **Open the queue**: keep the 5/week agent-task admission, enable the digest section, the project
+11. **Open the queue**: keep the agent-task admission (5/week when this was written; 14/week since the owner's 2026-10-30 change), enable the digest section, the project
     verify timer and the per-project canary SLOs; the coordinator dogfood and this project share the
     host through fair share, the coordinator's canary and reverts staying urgent.
 12. **Review at two weeks** against the exit metrics in §7.2; adjust `weight`, `daily_usd`,

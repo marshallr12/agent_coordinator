@@ -869,6 +869,8 @@ async fn the_ack_link_expires_after_seven_days() {
 }
 
 const WEEK: i64 = 7 * DAY;
+/// The default weekly admission budget the fixture runs with.
+const BUDGET: usize = coordinator_server::admission::DEFAULT_WEEKLY_BUDGET as usize;
 
 impl Fixture {
     async fn create_task(
@@ -903,27 +905,38 @@ impl Fixture {
     }
 }
 
+#[test]
+fn the_default_weekly_budget_is_fourteen_agent_tasks() {
+    assert_eq!(coordinator_server::admission::DEFAULT_WEEKLY_BUDGET, 14);
+    assert_eq!(BUDGET, 14);
+}
+
 #[tokio::test]
-async fn the_sixth_agent_task_in_a_week_lands_planned_in_its_own_project_only() {
+async fn the_fifteenth_agent_task_in_a_week_lands_planned_in_its_own_project_only() {
     let f = Fixture::new().await;
     let (p, q) = (
         f.project("admission-p").await,
         f.project("admission-q").await,
     );
-    // Each project has its own budget: ten tasks in two projects are all admitted.
-    f.admitted(&p, 5).await;
-    f.admitted(&q, 5).await;
+    // Each project has its own budget: two budgets of tasks in two projects are all admitted.
+    f.admitted(&p, BUDGET).await;
+    f.admitted(&q, BUDGET).await;
 
-    let held = f.create_task(&f.a, &p, "Sixth", json!({})).await;
+    let held = f.create_task(&f.a, &p, "Over budget", json!({})).await;
     assert_eq!(held["lifecycle"], "planned", "{held}");
     assert_eq!(held["origin"], "agent");
     assert_eq!(held["admission"]["held"], true);
-    assert_eq!(held["admission"]["weekly_budget"]["limit"], 5);
-    assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+    assert_eq!(held["admission"]["weekly_budget"]["limit"], BUDGET);
+    assert_eq!(
+        held["admission"]["weekly_budget"]["admitted_this_week"],
+        BUDGET
+    );
     let reason = held["admission"]["reason"].as_str().unwrap();
     assert!(reason.contains("held as planned"), "{reason}");
     assert!(reason.contains("in this project"), "{reason}");
-    let also_held = f.create_task(&f.a, &q, "Seventh", json!({})).await;
+    let also_held = f
+        .create_task(&f.a, &q, "Over budget again", json!({}))
+        .await;
     assert_eq!(also_held["lifecycle"], "planned", "{also_held}");
 
     // A third project is unaffected by the two spent budgets.
@@ -954,9 +967,12 @@ async fn the_sixth_agent_task_in_a_week_lands_planned_in_its_own_project_only() 
     let listed = digest["held_agent_tasks"].as_array().unwrap();
     assert_eq!(listed.len(), 1, "{digest}");
     assert_eq!(listed[0]["task_id"], held["id"]);
-    assert_eq!(listed[0]["title"], "Sixth");
-    assert_eq!(digest["agent_task_weekly_budget"]["limit"], 5);
-    assert_eq!(digest["agent_task_weekly_budget"]["admitted_this_week"], 5);
+    assert_eq!(listed[0]["title"], "Over budget");
+    assert_eq!(digest["agent_task_weekly_budget"]["limit"], BUDGET);
+    assert_eq!(
+        digest["agent_task_weekly_budget"]["admitted_this_week"],
+        BUDGET
+    );
     assert_eq!(
         f.digest(&q).await["held_agent_tasks"][0]["task_id"],
         also_held["id"]
@@ -984,20 +1000,23 @@ async fn a_held_task_in_one_project_leaves_another_project_admitting() {
         f.project("admission-busy").await,
         f.project("admission-quiet").await,
     );
-    f.admitted(&p, 5).await;
-    let held = f.create_task(&f.a, &p, "Sixth", json!({})).await;
+    f.admitted(&p, BUDGET).await;
+    let held = f.create_task(&f.a, &p, "Over budget", json!({})).await;
     assert_eq!(held["lifecycle"], "planned", "{held}");
 
     // The other project still has its whole budget, and no held tasks.
     let digest = f.digest(&q).await;
-    assert_eq!(digest["agent_task_weekly_budget"]["limit"], 5);
+    assert_eq!(digest["agent_task_weekly_budget"]["limit"], BUDGET);
     assert_eq!(digest["agent_task_weekly_budget"]["admitted_this_week"], 0);
     assert!(digest["held_agent_tasks"].as_array().unwrap().is_empty());
-    f.admitted(&q, 5).await;
+    f.admitted(&q, BUDGET).await;
     let digest = f.digest(&q).await;
-    assert_eq!(digest["agent_task_weekly_budget"]["admitted_this_week"], 5);
-    let sixth = f.create_task(&f.a, &q, "Sixth", json!({})).await;
-    assert_eq!(sixth["lifecycle"], "planned", "{sixth}");
+    assert_eq!(
+        digest["agent_task_weekly_budget"]["admitted_this_week"],
+        BUDGET
+    );
+    let over = f.create_task(&f.a, &q, "Over budget", json!({})).await;
+    assert_eq!(over["lifecycle"], "planned", "{over}");
     assert_eq!(
         f.digest(&p).await["held_agent_tasks"]
             .as_array()
@@ -1011,7 +1030,7 @@ async fn a_held_task_in_one_project_leaves_another_project_admitting() {
 async fn fixes_and_human_tasks_are_never_held_and_do_not_use_the_budget() {
     let f = Fixture::new().await;
     let p = f.project("admission-fixes").await;
-    f.admitted(&p, 5).await;
+    f.admitted(&p, BUDGET).await;
 
     for class in ["revert", "fix_target", "deflake", "refusal_fix"] {
         let fix = f
@@ -1046,7 +1065,10 @@ async fn fixes_and_human_tasks_are_never_held_and_do_not_use_the_budget() {
     // Neither fixes nor human tasks used a place: the budget is still exactly spent.
     let held = f.create_task(&f.a, &p, "Plain", json!({})).await;
     assert_eq!(held["lifecycle"], "planned", "{held}");
-    assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+    assert_eq!(
+        held["admission"]["weekly_budget"]["admitted_this_week"],
+        BUDGET
+    );
 }
 
 impl Fixture {
@@ -1111,7 +1133,7 @@ async fn an_agent_cannot_exempt_its_own_task_with_an_unbacked_class() {
         f.project("admission-evidence-other").await,
     );
     let (result, flaky, target) = f.integration_records(&p).await;
-    f.admitted(&p, 5).await;
+    f.admitted(&p, BUDGET).await;
 
     // Without evidence every class is refused and nothing is created.
     for class in ["revert", "fix_target", "deflake", "refusal_fix"] {
@@ -1206,13 +1228,16 @@ async fn an_agent_cannot_exempt_its_own_task_with_an_unbacked_class() {
     // The refused attempts created nothing, and the budget is still exactly spent.
     let held = f.create_task(&f.a, &p, "Plain", json!({})).await;
     assert_eq!(held["lifecycle"], "planned", "{held}");
-    assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+    assert_eq!(
+        held["admission"]["weekly_budget"]["admitted_this_week"],
+        BUDGET
+    );
     let tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks WHERE project_id=?")
         .bind(&p)
         .fetch_one(&f.state.pool)
         .await
         .unwrap();
-    assert_eq!(tasks, 5 + 5 + 1);
+    assert_eq!(tasks, BUDGET as i64 + 5 + 1);
 }
 
 #[tokio::test]
@@ -1305,11 +1330,14 @@ async fn canary_tasks_never_use_or_meet_the_weekly_budget() {
     let digest = f.digest(&p).await;
     assert_eq!(digest["held_agent_tasks"], json!([]), "{digest}");
 
-    // The budget is untouched: five ordinary agent tasks are still admitted and the sixth is held.
-    f.admitted(&p, 5).await;
-    let held = f.create_task(&f.a, &p, "Sixth", json!({})).await;
+    // The budget is untouched: a full budget of ordinary agent tasks is still admitted and the next is held.
+    f.admitted(&p, BUDGET).await;
+    let held = f.create_task(&f.a, &p, "Over budget", json!({})).await;
     assert_eq!(held["lifecycle"], "planned", "{held}");
-    assert_eq!(held["admission"]["weekly_budget"]["admitted_this_week"], 5);
+    assert_eq!(
+        held["admission"]["weekly_budget"]["admitted_this_week"],
+        BUDGET
+    );
 
     // Canary tasks stay admitted with the budget spent, and read back as canary tasks.
     let later = f
@@ -1353,8 +1381,8 @@ async fn only_a_designated_canary_may_use_the_canary_class() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
     }
     // The refusals created nothing and used no place.
-    f.admitted(&p, 5).await;
-    let held = f.create_task(&f.a, &p, "Sixth", json!({})).await;
+    f.admitted(&p, BUDGET).await;
+    let held = f.create_task(&f.a, &p, "Over budget", json!({})).await;
     assert_eq!(held["lifecycle"], "planned", "{held}");
     let listed = f
         .ok(
@@ -1374,7 +1402,7 @@ async fn only_a_designated_canary_may_use_the_canary_class() {
 async fn the_budget_starts_over_with_the_next_iso_week() {
     let f = Fixture::new().await;
     let p = f.project("admission-week").await;
-    f.admitted(&p, 5).await;
+    f.admitted(&p, BUDGET).await;
     let held = f.create_task(&f.a, &p, "Held", json!({})).await;
     assert_eq!(held["lifecycle"], "planned");
 
@@ -1389,8 +1417,10 @@ async fn the_budget_starts_over_with_the_next_iso_week() {
     let fresh = f.create_task(&f.a, &p, "New week", json!({})).await;
     assert_eq!(fresh["lifecycle"], "open", "{fresh}");
     assert_eq!(fresh["admission"]["weekly_budget"]["admitted_this_week"], 1);
-    f.admitted(&p, 4).await;
-    let again = f.create_task(&f.a, &p, "New week, sixth", json!({})).await;
+    f.admitted(&p, BUDGET - 1).await;
+    let again = f
+        .create_task(&f.a, &p, "New week, over budget", json!({}))
+        .await;
     assert_eq!(again["lifecycle"], "planned", "{again}");
 }
 
@@ -1398,7 +1428,7 @@ async fn the_budget_starts_over_with_the_next_iso_week() {
 async fn only_a_human_releases_a_task_the_budget_held() {
     let f = Fixture::new().await;
     let p = f.project("admission-release").await;
-    f.admitted(&p, 5).await;
+    f.admitted(&p, BUDGET).await;
     let held = f.create_task(&f.a, &p, "Held", json!({})).await;
     f.ok(
         &f.admin,

@@ -272,7 +272,7 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   `service`) and may carry an `admission_class` (`revert`, `fix_target`,
   `deflake`, `refusal_fix`); service-created reverts and revise follow-ups set
   it. An agent-created task without a class is admitted only while fewer than
-  5 (`--agent-task-weekly-budget`) agent-originated tasks were admitted in the
+  14 (`--agent-task-weekly-budget`; raised from 5 on 2026-10-30) agent-originated tasks were admitted in the
   task's own project in the current ISO week (the budget is per project, so one
   project's tasks never use another's); later ones are created `planned`, the
   response says why, and `GET .../digest` lists them as `held_agent_tasks`.
@@ -289,8 +289,8 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   by the budget (`tasks.budget_exempt`). Server tests in `tests/attention.rs`
   cover seven canary tasks in a week leaving the budget untouched, an
   ordinary agent being refused, each fix class refused without evidence,
-  admitted with it and set by a human, and two projects each admitting five tasks with
-  a sixth held in only one of them.
+  admitted with it and set by a human, and two projects each admitting 14 tasks (the default budget) with
+  a 15th held in only one of them.
 - Artifact links and streaming uploads with exact size/SHA-256, configurable quota
   and disk reserve, bounded concurrency, explicit expiry/deletion metadata, and
   safe storage reconciliation. Native upload journals preserve exact bytes and

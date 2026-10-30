@@ -274,7 +274,7 @@ the budget. Service-created reverts (`revert`) and the follow-up of a revise
 that lost to a landed push (`fix_target`) set their class; a re-land is
 created planned without one. An agent's task-definition edit cannot release a
 held task (`details.gate` `admission_budget`); a human's edit with
-`planned: false` can. N defaults to 5 and is set with
+`planned: false` can. N defaults to 14 and is set with
 `--agent-task-weekly-budget` or `COORDINATOR_AGENT_TASK_WEEKLY_BUDGET` (0
 through 10000).
 

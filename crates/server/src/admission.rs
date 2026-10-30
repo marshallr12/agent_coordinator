@@ -31,7 +31,7 @@ use sqlx::SqliteConnection;
 
 /// Agent-originated tasks admitted per ISO week unless the service is
 /// configured otherwise.
-pub const DEFAULT_WEEKLY_BUDGET: i64 = 5;
+pub const DEFAULT_WEEKLY_BUDGET: i64 = 14;
 /// Largest weekly budget the service accepts.
 pub const MAX_WEEKLY_BUDGET: i64 = 10_000;
 /// Always-admitted fix classes.

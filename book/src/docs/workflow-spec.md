@@ -106,7 +106,7 @@ response carries an `admission` object with `held: true` and the reason; the
 digest lists it under `held_agent_tasks`. A human releases it by editing it to
 `planned: false`; an agent cannot, even with a task-definition grant. Human
 tasks, tasks with a class and tasks an agent itself created as `planned` are
-never held and do not use a place. N defaults to 5 and is the service setting
+never held and do not use a place. N defaults to 14 and is the service setting
 `--agent-task-weekly-budget` (`COORDINATOR_AGENT_TASK_WEEKLY_BUDGET`, 0 through
 10000; 0 holds every unclassed agent task). The week rolls over with the clock:
 the first agent task of a new ISO week is admitted again.
