@@ -210,3 +210,18 @@ fetched to render any of this. `scripts/test_artifact_integrity.mjs` covers
 available, pinned, expired, deleted, unfinalized and external-link artifacts in
 both places, the clipboard fallback and a 360 px viewport; run it with
 `CHROME_BIN=/path/to/chrome node scripts/test_artifact_integrity.mjs`.
+
+## Time display
+
+My account has a *Time display* choice, Local time or UTC, saved in the
+browser's local storage under `agent-coordinator.time-zone`. It defaults to
+Local time, also when storage is unavailable. Every date on the page is
+formatted by one helper, `formatInstant()`, which appends the zone
+abbreviation. A date that stands alone is a focusable `<time>` whose `datetime`
+and `title` hold the exact ISO-8601 UTC instant; keyboard focus shows it in a
+bubble. Lease "minutes remaining" figures stay relative. The zone is part of
+every render signature, so changing it rebuilds only the dated nodes and an
+unchanged refresh still records no DOM mutation.
+`scripts/test_time_display.mjs` checks both modes across the task list, task
+detail and sessions, persistence, and blocked storage; run it with
+`CHROME_BIN=/path/to/chrome node scripts/test_time_display.mjs`.
