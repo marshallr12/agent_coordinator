@@ -548,6 +548,7 @@ async function checkAgentSessions(page) {
   assert(await evaluate("!document.querySelector('[data-session-id=\"session-reviewer\"] .held-attempts .status-badge') && document.querySelector('[data-session-id=\"session-reviewer\"]').textContent.includes('expires ')"), 'A live lease was marked expired or lost its expiry.');
   await chooseSessionWindow(page, '0');
   assert((await evaluate("document.querySelector('[data-session-id=\"session-idle\"]').textContent")).includes('Holds no attempts'), 'Idle session does not say it holds nothing.');
+  await checkAgentSessionFilters(page);
   await chooseSessionWindow(page, '1');
   const before = agentSessionQueries.length;
   await evaluate("document.querySelector('#refresh-agent-sessions').click()");
@@ -559,6 +560,72 @@ async function checkAgentSessions(page) {
   await page.send('Emulation.clearDeviceMetricsOverride');
   await evaluate("document.querySelector('#agent-sessions-back').click()");
   await waitPage("!document.querySelector('#project-view').hidden", 'return from connected sessions');
+}
+
+// Host, harness and activity filters narrow the loaded cards, combine with each other, make no request, and the cards
+// report recorded activity and heartbeats as relative and absolute times without saying anything stopped.
+async function checkAgentSessionFilters({ evaluate, waitPage }) {
+  const cards = "Array.from(document.querySelectorAll('#agent-sessions-list .agent-session-card')).map(card => card.dataset.sessionId).sort().join(',')";
+  const choose = async (name, value) => {
+    const before = agentSessionQueries.length;
+    await evaluate(`(() => { const select = document.querySelector('#agent-sessions-${name}'); select.value = ${JSON.stringify(value)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    assert(agentSessionQueries.length === before, `Changing the ${name} filter sent a request.`);
+  };
+  const expectCards = async (expected, label) => {
+    await waitPage(`${cards} === ${JSON.stringify(expected)}`, label);
+  };
+  const options = (name) => evaluate(`Array.from(document.querySelectorAll('#agent-sessions-${name} option')).map(option => option.value).join('|')`);
+  const count = () => evaluate("document.querySelector('#agent-sessions-count').textContent");
+  await expectCards('session-idle,session-reviewer,session-worker', 'all sessions before filtering');
+  assert(await count() === 'Showing 3 of 3 loaded sessions', `Unfiltered count was ${await count()}.`);
+  assert(await options('host') === '|ws-build-server-with-a-very-long-identifier-that-must-wrap|ws-idle|ws-laptop', 'Host options do not come from the loaded sessions.');
+  assert(await options('harness') === '|agent-coordinator-cli|claude-code', 'Harness options do not come from the loaded sessions.');
+  assert(await evaluate("document.querySelector('label[for=\"agent-sessions-host\"]').textContent.startsWith('Host') && document.querySelector('label[for=\"agent-sessions-harness\"]').textContent.startsWith('Harness') && document.querySelector('label[for=\"agent-sessions-activity\"]').textContent.startsWith('Activity')"), 'Filter selects lack visible labels.');
+  assert(await evaluate("Array.from(document.querySelectorAll('#agent-sessions-activity option')).map(option => option.textContent).join('|')") === 'All|Holding attempts|Idle|Lease expired', 'Activity options changed.');
+  await choose('host', 'ws-laptop');
+  await expectCards('session-reviewer', 'host filter');
+  assert(await count() === 'Showing 1 of 3 loaded sessions', 'Count did not follow the host filter.');
+  await choose('host', '');
+  await choose('harness', 'agent-coordinator-cli');
+  await expectCards('session-idle,session-worker', 'harness filter');
+  await choose('activity', 'idle');
+  await expectCards('session-idle', 'harness and activity filters');
+  await choose('activity', 'expired');
+  await expectCards('session-worker', 'lease-expired filter');
+  await choose('activity', 'holding');
+  await expectCards('session-worker', 'holding filter within a harness');
+  await choose('harness', '');
+  await expectCards('session-reviewer,session-worker', 'holding filter');
+  await choose('host', 'ws-idle');
+  await waitPage("document.querySelector('#agent-sessions-state').textContent.includes('No loaded sessions match these filters.') && !document.querySelector('#agent-sessions-list').childElementCount", 'no-match message');
+  assert(await count() === 'Showing 0 of 3 loaded sessions', 'Count did not report zero matches.');
+  await choose('host', '');
+  await choose('activity', '');
+  await expectCards('session-idle,session-reviewer,session-worker', 'filters cleared');
+  await waitPage("document.querySelector('#agent-sessions-state').hidden", 'state hidden once cards match');
+  // The window select still re-queries, and the filters combine with it: the idle session is outside the 24-hour window.
+  await choose('host', 'ws-laptop');
+  await choose('activity', 'holding');
+  const beforeWindow = agentSessionQueries.length;
+  await evaluate("(() => { const select = document.querySelector('#agent-sessions-window'); select.value = '24'; select.dispatchEvent(new Event('change', { bubbles: true })); })()");
+  await waitPage("document.querySelector('#agent-sessions-count').textContent === 'Showing 1 of 2 loaded sessions'", 'filters combined with the window');
+  assert(agentSessionQueries.length === beforeWindow + 1 && agentSessionQueries.at(-1).active_within_hours === '24', 'The window select did not re-query.');
+  await expectCards('session-reviewer', 'filters combined with the window');
+  assert(await options('host') === '|ws-build-server-with-a-very-long-identifier-that-must-wrap|ws-laptop', 'Host options were not rebuilt from the narrower window.');
+  await choose('host', '');
+  await choose('activity', '');
+  await chooseSessionWindow({ evaluate, waitPage }, '0');
+  // Recorded activity and heartbeats, relative to when the list was generated (2026-10-05T10:05Z).
+  const reviewer = await evaluate("document.querySelector('[data-session-id=\"session-reviewer\"]').textContent");
+  assert(reviewer.includes('(5 min ago)') && reviewer.includes('Last heartbeat') && reviewer.includes('(5 min ago)'), 'Reviewer card lacks relative activity or heartbeat.');
+  assert(reviewer.includes('No recorded activity for 5 min'), 'Reviewer card lacks the recorded-activity label.');
+  assert(await evaluate("document.querySelector('[data-session-id=\"session-reviewer\"] .held-heartbeat').textContent") === `Last heartbeat ${await evaluate("new Date('2026-10-05T10:00:00Z').toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })")} (5 min ago)`, 'Heartbeat line is not absolute plus relative.');
+  const worker = await evaluate("document.querySelector('[data-session-id=\"session-worker\"]').textContent");
+  assert(worker.includes('(35 min ago)') && worker.includes('No recorded activity for 35 min'), 'Worker card lacks its relative age.');
+  const idle = await evaluate("document.querySelector('[data-session-id=\"session-idle\"]').textContent");
+  assert(idle.includes('(26 h ago)') && idle.includes('No recorded activity for 26 h') && !idle.includes('heartbeat'), 'Idle card shows the wrong ages.');
+  const wording = await evaluate("document.querySelector('#agent-sessions-view').textContent");
+  assert(!/\b(dead|died|crashed|stopped|killed)\b/i.test(wording), 'The sessions page claims a session or process stopped.');
 }
 
 // The empty-window message and a server error both show in the state line.
@@ -1384,7 +1451,7 @@ async function main() {
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
     await checkReloadedResolutionLabel(ui, serverPort);
-    console.log('PASS: headless Chrome verified task kind prefill and revision-checked saves in both directions, project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, per-state CLI inspection and resume commands with shell quoting and copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), lifecycle reasons with replacement links in both directions, the human-only external-completion control (eligibility, roster-prefilled checks, request body, refusal codes), saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified task kind prefill and revision-checked saves in both directions, project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, host/harness/activity filters that combine with each other and the window without a request, relative and absolute activity and heartbeat times, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, per-state CLI inspection and resume commands with shell quoting and copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), lifecycle reasons with replacement links in both directions, the human-only external-completion control (eligibility, roster-prefilled checks, request body, refusal codes), saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {

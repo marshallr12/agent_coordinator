@@ -174,7 +174,14 @@ activity, and the attempts it holds (task title and ID, review or integration
 kind, and lease expiry, or a **Lease expired** badge when the lease lapsed while
 the attempt stayed active and the task needs recovery), or says it holds none. Choose **Active in the last 24
 hours** (the default), **Active in the last hour**, or **All open sessions**,
-and **Refresh** to re-read the list.
+and **Refresh** to re-read the list. The **Host**, **Harness** and **Activity**
+(all, holding attempts, idle, or lease expired) selects narrow the loaded cards
+without another request and combine with the window; their options come from the
+loaded sessions, and a count shows how many of the loaded sessions are shown.
+Each card shows its last activity as an absolute time and a relative age, with
+the line "No recorded activity for N min" (a record of what the service saw, not
+a statement that the session or process stopped), and each held attempt shows
+its last heartbeat. Ages are measured when the list was loaded.
 
 Last activity comes from instruction acknowledgments, claims, heartbeats,
 progress and checkpoints in this project; reads do not count, so an agent that

@@ -13,7 +13,7 @@
     try { const saved = localStorage.getItem(TASK_SORT_KEY); return TASK_SORTS.includes(saved) ? saved : TASK_SORTS[0]; } catch { return TASK_SORTS[0]; }
   }
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedFilters: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reportsQuery: '', reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedFilters: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reportsQuery: '', reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, agentSessionsPage: null, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
     projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', activityJobs: null, credentialDownloadUrl: null,
     taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskSort: savedTaskSort(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedProjects: [], archivedProjectsLoaded: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
@@ -418,7 +418,7 @@
     state.mutation = null; state.actor = null; state.csrfToken = null; state.projects = []; state.projectsRendered = false; state.tasks = []; state.detail = null;
     ++state.sharedSeq; state.sharedCursor = null; state.sharedFilters = null; state.sharedItems = []; state.sharedRules = undefined; state.sharedKey = ''; state.sharedLoaded = false; clear($('shared-list')); setText($('shared-freshness'), '');
     ++state.reportsSeq; state.reportsCursor = null; state.reports = []; state.reportsLoaded = false; state.reportsProjectId = ''; clear($('reports-list'));
-    ++state.agentSessionsSeq; state.agentSessionsProjectId = ''; state.agentSessionsLoaded = false; clear($('agent-sessions-list'));
+    ++state.agentSessionsSeq; state.agentSessionsProjectId = ''; state.agentSessionsLoaded = false; state.agentSessionsPage = null; clear($('agent-sessions-list'));
     ++state.digestSeq; state.digestProjectId = ''; state.digestLoaded = false; clear($('digest-content'));
     ++state.autonomySeq; state.autonomyProjectId = ''; state.autonomyLoaded = false; state.autonomySummaries.clear(); clear($('autonomy-content'));
     $('context-search').reset(); $('knowledge-filters').reset();
@@ -753,6 +753,8 @@
   $('agent-sessions-button').addEventListener('click', openAgentSessions);
   $('agent-sessions-back').addEventListener('click', () => openProjectSettings(state.projectId));
   $('agent-sessions-window').addEventListener('change', () => loadAgentSessions());
+  // Host, harness and activity narrow the sessions already loaded; they make no request.
+  ['host', 'harness', 'activity'].forEach(name => $(`agent-sessions-${name}`).addEventListener('change', () => { if (state.agentSessionsPage) renderAgentSessions(state.agentSessionsPage); }));
   $('refresh-agent-sessions').addEventListener('click', () => loadAgentSessions());
   $('project-review-button').addEventListener('click', async () => {
     const projectId = state.projectId;
@@ -3245,7 +3247,7 @@
   // screen during a reload and only the sessions whose data changed are rebuilt.
   async function loadAgentSessions() {
     const projectId = state.projectId, seq = ++state.agentSessionsSeq;
-    if (state.agentSessionsProjectId !== projectId) { state.agentSessionsProjectId = projectId; state.agentSessionsLoaded = false; reconcile($('agent-sessions-list'), []); }
+    if (state.agentSessionsProjectId !== projectId) { state.agentSessionsProjectId = projectId; state.agentSessionsLoaded = false; state.agentSessionsPage = null; reconcile($('agent-sessions-list'), []); }
     if (!state.agentSessionsLoaded) setState($('agent-sessions-state'), 'Loading sessions…', true);
     const query = new URLSearchParams({active_within_hours: $('agent-sessions-window').value});
     try {
@@ -3253,39 +3255,76 @@
       if (seq === state.agentSessionsSeq && projectId === state.projectId) { state.agentSessionsLoaded = true; renderAgentSessions(page); }
     } catch (error) { if (seq === state.agentSessionsSeq && projectId === state.projectId) setState($('agent-sessions-state'), errorMessage(error), false, true); }
   }
-  // Renders one card per session, the empty-window message, or a truncation note.
+  // The activity filter's tests on a session; "expired" matches a session holding a lapsed lease.
+  const SESSION_ACTIVITY = { holding: session => (session.held_attempts || []).length > 0, idle: session => !(session.held_attempts || []).length, expired: session => (session.held_attempts || []).some(attempt => attempt.lease_expired) };
+  // Fills a filter select with "All" plus the distinct values found in the loaded sessions; a chosen value
+  // that is no longer loaded falls back to "All".
+  function fillSessionFilter(name, allLabel, values) {
+    const select = $(`agent-sessions-${name}`), wanted = [...new Set(values.map(text).filter(Boolean))].sort();
+    const prior = select.value;
+    reconcile(select, optionItems([['', allLabel], ...wanted.map(value => [value, value])]));
+    setProp(select, 'value', wanted.includes(prior) ? prior : '');
+  }
+  // Renders the loaded sessions that pass the host, harness and activity filters, one card each, with the
+  // shown/loaded counts, the empty message and the truncation note. Filtering never makes a request.
   function renderAgentSessions(page) {
-    const items = page.items || [];
-    reconcile($('agent-sessions-list'), items.map(session => ({ key: session.session_id, sig: sig(session), build: () => agentSessionCard(session) })));
+    state.agentSessionsPage = page;
+    const items = page.items || [], now = Date.parse(page.generated_at) || Date.now();
+    fillSessionFilter('host', 'All hosts', items.map(session => session.workstation_id));
+    fillSessionFilter('harness', 'All harnesses', items.map(session => session.harness));
+    const host = $('agent-sessions-host').value, harness = $('agent-sessions-harness').value, activity = SESSION_ACTIVITY[$('agent-sessions-activity').value];
+    const shown = items.filter(session => (!host || text(session.workstation_id) === host) && (!harness || text(session.harness) === harness) && (!activity || activity(session)));
+    reconcile($('agent-sessions-list'), shown.map(session => { const age = sessionAges(session, now); return { key: session.session_id, sig: sig(session, age), build: () => agentSessionCard(session, age) }; }));
+    setText($('agent-sessions-count'), `Showing ${shown.length} of ${items.length} loaded session${items.length === 1 ? '' : 's'}`); show($('agent-sessions-count'), items.length > 0);
+    const note = page.truncated ? `Showing the ${items.length} most recently active sessions; narrow the window to see fewer.` : '';
     if (!items.length) setState($('agent-sessions-state'), NO_AGENT_SESSIONS);
-    else if (page.truncated) setState($('agent-sessions-state'), `Showing the ${items.length} most recently active sessions; narrow the window to see fewer.`);
+    else if (!shown.length) setState($('agent-sessions-state'), ['No loaded sessions match these filters.', note].filter(Boolean).join(' '));
+    else if (note) setState($('agent-sessions-state'), note);
     else show($('agent-sessions-state'), false);
   }
-  // One session: who and where, when it started and last acted, and what it holds.
-  function agentSessionCard(session) {
+  // A span of milliseconds as "N min", "N h" or "N d".
+  function spanText(ms) {
+    const minutes = Math.max(0, Math.floor(ms / 60000));
+    if (minutes < 120) return `${minutes} min`;
+    return minutes < 2880 ? `${Math.floor(minutes / 60)} h` : `${Math.floor(minutes / 1440)} d`;
+  }
+  // The age text for a timestamp as of `now`: "just now" under a minute, else "N min ago"; '' when unparseable.
+  function ageText(value, now) {
+    const at = Date.parse(value);
+    if (Number.isNaN(at)) return '';
+    return now - at < 60000 ? 'just now' : `${spanText(now - at)} ago`;
+  }
+  // The age texts a session card shows, as of `now`: its last activity and each held attempt's last heartbeat.
+  const sessionAges = (session, now) => ({ activity: ageText(session.last_activity_at, now), quiet: Number.isNaN(Date.parse(session.last_activity_at)) || now - Date.parse(session.last_activity_at) < 60000 ? '' : spanText(now - Date.parse(session.last_activity_at)), heartbeats: (session.held_attempts || []).map(attempt => ageText(attempt.last_heartbeat_at, now)) });
+  // One session: who and where, when it started and last acted, and what it holds. It reports the recorded
+  // last activity and never claims the session or its process has stopped.
+  function agentSessionCard(session, age) {
     const card = el('article', 'card report-card agent-session-card'); card.dataset.sessionId = session.session_id;
     const header = add(card, el('div', 'card-header')), held = session.held_attempts || [];
     add(header, el('h2', '', session.principal?.name || session.principal?.id || 'Agent'));
     add(header, el('span', `status-badge ${held.length ? 'report-open' : 'report-resolved'}`, held.length ? `Holds ${held.length} attempt${held.length === 1 ? '' : 's'}` : 'Idle'));
-    add(card, factList([['Agent', agentKind(session)], ['Workstation', session.workstation_id], ['Session', session.session_id], ['Started', formatDate(session.started_at)], ['Last activity', formatDate(session.last_activity_at)]]));
-    add(card, heldAttemptList(held));
+    const last = session.last_activity_at ? `${formatDate(session.last_activity_at)}${age.activity ? ` (${age.activity})` : ''}` : '';
+    add(card, factList([['Agent', agentKind(session)], ['Workstation', session.workstation_id], ['Session', session.session_id], ['Started', formatDate(session.started_at)], ['Last activity', last]]));
+    if (age.quiet) add(card, el('p', 'muted agent-session-quiet', `No recorded activity for ${age.quiet}`));
+    add(card, heldAttemptList(held, age.heartbeats));
     return card;
   }
   // The agent kind: the harness, plus the subagent name for a subagent session.
   const agentKind = session => session.subagent ? `${text(session.harness)} / subagent ${text(session.subagent.name)}` : text(session.harness);
   // The attempts a session holds (task title and id, kind, expiry), or a note that it holds none.
-  function heldAttemptList(held) {
+  function heldAttemptList(held, heartbeats = []) {
     if (!held.length) return el('p', 'muted', 'Holds no attempts');
     const list = el('ul', 'held-attempts');
-    held.forEach(attempt => add(list, heldAttemptItem(attempt)));
+    held.forEach((attempt, index) => add(list, heldAttemptItem(attempt, heartbeats[index])));
     return list;
   }
-  // One held attempt: task title, a lease-expired badge when its lease lapsed, and its details.
-  function heldAttemptItem(attempt) {
+  // One held attempt: task title, a lease-expired badge when its lease lapsed, its details and its last heartbeat.
+  function heldAttemptItem(attempt, heartbeatAge = '') {
     const item = el('li'), title = add(item, el('div', 'held-attempt-title'));
     add(title, el('strong', '', attempt.task_title || attempt.task_id));
     if (attempt.lease_expired) add(title, el('span', 'status-badge report-needs-human', 'Lease expired'));
     add(item, el('span', 'muted', heldAttemptMeta(attempt)));
+    add(item, el('span', 'muted held-heartbeat', attempt.last_heartbeat_at ? `Last heartbeat ${formatDate(attempt.last_heartbeat_at)}${heartbeatAge ? ` (${heartbeatAge})` : ''}` : 'No heartbeat recorded'));
     return item;
   }
   // A held attempt's task id, kind of work (review, integration or work), and lease expiry unless it already lapsed.
