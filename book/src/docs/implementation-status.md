@@ -131,6 +131,14 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   readable checkout metadata. Each implementation attempt should use its own
   worktree. The service records client attestations; it does not inspect a remote
   filesystem or execute Git itself.
+- Task queue and Completed sorting in the dashboard: a **Sort** select (Priority
+  then oldest, Oldest first, Newest first, Longest ready, Most recent progress,
+  Least recent progress) orders the whole filtered list client-side, with the
+  task id as the final tie-break and tasks without progress last for the progress
+  sorts. Task list items carry `last_progress_at` (newest checkpoint time or
+  `null`), so no per-task detail request is made. The choice is kept in
+  `localStorage` (`agent-coordinator.task-sort`) and falls back to the default
+  when storage is unavailable. `scripts/test_task_sort.mjs` covers it.
 - Public authentication help and service-delivered project instructions with
   version acknowledgments. Task/project/event lists use bounded cursor pages.
 - Native CLI with origin-bound credentials, separate local harness sessions,
