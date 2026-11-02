@@ -33,13 +33,14 @@ prior20-human-origin-pilot: ≥20 human tasks, median creation→Done ≤4.12254
   with a TRACKING STATE note in its description. Observer `*/15` crontab installed by the owner.
 - **Deployed 2026-11-02 (owner: "deploy 915d8aaa", drain-then-deploy):** production now runs
   **`766a9e6`** (= `9ac4d91` + CANARY.md) over `b3321f5`; live digest reports weekly agent limit
-  **14**. Task `ac8744ce` (agent-origin, human-delivered) submitted (`561da80f`), evidence artifact
-  `dd020274`; either_review `cb683d0e` queued (this session isn't independent). Drain: kill switch
+  **14**. Task `ac8744ce` (agent-origin, human-delivered) **Done**: submission `561da80f`, evidence
+  artifact `dd020274`, approved 18:30:39Z by independent subagent identity `deploy-reviewer`
+  (Oracle's reviewer did not pick it up in 20 min). Drain: kill switch
   `deploy-drain-ac8744ce` on both hosts 17:21:06Z → idle 17:54:37Z (0 launches killed) → rollout job
   `d2e8059f` 17:55–18:03Z → markers removed 18:03:28Z; recorded in window.json `reserved_events`.
   Release run `41487297105`; rollback CLIs `/opt/agentc/rollback-cli-766a9e6-20261102`. Scripts and
-  evidence: `~/.local/state/agent-coordinator-evidence/ac8744ce-454d-4162-bf16-74dfd5df7fe7/`. After
-  service-confirmed done remove worktree `ac-ac8744ce-deploy` + branch. Watch: one mxmini review
+  evidence: `~/.local/state/agent-coordinator-evidence/ac8744ce-454d-4162-bf16-74dfd5df7fe7/`. Worktree
+  `ac-ac8744ce-deploy` and its local branch removed (no remote branch). Watch: one mxmini review
   claim (activity 5362fa7f) failed with an empty error right after restart.
 
 **At window end:** re-activate P6, restore quiet hours, remove observer cron, run the final
