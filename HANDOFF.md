@@ -4,7 +4,164 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 pilot recovered to gen8 after renewer stopped (2026-10-16 13:10 UTC, workflow on)
+## Current resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
+
+**Window:** `2026-11-02T16:50:00Z` → `2026-11-16T16:50:00Z` (14×86400 s), pinned in
+`~/.local/share/agent-coordinator-autonomy/p6-repair-20261023/window.json` (baseline
+prior20-human-origin-pilot: ≥20 human tasks, median creation→Done ≤4.12254 h; canary
+`a21df6a2` ok 03:08:36Z; reserved-action categories listed there). P6 `d513bc21` is released
+(open, revision 4, human-delivered); the last P6 checkpoint (attempt `82322096`, gen 19) records it.
+
+- **Canaries:** mxmini/Claude ok on 10-31 02:22Z, 11-01 02:08Z, 11-02 03:08Z — the 10-30 mirror
+  repair fixed the timeouts.
+- **Import:** owner chose "Claude in Chrome, I click Apply". Agent filled the dashboard form and
+  previewed (20 planned, 0 conflicts); **owner clicked Apply preview** ~16:31Z. All 20 are
+  origin=human.
+- **Fill-in:** fresh read-only audit of origin/main `766a9e6` (9 absent, 11 partial, 0 complete; API
+  changes for 02, 05, 16, 18) → `p6-repair-20261030/p6-audit.json`. Each task got kind=code,
+  description and acceptance criteria (rev 2), then planned→open at 16:50:01–04Z (rev 3). Oracle
+  claimed p6w-06 at 16:50:19Z, mxmini p6w-02 at 16:50:48Z.
+- **Capacity change (owner decision):** mxmini quiet hours disabled for the window at 16:46:52Z.
+  Backup `/var/lib/agentc/p6-window-quiet-hours-backup-20261102/` (cron sha256 `0e416641…`, the
+  Oct 19 original; `agentc-quiet-hours.disabled` + `kill-switch`). **Restore at window end:**
+  `sudo -n cp -a <backup>/agentc-quiet-hours /etc/cron.d/` (cron re-sets the marker at the next
+  out-of-window minute). A host-setup rerun with QUIET_HOURS would also recreate it early.
+- **Observer:** `observe-p6.py` first real sample `observation-samples/20261102T165105…json`
+  complete, 0 errors. Owner installs the `*/15` user crontab line (agent process can't).
+- **P6 tracking state:** agent edit refused (`self_related_definition_change`, human required).
+  Owner may set P6 planned in the dashboard; otherwise it sits open but human-delivered.
+- **Open owner item:** deploy of `915d8aaa` (weekly agent limit 5→14; Done/integrated, not deployed).
+
+**At window end:** re-activate P6, restore quiet hours, remove observer cron, run the final
+fixed-window audit (value, HRI excl. reserved, direct-push reconciliation, digest ≤1/day).
+
+## Previous resume point — P6 rerun: mirrors repaired, import the 20 value tasks (2026-10-30 19:10 UTC)
+
+P6 task `d513bc21-71d9-40c4-a2ec-614af4318f37` is **released (Ready, revision 4)**. Reclaim it
+with a fresh revision before any work. The service checkpoint `39910498` is the authoritative
+record. The new 14-day window has **not** started.
+
+**Done 2026-10-30.** The owner ran reviewed helper v2 (SHA `3bd62786…`) at 18:32:07Z. It
+fixed 6 mirror permissions and the worker's full fsck passed. Backup:
+`/var/lib/agentc/repair-p6-mirror-20261030T183207.219465Z`. The agent verified that both
+mirrors have 0 unreadable entries and `core.sharedRepository=0644`, and that `agentc-run`
+restarted. Receipt: `~/.local/share/agent-coordinator-autonomy/p6-repair-20261030/operator-receipt.json`.
+Every nightly mxmini canary from 10-20 to 10-30 had timed out on this defect.
+
+**First thing next session (in order):**
+
+1. **Check the canary.** Confirm the scheduled 22:05 EDT (02:05Z Oct 31) mxmini/Claude canary
+   recorded `outcome=ok` (`sudo -n tail /var/lib/agentc/e2e-canary.jsonl`). If it failed,
+   stop and diagnose. Do not import or start the window.
+2. **Import the 20 value tasks. Ask the owner which way:**
+   - **(a) Owner imports.** In the agents.sithbit.com web dashboard, Knowledge section,
+     click **Preview and import tasks and context from Markdown** (down-arrow icon). Fill in:
+     Stable source identity `p6-rerun-workload`; Source path `p6-rerun-workload.md`; Source
+     Git revision `8607234a92598421826e199fd4b026725c2946fb`; Source branch `main`; Markdown
+     = contents of `~/.local/share/agent-coordinator-autonomy/p6-repair-20261030/p6-rerun-workload.md`.
+     Check that the preview shows 20 planned tasks and no blocking conflicts, then click
+     **Apply preview**.
+   - **(b) Agent imports in the owner's external browser** (Claude in Chrome, owner's
+     logged-in session), only on the owner's explicit instruction. Follow the same steps
+     and record in the P6 checkpoint that the agent applied it on the owner's instruction.
+   - **Why the agent CLI can't do it:** applying an import is human-only
+     (`imports.rs:60`). Tasks an agent creates are `origin=agent` and don't count toward the
+     human-requested value target, and the weekly agent limit would hold most of them.
+3. **Fill in the 20 tasks.** After the import, use `tasks edit` on each to set `kind: code`
+   and add a real description and acceptance criteria from
+   `p6-repair-20261023/VALUE-WORKLOAD-PROPOSAL.md`. Keep them **planned** until the window
+   opens. Editing doesn't change origin. The dashboard audit on origin/main found 8 features
+   absent and 12 partly present, none complete; scope each partial one to its missing part.
+4. **Set the window.** Pin exact UTC start and end, 14×86400 s apart. US DST ends Nov 1, so
+   compute expected canary fire times from the live timezone. Record the approved baseline
+   (≥20 human tasks/14 days, median ≤4.12 h, knowledge `79179d84`), the passing canary ID,
+   and reserved-action categories. Then activate the 20 tasks (planned → open) at the start,
+   install the bounded observer (`p6-repair-20261023/observe-p6.py`, which needs an owner
+   crontab step), and move P6 to a dated tracking state (see `OPERATOR-REPAIR-v2.md`).
+   **Latency caveat:** the baseline measures creation→Done. Importing on window day keeps
+   that comparable. If the import happened earlier, agree with the owner to measure from
+   activation instead.
+
+**Also open:** code task `915d8aaa-781d-4c2d-aba0-299a4a1c69bf` raises the default weekly
+agent-task limit from 5 to 14 (Ready; agent-origin; it doesn't affect the value metric). It
+needs review, integration, and an owner-approved deploy before the new limit applies.
+
+## Previous resume point — mxmini canary passed; quiet hours restored (2026-10-19 15:08 UTC)
+
+Owner task `422ce01e-7721-4737-ade4-816ebed8e817` is **Done**, revision 6.
+Independent review approved submission `5b5840d8` and accepted the owner-authorized
+timing amendment at 15:14:41Z. Supplemental artifact `00f0870e-f7d6-4f48-90d0-23e881173136`
+contains the corrected exact timeline excerpt and live allowlist/integrator evidence.
+The two clean task worktrees `ac-422ce01e-canary-now` and `ac-422ce01e-rollout`,
+and their merged local branches, were removed. Their remote branches were absent.
+Retain `ac-422ce01e-deploy`: pre-existing gcloud/SSH processes 540970 and 540986
+still use that working directory. Main parent and unrelated worktrees are preserved. The user explicitly requested a temporary quiet-hours override
+so acceptance could run now. Registered job `fcb259b8-08cb-4066-9ceb-20ad0afcd276`
+ran the configured cron wrapper and Claude canary under the usual flock. It
+succeeded with exit 0 and unchanged source; its reservation is released.
+
+Fresh task `93994673-c9eb-4f9f-b9bf-374355ff2267` reached Done and the canary
+recorded **outcome=ok at 15:07:36Z**, host **mxmini**, served_by **claude**, in
+**568.5 seconds**. Both implementation and review used mxmini's Claude supervisor.
+The prior task `a7758fab` also reached Done. The fresh run's first candidate
+conflicted after the prior task landed; the pipeline reopened it, implemented the
+revision, independently reviewed it and integrated `b1dd4c7f9f4625960f02b9c68f690cdb4a05f3dd`
+without manual pipeline intervention. Fresh-run recorded cost is **$0.2055326**.
+HRI: one owner-requested window override; zero canary-pipeline interventions.
+Historical setup interventions and the original timeout remain recorded.
+
+At 15:07:37Z the override restored the original quiet-hours cron byte for byte
+(SHA-256 `0e416641a771107626d6f07a77d339d47404a7275483a1bc0477428a424063cf`)
+and reapplied its `quiet-hours` marker. The normal 22:00–07:00 window and nightly
+22:05 cron remain configured. A 100-minute fallback restoration was installed
+for interruption protection and removed by restoring the original cron.
+The new result's telemetry receipt hash is in `e2e-canary.jsonl.reported`.
+
+Pinned artifact `f6a66111-af04-4665-927d-e47e35c1f2d0` holds the current result,
+workflow, cost, restoration and job evidence. The prior deployment/notification
+artifact remains `2ef83f8b-a162-45d4-8be5-8f5f6e8c9dfd`. Local evidence is under
+`~/.local/state/agent-coordinator-evidence/422ce01e-7721-4737-ade4-816ebed8e817/daytime/`.
+No service or CLI deployment was repeated. Preserve unrelated pending-decisions edits.
+
+## Previous resume point — mxmini canary fixes deployed; await the nightly run (2026-10-19)
+
+Owner task `422ce01e-7721-4737-ade4-816ebed8e817` remains open. The user approved
+its matching production service and CLI rollout. Production and the native CLIs
+on mxmini and Oracle now report clean source `b8053664808d2763a3b001f2b2d7843a53706dc9`;
+public HTTPS health and both hosts' compatibility checks pass. Release acceptance
+run `39196863956` passed. The mxmini supervisor separately uses reviewed source
+`1a828d55795db91dd63eb36c6151402177bacd70`, with a successful real contained Claude
+`pwd` test. The two code fixes are integrated and Done.
+
+Both pre- and post-upgrade backups were verified, transferred off-server and
+verified there. Original binaries and a snapshot are preserved under production
+`/var/lib/agent-coordinator-deployments/mira-422ce01e-b805366-20261019/rollback`.
+Native CLI rollback copies are under `/opt/agentc/rollback-cli-b805366-20261019`
+on each host. The supervisor rollback is `/opt/agentc/rollback-cwd-1a828d55795d`.
+Scheduled service-operation timers were restored. Workers and both integrators
+are running; deployment resources are released. The final Oracle check in the
+initial deployment job used the wrong binding path and failed after successful
+installation. Separate job `ac167d1c` verified the actual binding; no deployment
+mutation was repeated.
+
+The retry ledger now contains `{"total":2,"tasks":{}}`: only task `a7758fab`'s
+two strikes were cleared. The existing Ready task can retry when the normal
+22:00–07:00 America/New_York window opens. Outside that window, the unchanged
+quiet-hours switch holds the supervisor. Cron runs the configured Claude canary
+at **22:05 EDT on October 19**. The original waiter timed out and will not resume;
+retain that failure. An actual nightly `outcome=ok` is still required before
+finishing the owner task.
+
+A controlled failure through the unchanged deployed canary's run/page code
+successfully published a clearly labelled test alert to the configured ntfy
+topic. Its HTTP receipt and isolated failed result are saved separately from
+production canary telemetry. No task was created by this notification drill.
+
+Evidence: `~/.local/state/agent-coordinator-evidence/422ce01e-7721-4737-ade4-816ebed8e817/rollout/completed-deployment-evidence.json`.
+The service checkpoint and pilot timeline retain the rollout and outstanding
+nightly acceptance. Preserve unrelated `.claude/decisions-pending.md` changes.
+
+## Previous resume point — P6 pilot recovered to gen8 after renewer stopped (2026-10-16 13:10 UTC, workflow on)
 
 - **Actual failure and owner-authorized recovery:** old renew **pid778271** stopped at **10:12:21Z**
   after `fresh ownership read failed after renew`. Service history confirms its final successful
