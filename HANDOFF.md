@@ -10,7 +10,7 @@ execution, and links everything else.
 `~/.local/share/agent-coordinator-autonomy/p6-repair-20261023/window.json` (baseline
 prior20-human-origin-pilot: ≥20 human tasks, median creation→Done ≤4.12254 h; canary
 `a21df6a2` ok 03:08:36Z; reserved-action categories listed there). P6 `d513bc21` is released
-(open, revision 4, human-delivered); the last P6 checkpoint (attempt `82322096`, gen 19) records it.
+(planned, revision 5, human-delivered); the last P6 checkpoint (attempt `82322096`, gen 19) records it.
 
 - **Canaries:** mxmini/Claude ok on 10-31 02:22Z, 11-01 02:08Z, 11-02 03:08Z — the 10-30 mirror
   repair fixed the timeouts.
@@ -28,8 +28,9 @@ prior20-human-origin-pilot: ≥20 human tasks, median creation→Done ≤4.12254
   out-of-window minute). A host-setup rerun with QUIET_HOURS would also recreate it early.
 - **Observer:** `observe-p6.py` first real sample `observation-samples/20261102T165105…json`
   complete, 0 errors. Owner installs the `*/15` user crontab line (agent process can't).
-- **P6 tracking state:** agent edit refused (`self_related_definition_change`, human required).
-  Owner may set P6 planned in the dashboard; otherwise it sits open but human-delivered.
+- **P6 tracking state:** agent edit refused (`self_related_definition_change`, human required);
+  agent prefilled the dashboard edit form and the **owner clicked Save** → P6 **planned, revision 5**,
+  with a TRACKING STATE note in its description. Observer `*/15` crontab installed by the owner.
 - **Open owner item:** deploy of `915d8aaa` (weekly agent limit 5→14; Done/integrated, not deployed).
 
 **At window end:** re-activate P6, restore quiet hours, remove observer cron, run the final
