@@ -14,7 +14,7 @@
   }
   const state = {
     actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedFilters: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reportsQuery: '', reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
-    projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', credentialDownloadUrl: null,
+    projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', activityJobs: null, credentialDownloadUrl: null,
     taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskSort: savedTaskSort(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedProjects: [], archivedProjectsLoaded: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
   };
@@ -2090,6 +2090,69 @@
       if (after) after(data);
     }, 'POST', onError, { projectId, taskId });
   }
+  // A job counts as failed when its producer failed, it exited non-zero, or its source changed while it ran.
+  const jobFailed = (job) => job.state === 'failed' || (job.exit_code !== null && job.exit_code !== undefined && job.exit_code !== 0) || job.inputs_unchanged === false;
+  // The same result the service accepts as a passing check: succeeded, exit 0, unchanged source, not operator-reconciled.
+  const jobPassed = (job) => job.state === 'succeeded' && job.exit_code === 0 && job.inputs_unchanged === true && !job.reconciled_at;
+  const jobCheckName = (job) => job.check_identity ? `${job.check_identity} (${job.check_version}, ${job.check_environment})` : job.label || 'Local job';
+  const jobOrder = (a, b) => text(a.created_at) < text(b.created_at) ? -1 : text(a.created_at) > text(b.created_at) ? 1 : text(a.id) < text(b.id) ? -1 : text(a.id) > text(b.id) ? 1 : 0;
+  // Splits the jobs that ran on the candidate's exact source revision into the newest failure still in force
+  // and failures that a later pass of the same check has superseded. Jobs of older revisions are ignored.
+  function candidateFailures(submission, jobs) {
+    const groups = new Map(), seen = new Set();
+    for (const job of jobs) {
+      if (!job || seen.has(job.id) || !submission.candidate_revision || job.source_revision !== submission.candidate_revision) continue;
+      seen.add(job.id);
+      const key = job.check_identity ? sig(job.check_identity, job.check_version, job.check_environment) : sig(job.label);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(job);
+    }
+    let current = null; const superseded = [];
+    for (const group of groups.values()) {
+      group.sort(jobOrder);
+      let failure = null, failureIndex = -1;
+      group.forEach((job, index) => { if (jobFailed(job)) { failure = job; failureIndex = index; } });
+      if (!failure) continue;
+      if (group.slice(failureIndex + 1).some(jobPassed)) superseded.push(failure);
+      else if (!current || jobOrder(current, failure) < 0) current = failure;
+    }
+    superseded.sort((a, b) => jobOrder(b, a));
+    return { current, superseded };
+  }
+  // Fetches the one bounded page of job history that includes workflow-activity jobs (their task differs
+  // from the subject's), once per change of the evidence that could alter the answer.
+  function loadActivityJobs(data, submission, workflow) {
+    const projectId = state.projectId, taskId = text(submission.task_id);
+    if (!taskId || workflow.phase === 'revision_needed' || !(workflow.activities || []).length) { state.activityJobs = null; return; }
+    const key = sig(projectId, taskId, submission.id, (data.job_evidence?.jobs || []).map(job => [job.id, job.state]), (workflow.activities || []).map(activity => [activity.id, activity.state]));
+    if (state.activityJobs?.key === key) return;
+    const entry = state.activityJobs = { key, jobs: [], incomplete: false, failed: false };
+    request(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/history?kind=jobs&limit=50`).then(reply => {
+      if (state.activityJobs !== entry) return;
+      entry.jobs = (reply.data.items || []).map(item => item.record).filter(Boolean); entry.incomplete = Boolean(reply.data.next_cursor);
+    }, () => { if (state.activityJobs === entry) entry.failed = true; }).then(() => {
+      if (state.activityJobs === entry && state.projectId === projectId && state.selectedTaskId === taskId && state.detail) renderWorkflow(state.detail);
+    });
+  }
+  // Moves keyboard focus to a job's entry under "Jobs & resource holds"; jobs that page does not list open the job history.
+  function showJobEvidence(job) {
+    if (!focusJobEntry(job.id)) taskHistory('jobs');
+  }
+  function failureCallout(job, superseded, blocked, notes) {
+    const box = el('div', superseded ? 'inline-alert failure-callout' : 'inline-alert error failure-callout'); box.dataset.failureCallout = superseded ? 'superseded' : 'current';
+    box.setAttribute('role', 'group'); box.setAttribute('aria-label', superseded ? 'Superseded check failure' : 'Latest check failure');
+    add(box, el('strong', '', superseded ? 'Earlier failure superseded by a later pass' : 'Latest failed check for this candidate'));
+    add(box, el('p', '', `Check: ${jobCheckName(job)} · Producer: ${displayStatus(job.state)} · Exit code: ${job.exit_code ?? 'not reported'} · Observed: ${formatDate(job.last_observed_at || job.created_at)}`));
+    if (job.inputs_unchanged === false) add(box, el('p', '', 'Source changed during this job; its result does not verify the current checkout.'));
+    add(box, el('code', '', `Job ${job.id}`));
+    const button = el('button', 'button subtle', 'Show job evidence'); button.type = 'button'; button.addEventListener('click', () => showJobEvidence(job)); add(box, button);
+    if (blocked) {
+      add(box, el('p', '', [`Integration blocked: report ${displayStatus(blocked.kind)}`, blocked.verdict && `verdict ${blocked.verdict}`, blocked.check_name && `check ${blocked.check_name}`, blocked.target_revision && `target revision ${blocked.target_revision}`].filter(Boolean).join(' · ')));
+      add(box, el('p', 'muted', `Integrator report ${blocked.report_id}`));
+    }
+    notes.forEach(note => add(box, el('p', 'muted', note)));
+    return box;
+  }
   function renderWorkflow(data) {
     const target = $('workflow-content'), items = []; const workflow = data.workflow || {}; const submission = workflow.submission; const repositoryUrl = projectRepositoryUrl();
     if (!submission) { reconcile(target, [{ key: 'none', sig: '', build: () => el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.') }]); return; }
@@ -2122,9 +2185,22 @@
     }
     return candidate;
     };
+    let failures = { current: null, superseded: [] }, notes = [];
+    if (workflow.phase !== 'revision_needed') {
+      loadActivityJobs(data, submission, workflow);
+      const loaded = state.activityJobs;
+      failures = candidateFailures(submission, [...(data.job_evidence?.jobs || []), ...(loaded?.jobs || [])]);
+      if (loaded?.incomplete) notes.push('Only the first 50 recorded jobs of this task and its review and integration activities were checked; later activity jobs are not reflected here.');
+      if (loaded?.failed) notes.push('Job history for review and integration activities could not be loaded, so their jobs are not reflected here.');
+    }
+    const shownFailure = failures.current || failures.superseded[0];
+    if (shownFailure) {
+      const superseded = !failures.current, blocked = superseded ? null : workflow.integration_blocked;
+      items.push({ key: 'failure-callout', sig: sig(superseded, shownFailure.id, shownFailure.state, shownFailure.exit_code, shownFailure.inputs_unchanged, shownFailure.last_observed_at, shownFailure.created_at, blocked, notes), build: () => failureCallout(shownFailure, superseded, blocked, notes) });
+    }
     items.push({ key: 'candidate', sig: context, build: buildCandidate });
     (workflow.blockers || []).forEach((item, index) => items.push({ key: `blocker:${index}`, sig: sig(item), build: () => el('p', 'inline-alert error', typeof item === 'string' ? item : item.message || item.code) }));
-    if (workflow.integration_blocked) {
+    if (workflow.integration_blocked && !failures.current) {
       const blocked = workflow.integration_blocked;
       items.push({ key: 'integration-blocked', sig: sig(blocked), build: () => {
         const box = el('div', 'inline-alert error');
@@ -3292,11 +3368,11 @@
     selectField(view,'blocked','Next owner',false,[['false','Task may be claimed again'],['true','Leave blocked until the issue is resolved']]);
     view.finish('Release ownership', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath()}/attempts/${encodeURIComponent(attempt.id)}/release`, {generation:attempt.generation,summary:`${values.get('summary')}\nNext step: ${values.get('next_step')}`,blocked:values.get('blocked') === 'true'}, 'ownership release'); });
   }
-  function taskHistory() {
+  function taskHistory(initialKind = 'attempts') {
     const projectId = state.projectId, taskId = state.selectedTaskId, currentActor = actorId();
     const view = workflowDialog('Complete task history', 'Pages preserve a snapshot of inserted records. Start a fresh history view to include newer records.');
     const kinds = ['attempts','checkpoints','checkouts','jobs','job_observations','resources','artifacts','submissions','reviews','integrations','task_revisions','events'];
-    const kind = selectField(view,'kind','Record type','attempts',kinds.map(value => [value,displayStatus(value)]));
+    const kind = selectField(view,'kind','Record type',initialKind,kinds.map(value => [value,displayStatus(value)]));
     const list = add(view.form, el('div')), more = actionButton('Load more records', () => load(true), false); add(view.form, more); let cursor = null, sequence = 0;
     async function load(append = false) {
       const current = ++sequence, selectedKind = kind.value; more.disabled = true;
