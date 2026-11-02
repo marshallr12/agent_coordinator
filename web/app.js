@@ -422,7 +422,7 @@
     ++state.digestSeq; state.digestProjectId = ''; state.digestLoaded = false; clear($('digest-content'));
     ++state.autonomySeq; state.autonomyProjectId = ''; state.autonomyLoaded = false; state.autonomySummaries.clear(); clear($('autonomy-content'));
     $('context-search').reset(); $('knowledge-filters').reset();
-    state.credentials = []; state.credentialsLoaded = false; state.operators = []; state.restoreItems = []; state.archivedLoaded = false; state.archivedProjectId = ''; state.archivedTasks = []; state.archivedProjects = []; state.archivedProjectsLoaded = false; clear($('archived-projects-list')); state.detailKey = ''; clear($('archived-list')); state.resources = []; state.resourcesLoaded = false; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
+    state.credentials = []; state.credentialsLoaded = false; state.operators = []; state.restoreItems = []; state.archivedLoaded = false; state.archivedProjectId = ''; state.archivedTasks = []; state.archivedProjects = []; state.archivedProjectsLoaded = false; clear($('archived-projects-list')); state.detailKey = ''; clear($('archived-list')); state.resources = []; state.resourcesLoaded = false; state.resourceCursor = null; state.resourcePagesExtended = false; $('resources-search').value = ''; $('resources-sort').value = 'key'; $('resources-free').checked = false; clear($('resources-list')); clear($('resources-note')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
     clearCredentialDownload();
     setText($('issued-token'), ''); show($('token-reveal'), false); setText($('issue-feedback'), ''); show($('issue-feedback'), false); clear($('credentials-list')); clear($('operators-list')); clear($('restore-status')); clear($('clock-status')); clear($('restore-requirements')); clear($('task-operator-actions')); show($('credentials-list'), false);
@@ -1908,38 +1908,77 @@
   });
 
 
+  // Searching, sorting or filtering needs every resource, so those fetch 200 at a time up to this many.
+  const RESOURCE_CAP = 2000, RESOURCE_PAGE = 200;
+  const resourceControls = () => ({ search: $('resources-search').value.trim().toLowerCase(), sort: $('resources-sort').value, free: $('resources-free').checked });
+  const resourceNeedsAll = () => { const { search, sort, free } = resourceControls(); return Boolean(search) || sort !== 'key' || free; };
+  const resourceAvailable = (resource) => (Number(resource.capacity) || 0) - (Number(resource.held_units) || 0);
+  const resourceSorts = {
+    key: (a, b) => text(a.key).localeCompare(text(b.key)),
+    capacity: (a, b) => (Number(b.capacity) || 0) - (Number(a.capacity) || 0),
+    held: (a, b) => (Number(b.held_units) || 0) - (Number(a.held_units) || 0),
+    available: (a, b) => resourceAvailable(b) - resourceAvailable(a),
+  };
+  function renderResources() {
+    const { search, sort, free } = resourceControls();
+    const shown = state.resources
+      .filter(resource => (!search || `${text(resource.key)}\n${text(resource.description)}`.toLowerCase().includes(search)) && (!free || resourceAvailable(resource) > 0))
+      .sort((a, b) => resourceSorts[sort](a, b) || resourceSorts.key(a, b) || text(a.id).localeCompare(text(b.id)));
+    reconcile($('resources-list'), shown.map(resource => ({ key: resource.id, sig: sig(resource), build: () => {
+      const row = el('tr');
+      add(add(row, el('td')), el('code', '', resource.key));
+      add(row, el('td', '', resource.description || 'No description'));
+      add(row, el('td', '', text(resource.capacity)));
+      add(row, el('td', '', text(resource.held_units ?? 0)));
+      add(row, el('td', '', text(resourceAvailable(resource))));
+      add(add(row, el('td')), el('code', '', resource.id));
+      const actions = add(row, el('td', 'row-actions'));
+      const history = actionButton('History', () => openResourceHistory(resource), false); history.setAttribute('aria-label', `History for resource ${resource.key}`); add(actions, history);
+      add(actions, taskIconButton(`Edit resource ${resource.key}`, 'edit', () => openResourceEditor(resource)));
+      add(actions, taskIconButton(`Delete resource ${resource.key}`, 'delete', () => openResourceDeletion(resource)));
+      return row;
+    } })));
+    if (!state.resourcesLoaded) return;
+    if (!state.resources.length) setState($('resources-state'), 'No resources yet. Define a stable key before reserving shared capacity.');
+    else if (!shown.length) setState($('resources-state'), 'No resources match the search and filter.');
+    else show($('resources-state'), false);
+    const capped = Boolean(state.resourceCursor) && state.resources.length >= RESOURCE_CAP;
+    patchSection($('resources-note'), sig(capped), note => { if (capped) setText(note, `Showing the first ${RESOURCE_CAP.toLocaleString('en-US')} resources. Search, sort and filters apply only to these; more exist.`); });
+    show($('resources-note'), capped);
+    show($('load-more-resources'), Boolean(state.resourceCursor) && !capped);
+  }
   async function loadResources(silent = false, append = false) {
     if (state.fetching.has('resources')) return;
     state.fetching.add('resources');
     const requestedActor = actorId();
     if (!silent && !state.resourcesLoaded) setState($('resources-state'), 'Loading resources…', true);
+    let more = false;
     try {
-      const query = append && state.resourceCursor ? `?cursor=${encodeURIComponent(state.resourceCursor)}` : '';
-      const page = (await request(`/api/v1/resources${query}`)).data;
-      if (!requestedActor || requestedActor !== actorId()) return;
+      let items = append ? state.resources : [], cursor = append ? state.resourceCursor : null, page;
+      do {
+        const params = new URLSearchParams();
+        if (cursor) params.set('cursor', cursor);
+        if (resourceNeedsAll()) params.set('limit', String(Math.min(RESOURCE_PAGE, RESOURCE_CAP - items.length)));
+        page = (await request(`/api/v1/resources${params.size ? `?${params}` : ''}`)).data;
+        if (!requestedActor || requestedActor !== actorId()) return;
+        items = [...new Map([...items, ...listData(page)].map(item => [item.id, item])).values()];
+        cursor = page.next_cursor || null;
+      } while (cursor && items.length < RESOURCE_CAP && resourceNeedsAll());
       if (silent && refreshBlocked('resources-list')) return;
-      const items = listData(page);
-      state.resourcePagesExtended = append;
-      state.resources = append ? [...new Map([...state.resources, ...items].map(item => [item.id, item])).values()] : items;
-      state.resourceCursor = page.next_cursor || null; state.resourcesLoaded = true;
-      reconcile($('resources-list'), state.resources.map(resource => ({ key: resource.id, sig: sig(resource), build: () => {
-        const row = el('tr');
-        add(add(row, el('td')), el('code', '', resource.key));
-        add(row, el('td', '', resource.description || 'No description'));
-        add(row, el('td', '', text(resource.capacity)));
-        add(row, el('td', '', text(resource.held_units ?? 0)));
-        add(add(row, el('td')), el('code', '', resource.id));
-        const actions = add(row, el('td', 'row-actions'));
-        const history = actionButton('History', () => openResourceHistory(resource), false); history.setAttribute('aria-label', `History for resource ${resource.key}`); add(actions, history);
-        add(actions, taskIconButton(`Edit resource ${resource.key}`, 'edit', () => openResourceEditor(resource)));
-        add(actions, taskIconButton(`Delete resource ${resource.key}`, 'delete', () => openResourceDeletion(resource)));
-        return row;
-      } })));
-      if (state.resources.length) show($('resources-state'), false);
-      else setState($('resources-state'), 'No resources yet. Define a stable key before reserving shared capacity.');
-      show($('load-more-resources'), Boolean(state.resourceCursor));
+      state.resourcePagesExtended = append || items.length > listData(page).length;
+      state.resources = items; state.resourceCursor = cursor; state.resourcesLoaded = true;
+      renderResources();
+      more = Boolean(cursor) && items.length < RESOURCE_CAP && resourceNeedsAll();
     } catch (error) { if (requestedActor === actorId() && !(silent && state.resourcesLoaded)) setState($('resources-state'), errorMessage(error), false, true); }
     finally { state.fetching.delete('resources'); }
+    // A control changed while pages were loading.
+    if (more) loadResources(true, true);
+  }
+  // Narrowing the table needs every resource: fetch the rest the first time a control asks for it.
+  function resourceControlsChanged() {
+    if (!state.resourcesLoaded) return;
+    renderResources();
+    if (state.resourceCursor && state.resources.length < RESOURCE_CAP && resourceNeedsAll()) loadResources(false, true);
   }
 
   // The reservation trail of one resource across every project: current holds first, then released or
@@ -2144,6 +2183,9 @@
 
   $('refresh-resources').addEventListener('click', () => loadResources());
   $('load-more-resources').addEventListener('click', () => loadResources(false, true));
+  $('resources-search').addEventListener('input', resourceControlsChanged);
+  $('resources-sort').addEventListener('change', resourceControlsChanged);
+  $('resources-free').addEventListener('change', resourceControlsChanged);
   $('resource-form').addEventListener('submit', event => {
     event.preventDefault(); if (!event.currentTarget.reportValidity()) return;
     const body = {key: $('resource-key').value.trim(), capacity: Number($('resource-capacity').value), description: $('resource-description').value.trim()};
