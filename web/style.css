@@ -298,7 +298,9 @@ a.nav-item { text-decoration: none; }
 .help-text { margin: .25rem 0; padding: .75rem; border: 1px solid var(--line); border-radius: 6px; background: var(--teal-soft); overflow-wrap: anywhere; }
 .saved-blocker { white-space: pre-wrap; overflow-wrap: anywhere; }
 #context-search { align-items: end; }
-#shared-view .toolbar { flex-wrap: wrap; }
+#shared-view .toolbar, .report-filters { flex-wrap: wrap; }
+.report-filters .select-label { flex: 1 1 190px; }
+.report-filters .select-label input { width: 100%; }
 #shared-view .toolbar-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
 #shared-view .toolbar-actions .button { width: 38px; margin-left: 0; }
 .shared-records .record-actions .task-action-icon { display: inline-grid; place-items: center; }

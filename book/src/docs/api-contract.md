@@ -684,7 +684,13 @@ reports and only a human resolves one.
   unresolved ones; `limit` is 1 to 1000 (default 200); `before=<report_id>`
   continues after that report, and each page's `next_before` is the cursor of
   the following page (null on the last). `task_id=<task_id>` keeps only
-  reports about that task. An unknown `before` is `not_found`.
+  reports about that task. `kind=<kind>` keeps only reports of that kind and
+  `check_name`, `repository_url` and `target_branch` keep only reports whose
+  details name exactly that check, repository or target branch; every filter
+  combines with the others, with `open` and with paging. An unknown `kind`, or
+  a `check_name` or `target_branch` over 512 bytes, a `repository_url` over
+  2,048 bytes or a `task_id` over 100 bytes, is a 400 `bad_request`. An unknown
+  `before` is `not_found`.
 - `GET /api/v1/projects/{project_id}/integrator/reports/{report_id}` returns one
   report in the shape of a list item, for any authenticated reader. An unknown
   ID, or a report of another project, is `not_found`. The native

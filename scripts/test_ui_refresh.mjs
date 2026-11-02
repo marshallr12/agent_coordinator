@@ -69,7 +69,7 @@ const restore = {
 const resources = [{ id: 'resource-1', key: 'fixture:db', capacity: 2, held_units: 0, description: 'Database' }, { id: 'resource-2', key: 'fixture:device', capacity: 1, held_units: 1, description: 'Device' }];
 const reports = [
   { id: 'report-1', kind: 'flaky', requires_human: false, created_at: '2026-10-06T00:00:00Z', resolved_at: null, details: { reason: 'one' } },
-  { id: 'report-2', kind: 'fix_target', requires_human: true, created_at: '2026-10-07T00:00:00Z', resolved_at: null, details: { reason: 'two' } },
+  { id: 'report-2', kind: 'fix_target', requires_human: true, created_at: '2026-10-07T00:00:00Z', resolved_at: null, details: { reason: 'two', check_name: 'Coordination checks', target_branch: 'main', verdict: 'target_failing' } },
   { id: 'report-3', kind: 'flaky', requires_human: false, created_at: '2026-10-08T00:00:00Z', resolved_at: null, details: { reason: 'three' } },
 ];
 const autonomy = { window_days: 14, finished: { count: 2, by_day: [{ day: '2026-10-12', count: 2 }] }, human_required: { count: 1, per_finished_task: 0.5, by_day: [{ day: '2026-10-12', count: 1 }], integrator_reports: 1, parked_subjects: 0 }, parked: { count: 1, items: [{ task_id: 'task-1', title: 'Parked task', agent_revises_24h: 3, counted_revises_24h: 3 }] }, reviews: { submissions_reviewed: 2, decisions: 2, approved_first_pass: 1, revised: 1, disagreements: 0 }, caps: [{ host: 'h1', impl_daily_usd: 150, rev_daily_usd: 50, reported_at: '2026-10-12T00:00:00Z' }] };

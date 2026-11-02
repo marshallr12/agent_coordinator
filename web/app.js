@@ -8,7 +8,7 @@
     try { return localStorage.getItem(TASK_AUTO_REFRESH_KEY) === 'true'; } catch { return false; }
   }
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reportsQuery: '', reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
     projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', credentialDownloadUrl: null,
     taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedProjects: [], archivedProjectsLoaded: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
@@ -712,7 +712,9 @@
   $('integration-owner-button').addEventListener('click', openIntegrationOwner);
   $('integrator-reports-button').addEventListener('click', openReports);
   $('back-to-project-settings').addEventListener('click', () => openProjectSettings(state.projectId));
-  $('reports-filter').addEventListener('change', () => loadReports());
+  // Any filter change reloads page one; Enter in a text filter only commits its change.
+  $('reports-filters').addEventListener('change', () => loadReports());
+  $('reports-filters').addEventListener('submit', event => event.preventDefault());
   $('refresh-reports').addEventListener('click', () => loadReports());
   $('load-more-reports').addEventListener('click', () => loadReports(true));
   $('digest-button').addEventListener('click', openDigest);
@@ -2632,7 +2634,15 @@
   // Opens the reports page for the current project.
   function openReports() {
     if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
+    if ($('reports-kind').options.length === 1) Object.entries(REPORT_KINDS).forEach(([kind, label]) => { const option = el('option', '', label); option.value = kind; add($('reports-kind'), option); });
     setReportsProjectLabel(); showView('reports'); $('reports-heading').focus(); loadReports();
+  }
+  // The report list filters as query parameters: the open switch and every filled-in text or kind filter.
+  function reportFilterParams() {
+    const params = new URLSearchParams();
+    if ($('reports-filter').value === 'open') params.set('open', 'true');
+    [['kind', 'reports-kind'], ['check_name', 'reports-check'], ['repository_url', 'reports-repository'], ['target_branch', 'reports-target'], ['task_id', 'reports-task']].forEach(([name, id]) => { const value = $(id).value.trim(); if (value) params.set(name, value); });
+    return params;
   }
   // Names the project in the reports header; reruns once projects load after a reload.
   function setReportsProjectLabel() {
@@ -2646,8 +2656,9 @@
     if (state.reportsProjectId !== projectId) { state.reportsProjectId = projectId; state.reports = []; state.reportsLoaded = false; reconcile($('reports-list'), []); }
     if (!append) state.reportsCursor = null;
     if (!state.reportsLoaded) { show($('load-more-reports'), false); setState($('reports-state'), 'Loading reports…', true); }
-    const query = new URLSearchParams({limit:'50'});
-    if ($('reports-filter').value === 'open') query.set('open', 'true');
+    // Another page keeps the filters its first page was loaded with, even if a filter was edited since.
+    if (!append) state.reportsQuery = reportFilterParams().toString();
+    const query = new URLSearchParams(state.reportsQuery); query.set('limit', '50');
     if (append && state.reportsCursor) query.set('before', state.reportsCursor);
     try {
       const page = (await request(`${projectPath(projectId)}/integrator/reports?${query}`)).data;
@@ -2666,7 +2677,9 @@
     reconcile($('reports-list'), state.reports.map(report => ({ key: report.id, sig: sig(report, human), build: () => reportCard(report) })));
     state.reportsCursor = page.next_before || null; show($('load-more-reports'), Boolean(state.reportsCursor));
     if (state.reports.length) { show($('reports-state'), false); return; }
-    setState($('reports-state'), $('reports-filter').value === 'open' ? 'No open reports. Nothing from the integrator is waiting for a person.' : 'The integrator has not recorded any reports for this project.');
+    const applied = new URLSearchParams(state.reportsQuery), open = applied.get('open') === 'true'; applied.delete('open');
+    if (applied.size) setState($('reports-state'), `No ${open ? 'open ' : ''}reports match these filters. Change or clear a filter to see more.`);
+    else setState($('reports-state'), open ? 'No open reports. Nothing from the integrator is waiting for a person.' : 'The integrator has not recorded any reports for this project.');
   }
   // One report: kind, state, identities, raw details and the resolve action.
   function reportCard(report) {
@@ -2690,7 +2703,8 @@
   }
   // The report's identities and any resolution as a definition list.
   function reportFacts(report) {
-    return factList([['Report', report.id], ['Recorded', formatDate(report.created_at)], ['Task', report.task_id], ['Submission', report.submission_id], ['Result', report.result_id], ['Resolved', report.resolved_at && formatDate(report.resolved_at)], ['Resolved by', report.resolved_by], ['Resolution note', report.resolution_note]]);
+    const detail = name => typeof report.details?.[name] === 'string' ? report.details[name] : '';
+    return factList([['Report', report.id], ['Recorded', formatDate(report.created_at)], ['Check', detail('check_name')], ['Target branch', detail('target_branch')], ['Verdict', detail('verdict')], ['Task', report.task_id], ['Submission', report.submission_id], ['Result', report.result_id], ['Resolved', report.resolved_at && formatDate(report.resolved_at)], ['Resolved by', report.resolved_by], ['Resolution note', report.resolution_note]]);
   }
   // A definition list of the [label, value] pairs that have a value.
   function factList(pairs) {
