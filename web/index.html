@@ -234,7 +234,21 @@
                   <button id="export-markdown" class="button subtle task-action-icon" type="button" aria-label="Export a Markdown snapshot of project records" title="Export a Markdown snapshot of project records"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m-4 4 4-4 4 4M5 21h14"/></svg></button>
                 </div>
               </div>
-              <form id="context-search" class="toolbar" hidden><label for="context-query">Search text<input id="context-query" maxlength="256" placeholder="A task, component, or lesson"></label><label class="checkbox-label"><input id="context-shared" type="checkbox">Include explicitly shared lessons from other projects</label><button class="button primary" type="submit">Search</button></form>
+              <form id="knowledge-filters" class="toolbar filter-bar" aria-label="Filter lessons and facts">
+                <label class="select-label" for="knowledge-tag">Tag<input id="knowledge-tag" maxlength="64" autocomplete="off" placeholder="Any tag"></label>
+                <label class="select-label" for="knowledge-kind">Kind<select id="knowledge-kind"><option value="">Any kind</option><option value="lesson">Lesson</option><option value="fact">Fact</option><option value="rejected_approach">Rejected approach</option><option value="checkpoint">Checkpoint</option></select></label>
+                <label class="select-label" for="knowledge-status">Status<select id="knowledge-status"><option value="">Any status</option><option value="observed">Observed</option><option value="validated">Validated</option><option value="deprecated">Deprecated</option><option value="superseded">Superseded</option></select></label>
+                <label class="checkbox-label"><input id="knowledge-shared" type="checkbox">Include explicitly shared lessons from other projects</label>
+              </form>
+              <form id="context-search" class="toolbar filter-bar" hidden>
+                <label class="select-label" for="context-query">Search text<input id="context-query" maxlength="256" placeholder="A task, component, or lesson"></label>
+                <label class="select-label" for="context-task">Task ID<input id="context-task" maxlength="255" autocomplete="off" placeholder="Any task"></label>
+                <label class="select-label" for="context-component">Component<input id="context-component" maxlength="255" autocomplete="off" placeholder="Any component"></label>
+                <label class="select-label" for="context-environment">Environment<input id="context-environment" maxlength="255" autocomplete="off" placeholder="Any environment"></label>
+                <label class="select-label" for="context-version">Version<input id="context-version" maxlength="255" autocomplete="off" placeholder="Any version"></label>
+                <label class="checkbox-label"><input id="context-shared" type="checkbox">Include explicitly shared lessons from other projects</label>
+                <button class="button primary" type="submit">Search</button>
+              </form>
               <p id="shared-freshness" class="muted" aria-live="polite"></p>
               <div id="shared-state" class="state-panel" role="status">Choose a project to inspect its records.</div>
               <div id="shared-list" class="shared-records"></div>

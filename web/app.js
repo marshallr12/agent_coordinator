@@ -13,7 +13,7 @@
     try { const saved = localStorage.getItem(TASK_SORT_KEY); return TASK_SORTS.includes(saved) ? saved : TASK_SORTS[0]; } catch { return TASK_SORTS[0]; }
   }
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reportsQuery: '', reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedFilters: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reportsQuery: '', reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
     projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', credentialDownloadUrl: null,
     taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskSort: savedTaskSort(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedProjects: [], archivedProjectsLoaded: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
@@ -398,12 +398,12 @@
   function signOutLocal(preservePending = false) {
     document.querySelectorAll('dialog').forEach(dialog => dialog.close());
     state.mutation = null; state.actor = null; state.csrfToken = null; state.projects = []; state.projectsRendered = false; state.tasks = []; state.detail = null;
-    ++state.sharedSeq; state.sharedCursor = null; state.sharedItems = []; state.sharedRules = undefined; state.sharedKey = ''; state.sharedLoaded = false; clear($('shared-list')); setText($('shared-freshness'), '');
+    ++state.sharedSeq; state.sharedCursor = null; state.sharedFilters = null; state.sharedItems = []; state.sharedRules = undefined; state.sharedKey = ''; state.sharedLoaded = false; clear($('shared-list')); setText($('shared-freshness'), '');
     ++state.reportsSeq; state.reportsCursor = null; state.reports = []; state.reportsLoaded = false; state.reportsProjectId = ''; clear($('reports-list'));
     ++state.agentSessionsSeq; state.agentSessionsProjectId = ''; state.agentSessionsLoaded = false; clear($('agent-sessions-list'));
     ++state.digestSeq; state.digestProjectId = ''; state.digestLoaded = false; clear($('digest-content'));
     ++state.autonomySeq; state.autonomyProjectId = ''; state.autonomyLoaded = false; state.autonomySummaries.clear(); clear($('autonomy-content'));
-    $('context-search').reset();
+    $('context-search').reset(); $('knowledge-filters').reset();
     state.credentials = []; state.credentialsLoaded = false; state.operators = []; state.restoreItems = []; state.archivedLoaded = false; state.archivedProjectId = ''; state.archivedTasks = []; state.archivedProjects = []; state.archivedProjectsLoaded = false; clear($('archived-projects-list')); state.detailKey = ''; clear($('archived-list')); state.resources = []; state.resourcesLoaded = false; state.resourceCursor = null; state.resourcePagesExtended = false; clear($('resources-list')); clear($('job-evidence-content')); clear($('workflow-content')); resetTaskPages(); state.projectId = ''; state.selectedTaskId = ''; state.currentView = 'overview';
     if (!preservePending) clearPersistedMutation();
     clearCredentialDownload();
@@ -2290,21 +2290,37 @@
       if (after) after(data); else await loadShared();
     }, method, null, {projectId});
   }
+  // The server's byte limits for the filter values it validates.
+  const SHARED_FILTER_LIMITS = {tag:64, task_id:255, component:255, environment:255, version:255};
+  const SHARED_FILTER_LABELS = {tag:'Tag', task_id:'Task ID', component:'Component', environment:'Environment', version:'Version'};
+  // The filter values the controls hold for a record kind; empty values are omitted from the request.
+  function readSharedFilters(kind) {
+    const value = (id) => $(id).value.trim();
+    if (kind === 'knowledge') return {tag:value('knowledge-tag'), kind:$('knowledge-kind').value, status:$('knowledge-status').value, include_shared:$('knowledge-shared').checked};
+    if (kind === 'context') return {q:$('context-query').value, include_shared:$('context-shared').checked, task_id:value('context-task'), component:value('context-component'), environment:value('context-environment'), version:value('context-version')};
+    return null;
+  }
   // Loads one page of the chosen record kind. A reload keeps the cards on screen and patches only the
-  // records that changed; a different project, kind or search starts from an empty list.
+  // records that changed; a different project, kind or filter starts from an empty list, and Load more
+  // continues with the filters of the list on screen rather than edits not yet applied.
   async function loadShared(append = false) {
     const projectId = state.projectId, currentActor = actorId(), kind = $('shared-kind').value;
     const seq = ++state.sharedSeq, list = $('shared-list');
-    show($('context-search'), kind === 'context');
-    const shown = sig(projectId, kind, kind === 'context' ? [$('context-query').value, $('context-shared').checked] : null);
+    show($('knowledge-filters'), kind === 'knowledge'); show($('context-search'), kind === 'context');
+    const filters = append && state.sharedFilters ? state.sharedFilters : readSharedFilters(kind);
+    state.sharedFilters = filters;
+    const shown = sig(projectId, kind, filters);
     if (!append && state.sharedKey !== shown) { state.sharedKey = shown; state.sharedItems = []; state.sharedRules = undefined; state.sharedLoaded = false; reconcile(list, []); }
     if (!append) state.sharedCursor = null;
     if (!projectId) { setState($('shared-state'), 'Choose a project to inspect its records.'); show($('load-more-shared'), false); return; }
     if (kind === 'context' && !$('context-query').value.trim()) { setState($('shared-state'), 'Enter search text to retrieve relevant context.'); show($('load-more-shared'), false); return; }
+    const tooLong = Object.keys(SHARED_FILTER_LIMITS).find(name => new TextEncoder().encode(filters?.[name] ?? '').length > SHARED_FILTER_LIMITS[name]);
+    if (tooLong) { setState($('shared-state'), `${SHARED_FILTER_LABELS[tooLong]} must be at most ${SHARED_FILTER_LIMITS[tooLong]} bytes.`, false, true); show($('load-more-shared'), false); return; }
     if (!state.sharedLoaded) { show($('load-more-shared'), false); setState($('shared-state'), 'Loading records…', true); }
     const query = new URLSearchParams({limit:'50'});
     if (append && state.sharedCursor) query.set('cursor', state.sharedCursor);
-    if (kind === 'context') { query.set('q', $('context-query').value); query.set('include_shared', String($('context-shared').checked)); query.set('budget', '65536'); }
+    for (const [name, value] of Object.entries(filters || {})) if (value !== '') query.set(name, String(value));
+    if (kind === 'context') query.set('budget', '65536');
     try {
       const page = (await request(`${projectPath(projectId)}/${kind}?${query}`)).data;
       if (seq !== state.sharedSeq || projectId !== state.projectId || currentActor !== actorId()) return;
@@ -2328,10 +2344,26 @@
     const details = el('details'); add(details, el('summary', '', title));
     add(details, el('pre', '', typeof value === 'string' ? value : JSON.stringify(value, null, 2))); add(parent, details);
   }
+  // Tags and scope dimensions as text chips. In the lessons list a tag chip applies that tag filter.
+  function recordChips(record, kind) {
+    const chips = el('div', 'record-chips');
+    for (const tag of Array.isArray(record.tags) ? record.tags : []) {
+      if (kind !== 'knowledge') { add(chips, el('span', 'record-chip tag-chip', tag)); continue; }
+      const chip = el('button', 'record-chip tag-chip', tag); chip.type = 'button'; chip.title = `Show only lessons tagged ${tag}`;
+      chip.addEventListener('click', () => { setProp($('knowledge-tag'), 'value', tag); loadShared(); });
+      add(chips, chip);
+    }
+    const scope = record.scope && typeof record.scope === 'object' ? record.scope : {};
+    for (const [field, label] of [['task_ids', 'Task'], ['components', 'Component'], ['environments', 'Environment'], ['versions', 'Version']]) {
+      for (const value of Array.isArray(scope[field]) ? scope[field] : []) add(chips, el('span', 'record-chip scope-chip', `${label}: ${value}`));
+    }
+    return chips.children.length ? chips : null;
+  }
   function renderSharedRecord(item, kind) {
     const record = {...(item.record || item)}, card = el('article', 'card'); record.project_id ||= record.source_project_id;
     add(card, el('h2', '', record.title || record.question || record.display_name || record.filename || record.id));
     add(card, el('p', 'muted', [record.kind || kind, record.status || record.availability || record.state, record.revision ? `Revision ${record.revision}` : '', record.project_id && record.project_id !== state.projectId ? `Shared from project ${record.project_id}` : ''].filter(Boolean).join(' · ')));
+    add(card, recordChips(record, kind));
     add(card, el('p', 'shared-record-body', record.body || record.snippet || record.rationale || record.summary || ''));
     if (record.applicability) add(card, el('p', '', `Applies when: ${record.applicability}`));
     if (record.answer) {
@@ -2467,6 +2499,8 @@
   $('refresh-shared').addEventListener('click', () => loadShared());
   $('load-more-shared').addEventListener('click', () => loadShared(true));
   $('context-search').addEventListener('submit', event => { event.preventDefault(); loadShared(); });
+  $('knowledge-filters').addEventListener('submit', event => event.preventDefault());
+  ['knowledge-tag', 'knowledge-kind', 'knowledge-status', 'knowledge-shared'].forEach(id => $(id).addEventListener('change', () => loadShared()));
   $('new-lesson').addEventListener('click', () => lessonDialog());
   $('binding-rules').addEventListener('click', bindingRules);
   $('import-markdown').addEventListener('click', importDialog);
