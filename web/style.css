@@ -390,6 +390,10 @@ button.record-chip:focus-visible { outline: 3px solid var(--teal); outline-offse
 @media (max-width: 620px) { .blockers-groups { grid-template-columns: minmax(0, 1fr); } .blocker-item .text-button, .blocker-group > .button { min-height: 36px; } }
 .held-attempts { display: grid; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; font-size: 13px; }
 .held-attempts li { display: grid; gap: 2px; overflow-wrap: anywhere; }
+#agent-sessions-view .toolbar { flex-wrap: wrap; }
+#agent-sessions-view .select-label { min-width: min(100%, 170px); }
+#agent-sessions-count { margin: 0 0 12px; font-size: 13px; }
+.agent-session-quiet, .held-heartbeat { margin: 0; font-size: 13px; }
 .agent-session-card .report-facts dd { overflow-wrap: anywhere; }
 .held-attempt-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
 
