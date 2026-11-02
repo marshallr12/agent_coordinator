@@ -13,7 +13,7 @@
     try { const saved = localStorage.getItem(TASK_SORT_KEY); return TASK_SORTS.includes(saved) ? saved : TASK_SORTS[0]; } catch { return TASK_SORTS[0]; }
   }
   const state = {
-    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reportsQuery: '', reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, digestSeq: 0, digestProjectId: '', digestLoaded: false, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
+    actor: null, csrfToken: null, projects: [], tasks: [], credentials: [], credentialsLoaded: false, operators: [], restoreItems: [], resources: [], resourcesLoaded: false, resourceCursor: null, resourcePagesExtended: false, sharedCursor: null, sharedItems: [], sharedRules: undefined, sharedKey: '', sharedLoaded: false, sharedSeq: 0, reportsCursor: null, reports: [], reportsLoaded: false, reportsProjectId: '', reportsSeq: 0, agentSessionsSeq: 0, agentSessionsProjectId: '', agentSessionsLoaded: false, agentSessionsPage: null, digestSeq: 0, digestProjectId: '', digestLoaded: false, digestData: null, autonomySeq: 0, autonomyProjectId: '', autonomyLoaded: false, autonomySummaries: new Map(),
     projectId: '', projectsRendered: false, selectedTaskId: '', currentView: 'overview', detail: null, detailKey: '', credentialDownloadUrl: null,
     taskPages: [], taskPageIndex: 0, taskPageSize: 25, taskView: 'queue', taskSearch: { queue: '', completed: '' }, taskAutoRefresh: savedTaskAutoRefresh(), taskSort: savedTaskSort(), taskQueueLoaded: false, queueTasks: [], completedTasks: [], completedLoaded: false, completedPageIndex: 0, inflightCompleted: false, archivedProjects: [], archivedProjectsLoaded: false, archivedTasks: [], archivedLoaded: false, archivedPageIndex: 0, archivedProjectId: '', mutation: null, fetching: new Set(), inflight: { projects: false, tasks: null, detail: null, credentials: null },
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
@@ -67,16 +67,49 @@
     return node;
   };
   const add = (parent, child) => { if (parent && child) parent.appendChild(child); return child; };
-  const formatDate = (value) => {
-    if (!value) return '—';
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? text(value) : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  // ---- Time display -------------------------------------------------------------------------
+  // Every date the page shows is formatted by formatInstant(), in the zone chosen under My account
+  // ('local' or 'utc'). A timestamp that stands alone is a <time> whose title is its exact UTC instant.
+  const TIME_ZONE_KEY = 'agent-coordinator.time-zone';
+  let timeZone = (() => { try { return localStorage.getItem(TIME_ZONE_KEY) === 'utc' ? 'utc' : 'local'; } catch { return 'local'; } })();
+  const TIME_STYLES = {
+    datetime: { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' },
+    date: { month: 'short', day: 'numeric' },
+    clock: { hour: 'numeric', minute: '2-digit' },
   };
-  const shortDate = (value) => {
-    if (!value) return '—';
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? text(value) : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  };
+  function formatInstant(value, style = 'datetime') {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return text(value);
+    const options = { ...TIME_STYLES[style], timeZoneName: 'short' };
+    if (timeZone === 'utc') options.timeZone = 'UTC';
+    return date.toLocaleString([], options);
+  }
+  const countFormat = new Intl.NumberFormat('en-US');
+  const formatDate = (value) => value ? formatInstant(value) : '—';
+  const shortDate = (value) => value ? formatInstant(value, 'date') : '—';
+  const isoInstant = (value) => { const date = new Date(value); return value && !Number.isNaN(date.getTime()) ? date.toISOString() : ''; };
+  // A <time> showing `value` between optional text; it is focusable so keyboard users can read its UTC title.
+  function timeEl(value, className, before = '', after = '', style = 'datetime') {
+    const node = el('time', className, `${before}${value ? formatInstant(value, style) : '—'}${after}`), iso = isoInstant(value);
+    if (iso) { node.dateTime = iso; node.title = iso; node.tabIndex = 0; }
+    return node;
+  }
+  // Content mixing text with timestamps: a string stays text and {at: value} becomes a <time>.
+  function timedParts(parts) {
+    const fragment = document.createDocumentFragment();
+    parts.forEach((part) => add(fragment, typeof part === 'string' ? document.createTextNode(part) : timeEl(part.at, '', '', '', part.style)));
+    return fragment;
+  }
+  const timedEl = (tag, className, ...parts) => { const node = el(tag, className); add(node, timedParts(parts)); return node; };
+  // A `tag` holding a text value or a prepared node, such as a <time>.
+  const valueEl = (tag, value) => { const node = el(tag); if (value instanceof Node) add(node, value); else setText(node, value); return node; };
+  const timeZoneListeners = new Set();
+  function setTimeZone(value) {
+    const next = value === 'utc' ? 'utc' : 'local';
+    try { localStorage.setItem(TIME_ZONE_KEY, next); } catch { /* The choice still applies for this page. */ }
+    if (next === timeZone) return;
+    timeZone = next; timeZoneListeners.forEach((listener) => listener());
+  }
   const displayStatus = (value) => text(value || 'ready').replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
   const taskStatus = (task) => {
     if (task?.work_status) return task.work_status;
@@ -133,7 +166,7 @@
   // reconcile() keeps a node whose key and sig match, rebuilds one whose sig changed, and adds or removes
   // the rest, so a refresh with unchanged data touches nothing. Sections that are not lists use
   // patchSection(). Both carry focus, selection, open <details> and scroll offsets across a rebuild.
-  const sig = (...values) => JSON.stringify(values);
+  const sig = (...values) => JSON.stringify([timeZone, values]);
   const patched = new WeakMap();
   function pathWithin(root, node) {
     const path = [];
@@ -315,10 +348,11 @@
     if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'data')) {
       throw new ApiError('The coordinator returned an invalid response envelope.', response.status, 'invalid_response', null, method !== 'GET');
     }
-    state.lastSync = new Date();
-    setText($('last-sync'), `Updated ${state.lastSync.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`);
+    state.lastSync = new Date(); renderLastSync();
     return payload;
   }
+
+  const renderLastSync = () => { if (state.lastSync) setText($('last-sync'), `Updated ${formatInstant(state.lastSync, 'clock')}`); };
 
   function setGlobalAlert(message, kind = 'error', withRetry = false) {
     const target = $('global-alert');
@@ -678,7 +712,7 @@
     add(card, el('p', 'repo', project.repository_url || 'Repository not configured'));
     add(card, el('p', 'project-id', `Project ID · ${projectId || 'Unavailable'}`));
     const footer = el('div', 'project-card-footer');
-    add(footer, el('span', 'project-meta', `Archived · ${formatDate(project.archived_at)}`));
+    add(footer, timeEl(project.archived_at, 'project-meta', 'Archived · '));
     if (state.actor?.kind === 'human') {
       const restore = el('button', 'button subtle', 'Restore'); restore.type = 'button'; restore.dataset.mutation = 'true';
       restore.setAttribute('aria-label', `Restore project ${project.name || projectId}`);
@@ -1042,8 +1076,7 @@
     if (progressAt !== null) progress.dateTime = task.last_progress_at;
     add(title, progress);
     const identity = el('span', 'task-queue-id'); add(identity, el('span', '', 'Task ID · ')); add(identity, el('span', 'task-id-value', task.id));
-    const created = el('time', 'task-created project-meta', `Created ${formatDate(task.created_at)}`);
-    if (task.created_at && !Number.isNaN(new Date(task.created_at).getTime())) created.dateTime = task.created_at;
+    const created = timeEl(task.created_at, 'task-created project-meta', 'Created ');
     const meta = el('span', 'task-meta');
     const badge = paintStatusBadge(el('span', 'status-badge'), task); add(meta, badge);
     const description = el('span', 'task-description', task.description || 'No description');
@@ -1236,12 +1269,12 @@
       view = { message: task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : statusIndicator(task).stage === 'in_review' ? 'A reviewer holds a live review lease. The review activities below show who claimed it.' : statusIndicator(task).stage === 'awaiting_reviewer' ? 'No lease. The review is queued and waiting for a reviewer to claim it.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.' };
     } else {
       const remaining = taskStatus(task) === 'recovery_required' ? 'Ownership ended; recovery required' : current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
-      view = { rows: [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]] };
+      view = { rows: [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', { at: current.expires_at }], ['Generation', current.generation || 1]] };
     }
     // The signature is the rendered text, so a lease that ticks within the same displayed minute changes nothing.
     patchSection($('lease-content'), sig(view), (target) => {
       if (view.message) { add(target, el('p', 'muted', view.message)); return; }
-      const dl = el('dl'); view.rows.forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, el('dd', '', value)); add(dl, line); }); add(target, dl);
+      const dl = el('dl'); view.rows.forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, valueEl('dd', value?.at !== undefined ? timeEl(value.at) : value)); add(dl, line); }); add(target, dl);
     });
   }
 
@@ -1256,13 +1289,13 @@
     reconcile($('lifecycle-content'), [
       ...events.map((event, index) => ({ key: `event:${event.id ?? `${index}:${event.action}:${event.created_at}`}`, sig: sig(event), build: () => {
         const item = el('div', 'lifecycle-event');
-        add(item, el('p', '', `${verbs[event.action] || displayStatus(event.action)} by ${event.actor_name || event.actor_id || 'unknown'} on ${formatDate(event.created_at)}${event.reason_code ? ` (${displayStatus(event.reason_code)})` : ''}${event.reason ? `: ${event.reason}` : ' (no reason was recorded)'}`));
+        add(item, timedEl('p', '', `${verbs[event.action] || displayStatus(event.action)} by ${event.actor_name || event.actor_id || 'unknown'} on `, { at: event.created_at }, `${event.reason_code ? ` (${displayStatus(event.reason_code)})` : ''}${event.reason ? `: ${event.reason}` : ' (no reason was recorded)'}`));
         if (event.replacement_task_id) { const line = el('p', 'lifecycle-replacement', 'Replaced by '); add(line, taskLink(event.replacement_task_id, `task ${event.replacement_task_id}`)); add(item, line); }
         return item;
       } })),
       ...replaces.map((old) => ({ key: `replaces:${old.task_id}`, sig: sig(old), build: () => {
         const item = el('div', 'lifecycle-event'); const line = el('p', '', 'Replaces '); add(line, taskLink(old.task_id, old.title || old.task_id));
-        add(line, document.createTextNode(` (canceled by ${old.actor_name || old.actor_id || 'unknown'} on ${formatDate(old.canceled_at)}${old.reason ? `: ${old.reason}` : ''})`)); add(item, line);
+        add(line, timedParts([` (canceled by ${old.actor_name || old.actor_id || 'unknown'} on `, { at: old.canceled_at }, `${old.reason ? `: ${old.reason}` : ''})`])); add(item, line);
         return item;
       } }))
     ]);
@@ -1561,7 +1594,7 @@
     checkpoints = checkpoints.slice().sort((a, b) => new Date(b.created_at || b.at).getTime() - new Date(a.created_at || a.at).getTime());
     if (!checkpoints.length) { reconcile(target, [{ key: 'none', sig: '', build: () => el('p', 'muted', 'No checkpoints have been shared yet.') }]); return; }
     reconcile(target, checkpoints.map((point, index) => ({ key: point.id ?? `${index}:${point.attempt_id}:${point.created_at || point.at}`, sig: sig(point), build: () => {
-      const item = el('div', 'checkpoint'); const top = el('div', 'checkpoint-top'); add(top, el('span', '', point.actor_name || point.owner_id || 'Agent')); add(top, el('time', '', formatDate(point.created_at || point.at))); add(item, top); add(item, el('p', 'checkpoint-summary', point.summary || 'Progress update'));
+      const item = el('div', 'checkpoint'); const top = el('div', 'checkpoint-top'); add(top, el('span', '', point.actor_name || point.owner_id || 'Agent')); add(top, timeEl(point.created_at || point.at)); add(item, top); add(item, el('p', 'checkpoint-summary', point.summary || 'Progress update'));
       if (point.current_action) add(item, el('p', 'checkpoint-detail', `Current action · ${point.current_action}`)); if (point.next_step) add(item, el('p', 'checkpoint-detail', `Next step · ${point.next_step}`));
       if (Array.isArray(point.blockers) && point.blockers.length) add(item, el('p', 'checkpoint-detail', `Blockers · ${point.blockers.join(', ')}`));
       return item;
@@ -1607,8 +1640,8 @@
       return { key: credential.id, sig: sig(credential, offer), build: () => {
         const row = el('div', 'credential-row'), info = el('div');
         add(info, el('div', 'credential-name', `${credential.principal_name || credential.name || credential.id} · ${credential.credential_name || 'initial'}${credential.class && credential.class !== 'interactive' ? ` · ${credential.class}` : ''}${credential.access === 'read' ? ' · read-only' : ''}`));
-        add(info, el('div', 'credential-meta', `Issued ${shortDate(credential.created_at)}`));
-        if (credential.revoked_at) add(info, el('div', 'credential-revoked', `Revoked ${shortDate(credential.revoked_at)}`));
+        add(info, timedEl('div', 'credential-meta', 'Issued ', { at: credential.created_at, style: 'date' }));
+        if (credential.revoked_at) add(info, timedEl('div', 'credential-revoked', 'Revoked ', { at: credential.revoked_at, style: 'date' }));
         add(row, info);
         if (!credential.revoked_at) {
           const actions = el('div', 'credential-actions');
@@ -1641,6 +1674,27 @@
     const focused = document.activeElement, region = regionId && $(regionId);
     return Boolean(region && focused && region.contains(focused) && focused.matches('textarea, select, input:not([type=checkbox]):not([type=radio]):not([type=button])'));
   }
+  // Re-renders every view that holds data after the time display changes, so a view opened later is not stale.
+  // Signatures include the zone, so only dated nodes rebuild. Views with nothing cached read again if shown.
+  function renderTimeDisplays() {
+    renderLastSync();
+    const view = state.currentView;
+    if (state.projectsRendered) renderProjects();
+    if (state.archivedProjectsLoaded) renderArchivedProjects();
+    if (state.taskQueueLoaded || state.completedLoaded) showTaskPage(state.taskView === 'completed' ? state.completedPageIndex : state.taskPageIndex, false);
+    if (state.archivedLoaded) renderArchivedTasks();
+    if (state.detail) {
+      const data = state.detail, task = data.task || data;
+      paintStatusBadge($('detail-status'), task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
+    }
+    if (state.agentSessionsPage && state.agentSessionsLoaded && state.agentSessionsProjectId === state.projectId) renderAgentSessions(state.agentSessionsPage);
+    if (state.reportsLoaded && state.reportsProjectId === state.projectId) renderReports({ items: state.reports, next_before: state.reportsCursor }, false);
+    if (state.digestLoaded && state.digestData && state.digestProjectId === state.projectId) renderDigest(state.digestData);
+    if (view === 'autonomy') loadAutonomy();
+    else if (view === 'admin') loadCredentials(true);
+    else if (view === 'resources' && !state.resourcePagesExtended) loadResources(true);
+  }
+  timeZoneListeners.add(renderTimeDisplays);
   function pollTick() {
     if (!state.actor || refreshBlocked()) return;
     if (state.currentView === 'overview') loadProjects(true);
@@ -1937,7 +1991,7 @@
     jobs.forEach(job => items.push({ key: `job:${job.id}`, sig: sig(job, repositoryUrl), build: () => {
       const entry = el('div', 'evidence-entry'); entry.id = jobEntryId(job.id); entry.tabIndex = -1; add(entry, el('h3', '', job.label || 'Local job'));
       add(entry, el('p', '', `Producer: ${displayStatus(job.state)} · Observation: ${displayStatus(job.observation_freshness || 'unknown')}`));
-      add(entry, el('p', 'muted', `Last observation: ${formatDate(job.last_observed_at)} · Exit: ${job.exit_code ?? 'not reported'}`));
+      add(entry, timedEl('p', 'muted', 'Last observation: ', { at: job.last_observed_at }, ` · Exit: ${job.exit_code ?? 'not reported'}`));
       if (job.inputs_unchanged === false) add(entry, el('p', 'error', 'Source changed during this job; its result does not verify the current checkout.'));
       if (job.reconciled_at) { add(entry, el('p', 'muted', `Operator reconciliation: ${job.reconciliation_reason || 'Recorded'}`)); add(entry, el('p', '', job.reconciliation_evidence || '')); }
       if (job.source_revision) { const source = el('p', 'muted', 'Source revision: '); add(source, revisionNode(repositoryUrl, job.source_revision)); add(entry, source); }
@@ -2140,7 +2194,7 @@
       add(entry, el('p', 'muted', `${displayStatus(activity.status)} · ${activity.id}`));
       if (activity.activity_task_id) { const open = el('button', 'button text-button', 'Inspect activity task and jobs'); open.type = 'button'; open.addEventListener('click', () => openTask(activity.activity_task_id)); add(entry, open); }
       const attempt = activity.current_attempt || activity.attempt;
-      if (attempt) add(entry, el('p', 'muted', `Owner ${attempt.owner_id} · lease expires ${formatDate(attempt.expires_at)}`));
+      if (attempt) add(entry, timedEl('p', 'muted', `Owner ${attempt.owner_id} · lease expires `, { at: attempt.expires_at }));
       if (activity.review) { add(entry, el('p', '', `${displayStatus(activity.review.decision)}: ${activity.review.summary}`)); (activity.review.findings || []).forEach(finding => add(entry, el('p', '', `${displayStatus(finding.severity)}: ${finding.remedy}`))); }
       if (activity.intent) {
         const intent = add(entry, el('p', 'muted', 'Publication intent: '));
@@ -2392,7 +2446,7 @@
       show($('load-more-shared'), Boolean(state.sharedCursor));
       if (state.sharedItems.length || append) show($('shared-state'), false);
       else setState($('shared-state'), page.instructions_complete === false ? 'The context budget cannot include all binding rules. Increase the budget before relying on this packet.' : 'No matching records.');
-      setText($('shared-freshness'), `Read ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}. Refresh to inspect changes.${page.truncated ? ' Results were bounded; narrow the search for more context.' : ''}`);
+      setText($('shared-freshness'), `Read ${formatInstant(new Date(), 'clock')}. Refresh to inspect changes.${page.truncated ? ' Results were bounded; narrow the search for more context.' : ''}`);
       renderMutationState();
     } catch (error) { if (seq === state.sharedSeq && currentActor === actorId()) setState($('shared-state'), errorMessage(error), false, true); }
   }
@@ -2702,7 +2756,7 @@
     try {
       const digest = (await request(`${projectPath(projectId)}/digest`)).data;
       if (seq !== state.digestSeq || projectId !== state.projectId) return;
-      renderDigest(digest); state.digestLoaded = true;
+      state.digestData = digest; renderDigest(digest); state.digestLoaded = true;
       try { await request(`${projectPath(projectId)}/digest/read`, { method: 'POST', body: {}, idempotencyKey: newKey() }); }
       catch (error) { if (seq === state.digestSeq) setState($('digest-state'), `Showing the digest, but recording the read failed: ${errorMessage(error)}`, false, true); }
     } catch (error) { if (seq === state.digestSeq && projectId === state.projectId) setState($('digest-state'), errorMessage(error), false, true); }
@@ -2720,12 +2774,12 @@
     const section = (key, title, items, line) => ({ key, sig: sig(title, items), build: () => {
       const card = el('article', 'card report-card'); add(card, el('h2', '', `${title} (${items.length})`));
       if (!items.length) add(card, el('p', 'muted', 'None.'));
-      items.forEach(item => add(card, el('p', '', line(item))));
+      items.forEach(item => add(card, timedEl('p', '', ...[].concat(line(item)))));
       return card;
     } });
     reconcile($('digest-content'), [
-      section('proceeded', `Proceeded on their recommendation in the last ${digest.window_hours} hours`, proceeded, item => `${text(item.question)} → ${text(item.proceeded_with)} at ${formatDate(item.proceeded_at)}. Reopen decision ${text(item.decision_id)} to undo.${(item.affected_tasks || []).length ? ` Affects ${item.affected_tasks.map(task => digestTaskRef(task.title, task.task_id)).join(', ')}.` : ''}`),
-      section('pending', 'Will proceed on their own', pending, item => `${text(item.question)} → ${text(item.recommendation)} at ${formatDate(item.proceeds_at)}`),
+      section('proceeded', `Proceeded on their recommendation in the last ${digest.window_hours} hours`, proceeded, item => [`${text(item.question)} → ${text(item.proceeded_with)} at `, { at: item.proceeded_at }, `. Reopen decision ${text(item.decision_id)} to undo.${(item.affected_tasks || []).length ? ` Affects ${item.affected_tasks.map(task => digestTaskRef(task.title, task.task_id)).join(', ')}.` : ''}`]),
+      section('pending', 'Will proceed on their own', pending, item => [`${text(item.question)} → ${text(item.recommendation)} at `, { at: item.proceeds_at }]),
       section('hri', 'Human-required interventions', hri.items || [], digestHriLine)
     ]);
     setState($('digest-state'), digest.last_read_at ? `Last read ${formatDate(digest.last_read_at)} (before this visit).` : 'This digest had not been read before this visit.');
@@ -2835,13 +2889,13 @@
         const latest = canaries.latest || [];
         if (!canaryItems.length) { add(card, el('p', 'muted', 'No canary result has been reported for this project. A supervisor host reports each end-to-end canary run.')); return; }
         add(card, el('h3', '', 'Latest per host and harness'));
-        add(card, dataTable(['Host', 'Harness', 'Outcome', 'When'], latest.map(item => [item.host, item.harness, outcomeBadge(item.outcome), formatDate(item.occurred_at)])));
+        add(card, dataTable(['Host', 'Harness', 'Outcome', 'When'], latest.map(item => [item.host, item.harness, outcomeBadge(item.outcome), timeEl(item.occurred_at)])));
         add(card, el('h3', '', 'History, newest first'));
-        add(card, dataTable(['When', 'Outcome', 'Harness', 'Host', 'Duration', 'Task'], canaryItems.map(item => [formatDate(item.occurred_at), outcomeBadge(item.outcome), item.harness, item.host, `${Math.round(item.duration_seconds)} s`, taskButton(projectId, item.task_id)])));
+        add(card, dataTable(['When', 'Outcome', 'Harness', 'Host', 'Duration', 'Task'], canaryItems.map(item => [timeEl(item.occurred_at), outcomeBadge(item.outcome), item.harness, item.host, `${Math.round(item.duration_seconds)} s`, taskButton(projectId, item.task_id)])));
         if (canaries.next_before) add(card, el('p', 'muted', 'Older runs are available from the source.'));
       }, ['Reported canary results', 'canaries']),
       autonomyCard('digest', 'Digest status', ['digest'], [digest.last_read_at, digest.digest_sender, digest.held_agent_tasks, digest.agent_task_weekly_budget], sources, card => {
-        add(card, factList([['Last read', digest.last_read_at ? formatDate(digest.last_read_at) : 'Never read'], ['Designated sender', digest.digest_sender || 'None designated'], ['Last sent', 'Not recorded: the service sees when the digest is read, not when it is sent'], ['Held agent tasks', text((digest.held_agent_tasks || []).length)], ['Weekly agent-task budget', digest.agent_task_weekly_budget ? `${text(digest.agent_task_weekly_budget.admitted_this_week)} of ${text(digest.agent_task_weekly_budget.limit)} admitted this week` : '']]));
+        add(card, factList([['Last read', digest.last_read_at ? timeEl(digest.last_read_at) : 'Never read'], ['Designated sender', digest.digest_sender || 'None designated'], ['Last sent', 'Not recorded: the service sees when the digest is read, not when it is sent'], ['Held agent tasks', text((digest.held_agent_tasks || []).length)], ['Weekly agent-task budget', digest.agent_task_weekly_budget ? `${text(digest.agent_task_weekly_budget.admitted_this_week)} of ${text(digest.agent_task_weekly_budget.limit)} admitted this week` : '']]));
         const open = el('button', 'button subtle', 'Open the attention digest'); open.type = 'button'; open.addEventListener('click', openDigest); add(card, open);
       }, ['Attention digest', 'digest']),
     ]);
@@ -2858,7 +2912,7 @@
     const dayItems = costDays.items || [], taskItems = costTasks.items || [];
     add(card, el('h3', '', 'Daily caps reported by supervisor hosts'));
     if (!caps.length) add(card, el('p', 'muted', 'No host has reported its daily caps, so spend is shown without a cap.'));
-    else add(card, dataTable(['Host', 'Implementation cap', 'Reviewer cap', 'Reported'], caps.map(cap => [cap.host, cap.impl_daily_usd === 0 ? 'None' : dollars(cap.impl_daily_usd), cap.rev_daily_usd === 0 ? 'None' : dollars(cap.rev_daily_usd), formatDate(cap.reported_at)])));
+    else add(card, dataTable(['Host', 'Implementation cap', 'Reviewer cap', 'Reported'], caps.map(cap => [cap.host, cap.impl_daily_usd === 0 ? 'None' : dollars(cap.impl_daily_usd), cap.rev_daily_usd === 0 ? 'None' : dollars(cap.rev_daily_usd), timeEl(cap.reported_at)])));
     add(card, el('h3', '', 'Cost per day (UTC)'));
     const implCap = combinedCap(caps, 'impl_daily_usd'), revCap = combinedCap(caps, 'rev_daily_usd');
     if (!dayItems.length) add(card, el('p', 'muted', 'No cost has been reported for this project in this window.'));
@@ -2918,7 +2972,7 @@
     const query = new URLSearchParams({active_within_hours: $('agent-sessions-window').value});
     try {
       const page = (await request(`${projectPath(projectId)}/sessions?${query}`)).data;
-      if (seq === state.agentSessionsSeq && projectId === state.projectId) { state.agentSessionsLoaded = true; renderAgentSessions(page); }
+      if (seq === state.agentSessionsSeq && projectId === state.projectId) { state.agentSessionsLoaded = true; state.agentSessionsPage = page; renderAgentSessions(page); }
     } catch (error) { if (seq === state.agentSessionsSeq && projectId === state.projectId) setState($('agent-sessions-state'), errorMessage(error), false, true); }
   }
   // Renders one card per session, the empty-window message, or a truncation note.
@@ -2935,7 +2989,7 @@
     const header = add(card, el('div', 'card-header')), held = session.held_attempts || [];
     add(header, el('h2', '', session.principal?.name || session.principal?.id || 'Agent'));
     add(header, el('span', `status-badge ${held.length ? 'report-open' : 'report-resolved'}`, held.length ? `Holds ${held.length} attempt${held.length === 1 ? '' : 's'}` : 'Idle'));
-    add(card, factList([['Agent', agentKind(session)], ['Workstation', session.workstation_id], ['Session', session.session_id], ['Started', formatDate(session.started_at)], ['Last activity', formatDate(session.last_activity_at)]]));
+    add(card, factList([['Agent', agentKind(session)], ['Workstation', session.workstation_id], ['Session', session.session_id], ['Started', timeEl(session.started_at)], ['Last activity', timeEl(session.last_activity_at)]]));
     add(card, heldAttemptList(held));
     return card;
   }
@@ -2953,11 +3007,11 @@
     const item = el('li'), title = add(item, el('div', 'held-attempt-title'));
     add(title, el('strong', '', attempt.task_title || attempt.task_id));
     if (attempt.lease_expired) add(title, el('span', 'status-badge report-needs-human', 'Lease expired'));
-    add(item, el('span', 'muted', heldAttemptMeta(attempt)));
+    add(item, timedEl('span', 'muted', ...heldAttemptMeta(attempt)));
     return item;
   }
   // A held attempt's task id, kind of work (review, integration or work), and lease expiry unless it already lapsed.
-  const heldAttemptMeta = attempt => [attempt.task_id, displayStatus(attempt.activity_kind || attempt.mode), attempt.lease_expired ? 'needs recovery' : `expires ${formatDate(attempt.expires_at)}`].join(' · ');
+  const heldAttemptMeta = attempt => [`${attempt.task_id} · ${displayStatus(attempt.activity_kind || attempt.mode)} · `, ...(attempt.lease_expired ? ['needs recovery'] : ['expires ', { at: attempt.expires_at }])];
 
   // Integrator reports: findings the integrator records; humans resolve them.
   const REPORT_KINDS = {privilege_gate:'Privilege gate', flaky:'Flaky check', fix_target:'Target needs a fix', unreviewed_landing:'Unreviewed landing', target_rewritten:'Target rewritten', ruleset_missing:'Ruleset missing'};
@@ -3036,12 +3090,12 @@
   // The report's identities and any resolution as a definition list.
   function reportFacts(report) {
     const detail = name => typeof report.details?.[name] === 'string' ? report.details[name] : '';
-    return factList([['Report', report.id], ['Recorded', formatDate(report.created_at)], ['Check', detail('check_name')], ['Target branch', detail('target_branch')], ['Verdict', detail('verdict')], ['Task', report.task_id], ['Submission', report.submission_id], ['Result', report.result_id], ['Resolved', report.resolved_at && formatDate(report.resolved_at)], ['Resolved by', report.resolved_by], ['Resolution note', report.resolution_note]]);
+    return factList([['Report', report.id], ['Recorded', timeEl(report.created_at)], ['Check', detail('check_name')], ['Target branch', detail('target_branch')], ['Verdict', detail('verdict')], ['Task', report.task_id], ['Submission', report.submission_id], ['Result', report.result_id], ['Resolved', report.resolved_at && timeEl(report.resolved_at)], ['Resolved by', report.resolved_by], ['Resolution note', report.resolution_note]]);
   }
   // A definition list of the [label, value] pairs that have a value.
   function factList(pairs) {
     const facts = el('dl', 'report-facts');
-    pairs.filter(([, value]) => value).forEach(([label, value]) => { add(facts, el('dt', 'muted', label)); add(facts, el('dd', '', value)); });
+    pairs.filter(([, value]) => value).forEach(([label, value]) => { add(facts, el('dt', 'muted', label)); add(facts, valueEl('dd', value)); });
     return facts;
   }
   // Opens the human resolve form; a privilege gate also needs allow or deny.
@@ -3326,8 +3380,8 @@
   }
   // Says which side was cut at DIFF_LINE_CAP lines, so a capped comparison is never mistaken for a complete one.
   function truncationNote(section, sides, base, next) {
-    const cut = [[base, sides[0]], [next, sides[1]]].filter(([, side]) => side.total > DIFF_LINE_CAP).map(([record, side]) => `revision ${record.revision} has ${side.total.toLocaleString('en-US')} lines`);
-    if (cut.length) add(section, el('p', 'compare-truncation', `Truncated: only the first ${DIFF_LINE_CAP.toLocaleString('en-US')} lines of each side are compared (${cut.join('; ')}).`));
+    const cut = [[base, sides[0]], [next, sides[1]]].filter(([, side]) => side.total > DIFF_LINE_CAP).map(([record, side]) => `revision ${record.revision} has ${countFormat.format(side.total)} lines`);
+    if (cut.length) add(section, el('p', 'compare-truncation', `Truncated: only the first ${countFormat.format(DIFF_LINE_CAP)} lines of each side are compared (${cut.join('; ')}).`));
   }
   function renderRevisionComparison(target, base, next) {
     const before = base.definition || {}, after = next.definition || {};
@@ -3495,6 +3549,7 @@
       dialog.close(); startMutation('/api/v1/admin/operators',body,'operator creation',async () => { await loadOperators(); setGlobalAlert('Operator account created.', 'success'); });
     });
   }
+  const passkeyLabel = (passkey) => timedEl('span', '', `${passkey.name} · Added `, { at: passkey.created_at }, ' · ', ...(passkey.last_used_at ? ['Last used ', { at: passkey.last_used_at }] : ['Never used']));
   async function myAccount() {
     const currentActor = actorId();
     try {
@@ -3508,6 +3563,12 @@
         radio.addEventListener('change', () => applyTheme(value)); add(choice, radio); add(choice, el('span', '', label)); add(themeGroup, choice);
       });
       add(view.form, themeGroup);
+      const zoneGroup = el('fieldset', 'theme-selector time-zone-selector'); add(zoneGroup, el('legend', '', 'Time display'));
+      [['local', 'Local time'], ['utc', 'UTC']].forEach(([value, label]) => {
+        const choice = el('label', 'theme-choice'); const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'site-time-zone'; radio.value = value; radio.checked = timeZone === value;
+        radio.addEventListener('change', () => { if (radio.checked) setTimeZone(value); }); add(choice, radio); add(choice, el('span', '', label)); add(zoneGroup, choice);
+      });
+      add(view.form, zoneGroup);
       const emailBox = el('fieldset', 'email-settings'); add(emailBox, el('legend', '', 'Email address'));
       const emailStatus = operator.email ? `${operator.email} · ${operator.email_verified ? 'Verified' : 'Requires verification'}` : 'No email address is set.';
       add(emailBox, el('p', '', emailStatus));
@@ -3539,7 +3600,9 @@
         if (passkeys === null) add(passkeyBox, el('p', 'error', 'Your passkeys could not be loaded.'));
         else if (!passkeys.length) add(passkeyBox, el('p', '', 'No passkeys are set up for this account.'));
         passkeys?.forEach((passkey) => {
-          const row = el('div', 'passkey-row'); add(row, el('span', '', `${passkey.name} · Added ${formatDate(passkey.created_at)} · ${passkey.last_used_at ? `Last used ${formatDate(passkey.last_used_at)}` : 'Never used'}`));
+          const row = el('div', 'passkey-row'); let label = add(row, passkeyLabel(passkey));
+          const relabel = () => { const fresh = passkeyLabel(passkey); label.replaceWith(fresh); label = fresh; };
+          timeZoneListeners.add(relabel); view.dialog.addEventListener('close', () => timeZoneListeners.delete(relabel), { once: true });
           add(row, actionButton('Remove', () => { view.dialog.close(); startMutation(`/api/v1/auth/passkeys/${encodeURIComponent(passkey.id)}/delete`, {}, 'passkey removal', async () => setGlobalAlert('Passkey removed.', 'success'), 'POST', (error) => setGlobalAlert(errorMessage(error), 'error', error.uncertain)); }));
           add(passkeyBox, row);
         });
@@ -3571,8 +3634,8 @@
         if (!view.dialog.isConnected || actorId() !== currentActor) return;
         sessions = append ? [...sessions, ...(page.items || [])] : (page.items || []);
         reconcile(list, sessions.map(session => ({ key: session.id, sig: sig(session), build: () => {
-          const row = el('div','shared-card'); add(row,el('p','',`${session.current ? 'This browser' : session.id} · Created ${formatDate(session.created_at)} · Expires ${formatDate(session.expires_at)}`));
-          if (session.revoked_at) add(row,el('p','muted',`Revoked ${formatDate(session.revoked_at)}`));
+          const row = el('div','shared-card'); add(row,timedEl('p','',`${session.current ? 'This browser' : session.id} · Created `,{at:session.created_at},' · Expires ',{at:session.expires_at}));
+          if (session.revoked_at) add(row,timedEl('p','muted','Revoked ',{at:session.revoked_at}));
           else add(row,actionButton('Revoke session', () => startMutation(`/api/v1/browser-sessions/${encodeURIComponent(session.id)}/revoke`,{},'browser session revocation',async () => { if (session.current) { view.dialog.close(); signOutLocal(); } else await load(); })));
           return row;
         } })));
