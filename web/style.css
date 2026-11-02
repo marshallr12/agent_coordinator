@@ -329,6 +329,17 @@ a.nav-item { text-decoration: none; }
 .status-badge.report-resolved { color: var(--pill-ready-ink); background: var(--teal-soft); }
 .current-integration-owner { font-weight: 750; }
 @media (max-width: 650px) { .report-facts { grid-template-columns: 1fr; } }
+.blockers-card { margin-bottom: 20px; }
+.blockers-card .state-panel { min-height: 76px; margin: 0 0 12px; padding: 16px; }
+.blockers-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.blockers-groups:empty { display: none; }
+.blocker-group { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-bg); }
+.blocker-group h3 { margin: 0 0 8px; font-size: 14px; color: var(--navy); }
+.blocker-items { display: grid; gap: 8px; margin: 0 0 8px; padding: 0; list-style: none; }
+.blocker-item { display: grid; gap: 2px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.blocker-item .text-button { justify-self: start; padding: 0; text-align: left; overflow-wrap: anywhere; }
+.blocker-group > .button { margin: 0 8px 4px 0; }
+@media (max-width: 620px) { .blockers-groups { grid-template-columns: minmax(0, 1fr); } .blocker-item .text-button, .blocker-group > .button { min-height: 36px; } }
 .held-attempts { display: grid; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; font-size: 13px; }
 .held-attempts li { display: grid; gap: 2px; overflow-wrap: anywhere; }
 .agent-session-card .report-facts dd { overflow-wrap: anywhere; }

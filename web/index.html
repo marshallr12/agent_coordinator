@@ -164,6 +164,11 @@
                 <label id="status-filter-label" class="select-label" for="status-filter">Status<select id="status-filter"><option value="all">All statuses</option><option value="ready">Ready</option><option value="planned">Planned</option><option value="in_progress">In progress</option><option value="recovery_required">Recovery required</option><option value="waiting_review">Waiting for review</option><option value="waiting_integration">Waiting for integration</option><option value="integrating">Integrating</option><option value="validating">Validating</option><option value="blocked">Blocked</option><option value="canceled">Canceled</option><option value="superseded">Superseded</option></select></label>
                 <label class="select-label search-label" for="tasks-search">Search<input id="tasks-search" type="search" placeholder="Search task names or ids" autocomplete="off"></label>
               </div>
+              <section id="blockers-card" class="card blockers-card" aria-labelledby="blockers-heading" hidden>
+                <div class="card-header"><div><h2 id="blockers-heading">Blockers</h2><p class="muted">What is waiting on a person or a prerequisite, with a link to where it is cleared.</p></div></div>
+                <div id="blockers-state" class="state-panel" role="status" hidden></div>
+                <div id="blockers-groups" class="blockers-groups"></div>
+              </section>
               <div id="tasks-state" class="state-panel" role="status"><span class="spinner" aria-hidden="true"></span><span>Select a project to load tasks.</span></div>
               <div id="tasks-list" class="tasks-list" hidden></div>
               <div id="task-pagination" class="tasks-footer" aria-label="Task pagination" hidden>
