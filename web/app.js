@@ -1374,6 +1374,45 @@
     return button;
   }
 
+  // Says what the service records about an artifact, beside its download: whether it is available (and, if not,
+  // why), its media type, size, SHA-256 and retention. It reads only the record, never the file. An external
+  // link is labelled unverified because the service checks neither its availability nor its checksum.
+  function artifactIntegrity(record) {
+    const external = record.kind === 'external_link', reported = attachmentAvailability(record);
+    // The service never checks a link, so a link that is neither deleted nor expired is shown as unverified, not as unfinished.
+    const availability = external && !['deleted', 'expired'].includes(reported) ? 'available' : reported, available = availability === 'available';
+    const labels = { available: 'Available', expired: 'Expired', deleted: 'Deleted', unavailable: 'Unavailable' };
+    const label = external && available ? 'Unverified link' : labels[availability] || 'Not finalized';
+    const box = el('div', 'artifact-integrity');
+    add(box, el('p', 'muted artifact-summary', `${record.media_type || 'Unknown type'} · ${record.size_bytes ?? 'Unknown'} bytes`));
+    const meta = add(box, el('div', 'artifact-meta')), badge = add(meta, el('span', `artifact-badge ${labels[availability] ? availability : 'pending'}`, label));
+    badge.dataset.availability = availability;
+    if (record.pinned && availability !== 'deleted') add(meta, el('span', 'artifact-retention', 'Pinned'));
+    else if (available && record.retention_until) add(meta, el('span', 'artifact-retention', `Retained until ${formatDate(record.retention_until)}`));
+    else if (available) add(meta, el('span', 'artifact-retention', 'No retention date recorded'));
+    const reason = availability === 'deleted' ? `Deleted${record.deleted_at ? ` on ${formatDate(record.deleted_at)}` : ''}${record.deletion_reason ? `: ${record.deletion_reason}` : '. No reason was recorded.'}`
+      : availability === 'expired' ? (record.state === 'reserved' ? 'The upload reservation expired before the file was finalized.' : `Retention ended${record.retention_until ? ` on ${formatDate(record.retention_until)}` : ''}. The file is no longer served.`)
+      : availability === 'unavailable' ? 'The service reports that the stored file is missing.'
+      : available ? '' : 'Not yet finalized: the upload has not completed, so there is nothing to download.';
+    if (reason) add(box, el('p', 'artifact-reason', reason));
+    if (external) add(box, el('p', 'artifact-unverified', 'Unverified: the service does not verify this link’s availability or checksum.'));
+    const digest = add(box, el('div', 'artifact-digest'));
+    if (!record.sha256) { add(digest, el('span', 'muted', 'SHA-256: none recorded')); return box; }
+    add(digest, el('span', 'artifact-digest-label', external ? 'SHA-256 (as supplied)' : 'SHA-256'));
+    const code = add(digest, el('code', 'artifact-sha', `${record.sha256.slice(0, 16)}…`)); code.title = record.sha256;
+    const copy = add(digest, el('button', 'button subtle artifact-copy', 'Copy SHA-256')); copy.type = 'button'; copy.title = `Copy the full SHA-256 ${record.sha256}`;
+    const status = add(digest, el('span', 'muted artifact-copy-status')); status.setAttribute('role', 'status');
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(record.sha256); setText(status, 'SHA-256 copied.'); }
+      catch (_) {
+        code.textContent = record.sha256; const range = document.createRange(); range.selectNodeContents(code);
+        const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+        setText(status, 'Clipboard access was unavailable. The full SHA-256 is selected; copy it with your browser.');
+      }
+    });
+    return box;
+  }
+
   function renderTaskAttachments(records, pending, hasMore = false) {
     const list = $('task-attachments-list');
     const items = records.map((record) => ({ key: `record:${record.id}`, sig: sig(record), build: () => {
@@ -1389,7 +1428,7 @@
         if (previewKind(record)) add(heading, previewButton(record));
       }
       add(entry, heading);
-      add(entry, el('p', 'muted', `${record.media_type || 'Unknown type'} · ${record.size_bytes ?? 'Unknown'} bytes · ${displayStatus(availability || 'unknown')}`));
+      add(entry, artifactIntegrity(record));
       if (!downloadable && record.external_url) {
         try {
           const url = new URL(record.external_url);
@@ -2465,7 +2504,7 @@
       if (record.availability === 'available' && record.kind === 'upload') iconLink('Download this attachment', 'download', `${projectPath()}/artifacts/${encodeURIComponent(record.id)}/content`).download = '';
       if (previewKind(record)) add(actions, previewButton(record));
       if (record.external_url) { try { const url = new URL(record.external_url); if (url.protocol === 'https:' && !url.username && !url.password) { const link = iconLink('Open the external evidence in a new tab', 'external', url.href); link.rel = 'noopener noreferrer'; link.target = '_blank'; } } catch (_) { /* Show unusable links as metadata only. */ } }
-      add(card, el('p', 'muted', `${record.size_bytes ?? 'Unknown'} bytes · ${record.sha256 || 'No content digest'}${record.kind === 'external_link' ? ' · External availability is not verified by the service.' : ''}`));
+      add(card, artifactIntegrity(record));
     }
     add(card, actions);
     return card;

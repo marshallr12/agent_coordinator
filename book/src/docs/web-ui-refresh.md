@@ -180,3 +180,18 @@ entry in the Jobs & resource holds card, or opens the activity task that owns
 the job and focuses it there. `scripts/test_forge_links.mjs` covers these cases
 and runs the same way as the other browser scripts, with
 `CHROME_BIN=/path/to/chrome node scripts/test_forge_links.mjs`.
+
+## Artifact integrity
+
+Beside each artifact download, the task detail and Knowledge & evidence show
+what the service records about it, from the record alone: an availability badge
+(Available, Expired, Deleted, Unavailable or Not finalized), media type, size,
+the SHA-256 (truncated, with a **Copy SHA-256** button that copies the full
+digest), and either `Retained until <date>` or `Pinned`. An unavailable
+artifact has no download link and states why, including the `deletion_reason`
+when one was recorded. An external link is labelled unverified because the
+service checks neither its availability nor its checksum. No artifact content is
+fetched to render any of this. `scripts/test_artifact_integrity.mjs` covers
+available, pinned, expired, deleted, unfinalized and external-link artifacts in
+both places, the clipboard fallback and a 360 px viewport; run it with
+`CHROME_BIN=/path/to/chrome node scripts/test_artifact_integrity.mjs`.
