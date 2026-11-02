@@ -240,6 +240,12 @@ revision, saves its definition and actor, and records `old_kind`, `new_kind`,
 and `actor_id` in the `task.edited` event. Correct a misclassified task through
 this edit path instead of canceling it and creating a replacement.
 
+**Last progress.** Every task view, including each item of
+`GET /api/v1/projects/{project_id}/tasks`, carries `last_progress_at`: the RFC 3339
+`created_at` of the newest checkpoint saved for any attempt of the task, or `null`
+when the task has no checkpoint. It is read-only, does not change the task revision, and
+lets a client sort a list without requesting each task's detail.
+
 **Human-delivered tasks.** Every task view carries `human_delivered` (default `false`).
 `POST /api/v1/projects/{project_id}/tasks` accepts `human_delivered: true` to create a
 task a human delivers, and `POST …/tasks/{task_id}/human-delivery` with
