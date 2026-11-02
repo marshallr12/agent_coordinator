@@ -130,3 +130,21 @@ fixture-backed browser: queued, active and lapsed reviews and live In Progress
 work in both the task list and the task detail, live updates without a reload,
 tooltips on focus, and reduced motion. Run it with
 `CHROME_BIN=/path/to/chrome node scripts/test_status_indicators.mjs`.
+
+## Failed-check callout
+
+The task page's *Submission & completion* card shows a callout above the
+current candidate when a job on the candidate's exact source revision failed
+(producer state `failed`, a non-zero exit code, or source changed while it
+ran) and no later job of the same check passed. It names the check, producer
+state, exit code and observed time, carries the integrator's blocked report
+when there is one, and has a **Show job evidence** button that focuses the job's
+entry under *Jobs & resource holds*; a job that the page does not list opens
+the task's job history instead. A failure that a later pass of the same check
+superseded is shown as a neutral note rather than an error, and failures of
+other revisions are ignored. The callout reads the task's job evidence and, only
+when the submission has workflow activities, one `history?kind=jobs&limit=50`
+page per change of that evidence; it renders through `reconcile()`, so an
+unchanged poll mutates nothing. `scripts/test_failure_callout.mjs` covers the
+current, superseded, older-revision, clean and activity cases and runs the same
+way as `scripts/test_ui_refresh.mjs`.
