@@ -1286,6 +1286,21 @@ agent-coordinator objectives show --id OBJECTIVE_ID
 agent-coordinator objectives children --id OBJECTIVE_ID --input membership.json
 ```
 
+### Copy task commands from the dashboard
+
+The task detail page has a **CLI commands** disclosure that lists the commands
+above for the open task, each with a **Copy** button (the command is selected
+for manual copying when the browser refuses clipboard access): `tasks show`,
+`tasks history` for attempts and checkpoints, `reviews list` and
+`integrations list` once the task has workflow activities, `jobs inspect` for each
+listed job, and `recovery inspect --attempt` only while the task is
+`recovery_required`. `claim --task ID --revision N` appears only for a ready,
+unowned, agent-deliverable task and is labelled as taking ownership. IDs are
+single-quoted for a POSIX shell when they contain anything beyond plain
+characters, and an ID with control characters yields no command. The commands
+name no service URL, session, state directory or credential; the repository's
+`.agent-coordinator.toml` selects the service.
+
 ### Correct a task's kind
 
 `tasks edit` accepts an optional `"kind": "code"` or `"kind": "general"` in

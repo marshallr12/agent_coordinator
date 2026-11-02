@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import net from 'node:net';
@@ -579,7 +579,7 @@ async function checkExternalCompletion({ evaluate, waitPage }, openFixtureTask) 
   };
   await ineligible('a task with a current attempt', { current_attempt_id: 'fixture-attempt' });
   await ineligible('a task under review', { workflow: { phase: 'review', activities: [] } });
-  await ineligible('a task with an active integration activity', { workflow: { activities: [{ id: 'fixture-integration', kind: 'integration', state: 'active' }] } });
+  await ineligible('a task with an active integration activity', { workflow: { activities: [{ id: 'fixture-integration', kind: 'integration', status: 'active' }] } });
   await ineligible('an archived task', { archived_at: '2026-09-23T00:00:00Z' });
   await ineligible('a closed task', { lifecycle: 'done', work_status: 'done' });
   fixtureActor.kind = 'agent';
@@ -679,6 +679,104 @@ async function checkTaskSearch(page) {
   assert((await visibleTitles(page, 'archived-list')).length === 2, 'Clearing the archived search did not restore every archived task.');
   await evaluate("document.querySelector('#task-queue-tab').click()");
   await page.waitPage("!document.querySelector('#tasks-view').hidden && document.querySelectorAll('#tasks-list .task-row').length === 30", 'queue after search checks');
+}
+
+// The words a POSIX shell reads from a copied command, so the test proves quoting by running the shell, not by pattern.
+function shellWords(command) {
+  assert(command.startsWith('agent-coordinator '), `Command does not start with the CLI name: ${command}`);
+  const script = `cmd() { for word in "$@"; do printf '%s\\0' "$word"; done; }; cmd ${command.slice('agent-coordinator'.length)}`;
+  return execFileSync('sh', ['-c', script], { encoding: 'utf8' }).split('\0').slice(0, -1);
+}
+
+// The task page's CLI commands disclosure: which commands each task state offers, their quoting, their copy buttons and the clipboard fallback.
+async function checkCliCommands({ evaluate, waitPage, send }, openFixtureTask) {
+  const saved = JSON.parse(JSON.stringify(task));
+  const commands = () => evaluate("[...document.querySelectorAll('#task-cli-commands-content .cli-command')].map((row) => ({ label: row.querySelector('.cli-command-label').textContent, command: row.querySelector('code').textContent, ownership: row.classList.contains('ownership'), copy: row.querySelector('button.button')?.getAttribute('aria-label') }))");
+  const open = async (patch) => {
+    Object.assign(task, { lifecycle: 'open', work_status: 'ready', current_attempt_id: null, human_delivered: false, archived_at: null, attempts: [], checkpoints: [], lifecycle_events: [], workflow: { activities: [] }, job_evidence: { jobs: [], reservations: [] }, revision: 7 }, patch);
+    await openFixtureTask();
+    await waitPage("document.querySelectorAll('#task-cli-commands-content .cli-command').length > 0", 'CLI commands');
+    await evaluate("document.querySelector('#task-cli-commands').open = true");
+    return commands();
+  };
+  const plain = (list) => list.map((item) => item.command);
+  const history = (id) => [`agent-coordinator tasks history --id ${id} --kind attempts --limit 50`, `agent-coordinator tasks history --id ${id} --kind checkpoints --limit 50`];
+  const forbidden = /token|password|proof|credential|session|state-dir|https?:|\.toml/i;
+
+  let list = await open({});
+  assert(JSON.stringify(plain(list)) === JSON.stringify([`agent-coordinator tasks show --id ${task.id}`, ...history(task.id), `agent-coordinator claim --task ${task.id} --revision 7`]), `Ready task commands differ: ${JSON.stringify(plain(list))}`);
+  const claim = list.find((item) => item.command.includes(' claim '));
+  assert(claim.ownership && /takes ownership/i.test(claim.label), 'The claim command is not labelled as taking ownership.');
+  assert(list.filter((item) => item !== claim).every((item) => !item.ownership && !/ownership/i.test(item.label)), 'A read-only command is labelled as taking ownership.');
+  assert(await evaluate("document.querySelector('#task-cli-commands > summary').textContent") === 'CLI commands', 'The disclosure has no visible CLI commands label.');
+  assert(!list.some((item) => forbidden.test(item.command)), 'A command carries a credential, session, state directory or URL.');
+  assert(await evaluate("[...document.querySelectorAll('#task-cli-commands-content button')].every((button) => button.tagName === 'BUTTON' && button.type === 'button' && button.tabIndex >= 0 && button.getAttribute('aria-label').startsWith('Copy command: '))"), 'A copy control is not a labelled keyboard-reachable button.');
+
+  // Every copy button writes exactly its own command; when the clipboard refuses, that command is selected instead.
+  for (let index = 0; index < list.length; index++) {
+    await evaluate(`window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = false; document.querySelectorAll('#task-cli-commands-content button')[${index}].click()`);
+    await waitPage('window.__copiedTaskDetailValue !== null', `CLI command ${index} clipboard write`);
+    assert(await evaluate('window.__copiedTaskDetailValue') === list[index].command, `Copy button ${index} did not write exactly its command.`);
+    assert((await evaluate("document.querySelector('#detail-copy-feedback').textContent")).includes('copied to clipboard'), 'Copy success was not reported.');
+    await evaluate(`window.__copiedTaskDetailValue = null; window.__rejectTaskDetailClipboard = true; document.querySelectorAll('#task-cli-commands-content button')[${index}].click()`);
+    await waitPage("document.querySelector('#detail-copy-feedback').classList.contains('fallback')", `CLI command ${index} fallback`);
+    const selected = await evaluate("window.getSelection().toString()"); assert(selected === list[index].command, `Clipboard fallback ${index} did not select exactly its command: ${JSON.stringify(selected)}.`);
+    assert(await evaluate('window.__copiedTaskDetailValue') === null, 'A refused clipboard write was reported as written.');
+    await evaluate("window.__rejectTaskDetailClipboard = false");
+  }
+  // At phone width the opened disclosure stays inside the page and its copy buttons stay reachable.
+  await send('Emulation.setDeviceMetricsOverride', { width: 375, height: 844, deviceScaleFactor: 1, mobile: true });
+  assert(await evaluate("(() => { const details = document.querySelector('#task-cli-commands'); details.open = true; const fits = document.documentElement.scrollWidth <= window.innerWidth && [...details.querySelectorAll('button')].every((button) => button.getBoundingClientRect().right <= window.innerWidth); return fits; })()"), 'The CLI commands overflow the page at phone width.');
+  await send('Emulation.clearDeviceMetricsOverride');
+
+  // Workflow activities add the review and integration lists; jobs add one inspect command each, quoted for the shell.
+  const jobId = "job-1'; echo PWNED #";
+  list = await open({ work_status: 'waiting_review', workflow: { activities: [{ id: 'activity-1', kind: 'agent_review', status: 'queued' }] }, job_evidence: { jobs: [{ id: jobId, label: 'Gate' }, { id: 'plain-job' }], reservations: [] } });
+  assert(JSON.stringify(plain(list).slice(0, 4)) === JSON.stringify([`agent-coordinator tasks show --id ${task.id}`, ...history(task.id), `agent-coordinator reviews list --task ${task.id}`]), `Workflow commands differ: ${JSON.stringify(plain(list))}`);
+  assert(plain(list).includes(`agent-coordinator integrations list --task ${task.id}`), 'Integration list is missing for a task with workflow activities.');
+  const jobCommand = list.find((item) => item.command.includes('jobs inspect') && !item.command.includes('plain-job')).command;
+  assert(JSON.stringify(shellWords(jobCommand)) === JSON.stringify(['jobs', 'inspect', '--job', jobId]), `A job ID was not quoted for the shell: ${jobCommand}`);
+  assert(plain(list).includes('agent-coordinator jobs inspect --job plain-job'), 'A plain job ID was needlessly quoted or missing.');
+  assert(!list.some((item) => / claim | recovery /.test(item.command)), 'A task under review offered claim or recovery.');
+
+  // Recovery inspect appears only for recovery_required, and never a claim.
+  const attemptId = 'attempt$(echo PWNED)`id`"x"';
+  list = await open({ work_status: 'recovery_required', current_attempt_id: attemptId, attempts: [{ id: attemptId, task_id: task.id, generation: 1, mode: 'work', state: 'expired' }] });
+  const recovery = list.filter((item) => item.command.includes('recovery inspect'));
+  assert(recovery.length === 1 && JSON.stringify(shellWords(recovery[0].command)) === JSON.stringify(['recovery', 'inspect', '--attempt', attemptId]), `Recovery inspect is wrong: ${JSON.stringify(plain(list))}`);
+  assert(!list.some((item) => item.ownership || / claim /.test(item.command)), 'A recovery-required task offered a claim.');
+
+  // Claim never appears for owned, human-delivered, archived, blocked or planned tasks, nor recovery inspect.
+  for (const patch of [{ work_status: 'in_progress', current_attempt_id: 'live-attempt' }, { human_delivered: true }, { archived_at: '2026-09-23T00:00:00Z', lifecycle: 'canceled' }, { work_status: 'blocked', blocked_reason: 'Needs a decision' }, { work_status: 'planned', lifecycle: 'planned' }]) {
+    list = await open(patch);
+    assert(!list.some((item) => item.ownership || / claim | recovery /.test(item.command)), `Unexpected claim or recovery for ${JSON.stringify(patch)}.`);
+    assert(plain(list).includes(`agent-coordinator tasks show --id ${task.id}`), 'The show command vanished.');
+  }
+
+  // A task ID with shell metacharacters is quoted in every command; one with control characters yields no command.
+  const hostile = "task'; echo PWNED; `id` $(id) \"x\" #";
+  const hostileTask = { ...JSON.parse(JSON.stringify(task)), id: hostile, title: 'Hostile ID task', lifecycle_events: [], replaces: [{ task_id: task.id, title: task.title, actor_id: 'a', reason: 'r', canceled_at: '2026-10-10T00:00:00Z' }], work_status: 'ready', lifecycle: 'open', workflow: { activities: [{ id: 'activity-2', kind: 'agent_review', status: 'queued' }] }, job_evidence: { jobs: [], reservations: [] } };
+  fixtureTasks.set(hostile, hostileTask);
+  Object.assign(task, { lifecycle: 'open', work_status: 'ready', current_attempt_id: null, workflow: { activities: [] }, job_evidence: { jobs: [], reservations: [] }, lifecycle_events: [{ seq: 1, action: 'canceled', actor_id: 'a', reason: 'r', replacement_task_id: hostile, created_at: '2026-10-10T00:00:00Z' }] });
+  await openFixtureTask();
+  await evaluate("document.querySelector('#lifecycle-content .lifecycle-replacement button').click()");
+  await waitPage("document.querySelector('#task-detail-heading').textContent === 'Hostile ID task' && document.querySelectorAll('#task-cli-commands-content .cli-command').length > 0", 'hostile ID task');
+  list = await commands();
+  const expected = { 'tasks show': ['tasks', 'show', '--id', hostile], 'reviews list': ['reviews', 'list', '--task', hostile], 'integrations list': ['integrations', 'list', '--task', hostile], ' claim ': ['claim', '--task', hostile, '--revision', '7'] };
+  for (const [needle, words] of Object.entries(expected)) {
+    const item = list.find((entry) => entry.command.includes(needle));
+    assert(item && JSON.stringify(shellWords(item.command)) === JSON.stringify(words), `Hostile task ID was not safely quoted for ${needle}: ${item?.command}`);
+  }
+  assert(list.filter((entry) => entry.command.includes('tasks history')).every((entry) => shellWords(entry.command)[3] === hostile), 'Hostile task ID was not safely quoted in task history.');
+  await evaluate("document.querySelector('#lifecycle-content button').click()");
+  await waitPage(`document.querySelector('#task-detail-heading').textContent === ${JSON.stringify(task.title)}`, 'original task');
+  fixtureTasks.delete(hostile);
+
+  const controlId = 'job-\nrm';
+  list = await open({ job_evidence: { jobs: [{ id: controlId }, { id: '-dash' }], reservations: [] }, lifecycle_events: [] });
+  assert(!list.some((item) => item.command.includes('rm')), 'A control-character ID produced a command.');
+  assert(plain(list).includes('agent-coordinator jobs inspect --job=-dash'), 'A leading-dash ID can be read as an option.');
+  Object.keys(task).forEach((key) => delete task[key]); Object.assign(task, saved);
 }
 
 async function removeProfile(profile) {
@@ -1143,6 +1241,7 @@ async function main() {
     assert(await evaluate("Boolean(document.querySelector('dialog[open]')) && !document.querySelector('#workflow-findings').validity.valid"), 'Required remedies allowed approval.');
     await evaluate("document.querySelector('dialog[open]').close()");
 
+    await checkCliCommands({ evaluate, waitPage, send }, openFixtureTask);
     await checkVerifiedRecovery({ evaluate, waitPage }, openFixtureTask);
     await checkLifecycleReasons({ evaluate, waitPage }, openFixtureTask);
     await checkExternalCompletion({ evaluate, waitPage }, openFixtureTask);
@@ -1188,7 +1287,7 @@ async function main() {
     assert(await evaluate('window.getSelection().toString()') === 'synthetic-token-for-clipboard-test', 'Token fallback did not select the complete synthetic token.');
     await checkAgentActorControls(ui, serverPort);
     await checkReloadedResolutionLabel(ui, serverPort);
-    console.log('PASS: headless Chrome verified task kind prefill and revision-checked saves in both directions, project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), lifecycle reasons with replacement links in both directions, the human-only external-completion control (eligibility, roster-prefilled checks, request body, refusal codes), saved blockers, and keyboard/hover/emulated-touch help.');
+    console.log('PASS: headless Chrome verified task kind prefill and revision-checked saves in both directions, project navigation, the confirmed integration owner setting (held-integration refusal included), integrator reports listing, paging (with a failed-page retry) and resolution (privilege allow/deny, already-resolved refusal, and the project label after a reload with a pending resolution), connected agent sessions (held review and work attempts, the lapsed-lease marker, activity windows, refresh, empty and error states), human-only owner and resolve controls, dedicated archived-task view, queue exclusion, task lifecycle controls and deletion safeguards, keyboard focus, queue/completed-task separation, task-name search in the queue, completed and archived views, pagination, task attachments with safe uncertain-upload retry and download, binding download, task-detail and issued-token copy/fallback, per-state CLI inspection and resume commands with shell quoting and copy/fallback, completion action gating, human-review dialog, service-verified recovery dialog (fetched SHA instead of attestations), lifecycle reasons with replacement links in both directions, the human-only external-completion control (eligibility, roster-prefilled checks, request body, refusal codes), saved blockers, and keyboard/hover/emulated-touch help.');
   } finally {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null && process.platform === 'win32') {

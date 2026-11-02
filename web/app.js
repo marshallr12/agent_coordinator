@@ -1040,6 +1040,54 @@
     catch (_) { selectTaskDetailText(sourceId); setTaskDetailCopyFeedback(`Clipboard access was unavailable. ${label} is selected; copy it with your browser.`, 'fallback'); }
   }
 
+  // POSIX single-quote quoting for one shell word: plain words stay bare, anything else is wrapped so no
+  // metacharacter is interpreted. Control characters cannot be quoted safely for a pasted command, so they yield null.
+  function shellQuote(value) {
+    const word = text(value);
+    if (/[\u0000-\u001f\u007f]/.test(word)) return null;
+    return /^[A-Za-z0-9_@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
+  }
+  // A CLI command line: `args` mixes literal words with [flag, value] pairs whose value is quoted. A value that
+  // starts with a dash is attached as --flag=value so the CLI cannot read it as another option. Null when any value is unsafe.
+  function cliCommand(...args) {
+    const words = [];
+    for (const arg of args) {
+      if (!Array.isArray(arg)) { words.push(arg); continue; }
+      const [flag, value] = arg, quoted = shellQuote(value);
+      if (quoted === null || !text(value)) return null;
+      words.push(text(value).startsWith('-') ? `${flag}=${quoted}` : `${flag} ${quoted}`);
+    }
+    return ['agent-coordinator', ...words].join(' ');
+  }
+  // The inspection and resume commands that apply to this task. They carry only the task's own record IDs: the
+  // service comes from the repository's .agent-coordinator.toml, never a URL, session, state directory or credential.
+  function taskCliCommands(data, task) {
+    const id = text(task.id || state.selectedTaskId), status = taskStatus(task), list = [];
+    const push = (key, label, command, ownership = false) => { if (command) list.push({ key, label, command, ownership }); };
+    push('show', 'Show this task', cliCommand('tasks', 'show', ['--id', id]));
+    push('history-attempts', 'Attempt history', cliCommand('tasks', 'history', ['--id', id], ['--kind', 'attempts'], ['--limit', '50']));
+    push('history-checkpoints', 'Checkpoint history', cliCommand('tasks', 'history', ['--id', id], ['--kind', 'checkpoints'], ['--limit', '50']));
+    if ((data.workflow?.activities || []).length) {
+      push('reviews', 'List review activities', cliCommand('reviews', 'list', ['--task', id]));
+      push('integrations', 'List integration activities', cliCommand('integrations', 'list', ['--task', id]));
+    }
+    ((data.job_evidence || {}).jobs || []).forEach((job) => push(`job:${job.id}`, `Inspect job ${text(job.label || job.id)}`, cliCommand('jobs', 'inspect', ['--job', text(job.id)])));
+    if (status === 'recovery_required' && task.current_attempt_id) push('recovery', 'Inspect the expired attempt for recovery', cliCommand('recovery', 'inspect', ['--attempt', text(task.current_attempt_id)]));
+    const revision = Number(task.revision);
+    if (status === 'ready' && task.lifecycle === 'open' && !task.archived_at && !task.human_delivered && !task.current_attempt_id && Number.isInteger(revision) && revision > 0) push('claim', 'Claim this task (takes ownership)', cliCommand('claim', ['--task', id], ['--revision', String(revision)]), true);
+    return list;
+  }
+  function renderTaskCliCommands(data, task) {
+    reconcile($('task-cli-commands-content'), taskCliCommands(data, task).map((item, index) => ({ key: item.key, sig: sig(item.label, item.command, item.ownership), build: () => {
+      const row = el('div', item.ownership ? 'cli-command ownership' : 'cli-command'), codeId = `cli-command-${index}`;
+      add(row, el('p', 'cli-command-label', item.label));
+      const code = el('code', '', item.command); code.id = codeId; add(row, code);
+      const copy = el('button', 'button subtle', 'Copy'); copy.type = 'button'; setAttr(copy, 'aria-label', `Copy command: ${item.label}`);
+      copy.addEventListener('click', () => copyTaskDetailValue(code, item.label)); add(row, copy);
+      return row;
+    } })));
+  }
+
   // Task fields that the operator action buttons read; a change to any other field leaves them alone.
   const TASK_ACTION_FIELDS = ['id', 'title', 'description', 'acceptance_criteria', 'priority', 'kind', 'lifecycle', 'work_status', 'status', 'archived_at', 'activity_kind', 'current_attempt_id', 'human_delivered', 'revision', 'blocked_reason', 'depends_on', 'dependencies', 'objective_id', 'parent_objective_id'];
   const pick = (source, fields) => Object.fromEntries(fields.filter((field) => source && field in source).map((field) => [field, source[field]]));
@@ -1059,7 +1107,7 @@
     $('task-attachments-card').classList.toggle('task-attachments-readonly', readOnly);
     const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
     reconcile($('acceptance-list'), items.length ? items.map((item, index) => ({ key: index, sig: sig(item), build: () => el('li', '', item) })) : [{ key: 'none', sig: '', build: () => el('li', 'muted', 'No acceptance criteria recorded.') }]);
-    renderTaskActions(data, task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
+    renderTaskCliCommands(data, task); renderTaskActions(data, task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
     show($('task-detail-state'), false); show($('task-detail-content'), true);
     loadTaskAttachments(state.projectId, taskId, false, quiet);
   }
