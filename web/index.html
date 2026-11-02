@@ -264,8 +264,10 @@
                 <div><label for="resource-description">Description</label><input id="resource-description" maxlength="2000" placeholder="What consumes this capacity?" aria-describedby="resource-description-help"><p id="resource-description-help" class="muted">Describe what it is, who uses it, and any access constraint that matters.</p></div>
                 <button class="button primary" type="submit">Create resource</button>
               </form><p class="muted">Use the edit icon in the table to change a resource, or the delete icon to remove one that no reservation has used.</p></article>
+              <div class="toolbar resource-toolbar" role="search" aria-label="Find resources"><label class="select-label search-label" for="resources-search">Search<input id="resources-search" type="search" placeholder="Search keys or descriptions" autocomplete="off"></label><label class="select-label" for="resources-sort">Sort by<select id="resources-sort"><option value="key">Key (A–Z)</option><option value="capacity">Capacity (most first)</option><option value="held">Held (most first)</option><option value="available">Available (most first)</option></select></label><label class="checkbox-label resource-free-label" for="resources-free"><input id="resources-free" type="checkbox">Only resources with free capacity</label></div>
               <div id="resources-state" class="state-panel" role="status">Loading resources…</div>
-              <div class="table-wrap"><table class="data-table resource-table" id="resources-table"><thead><tr><th scope="col">Key</th><th scope="col">Description</th><th scope="col">Capacity</th><th scope="col">Held</th><th scope="col">ID</th><th scope="col">Actions</th></tr></thead><tbody id="resources-list"></tbody></table></div>
+              <p id="resources-note" class="muted" role="status" hidden></p>
+              <div class="table-wrap"><table class="data-table resource-table" id="resources-table"><thead><tr><th scope="col">Key</th><th scope="col">Description</th><th scope="col">Capacity</th><th scope="col">Held</th><th scope="col">Available</th><th scope="col">ID</th><th scope="col">Actions</th></tr></thead><tbody id="resources-list"></tbody></table></div>
               <button id="load-more-resources" class="button subtle" type="button" hidden>Load more resources</button>
             </section>
 
