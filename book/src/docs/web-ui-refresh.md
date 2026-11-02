@@ -88,7 +88,7 @@ is outside every view.
 | Project card autonomy summary | `loadAutonomySummary` after each project load, at most once a minute per project | Not shown | Counts, last canary, today's cost | Text patched in place; the card is not rebuilt |
 | Connected sessions | `loadAgentSessions`: open, window select, **Refresh** | Cleared and rebuilt | A session's activity and held attempts | Cards keyed by session id |
 | Knowledge & evidence | `loadShared`: open, selects, **Refresh**, **Load more**, search, post-mutation | Cleared and rebuilt, discarding history a person had expanded | Record fields; the rules text of a context search | Cards keyed by kind and record id; expanded history survives while the record is unchanged |
-| Resources | `loadResources`: open, **Refresh**, poll, **Load more**, create | Cleared and rebuilt every card | Held units, description; resources added | Cards keyed by resource id |
+| Resources | `loadResources`: open, **Refresh**, poll, **Load more**, create; `renderResources`: search, sort, free-capacity filter | Cleared and rebuilt every card | Held units, description; resources added | Rows keyed by resource id; the Available column is derived (capacity − held), so it changes with its row |
 | Access: credentials | `loadCredentials`: open, **Refresh**, poll, post-mutation | Cleared and rebuilt every row | Revocation, rotation, new credentials | Rows keyed by credential id (signature also records whether the row offers a replacement) |
 | Access: operators | `loadOperators`: open, **Refresh**, **Load more**, post-mutation | Cleared and rebuilt | Role, enabled, revision | Rows keyed by operator id |
 | Access: server clock, restore status | `loadClock`, `loadRestore`: open, **Refresh**, post-mutation | Cleared and rebuilt | Clock incident; restore progress and holds | Status lines, evidence and holds keyed separately |
@@ -111,6 +111,20 @@ Chrome against a fixture server and, per view, requires:
 
 Run it with `CHROME_BIN=/path/to/chrome node scripts/test_ui_refresh.mjs`. Set
 `CHROME_ARGS=--no-sandbox` where Chrome's sandbox is unavailable.
+
+## Resource search, sort and free-capacity filter
+
+The Resources toolbar searches keys and descriptions (case-insensitive), sorts
+by key, capacity, held or available units (most first; ties by key), and can
+hide fully held resources. The table's **Available** column is capacity minus
+held units. These controls work on the resources the page has loaded. The first
+time a search, a sort other than key, or the filter is used, the page fetches
+the remaining pages 200 at a time, and it stops at 2,000 resources. When more
+exist, a note under the toolbar says that only the first 2,000 are searched and
+**Load more** is hidden. Rendering goes through `reconcile()`, so an unchanged
+refresh records no DOM mutation. `scripts/test_resource_search.mjs` covers the
+controls, the column, the mobile layout and the cap; run it like
+`scripts/test_ui_refresh.mjs`.
 
 ## Address history
 
