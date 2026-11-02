@@ -326,6 +326,15 @@ records. Pagination preserves an insertion cutoff; mutable operational records
 can still change. Start a fresh history query to include records inserted later.
 Objective details also provide older membership-history pages.
 
+**Compare revisions**, in the Task brief card, compares two saved revisions of a
+task's definition side by side. It opens on the previous and current revisions and
+marks each field that differs with the word *Changed*. Acceptance criteria and the
+description are shown as line lists labelled *Added*, *Removed* or *Unchanged*. The
+revision pickers list the revisions loaded so far (50 per page, oldest first);
+**Load more revisions** fetches the next page. Each side of a line comparison is
+limited to 2,000 lines, with a visible note when text is cut. Task text is shown
+literally, never as HTML. The dialog only reads; it changes nothing.
+
 See [objective semantics](objective-contract.md), [history pages](history-contract.md),
 and [account lifecycle](operator-access-contract.md) for precise API contracts.
 
