@@ -130,3 +130,18 @@ fixture-backed browser: queued, active and lapsed reviews and live In Progress
 work in both the task list and the task detail, live updates without a reload,
 tooltips on focus, and reduced motion. Run it with
 `CHROME_BIN=/path/to/chrome node scripts/test_status_indicators.mjs`.
+
+## Time display
+
+My account has a *Time display* choice, Local time or UTC, saved in the
+browser's local storage under `agent-coordinator.time-zone`. It defaults to
+Local time, also when storage is unavailable. Every date on the page is
+formatted by one helper, `formatInstant()`, which appends the zone
+abbreviation. A date that stands alone is a focusable `<time>` whose `datetime`
+and `title` hold the exact ISO-8601 UTC instant; keyboard focus shows it in a
+bubble. Lease "minutes remaining" figures stay relative. The zone is part of
+every render signature, so changing it rebuilds only the dated nodes and an
+unchanged refresh still records no DOM mutation.
+`scripts/test_time_display.mjs` checks both modes across the task list, task
+detail and sessions, persistence, and blocked storage; run it with
+`CHROME_BIN=/path/to/chrome node scripts/test_time_display.mjs`.
