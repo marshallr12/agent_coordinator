@@ -1376,6 +1376,87 @@ async fn dependency_cycles_rollback_edits_and_blocked_tasks_are_not_claimed() {
     assert_eq!(v["data"]["title"], "first");
 }
 #[tokio::test]
+async fn task_detail_lists_prerequisites_and_dependents_for_a_chain() {
+    let f = Fixture::new().await;
+    let p = f.project("chain").await;
+    let a = f.task(&p, "task a", vec![]).await;
+    let b = f
+        .task(&p, "task b", vec![a["id"].as_str().unwrap().into()])
+        .await;
+    let c = f
+        .task(&p, "task c", vec![b["id"].as_str().unwrap().into()])
+        .await;
+    let detail = |t: &Value| format!("/api/v1/projects/{p}/tasks/{}", t["id"].as_str().unwrap());
+    let (status, v) = f.call(&f.a, "GET", &detail(&a), "a", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["depends_on"], json!([]));
+    assert_eq!(v["data"]["prerequisites"], json!([]));
+    assert_eq!(
+        v["data"]["dependents"],
+        json!([{"id":b["id"],"title":"task b","work_status":"blocked","lifecycle":"open"}])
+    );
+    assert_eq!(v["data"]["dependents_truncated"], false);
+    let (_, v) = f.call(&f.a, "GET", &detail(&b), "b", json!({})).await;
+    assert_eq!(v["data"]["depends_on"], json!([a["id"]]));
+    assert_eq!(
+        v["data"]["prerequisites"],
+        json!([{"id":a["id"],"title":"task a","work_status":"ready","lifecycle":"open"}])
+    );
+    assert_eq!(
+        v["data"]["dependents"],
+        json!([{"id":c["id"],"title":"task c","work_status":"blocked","lifecycle":"open"}])
+    );
+    let (_, v) = f.call(&f.a, "GET", &detail(&c), "c", json!({})).await;
+    assert_eq!(v["data"]["depends_on"], json!([b["id"]]));
+    assert_eq!(
+        v["data"]["prerequisites"],
+        json!([{"id":b["id"],"title":"task b","work_status":"blocked","lifecycle":"open"}])
+    );
+    assert_eq!(v["data"]["dependents"], json!([]));
+    assert_eq!(v["data"]["dependents_truncated"], false);
+}
+#[tokio::test]
+async fn task_detail_caps_dependents_and_flags_truncation() {
+    let f = Fixture::new().await;
+    let p = f.project("fanout").await;
+    let root = f.task(&p, "root", vec![]).await;
+    let root_id = root["id"].as_str().unwrap();
+    // The human-operated admin creates the tasks, so the agent admission budget does not apply.
+    for index in 0..51 {
+        let (status, v) = f
+            .call(
+                &f.admin,
+                "POST",
+                &format!("/api/v1/projects/{p}/tasks"),
+                &Uuid::new_v4().to_string(),
+                json!({"title":format!("dependent {index:02}"),"description":"Test task","acceptance_criteria":["Required behavior verified"],"kind":"code","depends_on":[root_id]}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+    }
+    let (status, v) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{root_id}"),
+            "root",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let dependents = v["data"]["dependents"].as_array().unwrap();
+    assert_eq!(dependents.len(), 50);
+    assert_eq!(v["data"]["dependents_truncated"], true);
+    assert!(dependents.iter().all(|d| d["work_status"] == "blocked"));
+    let mut ids: Vec<&str> = dependents
+        .iter()
+        .map(|d| d["id"].as_str().unwrap())
+        .collect();
+    let sorted = ids.clone();
+    ids.sort();
+    assert_eq!(ids, sorted, "dependents are ordered by task id");
+}
+#[tokio::test]
 async fn all_project_access_does_not_allow_cross_project_relationships() {
     let f = Fixture::new().await;
     let p = f.project("one").await;

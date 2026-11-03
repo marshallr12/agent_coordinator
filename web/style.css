@@ -386,3 +386,13 @@ a.nav-item { text-decoration: none; }
   .status-icon.reviewing { border-color: currentColor; }
 }
 .passkey-settings { margin: 18px 0 4px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }.passkey-settings legend { padding: 0 5px; color: var(--navy); font-size: 13px; font-weight: 750; }.passkey-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 6px 0; }
+.dependency-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
+.dependency-column h3 { margin: 0 0 8px; font-size: 13px; color: var(--navy); }
+.dependency-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.dependency-item { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.dependency-arrow { color: var(--muted); flex: none; }
+.dependency-open { flex: 1 1 auto; min-width: 0; padding: 0; text-align: left; overflow-wrap: anywhere; }
+.dependency-item .status-badge { flex: none; white-space: normal; }
+.dependency-truncated { margin-top: 10px; }
+@media (max-width: 620px) { .dependency-columns { grid-template-columns: 1fr; } .dependency-item { flex-wrap: wrap; } }
+.dependency-item .status-badge.done { color: var(--pill-ready-ink); background: var(--teal-soft); }
