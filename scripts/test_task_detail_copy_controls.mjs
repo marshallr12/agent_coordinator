@@ -790,7 +790,7 @@ async function main() {
   const chrome = spawn(executable, [
     '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`, ...extra,
-  ],{ stdio: 'ignore', windowsHide: true });
+  ], { stdio: 'ignore', windowsHide: true });
   let socket;
   let launchError;
   chrome.on('error', (error) => { launchError = error; });
