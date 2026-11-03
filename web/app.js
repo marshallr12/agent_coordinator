@@ -1220,7 +1220,7 @@
     $('task-attachments-card').classList.toggle('task-attachments-readonly', readOnly);
     const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
     reconcile($('acceptance-list'), items.length ? items.map((item, index) => ({ key: index, sig: sig(item), build: () => el('li', '', item) })) : [{ key: 'none', sig: '', build: () => el('li', 'muted', 'No acceptance criteria recorded.') }]);
-    renderTaskCliCommands(data, task); renderTaskActions(data, task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
+    renderTaskCliCommands(data, task); renderTaskActions(data, task); renderLease(data, task); renderDependencies(data); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
     show($('task-detail-state'), false); show($('task-detail-content'), true);
     // A check job opened from another task's workflow lands on its evidence entry once this task is on screen.
     const pending = state.pendingJobFocus;
@@ -1242,6 +1242,37 @@
     patchSection($('lease-content'), sig(view), (target) => {
       if (view.message) { add(target, el('p', 'muted', view.message)); return; }
       const dl = el('dl'); view.rows.forEach(([label, value]) => { const line = el('div', 'lease-line'); add(line, el('dt', '', label)); add(line, el('dd', '', value)); add(dl, line); }); add(target, dl);
+    });
+  }
+
+  // Lists the direct prerequisites ("Waiting on") and dependents ("Holding up") the server returns, each as a
+  // button that opens that task. The server caps dependents, so a truncated list says more exist.
+  function renderDependencies(data) {
+    const asList = (value) => (Array.isArray(value) ? value : []).map((item) => ({ id: text(item.id), title: item.title || '', status: text(item.work_status || item.lifecycle || 'ready'), lifecycle: text(item.lifecycle) }));
+    const view = { waiting: asList(data.prerequisites), holding: asList(data.dependents), truncated: Boolean(data.dependents_truncated) };
+    patchSection($('dependencies-content'), sig(view), (target) => {
+      if (!view.waiting.length && !view.holding.length) { add(target, el('p', 'muted', 'This task has no prerequisites and nothing waits on it.')); return; }
+      const columns = el('div', 'dependency-columns');
+      const column = (heading, className, items, prerequisites) => {
+        const section = el('section', `dependency-column ${className}`); const labelId = `dependency-heading-${className}`;
+        const title = el('h3', '', heading); title.id = labelId; add(section, title);
+        if (!items.length) { add(section, el('p', 'muted', prerequisites ? 'No prerequisites.' : 'Nothing waits on this task.')); return section; }
+        const list = el('ul', 'dependency-list'); list.setAttribute('aria-labelledby', labelId);
+        for (const item of items) {
+          const row = el('li', 'dependency-item'); add(row, el('span', 'dependency-arrow', prerequisites ? '→' : '←')).setAttribute('aria-hidden', 'true');
+          const open = el('button', 'button text-button dependency-open', item.title || item.id); open.type = 'button';
+          open.setAttribute('aria-label', `Open task ${item.title || item.id}`); open.addEventListener('click', () => openTask(item.id));
+          add(row, open);
+          const done = item.lifecycle === 'done';
+          add(row, el('span', `status-badge ${item.status}`, prerequisites ? (done ? 'Done' : `Not done · ${displayStatus(item.status)}`) : displayStatus(item.status)));
+          add(list, row);
+        }
+        add(section, list); return section;
+      };
+      add(columns, column('Waiting on', 'dependency-waiting', view.waiting, true));
+      add(columns, column('Holding up', 'dependency-holding', view.holding, false));
+      add(target, columns);
+      if (view.truncated) add(target, el('p', 'muted dependency-truncated', `Showing the first ${view.holding.length} dependents; more tasks depend on this one.`));
     });
   }
 

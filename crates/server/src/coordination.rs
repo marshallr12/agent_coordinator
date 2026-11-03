@@ -1972,6 +1972,32 @@ pub(crate) async fn owned(
     }
     Ok(a)
 }
+/// Most dependents `task_detail` lists before it sets `dependents_truncated`.
+const DEPENDENTS_LIMIT: usize = 50;
+
+/// The tasks `sql` selects for `id` as `{id,title,work_status,lifecycle}`, and whether `limit` cut the list short.
+async fn related_tasks(
+    c: &mut SqliteConnection,
+    p: &str,
+    sql: &'static str,
+    id: &str,
+    limit: Option<usize>,
+    now: i64,
+) -> Result<(Vec<Value>, bool), AppError> {
+    let mut ids: Vec<String> = sqlx::query_scalar(sql).bind(id).fetch_all(&mut *c).await?;
+    let truncated = limit.is_some_and(|limit| ids.len() > limit);
+    if let Some(limit) = limit {
+        ids.truncate(limit);
+    }
+    let mut related = Vec::with_capacity(ids.len());
+    for related_id in ids {
+        let t = task(c, p, &related_id, now).await?;
+        related.push(
+            json!({"id":t.id,"title":t.title,"work_status":t.status(now),"lifecycle":t.lifecycle}),
+        );
+    }
+    Ok((related, truncated))
+}
 async fn task_detail(
     State(s): State<AppState>,
     auth: Auth,
@@ -2001,6 +2027,29 @@ async fn task_detail(
         .fetch_all(&mut *c)
         .await?
     );
+    value["prerequisites"] = json!(
+        related_tasks(
+            &mut c,
+            &p,
+            "SELECT d.prerequisite_id FROM task_dependencies d JOIN tasks t ON t.id=d.prerequisite_id WHERE d.task_id=? AND t.deleted_at IS NULL ORDER BY d.prerequisite_id",
+            &id,
+            None,
+            s.now(),
+        )
+        .await?
+        .0
+    );
+    let (dependents, dependents_truncated) = related_tasks(
+        &mut c,
+        &p,
+        "SELECT d.task_id FROM task_dependencies d JOIN tasks t ON t.id=d.task_id WHERE d.prerequisite_id=? AND t.deleted_at IS NULL ORDER BY d.task_id",
+        &id,
+        Some(DEPENDENTS_LIMIT),
+        s.now(),
+    )
+    .await?;
+    value["dependents"] = json!(dependents);
+    value["dependents_truncated"] = json!(dependents_truncated);
     let checkouts = sqlx::query("SELECT ch.* FROM checkouts ch JOIN attempts a ON a.id=ch.attempt_id WHERE a.project_id=? AND a.task_id=? ORDER BY a.generation DESC LIMIT 50")
         .bind(&p).bind(&id).fetch_all(&mut *c).await?;
     value["checkouts"] = json!(checkouts.iter().map(checkout_value).collect::<Vec<_>>());
