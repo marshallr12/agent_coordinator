@@ -143,7 +143,7 @@ integrator reports or the decisions list; **Show all** applies the matching
 status filter. Every queue load adds one digest request and one open-reports
 request, however many tasks the project has, and never fetches task detail. A
 source that fails is named in the card, so a failure never reads as "nothing is
-waiting". The card renders through X
+waiting". The card renders through the `reconcile()` and `setState()`
 helpers, so an unchanged poll makes no mutation. `scripts/test_blockers_summary.mjs`
 covers each group, the links, the empty state, the request budget and the
 one-column mobile layout; run it like the other browser tests with
