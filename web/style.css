@@ -492,3 +492,10 @@ div.compare-diff .diff-line { grid-template-columns: 22px minmax(0, 1fr); font-f
 .dependency-truncated { margin-top: 10px; }
 @media (max-width: 620px) { .dependency-columns { grid-template-columns: 1fr; } .dependency-item { flex-wrap: wrap; } }
 .dependency-item .status-badge.done { color: var(--pill-ready-ink); background: var(--teal-soft); }
+.evidence-packet-card { margin-top: 15px; }
+.evidence-packet-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+.evidence-packet-controls .select-label { flex: 1; min-width: min(100%, 220px); }
+.evidence-packet-controls .select-label select { width: 100%; }
+@media (max-width: 620px) { .evidence-packet-controls .button { width: 100%; } }
+.evidence-packet-card .inline-alert { margin: 8px 0 0; }
+.evidence-packet-card ul { margin: 8px 0 0; padding-left: 20px; font-size: 13px; }
