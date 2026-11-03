@@ -646,7 +646,7 @@ async function checkExternalCompletion({ evaluate, waitPage }, openFixtureTask) 
   };
   await ineligible('a task with a current attempt', { current_attempt_id: 'fixture-attempt' });
   await ineligible('a task under review', { workflow: { phase: 'review', activities: [] } });
-  await ineligible('a task with an active integration activity', { workflow: { activities: [{ id: 'fixture-integration', kind: 'integration', state: 'active' }] } });
+  await ineligible('a task with an active integration activity', { workflow: { activities: [{ id: 'fixture-integration', kind: 'integration', status: 'active' }] } });
   await ineligible('an archived task', { archived_at: '2026-09-23T00:00:00Z' });
   await ineligible('a closed task', { lifecycle: 'done', work_status: 'done' });
   fixtureActor.kind = 'agent';
@@ -786,10 +786,11 @@ async function main() {
   const debugPort = await unusedPort();
   const profile = await mkdtemp(join(tmpdir(), 'agent-coordinator-copy-test-'));
   const executable = process.env.CHROME_BIN || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : 'chromium');
+  const extra = (process.env.CHROME_ARGS || '').split(/\s+/).filter(Boolean);
   const chrome = spawn(executable, [
     '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-    '--disable-background-networking', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
-  ], { stdio: 'ignore', windowsHide: true });
+    '--disable-background-networking', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`, ...extra,
+  ],{ stdio: 'ignore', windowsHide: true });
   let socket;
   let launchError;
   chrome.on('error', (error) => { launchError = error; });
