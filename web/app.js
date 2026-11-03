@@ -1222,6 +1222,9 @@
     reconcile($('acceptance-list'), items.length ? items.map((item, index) => ({ key: index, sig: sig(item), build: () => el('li', '', item) })) : [{ key: 'none', sig: '', build: () => el('li', 'muted', 'No acceptance criteria recorded.') }]);
     renderTaskCliCommands(data, task); renderTaskActions(data, task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
     show($('task-detail-state'), false); show($('task-detail-content'), true);
+    // A check job opened from another task's workflow lands on its evidence entry once this task is on screen.
+    const pending = state.pendingJobFocus;
+    if (pending && pending.taskId === taskId) { focusJobEntry(pending.jobId); state.pendingJobFocus = null; }
     loadTaskAttachments(state.projectId, taskId, false, quiet);
   }
 
@@ -1860,6 +1863,68 @@
     });
   }
 
+  // ---- Forge links -------------------------------------------------------------------------
+  // A revision links to its commit page and check runs only when the project's repository is a GitHub
+  // HTTPS or SSH address with no credentials and the revision is a full 40- or 64-digit hex object name.
+  // Anything else is shown as plain, selectable text.
+  const GITHUB_NAME = /^[A-Za-z0-9._-]+$/;
+  function githubRepository(repositoryUrl) {
+    const value = text(repositoryUrl).trim(); let owner, repo;
+    const scp = /^git@github\.com:([^/:@\s]+)\/([^/:@\s]+)$/.exec(value);
+    if (scp) [, owner, repo] = scp;
+    else {
+      let url; try { url = new URL(value); } catch { return null; }
+      if (url.hostname !== 'github.com' || url.port || url.search || url.hash || value.includes('?') || value.includes('#')) return null;
+      // Only the conventional bare `git` SSH user is allowed; any other user name or a password may be a credential.
+      if (url.protocol === 'https:' ? url.username || url.password : url.protocol !== 'ssh:' || url.username !== 'git' || url.password) return null;
+      const parts = url.pathname.replace(/\/$/, '').split('/');
+      if (parts.length !== 3 || parts[0]) return null;
+      [, owner, repo] = parts;
+    }
+    repo = repo.replace(/\.git$/, '');
+    if (![owner, repo].every((name) => GITHUB_NAME.test(name) && !/^\.+$/.test(name))) return null;
+    return `https://github.com/${owner}/${repo}`;
+  }
+  // The commit and checks URLs for `sha` in `repositoryUrl`, or null when either is not recognised.
+  function forgeLinks(repositoryUrl, sha) {
+    const revision = text(sha), base = githubRepository(repositoryUrl);
+    if (!base || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(revision)) return null;
+    return { commit: `${base}/commit/${revision}`, checks: `${base}/commit/${revision}/checks` };
+  }
+  function externalLink(href, label, ariaLabel) {
+    const link = el('a', 'forge-link', label); link.href = href; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    if (ariaLabel) link.setAttribute('aria-label', ariaLabel);
+    return link;
+  }
+  // A revision as linked text with a "checks" link, or as copyable text when it cannot be linked.
+  function revisionNode(repositoryUrl, revision) {
+    const links = forgeLinks(repositoryUrl, revision), wrap = el('span', 'forge-revision');
+    if (!links) { add(wrap, el('code', 'forge-text', revision)); return wrap; }
+    const commit = externalLink(links.commit, revision, `Open commit ${revision} in a new tab`); commit.classList.add('forge-commit'); add(wrap, commit);
+    add(wrap, externalLink(links.checks, 'checks', `Open check runs for commit ${revision} in a new tab`));
+    return wrap;
+  }
+  const projectRepositoryUrl = () => state.projects.find((project) => text(project.id) === state.projectId)?.repository_url || '';
+  // A job's entry in the Jobs & resource holds card; job ids are service-issued but never trusted as selectors.
+  const jobEntryId = (jobId) => `job-evidence-${text(jobId)}`;
+  function focusJobEntry(jobId) {
+    const entry = $(jobEntryId(jobId)); if (!entry) return false;
+    entry.scrollIntoView({ block: 'center' }); entry.focus({ preventScroll: true }); return true;
+  }
+  // Moves to the job's evidence entry here, or opens the activity task that owns the job and focuses it there.
+  function openCheckJob(jobId, activityTaskId) {
+    if (focusJobEntry(jobId)) return;
+    if (!activityTaskId) return;
+    state.pendingJobFocus = { taskId: text(activityTaskId), jobId: text(jobId) };
+    openTask(activityTaskId);
+  }
+  function checkJobButton(jobId, activityTaskId) {
+    const button = el('button', 'button text-button forge-job', jobId); button.type = 'button';
+    button.setAttribute('aria-label', `Show evidence for check job ${jobId}`);
+    button.addEventListener('click', () => openCheckJob(jobId, activityTaskId));
+    return button;
+  }
+
   function renderJobEvidence(data) {
     const target = $('job-evidence-content');
     const evidence = data.job_evidence || {};
@@ -1868,12 +1933,14 @@
     const items = [];
     if (evidence.jobs_truncated || evidence.reservations_truncated) items.push({ key: 'truncated', sig: '', build: () => el('p', 'muted', 'Showing up to 50 jobs and 50 reservations, with unresolved evidence first. Use the CLI job and reservation lists to inspect the complete history.') });
     if (!jobs.length && !reservations.length) items.push({ key: 'none', sig: '', build: () => el('p', 'muted', 'No jobs or resource reservations recorded.') });
-    jobs.forEach(job => items.push({ key: `job:${job.id}`, sig: sig(job), build: () => {
-      const entry = el('div', 'evidence-entry'); add(entry, el('h3', '', job.label || 'Local job'));
+    const repositoryUrl = projectRepositoryUrl();
+    jobs.forEach(job => items.push({ key: `job:${job.id}`, sig: sig(job, repositoryUrl), build: () => {
+      const entry = el('div', 'evidence-entry'); entry.id = jobEntryId(job.id); entry.tabIndex = -1; add(entry, el('h3', '', job.label || 'Local job'));
       add(entry, el('p', '', `Producer: ${displayStatus(job.state)} · Observation: ${displayStatus(job.observation_freshness || 'unknown')}`));
       add(entry, el('p', 'muted', `Last observation: ${formatDate(job.last_observed_at)} · Exit: ${job.exit_code ?? 'not reported'}`));
       if (job.inputs_unchanged === false) add(entry, el('p', 'error', 'Source changed during this job; its result does not verify the current checkout.'));
       if (job.reconciled_at) { add(entry, el('p', 'muted', `Operator reconciliation: ${job.reconciliation_reason || 'Recorded'}`)); add(entry, el('p', '', job.reconciliation_evidence || '')); }
+      if (job.source_revision) { const source = el('p', 'muted', 'Source revision: '); add(source, revisionNode(repositoryUrl, job.source_revision)); add(entry, source); }
       add(entry, el('code', '', `Job ${job.id} · Producer ${job.producer_id}`));
       return entry;
     } }));
@@ -2024,10 +2091,10 @@
     }, 'POST', onError, { projectId, taskId });
   }
   function renderWorkflow(data) {
-    const target = $('workflow-content'), items = []; const workflow = data.workflow || {}; const submission = workflow.submission;
+    const target = $('workflow-content'), items = []; const workflow = data.workflow || {}; const submission = workflow.submission; const repositoryUrl = projectRepositoryUrl();
     if (!submission) { reconcile(target, [{ key: 'none', sig: '', build: () => el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.') }]); return; }
     // The buttons below read the actor, the phase, the blockers and the project's integration setting.
-    const context = sig(state.actor?.kind, actorId(), state.actor?.session_id, workflow.phase, (workflow.blockers || []).length, state.projects.find(project => text(project.id) === state.projectId)?.automatic_integration, submission);
+    const context = sig(state.actor?.kind, actorId(), state.actor?.session_id, workflow.phase, (workflow.blockers || []).length, state.projects.find(project => text(project.id) === state.projectId)?.automatic_integration, submission, repositoryUrl);
     const guidance = {
       review: 'Work has been submitted for review. The submission is a saved version of the result and its evidence; edits require a new submission. ' + ((workflow.activities || []).some(activity => activity.kind === 'either_review') ? 'An independent agent or a human may take this review. One approval satisfies the review requirement; requesting changes requires a new submission. An agent reserves it by claiming; a human reserves it only when recording the decision. Reserving does not approve the work.' : (workflow.activities || []).some(activity => activity.kind === 'human_review') ? 'Review the evidence below, then start an available human review to approve it or request changes. The review is reserved for you only when you record your decision; closing the form leaves it available.' : 'An independent agent must claim the required review and approve the work or request changes.'),
       integration: 'The submitted code is awaiting integration: an agent must validate the required checks, publish the result, and finalize the task. If shown, Authorize integration gives permission to proceed.',
@@ -2039,7 +2106,7 @@
     const candidate = el('div', 'workflow-entry'); add(candidate, el('h3', '', workflow.phase === 'revision_needed' ? 'Previous candidate' : 'Current candidate'));
     add(candidate, el('p', '', submission.summary));
     const details = el('dl');
-    [['Submission', submission.id], ['Source revision', submission.candidate_revision], ['Source tree', submission.candidate_tree], ['Candidate remote identity', submission.candidate_remote], ['Candidate checkpoint ref', submission.candidate_ref], ['Task revision', submission.task_revision], ['Policy revision', submission.project_policy_revision]].filter(([,value]) => value !== null && value !== undefined).forEach(([label,value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+    [['Submission', submission.id], ['Source revision', submission.candidate_revision], ['Source tree', submission.candidate_tree], ['Candidate remote identity', submission.candidate_remote], ['Candidate checkpoint ref', submission.candidate_ref], ['Task revision', submission.task_revision], ['Policy revision', submission.project_policy_revision]].filter(([,value]) => value !== null && value !== undefined).forEach(([label,value]) => { add(details, el('dt', 'muted', label)); const detail = add(details, el('dd')); if (label === 'Source revision') add(detail, revisionNode(repositoryUrl, value)); else setText(detail, value); });
     if (submission.kind === 'code' && !submission.candidate_ref) add(candidate, el('p', 'inline-alert warning', 'Legacy submission has no durable candidate checkpoint. Ask an operator to reopen it before another workstation reviews or integrates its code.'));
     add(candidate, details); if (submission.handoff) add(candidate, el('p', '', submission.handoff));
     (submission.acceptance_evidence || []).forEach(item => add(candidate, el('p', '', `${item.criterion}: ${item.evidence}`)));
@@ -2075,8 +2142,14 @@
       const attempt = activity.current_attempt || activity.attempt;
       if (attempt) add(entry, el('p', 'muted', `Owner ${attempt.owner_id} · lease expires ${formatDate(attempt.expires_at)}`));
       if (activity.review) { add(entry, el('p', '', `${displayStatus(activity.review.decision)}: ${activity.review.summary}`)); (activity.review.findings || []).forEach(finding => add(entry, el('p', '', `${displayStatus(finding.severity)}: ${finding.remedy}`))); }
-      if (activity.intent) add(entry, el('p', 'muted', `Publication intent: ${activity.intent.observed_target_revision} → ${activity.intent.result_revision}`));
-      if (activity.result) add(entry, el('p', '', `Publication: ${displayStatus(activity.result.publication_state)}`));
+      if (activity.intent) {
+        const intent = add(entry, el('p', 'muted', 'Publication intent: '));
+        add(intent, revisionNode(repositoryUrl, activity.intent.observed_target_revision)); add(intent, document.createTextNode(' → ')); add(intent, revisionNode(repositoryUrl, activity.intent.result_revision));
+      }
+      if (activity.result) {
+        add(entry, el('p', '', `Publication: ${displayStatus(activity.result.publication_state)}`));
+        if (activity.result.result_revision) { const result = add(entry, el('p', 'muted', 'Published result revision: ')); add(result, revisionNode(repositoryUrl, activity.result.result_revision)); }
+      }
       if (activity.hold) add(entry, el('p', '', `Target hold: ${displayStatus(activity.hold.state)} · ${activity.hold.canonical_repository_key} · ${activity.hold.target_branch}`));
       if (activity.cancel_reason) {
         const cancel = activity.cancel_reason; const context = cancel.context || {};
@@ -2085,7 +2158,7 @@
         if (revisions.length) add(entry, el('p', 'muted', revisions.join(' · ')));
       }
       if (activity.publication_reconciliation) add(entry, el('p', '', `Reconciled ${displayStatus(activity.publication_reconciliation.disposition)}: ${activity.publication_reconciliation.evidence}`));
-      (activity.result?.check_job_ids || []).forEach(id => add(entry, el('p', 'muted', `Check producer: ${id}`)));
+      (activity.result?.check_job_ids || []).forEach(id => { const check = add(entry, el('p', 'muted', 'Check producer: ')); add(check, checkJobButton(id, activity.activity_task_id)); });
       if (activity.authorization) add(entry, el('p', '', `${activity.authorization.valid === false ? 'Invalidated authorization' : 'Human authorization'}: ${activity.authorization.summary}`));
       const action = (label, callback, help) => { const button = el('button', 'button subtle', label); button.type = 'button'; button.dataset.mutation = 'true'; button.addEventListener('click', callback); add(entry, button); if (help) contextualHelp(entry, button, label, help); };
       if (state.actor?.kind === 'human' && !['done','completed','canceled'].includes(activity.status)) {

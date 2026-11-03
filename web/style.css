@@ -261,6 +261,13 @@ a.nav-item { text-decoration: none; }
 .evidence-entry h3 { margin: 0 0 8px; }
 .evidence-entry p { margin: 5px 0; font-size: 13px; }
 .evidence-entry code { font-size: 11px; }
+.evidence-entry[tabindex="-1"]:focus { outline: 3px solid rgba(8, 125, 122, .42); outline-offset: 2px; }
+.forge-revision { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; max-width: 100%; }
+.forge-text, .forge-commit { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; word-break: break-all; }
+.forge-text { user-select: all; }
+.forge-link { color: var(--teal); text-decoration: underline; text-underline-offset: 2px; }
+.forge-link:hover { color: var(--accent-hover); }
+.button.forge-job { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; text-align: left; overflow-wrap: anywhere; word-break: break-all; }
 .recorded-revision code { display: block; margin: 4px 0; overflow-wrap: anywhere; font-size: 11px; }
 @media (max-width: 900px) { .resource-form { grid-template-columns: 1fr; } .resource-form > div { grid-template-rows: auto auto auto; } .resource-form > button { margin-top: 0; } .sidebar nav { grid-template-columns: repeat(2, 1fr); } }
 .detail-card .card-header, .lease-card .card-header { margin-bottom: 17px; }

@@ -152,3 +152,20 @@ helpers, so an unchanged poll makes no mutation. `scripts/test_blockers_summary.
 covers each group, the links, the empty state, the request budget and the
 one-column mobile layout; run it like the other browser tests with
 `CHROME_BIN=/path/to/chrome node scripts/test_blockers_summary.mjs`.
+
+## Forge links
+
+Task details link a source revision to its commit page and a `checks` link
+only when the project's repository is a GitHub HTTPS or SSH address
+(`https://github.com/owner/repo(.git)`, `git@github.com:owner/repo.git` or
+`ssh://git@github.com/owner/repo.git`) and the revision is 40 or 64 hex digits.
+This covers the submission's source revision, publication intent and result
+revisions and a job's source revision. Any other host, a malformed revision, or
+a repository URL carrying a user name other than the SSH `git` user, a
+password, a port, a query or a fragment is shown as plain selectable text.
+External links open with `target="_blank"` and `rel="noopener noreferrer"`.
+Each check job ID in a publication result is a button: it focuses that job's
+entry in the Jobs & resource holds card, or opens the activity task that owns
+the job and focuses it there. `scripts/test_forge_links.mjs` covers these cases
+and runs the same way as the other browser scripts, with
+`CHROME_BIN=/path/to/chrome node scripts/test_forge_links.mjs`.
