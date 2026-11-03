@@ -1981,6 +1981,9 @@
       if (job.reconciled_at) { add(entry, el('p', 'muted', `Operator reconciliation: ${job.reconciliation_reason || 'Recorded'}`)); add(entry, el('p', '', job.reconciliation_evidence || '')); }
       if (job.source_revision) { const source = el('p', 'muted', 'Source revision: '); add(source, revisionNode(repositoryUrl, job.source_revision)); add(entry, source); }
       add(entry, el('code', '', `Job ${job.id} · Producer ${job.producer_id}`));
+      const observe = el('button', 'button subtle', 'View observations'); observe.type = 'button';
+      observe.setAttribute('aria-label', `View observations for ${job.label || 'local job'} ${job.id}`);
+      observe.addEventListener('click', () => openJobObservations(job)); add(entry, observe);
       return entry;
     } }));
     const human = state.actor?.kind === 'human';
@@ -1997,6 +2000,87 @@
     } }));
     reconcile(target, items);
     renderMutationState();
+  }
+
+  // Job observations are history records served oldest first. The dialog loads them a page at a time,
+  // keeps this job's, and stops at a hard cap so a long task cannot exhaust the browser.
+  const OBSERVATION_PAGE = 200, OBSERVATION_CAP = 2000, OBSERVATION_BYTES = 2 * 1024 * 1024;
+  const OBSERVATION_FIELDS = ['job_id', 'sequence', 'producer_id', 'state', 'pid', 'process_started_at', 'exit_code', 'inputs_unchanged', 'summary', 'observed_at', 'payload_compacted_at'];
+  const newestObservationFirst = (a, b) => (Date.parse(b.observed_at) || 0) - (Date.parse(a.observed_at) || 0) || (b.sequence ?? 0) - (a.sequence ?? 0);
+  // The loaded observations of one job that match the search text (summary, state or exit code) and state.
+  function filterObservations(loaded, search, stateFilter) {
+    const needle = text(search).trim().toLowerCase();
+    return loaded.filter(item => (!stateFilter || item.state === stateFilter)
+      && (!needle || [item.summary, item.state, displayStatus(item.state), item.exit_code].some(value => text(value).toLowerCase().includes(needle)))).sort(newestObservationFirst);
+  }
+  function openJobObservations(job) {
+    const projectId = state.projectId, taskId = state.selectedTaskId, currentActor = actorId();
+    const dialog = el('dialog', 'form-dialog observations-dialog'); const form = el('form'); form.addEventListener('submit', event => event.preventDefault());
+    add(form, el('h2', '', `Observations for ${job.label || 'local job'}`));
+    add(form, el('code', '', `Job ${job.id}`));
+    add(form, el('p', 'muted', `Newest first. Loads ${OBSERVATION_PAGE} task observations at a time and keeps this job’s; stops at ${OBSERVATION_CAP.toLocaleString()} observations or 2 MiB.`));
+    const controls = add(form, el('div', 'observation-controls'));
+    const searchLabel = add(controls, el('label', '', 'Search summary, state or exit code')); const search = add(searchLabel, el('input')); search.type = 'search'; search.id = 'observation-search'; search.autocomplete = 'off'; search.maxLength = 200;
+    const stateLabel = add(controls, el('label', '', 'State')); const stateSelect = add(stateLabel, el('select')); stateSelect.id = 'observation-state';
+    const status = add(form, el('p', 'muted observation-status')); status.setAttribute('role', 'status');
+    const list = add(form, el('div', 'observation-list')), notice = add(form, el('p', 'inline-alert warning')); show(notice, false);
+    const actions = add(form, el('div', 'dialog-actions'));
+    const close = add(actions, el('button', 'button subtle', 'Close')); close.type = 'button'; close.addEventListener('click', () => dialog.close());
+    const more = add(actions, el('button', 'button subtle', 'Load more')); more.type = 'button';
+    const download = add(actions, el('button', 'button primary', 'Download JSON')); download.type = 'button';
+    add(dialog, form); add(document.body, dialog); dialog.addEventListener('close', () => dialog.remove());
+    // loaded: this job's observations; scanned/bytes: everything fetched, which the caps bound.
+    let loaded = [], cursor = null, scanned = 0, bytes = 0, capped = false, retrievedAt = null, failure = '', busy = false, started = false;
+    const filtered = () => filterObservations(loaded, search.value, stateSelect.value);
+    function render() {
+      const states = [...new Set(loaded.map(item => item.state))].sort();
+      if (stateSelect.value && !states.includes(stateSelect.value)) states.push(stateSelect.value);
+      reconcile(stateSelect, optionItems([['', 'All states'], ...states.map(value => [value, displayStatus(value)])]));
+      const shown = filtered();
+      setText(status, !started ? 'Loading observations…' : `Showing ${shown.length} of ${loaded.length} loaded observations for this job (${scanned} task observations read).`);
+      reconcile(list, shown.length ? shown.map(item => ({ key: `${item.sequence}:${item.observed_at}`, sig: sig(item), build: () => {
+        const entry = el('div', 'evidence-entry'); add(entry, el('h3', '', `#${item.sequence} · ${displayStatus(item.state)}`));
+        add(entry, el('p', 'muted', `${formatDate(item.observed_at)} · Exit: ${item.exit_code ?? 'not reported'} · Source unchanged: ${item.inputs_unchanged === null || item.inputs_unchanged === undefined ? 'not reported' : item.inputs_unchanged ? 'yes' : 'no'}`));
+        if (item.payload_compacted_at) add(entry, el('p', 'muted', `Summary cleared by retention on ${formatDate(item.payload_compacted_at)}; the state and exit code are unchanged.`));
+        else add(entry, el('p', '', item.summary || 'No summary.'));
+        return entry;
+      } })) : [{ key: 'none', sig: sig(started, loaded.length), build: () => el('p', 'muted', !started ? '' : loaded.length ? 'No loaded observations match this search.' : 'No observations loaded for this job yet.') }]);
+      patchSection(notice, sig(capped, failure), () => {
+        notice.classList.toggle('error', Boolean(failure));
+        if (failure) setText(notice, failure);
+        else if (capped) setText(notice, `Loading stopped at the limit of ${OBSERVATION_CAP.toLocaleString()} observations or 2 MiB, after ${scanned} observations from the oldest. Newer observations are not shown or downloaded; use the CLI history for the rest.`);
+      });
+      show(notice, Boolean(failure || capped));
+      show(more, Boolean(cursor) && !capped); more.disabled = busy; download.disabled = !started || !shown.length;
+    }
+    async function load() {
+      if (busy) return; busy = true; failure = ''; render();
+      try {
+        const query = `kind=job_observations&limit=${OBSERVATION_PAGE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+        const page = (await request(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/history?${query}`)).data;
+        if (!dialog.isConnected || currentActor !== actorId()) return;
+        const fresh = [];
+        for (const item of page.items || []) {
+          const record = item.record || {}, size = new TextEncoder().encode(JSON.stringify(record)).length;
+          if (scanned >= OBSERVATION_CAP || bytes + size > OBSERVATION_BYTES) { capped = true; break; }
+          scanned += 1; bytes += size;
+          if (record.job_id === job.id) fresh.push(Object.fromEntries(OBSERVATION_FIELDS.map(name => [name, record[name] ?? null])));
+        }
+        loaded = [...loaded, ...fresh]; retrievedAt = new Date().toISOString(); started = true;
+        cursor = page.next_cursor || null;
+        if (cursor && scanned >= OBSERVATION_CAP) capped = true;
+      } catch (error) { if (dialog.isConnected) { failure = errorMessage(error); started = true; } }
+      finally { busy = false; if (dialog.isConnected) render(); }
+    }
+    search.addEventListener('input', render); stateSelect.addEventListener('change', render);
+    more.addEventListener('click', load);
+    download.addEventListener('click', () => {
+      const observations = filtered(); if (!observations.length) return;
+      const body = { project_id: projectId, task_id: taskId, job_id: job.id, retrieved_at: retrievedAt, filters: { search: search.value.trim(), state: stateSelect.value || null }, load_limit_reached: capped, observations };
+      const url = URL.createObjectURL(new Blob([JSON.stringify(body, null, 2)], { type: 'application/json;charset=utf-8' }));
+      const link = el('a'); link.href = url; link.download = `job-observations-${job.id}.json`; add(document.body, link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    render(); dialog.showModal(); search.focus(); load();
   }
 
   function openResourceResolution(reservation) {

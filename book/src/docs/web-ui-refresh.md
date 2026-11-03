@@ -138,6 +138,28 @@ filter, and any filter change restarts pagination while **Load more** stays
 within the displayed filter. It runs the same way as
 `scripts/test_ui_refresh.mjs`.
 
+## Job observations
+
+Each job on the task page has a **View observations** button. It opens a dialog
+that reads the task's `job_observations` history 200 records at a time, keeps
+only the records whose `job_id` is that job, and lists them newest first. Search
+covers the summary, state and exit code; the state filter lists the states
+loaded so far. A summary cleared by retention (`payload_compacted_at`) is
+labeled as such. History is served oldest first and includes the observations of
+every job on the task, so **Load more** is user-driven.
+
+Loading stops, with a visible message and no **Load more**, at 2,000 task
+observations or 2 MiB of records, whichever comes first. The records read are
+the oldest ones, so a task with more history than the cap omits its newest
+observations; use the CLI history for those. **Download JSON** saves the loaded
+observations that match the current search and state as `project_id`, `task_id`,
+`job_id`, `retrieved_at` (when the last page was read), the active `filters`,
+`load_limit_reached`, and `observations`. Only the documented observation fields
+are exported, and the object URL is revoked after the download. Closing the
+dialog changes nothing on the task page. `scripts/test_job_observations.mjs`
+verifies job filtering, search, the cap and the downloaded content; it runs the
+same way as `scripts/test_ui_refresh.mjs`.
+
 ## Status indicators
 
 `scripts/test_status_indicators.mjs` verifies the task status badges in a
