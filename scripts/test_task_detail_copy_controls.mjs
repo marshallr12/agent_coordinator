@@ -981,10 +981,11 @@ async function main() {
   const debugPort = await unusedPort();
   const profile = await mkdtemp(join(tmpdir(), 'agent-coordinator-copy-test-'));
   const executable = process.env.CHROME_BIN || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : 'chromium');
+  const extra = (process.env.CHROME_ARGS || '').split(/\s+/).filter(Boolean);
   const chrome = spawn(executable, [
     '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-    '--disable-background-networking', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
-  ], { stdio: 'ignore', windowsHide: true });
+    '--disable-background-networking', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`, ...extra,
+  ],{ stdio: 'ignore', windowsHide: true });
   let socket;
   let launchError;
   chrome.on('error', (error) => { launchError = error; });
