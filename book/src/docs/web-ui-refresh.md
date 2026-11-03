@@ -127,6 +127,12 @@ part of the route. `scripts/test_deep_links.mjs` clicks through ten views,
 walks back and forward through them, and opens a task link directly; it runs
 the same way as `scripts/test_ui_refresh.mjs`.
 
+`scripts/test_resource_history.mjs` covers the Resources view's History dialog
+against a fixture trail: current holds, released and resolved entries, Load more
+(one request per open and per click), task links into their own projects, empty
+and failed trails, and the phone-width layout. It runs the same way, and also
+honors `CHROME_ARGS`.
+
 ## Status indicators
 
 `scripts/test_status_indicators.mjs` verifies the task status badges in a

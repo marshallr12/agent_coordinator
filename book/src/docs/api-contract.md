@@ -1060,6 +1060,24 @@ independently use revision checks; new lessons included in a task submission are
 stored atomically with that submission. Import apply must detect service changes
 since its preview rather than overwriting them.
 
+### Resource reservation trail
+
+`GET /api/v1/resources/{resource_id}/reservations` (any authenticated actor) lists
+every reservation that includes the resource, across all projects, newest first
+(`created_at` descending, then `id` descending). Query: `limit` (1–200, default 50),
+`cursor` (the opaque `next_cursor` of the previous page), and `state=held` to keep
+only reservations still holding units (stored state `held`, which includes derived
+`recovery_required`). Any other `state` value, a malformed cursor or an out-of-range
+`limit` is a 400; an unknown resource is a 404. Each item has the project reservation
+shape (`id`, `project_id`, `attempt_id`, `task_id`, `generation`, derived `state`,
+`stored_state`, `items`, `created_at`, release and resolution reasons, times and
+evidence) plus `project_name` and `task_title`, so a client can open the task in its
+own project. The response is `{items, next_cursor}`; `next_cursor` is null on the last
+page. It carries no credentials or session proofs. The existing
+`reservation_items(resource_id)` index serves the lookup, so no migration is needed.
+The dashboard's Resources view uses it for the **History** dialog: one page per open
+and per **Load more**, never on a timer.
+
 ## CLI behavior and contract checks
 
 Provide JSON input through `--input <file>` or standard input and JSON output

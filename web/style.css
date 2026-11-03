@@ -234,6 +234,16 @@ a.nav-item { text-decoration: none; }
 .resource-table td code { font-size: 12px; }
 .resource-table .row-actions { white-space: nowrap; }
 .resource-table .row-actions .task-action-icon + .task-action-icon { margin-left: 6px; }
+.resource-table .row-actions .button + .button { margin-left: 6px; }
+.form-dialog.history-dialog { width: min(100% - 32px, 720px); max-height: calc(100vh - 32px); }
+.history-body { padding: 24px; }
+.history-body h3 { margin: 20px 0 6px; }
+.history-title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0 0 6px; color: var(--navy); font-size: 14px; }
+.history-title .text-button { padding: 0; min-height: 0; text-align: left; font-weight: 700; overflow-wrap: anywhere; }
+.history-details { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 14px; margin: 0; font-size: 13px; }
+.history-details dd { margin: 0; overflow-wrap: anywhere; }
+.history-body .state-panel { margin-top: 12px; }
+.history-body > .button { margin-top: 12px; }
 #load-more-resources { margin-top: 20px; }
 .job-evidence-card { margin-top: 15px; }
 .task-attachments-card { margin-top: 15px; }
@@ -406,6 +416,10 @@ a.nav-item { text-decoration: none; }
   #task-operator-actions { flex-direction: row; flex-wrap: wrap; align-items: center; }
   #task-operator-actions .button:not(.task-action-icon) { width: auto; }
   .dialog-header .icon-button { width: 36px; height: 36px; }
+  .history-body { padding: 16px; }
+  .history-title .text-button, .history-body .button { min-height: 36px; }
+  .history-details { grid-template-columns: minmax(0, 1fr); }
+  .history-details dt { margin-top: 4px; }
   .source-link { display: inline-block; padding: 8px 0; }
   .detail-grid, .admin-grid { grid-template-columns: minmax(0, 1fr); }
   .detail-description, .criteria-list li { overflow-wrap: anywhere; }
