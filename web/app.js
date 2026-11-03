@@ -20,6 +20,7 @@
   const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
   const MAX_ATTACHMENT_BATCH_BYTES = 64 * 1024 * 1024;
   const MAX_ATTACHMENT_FILES = 10;
+  const PREVIEW_LIMIT_BYTES = 256 * 1024;
   const THEME_KEY = 'agent-coordinator.theme';
   function applyTheme(theme) {
     const selected = ['light', 'dark', 'system'].includes(theme) ? theme : 'system';
@@ -1119,6 +1120,97 @@
     return !record.pinned && until <= Date.now() ? 'expired' : 'available';
   }
 
+  // Evidence preview: a bounded, text-only look at an uploaded file. The bytes are decoded to a string and
+  // shown through textContent in a <pre>; they are never parsed as HTML, linked, or given an object URL.
+  function previewKind(record) {
+    if (record.kind !== 'upload' || attachmentAvailability(record) !== 'available') return null;
+    const size = record.size_bytes;
+    if (!Number.isInteger(size) || size < 0 || size > PREVIEW_LIMIT_BYTES) return null;
+    const type = text(record.media_type).split(';')[0].trim().toLowerCase();
+    if (type === 'application/json' || /^application\/[^/\s]+\+json$/.test(type)) return 'json';
+    return type.startsWith('text/') ? 'text' : null;
+  }
+
+  // Reads at most PREVIEW_LIMIT_BYTES; returns null (after aborting the request) when the body is longer.
+  async function readPreviewBytes(response, controller) {
+    const declared = Number(response.headers.get('Content-Length'));
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('This browser cannot read the file as a stream.');
+    const chunks = []; let total = declared > PREVIEW_LIMIT_BYTES ? Infinity : 0;
+    while (total <= PREVIEW_LIMIT_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength; if (total <= PREVIEW_LIMIT_BYTES) chunks.push(value);
+    }
+    if (total > PREVIEW_LIMIT_BYTES) { controller.abort(); reader.cancel().catch(() => {}); return null; }
+    const bytes = new Uint8Array(total); let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return bytes;
+  }
+
+  async function sha256Hex(bytes) {
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function openArtifactPreview(record, projectId = state.projectId) {
+    const kind = previewKind(record);
+    if (!kind || !projectId || document.querySelector('dialog.preview-dialog')) return;
+    const name = record.display_name || record.filename || 'attachment', controller = new AbortController();
+    const dialog = el('dialog', 'form-dialog preview-dialog'), header = el('div', 'dialog-header preview-header'), title = el('h2', '', `Preview: ${name}`);
+    title.id = 'artifact-preview-title'; dialog.setAttribute('aria-labelledby', title.id);
+    const close = el('button', 'button subtle', 'Close'); close.type = 'button'; close.setAttribute('aria-label', 'Close preview');
+    close.addEventListener('click', () => dialog.close());
+    add(header, title); add(header, close); add(dialog, header);
+    const body = el('div', 'preview-body'); add(dialog, body);
+    const view = { status: 'Loading the file…', error: false, content: null, verdict: 'pending' };
+    const recorded = text(record.sha256).toLowerCase();
+    const render = () => patchSection(body, sig(view.status, view.error, view.content, view.verdict), (box) => {
+      const status = el('p', view.error ? 'inline-alert error' : 'muted', view.status); status.setAttribute('role', view.error ? 'alert' : 'status'); add(box, status);
+      add(box, el('p', 'preview-digest', `Recorded SHA-256: ${recorded || 'none'}`));
+      const verdicts = {
+        match: 'SHA-256 verified in this browser: the previewed bytes match the recorded digest.',
+        mismatch: 'SHA-256 MISMATCH: the previewed bytes do not match the recorded digest. Do not rely on this content.',
+        unverified: 'This browser could not calculate a SHA-256 here, so this preview does not verify the file.',
+        norecord: 'No recorded digest is available to compare, so this preview does not verify the file.'
+      };
+      add(box, el('p', view.verdict === 'mismatch' ? 'inline-alert error' : 'muted', verdicts[view.verdict] || 'The preview is not a verification unless this browser compares the SHA-256.'));
+      if (view.content !== null) {
+        const pre = el('pre', 'preview-text', view.content); pre.tabIndex = 0; pre.setAttribute('role', 'region'); pre.setAttribute('aria-label', `Contents of ${name}`); add(box, pre);
+      }
+    });
+    const opener = document.activeElement;
+    dialog.addEventListener('close', () => { controller.abort(); dialog.remove(); if (opener?.isConnected && opener.focus) opener.focus(); });
+    add(document.body, dialog); render(); dialog.showModal();
+    (async () => {
+      try {
+        const response = await fetch(`${projectPath(projectId)}/artifacts/${encodeURIComponent(record.id)}/content`, { credentials: 'same-origin', redirect: 'error', signal: controller.signal });
+        if (!response.ok) throw new Error(`The coordinator refused the file (status ${response.status}).`);
+        const bytes = await readPreviewBytes(response, controller);
+        if (!dialog.isConnected) return;
+        if (!bytes) { Object.assign(view, { status: `This file is longer than the ${PREVIEW_LIMIT_BYTES / 1024} KiB preview limit, so the preview was stopped. Download it instead.`, error: true, verdict: 'unverified' }); render(); return; }
+        let content = new TextDecoder('utf-8', { fatal: false }).decode(bytes), pretty = false;
+        if (kind === 'json') { try { content = JSON.stringify(JSON.parse(content), null, 2); pretty = true; } catch (_) { /* Show invalid JSON as received. */ } }
+        Object.assign(view, { status: `${kind === 'json' ? (pretty ? 'Pretty-printed JSON' : 'Not valid JSON; shown as received') : 'Text'} · ${bytes.length} bytes. Shown as plain text; nothing in it is run or followed.`, content });
+        render();
+        if (!recorded) view.verdict = 'norecord';
+        else if (!globalThis.crypto?.subtle) view.verdict = 'unverified';
+        else { try { view.verdict = await sha256Hex(bytes) === recorded ? 'match' : 'mismatch'; } catch (_) { view.verdict = 'unverified'; } }
+        if (dialog.isConnected) render();
+      } catch (error) {
+        if (controller.signal.aborted || !dialog.isConnected) return;
+        Object.assign(view, { status: `Could not preview the file: ${error instanceof TypeError ? 'the coordinator could not be reached.' : errorMessage(error)}`, error: true, verdict: 'unverified' }); render();
+      }
+    })();
+  }
+
+  function previewButton(record, projectId = state.projectId) {
+    const button = el('button', 'button subtle', 'Preview'); button.type = 'button';
+    button.setAttribute('aria-label', `Preview ${record.display_name || record.filename || 'attachment'}`);
+    button.addEventListener('click', () => openArtifactPreview(record, projectId));
+    return button;
+  }
+
   function renderTaskAttachments(records, pending, hasMore = false) {
     const list = $('task-attachments-list');
     const items = records.map((record) => ({ key: `record:${record.id}`, sig: sig(record), build: () => {
@@ -1131,6 +1223,7 @@
         link.href = `${projectPath(state.projectId)}/artifacts/${encodeURIComponent(record.id)}/content`;
         link.download = record.display_name || 'attachment';
         add(heading, link);
+        if (previewKind(record)) add(heading, previewButton(record));
       }
       add(entry, heading);
       add(entry, el('p', 'muted', `${record.media_type || 'Unknown type'} · ${record.size_bytes ?? 'Unknown'} bytes · ${displayStatus(availability || 'unknown')}`));
@@ -2098,6 +2191,7 @@
     if (kind === 'decisions' && ownProject && record.status !== 'pending') button('Reopen this decision with the current scope', 'reopen', () => reopenDecision(record), true);
     if (kind === 'artifacts') {
       if (record.availability === 'available' && record.kind === 'upload') iconLink('Download this attachment', 'download', `${projectPath()}/artifacts/${encodeURIComponent(record.id)}/content`).download = '';
+      if (previewKind(record)) add(actions, previewButton(record));
       if (record.external_url) { try { const url = new URL(record.external_url); if (url.protocol === 'https:' && !url.username && !url.password) { const link = iconLink('Open the external evidence in a new tab', 'external', url.href); link.rel = 'noopener noreferrer'; link.target = '_blank'; } } catch (_) { /* Show unusable links as metadata only. */ } }
       add(card, el('p', 'muted', `${record.size_bytes ?? 'Unknown'} bytes · ${record.sha256 || 'No content digest'}${record.kind === 'external_link' ? ' · External availability is not verified by the service.' : ''}`));
     }
