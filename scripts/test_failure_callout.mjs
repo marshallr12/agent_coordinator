@@ -214,7 +214,7 @@ async function main() {
     socket?.close();
     if (chrome.pid && chrome.exitCode === null) { const exited = once(chrome, 'exit'); chrome.kill('SIGTERM'); await exited; }
     await new Promise((done) => server.close(done));
-    await rm(profile, { recursive: true, force: true });
+    await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     if (launchError) throw launchError;
   }
 }
