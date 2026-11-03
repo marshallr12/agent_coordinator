@@ -386,3 +386,10 @@ a.nav-item { text-decoration: none; }
   .status-icon.reviewing { border-color: currentColor; }
 }
 .passkey-settings { margin: 18px 0 4px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }.passkey-settings legend { padding: 0 5px; color: var(--navy); font-size: 13px; font-weight: 750; }.passkey-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 6px 0; }
+.evidence-packet-card { margin-top: 15px; }
+.evidence-packet-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+.evidence-packet-controls .select-label { flex: 1; min-width: min(100%, 220px); }
+.evidence-packet-controls .select-label select { width: 100%; }
+@media (max-width: 620px) { .evidence-packet-controls .button { width: 100%; } }
+.evidence-packet-card .inline-alert { margin: 8px 0 0; }
+.evidence-packet-card ul { margin: 8px 0 0; padding-left: 20px; font-size: 13px; }

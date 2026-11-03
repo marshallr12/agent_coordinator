@@ -326,6 +326,17 @@ records. Pagination preserves an insertion cutoff; mutable operational records
 can still change. Start a fresh history query to include records inserted later.
 Objective details also provide older membership-history pages.
 
+**Export evidence packet** on the task page downloads the task revision, each acceptance
+criterion with its submitted evidence, the candidate revision, tree and ref, review
+decisions and findings, the integration result with its check job IDs, and artifact
+references with SHA-256, size, availability and retention, as JSON, Markdown, or both.
+It reads one page of up to 50 reviews, integrations and artifacts (three history
+requests). A kind with more records is flagged as truncated in the packet and on the
+page. A task with no submission exports a valid packet that says so. Artifact bytes are
+referenced, never embedded; credentials, sessions, reporter and principal identities,
+artifact links and request headers are never copied; the packet is capped at 2 MiB.
+`scripts/test_evidence_packet.mjs` verifies it in headless Chrome.
+
 See [objective semantics](objective-contract.md), [history pages](history-contract.md),
 and [account lifecycle](operator-access-contract.md) for precise API contracts.
 

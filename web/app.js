@@ -1059,7 +1059,7 @@
     $('task-attachments-card').classList.toggle('task-attachments-readonly', readOnly);
     const items = Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : [];
     reconcile($('acceptance-list'), items.length ? items.map((item, index) => ({ key: index, sig: sig(item), build: () => el('li', '', item) })) : [{ key: 'none', sig: '', build: () => el('li', 'muted', 'No acceptance criteria recorded.') }]);
-    renderTaskActions(data, task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
+    renderTaskActions(data, task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data); renderPacketControls();
     show($('task-detail-state'), false); show($('task-detail-content'), true);
     loadTaskAttachments(state.projectId, taskId, false, quiet);
   }
@@ -2912,6 +2912,169 @@
     selectField(view,'blocked','Next owner',false,[['false','Task may be claimed again'],['true','Leave blocked until the issue is resolved']]);
     view.finish('Release ownership', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath()}/attempts/${encodeURIComponent(attempt.id)}/release`, {generation:attempt.generation,summary:`${values.get('summary')}\nNext step: ${values.get('next_step')}`,blocked:values.get('blocked') === 'true'}, 'ownership release'); });
   }
+  // Evidence packet: a portable JSON and Markdown record of one task's submission, reviews, integration and
+  // artifact references. Every record is copied field by field from an allowlist, so credentials, session
+  // identifiers, reporter identities and request headers cannot reach the file; artifact bytes are referenced
+  // by SHA-256 and never embedded.
+  const PACKET_SCHEMA_VERSION = 1, PACKET_BYTE_LIMIT = 2 * 1024 * 1024, PACKET_TEXT_LIMIT = 2000, PACKET_PAGE_LIMIT = 50;
+  const PACKET_HISTORY_KINDS = ['reviews', 'integrations', 'artifacts'];
+  const packetFields = (source, fields) => Object.fromEntries(fields.map((field) => [field, source?.[field] ?? null]));
+  const packetBytes = (value) => new TextEncoder().encode(value).length;
+  const packetLine = (value) => text(value).replace(/\s+/g, ' ').trim();
+
+  // Pairs each task criterion with its submitted evidence (null when none); evidence for a criterion the task no longer lists follows.
+  function packetCriteria(task, submission) {
+    const submitted = Array.isArray(submission?.acceptance_evidence) ? submission.acceptance_evidence : []; const taken = new Set();
+    const rows = (Array.isArray(task.acceptance_criteria) ? task.acceptance_criteria : []).map((criterion) => {
+      const index = submitted.findIndex((item, at) => !taken.has(at) && item?.criterion === criterion); if (index >= 0) taken.add(index);
+      return { criterion: text(criterion), listed_on_task: true, evidence: index >= 0 ? text(submitted[index].evidence) : null };
+    });
+    submitted.forEach((item, at) => { if (!taken.has(at)) rows.push({ criterion: text(item?.criterion), listed_on_task: false, evidence: text(item?.evidence) }); });
+    return rows;
+  }
+  function packetSubmission(submission) {
+    if (!submission) return null;
+    return {
+      ...packetFields(submission, ['id', 'kind', 'task_revision', 'project_policy_revision', 'workflow_policy_revision', 'summary', 'handoff', 'created_at', 'superseded_at']),
+      source: packetFields(submission, ['canonical_repository_key', 'candidate_remote', 'repository', 'target_branch', 'base_revision', 'candidate_revision', 'candidate_tree', 'candidate_ref']),
+      artifact_ids: (submission.artifact_ids || []).map(text),
+    };
+  }
+  const packetActivity = (activity) => packetFields(activity, ['id', 'kind', 'slot', 'state', 'submission_id', 'created_at', 'completed_at', 'canceled_at']);
+  const packetReview = (record) => ({
+    activity: packetActivity(record.activity),
+    decision: record.decision ? packetFields(record.decision, ['decision', 'summary', 'created_at']) : null,
+    findings: (record.findings || []).map((finding) => packetFields(finding, ['id', 'severity', 'remedy', 'evidence', 'created_at'])),
+  });
+  const packetIntegration = (record) => ({
+    activity: packetActivity(record.activity),
+    authorization: record.authorization ? packetFields(record.authorization, ['revision', 'submission_id', 'project_policy_revision', 'workflow_policy_revision', 'summary', 'created_at', 'invalidated_at', 'valid', 'validity_reason']) : null,
+    hold: record.hold ? packetFields(record.hold, ['canonical_repository_key', 'target_branch', 'state', 'acquired_at', 'released_at', 'release_reason']) : null,
+    publication_intent: record.publication_intent ? packetFields(record.publication_intent, ['submission_id', 'observed_target_revision', 'observed_target_tree', 'result_revision', 'result_tree', 'created_at']) : null,
+    result: record.integration_result ? { ...packetFields(record.integration_result, ['submission_id', 'publication_state', 'observed_target_revision', 'result_revision', 'result_tree', 'summary', 'created_at']), check_job_ids: (record.integration_result.check_job_ids || []).map(text) } : null,
+    check_jobs: (record.check_jobs || []).map((job) => packetFields(job, ['id', 'label', 'state', 'source_revision', 'source_tree', 'exit_code', 'inputs_unchanged', 'summary', 'check_identity', 'check_version', 'check_environment', 'created_at'])),
+    reconciliation: record.publication_reconciliation ? packetFields(record.publication_reconciliation, ['submission_id', 'disposition', 'observed_target_revision', 'observed_target_tree', 'evidence', 'created_at']) : null,
+  });
+  const packetArtifact = (record) => ({ ...packetFields(record, ['id', 'kind', 'task_id', 'job_id', 'display_name', 'media_type', 'size_bytes', 'sha256', 'state', 'pinned', 'created_at', 'finalized_at', 'retention_until', 'deleted_at']), availability: attachmentAvailability(record) });
+
+  // `pages` holds one history page per kind; a page with a next_cursor is flagged as truncated, never silently cut.
+  function buildEvidencePacket({ data, project, pages, origin, generatedAt }) {
+    const task = data.task || data, workflow = data.workflow || {}, submission = workflow.submission || null;
+    const records = (kind) => (pages[kind].items || []).map((item) => item.record).filter(Boolean);
+    const truncation = { reviews: Boolean(pages.reviews.next_cursor), integrations: Boolean(pages.integrations.next_cursor), artifacts: Boolean(pages.artifacts.next_cursor), workflow_activities: Boolean(workflow.activities_truncated), text_shortened: false };
+    return {
+      schema_version: PACKET_SCHEMA_VERSION, generated_at: generatedAt, service_origin: origin,
+      project: { id: text(task.project_id || project?.id), name: text(project?.name) },
+      task: { id: text(task.id), title: text(task.title), kind: text(task.kind), lifecycle: text(task.lifecycle), work_status: text(task.work_status), revision: task.revision, description: text(task.description) },
+      phase: workflow.phase ? text(workflow.phase) : null,
+      submission_exists: Boolean(submission),
+      statement: submission ? null : 'No submission exists for this task.',
+      criteria: packetCriteria(task, submission),
+      submission: packetSubmission(submission),
+      reviews: records('reviews').map(packetReview),
+      integrations: records('integrations').map(packetIntegration),
+      artifacts: records('artifacts').map(packetArtifact),
+      truncation: { ...truncation, any: Object.values(truncation).some(Boolean) },
+      limits: { history_page_size: PACKET_PAGE_LIMIT, history_requests: PACKET_HISTORY_KINDS.length, max_bytes: PACKET_BYTE_LIMIT },
+    };
+  }
+
+  function packetMarkdown(packet) {
+    const out = [], line = packetLine, code = (value) => (value === null || value === undefined || value === '' ? 'none' : `\`${line(value)}\``);
+    out.push(`# Evidence packet: ${line(packet.task.title)}`, '', `- Schema version: ${packet.schema_version}`, `- Generated: ${packet.generated_at}`, `- Service: ${packet.service_origin}`, `- Project: ${line(packet.project.name)} (${code(packet.project.id)})`, `- Task: ${code(packet.task.id)} at revision ${packet.task.revision}`, `- State: ${line(packet.task.lifecycle)} / ${line(packet.task.work_status)}`, '');
+    if (packet.truncation.any) {
+      out.push('## Truncated history', '');
+      for (const [name, flagged] of Object.entries(packet.truncation)) if (flagged && name !== 'any') out.push(`- ${name.replace(/_/g, ' ')}: more records exist than this packet includes.`);
+      out.push('');
+    }
+    out.push('## Acceptance criteria and submitted evidence', '');
+    if (!packet.submission_exists) out.push(`> ${packet.statement}`, '');
+    if (!packet.criteria.length) out.push('No acceptance criteria are recorded.', '');
+    packet.criteria.forEach((row, index) => out.push(`${index + 1}. ${line(row.criterion)}${row.listed_on_task ? '' : ' (no longer listed on the task)'}`, `   - Evidence: ${row.evidence === null ? 'none submitted' : line(row.evidence)}`));
+    if (packet.criteria.length) out.push('');
+    const submission = packet.submission;
+    if (submission) {
+      out.push('## Submission', '', `- Submission: ${code(submission.id)} (${line(submission.kind)}) for task revision ${submission.task_revision}`, `- Policy revisions: project ${submission.project_policy_revision}, workflow ${submission.workflow_policy_revision}`, `- Summary: ${line(submission.summary)}`, `- Handoff: ${line(submission.handoff) || 'none'}`, `- Candidate revision: ${code(submission.source.candidate_revision)}`, `- Candidate tree: ${code(submission.source.candidate_tree)}`, `- Candidate ref: ${code(submission.source.candidate_ref)}`, `- Repository: ${code(submission.source.canonical_repository_key)}`, `- Target branch: ${code(submission.source.target_branch)}`, `- Base revision: ${code(submission.source.base_revision)}`, `- Artifact IDs: ${submission.artifact_ids.length ? submission.artifact_ids.map(code).join(', ') : 'none'}`, '');
+    }
+    out.push('## Reviews', '');
+    if (!packet.reviews.length) out.push('No review activities are recorded.', '');
+    for (const review of packet.reviews) {
+      out.push(`- ${displayStatus(review.activity.kind)} ${code(review.activity.id)}: ${displayStatus(review.activity.state)}${review.decision ? `, ${displayStatus(review.decision.decision)} — ${line(review.decision.summary)}` : ', no decision recorded'}`);
+      review.findings.forEach((finding) => out.push(`  - Finding ${code(finding.id)} (${line(finding.severity)}): ${line(finding.remedy)}`));
+    }
+    if (packet.reviews.length) out.push('');
+    out.push('## Integration', '');
+    if (!packet.integrations.length) out.push('No integration activities are recorded.', '');
+    for (const integration of packet.integrations) {
+      out.push(`- Integration ${code(integration.activity.id)}: ${displayStatus(integration.activity.state)}`);
+      if (integration.authorization) out.push(`  - Authorization ${integration.authorization.valid === false ? '(invalidated)' : ''}: ${line(integration.authorization.summary)}`);
+      if (integration.result) out.push(`  - Result: ${displayStatus(integration.result.publication_state)}, revision ${code(integration.result.result_revision)}, tree ${code(integration.result.result_tree)}, target observed ${code(integration.result.observed_target_revision)}`, `  - Summary: ${line(integration.result.summary)}`, `  - Check job IDs: ${integration.result.check_job_ids.length ? integration.result.check_job_ids.map(code).join(', ') : 'none'}`);
+      else out.push('  - No integration result is recorded.');
+      integration.check_jobs.forEach((job) => out.push(`  - Check job ${code(job.id)} ${line(job.label)}: ${line(job.state)}, exit ${job.exit_code ?? 'unknown'}, source ${code(job.source_revision)}`));
+      if (integration.reconciliation) out.push(`  - Reconciled ${line(integration.reconciliation.disposition)}: ${line(integration.reconciliation.evidence)}`);
+    }
+    if (packet.integrations.length) out.push('');
+    out.push('## Artifacts', '', 'Artifact contents are referenced by SHA-256 and are not embedded.', '');
+    if (!packet.artifacts.length) out.push('No artifacts are recorded.', '');
+    for (const artifact of packet.artifacts) out.push(`- ${line(artifact.display_name)} ${code(artifact.id)}: ${line(artifact.media_type)}, ${artifact.size_bytes ?? 'unknown'} bytes, sha256 ${code(artifact.sha256)}, ${line(artifact.availability)}${artifact.pinned ? ', pinned' : ''}, retained until ${artifact.retention_until || 'not set'}`);
+    return `${out.join('\n')}\n`;
+  }
+
+  // Shortens oversized text so a very large packet still fits the cap; the packet records that it did.
+  function shortenPacketText(value) {
+    if (typeof value === 'string') return value.length > PACKET_TEXT_LIMIT ? `${value.slice(0, PACKET_TEXT_LIMIT)}… [shortened]` : value;
+    if (Array.isArray(value)) return value.map(shortenPacketText);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, shortenPacketText(item)]));
+    return value;
+  }
+  function renderEvidencePacket(parts) {
+    let packet = buildEvidencePacket(parts), json = JSON.stringify(packet, null, 2), markdown = packetMarkdown(packet);
+    if (packetBytes(json) > PACKET_BYTE_LIMIT || packetBytes(markdown) > PACKET_BYTE_LIMIT) {
+      packet = shortenPacketText(packet); packet.truncation.text_shortened = true; packet.truncation.any = true;
+      json = JSON.stringify(packet, null, 2); markdown = packetMarkdown(packet);
+    }
+    if (packetBytes(json) > PACKET_BYTE_LIMIT || packetBytes(markdown) > PACKET_BYTE_LIMIT) throw new ApiError('This evidence packet exceeds the 2 MiB export limit even with long text shortened. Use the CLI to inspect the full history.', 413, 'export_limit');
+    return { packet, json, markdown };
+  }
+  function downloadText(name, content, type) {
+    const url = URL.createObjectURL(new Blob([content], { type })); const link = el('a'); link.href = url; link.download = name;
+    add(document.body, link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  // Keeps the export controls and the last export's summary in step with state; unchanged state touches nothing.
+  function renderPacketControls() {
+    const key = `${state.projectId}/${state.selectedTaskId}`;
+    if (state.packetKey !== key) { state.packetKey = key; state.packetReport = null; }
+    const busy = Boolean(state.packetBusy), report = state.packetReport;
+    setProp($('export-evidence-packet'), 'disabled', busy); setProp($('evidence-packet-format'), 'disabled', busy);
+    setText($('evidence-packet-status'), busy ? 'Gathering reviews, integration results and artifacts…' : report?.message || '');
+    patchSection($('evidence-packet-summary'), sig(report?.lines, report?.warnings), (target) => {
+      if (!report) return;
+      const list = el('ul'); report.lines.forEach((item) => add(list, el('li', '', item))); add(target, list);
+      report.warnings.forEach((item) => add(target, el('p', 'inline-alert warning', item)));
+    });
+  }
+  async function exportEvidencePacket() {
+    const projectId = state.projectId, taskId = state.selectedTaskId, currentActor = actorId();
+    if (!projectId || !taskId || !state.detail || state.packetBusy) return;
+    const current = () => projectId === state.projectId && taskId === state.selectedTaskId && currentActor === actorId();
+    state.packetBusy = true; renderPacketControls();
+    try {
+      const results = await Promise.all(PACKET_HISTORY_KINDS.map((kind) => request(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/history?kind=${kind}&limit=${PACKET_PAGE_LIMIT}`)));
+      if (!current() || !state.detail) return;
+      const pages = Object.fromEntries(PACKET_HISTORY_KINDS.map((kind, index) => [kind, results[index].data || {}]));
+      const { packet, json, markdown } = renderEvidencePacket({ data: state.detail, project: state.projects.find((item) => text(item.id) === projectId), pages, origin: location.origin, generatedAt: new Date().toISOString() });
+      const base = `evidence-${text(packet.task.id).replace(/[^A-Za-z0-9._-]/g, '_')}-r${packet.task.revision}`, format = $('evidence-packet-format').value;
+      if (format !== 'markdown') downloadText(`${base}.json`, json, 'application/json;charset=utf-8');
+      if (format !== 'json') downloadText(`${base}.md`, markdown, 'text/markdown;charset=utf-8');
+      const flagged = Object.entries(packet.truncation).filter(([name, value]) => value && name !== 'any').map(([name]) => name.replace(/_/g, ' '));
+      state.packetReport = {
+        message: 'Evidence packet downloaded.',
+        lines: [`${packet.criteria.length} acceptance criteri${packet.criteria.length === 1 ? 'on' : 'a'}`, packet.submission_exists ? `Submission ${packet.submission.id}` : 'No submission exists for this task', `${packet.reviews.length} review activit${packet.reviews.length === 1 ? 'y' : 'ies'}`, `${packet.integrations.length} integration activit${packet.integrations.length === 1 ? 'y' : 'ies'}`, `${packet.artifacts.length} artifact reference${packet.artifacts.length === 1 ? '' : 's'}`],
+        warnings: flagged.length ? [`Truncated history: ${flagged.join(', ')}. The packet is flagged and includes only the first ${PACKET_PAGE_LIMIT} records of each history kind; use Browse history for the rest.`] : [],
+      };
+    } catch (error) { if (current()) setGlobalAlert(errorMessage(error)); }
+    finally { state.packetBusy = false; renderPacketControls(); }
+  }
   function taskHistory() {
     const projectId = state.projectId, taskId = state.selectedTaskId, currentActor = actorId();
     const view = workflowDialog('Complete task history', 'Pages preserve a snapshot of inserted records. Start a fresh history view to include newer records.');
@@ -2990,6 +3153,7 @@
   }
   $('project-policy-button').addEventListener('click',openProjectPolicy);
   $('task-history-button').addEventListener('click',taskHistory);
+  $('export-evidence-packet').addEventListener('click', exportEvidencePacket);
   $('upload-task-attachments').addEventListener('click', uploadTaskAttachments);
   $('retry-task-attachments').addEventListener('click', retryTaskAttachments);
   $('objective-list-button').addEventListener('click',objectives);
