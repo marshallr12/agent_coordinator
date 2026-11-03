@@ -159,7 +159,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   bounded task renewal tied to a specific live harness. Observation authority and
   task ownership are separate. The service never launches workstation processes.
 - Dashboard resource administration and task job/hold evidence, including explicit
-  human reconciliation with recorded termination/isolation evidence.
+  human reconciliation with recorded termination/isolation evidence, and a per-resource
+  History dialog (current holds, then released/resolved reservations across projects,
+  one page at a time) backed by `GET /api/v1/resources/{id}/reservations`.
 - Immutable code/general submissions pinned to task and policy revisions, with
   acceptance evidence, handoffs, and full Git commit/tree identities for code.
   Active jobs and unresolved physical holds prevent submission.

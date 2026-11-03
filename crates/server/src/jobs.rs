@@ -162,6 +162,10 @@ pub fn routes() -> Router<AppState> {
             patch(update_resource).delete(delete_resource),
         )
         .route(
+            "/api/v1/resources/{resource}/reservations",
+            get(resource_reservations),
+        )
+        .route(
             "/api/v1/projects/{project}/attempts/{attempt}/reservations",
             get(attempt_reservations).post(create_reservation),
         )
@@ -663,6 +667,93 @@ async fn reservations(
                 .last()
                 .and_then(|item| item["id"].as_str())
                 .map(str::to_owned)
+        })
+        .flatten();
+    Ok(response(json!({"items":items,"next_cursor":next})))
+}
+
+#[derive(Deserialize)]
+struct ResourceTrailPage {
+    cursor: Option<String>,
+    limit: Option<i64>,
+    state: Option<String>,
+}
+
+/// Newest-first reservation trail for one resource across every project.
+/// The cursor is `<created_at ms>:<reservation id>` of the last row returned.
+async fn resource_reservations(
+    State(state): State<AppState>,
+    _auth: Auth,
+    Path(resource): Path<String>,
+    Query(page): Query<ResourceTrailPage>,
+) -> Reply {
+    let limit = Page {
+        cursor: page.cursor.clone(),
+        limit: page.limit,
+    }
+    .limit()?;
+    if page.state.as_deref().is_some_and(|value| value != "held") {
+        return Err(AppError::bad_request("state may only be held."));
+    }
+    let after = match page.cursor.as_deref() {
+        None => None,
+        Some(cursor) => Some(
+            cursor
+                .split_once(':')
+                .and_then(|(created, id)| Some((created.parse::<i64>().ok()?, id.to_owned())))
+                .ok_or_else(|| AppError::bad_request("cursor must be valid."))?,
+        ),
+    };
+    if sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resources WHERE id=?")
+        .bind(&resource)
+        .fetch_one(&state.pool)
+        .await?
+        == 0
+    {
+        return Err(AppError::not_found());
+    }
+    let mut connection = state.pool.acquire().await?;
+    let rows = sqlx::query(
+        "SELECT r.id,r.project_id,r.created_at,p.name AS project_name,t.title AS task_title \
+         FROM reservation_items ri JOIN reservations r ON r.id=ri.reservation_id \
+         JOIN projects p ON p.id=r.project_id JOIN attempts a ON a.id=r.attempt_id \
+         JOIN tasks t ON t.id=a.task_id \
+         WHERE ri.resource_id=? AND (? IS NULL OR r.state=?) \
+         AND (? IS NULL OR r.created_at<? OR (r.created_at=? AND r.id<?)) \
+         ORDER BY r.created_at DESC,r.id DESC LIMIT ?",
+    )
+    .bind(&resource)
+    .bind(&page.state)
+    .bind(&page.state)
+    .bind(after.as_ref().map(|(created, _)| *created))
+    .bind(after.as_ref().map(|(created, _)| *created))
+    .bind(after.as_ref().map(|(created, _)| *created))
+    .bind(after.as_ref().map(|(_, id)| id.as_str()))
+    .bind(limit + 1)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut items = Vec::new();
+    for row in rows.iter().take(limit as usize) {
+        let mut value = reservation(
+            &mut connection,
+            &row.get::<String, _>("project_id"),
+            &row.get::<String, _>("id"),
+            state.now(),
+        )
+        .await?;
+        value["project_name"] = json!(row.get::<String, _>("project_name"));
+        value["task_title"] = json!(row.get::<String, _>("task_title"));
+        items.push(value);
+    }
+    let next = (rows.len() > limit as usize)
+        .then(|| {
+            rows.get(limit as usize - 1).map(|row| {
+                format!(
+                    "{}:{}",
+                    row.get::<i64, _>("created_at"),
+                    row.get::<String, _>("id")
+                )
+            })
         })
         .flatten();
     Ok(response(json!({"items":items,"next_cursor":next})))
