@@ -103,6 +103,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   and Forward buttons walk the views visited and a link opens its view after
   sign-in. Open dialogs are not part of the address. See
   [Web UI refresh behavior](web-ui-refresh.md#address-history).
+- The task queue and Completed tasks views filter by Kind, Origin and Delivery
+  mode together with Status and search, in the browser over the loaded list. See
+  [Web UI refresh behavior](web-ui-refresh.md#task-filters).
 - Local administrator initialization and password sign-in; Argon2id hashes,
   protected browser cookies, origin/CSRF checks, bounded login attempts, and
   human-admin issuance/revocation of separately named agent credentials.

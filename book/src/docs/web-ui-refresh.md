@@ -180,3 +180,18 @@ entry in the Jobs & resource holds card, or opens the activity task that owns
 the job and focuses it there. `scripts/test_forge_links.mjs` covers these cases
 and runs the same way as the other browser scripts, with
 `CHROME_BIN=/path/to/chrome node scripts/test_forge_links.mjs`.
+
+## Task filters
+
+The task queue and Completed tasks views filter the loaded list by Kind,
+Origin and Delivery (human-delivered or supervisor-claimable) as well as by
+Status (queue only) and search, all combined with AND. Rows show their kind,
+origin and a human-delivered pill. Filters read fields already in the list
+items, so changing one makes no request; the active filter count and **Clear
+filters** render through the same patching helpers, so a refresh with filters
+active records no DOM mutation. Switching project resets every filter, and
+**Clear filters** resets the filters but not the search text.
+`scripts/test_task_filters.mjs` verifies each filter, their combination, the
+empty-state text, Clear filters, the project reset and mobile width in a
+fixture-backed browser. Run it with
+`CHROME_BIN=/path/to/chrome node scripts/test_task_filters.mjs`.
