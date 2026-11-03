@@ -299,6 +299,23 @@ a.nav-item { text-decoration: none; }
 .status-badge.integrating, .status-badge.validating { background: var(--pill-run-bg); color: var(--pill-run-ink); }
 @media (max-width: 650px) { .check-row, .external-check { grid-template-columns: 1fr; } .workflow-entry dl { grid-template-columns: 1fr; } }
 
+/* Submission comparison: changed rows carry a text marker as well as a tint. */
+.form-dialog.compare-dialog { width: min(100% - 32px, 1100px); }
+.compare-dialog form { max-height: calc(100vh - 32px); overflow: auto; }
+.compare-pickers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 1rem; }
+.compare-pickers select { min-width: 0; }
+.compare-row { margin: .8rem 0; padding: .6rem .8rem; border: 1px solid var(--line); border-left-width: 6px; border-radius: 8px; }
+.compare-row.compare-changed { border-left-color: var(--amber); background: var(--amber-soft); }
+.compare-row.compare-added { border-left-color: var(--teal); background: var(--teal-soft); }
+.compare-row.compare-removed { border-left-color: var(--red); background: var(--red-soft); }
+.compare-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem; margin: 0 0 .4rem; overflow-wrap: anywhere; }
+.compare-marker { padding: 1px 7px; border: 1px solid currentColor; border-radius: 4px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .03em; }
+.compare-cells { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+.compare-cell { min-width: 0; padding: .4rem .6rem; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.compare-side { display: block; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; }
+.compare-value { margin: .2rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; }
+@media (max-width: 650px) { .compare-pickers, .compare-cells { grid-template-columns: 1fr; } }
+
 /* Shared records use prose-sized columns; imported text is always plain text. */
 .shared-records { display: grid; gap: 1rem; }
 .shared-records .card { min-width: 0; }

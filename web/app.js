@@ -2120,6 +2120,8 @@
         view.finish('Reopen for revision', (values, dialog) => { dialog.close(); workflowMutation(`${projectPath()}/tasks/${encodeURIComponent(submission.task_id)}/workflow/reopen`, {submission_id:submission.id, reason:values.get('reason')}, 'candidate revision'); });
       }); add(candidate, reopen);
     }
+    const compare = el('button', 'button subtle', 'Compare with previous submission'); compare.type = 'button'; compare.setAttribute('aria-haspopup', 'dialog');
+    compare.addEventListener('click', compareSubmissions); add(candidate, compare);
     return candidate;
     };
     items.push({ key: 'candidate', sig: context, build: buildCandidate });
@@ -3428,6 +3430,85 @@
     }
     for (const select of [base, target]) select.addEventListener('change', () => { chosen = true; sync(); });
     view.finish('Close', (_, dialog) => dialog.close()); setText(status, 'Loading revisions…'); show(more, false); load();
+  }
+  // ---- Submission comparison ----------------------------------------------------------------
+  const COMPARE_TEXT_CHARS = 1500, COMPARE_ROWS = 100;
+  const clipText = (value) => { const shown = text(value); return shown.length > COMPARE_TEXT_CHARS ? `${shown.slice(0, COMPARE_TEXT_CHARS)}… (${shown.length - COMPARE_TEXT_CHARS} more characters are in the complete task history)` : shown; };
+  // Compares two Maps of key → text. Returns {key, before, after, status} in `after` order, then the keys only `before` has;
+  // status is added, removed, changed or unchanged.
+  function diffEntries(before, after) {
+    const status = (key) => !before.has(key) ? 'added' : !after.has(key) ? 'removed' : before.get(key) === after.get(key) ? 'unchanged' : 'changed';
+    return [...after.keys(), ...[...before.keys()].filter((key) => !after.has(key))].map((key) => ({ key, before: before.get(key), after: after.get(key), status: status(key) }));
+  }
+  const COMPARE_MARKERS = { added: 'Added', removed: 'Removed', changed: 'Changed', unchanged: 'Unchanged' };
+  // Opens the side-by-side comparison of two submissions of the selected task. Only the first page of each record
+  // type (50 records, oldest first) is requested; Load more fetches the next page when the person asks.
+  function compareSubmissions() {
+    const projectId = state.projectId, taskId = state.selectedTaskId, currentActor = actorId();
+    const view = workflowDialog('Compare submissions', 'Each submission is a saved version of the work. Changed, added and removed items carry a text marker. Records load 50 at a time, oldest first.');
+    view.dialog.classList.add('compare-dialog');
+    const pickers = el('div', 'compare-pickers'), earlier = selectField(view, 'compare-earlier', 'Earlier submission', '', []), later = selectField(view, 'compare-later', 'Later submission', '', []);
+    [earlier, later].forEach((select) => { select.required = false; add(pickers, select.previousElementSibling); add(pickers, select); });
+    add(view.form, pickers);
+    const body = add(view.form, el('div', 'compare-body')), more = actionButton('Load more records', () => load(true), false); add(view.form, more);
+    body.setAttribute('aria-live', 'polite');
+    const cursors = { submissions: null, reviews: null }, found = { submissions: [], reviews: [] }; let sequence = 0, failure = '', loaded = false, touched = false;
+    const label = (record) => `${formatDate(record.created_at)} · ${text(record.id).slice(0, 8)} · ${text(record.summary).slice(0, 60)}`;
+    const evidenceMap = (record) => { const map = new Map(); (Array.isArray(record.acceptance_evidence) ? record.acceptance_evidence : []).forEach((item) => { const key = text(item?.criterion); map.set(key, map.has(key) ? `${map.get(key)}\n${text(item?.evidence)}` : text(item?.evidence)); }); return map; };
+    const idMap = (ids) => new Map((Array.isArray(ids) ? ids : []).map((id) => [text(id), text(id)]));
+    const requested = (record) => found.reviews.filter((review) => review.activity?.submission_id === record.id && review.decision?.decision === 'changes_requested');
+    const findingsText = (record) => requested(record).map((review) => [`Changes requested: ${text(review.decision.summary)}`, ...(review.findings || []).map((finding) => `${displayStatus(finding.severity)}: ${text(finding.remedy)}${finding.evidence ? `\nEvidence: ${text(finding.evidence)}` : ''}`)].join('\n\n')).join('\n\n— — —\n\n');
+    const cell = (side, value) => { const node = el('div', 'compare-cell'); add(node, el('span', 'compare-side', side)); add(node, el('p', 'compare-value', value === undefined || value === null || value === '' ? '— none —' : clipText(value))); return node; };
+    const row = (key, title, before, after, status, note) => ({ key, sig: sig(title, before, after, status, note), build: () => {
+      const node = el('section', `compare-row compare-${status}`); node.dataset.status = status;
+      const head = add(node, el('h4', 'compare-head')); add(head, el('span', 'compare-marker', COMPARE_MARKERS[status] || '')); add(head, el('span', '', title));
+      if (note) add(node, el('p', 'muted', note));
+      const cells = add(node, el('div', 'compare-cells')); add(cells, cell('Earlier', before)); add(cells, cell('Later', after));
+      return node;
+    } });
+    const rowsFor = (kind, title, before, after) => {
+      const entries = diffEntries(before, after), shownRows = entries.slice(0, COMPARE_ROWS);
+      const result = shownRows.map((entry) => row(`${kind}:${entry.key}`, `${title}: ${clipText(entry.key).slice(0, 300)}`, entry.before, entry.after, entry.status));
+      if (entries.length > shownRows.length) result.push({ key: `${kind}:more`, sig: sig(entries.length), build: () => el('p', 'muted', `Showing the first ${COMPARE_ROWS} of ${entries.length} ${title.toLowerCase()} entries.`) });
+      return result;
+    };
+    function render() {
+      const submissions = found.submissions, items = [];
+      const names = submissions.map((record) => [record.id, label(record)]);
+      reconcile(earlier, optionItems(names)); reconcile(later, optionItems(names));
+      if (submissions.length >= 2 && !touched) { later.value = submissions[submissions.length - 1].id; earlier.value = submissions[submissions.length - 2].id; }
+      show(pickers, submissions.length >= 2); show(more, Boolean(cursors.submissions || cursors.reviews));
+      if (failure) items.push({ key: 'failure', sig: failure, build: () => el('p', 'error', failure) });
+      if (!loaded) items.push({ key: 'loading', sig: '', build: () => el('p', 'muted', 'Loading submissions and reviews…') });
+      else if (submissions.length < 2) items.push({ key: 'single', sig: sig(submissions.length, Boolean(cursors.submissions)), build: () => el('p', 'inline-alert', cursors.submissions ? 'Nothing to compare in the records loaded so far. Choose Load more records.' : submissions.length ? 'Nothing to compare: this task has only one submission so far.' : 'Nothing to compare: no submission has been recorded for this task.') });
+      else {
+        const before = submissions.find((record) => record.id === earlier.value), after = submissions.find((record) => record.id === later.value);
+        if (cursors.submissions) items.push({ key: 'partial', sig: '', build: () => el('p', 'inline-alert warning', 'More submissions exist than are loaded, so the newest may not be listed. Choose Load more records to reach them.') });
+        if (before && after) {
+          const scalar = (field, title) => { const a = text(before[field]), b = text(after[field]); return row(`field:${field}`, title, a, b, a === b ? 'unchanged' : !a ? 'added' : !b ? 'removed' : 'changed'); };
+          items.push(scalar('summary', 'Summary'), scalar('candidate_revision', 'Source revision'), scalar('candidate_tree', 'Source tree'), scalar('candidate_ref', 'Candidate checkpoint ref'), scalar('handoff', 'Handoff'));
+          items.push(...rowsFor('evidence', 'Acceptance evidence', evidenceMap(before), evidenceMap(after)));
+          items.push(...rowsFor('artifact', 'Artifact', idMap(before.artifact_ids), idMap(after.artifact_ids)));
+          const a = findingsText(before), b = findingsText(after);
+          items.push(row('findings', 'Review findings requesting changes', a, b, a === b ? 'unchanged' : 'changed', cursors.reviews ? 'More reviews exist than are loaded; some findings may be missing until you load more records.' : ''));
+        }
+      }
+      reconcile(body, items);
+    }
+    async function load(append = false) {
+      const current = ++sequence; more.disabled = true; failure = '';
+      const page = async (kind) => (await request(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/history?kind=${kind}&limit=50${append && cursors[kind] ? `&cursor=${encodeURIComponent(cursors[kind])}` : ''}`)).data;
+      try {
+        const kinds = ['submissions', 'reviews'].filter((kind) => !append || cursors[kind]);
+        const pages = await Promise.all(kinds.map(page));
+        if (current !== sequence || currentActor !== actorId() || !view.dialog.isConnected) return;
+        kinds.forEach((kind, index) => { found[kind].push(...(pages[index].items || []).map((item) => item.record).filter((record) => record && typeof record === 'object')); cursors[kind] = pages[index].next_cursor || null; });
+        loaded = true;
+      } catch (error) { if (current === sequence) failure = errorMessage(error); }
+      finally { if (current === sequence) { more.disabled = false; render(); } }
+    }
+    [earlier, later].forEach((select) => select.addEventListener('change', () => { touched = true; render(); }));
+    view.finish('Close', (_, dialog) => dialog.close()); render(); load();
   }
   async function objectives() {
     if (!state.projectId) { setGlobalAlert('Choose a project first.'); return; }
