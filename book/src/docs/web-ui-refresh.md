@@ -182,6 +182,21 @@ dialog changes nothing on the task page. `scripts/test_job_observations.mjs`
 verifies job filtering, search, the cap and the downloaded content; it runs the
 same way as `scripts/test_ui_refresh.mjs`.
 
+## Submission comparison
+
+The Submission & completion card on the task detail page has a **Compare with
+previous submission** button. It opens a dialog that requests the first page
+(at most 50 records) of the task's `submissions` and `reviews` history; **Load
+more records** fetches the next page only when chosen. The latest submission is
+compared with the one before it, and two selects change the pair. Summary,
+source revision, tree, checkpoint ref, handoff, acceptance evidence (matched by
+criterion text), artifact IDs and the findings of changes-requested reviews are
+shown side by side. Each row carries a text marker (Added, Removed, Changed or
+Unchanged) in addition to its tint, long fields are clipped, and everything is
+inserted as text. With a single submission the dialog says there is nothing to
+compare. `scripts/test_submission_compare.mjs` covers these cases and runs the
+same way as `scripts/test_ui_refresh.mjs`.
+
 ## Status indicators
 
 `scripts/test_status_indicators.mjs` verifies the task status badges in a
