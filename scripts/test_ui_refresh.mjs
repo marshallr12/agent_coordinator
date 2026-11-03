@@ -77,6 +77,7 @@ const costByDay = { items: [{ day: '2026-10-12', impl: { usd: 10, launches: 1 },
 const costByTask = { items: [{ task_id: 'task-1', title: 'Parked task', impl: { usd: 10 }, rev: { usd: 2 }, total_usd: 12 }], totals: { impl: {}, rev: {} }, truncated: false };
 const canaries = { items: [{ id: 'c1', host: 'h1', harness: 'claude', outcome: 'ok', duration_seconds: 400, task_id: null, occurred_at: '2026-10-12T00:00:00Z' }], latest: [{ host: 'h1', harness: 'claude', outcome: 'ok', occurred_at: '2026-10-12T00:00:00Z' }], next_before: null };
 const digest = { window_hours: 24, last_read_at: '2026-10-12T00:00:00Z', hri: { items: [{ code: 'hri-1', title: 'Needs a person' }] }, proceeded_decisions: [{ decision_id: 'd-1', question: 'Q1?', proceeded_with: 'yes', proceeded_at: '2026-10-12T10:00:00Z' }], pending_reversible_decisions: [] };
+let sessionRequests = 0;
 const sessions = [
   { session_id: 'sess-1', principal: { id: 'pr-1', name: 'agent-a' }, harness: 'claude-code', workstation_id: 'ws-1', started_at: '2026-10-13T08:00:00Z', last_activity_at: '2026-10-13T11:00:00Z', held_attempts: [{ attempt_id: 'attempt-1', task_id: 'task-1', task_title: 'Detail fixture', mode: 'work', expires_at: '2026-10-13T12:15:00Z' }] },
   { session_id: 'sess-2', principal: { id: 'pr-2', name: 'agent-b' }, harness: 'codex', workstation_id: 'ws-2', started_at: '2026-10-13T08:00:00Z', last_activity_at: '2026-10-13T10:00:00Z', held_attempts: [] },
@@ -149,7 +150,8 @@ async function route(request, response) {
     if (rest === '/telemetry/cost') return json(response, url.searchParams.get('group_by') === 'day' ? costByDay : costByTask);
     if (rest === '/telemetry/canaries') return json(response, canaries);
     if (rest === '/digest') return json(response, digest);
-    if (rest === '/sessions') return json(response, { items: sessions, truncated: false });
+    // generated_at moves 3 s per request, as a live server's does, so unchanged refreshes must still patch nothing.
+    if (rest === '/sessions') return json(response, { items: sessions, truncated: false, generated_at: new Date(Date.parse('2026-10-13T11:45:00Z') + 3000 * sessionRequests++).toISOString() });
     if (rest === '/knowledge') return json(response, { items: lessons, next_cursor: null });
     if (rest === '/decisions') return json(response, { items: decisions, next_cursor: null });
     if (rest === '/artifacts') return json(response, { items: artifacts, next_cursor: null });
