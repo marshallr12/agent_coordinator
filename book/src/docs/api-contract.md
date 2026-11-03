@@ -227,6 +227,14 @@ must be reopened by an operator or revised by an agent (`reason_code`
 `operation_not_permitted` and add `details.required_actor: "human"` and a
 `details.gate` name, or `required_actor: "human"` on the precondition.
 
+**Task dependencies.** `GET /api/v1/projects/{project_id}/tasks/{task_id}` keeps
+`depends_on`, the sorted array of prerequisite task IDs, unchanged. It also returns
+`prerequisites`, one `{id, title, work_status, lifecycle}` object per prerequisite in
+the same order, and `dependents`, the same object for each task that lists this task as
+a prerequisite, ordered by task ID. `dependents` holds at most 50 entries;
+`dependents_truncated` is `true` when more exist. Both lists are direct relations only,
+never a transitive walk, and omit deleted tasks.
+
 **Task kind corrections.** `PATCH /api/v1/projects/{project_id}/tasks/{task_id}`
 accepts optional `kind` (`code` or `general`) with the existing `TaskEdit`
 definition and `expected_revision`. Omission preserves the kind and old saved
