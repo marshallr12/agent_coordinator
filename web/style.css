@@ -528,3 +528,11 @@ div.compare-diff .diff-line { grid-template-columns: 22px minmax(0, 1fr); font-f
 .observation-status { font-size: 12px; }
 .observations-dialog .dialog-actions { flex-wrap: wrap; }
 @media (max-width: 620px) { .observation-controls { grid-template-columns: 1fr; } .observations-dialog .dialog-actions .button { flex: 1 1 100%; } }
+
+.evidence-packet-card { margin-top: 15px; }
+.evidence-packet-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+.evidence-packet-controls .select-label { flex: 1; min-width: min(100%, 220px); }
+.evidence-packet-controls .select-label select { width: 100%; }
+@media (max-width: 620px) { .evidence-packet-controls .button { width: 100%; } }
+.evidence-packet-card .inline-alert { margin: 8px 0 0; }
+.evidence-packet-card ul { margin: 8px 0 0; padding-left: 20px; font-size: 13px; }
