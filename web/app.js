@@ -1499,7 +1499,7 @@
   });
   $('archived-search').addEventListener('input', () => { state.archivedPageIndex = 0; renderArchivedTasks(); });
   $('status-filter').addEventListener('change', () => { state.taskPageIndex = 0; rebuildQueuePages(); showTaskPage(0); });
-  $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else showView('tasks'); }); [['task-detail-heading', 'Task name'], ['detail-task-id-value', 'Task ID']].forEach(([id, label]) => { const source = $(id); source.addEventListener('click', () => copyTaskDetailValue(source, label)); source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); copyTaskDetailValue(source, label); } }); }); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation(`/api/v1/admin/agents`, { name: input.value.trim(), class: $('agent-class').value, access: $('agent-access').value }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
+  $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else { showView('tasks'); if (state.projectId && !state.taskQueueLoaded) loadTasks(); } }); [['task-detail-heading', 'Task name'], ['detail-task-id-value', 'Task ID']].forEach(([id, label]) => { const source = $(id); source.addEventListener('click', () => copyTaskDetailValue(source, label)); source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); copyTaskDetailValue(source, label); } }); }); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation(`/api/v1/admin/agents`, { name: input.value.trim(), class: $('agent-class').value, access: $('agent-access').value }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
   $('refresh-archive').addEventListener('click',loadArchivedTasks); $('archive-project-select').addEventListener('change',loadArchivedTasks);
   function showToken(token) { clearCredentialDownload(); setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }
   function clearCredentialDownload() {
@@ -1571,6 +1571,7 @@
         add(row, el('td', '', text(resource.held_units ?? 0)));
         add(add(row, el('td')), el('code', '', resource.id));
         const actions = add(row, el('td', 'row-actions'));
+        const history = actionButton('History', () => openResourceHistory(resource), false); history.setAttribute('aria-label', `History for resource ${resource.key}`); add(actions, history);
         add(actions, taskIconButton(`Edit resource ${resource.key}`, 'edit', () => openResourceEditor(resource)));
         add(actions, taskIconButton(`Delete resource ${resource.key}`, 'delete', () => openResourceDeletion(resource)));
         return row;
@@ -1580,6 +1581,69 @@
       show($('load-more-resources'), Boolean(state.resourceCursor));
     } catch (error) { if (requestedActor === actorId() && !(silent && state.resourcesLoaded)) setState($('resources-state'), errorMessage(error), false, true); }
     finally { state.fetching.delete('resources'); }
+  }
+
+  // The reservation trail of one resource across every project: current holds first, then released or
+  // resolved reservations. One page is requested per open or Load more; nothing is fetched on a timer.
+  function openResourceHistory(resource) {
+    const requestedActor = actorId();
+    const dialog = el('dialog', 'form-dialog history-dialog'); setupHelpDismissal(dialog);
+    const body = add(dialog, el('div', 'history-body'));
+    const heading = add(body, el('h2', '', `Reservation history: ${resource.key}`)); heading.id = 'resource-history-heading'; dialog.setAttribute('aria-labelledby', heading.id);
+    add(body, el('p', 'muted', 'Reservations that include this resource in any project, newest first. A reservation coordinates access only; it is not proof that a job ran or stopped.'));
+    const note = add(body, el('p', 'inline-alert warning')); note.hidden = true;
+    add(body, el('h3', '', 'Current holds')); const holds = add(body, el('div', 'history-list')); holds.id = 'resource-history-holds';
+    add(body, el('h3', '', 'Released and resolved')); const past = add(body, el('div', 'history-list')); past.id = 'resource-history-past';
+    const status = add(body, el('div', 'state-panel compact', 'Loading reservation history…')); status.setAttribute('role', 'status');
+    const more = add(body, el('button', 'button subtle', 'Load more history')); more.type = 'button'; more.hidden = true;
+    const actions = add(body, el('div', 'dialog-actions')); const close = add(actions, el('button', 'button primary', 'Close')); close.type = 'button'; close.addEventListener('click', () => dialog.close());
+    let entries = [], cursor = null, loading = false, loaded = false, failure = '';
+    const unitsHere = (reservation) => (reservation.items || []).filter(item => item.resource_id === resource.id).reduce((sum, item) => sum + Number(item.units || 0), 0);
+    const goToTask = (reservation) => {
+      dialog.close();
+      if (state.projectId !== reservation.project_id) { resetTaskPages(); state.projectId = reservation.project_id; }
+      openTask(reservation.task_id, 'tasks');
+    };
+    const describe = (reservation) => {
+      const entry = el('div', 'evidence-entry history-entry');
+      const title = add(entry, el('h4', 'history-title'));
+      const link = add(title, el('button', 'button text-button', reservation.task_title || reservation.task_id)); link.type = 'button'; link.title = `Open task ${reservation.task_id}`;
+      link.setAttribute('aria-label', `Open task ${reservation.task_title || reservation.task_id} in project ${reservation.project_name || reservation.project_id}`); link.addEventListener('click', () => goToTask(reservation));
+      add(title, el('span', 'status-badge', displayStatus(reservation.state)));
+      const details = add(entry, el('dl', 'history-details'));
+      [['Project', reservation.project_name || reservation.project_id], ['Units', `${unitsHere(reservation)} of ${resource.capacity}`], ['Since', formatDate(reservation.created_at)]].forEach(([label, value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+      if (reservation.stored_state === 'released') {
+        [['Released', formatDate(reservation.released_at)], ['Reason', reservation.release_reason || 'None recorded']].forEach(([label, value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+      } else if (reservation.stored_state === 'resolved') {
+        [['Resolved', formatDate(reservation.resolved_at)], ['Reason', reservation.resolution_reason || 'None recorded'], ['Evidence', reservation.resolution_evidence || 'None recorded']].forEach(([label, value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+      } else if (reservation.state === 'recovery_required') add(entry, el('p', 'muted', 'The owning attempt is no longer live. The hold remains until a person inspects it and the owner or an operator releases or resolves it.'));
+      return entry;
+    };
+    const draw = () => {
+      const current = entries.filter(item => item.stored_state === 'held'), earlier = entries.filter(item => item.stored_state !== 'held');
+      const describeAll = (list) => list.map(reservation => ({ key: reservation.id, sig: sig(reservation, resource.capacity), build: () => describe(reservation) }));
+      reconcile(holds, current.length ? describeAll(current) : [{ key: 'none', sig: sig(loaded), build: () => el('p', 'muted', loaded ? 'No current holds in the entries loaded so far.' : '') }]);
+      reconcile(past, earlier.length ? describeAll(earlier) : [{ key: 'none', sig: sig(loaded), build: () => el('p', 'muted', loaded ? 'No released or resolved reservations in the entries loaded so far.' : '') }]);
+      const heldHere = current.reduce((sum, item) => sum + unitsHere(item), 0);
+      note.hidden = !(loaded && cursor && heldHere < Number(resource.held_units || 0));
+      setText(note, `${resource.held_units} units are held in total, but only ${heldHere} appear in the entries loaded so far. Load more history to find the older holds.`);
+      status.hidden = !(loading || failure || (loaded && !entries.length)); status.classList.toggle('error', Boolean(failure));
+      setText(status, failure || (loading ? 'Loading reservation history…' : 'This resource has never been reserved.'));
+      more.hidden = !cursor; more.disabled = loading;
+    };
+    const load = async () => {
+      if (loading) return; loading = true; failure = ''; draw();
+      try {
+        const query = new URLSearchParams({ limit: '20' }); if (cursor) query.set('cursor', cursor);
+        const page = (await request(`/api/v1/resources/${encodeURIComponent(resource.id)}/reservations?${query}`)).data;
+        if (!dialog.isConnected || requestedActor !== actorId()) return;
+        entries = [...new Map([...entries, ...listData(page)].map(item => [item.id, item])).values()];
+        cursor = page.next_cursor || null; loaded = true;
+      } catch (error) { if (dialog.isConnected) failure = errorMessage(error); }
+      finally { loading = false; if (dialog.isConnected) draw(); }
+    };
+    more.addEventListener('click', load);
+    add(document.body, dialog); dialog.addEventListener('close', () => dialog.remove()); dialog.showModal(); draw(); load();
   }
 
   function openResourceEditor(resource) {

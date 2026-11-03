@@ -484,6 +484,156 @@ async fn reservations_are_atomic_and_capacity_is_global_across_projects() {
 }
 
 #[tokio::test]
+async fn resource_trail_lists_reservations_across_projects_newest_first() {
+    let fixture = Fixture::new().await;
+    let project_a = fixture.project("trail-a").await;
+    let project_b = fixture.project("trail-b").await;
+    let (_, attempt_a, generation_a) = fixture
+        .claimed(&fixture.a, &project_a, "trail task a")
+        .await;
+    let (_, attempt_b, generation_b) = fixture
+        .claimed(&fixture.b, &project_b, "trail task b")
+        .await;
+    let shared = fixture.resource("device/trail", 5).await;
+    let other = fixture.resource("device/other", 5).await;
+
+    let (status, first) = fixture
+        .reserve(
+            &fixture.a,
+            &project_a,
+            &attempt_a,
+            generation_a,
+            json!([{"resource_id":shared,"units":2},{"resource_id":other,"units":1}]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let first = first["data"]["id"].as_str().unwrap().to_owned();
+    fixture.clock.0.fetch_add(1_000, Ordering::SeqCst);
+    let (status, released) = fixture
+        .call(
+            &fixture.a,
+            "POST",
+            &format!("/api/v1/projects/{project_a}/reservations/{first}/release"),
+            "trail-release",
+            json!({"generation":generation_a,"reason":"bench finished"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{released}");
+    fixture.clock.0.fetch_add(1_000, Ordering::SeqCst);
+    let (status, second) = fixture
+        .reserve(
+            &fixture.b,
+            &project_b,
+            &attempt_b,
+            generation_b,
+            json!([{"resource_id":shared,"units":1}]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let second = second["data"]["id"].as_str().unwrap().to_owned();
+    fixture.clock.0.fetch_add(1_000, Ordering::SeqCst);
+    let (status, third) = fixture
+        .reserve(
+            &fixture.a,
+            &project_a,
+            &attempt_a,
+            generation_a,
+            json!([{"resource_id":shared,"units":3}]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{third}");
+    let third = third["data"]["id"].as_str().unwrap().to_owned();
+
+    let path = format!("/api/v1/resources/{shared}/reservations");
+    let (status, all) = fixture
+        .call(&fixture.admin, "GET", &path, "", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    let items = all["data"]["items"].as_array().unwrap();
+    let ids = items
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, [third.as_str(), second.as_str(), first.as_str()]);
+    assert!(all["data"]["next_cursor"].is_null());
+    assert_eq!(items[0]["project_name"], "trail-a");
+    assert_eq!(items[0]["task_title"], "trail task a");
+    assert_eq!(items[1]["project_name"], "trail-b");
+    assert_eq!(items[1]["project_id"], project_b);
+    assert_eq!(items[1]["task_title"], "trail task b");
+    assert_eq!(items[2]["state"], "released");
+    assert_eq!(items[2]["release_reason"], "bench finished");
+    assert_eq!(items[2]["items"].as_array().unwrap().len(), 2);
+    assert!(!all.to_string().contains(&fixture.a.proof));
+
+    let (_, held) = fixture
+        .call(
+            &fixture.admin,
+            "GET",
+            &format!("{path}?state=held"),
+            "",
+            json!({}),
+        )
+        .await;
+    let ids = held["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, [third.as_str(), second.as_str()]);
+
+    let (_, page_one) = fixture
+        .call(
+            &fixture.admin,
+            "GET",
+            &format!("{path}?limit=2"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(page_one["data"]["items"].as_array().unwrap().len(), 2);
+    let cursor = page_one["data"]["next_cursor"].as_str().unwrap().to_owned();
+    let (status, page_two) = fixture
+        .call(
+            &fixture.admin,
+            "GET",
+            &format!("{path}?limit=2&cursor={cursor}"),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page_two}");
+    let items = page_two["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], first);
+    assert!(page_two["data"]["next_cursor"].is_null());
+
+    for bad in ["limit=0", "state=released", "cursor=nonsense"] {
+        let (status, _) = fixture
+            .call(
+                &fixture.admin,
+                "GET",
+                &format!("{path}?{bad}"),
+                "",
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (status, _) = fixture
+        .call(
+            &fixture.admin,
+            "GET",
+            &format!("/api/v1/resources/{}/reservations", Uuid::new_v4()),
+            "",
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn resources_can_be_updated_and_deleted_only_by_humans_and_only_when_unheld() {
     let fixture = Fixture::new().await;
     let project = fixture.project("resource-edit").await;
