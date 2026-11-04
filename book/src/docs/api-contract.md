@@ -404,7 +404,30 @@ reports that need a human, each with `required_actor: "human"`, the report kind
 as `gate`, the report and its resolve `call`. It also lists, after the reports, the project's
 open non-canary tasks the revise limit parks, as the digest's `revise_limit_reached`
 items below. With no action,
-`retry_after_seconds` suggests a poll interval. Read-access credentials may call it, so a shadow supervisor can log
+`retry_after_seconds` suggests a poll interval.
+
+`next` accepts two optional, comma-separated exclusion lists that let a caller
+hold work back locally without changing it: `exclude_tasks` (role `implementer`)
+and `exclude_submissions` (role `reviewer`, matched against the review's
+`submission_id`). The filter is applied in the candidate queries, before the
+50-candidate window is cut and in the same priority order, so an eligible task
+or review behind any number of held candidates is reachable. A list holds at
+most 64 distinct ids, each a canonical lowercase UUID, and its value is at most
+2,368 bytes; a malformed, empty-element, duplicate or oversized list, a list
+for the wrong role, or either list with `role=integrator` is `400
+invalid_request`. An id the project does not have, or one that is not a
+candidate, is accepted and matches nothing, and an empty value is the same as
+omitting the parameter, which keeps the previous behavior exactly. The response
+adds `excluded_candidates`: the excluded ids that would otherwise have been
+candidates (tasks, or review submissions), in candidate order, at most 50 per
+kind of work (the window); it is `[]` when nothing was held back. Exclusions
+are read-only and apply to the one call: nothing is stored, no task, review,
+dependency, policy or strike changes, and other callers see no difference. They
+never grant eligibility: the guarded claim endpoints re-check ownership,
+independence, policy, budgets and every precondition for whatever is claimed.
+Callers that ignore `excluded_candidates` stay compatible, and a service
+without the parameter ignores it, so a caller must still check what it is
+offered against its own holds. Read-access credentials may call it, so a shadow supervisor can log
 what it would launch without holding write authority.
 
 `GET /api/v1/projects/{project_id}/state-wait` accepts `target_kind=task|activity|job`,

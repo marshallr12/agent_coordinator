@@ -19,7 +19,8 @@ use coordinator_core::INSTRUCTION_VERSION;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
 
 type Reply = Result<Json<Value>, AppError>;
 
@@ -29,6 +30,11 @@ const CANDIDATE_LIMIT: i64 = 50;
 const RETRY_AFTER_SECONDS: i64 = 30;
 /// Parked tasks `human_queue_items` lists besides the integrator reports.
 const PARKED_ITEM_LIMIT: usize = 50;
+/// Most ids one exclusion parameter may list. Each id is a 36-character UUID,
+/// so the whole parameter value stays under [`EXCLUSION_LIST_BYTES`].
+const EXCLUSION_LIMIT: usize = 64;
+/// Longest accepted value of one exclusion parameter, in bytes.
+const EXCLUSION_LIST_BYTES: usize = EXCLUSION_LIMIT * 37;
 /// Unmet codes the caller can clear itself right before claiming.
 const CALLER_LOCAL: &[&str] = &["instructions_required"];
 
@@ -66,6 +72,74 @@ impl Role {
 #[derive(Deserialize)]
 struct NextQuery {
     role: Option<String>,
+    exclude_tasks: Option<String>,
+    exclude_submissions: Option<String>,
+}
+
+/// Ids the caller holds back from this call only. They are read-only
+/// filters: nothing is stored, no task or review changes state, and other
+/// callers see no difference.
+#[derive(Default)]
+struct Exclusions {
+    tasks: Vec<String>,
+    submissions: Vec<String>,
+}
+
+impl Exclusions {
+    /// Validates the query's exclusion parameters for `role`.
+    fn parse(query: &NextQuery, role: Role) -> Result<Self, AppError> {
+        let tasks = parse_ids("exclude_tasks", query.exclude_tasks.as_deref())?;
+        let submissions = parse_ids("exclude_submissions", query.exclude_submissions.as_deref())?;
+        if !tasks.is_empty() && role != Role::Implementer {
+            return Err(AppError::bad_request(
+                "exclude_tasks applies only to role implementer.",
+            ));
+        }
+        if !submissions.is_empty() && role != Role::Reviewer {
+            return Err(AppError::bad_request(
+                "exclude_submissions applies only to role reviewer.",
+            ));
+        }
+        Ok(Self { tasks, submissions })
+    }
+}
+
+/// The ids in a comma-separated exclusion `value`. Each must be a canonical
+/// lowercase UUID, none may repeat, and there are at most
+/// [`EXCLUSION_LIMIT`]; an empty value lists none. Ids the project does not
+/// have are accepted and match nothing.
+fn parse_ids(name: &str, value: Option<&str>) -> Result<Vec<String>, AppError> {
+    let value = value.unwrap_or("");
+    if value.len() > EXCLUSION_LIST_BYTES {
+        return Err(AppError::bad_request(&format!(
+            "{name} may not exceed {EXCLUSION_LIST_BYTES} bytes."
+        )));
+    }
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut seen = BTreeSet::new();
+    let mut ids = Vec::new();
+    for id in value.split(',') {
+        let canonical = Uuid::parse_str(id).is_ok_and(|u| u.to_string() == id);
+        if !canonical {
+            return Err(AppError::bad_request(&format!(
+                "{name} must list canonical lowercase UUIDs separated by commas."
+            )));
+        }
+        if !seen.insert(id) {
+            return Err(AppError::bad_request(&format!(
+                "{name} lists an id more than once."
+            )));
+        }
+        ids.push(id.to_owned());
+    }
+    if ids.len() > EXCLUSION_LIMIT {
+        return Err(AppError::bad_request(&format!(
+            "{name} may list at most {EXCLUSION_LIMIT} ids."
+        )));
+    }
+    Ok(ids)
 }
 
 /// What one scan over the candidates found.
@@ -76,6 +150,9 @@ struct Scan {
     inspected: u64,
     human_gated: u64,
     skipped: BTreeMap<String, u64>,
+    /// Excluded ids that would otherwise have been candidates, in candidate
+    /// order.
+    excluded: Vec<String>,
 }
 
 impl Scan {
@@ -113,6 +190,7 @@ impl Scan {
             "inspected": self.inspected,
             "human_queue": self.human_gated,
             "skipped": self.skipped,
+            "excluded_candidates": self.excluded,
             "retry_after_seconds": if found { 0 } else { RETRY_AFTER_SECONDS },
         })
     }
@@ -131,14 +209,15 @@ async fn next(
     Query(query): Query<NextQuery>,
 ) -> Reply {
     let role = Role::parse(query.role.as_deref())?;
+    let exclusions = Exclusions::parse(&query, role)?;
     let mut c = s.pool.acquire().await?;
     let policy = crate::coordination::current_policy_revision(&mut c, &p).await?;
     let now = s.now();
     let mut body = match role {
-        Role::Implementer => scan_tasks(&mut c, &p, &auth.actor, policy, now)
+        Role::Implementer => scan_tasks(&mut c, &p, &auth.actor, policy, now, &exclusions.tasks)
             .await?
             .into_value(role),
-        Role::Reviewer => scan_reviews(&mut c, &p, &auth.actor, now)
+        Role::Reviewer => scan_reviews(&mut c, &p, &auth.actor, now, &exclusions.submissions)
             .await?
             .into_value(role),
         Role::Integrator => integrator_next(&mut c, &p, &auth.actor).await?,
@@ -149,19 +228,28 @@ async fn next(
     Ok(response(body))
 }
 
-/// Finds the first task the caller could claim (recovery before new work).
+/// Finds the first task the caller could claim (recovery before new work),
+/// leaving out `exclude` before the candidate window is cut.
 async fn scan_tasks(
     c: &mut SqliteConnection,
     p: &str,
     actor: &Actor,
     policy: i64,
     now: i64,
+    exclude: &[String],
 ) -> Result<Scan, AppError> {
     let mut scan = Scan::default();
+    if !exclude.is_empty() {
+        scan.excluded =
+            crate::coordination::next_task_candidates(c, p, now, CANDIDATE_LIMIT, exclude, true)
+                .await?;
+    }
     let human_files =
         crate::attention::recent_human_files(c, p, now - crate::attention::OVERLAP_WINDOW_MS)
             .await?;
-    for id in crate::coordination::next_task_candidates(c, p, now, CANDIDATE_LIMIT).await? {
+    for id in crate::coordination::next_task_candidates(c, p, now, CANDIDATE_LIMIT, exclude, false)
+        .await?
+    {
         let task = crate::coordination::task_preconditions_snapshot(c, p, &id, actor, now).await?;
         let unmet = task["unmet_preconditions"]
             .as_array()
@@ -206,7 +294,8 @@ fn task_action(p: &str, task: &Value, policy: i64) -> Value {
     })
 }
 
-/// Finds the first agent-claimable review, highest subject priority first.
+/// Finds the first agent-claimable review, highest subject priority first,
+/// leaving out submissions in `exclude` before the candidate window is cut.
 /// Independence is judged against the caller, so a shadow principal that
 /// never contributed may be offered reviews a contributor could not claim.
 async fn scan_reviews(
@@ -214,9 +303,16 @@ async fn scan_reviews(
     p: &str,
     actor: &Actor,
     now: i64,
+    exclude: &[String],
 ) -> Result<Scan, AppError> {
     let mut scan = Scan::default();
-    for row in review_candidates(c, p).await? {
+    if !exclude.is_empty() {
+        scan.excluded = (review_candidates(c, p, exclude, true).await?)
+            .iter()
+            .map(|row| row.get("submission_id"))
+            .collect();
+    }
+    for row in review_candidates(c, p, exclude, false).await? {
         let id: String = row.get("id");
         let checked = crate::workflow::activity_preconditions(c, p, &id, actor, now).await?;
         let unmet = checked["unmet_preconditions"]
@@ -231,11 +327,15 @@ async fn scan_reviews(
     Ok(scan)
 }
 
-/// Open agent-claimable review activities in subject priority order.
+/// Open agent-claimable review activities in subject priority order, without
+/// the submissions in `exclude`; with `only`, just those submissions.
 async fn review_candidates(
     c: &mut SqliteConnection,
     p: &str,
+    exclude: &[String],
+    only: bool,
 ) -> Result<Vec<sqlx::sqlite::SqliteRow>, AppError> {
+    let listed = json!(exclude).to_string();
     Ok(sqlx::query(
         "SELECT wa.id,wa.kind,wa.subject_task_id,wa.submission_id,s.kind AS submission_kind,\
          s.project_policy_revision,s.workflow_policy_revision,t.title,t.priority \
@@ -244,9 +344,12 @@ async fn review_candidates(
          WHERE wa.project_id=? AND wa.kind IN ('agent_review','either_review') \
          AND wa.state IN ('queued','active') \
          AND t.deleted_at IS NULL AND t.archived_at IS NULL \
+         AND (wa.submission_id IN (SELECT value FROM json_each(?)))=? \
          ORDER BY t.priority,wa.created_at,wa.id LIMIT ?",
     )
     .bind(p)
+    .bind(listed)
+    .bind(only)
     .bind(CANDIDATE_LIMIT)
     .fetch_all(&mut *c)
     .await?)
