@@ -18,6 +18,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+/// The most ids one `next` call is asked to leave out (the service's
+/// limit for `exclude_tasks` and `exclude_submissions`).
+pub const MAX_EXCLUDED: usize = 64;
 /// The most characters of the agent's final message put in a handoff.
 pub const MAX_FINAL_CHARS: usize = 1000;
 /// The most bytes kept of a launch's events, and of its stderr.
@@ -60,7 +63,7 @@ impl Strikes {
     }
 
     /// Writes the counts atomically (a mode 0600 temporary file, then rename).
-    fn save(&self, config: &Config) -> Result<()> {
+    pub(super) fn save(&self, config: &Config) -> Result<()> {
         let target = path(config);
         fs::create_dir_all(&config.state_dir).context("create the state directory")?;
         let temp = target.with_extension("tmp");
@@ -83,6 +86,25 @@ impl Strikes {
                 path(config).display()
             )
         })
+    }
+
+    /// The tasks [`Strikes::task_hold`] holds, most strikes first (then by
+    /// id), at most [`MAX_EXCLUDED`]: what the loop asks `next` to leave out.
+    /// Read-only: selection never changes a count.
+    pub fn held_tasks(&self, settings: &RunConfig) -> Vec<String> {
+        let limit = settings.empty_exit_limit;
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut held: Vec<(&u32, &String)> = (self.tasks.iter())
+            .filter(|(_, count)| **count >= limit)
+            .map(|(task, count)| (count, task))
+            .collect();
+        held.sort_by(|a, b| b.0.cmp(a.0).then(a.1.cmp(b.1)));
+        held.into_iter()
+            .take(MAX_EXCLUDED)
+            .map(|(_, task)| task.clone())
+            .collect()
     }
 
     /// Why nothing must be claimed, if `[run] empty_exit_total_limit`
