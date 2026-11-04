@@ -148,7 +148,7 @@ async fn poll_all(
     last.remove(LISTING_SLOT);
     for project in &projects {
         for role in ROLES {
-            let record = match fetch_next(client, project, role).await {
+            let record = match fetch_next(client, project, role, ("", &[])).await {
                 Ok(next) => next_record(config, &next),
                 Err(error) => error_record(&error),
             };
@@ -172,14 +172,23 @@ async fn project_ids(client: &CoordinatorClient, config: &ShadowConfig) -> Resul
         .collect())
 }
 
-/// `GET next` for one project and role.
+/// `GET next` for one project and role. `exclude` is the name of the
+/// exclusion parameter (`exclude_tasks` or `exclude_submissions`) and the
+/// ids to leave out of this one answer; no ids sends no parameter.
 pub(crate) async fn fetch_next(
     client: &CoordinatorClient,
     project: &str,
     role: &str,
+    exclude: (&str, &[String]),
 ) -> Result<Value> {
     let path = format!("/api/v1/projects/{project}/next");
-    get_data(client, &path, &[("role", role.to_owned())]).await
+    let mut query = vec![("role", role.to_owned())];
+    if let (name, ids) = exclude
+        && !ids.is_empty()
+    {
+        query.push((name, ids.join(",")));
+    }
+    get_data(client, &path, &query).await
 }
 
 /// GETs `path` and returns the envelope's `data`, or the service error code.
