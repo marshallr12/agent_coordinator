@@ -295,9 +295,14 @@ impl Driver for LiveDriver {
         }
     }
 
-    fn next(&mut self, role: Role) -> Result<Value> {
+    fn next(&mut self, role: Role, exclude: &[String]) -> Result<Value> {
         let name = format!("{role:?}").to_lowercase();
-        let call = crate::shadow::fetch_next(&self.client, self.project(), &name);
+        let call = crate::shadow::fetch_next(
+            &self.client,
+            self.project(),
+            &name,
+            ("exclude_tasks", exclude),
+        );
         self.runtime.block_on(call)
     }
 
