@@ -6,11 +6,11 @@
 //! that always follows a grant — even when the push step fails — because
 //! the service keeps authority outstanding until an observation ends it.
 use crate::checks::{CheckRun, ChecksSource, RosterCheck};
-use crate::flake::attempts_by_check;
+use crate::flake::{attempts_by_check, unfinished_runs};
 use crate::git;
 use crate::integrate::{Integrator, Job, Step};
 use crate::roster::Roster;
-use crate::service::{Ancestry, Observation, Receipt, Reply, ResultRecord};
+use crate::service::{Ancestry, Observation, ProgressRun, Receipt, Reply, ResultRecord};
 use crate::state::{Published, TipMove};
 use anyhow::{Context, Result, bail, ensure};
 use coordinator_local::git_workflow::{
@@ -56,6 +56,7 @@ impl<C: ChecksSource> Integrator<C> {
             .checks
             .check_runs(job.repo.as_ref(), &result.r, wanted)
             .await?;
+        self.report_progress(job, result, &runs, wanted).await;
         let Some(checks) = attempts_by_check(&runs, wanted, &result.r) else {
             return Ok(Some(Step::ChecksPending));
         };
@@ -66,6 +67,51 @@ impl<C: ChecksSource> Integrator<C> {
             self.post_receipt(job, result, run).await?;
         }
         self.attribute(job, result, &checks).await
+    }
+
+    /// Tells the service which required checks on R are queued or running so
+    /// the task shows active verification. It only feeds a display: a failure
+    /// is logged and never stops the integration.
+    async fn report_progress(
+        &self,
+        job: &Job,
+        result: &ResultRecord,
+        runs: &[CheckRun],
+        wanted: &[RosterCheck],
+    ) {
+        let unfinished: Vec<ProgressRun> = unfinished_runs(runs, wanted, &result.r)
+            .into_iter()
+            .map(|run| ProgressRun {
+                check_name: run.check_name,
+                status: if run.started_at.is_some() {
+                    "in_progress"
+                } else {
+                    "queued"
+                },
+                run_id: run.run_id,
+                run_attempt: run.run_attempt,
+                started_at: run.started_at,
+            })
+            .collect();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs())
+            .to_string();
+        match self
+            .service
+            .record_progress(&job.project, result, &unfinished, &nonce)
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(refusal)) => eprintln!(
+                "agentc-integrator: check progress for {} refused: {}",
+                result.id, refusal.code
+            ),
+            Err(error) => eprintln!(
+                "agentc-integrator: check progress for {} not recorded: {error:#}",
+                result.id
+            ),
+        }
     }
 
     /// Posts one receipt, bound to the workflow blob the run used (in R).

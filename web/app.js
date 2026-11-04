@@ -92,18 +92,36 @@
     in_review: { status: 'waiting_review', label: 'In Review', icon: 'reviewing', note: 'A reviewer has claimed a required review and holds a live lease.' },
     awaiting_reviewer: { status: 'waiting_review', label: 'Awaiting Reviewer', icon: 'queued', note: 'The review is queued and no reviewer has claimed it yet.' },
     review_lease_expired: { status: 'waiting_review', label: 'Review Lease Expired', icon: 'lapsed', note: 'A reviewer claimed a review but the lease ended; it needs recovery before anyone is reviewing.' },
+    // The integrator service processes an approved candidate itself, so these stages have no agent, lease or claim. They
+    // come from the integrator's own recent report for the exact current candidate and result; a report that has gone
+    // stale is "unknown", never "running".
+    awaiting_checks: { status: 'waiting_integration', label: 'Awaiting Checks', icon: 'queued', integration: true, note: 'The integrator pinned an integration result for this candidate and has not yet reported its required checks.' },
+    verification_queued: { status: 'waiting_integration', label: 'Verification Queued', icon: 'queued', integration: true, note: 'The integrator queued the required checks on the integration result. None is running yet.' },
+    verifying: { status: 'waiting_integration', label: 'Verifying', icon: 'working', integration: true, note: 'The integrator is running the required checks on the integration result.' },
+    checks_passed: { status: 'waiting_integration', label: 'Checks Passed', icon: 'queued', integration: true, note: 'Every required check passed on the integration result. The integrator publishes it next.' },
+    checks_failed: { status: 'waiting_integration', label: 'Checks Failed', icon: 'lapsed', integration: true, note: 'A required check did not pass on the integration result and no newer run is going.' },
+    verification_unknown: { status: 'waiting_integration', label: 'Verification Unknown', icon: 'lapsed', integration: true, note: 'The last report of running checks is out of date, so the service cannot say whether verification is still going.' },
+    publishing: { status: 'waiting_integration', label: 'Publishing', icon: 'working', integration: true, note: 'The integrator holds push authority and is publishing the verified result. This continues until the target branch is observed.' },
+    publication_unconfirmed: { status: 'waiting_integration', label: 'Publication Unconfirmed', icon: 'lapsed', integration: true, note: 'Push authority ran out before the integrator observed the target branch, so the outcome is not yet known.' },
+  };
+  const checkSummary = (checks) => {
+    if (!checks || !checks.total) return null;
+    const parts = [`${checks.passed} of ${checks.total} passed`];
+    for (const [key, word] of [['running', 'running'], ['queued', 'queued'], ['failed', 'failed'], ['pending', 'not reported']]) if (checks[key]) parts.push(`${checks[key]} ${word}`);
+    return `Required checks: ${parts.join(', ')}`;
   };
   const statusIndicator = (task) => {
     const status = taskStatus(task), processing = task?.processing, copy = processing && STAGE_COPY[processing.stage];
-    if (!copy || copy.status !== status) return { status, label: displayStatus(status), icon: null, active: false, lines: [] };
+    if (!copy || copy.status !== status) return { status, label: displayStatus(status), icon: null, active: false, integration: false, lines: [] };
     const lines = [copy.note];
-    if (processing.active) lines.push('The lease proves a claim, not that the process is running right now.');
+    if (copy.integration) { const summary = checkSummary(processing.checks); if (summary) lines.push(summary); lines.push('The integrator service does this itself; no agent owns or has claimed it.'); }
+    else if (processing.active) lines.push('The lease proves a claim, not that the process is running right now.');
     if (processing.stage === 'awaiting_reviewer' && processing.pending_reviews > 1) lines.push(`${processing.pending_reviews} reviews are pending.`);
     for (const holder of processing.holders || []) {
       const role = holder.role === 'reviewer' ? 'Reviewer' : 'Agent';
       lines.push(`${role}: ${holder.name || 'not recorded'}`, `Harness: ${holder.harness || 'not recorded'}`, `Workstation: ${holder.workstation || 'not recorded'}`, `Lease expires: ${holder.lease_expires_at ? formatDate(holder.lease_expires_at) : 'not recorded'}`);
     }
-    return { status, label: copy.label, icon: copy.icon, stage: processing.stage, active: Boolean(processing.active), lines };
+    return { status, label: copy.label, icon: copy.icon, stage: processing.stage, active: Boolean(processing.active), integration: Boolean(copy.integration), lines };
   };
   let tipCount = 0;
   // Fills `badge` from the task; leaves it untouched when nothing it shows has changed.
@@ -1011,10 +1029,11 @@
     }
     show($('tasks-state'), false); show(target, true);
     const completed = state.taskView === 'completed';
-    reconcile(target, tasks.map((task) => ({ key: task.id, sig: sig(completed, task), build: () => taskRow(task, completed) })));
+    const repositoryUrl = projectRepositoryUrl();
+    reconcile(target, tasks.map((task) => ({ key: task.id, sig: sig(completed, task, repositoryUrl), build: () => taskRow(task, completed, repositoryUrl) })));
   }
 
-  function taskRow(task, completed) {
+  function taskRow(task, completed, repositoryUrl) {
     const status = taskStatus(task);
     const stage = statusIndicator(task).stage, row = el('article', `task-row${completed ? ' completed-task-row' : ''} ${status}${stage ? ` stage-${stage}` : ''}`);
     row.setAttribute('role', completed ? 'group' : 'button'); row.setAttribute('tabindex', '0');
@@ -1046,6 +1065,13 @@
     if (task.created_at && !Number.isNaN(new Date(task.created_at).getTime())) created.dateTime = task.created_at;
     const meta = el('span', 'task-meta');
     const badge = paintStatusBadge(el('span', 'status-badge'), task); add(meta, badge);
+    // Only the integrator's own result revision is linked, and only when the repository is a recognised forge.
+    const checksLink = forgeLinks(repositoryUrl, statusIndicator(task).integration ? task.processing.result_revision : null);
+    if (checksLink) {
+      const link = externalLink(checksLink.checks, 'checks', `Open check runs for the integration result of ${task.title || task.id} in a new tab`);
+      link.classList.add('task-checks-link'); link.addEventListener('click', (event) => event.stopPropagation()); link.addEventListener('keydown', (event) => event.stopPropagation());
+      add(meta, link);
+    }
     const description = el('span', 'task-description', task.description || 'No description');
     add(row, title); add(row, identity); add(row, created); add(row, meta); add(row, description);
     return row;
@@ -1233,7 +1259,7 @@
     let view;
     if (!current) {
       const status = taskStatus(task);
-      view = { message: task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : statusIndicator(task).stage === 'in_review' ? 'A reviewer holds a live review lease. The review activities below show who claimed it.' : statusIndicator(task).stage === 'awaiting_reviewer' ? 'No lease. The review is queued and waiting for a reviewer to claim it.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.' };
+      view = { message: task.current_attempt_id ? 'Ownership details are still syncing. Refresh to reconcile this task.' : ['done', 'canceled', 'superseded'].includes(status) ? `No active lease. This task is ${displayStatus(status).toLowerCase()}.` : status === 'blocked' ? 'No active lease. This task is blocked and needs attention.' : status === 'planned' ? 'No active lease. This task is planned and is not yet admitted.' : statusIndicator(task).stage === 'in_review' ? 'A reviewer holds a live review lease. The review activities below show who claimed it.' : statusIndicator(task).stage === 'awaiting_reviewer' ? 'No lease. The review is queued and waiting for a reviewer to claim it.' : statusIndicator(task).integration ? 'No lease. The integrator service processes this candidate itself; the integration activity below shows its checks.' : ['waiting_review', 'waiting_integration', 'integrating', 'validating'].includes(status) ? 'The submitted candidate is moving through its review and integration activities below.' : 'No active lease. This task is available for eligible work.' };
     } else {
       const remaining = taskStatus(task) === 'recovery_required' ? 'Ownership ended; recovery required' : current.lease_remaining_ms !== undefined ? `${Math.max(0, Math.round(Number(current.lease_remaining_ms) / 60000))} min remaining` : current.expires_at ? formatLease(current.expires_at) : 'Lease active';
       view = { rows: [['Owner', current.owner_name || current.owner_id || 'Agent'], ['State', displayStatus(taskStatus(task))], ['Lease', remaining], ['Expires', formatDate(current.expires_at)], ['Generation', current.generation || 1]] };
@@ -2129,6 +2155,25 @@
       if (after) after(data);
     }, 'POST', onError, { projectId, taskId });
   }
+  // The integrator service's own activity on the exact current candidate and result, from the task's `processing`.
+  function integratorActivity(processing, repositoryUrl) {
+    const copy = STAGE_COPY[processing.stage], box = el('div', 'workflow-entry integrator-activity');
+    add(box, el('h3', '', `Integrator: ${copy.label}`)); add(box, el('p', '', copy.note));
+    add(box, el('p', 'muted', 'The integrator service does this itself. No agent owns or has claimed it, and it changes no review, required-check or policy rule.'));
+    const details = el('dl');
+    const row = (label, value) => { if (value === null || value === undefined) return null; add(details, el('dt', 'muted', label)); return add(details, el('dd')); };
+    const revision = (label, value) => { const node = row(label, value); if (node) add(node, revisionNode(repositoryUrl, value)); };
+    revision('Candidate revision', processing.candidate_revision); revision('Integration result revision', processing.result_revision);
+    [['Result pinned', processing.result_created_at], ['Last reported by the integrator', processing.observed_at], ['Push authority ends', processing.authority_expires_at]].forEach(([label, value]) => { const node = row(label, value && formatDate(value)); if (node) setText(node, formatDate(value)); });
+    const summary = checkSummary(processing.checks); if (summary) { const node = row('Checks', summary); if (node) setText(node, summary.replace('Required checks: ', '')); }
+    add(box, details);
+    if ((processing.check_runs || []).length) {
+      const list = add(box, el('ul', 'integrator-checks'));
+      processing.check_runs.forEach((run) => add(list, el('li', `integrator-check ${text(run.state)}`, [run.check_name, displayStatus(run.state), run.run_id ? `run ${run.run_id}${run.run_attempt ? ` attempt ${run.run_attempt}` : ''}` : null, run.conclusion ? `conclusion ${run.conclusion}` : null, run.started_at ? `started ${formatDate(run.started_at)}` : null].filter(Boolean).join(' · '))));
+      if (processing.checks?.total > processing.check_runs.length) add(box, el('p', 'muted', `Showing ${processing.check_runs.length} of ${processing.checks.total} required checks.`));
+    }
+    return box;
+  }
   function renderWorkflow(data) {
     const target = $('workflow-content'), items = []; const workflow = data.workflow || {}; const submission = workflow.submission; const repositoryUrl = projectRepositoryUrl();
     if (!submission) { reconcile(target, [{ key: 'none', sig: '', build: () => el('p', 'muted', 'No current submission. The implementation owner submits the result and acceptance evidence through the CLI.') }]); return; }
@@ -2162,6 +2207,7 @@
     return candidate;
     };
     items.push({ key: 'candidate', sig: context, build: buildCandidate });
+    if (data.processing?.kind === 'integration' && STAGE_COPY[data.processing.stage]?.status === taskStatus(data)) items.push({ key: 'integrator-activity', sig: sig(data.processing, repositoryUrl), build: () => integratorActivity(data.processing, repositoryUrl) });
     (workflow.blockers || []).forEach((item, index) => items.push({ key: `blocker:${index}`, sig: sig(item), build: () => el('p', 'inline-alert error', typeof item === 'string' ? item : item.message || item.code) }));
     if (workflow.integration_blocked) {
       const blocked = workflow.integration_blocked;

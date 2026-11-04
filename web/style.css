@@ -414,6 +414,12 @@ button.record-chip:focus-visible { outline: 3px solid var(--teal); outline-offse
 @keyframes status-pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent); opacity: 1; } 50% { box-shadow: 0 0 0 4px transparent; opacity: .55; } }
 .status-badge.stage-in_review { color: var(--pill-live-ink); background: var(--pill-live-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pill-live-ink) 45%, transparent); }
 .status-badge.stage-review_lease_expired { color: var(--pill-stop-ink); background: var(--red-soft); }
+.status-badge.stage-verifying, .status-badge.stage-publishing { color: var(--pill-live-ink); background: var(--pill-live-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pill-live-ink) 45%, transparent); }
+.status-badge.stage-checks_failed, .status-badge.stage-verification_unknown, .status-badge.stage-publication_unconfirmed { color: var(--pill-stop-ink); background: var(--red-soft); }
+.task-row.stage-verifying, .task-row.stage-publishing { --task-accent: var(--pill-live-ink); }
+.task-row.stage-checks_failed, .task-row.stage-verification_unknown, .task-row.stage-publication_unconfirmed { --task-accent: var(--red); }
+.task-checks-link { margin-left: .5rem; }
+.integrator-checks { margin: .5rem 0 0; padding-left: 1.25rem; }
 .task-row.stage-in_review { --task-accent: var(--pill-live-ink); }
 .task-row.stage-review_lease_expired { --task-accent: var(--red); }
 .status-tip { position: absolute; z-index: 20; top: calc(100% + 6px); right: 0; display: none; min-width: 230px; max-width: 320px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); font-size: 12px; font-weight: 500; line-height: 1.45; white-space: normal; text-align: left; cursor: default; }

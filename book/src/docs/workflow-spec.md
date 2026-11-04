@@ -62,7 +62,8 @@ task can be waiting for review while its linked review task is in progress.
 Task records also carry a read-only `processing` object that says whether
 anyone is acting on the status right now, so a list can tell a queued review
 from a claimed one without opening the task. It is `null` unless the task is
-`in_progress` or `waiting_review`. Its `stage` is `in_progress` (a live,
+`in_progress`, `waiting_review` or, as described below, an integrator-owned
+`waiting_integration`. Its `stage` is `in_progress` (a live,
 authorized, unexpired attempt owns the task), `in_review` (a required review
 activity is claimed under a live lease), `awaiting_reviewer` (every pending
 review is queued and unclaimed) or `review_lease_expired` (a claimed review's
@@ -72,6 +73,37 @@ lease lapsed and needs recovery). `active` is true only for the first two.
 guess. A live lease proves a claim, not that the holder's process is running.
 The dashboard animates a status icon only while `active` is true, labels every
 stage in text, and shows `holders` in a tooltip that opens on hover and focus.
+
+On a project whose `integration_owner` is `integrator`, a task that is
+`waiting_integration` carries `processing.kind` `integration`: an additive
+indicator that leaves `work_status` and its filters unchanged and creates no
+owner, lease, claim or policy change (`holders` is always empty). The service
+derives it from the current code submission's newest integration result for its
+exact `candidate_revision`; a result for another candidate, a superseded
+submission or a different revision is ignored, so old evidence never makes the
+task look active. Its `stage` is `awaiting_checks` (a result is pinned and no
+check was reported), `verification_queued` (the integrator reported required
+checks that are queued and none is running), `verifying` (at least one required
+check is running), `checks_passed` (every required check passed and the result
+awaits publication), `checks_failed` (a required check's deciding run did not
+pass and no newer run is going), `verification_unknown` (the report of queued or
+running checks, or the integrator heartbeat, is more than three minutes old),
+`publishing` (push authority is outstanding and unexpired) or
+`publication_unconfirmed` (push authority expired before the integrator
+observed the target). `active` is true only for `verifying` and `publishing`.
+Publication ends, and the indicator disappears, when the integrator's
+observation completes the task or returns it to review. The object also names
+`submission_id`, `candidate_revision`, `result_id`, `result_revision`,
+`result_created_at`, `observed_at` (the integrator's last progress report),
+`authority_expires_at`, `checks` (`total`, `passed`, `failed`, `running`,
+`queued`, `pending`) and up to 25 `check_runs` (`check_name`, `state`,
+`run_id`, `run_attempt`, `conclusion`, `started_at`). A task that is `blocked`,
+`done`, `ready` again or superseded, a legacy agent-owned integration, and a
+task with no result for its current candidate have `processing` null; their
+existing statuses (`integrating`, `validating`, `recovery_required`) are
+unchanged. The integrator feeds the queued and running state through
+`POST …/integrator/check-progress`; completed runs and publication come from
+receipts and push authority as before.
 
 Status is derived from authoritative records, including server-time lease
 validity. The database must not rely on a periodic job to change `in_progress`
