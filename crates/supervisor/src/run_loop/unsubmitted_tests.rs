@@ -41,7 +41,7 @@ fn consecutive_exits_without_a_submission_stop_further_claims_of_the_task() {
     assert!(fake.releases[1].contains("will not claim it again"));
     assert!(!fake.releases[0].contains("will not claim it again"));
     let outcome = poll(&mut fake, &settings);
-    let Outcome::Refused(reason) = outcome else {
+    let Outcome::Held(reason) = outcome else {
         panic!("{outcome:?}");
     };
     assert!(reason.contains("task t1 is held") && reason.contains("unsubmitted.json"));
@@ -72,7 +72,7 @@ fn the_limit_is_configurable_and_zero_turns_it_off() {
     for _ in 0..3 {
         poll(&mut fake, &settings);
     }
-    assert!(matches!(poll(&mut fake, &settings), Outcome::Refused(_)));
+    assert!(matches!(poll(&mut fake, &settings), Outcome::Held(_)));
     assert_eq!(claims(&fake), 3);
     let mut off = config(dir.path());
     off.run.empty_exit_limit = 0;
@@ -242,4 +242,162 @@ fn retained_logs_are_bounded_in_size_and_number() {
     let events = fs::read(newest.path().join("events.jsonl")).unwrap();
     assert!(events.len() <= unsubmitted::MAX_RETAINED_BYTES);
     assert!(events.starts_with(b"yyy") && events.ends_with(b"\n"));
+}
+
+/// A fake whose project `p1` queues `tasks`, each launch exiting 0 unsubmitted.
+fn queued(tasks: &[&'static str]) -> Fake {
+    let mut fake = Fake::new();
+    fake.queues = vec![("p1", tasks.to_vec())];
+    fake
+}
+
+/// Strikes `tasks` up to the per-task limit, leaving the total under its own.
+fn strike_out(settings: &Config, tasks: &[&str]) {
+    let mut strikes = unsubmitted::Strikes::default();
+    for task in tasks {
+        strikes
+            .tasks
+            .insert((*task).to_owned(), settings.run.empty_exit_limit);
+    }
+    strikes.save(settings).unwrap();
+}
+
+#[test]
+fn a_held_first_task_is_skipped_for_the_next_eligible_one_without_launching_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    strike_out(&settings, &["t1"]);
+    let before = unsubmitted::Strikes::load(&settings);
+    let mut fake = queued(&["t1", "t2", "t3"]);
+    let (outcome, skipped) = iterate_reporting(&mut fake, &settings);
+    assert!(
+        matches!(&outcome, Outcome::Launched { task, .. } if task == "t2"),
+        "{outcome:?}"
+    );
+    assert_eq!(skipped.tasks, ["t1"]);
+    assert_eq!(fake.claimed_in.len(), 1);
+    assert!(!fake.steps.contains(&"claim:t1".to_owned()));
+    assert_eq!(fake.asked, [("p1", vec!["t1".to_owned()])], "one call");
+    // t2 ended without a submission: its own strike counts, t1's are intact.
+    let after = unsubmitted::Strikes::load(&settings);
+    assert_eq!(after.tasks["t1"], before.tasks["t1"]);
+    assert_eq!(after.tasks["t2"], 1);
+}
+
+#[test]
+fn several_held_tasks_are_all_excluded_in_a_deterministic_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    strike_out(&settings, &["t3", "t1", "t2"]);
+    let mut fake = queued(&["t1", "t2", "t3", "t4"]);
+    let outcome = iterate(&mut fake, &settings);
+    assert!(matches!(&outcome, Outcome::Launched { task, .. } if task == "t4"));
+    let held: Vec<String> = ["t1", "t2", "t3"].map(String::from).to_vec();
+    assert_eq!(fake.asked, [("p1", held)]);
+}
+
+#[test]
+fn only_held_tasks_left_is_a_bounded_held_outcome_naming_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    strike_out(&settings, &["t1", "t2"]);
+    let mut fake = queued(&["t1", "t2"]);
+    for _ in 0..3 {
+        let (outcome, skipped) = iterate_reporting(&mut fake, &settings);
+        let Outcome::Held(reason) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert!(reason.contains("task t1 is held") && reason.contains("task t2 is held"));
+        assert_eq!(skipped.tasks, ["t1", "t2"]);
+    }
+    assert_eq!(fake.asked.len(), 3, "one call per poll");
+    assert_eq!(claims(&fake), 0);
+    assert!(!fake.steps.contains(&"create".to_owned()));
+}
+
+#[test]
+fn an_empty_queue_is_idle_and_holds_elsewhere_are_not_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    strike_out(&settings, &["elsewhere"]);
+    let mut fake = queued(&[]);
+    let (outcome, skipped) = iterate_reporting(&mut fake, &settings);
+    assert_eq!(outcome, Outcome::Idle);
+    assert!(skipped.tasks.is_empty());
+}
+
+#[test]
+fn a_service_that_ignores_exclusions_is_not_retried_or_launched() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    strike_out(&settings, &["t1"]);
+    let mut fake = queued(&["t1", "t2"]);
+    fake.honors_exclusions = false;
+    for _ in 0..3 {
+        let (outcome, skipped) = iterate_reporting(&mut fake, &settings);
+        assert!(matches!(outcome, Outcome::Held(_)), "{outcome:?}");
+        assert_eq!(skipped.tasks, ["t1"]);
+    }
+    assert_eq!(fake.asked.len(), 3, "never more than one call per poll");
+    assert_eq!(claims(&fake), 0);
+}
+
+#[test]
+fn holds_survive_a_restart_and_the_total_limit_still_stops_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = config(dir.path());
+    settings.run.empty_exit_total_limit = 1;
+    strike_out(&settings, &["t1"]);
+    let mut fake = queued(&["t1", "t2"]);
+    // A new loop (restart) reads the same file and still skips t1.
+    let (outcome, _) = iterate_reporting(&mut fake, &settings);
+    assert!(matches!(&outcome, Outcome::Launched { task, .. } if task == "t2"));
+    // t2's strike brought the total to its limit: nothing is asked or claimed.
+    let polls = fake.asked.len();
+    let (outcome, skipped) = iterate_reporting(&mut fake, &settings);
+    assert!(matches!(&outcome, Outcome::Refused(r) if r.contains("1 launches in a row")));
+    assert!(skipped.tasks.is_empty());
+    assert_eq!(fake.asked.len(), polls, "a total stop asks nothing");
+    assert_eq!(unsubmitted::Strikes::load(&settings).tasks["t1"], 2);
+}
+
+#[test]
+fn a_limit_of_zero_excludes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = config(dir.path());
+    strike_out(&settings, &["t1"]);
+    settings.run.empty_exit_limit = 0;
+    assert!(
+        unsubmitted::Strikes::load(&settings)
+            .held_tasks(&settings.run)
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_exclusions_are_bounded_and_ordered_by_strikes_then_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    let mut strikes = unsubmitted::Strikes::default();
+    for n in 0..70 {
+        strikes.tasks.insert(format!("t{n:02}"), 2);
+    }
+    strikes.tasks.insert("worst".into(), 9);
+    strikes.tasks.insert("fine".into(), 1);
+    let held = strikes.held_tasks(&settings.run);
+    assert_eq!(held.len(), unsubmitted::MAX_EXCLUDED);
+    assert_eq!((held[0].as_str(), held[1].as_str()), ("worst", "t00"));
+    assert!(!held.contains(&"fine".to_owned()));
+}
+
+#[test]
+fn the_canary_project_skips_its_own_holds_and_the_main_project_still_gets_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path());
+    strike_out(&settings, &["c1"]);
+    let mut fake = Fake::with_canary();
+    fake.queues = vec![("canary", vec!["c1"]), ("p1", vec!["t1"])];
+    let outcome = iterate(&mut fake, &settings);
+    assert!(matches!(&outcome, Outcome::Launched { task, .. } if task == "t1"));
+    assert_eq!(fake.polled[..2], ["canary", "p1"]);
 }

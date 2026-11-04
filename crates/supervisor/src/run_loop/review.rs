@@ -72,8 +72,9 @@ pub struct CriterionEvidence {
 
 /// What the pipeline needs from the coordinator and the host.
 pub trait ReviewDriver {
-    /// `next` for the reviewer principal.
-    fn next_review(&mut self) -> Result<Value>;
+    /// `next` for the reviewer principal, leaving out the submissions in
+    /// `exclude` (this host's holds; see [`Strikes::held`]).
+    fn next_review(&mut self, exclude: &[String]) -> Result<Value>;
     /// Claims the review in a fresh reviewer-principal session.
     fn claim_review(&mut self, review: &Review) -> Result<ReviewClaim>;
     /// Runs the reviewer launch to its end and returns its final output:
@@ -100,6 +101,20 @@ impl Strikes {
     /// The failed verdicts recorded for `submission` since its last success.
     pub fn count(&self, submission: &str) -> u32 {
         self.0.get(submission).copied().unwrap_or(0)
+    }
+
+    /// The submissions held at `attempts` failures, most failures first (then
+    /// by id), at most [`super::unsubmitted::MAX_EXCLUDED`]. Read-only.
+    pub fn held(&self, attempts: u32) -> Vec<String> {
+        let mut held: Vec<(&u32, &String)> = (self.0.iter())
+            .filter(|(_, count)| **count > 0 && **count >= attempts)
+            .map(|(submission, count)| (count, submission))
+            .collect();
+        held.sort_by(|a, b| b.0.cmp(a.0).then(a.1.cmp(b.1)));
+        (held.into_iter())
+            .take(super::unsubmitted::MAX_EXCLUDED)
+            .map(|(_, submission)| submission.clone())
+            .collect()
     }
 
     /// Counts one more failure for `submission`, or clears it on success.
@@ -136,15 +151,34 @@ pub enum ReviewOutcome {
 /// One review poll: claim the offered review, launch the reviewer, and post
 /// its verdict, or release the review when the verdict cannot be posted.
 /// After `settings.review_attempts` failed verdicts in a row a submission is
-/// skipped instead.
+/// held: `next` is asked to leave it out, so another independent review is
+/// offered, and nothing is launched for it. The call is made once; a held
+/// submission offered anyway (a service that ignores the exclusion, or more
+/// holds than the exclusion limit) is skipped, never retried. Holds are read,
+/// not changed, by selection.
 pub fn review(driver: &mut dyn ReviewDriver, settings: &RunConfig) -> ReviewOutcome {
-    let next = match driver.next_review() {
+    let held = driver.strikes().held(settings.review_attempts);
+    let next = match driver.next_review(&held) {
         Ok(next) => next,
         Err(error) => return ReviewOutcome::Failed(format!("reviewer next: {error:#}")),
     };
+    let passed = super::excluded(&next);
     let Some(review) = offered(&next) else {
-        return ReviewOutcome::Idle;
+        let Some(submission) = passed.first() else {
+            return ReviewOutcome::Idle;
+        };
+        let failures = driver.strikes().count(submission);
+        return ReviewOutcome::Skipped {
+            submission: submission.clone(),
+            failures,
+        };
     };
+    if !passed.is_empty() {
+        eprintln!(
+            "agentc-supervisor run: review: passed over held submissions {}",
+            passed.join(", ")
+        );
+    }
     let failures = driver.strikes().count(&review.submission);
     if failures >= settings.review_attempts {
         let submission = review.submission;

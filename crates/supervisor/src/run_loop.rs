@@ -191,8 +191,10 @@ pub trait Driver {
     /// `next` and the reviewer side act on. A single-project driver has
     /// nothing to switch.
     fn select(&mut self, _project: &str) {}
-    /// `next` data for `role`.
-    fn next(&mut self, role: Role) -> Result<Value>;
+    /// `next` data for `role`, leaving the task ids in `exclude` (this
+    /// host's holds) out of the answer. A service that does not know the
+    /// exclusion ignores it, so a caller must still check what it is offered.
+    fn next(&mut self, role: Role, exclude: &[String]) -> Result<Value>;
     /// Free bytes on the filesystem holding the state directory.
     fn free_bytes(&self) -> Result<u64>;
     /// Creates the clone and the prepared `$RUN`, owned by the role.
@@ -273,9 +275,40 @@ pub trait Driver {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     Idle,
+    /// A host-wide stop: recovery pending, disk, kill switch, vendor or cost
+    /// admission, or the total strike limit. Nothing was asked of `next`.
     Refused(String),
-    Launched { task: String, exit_code: i32 },
+    /// Every task `next` could offer is held on this host by its own strikes
+    /// ([`unsubmitted::Strikes::task_hold`]); the reason names the holds.
+    Held(String),
+    Launched {
+        task: String,
+        exit_code: i32,
+    },
     Failed(String),
+}
+
+impl Outcome {
+    /// The heartbeat's `state`: what the host is doing or why it is not.
+    fn state(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Refused(_) => "stopped",
+            Self::Held(_) => "held",
+            Self::Launched { .. } => "launched",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
+/// The most held tasks one heartbeat names.
+const MAX_REPORTED_HOLDS: usize = 20;
+
+/// What one poll passed over, for the heartbeat: the local holds `next` was
+/// asked to skip (or offered anyway and were not launched).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Skipped {
+    pub tasks: Vec<String>,
 }
 
 /// Polls until stopped (or once), writing the heartbeat after every poll
@@ -284,11 +317,17 @@ pub fn run(driver: &mut impl Driver, config: &Config, once: bool) -> Result<()> 
     sweep_terminal(driver, config);
     record::reset_retries(config);
     for iteration in 1_u64.. {
-        let outcome = iterate(driver, config);
+        let (outcome, skipped) = iterate_reporting(driver, config);
         if outcome != Outcome::Idle {
             eprintln!("agentc-supervisor run: {outcome:?}");
         }
-        if let Err(error) = beat(&heartbeat_path(config), iteration, &outcome) {
+        if !skipped.tasks.is_empty() {
+            eprintln!(
+                "agentc-supervisor run: skipped held tasks {}",
+                skipped.tasks.join(", ")
+            );
+        }
+        if let Err(error) = beat_with(&heartbeat_path(config), iteration, &outcome, &skipped) {
             eprintln!("agentc-supervisor run: heartbeat: {error:#}");
         }
         driver.report_costs(config);
@@ -340,23 +379,34 @@ pub fn sweep_terminal(driver: &mut impl Driver, config: &Config) {
 /// of the extra (canary) projects before the main one, so a ready canary
 /// task is claimed ahead of any other work.
 pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
+    iterate_reporting(driver, config).0
+}
+
+/// [`iterate`], also returning the local holds the poll passed over. A task
+/// held by its own strikes is left out of `next` (one call per project, the
+/// same list in each), so it cannot block independent work behind it; it is
+/// never claimed or launched, and its strikes are left as they are. A held
+/// task offered anyway (an older service, or more holds than the exclusion
+/// limit) is passed over without another call, so a poll never spins.
+pub fn iterate_reporting(driver: &mut impl Driver, config: &Config) -> (Outcome, Skipped) {
+    let mut skipped = Skipped::default();
     let projects = driver.projects();
     let main = projects.first().cloned().unwrap_or_default();
     driver.select(&main);
     if let Some(reason) = record::recover(driver, config) {
-        return Outcome::Refused(reason);
+        return (Outcome::Refused(reason), skipped);
     }
     driver.select(&main);
     if let Some(reason) = refusal(driver, &config.run) {
-        return Outcome::Refused(reason);
+        return (Outcome::Refused(reason), skipped);
     }
     let vendor = match health::admit(driver, config) {
         Ok(vendor) => vendor,
-        Err(reason) => return Outcome::Refused(reason),
+        Err(reason) => return (Outcome::Refused(reason), skipped),
     };
     let strikes = unsubmitted::Strikes::load(config);
     if let Some(reason) = strikes.total_hold(&config.run, config) {
-        return Outcome::Refused(reason);
+        return (Outcome::Refused(reason), skipped);
     }
     if config.run.reviewer {
         for project in &projects {
@@ -364,22 +414,30 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
             review_hook(driver, config);
         }
     }
+    let exclude = strikes.held_tasks(&config.run);
     let mut failure = None;
-    let mut held = None;
     for project in projects.iter().skip(1).chain(projects.first()) {
         driver.select(project);
-        let next = match driver.next(Role::Implementer) {
+        let next = match driver.next(Role::Implementer, &exclude) {
             Ok(next) => next,
             Err(error) => {
                 failure.get_or_insert(format!("next: {error:#}"));
                 continue;
             }
         };
+        for task in excluded(&next) {
+            if exclude.contains(&task) {
+                skipped.add(task);
+            }
+        }
         let Some(suggestion) = suggestion(&next) else {
             continue;
         };
-        if let Some(reason) = strikes.task_hold(&config.run, config, &suggestion.task) {
-            held.get_or_insert(reason);
+        if strikes
+            .task_hold(&config.run, config, &suggestion.task)
+            .is_some()
+        {
+            skipped.add(suggestion.task);
             continue;
         }
         let launch = Launch {
@@ -389,13 +447,37 @@ pub fn iterate(driver: &mut impl Driver, config: &Config) -> Outcome {
         let result = work(driver, config, &launch);
         let outcome = finish(driver, config, &launch, result);
         driver.select(&main);
-        return outcome;
+        return (outcome, skipped);
     }
     driver.select(&main);
-    match (failure, held) {
-        (Some(failure), _) => Outcome::Failed(failure),
-        (None, Some(held)) => Outcome::Refused(held),
-        (None, None) => Outcome::Idle,
+    let outcome = match failure {
+        Some(failure) => Outcome::Failed(failure),
+        None if skipped.tasks.is_empty() => Outcome::Idle,
+        None => Outcome::Held(skipped.reason(&strikes, config)),
+    };
+    (outcome, skipped)
+}
+
+impl Skipped {
+    /// Notes a held task once.
+    fn add(&mut self, task: String) {
+        if !self.tasks.contains(&task) {
+            self.tasks.push(task);
+        }
+    }
+
+    /// The sentence naming the holds (the first few in full): why `next`
+    /// had nothing left to launch.
+    fn reason(&self, strikes: &unsubmitted::Strikes, config: &Config) -> String {
+        const SHOWN: usize = 3;
+        let mut text: Vec<String> = (self.tasks.iter())
+            .take(SHOWN)
+            .filter_map(|task| strikes.task_hold(&config.run, config, task))
+            .collect();
+        if self.tasks.len() > SHOWN {
+            text.push(format!("and {} more held tasks", self.tasks.len() - SHOWN));
+        }
+        text.join("; ")
     }
 }
 
@@ -426,7 +508,7 @@ pub fn review_hook(driver: &mut impl Driver, config: &Config) {
         return;
     }
     let Some(reviewer) = driver.reviewer() else {
-        if let Ok(next) = driver.next(Role::Reviewer)
+        if let Ok(next) = driver.next(Role::Reviewer, &[])
             && !next["action"].is_null()
         {
             eprintln!("agentc-supervisor run: reviewer work needs a reviewer side");
@@ -449,6 +531,15 @@ pub fn suggestion(next: &Value) -> Option<Suggestion> {
         revision: body["expected_task_revision"].as_u64()?,
         title: action["title"].as_str().unwrap_or("").to_owned(),
     })
+}
+
+/// The held ids a `next` response says it left out because they would
+/// otherwise have been candidates (at most the exclusion limit).
+pub fn excluded(next: &Value) -> Vec<String> {
+    (next["excluded_candidates"].as_array().into_iter().flatten())
+        .filter_map(|id| id.as_str().map(str::to_owned))
+        .take(unsubmitted::MAX_EXCLUDED)
+        .collect()
 }
 
 /// Creates, claims, registers the checkout, prompts and launches, stopping
@@ -626,24 +717,51 @@ pub fn defuse(text: &str) -> String {
 
 /// Rewrites the heartbeat atomically: poll count, time and last outcome.
 pub fn beat(path: &Path, iteration: u64, outcome: &Outcome) -> Result<()> {
-    let record = json!({"pid": std::process::id(), "iteration": iteration,
-                        "at_ms": crate::shadow::now_ms(), "outcome": format!("{outcome:?}")});
+    beat_with(path, iteration, outcome, &Skipped::default())
+}
+
+/// [`beat`], also saying what the poll was: `state` (`idle`, `stopped` by a
+/// host-wide admission stop with `stop` giving the reason, `held` when only
+/// locally held tasks were left, `launched`, `failed`) and `skipped_holds`,
+/// the held tasks it passed over (at most [`MAX_REPORTED_HOLDS`], with
+/// `skipped_hold_count` the full number). Ids and reasons only: never a
+/// credential, proof or harness log.
+pub fn beat_with(path: &Path, iteration: u64, outcome: &Outcome, skipped: &Skipped) -> Result<()> {
+    let mut record = json!({"pid": std::process::id(), "iteration": iteration,
+                            "at_ms": crate::shadow::now_ms(), "outcome": format!("{outcome:?}"),
+                            "state": outcome.state(),
+                            "skipped_hold_count": skipped.tasks.len(),
+                            "skipped_holds": skipped.tasks.iter().take(MAX_REPORTED_HOLDS)
+                                .collect::<Vec<_>>()});
+    match outcome {
+        Outcome::Refused(reason) => record["stop"] = json!(reason),
+        Outcome::Held(reason) => record["hold"] = json!(reason),
+        _ => {}
+    }
     write_beat(path, &record)
 }
 
 /// Refreshes the heartbeat's time while a `role` launch for `task` runs,
-/// adding a `launch` entry that says so. The poll count and last outcome are
-/// kept as the previous poll left them, and the next [`beat`] drops the
-/// entry.
+/// adding a `launch` entry that says so and `state: "busy"`. The poll count
+/// is kept as the previous poll left it; that poll's outcome moves to
+/// `last_outcome`, so a refusal that came before the launch is not mistaken
+/// for the host's present state. The next [`beat_with`] drops the entry.
 pub fn beat_busy(path: &Path, role: &str, task: &str) -> Result<()> {
     let last: Value = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
+    let previous = last["last_outcome"]
+        .as_str()
+        .filter(|_| last.get("launch").is_some())
+        .or(last["outcome"].as_str())
+        .unwrap_or("Idle");
     let record = json!({"pid": std::process::id(),
                         "iteration": last["iteration"].as_u64().unwrap_or(0),
                         "at_ms": crate::shadow::now_ms(),
-                        "outcome": last["outcome"].as_str().unwrap_or("Idle"),
+                        "outcome": "Busy",
+                        "state": "busy",
+                        "last_outcome": previous,
                         "launch": {"role": role, "task": task}});
     write_beat(path, &record)
 }
