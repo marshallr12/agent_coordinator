@@ -392,8 +392,13 @@ impl LiveReviewer {
 }
 
 impl ReviewDriver for LiveReviewer {
-    fn next_review(&mut self) -> Result<Value> {
-        let call = crate::shadow::fetch_next(&self.client, &self.project, "reviewer");
+    fn next_review(&mut self, exclude: &[String]) -> Result<Value> {
+        let call = crate::shadow::fetch_next(
+            &self.client,
+            &self.project,
+            "reviewer",
+            ("exclude_submissions", exclude),
+        );
         self.runtime.block_on(call)
     }
 

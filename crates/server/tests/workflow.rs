@@ -3948,6 +3948,235 @@ async fn next_is_not_starved_by_blocked_higher_priority_tasks() {
     assert_eq!(offered["action"]["task_id"], ready["id"], "{offered}");
 }
 
+/// Reads `next` with extra query text, returning the status and body.
+async fn next_with(f: &Fixture, c: &Caller, p: &str, query: &str) -> (StatusCode, Value) {
+    let path = format!("/api/v1/projects/{p}/next?{query}");
+    f.call(c, "GET", &path, Value::Null).await
+}
+
+/// Sets the priority of `task` (lower is more urgent).
+async fn set_priority(f: &Fixture, task: &Value, priority: i64) {
+    sqlx::query("UPDATE tasks SET priority=? WHERE id=?")
+        .bind(priority)
+        .bind(task["id"].as_str().unwrap())
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn next_exclusions_reach_work_behind_more_held_tasks_than_the_window() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("next-exclude", "https://example.test/next.git")
+        .await;
+    let later = f.task(&p, "general", "Independent work").await;
+    set_priority(&f, &later, 2).await;
+    let mut held = Vec::new();
+    for n in 0..51 {
+        let task = f.task(&p, "general", &format!("Held {n}")).await;
+        set_priority(&f, &task, 0).await;
+        held.push(task["id"].as_str().unwrap().to_owned());
+    }
+    let plain = next_action(&f, &f.b, &p, "implementer").await;
+    assert!(held.contains(&plain["action"]["task_id"].as_str().unwrap().to_owned()));
+    assert_eq!(plain["excluded_candidates"], json!([]), "{plain}");
+    // Without the exclusion the 50-candidate window never reaches `later`.
+    assert_eq!(plain["inspected"], 1, "{plain}");
+
+    let query = format!("role=implementer&exclude_tasks={}", held.join(","));
+    let (status, skipped) = next_with(&f, &f.b, &p, &query).await;
+    assert_eq!(status, StatusCode::OK, "{skipped}");
+    let data = &skipped["data"];
+    assert_eq!(data["action"]["task_id"], later["id"], "{data}");
+    assert_eq!(data["inspected"], 1, "{data}");
+    let mut passed: Vec<String> =
+        serde_json::from_value(data["excluded_candidates"].clone()).unwrap();
+    assert_eq!(passed.len(), 50, "bounded by the candidate window");
+    passed.sort();
+    assert!(passed.iter().all(|id| held.contains(id)));
+
+    // Everything eligible held: no action, the holds are named.
+    let all = format!("{},{}", held.join(","), later["id"].as_str().unwrap());
+    let (_, none) = next_with(
+        &f,
+        &f.b,
+        &p,
+        &format!("role=implementer&exclude_tasks={all}"),
+    )
+    .await;
+    assert!(none["data"]["action"].is_null(), "{none}");
+    assert_eq!(none["data"]["retry_after_seconds"], 30);
+    assert!(
+        !none["data"]["excluded_candidates"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(none["data"]["inspected"], 0);
+}
+
+#[tokio::test]
+async fn next_exclusions_are_read_only_and_local_to_the_call() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("next-local", "https://example.test/next.git")
+        .await;
+    let first = f.task(&p, "general", "Held here").await;
+    let second = f.task(&p, "general", "Free").await;
+    set_priority(&f, &first, 1).await;
+    set_priority(&f, &second, 2).await;
+    let id = first["id"].as_str().unwrap();
+    let (_, mine) = next_with(
+        &f,
+        &f.b,
+        &p,
+        &format!("role=implementer&exclude_tasks={id}"),
+    )
+    .await;
+    assert_eq!(mine["data"]["action"]["task_id"], second["id"], "{mine}");
+    // Another caller, and the same caller without the parameter, are unaffected.
+    for caller in [&f.a, &f.b] {
+        let plain = next_action(&f, caller, &p, "implementer").await;
+        assert_eq!(plain["action"]["task_id"], first["id"], "{plain}");
+    }
+    // The task is unchanged, and the guarded claim still works for it.
+    let (_, shown) = f
+        .call(
+            &f.a,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks/{id}"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(shown["data"]["revision"], first["revision"], "{shown}");
+    assert_eq!(shown["data"]["work_status"], "ready", "{shown}");
+    let owner = f.claim(&f.a, &p, &first, 1).await;
+    assert_eq!(owner["state"], "active");
+    // Claiming never depended on the exclusion: a claimed task is simply not offered.
+    let (_, after) = next_with(
+        &f,
+        &f.b,
+        &p,
+        &format!("role=implementer&exclude_tasks={id}"),
+    )
+    .await;
+    assert_eq!(after["data"]["action"]["task_id"], second["id"], "{after}");
+    assert_eq!(after["data"]["excluded_candidates"], json!([]), "{after}");
+}
+
+#[tokio::test]
+async fn next_exclusions_are_validated() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("next-validate", "https://example.test/next.git")
+        .await;
+    let t = f.task(&p, "general", "Only task").await;
+    let id = Uuid::new_v4().to_string();
+    let other = Uuid::new_v4().to_string();
+    let too_many = (0..65)
+        .map(|_| Uuid::new_v4().to_string())
+        .collect::<Vec<_>>();
+    let limit = too_many[..64].join(",");
+    let rejected = [
+        "role=implementer&exclude_tasks=not-a-uuid".to_owned(),
+        format!("role=implementer&exclude_tasks={}", id.to_uppercase()),
+        format!("role=implementer&exclude_tasks={id},"),
+        format!("role=implementer&exclude_tasks=,{id}"),
+        format!("role=implementer&exclude_tasks={id},{other},{id}"),
+        format!("role=implementer&exclude_tasks={}", too_many.join(",")),
+        format!("role=implementer&exclude_tasks={}", "a".repeat(5000)),
+        format!("role=implementer&exclude_tasks={}%20", id),
+        format!("role=implementer&exclude_submissions={id}"),
+        format!("role=reviewer&exclude_tasks={id}"),
+        format!("role=integrator&exclude_tasks={id}"),
+        "role=reviewer&exclude_submissions=nope".to_owned(),
+    ];
+    for query in &rejected {
+        let (status, body) = next_with(&f, &f.b, &p, query).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+    // Unknown ids, an empty value, the maximum and the old shape are accepted.
+    for query in [
+        format!("role=implementer&exclude_tasks={id},{other}"),
+        "role=implementer&exclude_tasks=".to_owned(),
+        format!("role=implementer&exclude_tasks={limit}"),
+        "role=implementer".to_owned(),
+        "".to_owned(),
+        format!("role=reviewer&exclude_submissions={id}"),
+        "role=reviewer&exclude_tasks=".to_owned(),
+    ] {
+        let (status, body) = next_with(&f, &f.b, &p, &query).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        if query.starts_with("role=implementer") || query.is_empty() {
+            assert_eq!(
+                body["data"]["action"]["task_id"], t["id"],
+                "{query}: {body}"
+            );
+            assert_eq!(body["data"]["excluded_candidates"], json!([]), "{body}");
+        }
+    }
+    // The listing is identical to what it was before the parameter existed.
+    let plain = next_action(&f, &f.b, &p, "implementer").await;
+    assert_eq!(plain["inspected"], 1, "{plain}");
+}
+
+#[tokio::test]
+async fn review_exclusions_advance_to_another_independent_review() {
+    let f = Fixture::new().await;
+    let p = f
+        .project("next-review-exclude", "https://example.test/next.git")
+        .await;
+    let mut submissions = Vec::new();
+    for (n, title) in ["First review", "Second review"].into_iter().enumerate() {
+        let t = f.task(&p, "general", title).await;
+        set_priority(&f, &t, n as i64).await;
+        let owner = f.claim(&f.a, &p, &t, 1).await;
+        f.submit(&f.a, &p, &t, &owner, "general", 1, None, None, None, None)
+            .await;
+        submissions.push(t);
+    }
+    let plain = next_action(&f, &f.b, &p, "reviewer").await;
+    assert_eq!(
+        plain["action"]["subject_task_id"], submissions[0]["id"],
+        "{plain}"
+    );
+    let held = plain["action"]["submission_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let query = format!("role=reviewer&exclude_submissions={held}");
+    let (status, skipped) = next_with(&f, &f.b, &p, &query).await;
+    assert_eq!(status, StatusCode::OK, "{skipped}");
+    let data = &skipped["data"];
+    assert_eq!(
+        data["action"]["subject_task_id"], submissions[1]["id"],
+        "{data}"
+    );
+    assert_eq!(data["excluded_candidates"], json!([held]), "{data}");
+    // Another submission's identity does not inherit the hold.
+    let unrelated = Uuid::new_v4().to_string();
+    let (_, other) = next_with(
+        &f,
+        &f.b,
+        &p,
+        &format!("role=reviewer&exclude_submissions={unrelated}"),
+    )
+    .await;
+    assert_eq!(
+        other["data"]["action"]["submission_id"],
+        json!(held),
+        "{other}"
+    );
+    // Independence is still judged: the author is offered nothing.
+    let (_, author) = next_with(&f, &f.a, &p, &query).await;
+    assert!(author["data"]["action"].is_null(), "{author}");
+    // The hold is local: the review stays claimable without it, guarded.
+    let claimed = follow(&f, &f.b, &p, &plain).await;
+    assert_eq!(claimed["attempt"]["state"], "active", "{claimed}");
+}
+
 /// An agent caller whose credential is switched to the integrator class.
 async fn integrator_caller(f: &Fixture) -> Caller {
     let c = seed(&f.state, false, "integrator").await;
