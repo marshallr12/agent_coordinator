@@ -60,6 +60,14 @@ struct Fake {
     polled: Vec<&'static str>,
     claimed_in: Vec<String>,
     released_in: Vec<&'static str>,
+    /// Ready tasks in claim order per project, served like the service does
+    /// (the first one not excluded); a project without a queue answers
+    /// `next`/`nexts`.
+    queues: Vec<(&'static str, Vec<&'static str>)>,
+    /// Whether the service applies the exclusions it is sent.
+    honors_exclusions: bool,
+    /// The (project, exclusions) of every implementer `next` call.
+    asked: Vec<(&'static str, Vec<String>)>,
 }
 
 impl Fake {
@@ -102,6 +110,9 @@ impl Fake {
             polled: Vec::new(),
             claimed_in: Vec::new(),
             released_in: Vec::new(),
+            queues: Vec::new(),
+            honors_exclusions: true,
+            asked: Vec::new(),
             cost_reports: 0,
         }
     }
@@ -151,13 +162,24 @@ impl Driver for Fake {
         }
     }
 
-    fn next(&mut self, role: Role) -> Result<Value> {
+    fn next(&mut self, role: Role, exclude: &[String]) -> Result<Value> {
         self.steps.push(format!("next:{}", role.slug()));
         self.polled.push(self.selected);
+        if role == Role::Implementer {
+            self.asked.push((self.selected, exclude.to_vec()));
+        }
         anyhow::ensure!(
             !self.failing.contains(&self.selected),
             "service unavailable"
         );
+        if let Some((_, queue)) = self.queues.iter().find(|(p, _)| *p == self.selected) {
+            let held = |task: &str| self.honors_exclusions && exclude.iter().any(|e| e == task);
+            let passed: Vec<&str> = queue.iter().copied().filter(|t| held(t)).collect();
+            let mut answer = (queue.iter().copied().find(|t| !held(t)))
+                .map_or(json!({"action": null}), |task| self.suggest(task));
+            answer["excluded_candidates"] = json!(passed);
+            return Ok(answer);
+        }
         let own = self
             .nexts
             .iter()
@@ -505,7 +527,7 @@ fn a_launch_beat_keeps_the_last_poll_and_the_next_poll_clears_it() {
     beat_busy(&path, "reviewer", "t9").unwrap();
     let busy = read();
     assert_eq!(
-        (busy["iteration"].as_u64(), busy["outcome"].as_str()),
+        (busy["iteration"].as_u64(), busy["last_outcome"].as_str()),
         (Some(0), Some("Idle"))
     );
     assert_eq!(busy["launch"], json!({"role": "reviewer", "task": "t9"}));
@@ -514,11 +536,64 @@ fn a_launch_beat_keeps_the_last_poll_and_the_next_poll_clears_it() {
     beat_busy(&path, "implementer", "t1").unwrap();
     let busy = read();
     assert_eq!(
-        (busy["iteration"].as_u64(), busy["outcome"].as_str()),
+        (busy["iteration"].as_u64(), busy["last_outcome"].as_str()),
         (Some(4), Some("Failed(\"x\")"))
     );
     assert_eq!(busy["launch"], json!({"role": "implementer", "task": "t1"}));
     assert!(busy["at_ms"].as_u64().unwrap() > 0);
+    // A second beat of the same launch keeps the outcome that preceded it.
+    beat_busy(&path, "implementer", "t1").unwrap();
+    assert_eq!(read()["last_outcome"], "Failed(\"x\")");
+}
+
+#[test]
+fn a_busy_heartbeat_is_not_a_stale_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("heartbeat.json");
+    let read = || -> Value { serde_json::from_slice(&fs::read(&path).unwrap()).unwrap() };
+    let refused = Outcome::Held("task t1 is held".into());
+    let skipped = Skipped {
+        tasks: vec!["t1".into()],
+    };
+    beat_with(&path, 7, &refused, &skipped).unwrap();
+    let idle = read();
+    assert_eq!(idle["state"], "held");
+    assert_eq!(idle["hold"], "task t1 is held");
+    assert_eq!(idle["skipped_holds"], json!(["t1"]));
+    beat_busy(&path, "implementer", "t2").unwrap();
+    let busy = read();
+    assert_eq!(
+        (busy["state"].as_str(), busy["outcome"].as_str()),
+        (Some("busy"), Some("Busy"))
+    );
+    assert_eq!(busy["last_outcome"], "Held(\"task t1 is held\")");
+    assert!(busy.get("hold").is_none() && busy["skipped_holds"].is_null());
+    assert_eq!(busy["launch"], json!({"role": "implementer", "task": "t2"}));
+}
+
+#[test]
+fn the_heartbeat_tells_a_host_wide_stop_from_local_holds_and_bounds_the_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("heartbeat.json");
+    let read = || -> Value { serde_json::from_slice(&fs::read(&path).unwrap()).unwrap() };
+    beat(&path, 1, &Outcome::Refused("kill switch".into())).unwrap();
+    let stopped = read();
+    assert_eq!(
+        (stopped["state"].as_str(), stopped["stop"].as_str()),
+        (Some("stopped"), Some("kill switch"))
+    );
+    assert!(stopped.get("hold").is_none());
+    let many = Skipped {
+        tasks: (0..30).map(|n| format!("t{n}")).collect(),
+    };
+    beat_with(&path, 2, &Outcome::Idle, &many).unwrap();
+    let held = read();
+    assert_eq!(held["state"], "idle");
+    assert_eq!(held["skipped_hold_count"], 30);
+    assert_eq!(
+        held["skipped_holds"].as_array().unwrap().len(),
+        MAX_REPORTED_HOLDS
+    );
 }
 
 #[test]
