@@ -279,8 +279,8 @@ My account has a *Time display* choice, Local time or UTC, saved in the
 browser's local storage under `agent-coordinator.time-zone`. It defaults to
 Local time, also when storage is unavailable. Every date on the page is
 formatted by one helper, `formatInstant()`, which appends the zone
-abbreviation. A date that stands alone is a focusable `<time>` whose `datetime`
-and `title` hold the exact ISO-8601 UTC instant; keyboard focus shows it in a
+abbreviation. Every date, including one inside a sentence or a tooltip, is a
+focusable `<time>` whose `datetime` and `title` hold the exact ISO-8601 UTC instant; keyboard focus shows it in a
 bubble. Lease "minutes remaining" figures stay relative. The zone is part of
 every render signature, so changing it rebuilds only the dated nodes and an
 unchanged refresh still records no DOM mutation.

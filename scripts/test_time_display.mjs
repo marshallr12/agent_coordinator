@@ -13,19 +13,20 @@ const root = resolve(import.meta.dirname, '..');
 // 2026-10-05 is inside US daylight time, so New York local time is UTC-4 and the abbreviation is EDT.
 const ZONE = 'America/New_York';
 const CREATED = '2026-10-05T14:30:00Z', EXPIRES = '2026-10-05T16:45:00Z', CHECKPOINT = '2026-10-05T15:15:00Z';
+const PROGRESS = '2026-10-05T15:20:00Z', FAILED_AT = '2026-10-05T13:45:00Z';
 const OBSERVED = '2026-10-05T13:05:00Z', REVIEW_EXPIRES = '2026-10-05T17:20:00Z', STARTED = '2026-10-05T12:00:00Z', ACTIVE = '2026-10-05T15:40:00Z';
 const task = {
   id: 'time-task', title: 'Time display task', description: 'Synthetic browser-fixture task.', revision: 3, kind: 'code', priority: 2,
-  lifecycle: 'open', work_status: 'in_progress', current_attempt_id: 'time-attempt', created_at: CREATED, acceptance_criteria: [],
+  lifecycle: 'open', work_status: 'in_progress', current_attempt_id: 'time-attempt', created_at: CREATED, last_progress_at: PROGRESS, acceptance_criteria: [],
   processing: { stage: 'in_progress', active: true, holders: [{ role: 'owner', name: 'worker', harness: 'cli', workstation: 'ws', lease_expires_at: EXPIRES }] },
 };
 const detail = {
   ...task,
   attempts: [{ id: 'time-attempt', owner_id: 'worker', owner_name: 'worker', generation: 1, state: 'active', expires_at: EXPIRES }],
   checkpoints: [{ id: 'cp-1', actor_name: 'worker', summary: 'Halfway there', created_at: CHECKPOINT }],
-  job_evidence: { jobs: [{ id: 'job-1', label: 'Gate run', state: 'succeeded', observation_freshness: 'fresh', exit_code: 0, last_observed_at: OBSERVED }], reservations: [] },
+  job_evidence: { jobs: [{ id: 'job-1', label: 'Gate run', state: 'succeeded', observation_freshness: 'fresh', exit_code: 0, last_observed_at: OBSERVED }, { id: 'job-2', label: 'Lint run', state: 'failed', exit_code: 1, source_revision: 'candidate-rev', created_at: FAILED_AT, last_observed_at: FAILED_AT }], reservations: [] },
   workflow: {
-    phase: 'review', blockers: [], submission: { id: 'sub-1', result_id: 'res-1' },
+    phase: 'review', blockers: [], submission: { id: 'sub-1', result_id: 'res-1', candidate_revision: 'candidate-rev' },
     activities: [{ id: 'act-review', kind: 'agent_review', status: 'claimed', current_attempt: { owner_id: 'reviewer', expires_at: REVIEW_EXPIRES } }],
   },
 };
@@ -193,6 +194,10 @@ async function main() {
       // Local 10:30 AM EDT is 2:30 PM UTC.
       const created = await expectZone('#tasks-list .task-row', CREATED, mark, 'Task list created time');
       assert(created.includes(utc ? '2:30 PM' : '10:30 AM'), `Task list time is wrong in ${zone}: ${created}`);
+      // 11:20 AM EDT is 3:20 PM UTC.
+      const progress = await expectZone('#tasks-list .task-row', PROGRESS, mark, 'Task list last progress');
+      assert(progress.startsWith('Last progress ') && progress.includes(utc ? '3:20 PM' : '11:20 AM'), `Task list last progress is wrong in ${zone}: ${progress}`);
+      await expectZone('#tasks-list .task-row .status-tip', EXPIRES, mark, 'Task list lease tooltip expiry');
       assert(!(await evaluate("document.querySelector('#tasks-list').textContent")).includes(utc ? 'EDT' : 'UTC'), `Task list mixes zones in ${zone}.`);
     };
     const openAccount = async () => {
@@ -230,7 +235,7 @@ async function main() {
     await waitPage("!document.querySelector('#task-detail-content').hidden && document.querySelector('#checkpoints-content time')", 'task detail');
     const detailChecks = [
       ['#lease-content', EXPIRES, 'Lease expiry'], ['#checkpoints-content', CHECKPOINT, 'Checkpoint time'],
-      ['#job-evidence-content', OBSERVED, 'Job observation time'], ['#workflow-content', REVIEW_EXPIRES, 'Review lease expiry'],
+      ['#job-evidence-content', OBSERVED, 'Job observation time'], ['.failure-callout', FAILED_AT, 'Failure callout observation time'], ['#workflow-content', REVIEW_EXPIRES, 'Review lease expiry'],
     ];
     for (const [selector, iso, label] of detailChecks) {
       const shown = await expectZone(selector, iso, 'EDT', label);

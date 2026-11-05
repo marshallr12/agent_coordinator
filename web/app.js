@@ -85,8 +85,6 @@
     return date.toLocaleString([], options);
   }
   const countFormat = new Intl.NumberFormat('en-US');
-  const formatDate = (value) => value ? formatInstant(value) : '—';
-  const shortDate = (value) => value ? formatInstant(value, 'date') : '—';
   const isoInstant = (value) => { const date = new Date(value); return value && !Number.isNaN(date.getTime()) ? date.toISOString() : ''; };
   // A <time> showing `value` between optional text; it is focusable so keyboard users can read its UTC title.
   function timeEl(value, className, before = '', after = '', style = 'datetime') {
@@ -152,7 +150,7 @@
     if (processing.stage === 'awaiting_reviewer' && processing.pending_reviews > 1) lines.push(`${processing.pending_reviews} reviews are pending.`);
     for (const holder of processing.holders || []) {
       const role = holder.role === 'reviewer' ? 'Reviewer' : 'Agent';
-      lines.push(`${role}: ${holder.name || 'not recorded'}`, `Harness: ${holder.harness || 'not recorded'}`, `Workstation: ${holder.workstation || 'not recorded'}`, `Lease expires: ${holder.lease_expires_at ? formatDate(holder.lease_expires_at) : 'not recorded'}`);
+      lines.push(`${role}: ${holder.name || 'not recorded'}`, `Harness: ${holder.harness || 'not recorded'}`, `Workstation: ${holder.workstation || 'not recorded'}`, holder.lease_expires_at ? ['Lease expires: ', { at: holder.lease_expires_at }] : 'Lease expires: not recorded');
     }
     return { status, label: copy.label, icon: copy.icon, stage: processing.stage, active: Boolean(processing.active), integration: Boolean(copy.integration), lines };
   };
@@ -167,7 +165,7 @@
     add(badge, el('span', 'status-label', view.label));
     if (view.lines.length) {
       const id = `status-tip-${++tipCount}`, tip = el('span', 'status-tip'); tip.id = id; tip.setAttribute('role', 'tooltip');
-      view.lines.forEach((line) => add(tip, el('span', 'status-tip-line', line)));
+      view.lines.forEach((line) => add(tip, Array.isArray(line) ? timedEl('span', 'status-tip-line', ...line) : el('span', 'status-tip-line', line)));
       badge.tabIndex = 0; badge.setAttribute('aria-describedby', id); add(badge, tip);
     } else { badge.removeAttribute('tabindex'); badge.removeAttribute('aria-describedby'); }
     return badge;
@@ -611,12 +609,14 @@
   }
 
   // Shows a status panel; an identical panel is left untouched.
+  // `message` is text, or an array mixing text with {at: value} timestamps.
   function setState(target, message, loading = false, error = false) {
     setClass(target, `state-panel${error ? ' error' : ''}`); show(target, true);
+    const line = Array.isArray(message) ? timedEl('span', '', ...message) : el('span', '', message);
     const same = target.childNodes.length === target.children.length && target.children.length === (loading ? 2 : 1)
-      && target.lastElementChild.tagName === 'SPAN' && target.lastElementChild.textContent === text(message) && (!loading || target.firstElementChild.classList.contains('spinner'));
+      && target.lastElementChild.tagName === 'SPAN' && target.lastElementChild.isEqualNode(line) && (!loading || target.firstElementChild.classList.contains('spinner'));
     if (same) return;
-    clear(target); if (loading) add(target, el('span', 'spinner')); add(target, el('span', '', message));
+    clear(target); if (loading) add(target, el('span', 'spinner')); add(target, line);
   }
 
   function renderProjects() {
@@ -903,8 +903,8 @@
   function blockerGroups(tasks, digest, reports) {
     const fromTasks = (pick) => tasks.flatMap((task) => { const note = pick(task); return note === null ? [] : [{ kind: 'task', id: text(task.id), label: text(task.title || task.id), note, status: taskStatus(task) }]; });
     const blockedBy = (...codes) => (task) => { const found = taskStatus(task) === 'blocked' && preconditionFor(task, codes); return found ? text(found.message) : null; };
-    const decisions = (digest?.pending_reversible_decisions || []).map((item) => ({ kind: 'decision', id: text(item.decision_id), label: text(item.question), note: `Proceeds on its recommendation (${text(item.recommendation)}) at ${formatDate(item.proceeds_at)}` }));
-    const people = (reports || []).filter((report) => report.requires_human && !report.resolved_at).map((report) => ({ kind: 'report', id: text(report.id), label: reportKind(report), note: `${report.task_id ? `Task ${text(report.task_id)} · ` : ''}Recorded ${formatDate(report.created_at)}` }));
+    const decisions = (digest?.pending_reversible_decisions || []).map((item) => ({ kind: 'decision', id: text(item.decision_id), label: text(item.question), note: [`Proceeds on its recommendation (${text(item.recommendation)}) at `, { at: item.proceeds_at }] }));
+    const people = (reports || []).filter((report) => report.requires_human && !report.resolved_at).map((report) => ({ kind: 'report', id: text(report.id), label: reportKind(report), note: [`${report.task_id ? `Task ${text(report.task_id)} · ` : ''}Recorded `, { at: report.created_at }] }));
     const groups = [
       ['decision', 'Needs a human decision', [...fromTasks(blockedBy('scoped_decisions_pending')), ...decisions]],
       ['blocked', 'Saved blocker', fromTasks(blockedBy('task_blocked'))],
@@ -923,7 +923,7 @@
     if (item.kind === 'task') { open.title = `Task ${item.id}`; open.addEventListener('click', () => openTask(item.id, 'tasks')); }
     else if (item.kind === 'report') { open.title = `Report ${item.id}`; open.addEventListener('click', () => openReports()); }
     else { open.title = `Decision ${item.id}`; open.addEventListener('click', () => openDecisions()); }
-    add(row, open); add(row, el('span', 'muted blocker-note', item.note));
+    add(row, open); add(row, Array.isArray(item.note) ? timedEl('span', 'muted blocker-note', ...item.note) : el('span', 'muted blocker-note', item.note));
     return row;
   }
   function blockerGroup(group) {
@@ -1093,8 +1093,7 @@
     }
     const title = el('span', 'task-main'); add(title, el('span', 'task-title', task.title || 'Untitled task'));
     const progressAt = taskTime(task.last_progress_at);
-    const progress = el('time', 'task-progress project-meta', progressAt === null ? 'No progress yet' : `Last progress ${formatDate(task.last_progress_at)}`);
-    if (progressAt !== null) progress.dateTime = task.last_progress_at;
+    const progress = progressAt === null ? el('time', 'task-progress project-meta', 'No progress yet') : timeEl(task.last_progress_at, 'task-progress project-meta', 'Last progress ');
     add(title, progress);
     const identity = el('span', 'task-queue-id'); add(identity, el('span', '', 'Task ID · ')); add(identity, el('span', 'task-id-value', task.id));
     const created = timeEl(task.created_at, 'task-created project-meta', 'Created ');
@@ -1480,13 +1479,13 @@
     const meta = add(box, el('div', 'artifact-meta')), badge = add(meta, el('span', `artifact-badge ${labels[availability] ? availability : 'pending'}`, label));
     badge.dataset.availability = availability;
     if (record.pinned && availability !== 'deleted') add(meta, el('span', 'artifact-retention', 'Pinned'));
-    else if (available && record.retention_until) add(meta, el('span', 'artifact-retention', `Retained until ${formatDate(record.retention_until)}`));
+    else if (available && record.retention_until) add(meta, timedEl('span', 'artifact-retention', 'Retained until ', { at: record.retention_until }));
     else if (available) add(meta, el('span', 'artifact-retention', 'No retention date recorded'));
-    const reason = availability === 'deleted' ? `Deleted${record.deleted_at ? ` on ${formatDate(record.deleted_at)}` : ''}${record.deletion_reason ? `: ${record.deletion_reason}` : '. No reason was recorded.'}`
-      : availability === 'expired' ? (record.state === 'reserved' ? 'The upload reservation expired before the file was finalized.' : `Retention ended${record.retention_until ? ` on ${formatDate(record.retention_until)}` : ''}. The file is no longer served.`)
-      : availability === 'unavailable' ? 'The service reports that the stored file is missing.'
-      : available ? '' : 'Not yet finalized: the upload has not completed, so there is nothing to download.';
-    if (reason) add(box, el('p', 'artifact-reason', reason));
+    const reason = availability === 'deleted' ? ['Deleted', ...(record.deleted_at ? [' on ', { at: record.deleted_at }] : []), record.deletion_reason ? `: ${record.deletion_reason}` : '. No reason was recorded.']
+      : availability === 'expired' ? (record.state === 'reserved' ? ['The upload reservation expired before the file was finalized.'] : ['Retention ended', ...(record.retention_until ? [' on ', { at: record.retention_until }] : []), '. The file is no longer served.'])
+      : availability === 'unavailable' ? ['The service reports that the stored file is missing.']
+      : available ? [] : ['Not yet finalized: the upload has not completed, so there is nothing to download.'];
+    if (reason.length) add(box, timedEl('p', 'artifact-reason', ...reason));
     if (external) add(box, el('p', 'artifact-unverified', 'Unverified: the service does not verify this link’s availability or checksum.'));
     const digest = add(box, el('div', 'artifact-digest'));
     if (!record.sha256) { add(digest, el('span', 'muted', 'SHA-256: none recorded')); return box; }
@@ -2065,11 +2064,11 @@
       link.setAttribute('aria-label', `Open task ${reservation.task_title || reservation.task_id} in project ${reservation.project_name || reservation.project_id}`); link.addEventListener('click', () => goToTask(reservation));
       add(title, el('span', 'status-badge', displayStatus(reservation.state)));
       const details = add(entry, el('dl', 'history-details'));
-      [['Project', reservation.project_name || reservation.project_id], ['Units', `${unitsHere(reservation)} of ${resource.capacity}`], ['Since', formatDate(reservation.created_at)]].forEach(([label, value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+      [['Project', reservation.project_name || reservation.project_id], ['Units', `${unitsHere(reservation)} of ${resource.capacity}`], ['Since', timeEl(reservation.created_at)]].forEach(([label, value]) => { add(details, el('dt', 'muted', label)); add(details, valueEl('dd', value)); });
       if (reservation.stored_state === 'released') {
-        [['Released', formatDate(reservation.released_at)], ['Reason', reservation.release_reason || 'None recorded']].forEach(([label, value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+        [['Released', timeEl(reservation.released_at)], ['Reason', reservation.release_reason || 'None recorded']].forEach(([label, value]) => { add(details, el('dt', 'muted', label)); add(details, valueEl('dd', value)); });
       } else if (reservation.stored_state === 'resolved') {
-        [['Resolved', formatDate(reservation.resolved_at)], ['Reason', reservation.resolution_reason || 'None recorded'], ['Evidence', reservation.resolution_evidence || 'None recorded']].forEach(([label, value]) => { add(details, el('dt', 'muted', label)); add(details, el('dd', '', value)); });
+        [['Resolved', timeEl(reservation.resolved_at)], ['Reason', reservation.resolution_reason || 'None recorded'], ['Evidence', reservation.resolution_evidence || 'None recorded']].forEach(([label, value]) => { add(details, el('dt', 'muted', label)); add(details, valueEl('dd', value)); });
       } else if (reservation.state === 'recovery_required') add(entry, el('p', 'muted', 'The owning attempt is no longer live. The hold remains until a person inspects it and the owner or an operator releases or resolves it.'));
       return entry;
     };
@@ -2441,12 +2440,15 @@
     const row = (label, value) => { if (value === null || value === undefined) return null; add(details, el('dt', 'muted', label)); return add(details, el('dd')); };
     const revision = (label, value) => { const node = row(label, value); if (node) add(node, revisionNode(repositoryUrl, value)); };
     revision('Candidate revision', processing.candidate_revision); revision('Integration result revision', processing.result_revision);
-    [['Result pinned', processing.result_created_at], ['Last reported by the integrator', processing.observed_at], ['Push authority ends', processing.authority_expires_at]].forEach(([label, value]) => { const node = row(label, value && formatDate(value)); if (node) setText(node, formatDate(value)); });
+    [['Result pinned', processing.result_created_at], ['Last reported by the integrator', processing.observed_at], ['Push authority ends', processing.authority_expires_at]].forEach(([label, value]) => { const node = row(label, value); if (node) add(node, timeEl(value)); });
     const summary = checkSummary(processing.checks); if (summary) { const node = row('Checks', summary); if (node) setText(node, summary.replace('Required checks: ', '')); }
     add(box, details);
     if ((processing.check_runs || []).length) {
       const list = add(box, el('ul', 'integrator-checks'));
-      processing.check_runs.forEach((run) => add(list, el('li', `integrator-check ${text(run.state)}`, [run.check_name, displayStatus(run.state), run.run_id ? `run ${run.run_id}${run.run_attempt ? ` attempt ${run.run_attempt}` : ''}` : null, run.conclusion ? `conclusion ${run.conclusion}` : null, run.started_at ? `started ${formatDate(run.started_at)}` : null].filter(Boolean).join(' · '))));
+      processing.check_runs.forEach((run) => {
+        const parts = [run.check_name, displayStatus(run.state), run.run_id ? `run ${run.run_id}${run.run_attempt ? ` attempt ${run.run_attempt}` : ''}` : null, run.conclusion ? `conclusion ${run.conclusion}` : null].filter(Boolean);
+        add(list, timedEl('li', `integrator-check ${text(run.state)}`, parts.join(' · ') + (run.started_at ? `${parts.length ? ' · ' : ''}started ` : ''), ...(run.started_at ? [{ at: run.started_at }] : [])));
+      });
       if (processing.checks?.total > processing.check_runs.length) add(box, el('p', 'muted', `Showing ${processing.check_runs.length} of ${processing.checks.total} required checks.`));
     }
     return box;
@@ -2503,7 +2505,7 @@
     const box = el('div', superseded ? 'inline-alert failure-callout' : 'inline-alert error failure-callout'); box.dataset.failureCallout = superseded ? 'superseded' : 'current';
     box.setAttribute('role', 'group'); box.setAttribute('aria-label', superseded ? 'Superseded check failure' : 'Latest check failure');
     add(box, el('strong', '', superseded ? 'Earlier failure superseded by a later pass' : 'Latest failed check for this candidate'));
-    add(box, el('p', '', `Check: ${jobCheckName(job)} · Producer: ${displayStatus(job.state)} · Exit code: ${job.exit_code ?? 'not reported'} · Observed: ${formatDate(job.last_observed_at || job.created_at)}`));
+    add(box, timedEl('p', '', `Check: ${jobCheckName(job)} · Producer: ${displayStatus(job.state)} · Exit code: ${job.exit_code ?? 'not reported'} · Observed: `, { at: job.last_observed_at || job.created_at }));
     if (job.inputs_unchanged === false) add(box, el('p', '', 'Source changed during this job; its result does not verify the current checkout.'));
     add(box, el('code', '', `Job ${job.id}`));
     const button = el('button', 'button subtle', 'Show job evidence'); button.type = 'button'; button.addEventListener('click', () => showJobEvidence(job)); add(box, button);
@@ -2850,9 +2852,10 @@
       renderMutationState();
     } catch (error) { if (seq === state.sharedSeq && currentActor === actorId()) setState($('shared-state'), errorMessage(error), false, true); }
   }
+  // `title` is text, or an array mixing text with {at: value} timestamps.
   function recordDetails(parent, title, value) {
     if (value === undefined || value === null) return;
-    const details = el('details'); add(details, el('summary', '', title));
+    const details = el('details'); add(details, Array.isArray(title) ? timedEl('summary', '', ...title) : el('summary', '', title));
     add(details, el('pre', '', typeof value === 'string' ? value : JSON.stringify(value, null, 2))); add(parent, details);
   }
   // Tags and scope dimensions as text chips. In the lessons list a tag chip applies that tag filter.
@@ -3200,7 +3203,7 @@
       section('pending', 'Will proceed on their own', pending, item => [`${text(item.question)} → ${text(item.recommendation)} at `, { at: item.proceeds_at }]),
       section('hri', 'Human-required interventions', hri.items || [], digestHriLine)
     ]);
-    setState($('digest-state'), digest.last_read_at ? `Last read ${formatDate(digest.last_read_at)} (before this visit).` : 'This digest had not been read before this visit.');
+    setState($('digest-state'), digest.last_read_at ? ['Last read ', { at: digest.last_read_at }, ' (before this visit).'] : 'This digest had not been read before this visit.');
   }
   // The autonomy view: how much of the project's work ran without a person, each figure with its source.
   const AUTONOMY_NO_SUPERVISOR = 'No supervisor host has reported cost, caps or canary results for this project yet, so only the service\'s own records are shown.';
@@ -3779,7 +3782,7 @@
         const page = (await request(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/history?kind=${encodeURIComponent(selectedKind)}&limit=50${append && cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
         if (current !== sequence || currentActor !== actorId() || !view.dialog.isConnected) return;
         if (!append) clear(list);
-        for (const item of page.items || []) recordDetails(list,`${formatDate(item.occurred_at)} · ${displayStatus(item.relation)} · ${text(item.record.summary || item.record.outcome || item.record.definition?.title || item.task_id).slice(0,300)}`,item.record);
+        for (const item of page.items || []) recordDetails(list,[{at:item.occurred_at},` · ${displayStatus(item.relation)} · ${text(item.record.summary || item.record.outcome || item.record.definition?.title || item.task_id).slice(0,300)}`],item.record);
         if (!append && !(page.items || []).length) add(list,el('p','muted','No preserved records of this type.'));
         cursor = page.next_cursor; show(more, Boolean(cursor));
       } catch (error) { if (current === sequence) { if (!append) clear(list); add(list,el('p','error',errorMessage(error))); } }
@@ -3841,7 +3844,7 @@
   function renderRevisionComparison(target, base, next) {
     const before = base.definition || {}, after = next.definition || {};
     const head = el('div', 'compare-columns');
-    for (const record of [base, next]) add(head, el('p', 'compare-column-head', `Revision ${record.revision} · saved ${formatDate(record.created_at)}`));
+    for (const record of [base, next]) add(head, timedEl('p', 'compare-column-head', `Revision ${record.revision} · saved `, { at: record.created_at }));
     add(target, head);
     if (base.revision === next.revision) add(target, el('p', 'muted', 'Both selections are the same revision, so nothing differs.'));
     const grid = el('div', 'compare-fields');

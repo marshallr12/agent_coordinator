@@ -204,7 +204,7 @@ async function main() {
     await waitPage("document.querySelector('#tasks-list .task-row .task-title').textContent === 'Task t-h'", 'progress order');
     const progress = await evaluate("[...document.querySelectorAll('#tasks-list .task-row')].map((row) => [row.querySelector('.task-title').textContent, row.querySelector('.task-progress')?.textContent || '', row.querySelector('.task-progress')?.dateTime || ''])");
     const lead = progress.find(([title]) => title === 'Task t-h'), none = await (async () => { await click('#tasks-last-page'); return evaluate("[...document.querySelectorAll('#tasks-list .task-row')].map((row) => [row.querySelector('.task-title').textContent, row.querySelector('.task-progress')?.textContent || ''])"); })();
-    assert(lead[1].startsWith('Last progress ') && lead[2] === '2026-10-10T00:00:00Z', `A task with progress should show its time: ${JSON.stringify(lead)}`);
+    assert(lead[1].startsWith('Last progress ') && lead[2] === '2026-10-10T00:00:00.000Z', `A task with progress should show its time: ${JSON.stringify(lead)}`);
     assert(none.find(([title]) => title === 'Task t-l')[1] === 'No progress yet', 'A task without progress should say so.');
     await click('#tasks-first-page');
 
