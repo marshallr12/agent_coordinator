@@ -210,6 +210,15 @@ async function main() {
     await waitPage("document.querySelector('#task-detail-heading').textContent === 'Beta benchmark run'", 'task heading');
     assert(requests.includes('GET /api/v1/projects/p2/tasks/beta-task'), 'The task was not loaded from its own project.');
 
+    // Going back from a task opened through History loads the queue of that task's project, which was
+    // never loaded while the other project was selected.
+    const queueRequests = () => requests.filter((line) => line.startsWith('GET /api/v1/projects/p2/tasks?'));
+    assert(queueRequests().length === 0, 'The Beta queue was loaded before going back.');
+    await evaluate("document.querySelector('#back-to-tasks').click()");
+    await expectPage('#/projects/p2/tasks', 'tasks', 'back to the task queue');
+    await sleep(300);
+    assert(queueRequests().length === 1, `Going back requested the Beta queue ${queueRequests().length} times.`);
+
     // An older hold from the second page opens in project Alpha.
     await openResources();
     await openHistory('device/gpu-0');

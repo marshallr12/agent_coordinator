@@ -138,6 +138,8 @@ filter, and any filter change restarts pagination while **Load more** stays
 within the displayed filter. It runs the same way as
 `scripts/test_ui_refresh.mjs`.
 
+## Resource history
+
 `scripts/test_resource_history.mjs` covers the Resources view's History dialog
 against a fixture trail: current holds, released and resolved entries, Load more
 (one request per open and per click), task links into their own projects, empty
