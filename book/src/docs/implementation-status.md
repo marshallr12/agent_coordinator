@@ -142,6 +142,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   `null`), so no per-task detail request is made. The choice is kept in
   `localStorage` (`agent-coordinator.task-sort`) and falls back to the default
   when storage is unavailable. `scripts/test_task_sort.mjs` covers it.
+- Saved task views in the dashboard: a **Views** control under the task toolbar
+  saves the current status, kind, origin, delivery, search and sort under a name
+  (at most 60 characters, 20 per project), applies, renames and deletes it
+  (delete asks for confirmation), and marks the active view and when the toolbar
+  differs from it. Views live in `localStorage` (`agent-coordinator.task-views`)
+  per signed-in actor and project; every loaded value is checked against the
+  toolbar's options and invalid entries are ignored. They hold no task data or
+  secrets, and applying one makes no request. When storage throws, views last for
+  the page only and a note says so. `scripts/test_task_views.mjs` covers it.
 - Public authentication help and service-delivered project instructions with
   version acknowledgments. Task/project/event lists use bounded cursor pages.
 - Native CLI with origin-bound credentials, separate local harness sessions,

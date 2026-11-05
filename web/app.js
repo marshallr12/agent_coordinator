@@ -19,6 +19,8 @@
     requestSeq: { projects: 0, tasks: 0, detail: 0, credentials: 0 }, attachmentTaskKey: '', attachmentRequestSeq: 0, attachmentsLoaded: false, attachmentBusy: false, pollTimer: null, lastSync: null
   };
 
+  state.taskViews = { scope: '', items: [], activeId: '', available: true, persisted: true };
+
   state.blockers = { projectId: '', seq: 0, inflight: false, loaded: false, digest: null, digestError: '', reports: null, reportsMore: false, reportsError: '' };
 
   const PENDING_MUTATION_KEY = 'agent-coordinator.pending-mutation';
@@ -1088,10 +1090,145 @@
     const count = activeTaskFilterCount();
     show($('task-filter-bar'), count > 0);
     setText($('task-filter-count'), `${count} ${count === 1 ? 'filter' : 'filters'} active`);
+    renderTaskViews();
   }
   function syncTaskFilterControls() {
     Object.entries(state.taskFilters).forEach(([name, value]) => setProp($(`${name}-filter`), 'value', value));
     renderTaskFilterBar();
+  }
+
+  // ---- Saved task views ---------------------------------------------------------------------
+  // A view is the status, kind, origin, delivery, search and sort chosen in the task toolbar, saved
+  // under a name in localStorage for one actor and one project. Nothing else is stored: no task data,
+  // token or credential. Every loaded value is checked against the toolbar's own option lists, and an
+  // entry that fails is ignored. Applying a view only sets the toolbar and re-renders the loaded tasks.
+  const TASK_VIEWS_KEY = 'agent-coordinator.task-views';
+  const MAX_TASK_VIEWS = 20, MAX_TASK_VIEW_NAME = 60, MAX_TASK_VIEW_SEARCH = 200;
+  const TASK_VIEW_FIELDS = ['status', 'kind', 'origin', 'delivery', 'search', 'sort'];
+  const TASK_VIEW_CHOICES = { status: 'status-filter', kind: 'kind-filter', origin: 'origin-filter', delivery: 'delivery-filter' };
+  const hasControlCharacters = (value) => /[\u0000-\u001f\u007f]/.test(value);
+  const currentTaskSettings = () => ({
+    status: $('status-filter').value, ...state.taskFilters, search: state.taskSearch[state.taskView === 'completed' ? 'completed' : 'queue'], sort: state.taskSort
+  });
+  const sameTaskSettings = (a, b) => TASK_VIEW_FIELDS.every((field) => a[field] === b[field]);
+  function validTaskView(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    if (!name || name.length > MAX_TASK_VIEW_NAME || hasControlCharacters(name) || typeof raw.id !== 'string' || !/^[\w-]{1,64}$/.test(raw.id)) return null;
+    if (typeof raw.search !== 'string' || raw.search.length > MAX_TASK_VIEW_SEARCH || hasControlCharacters(raw.search) || !TASK_SORTS.includes(raw.sort)) return null;
+    for (const [field, id] of Object.entries(TASK_VIEW_CHOICES)) {
+      if (typeof raw[field] !== 'string' || ![...$(id).options].some((option) => option.value === raw[field])) return null;
+    }
+    return { id: raw.id, name, ...Object.fromEntries(TASK_VIEW_FIELDS.map((field) => [field, raw[field]])) };
+  }
+  const plainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  // The whole stored map { actor: { project: [view] } }, or null when localStorage cannot be read.
+  function readTaskViewStore() {
+    let raw, parsed = null;
+    try { raw = localStorage.getItem(TASK_VIEWS_KEY); } catch { return null; }
+    try { parsed = JSON.parse(raw ?? 'null'); } catch { /* Corrupt storage reads as empty and is replaced on the next save. */ }
+    return Object.assign(Object.create(null), plainObject(parsed) ? parsed : {});
+  }
+  function loadTaskViews(actor, project) {
+    const views = state.taskViews, store = readTaskViewStore();
+    views.scope = JSON.stringify([actor, project]); views.activeId = ''; views.items = []; views.available = store !== null; views.persisted = true;
+    const mine = store && plainObject(store[actor]) ? store[actor][project] : null;
+    if (!Array.isArray(mine)) return;
+    const ids = new Set(), names = new Set();
+    for (const raw of mine) {
+      const view = views.items.length < MAX_TASK_VIEWS ? validTaskView(raw) : null;
+      if (!view || ids.has(view.id) || names.has(view.name.toLowerCase())) continue;
+      ids.add(view.id); names.add(view.name.toLowerCase()); views.items.push(view);
+    }
+  }
+  // Writes this scope's views back, keeping every other actor's and project's entries as they are.
+  function persistTaskViews() {
+    const views = state.taskViews, [actor, project] = JSON.parse(views.scope), store = readTaskViewStore();
+    views.persisted = false;
+    if (!store) return;
+    const mine = Object.assign(Object.create(null), plainObject(store[actor]) ? store[actor] : {});
+    if (views.items.length) mine[project] = views.items; else delete mine[project];
+    store[actor] = mine;
+    try { localStorage.setItem(TASK_VIEWS_KEY, JSON.stringify(store)); views.persisted = true; } catch { /* The views last for this page only. */ }
+  }
+  function renderTaskViews() {
+    const views = state.taskViews, actor = actorId(), enabled = Boolean(actor && state.projectId);
+    if (enabled && views.scope !== JSON.stringify([actor, state.projectId])) loadTaskViews(actor, state.projectId);
+    else if (!enabled && views.scope) Object.assign(views, { scope: '', items: [], activeId: '' });
+    const active = views.items.find((view) => view.id === views.activeId) || null;
+    if (!active) views.activeId = '';
+    const modified = Boolean(active) && !sameTaskSettings(currentTaskSettings(), active);
+    const label = (view) => view.id === views.activeId ? `${view.name} (${modified ? 'active, modified' : 'active'})` : view.name;
+    const select = $('task-views-select');
+    reconcile(select, optionItems([['', 'No view applied'], ...views.items.map((view) => [view.id, label(view)])]));
+    setProp(select, 'value', views.activeId); setProp(select, 'disabled', !enabled);
+    setProp($('save-task-view'), 'disabled', !enabled); setProp($('rename-task-view'), 'disabled', !active); setProp($('delete-task-view'), 'disabled', !active);
+    show($('reapply-task-view'), modified);
+    const note = $('task-views-note');
+    let kind = '', message = '';
+    if (enabled && !views.available) { kind = ' unavailable'; message = 'This browser cannot store views. Views you save last until you reload.'; }
+    else if (enabled && !views.persisted) { kind = ' unavailable'; message = 'The browser refused to store views. Views you save last until you reload.'; }
+    else if (modified) { kind = ' modified'; message = `The toolbar differs from “${active.name}”.`; }
+    else if (active) message = `Applied “${active.name}”.`;
+    else if (views.items.length) message = `${views.items.length} of ${MAX_TASK_VIEWS} views saved.`;
+    setClass(note, `views-note${kind}`); setText(note, message);
+  }
+  function applyTaskView(view) {
+    state.taskFilters = { kind: view.kind, origin: view.origin, delivery: view.delivery };
+    setProp($('status-filter'), 'value', view.status);
+    state.taskSearch = { queue: view.search, completed: view.search }; setProp($('tasks-search'), 'value', view.search);
+    state.taskSort = view.sort; setProp($('tasks-sort'), 'value', view.sort);
+    try { localStorage.setItem(TASK_SORT_KEY, state.taskSort); } catch { /* The sort still applies for this page. */ }
+    state.taskViews.activeId = view.id; state.taskPageIndex = 0;
+    syncTaskFilterControls(); applyTaskFilters();
+  }
+  // The first thing wrong with a view name, or ''. `exceptId` is the view being renamed.
+  function taskViewNameProblem(name, exceptId) {
+    const trimmed = name.trim();
+    if (!trimmed) return 'Enter a name for the view.';
+    if (trimmed.length > MAX_TASK_VIEW_NAME) return `View names can have at most ${MAX_TASK_VIEW_NAME} characters; this one has ${trimmed.length}.`;
+    if (hasControlCharacters(trimmed)) return 'View names cannot contain control characters.';
+    if (state.taskViews.items.some((view) => view.id !== exceptId && view.name.toLowerCase() === trimmed.toLowerCase())) return `A view named “${trimmed}” already exists. Choose another name.`;
+    return '';
+  }
+  // A name dialog whose problems show in the dialog as the name is typed and block the submit.
+  function taskViewDialog(title, description, label, initial, extraProblem, exceptId, submit) {
+    const { form, field, finish } = workflowDialog(title, description), input = field('name', label, initial, 'input'), problem = el('p', 'inline-alert error');
+    problem.setAttribute('role', 'alert'); problem.hidden = true; add(form, problem);
+    const check = (reveal) => {
+      const message = extraProblem() || taskViewNameProblem(input.value, exceptId);
+      input.setCustomValidity(message);
+      problem.hidden = !message || (!reveal && !extraProblem()); problem.textContent = message;
+      return message;
+    };
+    input.addEventListener('input', () => check(true)); check(false);
+    finish(title, (values, dialog) => { if (check(true)) { input.reportValidity(); return; } dialog.close(); submit(values.get('name').trim()); });
+  }
+  function saveTaskViewDialog() {
+    const views = state.taskViews, settings = currentTaskSettings();
+    if (!views.scope) return;
+    const limit = () => views.items.length >= MAX_TASK_VIEWS ? `This project already has ${MAX_TASK_VIEWS} saved views. Delete one before saving another.`
+      : settings.search.length > MAX_TASK_VIEW_SEARCH ? `The search text has ${settings.search.length} characters; a view keeps at most ${MAX_TASK_VIEW_SEARCH}. Shorten the search to save a view.` : '';
+    taskViewDialog('Save view', `Saves the current status, kind, origin, delivery, search and sort for you in this project. Up to ${MAX_TASK_VIEWS} views, names up to ${MAX_TASK_VIEW_NAME} characters.`, 'View name', '', limit, null, (name) => {
+      const view = { id: newKey(), name, ...settings };
+      views.items.push(view); views.activeId = view.id; persistTaskViews(); renderTaskViews();
+      setGlobalAlert(`Saved view “${name}”.`, 'success'); $('task-views-select').focus();
+    });
+  }
+  function renameTaskViewDialog() {
+    const views = state.taskViews, view = views.items.find((item) => item.id === views.activeId);
+    if (!view) return;
+    taskViewDialog('Rename view', `Renames “${view.name}”. Its saved filters and sort do not change.`, 'New name', view.name, () => '', view.id, (name) => {
+      view.name = name; persistTaskViews(); renderTaskViews(); setGlobalAlert(`Renamed the view to “${name}”.`, 'success');
+    });
+  }
+  function deleteTaskViewDialog() {
+    const views = state.taskViews, view = views.items.find((item) => item.id === views.activeId);
+    if (!view) return;
+    workflowDialog('Delete view', `Delete the saved view “${view.name}”? The toolbar keeps its current filters and sort. This cannot be undone.`).finish('Delete view', (values, dialog) => {
+      dialog.close(); views.items = views.items.filter((item) => item.id !== view.id); views.activeId = '';
+      persistTaskViews(); renderTaskViews(); setGlobalAlert(`Deleted view “${view.name}”.`, 'success'); $('task-views-select').focus();
+    });
   }
 
   function taskRow(task, completed, repositoryUrl) {
@@ -1949,6 +2086,17 @@
     state.taskFilters = { kind: 'all', origin: 'all', delivery: 'all' }; $('status-filter').value = 'all'; syncTaskFilterControls();
     applyTaskFilters(); (state.taskView === 'completed' ? $('kind-filter') : $('status-filter')).focus();
   });
+  $('task-views-select').addEventListener('change', (event) => {
+    const view = state.taskViews.items.find((item) => item.id === event.target.value);
+    if (view) applyTaskView(view); else { state.taskViews.activeId = ''; renderTaskViews(); }
+  });
+  $('reapply-task-view').addEventListener('click', () => {
+    const view = state.taskViews.items.find((item) => item.id === state.taskViews.activeId);
+    $('task-views-select').focus(); if (view) applyTaskView(view);
+  });
+  $('save-task-view').addEventListener('click', saveTaskViewDialog);
+  $('rename-task-view').addEventListener('click', renameTaskViewDialog);
+  $('delete-task-view').addEventListener('click', deleteTaskViewDialog);
   $('back-to-tasks').addEventListener('click', () => { if (state.detailOrigin === 'archived') { showView('archived'); loadArchivedTasks(); } else { showView('tasks'); if (state.projectId && !state.taskQueueLoaded) loadTasks(); } }); [['task-detail-heading', 'Task name'], ['detail-task-id-value', 'Task ID']].forEach(([id, label]) => { const source = $(id); source.addEventListener('click', () => copyTaskDetailValue(source, label)); source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); copyTaskDetailValue(source, label); } }); }); $('refresh-credentials').addEventListener('click', () => loadCredentials()); $('issue-form').addEventListener('submit', (event) => { event.preventDefault(); const input = $('agent-name'); if (!input.value.trim()) return; startMutation(`/api/v1/admin/agents`, { name: input.value.trim(), class: $('agent-class').value, access: $('agent-access').value }, 'credential issuance', async (data) => { input.value = ''; downloadIssuedCredential(data); await loadCredentials(); }); });
   $('refresh-archive').addEventListener('click',loadArchivedTasks); $('archive-project-select').addEventListener('change',loadArchivedTasks);
   function showToken(token) { clearCredentialDownload(); setText($('issued-token'), token || 'The token was not returned. Revoke this credential and issue a replacement.'); show($('token-reveal'), true); }

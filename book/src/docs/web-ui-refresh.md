@@ -317,3 +317,26 @@ active records no DOM mutation. Switching project resets every filter, and
 empty-state text, Clear filters, the project reset and mobile width in a
 fixture-backed browser. Run it with
 `CHROME_BIN=/path/to/chrome node scripts/test_task_filters.mjs`.
+
+## Saved task views
+
+The **Views** controls under the task toolbar save the status, kind, origin,
+delivery, search and sort as a named view for the signed-in actor and project.
+A name has at most 60 characters and must be unique in the project (ignoring
+case); a project keeps at most 20 views. Applying a view sets the toolbar and
+re-renders the loaded tasks, so it makes no request. The active view is marked
+in the select, and when the toolbar no longer matches it the note says so and
+**Reset to view** appears. Delete asks for confirmation in a dialog.
+The controls render through `reconcile()` with idempotent setters, so a refresh
+with an active or diverged view records no DOM mutation.
+
+Views are stored in `localStorage` under `agent-coordinator.task-views` as
+`{actor: {project: [view]}}`, with no task data or secrets. Each loaded value is
+checked against the toolbar's own option lists; an entry that fails, a
+duplicate, or an entry past the 20th is ignored, and the next save drops it
+while keeping other actors' and projects' entries. If storage throws on read or
+write, views still work until the page is reloaded and a note says they cannot
+be kept. `scripts/test_task_views.mjs` verifies save, reload and apply, rename,
+delete, the limits, scoping, corrupt storage, throwing storage, the refresh and
+mobile width. Run it with
+`CHROME_BIN=/path/to/chrome node scripts/test_task_views.mjs`.
