@@ -619,7 +619,8 @@ async function checkAgentSessionFilters({ evaluate, waitPage }) {
   const reviewer = await evaluate("document.querySelector('[data-session-id=\"session-reviewer\"]').textContent");
   assert(reviewer.includes('(5 min ago)') && reviewer.includes('Last heartbeat') && reviewer.includes('(5 min ago)'), 'Reviewer card lacks relative activity or heartbeat.');
   assert(reviewer.includes('No recorded activity for 5 min'), 'Reviewer card lacks the recorded-activity label.');
-  assert(await evaluate("document.querySelector('[data-session-id=\"session-reviewer\"] .held-heartbeat').textContent") === `Last heartbeat ${await evaluate("new Date('2026-10-05T10:00:00Z').toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })")} (5 min ago)`, 'Heartbeat line is not absolute plus relative.');
+  assert(await evaluate("document.querySelector('[data-session-id=\"session-reviewer\"] .held-heartbeat').textContent") === `Last heartbeat ${await evaluate("new Date('2026-10-05T10:00:00Z').toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })")} (5 min ago)`, 'Heartbeat line is not absolute plus relative.');
+  assert(await evaluate("document.querySelector('[data-session-id=\"session-reviewer\"] .held-heartbeat').title") === '2026-10-05T10:00:00.000Z', 'Heartbeat time does not carry its UTC instant.');
   const worker = await evaluate("document.querySelector('[data-session-id=\"session-worker\"]').textContent");
   assert(worker.includes('(35 min ago)') && worker.includes('No recorded activity for 35 min'), 'Worker card lacks its relative age.');
   const idle = await evaluate("document.querySelector('[data-session-id=\"session-idle\"]').textContent");
