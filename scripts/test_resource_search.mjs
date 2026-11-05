@@ -173,7 +173,7 @@ async function main() {
     const badRows = await evaluate("[...document.querySelectorAll('#resources-list tr')].filter((row) => Number(row.children[2].textContent) - Number(row.children[3].textContent) !== Number(row.children[4].textContent)).length");
     assert(badRows === 0, `${badRows} rows have an Available cell that is not capacity minus held.`);
     assert(await evaluate("[...document.querySelectorAll('#resources-table th')].map((th) => th.textContent).join() === 'Key,Description,Capacity,Held,Available,ID,Actions'"), 'The table should list Available after Held.');
-    assert(await evaluate("[...document.querySelectorAll('#resources-list tr')].every((row) => row.querySelectorAll('.row-actions button').length === 2)"), 'Every row should keep its edit and delete actions.');
+    assert(await evaluate("[...document.querySelectorAll('#resources-list tr')].every((row) => row.querySelectorAll('.row-actions button').length === 3)"), 'Every row should keep its history, edit and delete actions.');
 
     // Each sort option, ties broken by key.
     await setControls({ sort: 'key' });

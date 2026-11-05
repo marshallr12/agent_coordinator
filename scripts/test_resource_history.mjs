@@ -161,7 +161,7 @@ async function main() {
 
     // The row action is a visible, labelled, keyboard-reachable button.
     assert(await evaluate("[...document.querySelectorAll('#resources-list tr')].every((row) => row.querySelector('button[aria-label^=\"History for resource\"]')?.textContent === 'History')"), 'Every resource row needs a visible History button.');
-    await evaluate("document.querySelector('#resources-list tr button[aria-label^=\"History for resource\"]').focus()");
+    await evaluate("document.querySelector('#resources-list tr button[aria-label=\"History for resource device/gpu-0\"]').focus()");
     await press('Enter', 'Enter', 13);
     await waitPage("document.querySelector('dialog[open].history-dialog #resource-history-holds .history-entry')", 'dialog opened from the keyboard');
     assert(trailRequests().length === 1 && trailRequests()[0].includes('/api/v1/resources/res-gpu/reservations') && trailRequests()[0].includes('limit='), `Opening requested ${trailRequests().length} pages.`);
