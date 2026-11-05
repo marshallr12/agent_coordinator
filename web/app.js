@@ -2233,7 +2233,7 @@
     const dialog = el('dialog', 'form-dialog observations-dialog'); const form = el('form'); form.addEventListener('submit', event => event.preventDefault());
     add(form, el('h2', '', `Observations for ${job.label || 'local job'}`));
     add(form, el('code', '', `Job ${job.id}`));
-    add(form, el('p', 'muted', `Newest first. Loads ${OBSERVATION_PAGE} task observations at a time and keeps this job’s; stops at ${OBSERVATION_CAP.toLocaleString()} observations or 2 MiB.`));
+    add(form, el('p', 'muted', `Newest first. Loads ${OBSERVATION_PAGE} task observations at a time and keeps this job’s; stops at ${countFormat.format(OBSERVATION_CAP)} observations or 2 MiB.`));
     const controls = add(form, el('div', 'observation-controls'));
     const searchLabel = add(controls, el('label', '', 'Search summary, state or exit code')); const search = add(searchLabel, el('input')); search.type = 'search'; search.id = 'observation-search'; search.autocomplete = 'off'; search.maxLength = 200;
     const stateLabel = add(controls, el('label', '', 'State')); const stateSelect = add(stateLabel, el('select')); stateSelect.id = 'observation-state';
@@ -2255,15 +2255,15 @@
       setText(status, !started ? 'Loading observations…' : `Showing ${shown.length} of ${loaded.length} loaded observations for this job (${scanned} task observations read).`);
       reconcile(list, shown.length ? shown.map(item => ({ key: `${item.sequence}:${item.observed_at}`, sig: sig(item), build: () => {
         const entry = el('div', 'evidence-entry'); add(entry, el('h3', '', `#${item.sequence} · ${displayStatus(item.state)}`));
-        add(entry, el('p', 'muted', `${formatDate(item.observed_at)} · Exit: ${item.exit_code ?? 'not reported'} · Source unchanged: ${item.inputs_unchanged === null || item.inputs_unchanged === undefined ? 'not reported' : item.inputs_unchanged ? 'yes' : 'no'}`));
-        if (item.payload_compacted_at) add(entry, el('p', 'muted', `Summary cleared by retention on ${formatDate(item.payload_compacted_at)}; the state and exit code are unchanged.`));
+        add(entry, timedEl('p', 'muted', { at: item.observed_at }, ` · Exit: ${item.exit_code ?? 'not reported'} · Source unchanged: ${item.inputs_unchanged === null || item.inputs_unchanged === undefined ? 'not reported' : item.inputs_unchanged ? 'yes' : 'no'}`));
+        if (item.payload_compacted_at) add(entry, timedEl('p', 'muted', 'Summary cleared by retention on ', { at: item.payload_compacted_at }, '; the state and exit code are unchanged.'));
         else add(entry, el('p', '', item.summary || 'No summary.'));
         return entry;
       } })) : [{ key: 'none', sig: sig(started, loaded.length), build: () => el('p', 'muted', !started ? '' : loaded.length ? 'No loaded observations match this search.' : 'No observations loaded for this job yet.') }]);
       patchSection(notice, sig(capped, failure), () => {
         notice.classList.toggle('error', Boolean(failure));
         if (failure) setText(notice, failure);
-        else if (capped) setText(notice, `Loading stopped at the limit of ${OBSERVATION_CAP.toLocaleString()} observations or 2 MiB, after ${scanned} observations from the oldest. Newer observations are not shown or downloaded; use the CLI history for the rest.`);
+        else if (capped) setText(notice, `Loading stopped at the limit of ${countFormat.format(OBSERVATION_CAP)} observations or 2 MiB, after ${scanned} observations from the oldest. Newer observations are not shown or downloaded; use the CLI history for the rest.`);
       });
       show(notice, Boolean(failure || capped));
       show(more, Boolean(cursor) && !capped); more.disabled = busy; download.disabled = !started || !shown.length;
