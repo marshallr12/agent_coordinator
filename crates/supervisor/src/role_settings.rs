@@ -2,8 +2,9 @@
 //!
 //! `claude -p` silently ignores settings it cannot parse, so the files are
 //! never hand-edited: the preflight requires the installed file to equal this
-//! output. Only keys verified by the P2 probes are used (`permissions` with
-//! `defaultMode`, and `sandbox.enabled`).
+//! output. Only keys verified by live probes are used (`permissions` with
+//! `defaultMode` and `sandbox.enabled` in P2; `sandbox.network.allowedDomains`
+//! on Claude Code 2.1.303, 2026-11-06).
 //!
 //! The persistent `CLAUDE.md` is generated the same way, so a role's standing
 //! instructions are reviewed code and the preflight can require them exactly.
@@ -60,6 +61,27 @@ fn claude_sandbox(role: Role) -> bool {
     role != Role::Implementer
 }
 
+/// Hosts a reviewer's Bash commands may reach through Claude's own sandbox.
+///
+/// Where that sandbox is active (a host with `socat`), it tunnels Bash network
+/// traffic through its own proxy, which in `-p` mode denies every host not
+/// listed here (`CONNECT 403`) before the egress proxy is consulted. Reviewers
+/// run hostile candidate code, so only the registry Cargo needs is listed:
+/// the sparse index and crate downloads. The egress proxy still applies.
+const REVIEWER_SANDBOX_DOMAINS: &[&str] = &["crates.io", "index.crates.io", "static.crates.io"];
+
+/// The `sandbox` settings for a role: off for implementers; on for
+/// reviewers, with network access limited to [`REVIEWER_SANDBOX_DOMAINS`].
+fn sandbox(role: Role) -> Value {
+    if !claude_sandbox(role) {
+        return json!({"enabled": false});
+    }
+    json!({
+        "enabled": true,
+        "network": {"allowedDomains": REVIEWER_SANDBOX_DOMAINS}
+    })
+}
+
 /// The settings document for a role.
 pub fn settings(role: Role) -> Value {
     json!({
@@ -68,7 +90,7 @@ pub fn settings(role: Role) -> Value {
             "deny": deny(role),
             "defaultMode": "dontAsk"
         },
-        "sandbox": {"enabled": claude_sandbox(role)}
+        "sandbox": sandbox(role)
     })
 }
 
@@ -132,6 +154,20 @@ mod tests {
         assert_eq!(settings(Role::Implementer)["sandbox"]["enabled"], false);
         assert_eq!(settings(Role::Reviewer)["sandbox"]["enabled"], true);
         assert!(render(Role::Implementer).contains("\"enabled\": false"));
+    }
+
+    #[test]
+    fn only_reviewers_reach_exactly_the_crates_registry_through_claudes_sandbox() {
+        let domains = &settings(Role::Reviewer)["sandbox"]["network"]["allowedDomains"];
+        assert_eq!(
+            domains,
+            &json!(["crates.io", "index.crates.io", "static.crates.io"])
+        );
+        assert!(
+            settings(Role::Implementer)["sandbox"]
+                .get("network")
+                .is_none()
+        );
     }
 
     #[test]

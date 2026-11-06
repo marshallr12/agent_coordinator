@@ -302,6 +302,16 @@ unset; procfs is read-only and no further user namespace can be created. Each
 command gets its own PID namespace, so a process it backgrounds ends with it.
 Preflight starts the nested sandbox once and fails closed if the kernel refuses.
 
+The reviewer's generated `settings.json` also keeps Claude Code's own Bash
+sandbox on. That sandbox is active only on hosts with `socat` installed. When it
+is active, it sends Bash network traffic through its own proxy, which in `-p`
+mode refuses every host missing from `sandbox.network.allowedDomains` with
+`CONNECT 403`. The egress proxy never sees those requests. The reviewer list is
+therefore exactly the Cargo registry: `crates.io`, `index.crates.io` and
+`static.crates.io`. Without it, a reviewer on a `socat` host cannot resolve
+dependencies, and every Rust gate it runs fails. The egress allowlist still
+applies on top of this list.
+
 Codex has no equivalent per-command hook, so Codex reviewer launches are refused.
 Candidate code can no longer read the long-lived verification login. Instead,
 per run (decisions U18 and U22), the supervisor signs in to the staging
