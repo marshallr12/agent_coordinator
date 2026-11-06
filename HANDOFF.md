@@ -59,6 +59,29 @@ prior20-human-origin-pilot: ≥20 human tasks, median creation→Done ≤4.12254
   at `9c80ed3`. e641488e unblocked → ready (rev 2) 16:53Z. **Watch:** the next mxmini review of a Rust
   change should run the gate. The next host-setup rerun installs settings from whatever binary it
   is given, so build that binary from a commit containing `39c22d8`.
+- **Full main rollout to `39c22d8` DONE (2026-11-06, owner request; task `c2642e99`, reserved event #3).**
+  Production, both hosts' CLI/supervisor/push and oracle-1's integrators now run `39c22d8`; this
+  supersedes the host sources in the bullet above. Release `42259365090` passed with full load
+  acceptance, because migration `0046` (additive) is new since `766a9e6`. Drain marker
+  `deploy-drain-c2642e99` was set 17:24:51Z with 0 launches killed. Production R1 (job `929e18f8`)
+  refused safely on an active sithbit attempt; the owner released it, and R2 (job `fe562889`)
+  succeeded with verified pre/post backups and off-server copies. Rollback dir
+  `/var/lib/agent-coordinator-deployments/claude-c2642e99-39c22d8-20261106-r2`; CLI rollbacks
+  `/opt/agentc/rollback-cli-39c22d8-20261106`. Order per owner: production, then oracle-1
+  (native aarch64 build, `APPARMOR_BWRAP=1 UPDATE_TIMER=0`, cleared 18:11:51Z), then mxmini last
+  (native x86_64, QUIET_HOURS unset, cleared 18:28:14Z). Each host: containment 112 / 100 PASS, a
+  real reviewer cargo probe OK, and host rollback `/opt/agentc/rollback-host-39c22d8-20261106`.
+  Evidence artifact `3c172b6c`; scripts under
+  `~/.local/state/agent-coordinator-evidence/c2642e99-c096-426f-9a4b-80124613f6ab/`.
+  **Trap:** host-setup re-pins the agent harness to the owner's installed Claude. 2.1.319's Bash
+  sandbox (active only where socat is installed: mxmini) denies the nested user namespace that
+  candidate-shell needs. **mxmini is rolled back to Claude 2.1.303** (pin `claude = "2.1.303"`; the
+  2.1.319 binary and supervisor.toml are in the host rollback dir). oracle-1 runs 2.1.319 (no
+  socat, so its sandbox is inactive). Fix and upgrade: human-delivered task **`54abf543`** (add
+  `sandbox.allowNestedUserNamespaces` for reviewers, plus a real-Claude containment check). Until
+  that lands, **never re-run host-setup on mxmini without re-pinning 2.1.303 afterwards.**
+- **Other hosts' sithbit work** resumed after the deploy. Workstation CLIs must be at `39c22d8`,
+  or they fail with `client_upgrade_required`.
 
 **At window end:** re-activate P6, restore quiet hours, remove observer cron, run the final
 fixed-window audit (value, HRI excl. reserved, direct-push reconciliation, digest ≤1/day).
