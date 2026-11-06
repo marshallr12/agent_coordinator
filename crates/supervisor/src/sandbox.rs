@@ -475,7 +475,7 @@ mod tests {
             fs::create_dir(&persistent).unwrap();
             fs::write(
                 persistent.join("settings.json"),
-                role_settings::render(role),
+                role_settings::render(role, &config.state_dir),
             )
             .unwrap();
             fs::write(
@@ -691,7 +691,7 @@ test ! -e "$HOME/candidate-write"
         let reviewer = base_args(Role::Reviewer);
         assert!(!reviewer.iter().any(|arg| arg == "--disable-userns"));
         assert_eq!(
-            role_settings::settings(Role::Implementer)["sandbox"]["enabled"],
+            role_settings::settings(Role::Implementer, std::path::Path::new("/"))["sandbox"]["enabled"],
             false
         );
     }

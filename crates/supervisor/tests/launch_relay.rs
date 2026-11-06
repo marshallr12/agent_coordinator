@@ -82,7 +82,7 @@ fn reviewer(config: &Config) -> LaunchSpec {
     fs::create_dir(&persistent).unwrap();
     fs::write(
         persistent.join("settings.json"),
-        role_settings::render(Role::Reviewer),
+        role_settings::render(Role::Reviewer, &config.state_dir),
     )
     .unwrap();
     fs::write(persistent.join("CLAUDE.md"), "").unwrap();

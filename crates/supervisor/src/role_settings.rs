@@ -4,12 +4,13 @@
 //! never hand-edited: the preflight requires the installed file to equal this
 //! output. Only keys verified by live probes are used (`permissions` with
 //! `defaultMode` and `sandbox.enabled` in P2; `sandbox.network.allowedDomains`
-//! on Claude Code 2.1.303, 2026-11-06).
+//! and `sandbox.filesystem.allowWrite` on Claude Code 2.1.303, 2026-11-06).
 //!
 //! The persistent `CLAUDE.md` is generated the same way, so a role's standing
 //! instructions are reviewed code and the preflight can require them exactly.
 use crate::profile::Role;
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 /// Tool rules every supervised launch denies: raw publication, remote and
 /// config changes, privilege escalation and web tools (egress goes through the
@@ -70,33 +71,53 @@ fn claude_sandbox(role: Role) -> bool {
 /// the sparse index and crate downloads. The egress proxy still applies.
 const REVIEWER_SANDBOX_DOMAINS: &[&str] = &["crates.io", "index.crates.io", "static.crates.io"];
 
+/// The directory holding every launch's `$RUN` for a role.
+///
+/// Claude's sandbox, where active, makes everything outside the working
+/// directory and its own temp read-only, including the run's Cargo home,
+/// build directory and candidate home and temp. Its `allowWrite` takes no
+/// globs, and the persistent settings are shared by every run, so the grant
+/// is the whole role `runs/` directory. That widens nothing: the outer launch
+/// sandbox hides other runs under a tmpfs and keeps this run read-only except
+/// its own writable directories, and `candidate-shell` narrows it further.
+fn runs_dir(role: Role, state_dir: &Path) -> PathBuf {
+    state_dir.join(role.slug()).join("runs")
+}
+
 /// The `sandbox` settings for a role: off for implementers; on for
-/// reviewers, with network access limited to [`REVIEWER_SANDBOX_DOMAINS`].
-fn sandbox(role: Role) -> Value {
+/// reviewers, with network access limited to [`REVIEWER_SANDBOX_DOMAINS`] and
+/// writes allowed under the role's [`runs_dir`].
+fn sandbox(role: Role, state_dir: &Path) -> Value {
     if !claude_sandbox(role) {
         return json!({"enabled": false});
     }
     json!({
         "enabled": true,
-        "network": {"allowedDomains": REVIEWER_SANDBOX_DOMAINS}
+        "network": {"allowedDomains": REVIEWER_SANDBOX_DOMAINS},
+        "filesystem": {"allowWrite": [runs_dir(role, state_dir)]}
     })
 }
 
-/// The settings document for a role.
-pub fn settings(role: Role) -> Value {
+/// Tools a role may use without prompting, as passed to `--tools`.
+pub fn tools(role: Role) -> Vec<&'static str> {
+    allow(role)
+}
+
+/// The settings document for a role on a host whose state root is `state_dir`.
+pub fn settings(role: Role, state_dir: &Path) -> Value {
     json!({
         "permissions": {
             "allow": allow(role),
             "deny": deny(role),
             "defaultMode": "dontAsk"
         },
-        "sandbox": sandbox(role)
+        "sandbox": sandbox(role, state_dir)
     })
 }
 
 /// The exact file contents the launcher and preflight expect.
-pub fn render(role: Role) -> String {
-    let mut text = serde_json::to_string_pretty(&settings(role)).expect("static JSON");
+pub fn render(role: Role, state_dir: &Path) -> String {
+    let mut text = serde_json::to_string_pretty(&settings(role, state_dir)).expect("static JSON");
     text.push('\n');
     text
 }
@@ -132,13 +153,16 @@ pub fn instructions(_role: Role) -> &'static str {
 }
 
 /// True when `installed` is semantically identical to the generated settings.
-pub fn matches(role: Role, installed: &str) -> bool {
-    serde_json::from_str::<Value>(installed).is_ok_and(|value| value == settings(role))
+pub fn matches(role: Role, state_dir: &Path, installed: &str) -> bool {
+    serde_json::from_str::<Value>(installed).is_ok_and(|value| value == settings(role, state_dir))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default state root, as on both supervised hosts.
+    const STATE: &str = "/var/lib/agentc";
 
     #[test]
     fn every_role_denies_raw_push_and_reviewers_cannot_edit() {
@@ -151,23 +175,41 @@ mod tests {
 
     #[test]
     fn only_implementers_turn_claudes_nested_bash_sandbox_off() {
-        assert_eq!(settings(Role::Implementer)["sandbox"]["enabled"], false);
-        assert_eq!(settings(Role::Reviewer)["sandbox"]["enabled"], true);
-        assert!(render(Role::Implementer).contains("\"enabled\": false"));
+        assert_eq!(
+            settings(Role::Implementer, Path::new(STATE))["sandbox"]["enabled"],
+            false
+        );
+        assert_eq!(
+            settings(Role::Reviewer, Path::new(STATE))["sandbox"]["enabled"],
+            true
+        );
+        assert!(render(Role::Implementer, Path::new(STATE)).contains("\"enabled\": false"));
     }
 
     #[test]
     fn only_reviewers_reach_exactly_the_crates_registry_through_claudes_sandbox() {
-        let domains = &settings(Role::Reviewer)["sandbox"]["network"]["allowedDomains"];
+        let domains =
+            &settings(Role::Reviewer, Path::new(STATE))["sandbox"]["network"]["allowedDomains"];
         assert_eq!(
             domains,
             &json!(["crates.io", "index.crates.io", "static.crates.io"])
         );
         assert!(
-            settings(Role::Implementer)["sandbox"]
+            settings(Role::Implementer, Path::new(STATE))["sandbox"]
                 .get("network")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn only_reviewers_may_write_under_their_roles_runs_directory() {
+        let writable =
+            &settings(Role::Reviewer, Path::new(STATE))["sandbox"]["filesystem"]["allowWrite"];
+        assert_eq!(writable, &json!(["/var/lib/agentc/rev/runs"]));
+        let implementer = settings(Role::Implementer, Path::new(STATE));
+        assert!(implementer["sandbox"].get("filesystem").is_none());
+        let elsewhere = render(Role::Reviewer, Path::new("/srv/agentc"));
+        assert!(!matches(Role::Reviewer, Path::new(STATE), &elsewhere));
     }
 
     #[test]
@@ -191,13 +233,14 @@ mod tests {
 
     #[test]
     fn rendered_files_round_trip_and_edits_are_detected() {
-        let text = render(Role::Implementer);
-        assert!(matches(Role::Implementer, &text));
-        assert!(!matches(Role::Reviewer, &text));
+        let text = render(Role::Implementer, Path::new(STATE));
+        assert!(matches(Role::Implementer, Path::new(STATE), &text));
+        assert!(!matches(Role::Reviewer, Path::new(STATE), &text));
         assert!(!matches(
             Role::Implementer,
+            Path::new(STATE),
             &text.replace("dontAsk", "acceptEdits")
         ));
-        assert!(!matches(Role::Implementer, "{not json"));
+        assert!(!matches(Role::Implementer, Path::new(STATE), "{not json"));
     }
 }

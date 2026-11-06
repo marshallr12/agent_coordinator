@@ -179,11 +179,9 @@ fn claude_args(spec: &LaunchSpec) -> Vec<OsString> {
     }
     args.push("--tools".into());
     args.extend(
-        role_settings::settings(spec.role)["permissions"]["allow"]
-            .as_array()
+        role_settings::tools(spec.role)
             .into_iter()
-            .flatten()
-            .filter_map(|tool| tool.as_str().map(OsString::from)),
+            .map(OsString::from),
     );
     args
 }

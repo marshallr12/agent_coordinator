@@ -308,9 +308,15 @@ is active, it sends Bash network traffic through its own proxy, which in `-p`
 mode refuses every host missing from `sandbox.network.allowedDomains` with
 `CONNECT 403`. The egress proxy never sees those requests. The reviewer list is
 therefore exactly the Cargo registry: `crates.io`, `index.crates.io` and
-`static.crates.io`. Without it, a reviewer on a `socat` host cannot resolve
-dependencies, and every Rust gate it runs fails. The egress allowlist still
-applies on top of this list.
+`static.crates.io`. The egress allowlist still applies on top of this list.
+The same sandbox also makes everything outside the clone and its own temp
+read-only, including the run's Cargo home, build directory and candidate
+home. The settings therefore grant `sandbox.filesystem.allowWrite` on the
+role's `<state_dir>/rev/runs`; Claude Code takes no globs there, and every run
+shares one persistent file. That grant widens nothing: this outer sandbox
+already hides other runs and keeps this run read-only apart from its own
+writable directories. Without both settings, a reviewer on a `socat` host
+cannot fetch or cache dependencies, and every Rust gate it runs fails.
 
 Codex has no equivalent per-command hook, so Codex reviewer launches are refused.
 Candidate code can no longer read the long-lived verification login. Instead,

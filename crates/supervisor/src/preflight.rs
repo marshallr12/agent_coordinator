@@ -25,7 +25,7 @@ pub fn check(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     ));
     problems.extend(layout_problems(spec));
     problems.extend(state_problems(spec, config));
-    problems.extend(settings_problem(spec));
+    problems.extend(settings_problem(spec, config));
     if let Err(error) = crate::sandbox::check(spec, config) {
         problems.push(format!("Claude write confinement: {error:#}"));
     }
@@ -163,7 +163,7 @@ fn layout_problems(spec: &LaunchSpec) -> Vec<String> {
 }
 
 /// Claude launches need the generated role settings, byte-for-byte in meaning.
-fn settings_problem(spec: &LaunchSpec) -> Option<String> {
+fn settings_problem(spec: &LaunchSpec, config: &Config) -> Option<String> {
     if spec.harness != Harness::Claude {
         return None;
     }
@@ -172,7 +172,7 @@ fn settings_problem(spec: &LaunchSpec) -> Option<String> {
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_default();
-    (!role_settings::matches(spec.role, &installed)).then(|| {
+    (!role_settings::matches(spec.role, &config.state_dir, &installed)).then(|| {
         format!(
             "{} differs from the generated {:?} settings",
             path.display(),
@@ -242,7 +242,7 @@ fn claude_problems(spec: &LaunchSpec, config: &Config) -> Vec<String> {
     for file in CLAUDE_CONFIG_ENTRIES {
         results.push(protected_file(&persistent.join(file)));
     }
-    results.push(claude_seeds(spec.role, &persistent));
+    results.push(claude_seeds(spec.role, &config.state_dir, &persistent));
     results.push(token_file(spec.role, config));
     let errors = results.into_iter().filter_map(Result::err);
     let mut problems: Vec<String> = errors.map(|error| format!("{error:#}")).collect();
@@ -258,10 +258,11 @@ const CLAUDE_CONFIG_ENTRIES: [&str; 2] = ["settings.json", "CLAUDE.md"];
 
 /// The persistent settings match the role's generated settings and the
 /// persistent CLAUDE.md the role's generated instructions.
-fn claude_seeds(role: Role, persistent: &Path) -> Result<()> {
+fn claude_seeds(role: Role, state_dir: &Path, persistent: &Path) -> Result<()> {
     let settings = confine::read_regular(&persistent.join("settings.json"))?;
     ensure!(
-        std::str::from_utf8(&settings).is_ok_and(|text| role_settings::matches(role, text)),
+        std::str::from_utf8(&settings)
+            .is_ok_and(|text| role_settings::matches(role, state_dir, text)),
         "persistent Claude settings differ from the generated role settings"
     );
     ensure!(
@@ -684,7 +685,7 @@ mod tests {
         fs::create_dir(&persistent).unwrap();
         fs::write(
             persistent.join("settings.json"),
-            crate::role_settings::render(Role::Reviewer),
+            crate::role_settings::render(Role::Reviewer, &config.state_dir),
         )
         .unwrap();
         fs::write(persistent.join("CLAUDE.md"), "unexpected instructions").unwrap();
@@ -706,7 +707,7 @@ mod tests {
         }
         fs::write(
             persistent.join("settings.json"),
-            crate::role_settings::render(spec.role),
+            crate::role_settings::render(spec.role, &config.state_dir),
         )
         .unwrap();
         assert!(

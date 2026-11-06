@@ -27,7 +27,7 @@ fn prepare(spec: &LaunchSpec, config: &Config) -> Result<RunState> {
     }
     confine::generated_file(
         &spec.run.join(run_files::SETTINGS),
-        role_settings::render(spec.role).as_bytes(),
+        role_settings::render(spec.role, &config.state_dir).as_bytes(),
     )?;
     if spec.role == Role::Reviewer {
         let schema = serde_json::to_string_pretty(&profile::review_schema())?;

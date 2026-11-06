@@ -177,7 +177,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
     let config = config::Config::load(cli.config.as_deref())?;
     match cli.command {
-        Commands::Settings { role } => print!("{}", role_settings::render(role)),
+        Commands::Settings { role } => print!("{}", role_settings::render(role, &config.state_dir)),
         Commands::Instructions { role } => print!("{}", role_settings::instructions(role)),
         Commands::Clone {
             url,
