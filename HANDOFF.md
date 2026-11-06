@@ -42,6 +42,23 @@ prior20-human-origin-pilot: ≥20 human tasks, median creation→Done ≤4.12254
   evidence: `~/.local/state/agent-coordinator-evidence/ac8744ce-454d-4162-bf16-74dfd5df7fe7/`. Worktree
   `ac-ac8744ce-deploy` and its local branch removed (no remote branch). Watch: one mxmini review
   claim (activity 5362fa7f) failed with an empty error right after restart.
+- **Reviewer sandbox fixed on both hosts (2026-11-06 owner goal; reserved event #2 in window.json).**
+  Cause: Claude Code's own reviewer Bash sandbox runs only where `socat` is installed (mxmini, not
+  oracle-1). It denied crates.io (`CONNECT 403`) and made `$RUN/state/cargo`, `$RUN/target` and the
+  candidate home read-only. So the mxmini reviewer `d21d0442` (`agentc-rev-mxmini-write`) failed every
+  Rust gate (task e641488e blocked after 6 rounds; also bc9f8a58, dc9387db, bbdfaf5c, 5767bc49…).
+  Fix on branch `reviewer-sandbox-crates` (`4560cc5` + `39c22d8`, gate green; ship.py fast-forwarded main to `39c22d8` ~17:00Z):
+  reviewer `settings.json` gets `sandbox.network.allowedDomains` crates.io/index.crates.io/
+  static.crates.io and `sandbox.filesystem.allowWrite` `<state_dir>/rev/runs` (no globs in 2.1.303;
+  the outer sandbox already hides other runs). Each host runs its own installed source plus the fix:
+  mxmini `1a828d5` (sha `40af7e25…`), oracle-1 `9c80ed3` (sha `a2e823f1…`, source in
+  `/home/ubuntu/agentc-reviewer-crates-prep`). Installed while Idle; containment suite 100 / 112 PASS.
+  A real contained reviewer launch on each host ran cargo fetch (600 MB cache), offline metadata and
+  `cargo check`, all OK; example.com stayed blocked. Rollback: `/opt/agentc/rollback-reviewer-crates-20261106`
+  on each host. oracle-1's 3 supervisor test failures (bwrap userns under AppArmor) are pre-existing
+  at `9c80ed3`. e641488e unblocked → ready (rev 2) 16:53Z. **Watch:** the next mxmini review of a Rust
+  change should run the gate. The next host-setup rerun installs settings from whatever binary it
+  is given, so build that binary from a commit containing `39c22d8`.
 
 **At window end:** re-activate P6, restore quiet hours, remove observer cron, run the final
 fixed-window audit (value, HRI excl. reserved, direct-push reconciliation, digest ≤1/day).
