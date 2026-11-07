@@ -73,13 +73,27 @@ prior20-human-origin-pilot: ≥20 human tasks, median creation→Done ≤4.12254
   real reviewer cargo probe OK, and host rollback `/opt/agentc/rollback-host-39c22d8-20261106`.
   Evidence artifact `3c172b6c`; scripts under
   `~/.local/state/agent-coordinator-evidence/c2642e99-c096-426f-9a4b-80124613f6ab/`.
-  **Trap:** host-setup re-pins the agent harness to the owner's installed Claude. 2.1.319's Bash
-  sandbox (active only where socat is installed: mxmini) denies the nested user namespace that
-  candidate-shell needs. **mxmini is rolled back to Claude 2.1.303** (pin `claude = "2.1.303"`; the
-  2.1.319 binary and supervisor.toml are in the host rollback dir). oracle-1 runs 2.1.319 (no
-  socat, so its sandbox is inactive). Fix and upgrade: human-delivered task **`54abf543`** (add
-  `sandbox.allowNestedUserNamespaces` for reviewers, plus a real-Claude containment check). Until
-  that lands, **never re-run host-setup on mxmini without re-pinning 2.1.303 afterwards.**
+  (Its 2.1.303 re-pin trap is resolved by the next bullet.)
+- **Reviewer sandbox fix + harness upgrade DONE (2026-11-07 UTC, owner: "work on task 54abf543",
+  chose ship-then-roll-out; reserved event #4).** Reviewer settings gain
+  `sandbox.allowNestedUserNamespaces` (Claude 2.1.319 otherwise denies candidate-shell's nested
+  bwrap) and `sandbox.network.allowAllUnixSockets` (the per-path list does nothing on Linux),
+  probed live on 2.1.303 and 2.1.319. The containment suite now drives the real pinned Claude via
+  a loopback fake Messages API (`deploy/agentc/fake-messages-api.py`, no LLM). ship.py moved main to
+  **`e5b670d`**. Both hosts drained 01:40:08Z (idle, 0 killed) and cleared 02:25:39Z. host-setup
+  installed supervisor/push at `e5b670d`; **the CLI stays at production `39c22d8`** (a newer CLI
+  would fail `client_upgrade_required`). Agent Claude is **2.1.319 on both hosts**; oracle-1's
+  owner Claude was updated 2.1.316 → 2.1.319 first (HANDOFF previously said 2.1.319 there, wrongly).
+  Containment: oracle-1 113 PASS (the new check notes no socat), mxmini 104 PASS (nested
+  candidate-shell bwrap and a Unix socket inside the active Claude sandbox). Real contained
+  reviewer launches (haiku): oracle-1 fetch/check plus 1107/1107 tests pass; mxmini fetch/check
+  plus 1106/1107 with 0 `Operation not permitted` (was 24). The one failure,
+  `artifact_transfer::…publication_replays_lost_reservation…`, passed on a targeted rerun in a
+  launch (flaky under load). Targeted mxmini run: candidate_checkpoint 18/18, agentc-push 34/34,
+  supervisor 327+4 pass (30 skip by design: no writable /tmp in launches). Rollback:
+  `/opt/agentc/rollback-host-e5b670d-20261106` on each host (old binaries, Claude, supervisor.toml,
+  reviewer settings). Evidence and scripts: `~/.local/state/agent-coordinator-evidence/54abf543-2870-47da-ae9b-ac4e84f521a3/`.
+  host-setup still pins whatever Claude the owner has installed (`~/.local/bin/claude`).
 - **Other hosts' sithbit work** resumed after the deploy. Workstation CLIs must be at `39c22d8`,
   or they fail with `client_upgrade_required`.
 
