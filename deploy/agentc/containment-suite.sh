@@ -25,6 +25,7 @@ FAILED=0
 SUITE_BINS=()
 PUSH_PID=
 PUSH_RUN=
+PROBE_SERVER=
 DUMMY_TOKEN=agentc-suite-dummy-token
 DUMMY_TOKENS=()
 STALE_TOKENS=()
@@ -305,6 +306,108 @@ check_implementer_bash() {
     echo "NOTE agentc-impl/claude: socat is not installed on this host; the socat-present case is not exercised"
 }
 
+# candidate-shell's own namespace, /proc and /dev flags (see
+# crates/supervisor/src/candidate.rs `isolation_args`), with a read-only root:
+# the nested Bubblewrap the probe starts the way a reviewer command does.
+CANDIDATE_BWRAP_FLAGS="--unshare-user --disable-userns --assert-userns-disabled --unshare-pid \
+--unshare-ipc --unshare-uts --new-session --die-with-parent --cap-drop ALL --ro-bind / / \
+--proc /proc --remount-ro /proc --dev /dev"
+
+# The Bash command the real-Claude reviewer probe runs, writing markers into
+# its cwd $1: it ran, a nested Bubblewrap with candidate-shell's flags (using
+# bubblewrap $2), a Unix socket, and a write to $3, outside every directory
+# Claude's sandbox allows (so that marker means the sandbox is off).
+reviewer_probe_command() {
+  local cwd=$1 bwrap=$2 outside=$3
+  printf '%s' ": > $cwd/ran; $bwrap $CANDIDATE_BWRAP_FLAGS true && : > $cwd/nested-ok; " \
+    "/usr/bin/python3 -I -c \"import socket;s=socket.socket(socket.AF_UNIX);s.bind('$cwd/s');s.listen()\" && : > $cwd/unix-ok; " \
+    "touch $outside/escape 2>/dev/null && : > $cwd/sandbox-off"
+}
+
+# The loopback stand-in API the probe drives Claude with. A release bundle
+# that carries scripts/containment-suite.sh must carry it beside the suite.
+fake_api() { echo "$(dirname "${BASH_SOURCE[0]}")/fake-messages-api.py"; }
+
+# Starts the fake API as root, serving the probe command in file $1 and
+# writing its port to $2; sets PROBE_SERVER (stopped by suite_cleanup too).
+# Fails when the port never appears.
+start_fake_api() {
+  /usr/bin/python3 -I "$(fake_api)" "$2" "$1" 120 &
+  PROBE_SERVER=$!
+  for _ in $(seq 50); do [ -s "$2" ] && return 0; sleep 0.1; done
+  return 1
+}
+
+# Stops the fake API, if one is running.
+stop_fake_api() {
+  [ -n "$PROBE_SERVER" ] || return 0
+  kill "$PROBE_SERVER" 2>/dev/null; wait "$PROBE_SERVER" 2>/dev/null; PROBE_SERVER=
+}
+
+# Runs the real pinned Claude as agentc-rev in run dir $1, with the installed
+# reviewer settings, against the fake API on port $2 (no LLM): it asks for
+# one Bash call, the probe command. Logs to $1/claude.log.
+run_reviewer_probe() {
+  local run=$1 port=$2
+  as agentc-rev sh -c "cd $run/cwd && env CLAUDE_CONFIG_DIR=$run/config HOME=$run/home \
+    ANTHROPIC_BASE_URL=http://127.0.0.1:$port ANTHROPIC_API_KEY=suite-dummy \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 timeout 90 $PREFIX/bin/claude -p \
+    --settings $STATE/rev/claude-config/settings.json --tools Bash --max-turns 3 probe" >"$run/claude.log" 2>&1
+}
+
+# Judges the probe markers in $1: where Claude's sandbox is active (socat
+# installed, checked as the existing implementer leg does), the command must
+# nest candidate-shell's Bubblewrap and bind a Unix socket (Claude Code
+# 2.1.319 denies both without the reviewer settings); where it is inactive,
+# the suite says so instead. Nothing else is judged when the command never
+# ran, since absent markers would then prove nothing.
+judge_reviewer_probe() {
+  local cwd=$1
+  if [ ! -e "$cwd/ran" ]; then
+    fail "agentc-rev/claude: real pinned Claude ran no Bash command (log: ${cwd%/cwd}/claude.log)"; return
+  fi
+  pass "agentc-rev/claude: real pinned Claude ran a Bash command"
+  if [ ! -x /usr/bin/socat ]; then
+    echo "NOTE agentc-rev/claude: Claude's Bash sandbox is inactive on this host (no socat); nesting not exercised"
+    return
+  fi
+  expect_fail "agentc-rev/claude: Claude's Bash sandbox is active (outside write denied)" test -e "$cwd/sandbox-off"
+  expect_ok "agentc-rev/claude: candidate-shell's nested Bubblewrap inside Claude's sandbox" test -e "$cwd/nested-ok"
+  expect_ok "agentc-rev/claude: Unix socket inside Claude's sandbox" test -e "$cwd/unix-ok"
+}
+
+# Makes the probe's outside directory, owned by agentc-rev (so only Claude's
+# sandbox can stop the write), and prints its path.
+make_outside_dir() {
+  local outside
+  outside=$(mktemp -d /var/tmp/agentc-suite-outside.XXXX) || return 1
+  chown agentc-rev "$outside" || { rm -rf "$outside"; return 1; }
+  echo "$outside"
+}
+
+# The real pinned Claude, with its Bash sandbox on and the installed reviewer
+# settings, can start a Bubblewrap with candidate-shell's flags and serve a
+# test socket. Claude runs directly as agentc-rev, not inside the outer launch
+# sandbox; a contained reviewer launch covers that level. The run dir sits
+# under rev/runs, the settings' write grant.
+check_reviewer_claude_nesting() {
+  local run=$STATE/rev/runs/suite-nesting outside bwrap=bwrap
+  [ -x "$PREFIX/bin/bwrap" ] && bwrap=$PREFIX/bin/bwrap
+  [ -f "$(fake_api)" ] || { fail "agentc-rev/claude: no $(fake_api) beside the suite"; return; }
+  outside=$(make_outside_dir) || { fail "agentc-rev/claude: cannot make the probe's outside directory"; return; }
+  as agentc-rev rm -rf "$run"
+  as agentc-rev mkdir -p "$run/cwd" "$run/config" "$run/home"
+  reviewer_probe_command "$run/cwd" "$bwrap" "$outside" > "$outside.command"
+  if start_fake_api "$outside.command" "$outside.port"; then
+    run_reviewer_probe "$run" "$(cat "$outside.port")"
+    judge_reviewer_probe "$run/cwd"
+  else
+    fail "agentc-rev/claude: the fake Messages API did not start"
+  fi
+  stop_fake_api
+  rm -rf "$outside" "$outside.command" "$outside.port"
+}
+
 # True when preflight as $1 with config $2 reports a failed relay probe.
 # Preflight exits non-zero then, so its output is captured, not piped
 # (the suite runs under pipefail).
@@ -408,6 +511,7 @@ stop_push_launch() {
 # The EXIT trap: no launch-root left running, no suite bin dir or dummy
 # token left behind.
 suite_cleanup() {
+  stop_fake_api
   stop_push_launch
   remove_suite_bins
   remove_dummy_tokens
@@ -801,6 +905,7 @@ main() {
     check_relay_probe "$1" "$stub_bin"
   done
   check_candidate_token
+  check_reviewer_claude_nesting
   check_push_kill "$push_bin"
   check_push_launch "$push_bin"
   check_push_key

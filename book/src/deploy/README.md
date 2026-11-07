@@ -318,6 +318,37 @@ already hides other runs and keeps this run read-only apart from its own
 writable directories. Without both settings, a reviewer on a `socat` host
 cannot fetch or cache dependencies, and every Rust gate it runs fails.
 
+Two more reviewer settings keep `candidate-shell` and the workspace tests
+working under that sandbox (probed live on Claude Code 2.1.303 and 2.1.319,
+2026-11-06):
+
+- `sandbox.allowNestedUserNamespaces`: `candidate-shell` is a nested
+  Bubblewrap and needs its own user namespace. From 2.1.319, Claude's sandbox
+  denies one by default, and every reviewer command fails with
+  `bwrap: No permissions to create new namespace`. Claude warns that the
+  setting lets commands get around its file deny rules, but a reviewer's file
+  isolation comes from the outer sandbox and `candidate-shell`, not from
+  Claude's sandbox. Candidate code itself still cannot nest: `candidate-shell`
+  keeps `--disable-userns`. 2.1.303 nests either way and ignores the key.
+- `sandbox.network.allowAllUnixSockets`: the sandbox otherwise blocks
+  creating any Unix socket, so tests that serve on one fail with
+  `Operation not permitted`. The per-path `allowUnixSockets` list has no
+  effect on Linux, so this is the narrowest setting that works. Candidate
+  code can then connect to host socket files the reviewer uid may open (the
+  system D-Bus socket, for example); the network namespace still hides
+  abstract sockets. That is the same socket access as on a host without
+  `socat`, where Claude's sandbox is inactive.
+
+The containment suite drives the real pinned Claude, with its sandbox on and
+the installed reviewer settings, through one Bash command without an LLM: a
+loopback stand-in API (`fake-messages-api.py`, kept beside the suite) answers
+with that tool call. The command must start a Bubblewrap with
+`candidate-shell`'s flags and bind a Unix socket; on a host without `socat`
+the suite notes that the sandbox is inactive instead. After a supervisor
+upgrade that changes these settings, re-run host-setup before launching
+reviewers: preflight refuses a reviewer whose installed `settings.json`
+differs from the generated one.
+
 Codex has no equivalent per-command hook, so Codex reviewer launches are refused.
 Candidate code can no longer read the long-lived verification login. Instead,
 per run (decisions U18 and U22), the supervisor signs in to the staging
@@ -1666,7 +1697,8 @@ and a non-HTTPS URL are all refused):
   `bin/agentc-supervisor`, `bin/agent-coordinator`, `bin/agentc-push` and its own
   `SHA256SUMS` (every file, no extras). It may also carry `harness.json`
   (`{"claude": {"file": "harness/claude", "version": "2.1.0"}, ...}`) with the
-  harness binaries it names, and `scripts/containment-suite.sh`.
+  harness binaries it names, and `scripts/containment-suite.sh` with the
+  `scripts/fake-messages-api.py` it runs (without it the suite fails).
 - `SHA256SUMS`, the release asset listing the archive's SHA-256.
 - A GitHub build attestation for the archive, checked with `gh attestation
   verify <file> --repo <repo>` (`UPDATE_ATTEST_COMMAND`). Root needs a `gh`

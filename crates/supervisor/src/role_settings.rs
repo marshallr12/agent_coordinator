@@ -4,7 +4,9 @@
 //! never hand-edited: the preflight requires the installed file to equal this
 //! output. Only keys verified by live probes are used (`permissions` with
 //! `defaultMode` and `sandbox.enabled` in P2; `sandbox.network.allowedDomains`
-//! and `sandbox.filesystem.allowWrite` on Claude Code 2.1.303, 2026-11-06).
+//! and `sandbox.filesystem.allowWrite` on Claude Code 2.1.303, 2026-11-06;
+//! `sandbox.allowNestedUserNamespaces` and `sandbox.network.allowAllUnixSockets`
+//! on 2.1.303 and 2.1.319, 2026-11-06).
 //!
 //! The persistent `CLAUDE.md` is generated the same way, so a role's standing
 //! instructions are reviewed code and the preflight can require them exactly.
@@ -84,16 +86,43 @@ fn runs_dir(role: Role, state_dir: &Path) -> PathBuf {
     state_dir.join(role.slug()).join("runs")
 }
 
+/// The reviewer's `sandbox.network` settings: [`REVIEWER_SANDBOX_DOMAINS`],
+/// plus Unix sockets.
+///
+/// Where Claude's sandbox is active it blocks creating any Unix socket, so
+/// workspace tests that serve on one (coordinator-cli `candidate_checkpoint`,
+/// agentc-push serve/socket, agentc-supervisor relay/push-helper) fail with
+/// `Operation not permitted`. Probed live on mxmini, 2026-11-06, Claude Code
+/// 2.1.303 and 2.1.319: the path list `allowUnixSockets` has no effect on
+/// Linux (bind still denied), so `allowAllUnixSockets` is the narrowest
+/// setting that works. It matches hosts where the sandbox is inactive
+/// (oracle-1, no `socat`); the outer sandbox's network namespace still hides
+/// abstract sockets, and the agent uid limits which socket files connect.
+fn reviewer_network() -> Value {
+    json!({"allowedDomains": REVIEWER_SANDBOX_DOMAINS, "allowAllUnixSockets": true})
+}
+
 /// The `sandbox` settings for a role: off for implementers; on for
-/// reviewers, with network access limited to [`REVIEWER_SANDBOX_DOMAINS`] and
-/// writes allowed under the role's [`runs_dir`].
+/// reviewers, with [`reviewer_network`], writes allowed under the role's
+/// [`runs_dir`], and nested user namespaces.
+///
+/// `candidate-shell` is itself a Bubblewrap sandbox, so it needs a user
+/// namespace inside Claude's. Claude Code 2.1.319 denies that by default
+/// ("bwrap: No permissions to create new namespace") unless
+/// `allowNestedUserNamespaces` is set. Probed live on mxmini, 2026-11-06:
+/// with it, `unshare --user` and `bwrap --unshare-user` succeed in 2.1.319's
+/// sandbox and fail without it; 2.1.303 nests either way and ignores the key.
+/// Claude warns that nested namespaces get around its file deny rules, but a
+/// reviewer's file isolation comes from the outer launch sandbox and
+/// `candidate-shell`, not from Claude's sandbox.
 fn sandbox(role: Role, state_dir: &Path) -> Value {
     if !claude_sandbox(role) {
         return json!({"enabled": false});
     }
     json!({
         "enabled": true,
-        "network": {"allowedDomains": REVIEWER_SANDBOX_DOMAINS},
+        "allowNestedUserNamespaces": true,
+        "network": reviewer_network(),
         "filesystem": {"allowWrite": [runs_dir(role, state_dir)]}
     })
 }
@@ -210,6 +239,34 @@ mod tests {
         assert!(implementer["sandbox"].get("filesystem").is_none());
         let elsewhere = render(Role::Reviewer, Path::new("/srv/agentc"));
         assert!(!matches(Role::Reviewer, Path::new(STATE), &elsewhere));
+    }
+
+    /// The whole reviewer sandbox document is pinned, so a probed key cannot
+    /// drift or vanish without a reviewed test change.
+    #[test]
+    fn reviewer_sandbox_document_is_pinned() {
+        assert_eq!(
+            settings(Role::Reviewer, Path::new(STATE))["sandbox"],
+            json!({
+                "enabled": true,
+                "allowNestedUserNamespaces": true,
+                "network": {
+                    "allowedDomains": ["crates.io", "index.crates.io", "static.crates.io"],
+                    "allowAllUnixSockets": true
+                },
+                "filesystem": {"allowWrite": ["/var/lib/agentc/rev/runs"]}
+            })
+        );
+    }
+
+    /// Implementers keep Claude's sandbox off and gain none of the reviewer
+    /// keys (their outer sandbox forbids nesting; see [`claude_sandbox`]).
+    #[test]
+    fn implementer_sandbox_document_is_pinned() {
+        assert_eq!(
+            settings(Role::Implementer, Path::new(STATE))["sandbox"],
+            json!({"enabled": false})
+        );
     }
 
     #[test]
