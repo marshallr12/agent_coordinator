@@ -31,7 +31,10 @@ OWNER_CONTROLS = ("file_read", "registry_read", "process_open", "pipe_connect", 
 MANIFEST_KEYS = ("schema_version", "owner_sid", "profile", "directory", "file", "credential",
                  "registry_path", "pid", "pipe", "event", "toolchain", "msvc", "windows_kit", "controls")
 # Probe files another account needs, relative to this directory.
-STAGED_SOURCES = ("windows-containment-probe.py", "windows-probe-native.py", "windows-probe-owner.py")
+STAGED_SOURCES = ("windows-containment-probe.py", "windows-probe-native.py", "windows-probe-owner.py",
+                  "windows-probe-policy.py")
+# Well-known SIDs kept on the staging tree: local administrators and the system.
+KEPT_SIDS = ("S-1-5-32-544", "S-1-5-18")
 # Parts of a Python installation the probe never imports.
 UNUSED_PYTHON = ("Doc", "tcl", "test", "site-packages", "idlelib", "tkinter", "ensurepip", "__pycache__")
 
@@ -150,17 +153,28 @@ def stage(probe, staging, arguments):
     copy_sources(staging / "source")
     probe.copy_toolchain(probe.locate_toolchain(arguments), staging / "toolchain")
     (staging / "role").mkdir()
+    if arguments.policy_conditions:
+        # Only the owner's elevated step writes here; the role run reads it.
+        probe.policy.owner_directory(staging).mkdir()
     return {"toolchain": str(staging / "toolchain"), "msvc": str(probe.locate_msvc(arguments)),
             "windows_kit": str(probe.locate_kit(arguments))}
 
 
-def grant_role(probe, windows, staging, account):
-    """Let the role account read the staged tree and modify only its own report directory."""
-    native = probe.native
-    for path, rights in ((staging, "RX"), (staging / "role", "M")):
-        arguments = [str(path), "/grant", f"{account}:(OI)(CI)({rights})", "/T", "/Q"]
-        if native.run_tool(windows, "icacls.exe", arguments) != 0:
-            raise RuntimeError(f"could not grant {account} {rights} on {path}")
+def grant_role(probe, windows, staging, account, owner_sid):
+    """Give the staging tree exactly the access the run needs.
+
+    A directory under C:/Users/Public inherits modify access for every
+    interactive user. Inheritance is cut, so the role account can read the
+    staged tree and modify only its own report directory. In a same-account
+    dry run the role is the owner, who keeps full access.
+    """
+    kept = [f"*{sid}:(OI)(CI)(F)" for sid in (owner_sid, *KEPT_SIDS)]
+    reader = [] if account == "*" + owner_sid else [f"{account}:(OI)(CI)(RX)"]
+    steps = ([str(staging), "/inheritance:r", "/grant:r", *kept, *reader, "/Q"],
+             [str(staging / "role"), "/grant", f"{account}:(OI)(CI)(M)", "/Q"])
+    for step in steps:
+        if probe.native.run_tool(windows, "icacls.exe", step) != 0:
+            raise RuntimeError(f"could not set access on {step[0]}")
 
 
 def role_command(staging):
@@ -195,9 +209,15 @@ def integrity_rows(probe, targets):
     return probe.tag(rows, "-", "-")
 
 
-def finish(probe, api, staging, targets, finished):
-    """Read the role run's report by handle, add the owner's rows and recompute the verdict."""
+def finish(probe, api, staging, targets, finished, conditions=()):
+    """Read the role run's report by handle, add the owner's rows and recompute the verdict.
+
+    When the run changed firewall state, the report also needs the elevated
+    step's confirmation that the original state is back.
+    """
     rows = integrity_rows(probe, targets)
+    if conditions:
+        rows += probe.policy.restored_rows(probe, staging)
     if not finished:
         rows += probe.tag([probe.host_row("owner.role_run_completed", "control", False, "no completion marker")],
                           "-", "-")
@@ -223,11 +243,12 @@ def cleanup(api, targets, handles):
         pass
 
 
-def write_manifest(probe, api, staging, targets, tools):
-    """Record the owner's identity, targets, tools and controls for the role run."""
+def write_manifest(probe, api, staging, targets, tools, conditions=()):
+    """Record the owner's identity, targets, tools, controls and firewall conditions for the role run."""
     manifest = {"schema_version": 1, "owner_sid": probe.native.current_user_sid(api),
                 "profile": str(Path.home()), **targets, **tools,
-                "controls": evaluate_controls(probe, api, targets)}
+                "controls": evaluate_controls(probe, api, targets),
+                "policy_conditions": list(conditions)}
     (staging / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 
@@ -244,18 +265,20 @@ def start_role_run(arguments, staging):
 
 def run(probe, arguments):
     """The owner's step: plant, stage, wait for the role run, then write the final report."""
-    api, staging = probe.native.Api(), arguments.staging
+    api, staging, conditions = probe.native.Api(), arguments.staging, arguments.policy_conditions
     windows = Path(os.environ.get("SystemRoot", "C:/Windows"))
+    owner_sid = probe.native.current_user_sid(api)
     # Without a named role account, grant this account by SID: a same-account dry run.
-    account = arguments.role_account or "*" + probe.native.current_user_sid(api)
+    account = arguments.role_account or "*" + owner_sid
     with arguments.output.open("x", encoding="utf-8") as output:
         targets, handles = plant_targets(probe, api, uuid.uuid4().hex[:12])
         try:
             tools = stage(probe, staging, arguments)
-            write_manifest(probe, api, staging, targets, tools)
-            grant_role(probe, windows, staging, account)
+            write_manifest(probe, api, staging, targets, tools, conditions)
+            grant_role(probe, windows, staging, account, owner_sid)
             child = start_role_run(arguments, staging)
-            record = finish(probe, api, staging, targets, await_role(staging, child, arguments.role_wait))
+            finished = await_role(staging, child, arguments.role_wait)
+            record = finish(probe, api, staging, targets, finished, conditions)
         finally:
             cleanup(api, targets, handles)
         json.dump(record, output, indent=2)

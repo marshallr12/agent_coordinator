@@ -22,6 +22,7 @@ sys.modules[spec.name] = probe
 spec.loader.exec_module(probe)
 native = probe.native
 owner = probe.owner
+policy = probe.policy
 
 PEERS = {"implementer": [("impl-2", "implementer"), ("rev-1", "reviewer")],
          "reviewer": [("impl-1", "implementer"), ("impl-2", "implementer")]}
@@ -352,6 +353,110 @@ class StationTests(unittest.TestCase):
         finally:
             second.close()
             first.close()
+
+
+STATE_ON = {"profiles": {"Domain": True, "Private": True, "Public": True}, "service": "Running"}
+STATE_OFF = {"profiles": {"Domain": False, "Private": False, "Public": False}, "service": "Running"}
+
+
+class PolicyTests(unittest.TestCase):
+    """Network rounds under firewall conditions: conditions, observed state and the restore record."""
+
+    def test_conditions_start_with_the_untouched_state_and_are_known_and_distinct(self):
+        self.assertEqual(policy.parse_conditions("baseline, profiles-off"), ["baseline", "profiles-off"])
+        for text in ("profiles-off", "baseline,baseline", "baseline,invented", ""):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                policy.parse_conditions(text)
+
+    def test_the_state_query_output_is_parsed_strictly(self):
+        text = json.dumps({"profiles": [{"name": "Domain", "enabled": "True"}, {"name": "Private", "enabled": "False"},
+                                        {"name": "Public", "enabled": "True"}], "service": "Running"})
+        self.assertEqual(policy.parse_state(text),
+                         {"profiles": {"Domain": True, "Private": False, "Public": True}, "service": "Running"})
+        one_profile = json.dumps({"profiles": [{"name": "Domain", "enabled": "True"}], "service": "Running"})
+        for broken in ("", "{}", "[]", one_profile):
+            with self.subTest(broken=broken):
+                self.assertIsNone(policy.parse_state(broken))
+
+    def test_a_condition_is_reached_only_by_its_own_state(self):
+        stopped = {**STATE_ON, "service": "Stopped"}
+        mixed = {"profiles": {**STATE_OFF["profiles"], "Public": True}, "service": "Running"}
+        reached = {("baseline", "on"): STATE_ON, ("profiles-off", "off"): STATE_OFF, ("service-stop", "stopped"): stopped}
+        for (condition, _), state in reached.items():
+            self.assertTrue(policy.reached(condition, state), condition)
+        missed = (("baseline", STATE_OFF), ("baseline", stopped), ("baseline", None), ("profiles-off", mixed),
+                  ("profiles-off", STATE_ON), ("service-stop", STATE_ON))
+        for condition, state in missed:
+            with self.subTest(condition=condition, state=state):
+                self.assertFalse(policy.reached(condition, state))
+
+    def test_a_round_needs_the_owners_record_and_the_state_the_role_run_itself_reads(self):
+        applied = {"condition": "profiles-off", "outcome": "applied", "detail": "every profile disabled"}
+        def statuses(record, state):
+            """Row statuses for the profiles-off condition."""
+            return [row["status"] for row in policy.condition_rows(probe, "profiles-off", record, state)]
+
+        self.assertEqual(statuses(applied, STATE_OFF), ["pass", "pass"])
+        # The record claims the change, but the role run still sees the firewall on.
+        self.assertEqual(statuses(applied, STATE_ON), ["pass", "fail"])
+        self.assertEqual(statuses(None, STATE_OFF)[0], "fail")
+        self.assertEqual(statuses({"outcome": "not-applied"}, STATE_OFF)[0], "fail")
+
+    def test_only_the_service_stop_may_be_refused_without_blocking(self):
+        refused = {"outcome": "refused", "detail": "access denied"}
+        rows = policy.condition_rows(probe, "service-stop", refused, STATE_ON)
+        self.assertEqual([row["status"] for row in rows], ["info"])
+        rows = policy.condition_rows(probe, "profiles-off", refused, STATE_ON)
+        self.assertEqual(rows[0]["status"], "fail")
+
+    def test_a_missing_fixture_fails_every_condition_and_blocks_the_gate(self):
+        host = types.SimpleNamespace(manifest={"policy_conditions": ["baseline", "profiles-off"]})
+        rows = policy.role_rounds(probe, host, None)
+        self.assertEqual([row["launch"] for row in rows], ["policy-baseline", "policy-profiles-off"])
+        result = probe.summary({"appcontainer": all_passing_rows(), "lpac": all_passing_rows() + rows}, [])
+        self.assertEqual(result["prototype_gate"], "blocked")
+        self.assertEqual(policy.role_rounds(probe, types.SimpleNamespace(manifest={}), "fixture.exe"), [])
+
+    def test_a_round_expects_what_the_matrix_expects(self):
+        targets = {"tcp.loopback4": "127.0.0.1:1", "tcp.external": "192.0.2.1:443",
+                   "udp.loopback4": "127.0.0.1:2", "dns_name": "example.com"}
+        facts = policy.network_facts(targets)
+        self.assertEqual(facts, {"tcp": ["loopback4", "external"], "udp": ["loopback4"], "dns": True})
+        observed = {"net.tcp.loopback4": "error:10013", "net.tcp.external": "allowed",
+                    "net.udp.loopback4": "allowed", "net.dns": "error:11001"}
+        statuses = {row["check"]: row["status"] for row in probe.judge(probe.network_checks(facts), observed)}
+        self.assertEqual(statuses, {"net.tcp.loopback4": "pass", "net.tcp.external": "fail",
+                                    "net.udp.loopback4": "info", "net.dns": "pass"})
+        self.assertEqual(policy.observations(probe, None), {})
+        self.assertEqual(policy.observations(probe, b"net.dns=allowed\nnet.dns=allowed\n"), {})
+
+    def test_an_applied_condition_counts_only_when_the_state_read_back_matches(self):
+        self.assertEqual(policy.confirm("profiles-off", "applied", "done", STATE_OFF)[0], "applied")
+        self.assertEqual(policy.confirm("profiles-off", "applied", "done", STATE_ON)[0], "failed")
+        self.assertEqual(policy.confirm("service-stop", "refused", "denied", STATE_ON)[0], "refused")
+        self.assertEqual(policy.apply_condition(Path("C:/Windows"), "profiles-off", observe_only=True)[0],
+                         "not-applied")
+        self.assertEqual(policy.apply_condition(Path("C:/Windows"), "baseline")[0], "applied")
+
+    def test_the_report_fails_unless_the_original_firewall_state_is_confirmed_back(self):
+        back = {"restored": True, "original": STATE_ON, "final": STATE_ON, "changed": ["profiles-off"]}
+        self.assertEqual(policy.restored_row(probe, back)["status"], "pass")
+        for record in (None, {**back, "restored": False}, {**back, "final": STATE_OFF}, {**back, "final": None}):
+            with self.subTest(record=record):
+                self.assertEqual(policy.restored_row(probe, record)["status"], "fail")
+
+    def test_the_two_sides_write_in_separate_directories_and_the_original_state_is_saved_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            staging = Path(directory)
+            self.assertEqual(policy.marker(staging, "baseline", "ready"),
+                             staging / "role" / "policy" / "baseline.ready")
+            self.assertEqual(policy.record_file(staging, "baseline"), staging / "policy" / "baseline.json")
+            policy.owner_directory(staging).mkdir()
+            self.assertEqual(policy.save_original(staging, STATE_ON), STATE_ON)
+            # A second run that starts from a changed state must not replace the saved original.
+            self.assertEqual(policy.save_original(staging, STATE_OFF), STATE_ON)
+            self.assertIsNone(policy.read_json(staging / "policy" / "absent.json"))
+            self.assertTrue(policy.wait_for_file(staging / "policy" / "original.json", 0))
 
 
 @unittest.skipUnless(ON_WINDOWS, "needs native Windows and NTFS links")

@@ -44,6 +44,7 @@ def load(name):
 
 native = load("windows-probe-native.py")
 owner = load("windows-probe-owner.py")
+policy = load("windows-probe-policy.py")
 
 # A custom capability: the tool directory's access list names it once, so tools
 # need no access entry per launch.
@@ -373,6 +374,8 @@ class Host:
         self.private, self.logs = self.folder("host"), self.folder("logs")
         self.listeners, self.handles, self.notes, self.contained = {}, [], [], []
         self.external, self.station = None, None
+        # The fixture each variant built, kept for the network rounds after the matrix.
+        self.executables = {}
 
     def shared_station(self):
         """The one window station this run's launches use, made on first use."""
@@ -833,7 +836,8 @@ def fixture_source():
 
 def source_digests():
     """Digests of every probe source file, so a report names the exact code that ran."""
-    files = [HERE / "windows-containment-probe.py", HERE / "windows-probe-native.py"]
+    files = [HERE / "windows-containment-probe.py", HERE / "windows-probe-native.py",
+             HERE / "windows-probe-owner.py", HERE / "windows-probe-policy.py"]
     files += sorted(path for path in fixture_source().rglob("*")
                     if path.is_file() and "target" not in path.parts)
     return {str(path.relative_to(HERE)).replace("\\", "/"): sha256(path) for path in files}
@@ -1139,6 +1143,7 @@ def evaluate(host, variant, aliases):
     rows, executable = build(host, variant)
     if executable is None:
         return rows
+    host.executables[variant] = executable
     rows += handle_rows(host, variant, executable)
     group = start_fixtures(host, variant, executable)
     try:
@@ -1227,6 +1232,9 @@ def run(host):
         aliases = usable_aliases(host)
         for variant in VARIANTS:
             variants[variant] = evaluate(host, variant, aliases)
+        if host.manifest:
+            # Network rounds under the owner's firewall conditions, for the proposed boundary only.
+            variants[CANDIDATE] += policy.role_rounds(sys.modules[__name__], host, host.executables.get(CANDIDATE))
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         shared.append(host_row("setup", "control", False, f"{type(error).__name__}: {error}"))
     finally:
@@ -1266,11 +1274,26 @@ def arguments():
     parser.add_argument("--same-account-dry-run", action="store_true",
                         help="start the role run as this account; exercises the steps, proves no separation")
     parser.add_argument("--owner-manifest", type=Path, help="role account's step: the owner's manifest")
+    parser.add_argument("--policy-conditions", default="",
+                        help="with --owner-plant: comma-separated firewall conditions for network rounds, "
+                             "starting with baseline (see windows-probe-policy.py)")
     parsed = parser.parse_args()
     if sys.platform != "win32" or not parsed.output.is_absolute():
         parser.error("requires native Windows and an absolute, new output path")
     if parsed.owner_plant and (parsed.staging is None or not parsed.staging.is_absolute() or parsed.owner_manifest):
         parser.error("--owner-plant needs an absolute, new --staging directory and no --owner-manifest")
+    return with_conditions(parser, parsed)
+
+
+def with_conditions(parser, parsed):
+    """Turn `--policy-conditions` into a checked list; only the owner's step may name any."""
+    try:
+        parsed.policy_conditions = policy.parse_conditions(parsed.policy_conditions) \
+            if parsed.policy_conditions else []
+    except ValueError as error:
+        parser.error(str(error))
+    if parsed.policy_conditions and not parsed.owner_plant:
+        parser.error("--policy-conditions needs --owner-plant")
     return parsed
 
 

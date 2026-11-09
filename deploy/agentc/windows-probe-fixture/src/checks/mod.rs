@@ -35,6 +35,11 @@ pub fn run(spec: &Spec, work: &Path, report: &mut Report) -> Result<(), String> 
     peers::run(spec, report)
 }
 
+/// Runs only the direct network attempts, for a round under one firewall condition.
+pub fn network_only(spec: &Spec, report: &mut Report) {
+    network::run(spec, report);
+}
+
 /// The sorted names of every environment variable the launch received.
 fn environment_names() -> String {
     let mut names: Vec<String> = std::env::vars_os()

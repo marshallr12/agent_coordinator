@@ -19,6 +19,7 @@ pub fn dispatch(arguments: &[String]) -> i32 {
     let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["launch", name, control, work] => launch(name, Path::new(control), Path::new(work)),
+        ["network", control, work] => network(Path::new(control), Path::new(work)),
         ["child", package_sid] => child(package_sid),
         ["sleeper", seconds] => sleeper(seconds),
         ["memhog", ceiling_mb] => memhog(ceiling_mb),
@@ -47,6 +48,25 @@ fn launch(name: &str, control: &Path, work: &Path) -> i32 {
     }
     appeared(&control.join("stop"));
     0
+}
+
+/// One network round: repeat only the direct network attempts and report them.
+///
+/// The driver runs this once per firewall condition, so a round stays short
+/// while the host's policy is changed.
+fn network(control: &Path, work: &Path) -> i32 {
+    let Ok(text) = fs::read_to_string(control.join("spec.txt")) else {
+        return 3;
+    };
+    let Ok(spec) = Spec::parse(&text) else {
+        return 4;
+    };
+    let mut report = Report::default();
+    checks::network_only(&spec, &mut report);
+    match publish(work, &report.render()) {
+        Ok(()) => 0,
+        Err(_) => 5,
+    }
 }
 
 /// Reads the spec and gathers every row.
