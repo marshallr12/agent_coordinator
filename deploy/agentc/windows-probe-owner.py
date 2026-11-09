@@ -15,7 +15,6 @@ owner and the launch identity are one account. This module separates them.
 The module imports everywhere; nothing touches Windows until a step runs. The
 driver passes itself in as `probe`, which avoids an import cycle.
 """
-import getpass
 import json
 import os
 from pathlib import Path
@@ -247,7 +246,8 @@ def run(probe, arguments):
     """The owner's step: plant, stage, wait for the role run, then write the final report."""
     api, staging = probe.native.Api(), arguments.staging
     windows = Path(os.environ.get("SystemRoot", "C:/Windows"))
-    account = arguments.role_account or getpass.getuser()
+    # Without a named role account, grant this account by SID: a same-account dry run.
+    account = arguments.role_account or "*" + probe.native.current_user_sid(api)
     with arguments.output.open("x", encoding="utf-8") as output:
         targets, handles = plant_targets(probe, api, uuid.uuid4().hex[:12])
         try:
