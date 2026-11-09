@@ -41,6 +41,9 @@ schemars = "1"
 tower.workspace = true
 reqwest.workspace = true
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1", "tokio1-rustls-tls", "hostname"] }
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 mail-parser = { version = "=0.11.9", default-features = false }
 http-body-util.workspace = true

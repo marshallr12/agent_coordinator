@@ -27,5 +27,8 @@ uuid.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "=0.2.189"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

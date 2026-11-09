@@ -1264,8 +1264,14 @@ fn ensure_free_space(path: &Path, incoming: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Flushes the file at `path` to disk. Windows flushes only through a
+/// handle opened for writing; elsewhere a read-only one is enough.
 fn sync_file(path: &Path) -> anyhow::Result<()> {
-    File::open(path)?.sync_all()?;
+    #[cfg(windows)]
+    let file = OpenOptions::new().write(true).open(path)?;
+    #[cfg(not(windows))]
+    let file = File::open(path)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -1393,10 +1399,21 @@ fn rename_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Moves `source` to `destination` only if nothing is there. The standard
+/// library's rename replaces an existing file or empty directory on Windows,
+/// so the move is made without the replace flag.
 #[cfg(target_os = "windows")]
 fn rename_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    // Windows rename fails when the destination already exists.
-    fs::rename(source, destination)
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let wide = |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain([0]).collect() };
+    let (source, destination) = (wide(source), wide(destination));
+    // SAFETY: both strings are NUL-terminated and outlive the call; no flag
+    // is set, so an existing destination makes the move fail.
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

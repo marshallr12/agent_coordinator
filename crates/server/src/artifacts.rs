@@ -351,12 +351,19 @@ async fn try_acquire_cleanup_guard(root: &FsPath) -> Result<Option<std::fs::File
         let file = open_gc_lock(&path)?;
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => Ok(Some(file)),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) if lock_is_held(&error) => Ok(None),
             Err(_) => Err(AppError::internal()),
         }
     })
     .await
     .map_err(|_| AppError::internal())?
+}
+
+/// Whether `error` says another holder has the lock. Windows reports that
+/// as a lock violation, not as an operation that would block.
+fn lock_is_held(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 fn open_gc_lock(path: &FsPath) -> Result<std::fs::File, AppError> {
