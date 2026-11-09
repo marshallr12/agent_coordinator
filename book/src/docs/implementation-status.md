@@ -10,9 +10,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 ## Working now
 
 - The [native Windows host design and prototype](windows-host-design.md) defines
-  a proposed containment/service architecture and an initial disposable native
-  AppContainer/LPAC build/test experiment. No Windows supervised harness or
-  service is admitted; the experiment cannot issue a host acceptance receipt.
+  a proposed containment/service architecture and a disposable containment
+  prototype (`deploy/agentc/windows-containment-probe.py`). The prototype builds
+  and tests a Rust/MSVC fixture inside an AppContainer and a less-privileged
+  AppContainer, then runs it as three concurrent launches that attack the host
+  and each other, and fails closed on any missing or unexpected result. On the
+  one evaluated host its gate is **blocked**: a launch running as the owner can
+  open the owner's registry `Environment` key, which only separate role
+  accounts can close. No Windows supervised harness or service exists or is
+  admitted, and the prototype cannot issue a host acceptance receipt.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
