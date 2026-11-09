@@ -282,15 +282,16 @@ def restored_rows(probe, staging, seconds=180):
 # --- the owner's elevated step ---------------------------------------------
 
 
-def apply_condition(windows, condition, observe_only=False):
+def apply_condition(windows, condition, untouched=False):
     """Change the firewall for one condition; returns (outcome, detail).
 
-    The untouched state needs no change, and an observe-only run makes none.
+    The baseline needs no change. With `untouched`, nothing is changed at all:
+    the run is observe-only, or the firewall was not fully on to begin with.
     """
     if condition == BASELINE:
         return "applied", "no change"
-    if observe_only:
-        return "not-applied", "observe-only run"
+    if untouched:
+        return "not-applied", "nothing was changed: observe-only, or the firewall was not fully on to begin with"
     if condition == PROFILES_OFF:
         code, _, error = run_powershell(windows, f"Set-NetFirewallProfile -Name {','.join(PROFILES)} -Enabled False")
         return ("applied", "every profile disabled") if code == 0 else ("failed", error)
@@ -318,15 +319,18 @@ def serve(windows, staging, condition, original, parsed):
     """Apply one condition when the role run asks for it, and undo it when the round ends.
 
     The firewall is back as it was after `--round-seconds` at the latest, even
-    when the role run never reports that its round ended.
+    when the role run never reports that its round ended. Nothing is changed
+    unless the firewall was fully on when the step started, so the state to
+    restore is never in doubt.
     """
     if not wait_for_file(marker(staging, condition, "ready"), parsed.wait):
         write_json(record_file(staging, condition), {"condition": condition, "outcome": "failed",
                                                      "detail": "the role run never asked for this condition"})
         return False
-    changed = not parsed.observe_only and condition != BASELINE
+    untouched = parsed.observe_only or not reached(BASELINE, original)
+    changed = not untouched and condition != BASELINE
     try:
-        outcome, detail = apply_condition(windows, condition, parsed.observe_only)
+        outcome, detail = apply_condition(windows, condition, untouched)
         outcome, detail = confirm(condition, outcome, detail, firewall_state(windows))
         write_json(record_file(staging, condition), {"condition": condition, "outcome": outcome, "detail": detail})
         wait_for_file(marker(staging, condition, "done"), parsed.round_seconds)

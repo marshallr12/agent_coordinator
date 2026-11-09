@@ -199,7 +199,9 @@ observed policy failures are required.
 A token with no network capability is the demonstrated equivalent so far: the
 prototype's launches could not reach loopback, the local network, a public
 address or the resolver. What happens when the firewall service or its policy
-is lost is untested and needs a privileged session.
+is lost is untested. The prototype has a
+[test for it](#network-policy-rounds), which needs the owner in an elevated
+session and has run only without changing anything.
 
 The reviewer harness and candidate commands require distinct package identities
 and separate jobs. Every candidate execution route (shell, file tool, code mode,
@@ -295,7 +297,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | --- | --- | --- | --- |
 | 1 | This design and the containment prototype | None | Delivered by task `a9126e52`; the prototype gate is **blocked** |
 | 2 preparation | A role-account mode for the prototype and the owner runbook | Owner decision `df37b339` | Delivered by task `3787e738` |
-| 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station; network policy loss is not started |
+| 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test is written (task `96d4927e`) and exercised only as a dry run that changes nothing; the owner's run is not started |
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Blocked |
 | 4 | SCM services, lifecycle and recovery acceptance | Phase 3 | Blocked |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Blocked |
@@ -308,7 +310,7 @@ integration complete each task; only the final acceptance can admit a host.
 ## Containment prototype
 
 `deploy/agentc/windows-containment-probe.py` is a disposable experiment with
-four parts.
+five parts.
 
 - `windows-containment-probe.py` is the driver. It holds the accepted value of
   every row, creates the host-side canaries and positive controls, and derives
@@ -320,6 +322,9 @@ four parts.
   workload and the attacker.
 - `windows-probe-owner.py` is the [role-account mode](#role-account-mode): the
   owner's step and the manifest that a separate account's run reads.
+- `windows-probe-policy.py` is the
+  [network policy loss test](#network-policy-rounds): the role run's network
+  rounds and the owner's elevated step that changes and restores the firewall.
 
 For each boundary variant the driver does the following.
 
@@ -449,14 +454,123 @@ What each step changes on the host:
 | Step | Change | Removed by |
 | --- | --- | --- |
 | 1 | One local standard account | Step 5 |
-| 2 | The staging directory, about half a gigabyte, with access entries for the role account. Under `C:\Users\Public` it also inherits modify access for every interactive user, so the role account can write to the staged tree; the contained launches cannot | Step 5 |
+| 2 | The staging directory, about half a gigabyte. The owner step cuts its inherited access: the owner, administrators and the system keep full access, and the role account can read the tree and modify only its own report directory | Step 5 |
 | 2 | The owner's canaries: a temporary directory, one key under your `Software` registry key, a pipe and two events | The owner step, when it ends |
 | 3 | The role account's profile directory and registry hive, created on its first run | Step 5 |
 | 3 | A run directory under that profile, AppContainer profiles, and one window station with a desktop per launch | The role run deletes the profiles and closes the station; step 5 removes the directory with the profile |
 
 No step installs a service or a firewall rule, changes WSL or reads a real
 credential. A passing run closes the registry finding. It does not finish phase
-2: behavior when network policy is lost still needs its own privileged test.
+2: behavior when network policy is lost needs the test below.
+
+### Network policy rounds
+
+A launch with no network capability is refused every direct connection.
+Windows itself enforces that, and the design depends on it until a
+launch-specific filter policy exists. The network policy loss test shows
+whether the refusal still holds when the Windows Firewall policy is taken
+away. It extends role-account mode with network rounds and has three parts.
+
+1. **Conditions.** The owner step takes `--policy-conditions` and lists them in
+   its manifest. `baseline` is the firewall as found and always comes first.
+   `profiles-off` disables every firewall profile. `service-stop` tries to stop
+   the firewall service.
+2. **Rounds.** After the normal matrix, the role run handles one condition at a
+   time. It asks for the condition, reads the firewall state itself, makes the
+   host-token controls, then starts a fresh launch inside the proposed boundary
+   that repeats the direct TCP, UDP and DNS attempts. The rows are judged with
+   the same accepted values as the matrix, and the host's listeners stay the
+   authority on whether anything arrived.
+3. **Owner's elevated step.** `windows-probe-policy.py` runs elevated as the
+   owner. It saves the original state before any change and changes nothing
+   unless the firewall was fully on to begin with. It applies a condition
+   only when the role run asks for it, and restores the original state as soon
+   as the round ends, after 180 seconds at the latest, and when it is
+   interrupted. It then writes a restore record.
+
+A round counts only when the role run's own reading of the firewall matches the
+condition; the owner's record alone proves nothing. A condition that was not
+reached, a missing round, a failed control and a missing restore record all
+fail. One exception is recorded instead of failed: Windows may refuse to stop
+the firewall service, which shows only that the condition cannot be reached
+that way.
+
+`--observe-only` makes the elevated step change nothing and needs no
+elevation. It exercises the handshake; the `profiles-off` round then fails, as
+it must.
+
+### Owner runbook for the network policy test
+
+Only the owner can do this, because step 2 needs elevation. It turns the host
+firewall off for the length of one round, a few seconds, so use a network you
+trust. It has been exercised only as a dry run that changed nothing; treat a
+row that fails for any reason other than the boundary as a defect in this
+procedure, and stop. It needs the role account from the
+[role-account runbook](#owner-runbook-for-the-role-account-run) and a firewall
+that is on for every profile.
+
+1. In your own shell, not elevated, from the source checkout, start the owner
+   step with the conditions. Replace `NEW_REPORT` with a new absolute path
+   outside the repository. It prints one command and waits for up to an hour.
+
+   ```text
+   python -I deploy/agentc/windows-containment-probe.py --owner-plant --staging C:\Users\Public\agentc-probe-staging --role-account AgentcProbeRole --policy-conditions baseline,profiles-off --output NEW_REPORT
+   ```
+
+2. In an elevated shell, from the same checkout, start the policy step. It
+   changes nothing until the role run asks for a condition.
+
+   ```text
+   python -I deploy/agentc/windows-probe-policy.py --staging C:\Users\Public\agentc-probe-staging
+   ```
+
+3. In a third shell, not elevated, run the printed command as the role account
+   and enter its password. The matrix takes a few minutes; each round then
+   takes a few seconds. Windows Security may report that the firewall was
+   turned off.
+
+   ```text
+   runas /user:AgentcProbeRole "PRINTED_COMMAND"
+   ```
+
+4. The policy step prints its restore record and exits 0 only when the firewall
+   is as it was. The owner step then prints the verdict. In `NEW_REPORT`, under
+   the launch `policy-profiles-off`, `policy.condition_applied` and
+   `policy.state_observed` must pass, every `net.` row must be a refusal, and
+   every `net.host_received.` row must pass. `policy.host_firewall_restored`
+   must pass.
+
+5. Check the firewall yourself. If the policy step was interrupted, restore
+   the saved state from the elevated shell.
+
+   ```text
+   Get-NetFirewallProfile | Select-Object Name, Enabled
+   python -I deploy/agentc/windows-probe-policy.py --staging C:\Users\Public\agentc-probe-staging --restore
+   ```
+
+6. Delete the staging directory. When no further run needs the role account,
+   remove it as step 5 of the role-account runbook describes.
+
+To also try the firewall service, use
+`--policy-conditions baseline,profiles-off,service-stop`. If Windows stops the
+service, a round runs and the step starts the service again.
+
+What each step changes on the host:
+
+| Step | Change | Undone by |
+| --- | --- | --- |
+| 1 | The staging directory and the owner's canaries, as in the role-account run | Step 6; the owner step, when it ends |
+| 2 | `policy\original.json` in the staging directory: the firewall state as found | Step 6 |
+| 3 | Every firewall profile is disabled while the `profiles-off` round runs | The policy step, when the round ends or after 180 seconds |
+| 3 | With `service-stop`: the firewall service is stopped, if Windows allows it | The policy step, when the round ends or after 180 seconds |
+
+No step installs a service or a firewall rule, writes a filter policy, changes
+WSL or reads a real credential. A passing run shows that a launch with no
+network capability stays refused while the firewall profiles are disabled. It
+does not test the production egress broker or its filters, which do not exist,
+or a firewall service that Windows would not stop. A failing run means the
+refusal depends on the firewall policy, and the design then needs its own
+filters before any launch is admitted.
 
 ### MiniAir findings, 2026-11-09
 
@@ -597,13 +711,41 @@ exited 0. The report is coordinator artifact
   is informational. It is why a role account must hold no credential and no
   setting worth reading.
 
-Two things in the procedure are looser than it says. The staging directory
-inherits modify access for interactive users, as the table above records. And
-a launch that fails to start shows a system error dialog on the interactive
-desktop, although the job suppresses error dialogs for a launch that runs.
+Two things in the procedure were looser than it said. In these runs the
+staging directory inherited modify access for interactive users, so the role
+account could write to the staged tree; the owner step now cuts that
+inheritance. And a launch that fails to start shows a system error dialog on
+the interactive desktop, although the job suppresses error dialogs for a
+launch that runs.
 
 The owner chose to keep `AgentcProbeRole` for the network policy test instead
 of removing it as step 5 describes. The staging directory was deleted.
+
+### Network policy dry run, 2026-11-09
+
+Registered producers `2ae92d05-7251-42e4-a15f-a945ab7898e4` (the owner step,
+with `--same-account-dry-run` and `--policy-conditions baseline,profiles-off`)
+and `f3889e40-7c2e-4407-aafc-bb90d5c6c60a` (the policy step, with
+`--observe-only`) ran source `677c2a592ece185063d66a512f84c873b3355278` on
+MiniAir, not elevated. The report is coordinator artifact
+`8007ea77-2af8-40c5-bcaf-365833d14101`, SHA-256
+`faa71a3640c84d307b157c3d22ee47d00e9687248e30e8157d3745f8af782add`.
+
+This is plumbing evidence only. No firewall state was changed, and one account
+played every part.
+
+- The `baseline` round ran: the role run read every profile as on, the six
+  host-token controls passed, the launch's four TCP attempts were refused with
+  error 10013, its lookup failed with error 11003, and no listener received
+  anything. The round took about five seconds.
+- The `profiles-off` round failed, as it must: the policy step recorded
+  `not-applied`, and the role run still read every profile as on.
+- `policy.host_firewall_restored` passed, with nothing changed.
+- The gate was blocked by those rows and by the rows a same-account run always
+  fails.
+
+Nothing here shows what a launch can reach when the firewall policy is lost;
+only the [runbook](#owner-runbook-for-the-network-policy-test) can.
 
 ### Disposition
 
@@ -613,8 +755,9 @@ running as a separate role account cannot: the role-account run passed the
 gate for the proposed boundary, with one temporary standard account.
 
 That does not start phase 3. Phase 2 also needs behavior when network policy
-is lost, which needs its own privileged test and has not been written. Until
-phase 2 is complete, no runtime, service, broker or installer work starts.
+is lost. The test for it is written and has run only as a dry run that changed
+nothing; the owner's run is the next step. Until phase 2 is complete, no
+runtime, service, broker or installer work starts.
 
 Still unverified, and never to be read as passed:
 

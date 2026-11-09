@@ -20,8 +20,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   role-account mode the owner plants canaries and a separate account launches
   the matrix; that cross-account run **passed** the gate for the proposed
   boundary on 2026-11-09 with one temporary standard account. Behavior when
-  network policy is lost is untested, and launches of one account share a
-  window station. No Windows supervised harness or service exists or is
+  network policy is lost is untested: the prototype has a test that repeats
+  the network attempts while an elevated owner step disables the firewall
+  profiles, and it has run only as a dry run that changed nothing. Launches of
+  one account share a window station. No Windows supervised harness or service
+  exists or is
   admitted, and the prototype cannot issue a host acceptance receipt.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded

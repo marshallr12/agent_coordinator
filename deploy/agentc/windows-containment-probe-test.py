@@ -434,7 +434,7 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(policy.confirm("profiles-off", "applied", "done", STATE_OFF)[0], "applied")
         self.assertEqual(policy.confirm("profiles-off", "applied", "done", STATE_ON)[0], "failed")
         self.assertEqual(policy.confirm("service-stop", "refused", "denied", STATE_ON)[0], "refused")
-        self.assertEqual(policy.apply_condition(Path("C:/Windows"), "profiles-off", observe_only=True)[0],
+        self.assertEqual(policy.apply_condition(Path("C:/Windows"), "profiles-off", untouched=True)[0],
                          "not-applied")
         self.assertEqual(policy.apply_condition(Path("C:/Windows"), "baseline")[0], "applied")
 
