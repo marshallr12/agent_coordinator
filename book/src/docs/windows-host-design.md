@@ -35,7 +35,11 @@ the owner or as an account that holds provider, coordinator or publication
 credentials.
 
 A window station is part of the boundary. A launch that shares the interactive
-window station shares its clipboard, atoms and window messages.
+window station shares its clipboard, atoms and window messages. Windows gives
+an account one unnamed window station per logon session, and only an
+administrator may create a named one. Launches that run as one account in one
+logon session therefore share a station: their desktops are separate, their
+clipboard and atom table are not.
 
 Trust the Windows kernel and administrator-installed service binaries and
 policy. Administrator/kernel compromise, physical attacks and side channels are
@@ -97,8 +101,14 @@ why the first is still a requirement and not a result.
    count and memory, applies every user-interface restriction and suppresses
    error dialogs. A job controls lifetime and resources; it is not the access
    boundary.
-4. **Private window station and desktop (demonstrated).** Each launch gets its
-   own, with an access list naming only the service owner and that package.
+4. **Private desktop in a window station the launcher makes (demonstrated).**
+   Each launch gets its own desktop, with an access list naming only the
+   service owner and that package. The launcher makes the logon session's
+   window station and lists only the service owner and the packages of its live
+   launches. A launcher that finds the station already made by another program
+   does not control who may open it and must refuse. **A station per launch is
+   not established**: it needs a logon session per launch or a named station
+   made by an administrator, and neither has been tried.
 5. **Explicit inheritance (demonstrated).** The environment block is an exact
    allowlist. On the evaluated build `CreateProcessW` fails with error 203 when
    that block lacks `LOCALAPPDATA`, so the allowlist includes it; the value is a
@@ -235,7 +245,7 @@ only proposed.
 | `check_profiles`, exact versions, trusted binaries | None. The report pins tool hashes; nothing refuses a wrong version |
 | `check_git`, hardened clone | None |
 | `check_writes`, `check_seeds` | Partial. The host directory, the tool directory and every other launch's directory are denied (`host.file_*`, `host.dir_*`, `host.tool_write`, `peer.*.file_*`). Role state and seeds are untested |
-| `check_codex_sandbox`, `check_claude_sandbox` | Partial. Own writes work; host and cross-launch files, processes, pipes, events and the interactive window station are denied. **The owner's registry is not denied**: `host.registry_environment_open` fails |
+| `check_codex_sandbox`, `check_claude_sandbox` | Partial. Own writes work; host and cross-launch files, processes, pipes, events and the interactive window station are denied. **The owner's registry is denied only to a launch running as a separate account**: `host.registry_environment_open` fails when the launch runs as the owner and passed in the role-account run |
 | `check_egress` | Partial. Direct TCP over IPv4 and IPv6, loopback, the local network, UDP and DNS are denied to a token with no network capability, and the authorized pipe route works. No WFP policy, allowlist broker or policy-loss test exists |
 | `check_claude_launch`, `check_relay_probe`, shell execution | None |
 | `check_claude_token`, `check_candidate_token`, reviewer isolation | Partial. A synthetic credential file is denied, and implementer and reviewer packages cannot reach each other. No real harness, environment or credentialed process was involved |
@@ -284,8 +294,8 @@ before it has passed; a blocked gate stops the phases behind it.
 | Phase | Content | Gate to start | State |
 | --- | --- | --- | --- |
 | 1 | This design and the containment prototype | None | Delivered by task `a9126e52`; the prototype gate is **blocked** |
-| 2 preparation | A role-account mode for the prototype and the owner runbook | Owner decision `df37b339` | Delivered by task `3787e738`; exercised only as a same-account dry run |
-| 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | Not started; needs the owner to follow the [runbook](#owner-runbook-for-the-role-account-run) |
+| 2 preparation | A role-account mode for the prototype and the owner runbook | Owner decision `df37b339` | Delivered by task `3787e738` |
+| 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station; network policy loss is not started |
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Blocked |
 | 4 | SCM services, lifecycle and recovery acceptance | Phase 3 | Blocked |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Blocked |
@@ -393,9 +403,10 @@ role account, so that row fails and the gate stays blocked.
 ### Owner runbook for the role-account run
 
 This is the cross-account run that phase 2 needs. Only the owner can do it,
-because step 1 needs elevation. It has been exercised only as a same-account
-dry run; treat a row that fails for any reason other than the boundary as a
-defect in this procedure, and stop.
+because step 1 needs elevation. The owner followed it on MiniAir on 2026-11-09;
+see [Cross-account runs](#cross-account-runs-2026-11-09). Treat a row that
+fails for any reason other than the boundary as a defect in this procedure, and
+stop.
 
 1. In an elevated shell, create a temporary local standard account. The command
    asks for a password.
@@ -413,7 +424,8 @@ defect in this procedure, and stop.
    ```
 
 3. In a second shell, not elevated, run the printed command as the role account
-   and enter its password. It takes a few minutes.
+   and enter its password. It takes a few minutes. Windows may ask whether to
+   allow the staged Python to run; allow it.
 
    ```text
    runas /user:AgentcProbeRole "PRINTED_COMMAND"
@@ -437,10 +449,10 @@ What each step changes on the host:
 | Step | Change | Removed by |
 | --- | --- | --- |
 | 1 | One local standard account | Step 5 |
-| 2 | The staging directory, about half a gigabyte, with access entries for the role account | Step 5 |
+| 2 | The staging directory, about half a gigabyte, with access entries for the role account. Under `C:\Users\Public` it also inherits modify access for every interactive user, so the role account can write to the staged tree; the contained launches cannot | Step 5 |
 | 2 | The owner's canaries: a temporary directory, one key under your `Software` registry key, a pipe and two events | The owner step, when it ends |
 | 3 | The role account's profile directory and registry hive, created on its first run | Step 5 |
-| 3 | A run directory under that profile, AppContainer profiles and private window stations | The role run deletes the profiles and stations; step 5 removes the directory with the profile |
+| 3 | A run directory under that profile, AppContainer profiles, and one window station with a desktop per launch | The role run deletes the profiles and closes the station; step 5 removes the directory with the profile |
 
 No step installs a service or a firewall rule, changes WSL or reads a real
 credential. A passing run closes the registry finding. It does not finish phase
@@ -529,22 +541,88 @@ must when one account plays both parts, and the registry `Environment` rows
 failed as they did in the single-account run. Nothing here shows that a role
 account is denied the owner's registry; only the runbook above can.
 
+### Cross-account runs, 2026-11-09
+
+The owner answered decision `df37b339`, created the temporary standard account
+`AgentcProbeRole` and followed the runbook twice on MiniAir. The owner step ran
+not elevated as a registered producer; the owner started the role run with
+`runas`.
+
+**First run: a defect in the prototype.** Registered producer
+`da297742-44bf-4bae-a6f9-e87f19ed3073` ran source
+`d5d6b1eaeb0a5cb8c47eff0b7c22788586b0a9b7` and exited 1. The report is
+coordinator artifact `9b76fb34-b485-4b93-a806-ed0ea55e2d64`, SHA-256
+`4dec806133ff7ad51d07511814e2bd9fb5a9fec288529c6d8eca083bd8892cfb`. Of 640
+mandatory rows, 243 passed. `identity.role_account_distinct` passed. In each
+variant the first launch ran and was denied the owner's `Environment` key with
+error 5. The other two launches ended at startup with status `0xC0000142`, so
+every row of theirs was missing, and Windows showed an error dialog for each on
+the owner's desktop.
+
+The cause was the window station. The prototype asked for an unnamed station
+per launch and gave it an access list naming one package. Windows names an
+unnamed station after the caller's logon session, so the second and third
+requests reached the first launch's station, which did not admit their
+packages. This had stayed hidden in every run under the owner's account. There
+the same request opens a station that another program in the owner's logon
+session already holds, and its access list admits all application packages and
+all restricted application packages. That program was not identified; browser
+sandboxes make such stations. The earlier `desktop.station` rows compared names
+only, so they passed. Those runs did not show a station private to a launch.
+
+**Second run: the gate passes.** Source
+`a450451d8c339704d19a7fe254c8a80d8e59a1b5` makes one station per run, admits
+each launch's package to it and gives each launch its own desktop. The new row
+`desktop.station_made_by_run` fails when the run did not make the station.
+Registered producer `c055e4bb-d9fa-432b-8784-cf697ee8db71` ran that source and
+exited 0. The report is coordinator artifact
+`edc18a08-82ca-46e5-9b51-bccc4652035e`, SHA-256
+`a45d77159c770d62ff2ef9ffd396ef34479c5e5dd6567349104c37079ae1ec0f`. It holds
+692 rows, of which 645 are mandatory.
+
+| Group | Mandatory rows | Passed | Failed |
+| --- | --- | --- | --- |
+| Host and owner controls, reader self-test, identity, station, canary integrity | 27 | 27 | 0 |
+| Ordinary AppContainer | 309 | 306 | 3 |
+| Less-privileged AppContainer, the proposed boundary | 309 | 309 | 0 |
+
+- `identity.role_account_distinct` and `desktop.station_made_by_run` passed.
+- All six launches were denied the owner's `Environment` key with error 5.
+- All 54 attacks on the owner's files, process, pipe and events were denied,
+  and the owner's canaries were exactly as planted afterwards.
+- The three failures are the ordinary AppContainer's Task Scheduler rows, as
+  in the single-account run: one launch ended with a heap-corruption status
+  and two saw `REGDB_E_CLASSNOTREG`. That variant is not the candidate.
+- A launch can still open the role account's own `Environment` key. That row
+  is informational. It is why a role account must hold no credential and no
+  setting worth reading.
+
+Two things in the procedure are looser than it says. The staging directory
+inherits modify access for interactive users, as the table above records. And
+a launch that fails to start shows a system error dialog on the interactive
+desktop, although the job suppresses error dialogs for a launch that runs.
+
+The owner chose to keep `AgentcProbeRole` for the network policy test instead
+of removing it as step 5 describes. The staging directory was deleted.
+
 ### Disposition
 
-**NO-GO for Windows supervised execution.** The prototype gate is blocked by
-one guarantee: a launch running as the owner can read the owner's registry.
-Everything else the prototype can test passed for the proposed boundary.
+**NO-GO for Windows supervised execution.** A launch running as the owner can
+read the owner's registry, so the single-account gate stays blocked. A launch
+running as a separate role account cannot: the role-account run passed the
+gate for the proposed boundary, with one temporary standard account.
 
-The blocked gate stops phase 3 and everything behind it. Phase 2 is the next
-step and needs the owner: an elevated session on the target to create role
-accounts, run this matrix with launches under them, and test network policy
-loss. The [owner runbook](#owner-runbook-for-the-role-account-run) is the first
-part of that. Until it passes, no runtime, service, broker or installer work
-starts.
+That does not start phase 3. Phase 2 also needs behavior when network policy
+is lost, which needs its own privileged test and has not been written. Until
+phase 2 is complete, no runtime, service, broker or installer work starts.
 
 Still unverified, and never to be read as passed:
 
-- role service identities, since every launch here ran as the invoking account;
+- role service identities: the role account was a temporary standard account
+  started with `runas` in the owner's interactive session, not a service
+  account;
+- clipboard and atom separation between launches of one account, which share
+  a window station;
 - privileged network policy and behavior when the firewall service or its
   policy is lost;
 - native provider harness command paths and reviewer candidate interception;

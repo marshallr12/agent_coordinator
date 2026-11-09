@@ -15,13 +15,14 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   and tests a Rust/MSVC fixture inside an AppContainer and a less-privileged
   AppContainer, then runs it as three concurrent launches that attack the host
   and each other, and fails closed on any missing or unexpected result. On the
-  one evaluated host its gate is **blocked**: a launch running as the owner can
-  open the owner's registry `Environment` key, which only separate role
-  accounts can close. The prototype has a role-account mode for that run, in
-  which the owner plants canaries and a separate account launches the matrix;
-  it has been exercised only with one account playing both parts, and the
-  cross-account run needs the owner. No Windows supervised harness or service
-  exists or is admitted, and the prototype cannot issue a host acceptance receipt.
+  one evaluated host a launch running as the owner can open the owner's
+  registry `Environment` key, so the single-account gate is **blocked**. In
+  role-account mode the owner plants canaries and a separate account launches
+  the matrix; that cross-account run **passed** the gate for the proposed
+  boundary on 2026-11-09 with one temporary standard account. Behavior when
+  network policy is lost is untested, and launches of one account share a
+  window station. No Windows supervised harness or service exists or is
+  admitted, and the prototype cannot issue a host acceptance receipt.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
