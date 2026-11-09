@@ -75,6 +75,7 @@ UNVERIFIED = (
     "Service Control Manager lifecycle, crash recovery and reboot behaviour",
     "handle-relative creation and deletion by host brokers inside worker-writable trees",
     "COM, RPC and broker surfaces beyond the Task Scheduler",
+    "clipboard and atom separation between launches: one account's logon session has one window station",
 )
 
 
@@ -371,7 +372,13 @@ class Host:
         self.local_appdata = Path(os.environ["LOCALAPPDATA"])
         self.private, self.logs = self.folder("host"), self.folder("logs")
         self.listeners, self.handles, self.notes, self.contained = {}, [], [], []
-        self.external = None
+        self.external, self.station = None, None
+
+    def shared_station(self):
+        """The one window station this run's launches use, made on first use."""
+        if self.station is None:
+            self.station = native.Station(self.api, self.identity_sid)
+        return self.station
 
     def folder(self, *parts):
         """Create and return a directory under the run root."""
@@ -771,7 +778,7 @@ class Contained:
         self.sid = self.profile.sid_text
         self.control, self.work = host.folder(variant, name, "control"), host.folder(variant, name, "work")
         self.grant_directories()
-        self.desktop = native.Desktop(host.api, host.identity_sid, self.sid)
+        self.desktop = native.Desktop(host.api, host.shared_station(), host.identity_sid, self.sid)
         self.broker = native.Broker(host.api, f"agentc-probe-{host.identifier}-{variant}-{name}-broker",
                                     host.identity_sid, self.sid)
         self.broker.start()
@@ -1184,6 +1191,8 @@ def cleanup(host):
     """
     for contained in host.contained:
         contained.dispose()
+    if host.station:
+        host.station.close()
     for listener in host.listeners.values():
         listener.close()
     for handle in host.handles + [getattr(host, "held", None)]:
@@ -1194,6 +1203,19 @@ def cleanup(host):
         return []
     return [host_row("cleanup.registry_canary_removed", "cleanup", remove_registry_canary(host),
                      "disposable key", False)]
+
+
+def station_row(station):
+    """The run must have made its window station, or it does not control who may open it.
+
+    Another program in the same logon session, such as a browser sandbox, may
+    already hold the session's unnamed station. The launches then run in that
+    program's station under its access list, which is not this boundary.
+    """
+    created = station is not None and station.created
+    detail = "made by this run; only its account and its launches may open it" if created else \
+        "not made by this run: no station, or one another program in this logon session already held"
+    return host_row("desktop.station_made_by_run", "ipc", created, detail)
 
 
 def run(host):
@@ -1208,6 +1230,7 @@ def run(host):
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         shared.append(host_row("setup", "control", False, f"{type(error).__name__}: {error}"))
     finally:
+        shared.append(station_row(host.station))
         shared += cleanup(host)
     return tag(shared, "-", "-"), variants
 

@@ -41,6 +41,9 @@ JOB_LIMIT_FLAGS = 0x8 | 0x100 | 0x200 | 0x400 | 0x2000
 JOB_UI_RESTRICTIONS_ALL = 0xFF
 PIPE_DUPLEX, PIPE_FIRST_INSTANCE, PIPE_REJECT_REMOTE = 0x3, 0x00080000, 0x8
 ERROR_PIPE_CONNECTED = 535
+# CreateWindowStationW fails instead of opening a station that already exists.
+CWF_CREATE_ONLY = 0x1
+DACL_SECURITY_INFORMATION = 0x4
 SE_GROUP_ENABLED = 0x4
 
 
@@ -170,6 +173,7 @@ SIGNATURES = {
         "GetProcessWindowStation": (w.HANDLE, []),
         "SetProcessWindowStation": (w.BOOL, [w.HANDLE]),
         "CloseWindowStation": (w.BOOL, [w.HANDLE]),
+        "SetUserObjectSecurity": (w.BOOL, [w.HANDLE, c.POINTER(w.DWORD), c.c_void_p]),
         "CreateDesktopW": (w.HANDLE, [w.LPCWSTR, w.LPCWSTR, c.c_void_p, w.DWORD, w.DWORD, _ATTRIBUTES]),
         "CloseDesktop": (w.BOOL, [w.HANDLE]),
         "GetUserObjectInformationW": (w.BOOL, [w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c.POINTER(w.DWORD)]),
@@ -325,42 +329,92 @@ class Profile:
         return self.api.DeleteAppContainerProfile(self.name) & 0xffffffff
 
 
-class Desktop:
-    """A private window station and desktop only the owner and one package may open.
+def station_sddl(owner_sid, package_sids):
+    """Access list for a run's window station: the owner and each admitted package, labelled low."""
+    packages = "".join(f"(A;;GA;;;{sid})" for sid in package_sids)
+    return f"D:(A;;GA;;;{owner_sid}){packages}S:(ML;;NW;;;LW)"
 
-    It gives the launch its own clipboard, atom table and message queue,
-    separate from the interactive session and from every other launch.
+
+def object_name(api, handle):
+    """The object name Windows reports for a station or desktop handle."""
+    buffer, needed = c.create_unicode_buffer(256), w.DWORD()
+    require(api.GetUserObjectInformationW(handle, 2, buffer, c.sizeof(buffer), c.byref(needed)),
+            "GetUserObjectInformationW")
+    return buffer.value
+
+
+class Station:
+    """The logon session's unnamed window station, which every launch of a run shares.
+
+    Only an administrator may name a window station. Windows names an unnamed
+    one after the caller's logon session, so a second request returns the first
+    station instead of a new one: an account gets one per logon session, not one
+    per launch. Launches therefore share its clipboard and atom table.
+
+    `created` is True when this run made the station, and so controls who may
+    open it. It is False when another program in the logon session, such as a
+    browser sandbox, already holds one; that station keeps its own access list.
     """
 
-    def __init__(self, api, owner_sid, package_sid):
-        self.api = api
-        descriptor = launch_descriptor(api, owner_sid, package_sid)
-        self.station = require(api.CreateWindowStationW(None, 0, GENERIC_ALL, descriptor.reference()),
-                               "CreateWindowStationW")
-        self.desktop = self._create_desktop(descriptor)
-        self.name = self._name(self.station) + "\\" + self._name(self.desktop)
+    def __init__(self, api, owner_sid):
+        self.api, self.owner_sid, self.packages = api, owner_sid, []
+        descriptor = Descriptor(api, station_sddl(owner_sid, ()))
+        self.handle = api.CreateWindowStationW(None, CWF_CREATE_ONLY, GENERIC_ALL, descriptor.reference())
+        self.created = bool(self.handle)
+        if not self.created:
+            self.handle = require(api.CreateWindowStationW(None, 0, GENERIC_ALL, None), "CreateWindowStationW")
+        self.name = object_name(api, self.handle)
+
+    def _apply(self):
+        """Rewrite the access list of a station this run created; an existing one is left alone."""
+        if self.created:
+            descriptor = Descriptor(self.api, station_sddl(self.owner_sid, self.packages))
+            require(self.api.SetUserObjectSecurity(self.handle, c.byref(w.DWORD(DACL_SECURITY_INFORMATION)),
+                                                   descriptor.attributes.descriptor), "SetUserObjectSecurity")
+
+    def admit(self, package_sid):
+        """Let one launch's package open the station."""
+        self.packages.append(package_sid)
+        self._apply()
+
+    def dismiss(self, package_sid):
+        """Withdraw a finished launch's package."""
+        self.packages.remove(package_sid)
+        self._apply()
+
+    def close(self):
+        """Close the station; Windows destroys it with its last handle."""
+        self.api.CloseWindowStation(self.handle)
+
+
+class Desktop:
+    """A private desktop, inside the run's station, that only the owner and one package may open.
+
+    It gives the launch its own windows and message queue, separate from the
+    interactive session and from every other launch. The clipboard and atom
+    table belong to the station, which the launches of one logon session share.
+    """
+
+    def __init__(self, api, station, owner_sid, package_sid):
+        self.api, self.station, self.package_sid = api, station, package_sid
+        station.admit(package_sid)
+        self.desktop = self._create_desktop(launch_descriptor(api, owner_sid, package_sid))
+        self.name = station.name + "\\" + object_name(api, self.desktop)
 
     def _create_desktop(self, descriptor):
-        """Create the desktop inside the new station, then restore the probe's own station."""
+        """Create the desktop inside the run's station, then restore the probe's own station."""
         original = self.api.GetProcessWindowStation()
-        require(self.api.SetProcessWindowStation(self.station), "SetProcessWindowStation")
+        require(self.api.SetProcessWindowStation(self.station.handle), "SetProcessWindowStation")
         try:
             return require(self.api.CreateDesktopW("agentc-" + uuid.uuid4().hex, None, None, 0, GENERIC_ALL,
                                                    descriptor.reference()), "CreateDesktopW")
         finally:
             self.api.SetProcessWindowStation(original)
 
-    def _name(self, handle):
-        """The object name Windows reports for a station or desktop handle."""
-        buffer, needed = c.create_unicode_buffer(256), w.DWORD()
-        require(self.api.GetUserObjectInformationW(handle, 2, buffer, c.sizeof(buffer), c.byref(needed)),
-                "GetUserObjectInformationW")
-        return buffer.value
-
     def close(self):
-        """Close the desktop and its station."""
+        """Close the desktop and withdraw the launch's package from the station."""
         self.api.CloseDesktop(self.desktop)
-        self.api.CloseWindowStation(self.station)
+        self.station.dismiss(self.package_sid)
 
 
 class Limits(NamedTuple):

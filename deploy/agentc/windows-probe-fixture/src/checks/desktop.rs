@@ -1,9 +1,11 @@
 //! Window station and desktop isolation.
 //!
-//! A launch gets a private window station and desktop, which separates its
-//! clipboard, atoms and window messages from the interactive session and from
-//! other launches. `user32` is loaded on demand so that a boundary which
-//! cannot load it is reported instead of preventing the fixture from starting.
+//! A launch gets a private desktop inside its run's window station. The
+//! desktop separates its windows and messages from the interactive session and
+//! from other launches. The station, which holds the clipboard and atoms, is
+//! one per logon session, so the launches of one account share it. `user32` is
+//! loaded on demand so that a boundary which cannot load it is reported
+//! instead of preventing the fixture from starting.
 
 use crate::ffi;
 use crate::report::{Report, code};

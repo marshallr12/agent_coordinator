@@ -318,6 +318,42 @@ class LaunchTests(unittest.TestCase):
             native.Api()
 
 
+class StationTests(unittest.TestCase):
+    """One logon session has one unnamed window station, so a run shares it between launches."""
+
+    def test_the_station_admits_the_owner_and_exactly_the_listed_packages(self):
+        sddl = native.station_sddl("S-1-5-21-1", ["S-1-15-2-7", "S-1-15-2-8"])
+        self.assertEqual(sddl, "D:(A;;GA;;;S-1-5-21-1)(A;;GA;;;S-1-15-2-7)(A;;GA;;;S-1-15-2-8)S:(ML;;NW;;;LW)")
+        self.assertEqual(native.station_sddl("S-1-5-21-1", []), "D:(A;;GA;;;S-1-5-21-1)S:(ML;;NW;;;LW)")
+
+    def test_a_station_the_run_did_not_make_blocks_the_gate(self):
+        made = types.SimpleNamespace(created=True)
+        self.assertEqual(probe.station_row(made)["status"], "pass")
+        for station in (None, types.SimpleNamespace(created=False)):
+            row = probe.tag([probe.station_row(station)], "-", "-")[0]
+            self.assertEqual(row["status"], "fail")
+            result = probe.summary({"appcontainer": all_passing_rows(), "lpac": all_passing_rows()}, [row])
+            self.assertEqual(result["prototype_gate"], "blocked")
+            self.assertIn("-:desktop.station_made_by_run", result["variants"]["lpac"]["blocking"])
+
+    @unittest.skipUnless(ON_WINDOWS, "needs native Windows window stations")
+    def test_two_requests_in_one_logon_session_reach_the_same_station(self):
+        api = native.Api()
+        owner_sid = native.current_user_sid(api)
+        first, second = native.Station(api, owner_sid), native.Station(api, owner_sid)
+        try:
+            self.assertEqual(first.name, second.name)
+            # The second request can never be the one that made the station.
+            self.assertIs(second.created, False)
+            for package in ("S-1-15-2-7", "S-1-15-2-8"):
+                first.admit(package)
+            first.dismiss("S-1-15-2-7")
+            self.assertEqual(first.packages, ["S-1-15-2-8"])
+        finally:
+            second.close()
+            first.close()
+
+
 @unittest.skipUnless(ON_WINDOWS, "needs native Windows and NTFS links")
 class ReaderTests(unittest.TestCase):
     """The handle-based reader against real links, as a host broker would meet them."""
