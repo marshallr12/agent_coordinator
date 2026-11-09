@@ -20,7 +20,7 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
     },
     service::RequestContext,
     transport::streamable_http_server::{
@@ -142,8 +142,8 @@ impl ServerHandler for CoordinatorMcp {
         catalog::tools().into_iter().find(|tool| tool.name == name)
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
                 Implementation::new("agent-coordinator", env!("CARGO_PKG_VERSION"))
                     .with_title("Agent Coordinator")

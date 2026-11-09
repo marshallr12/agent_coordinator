@@ -55,6 +55,14 @@ The smoke exercise uses disposable local accounts and data, and tests two actual
 CLI processes against the server. Install `cargo-audit` separately to run the last
 command. Linux and native Windows client checks are defined in GitHub Actions.
 
+The audit reads `.cargo/audit.toml`, which ignores exactly one advisory:
+RUSTSEC-2026-0459 in the SQLite that `libsqlite3-sys` bundles. No upgrade can fix
+it until sqlx allows `libsqlite3-sys` 0.39.0 or later, and it needs a crafted
+database and write-ahead-log pair, which this service never opens. That file
+records the owner's decision, a review date of 2026-12-09 and the condition for
+removing the entry. While the entry stands, do not verify or restore a backup
+snapshot from an untrusted source.
+
 ## Design documents
 
 - [MCP connection guide](docs/mcp-guide.md): authenticated Streamable HTTP tools,

@@ -1,0 +1,29 @@
+# cargo-audit configuration, read by `cargo audit --file Cargo.lock`.
+#
+# An advisory is ignored only when no upgrade can fix it and its preconditions
+# do not hold for this service. Each entry records the reason, the decision
+# behind it, a review date and the condition for removing it. Remove an entry
+# as soon as its condition is met; never add one to make a fixable advisory
+# pass.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0459: libsqlite3-sys 0.37.0 bundles SQLite 3.53, which can
+    # return uninitialized page-cache memory when a process opens a database
+    # together with a write-ahead-log file whose page size differs
+    # (CVE-2026-119375, CVSS 6.8, local). It needs a crafted database and WAL
+    # pair written by a less trusted party.
+    #
+    # Why it does not apply: the server opens only its own database in its
+    # protected data directory and backup snapshots an operator names. No API
+    # path opens a database a caller supplies. A snapshot from an untrusted
+    # source is still affected, so do not verify or restore one.
+    #
+    # Why no upgrade: the fix is libsqlite3-sys 0.39.0 or later, and
+    # sqlx-sqlite 0.9.0, the newest sqlx, requires a version below 0.38.0.
+    #
+    # Decision: owner, 2026-11-09, task 774c577c-bf0c-40f2-a519-a88ce06e2de7.
+    # Review by: 2026-12-09.
+    # Remove when: sqlx allows libsqlite3-sys 0.39.0 or later; upgrade then.
+    "RUSTSEC-2026-0459",
+]
