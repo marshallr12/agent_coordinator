@@ -104,6 +104,15 @@ enum Commands {
         #[arg(last = true, required = true)]
         command: Vec<std::ffi::OsString>,
     },
+    /// On Windows: serve contained launches to a driver, one JSON request
+    /// per line on standard input, journaling each launch in `--state-dir`.
+    /// Every launch ends when this process does.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    WindowsRunner {
+        #[arg(long)]
+        state_dir: PathBuf,
+    },
 }
 
 /// Identifies one launch.
@@ -175,6 +184,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         let code = relay::run_namespace(relays, command)?;
         return Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)));
     }
+    #[cfg(windows)]
+    if let Commands::WindowsRunner { state_dir } = &cli.command {
+        // Needs no configuration: every launch arrives as a typed request.
+        return windows_runner(state_dir);
+    }
     let config = config::Config::load(cli.config.as_deref())?;
     match cli.command {
         Commands::Settings { role } => print!("{}", role_settings::render(role, &config.state_dir)),
@@ -215,11 +229,23 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Run { once } => live_run(&config, cli.config.as_deref(), once)?,
         Commands::ReportCosts => report_costs(&config, cli.config.as_deref())?,
         Commands::NetnsRelay { .. } => unreachable!("dispatched before loading config"),
+        #[cfg(windows)]
+        Commands::WindowsRunner { .. } => unreachable!("dispatched before loading config"),
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
             println!("{}", serde_json::to_string_pretty(&shadow::report(&log)?)?);
         }
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Serves contained launches on standard input and output until the input
+/// ends.
+#[cfg(windows)]
+fn windows_runner(state_dir: &std::path::Path) -> Result<ExitCode> {
+    use agentc_supervisor::host_runtime::windows::runner;
+    let (input, output) = (std::io::stdin().lock(), std::io::stdout().lock());
+    runner::serve(input, output, state_dir)?;
     Ok(ExitCode::SUCCESS)
 }
 

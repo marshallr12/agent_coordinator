@@ -11,11 +11,14 @@
 //!
 //! The Linux backend is [`linux::LinuxHost`]: role accounts, `launch-root`,
 //! the candidate-push helper and the reaper, exactly as before the interface
-//! existed. A host without a backend gets [`Refusing`], which starts nothing.
+//! existed. The Windows backend is [`windows::WindowsHost`]. A host without a
+//! backend gets [`Refusing`], which starts nothing.
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
 pub mod rooted;
+#[cfg(windows)]
+pub mod windows;
 
 use crate::run_loop::Launch;
 use crate::run_loop::record::LaunchRecord;
