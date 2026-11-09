@@ -337,9 +337,21 @@ mod tests {
     /// Commits `content` at `path`; content starting with `-> ` commits a
     /// symbolic link to the rest instead.
     fn commit_entry(repo: &Path, path: &str, content: &str) -> String {
-        let Some(target) = content.strip_prefix("-> ") else {
-            return commit(repo, path, content);
-        };
+        match content.strip_prefix("-> ") {
+            Some(target) => commit_link(repo, path, target),
+            None => commit(repo, path, content),
+        }
+    }
+
+    /// A symbolic-link fixture needs Unix; no test asks for one elsewhere.
+    #[cfg(not(unix))]
+    fn commit_link(_repo: &Path, path: &str, _target: &str) -> String {
+        panic!("committing the symbolic link {path} needs Unix")
+    }
+
+    /// Commits a symbolic link to `target` at `path`.
+    #[cfg(unix)]
+    fn commit_link(repo: &Path, path: &str, target: &str) -> String {
         let link = repo.join(path);
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(target, &link).unwrap();
@@ -444,6 +456,7 @@ mod tests {
         fails_closed("    steps:\n      - uses: \"./ci/\\x78\"\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_action_targets_are_scoped() {
         let files = [

@@ -259,7 +259,7 @@ fn a_recovered_launch_records_its_cost_and_429_once_under_its_own_vendor() {
     ];
     let lines: Vec<String> = events.iter().map(Value::to_string).collect();
     fs::write(launch.run.join("events.jsonl"), lines.join("\n")).unwrap();
-    let mut record = LaunchRecord::new(&launch, &Fake::lease(), "boot-0".into(), 0);
+    let mut record = LaunchRecord::new(&launch, &Fake::lease(), &on_boot("boot-0"), 0);
     (record.pid, record.start_ticks) = (Some(4242), Some(77));
     record.save(&config).unwrap();
     let mut fake = Fake::new();
@@ -303,6 +303,9 @@ fn a_codex_fallback_is_skipped_before_claiming_for_a_project_with_setup() {
     assert!(fake.steps.is_empty(), "{:?}", fake.steps);
 }
 
+// Windows reports a path below a plain file as not found, the same as an
+// absent switch, so this unreadable case exists only on Unix.
+#[cfg(unix)]
 #[test]
 fn a_kill_switch_that_cannot_be_checked_counts_as_set() {
     let dir = tempfile::tempdir().unwrap();

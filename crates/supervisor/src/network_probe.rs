@@ -150,6 +150,8 @@ mod tests {
         assert!(problem.contains("not filtering"), "{problem}");
     }
 
+    // Windows retries a refused loopback connect past the probe's timeout.
+    #[cfg(unix)]
     #[test]
     fn stopped_proxy_is_reported_as_not_running() {
         let problem = proxy_problem(&closed_port(), "blocked.invalid", SHORT).unwrap();

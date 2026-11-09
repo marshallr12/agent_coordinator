@@ -12,6 +12,7 @@ pub mod config;
 pub mod confine;
 pub mod egress;
 pub mod estimate;
+pub mod host_runtime;
 pub mod launch;
 pub mod network_probe;
 pub mod preflight;

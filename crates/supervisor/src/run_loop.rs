@@ -3,8 +3,9 @@
 //! the role contract into the prompt, run `launch-root`, then remove the clone
 //! and run directory once the launch is terminal.
 //!
-//! The loop only sequences steps; everything that talks to the coordinator or
-//! runs commands sits behind [`Driver`], so tests drive it with a fake.
+//! The loop only sequences steps; everything that talks to the coordinator
+//! sits behind [`Driver`], and every operating-system operation on a launch
+//! behind the [`HostRuntime`] it hands out, so tests drive both with a fake.
 //! Extension points for the follow-up tasks: [`refusal`] (disk),
 //! [`health::admit`] (kill switch, caps, vendor health) and [`review_hook`]
 //! (reviewer launches and verdicts, in [`review`]); [`cost`] records what
@@ -29,11 +30,15 @@ pub mod renewal;
 pub mod report;
 pub mod review;
 pub mod review_cost;
-#[cfg(target_os = "linux")]
-mod rooted;
 pub mod unsubmitted;
 
+/// Root's no-symlink file operations below a role directory. They belong to
+/// the Linux host runtime and are named here for the live reviewer side.
+#[cfg(target_os = "linux")]
+use crate::host_runtime::rooted;
+
 use crate::config::Config;
+use crate::host_runtime::HostRuntime;
 use crate::profile::{Harness, Role};
 use anyhow::{Context, Result, ensure};
 use lease::Lease;
@@ -197,8 +202,9 @@ pub trait Driver {
     fn next(&mut self, role: Role, exclude: &[String]) -> Result<Value>;
     /// Free bytes on the filesystem holding the state directory.
     fn free_bytes(&self) -> Result<u64>;
-    /// Creates the clone and the prepared `$RUN`, owned by the role.
-    fn create(&mut self, launch: &Launch) -> Result<()>;
+    /// The host runtime: every operating-system operation on a launch
+    /// (prepare, start, observe, stop, terminate, recover, clean up).
+    fn host(&mut self) -> &mut dyn HostRuntime;
     /// The repository's instruction files (name, text) at the cloned
     /// revision, read from a source the role cannot change.
     fn instructions(&mut self, launch: &Launch) -> Vec<(String, String)>;
@@ -209,13 +215,6 @@ pub trait Driver {
     /// Prepares and registers [`Launch::checkout`] for the claimed attempt
     /// in the launch's session, so the agent can submit code from it.
     fn register(&mut self, launch: &Launch, lease: &Lease) -> Result<()>;
-    /// Spawns `launch-root` for the launch; returns its pid and `/proc`
-    /// start time.
-    fn start(&mut self, launch: &Launch) -> Result<(u32, Option<u64>)>;
-    /// The running launch's exit code once it has exited.
-    fn exited(&mut self) -> Option<i32>;
-    /// Asks the running launch to stop (SIGTERM), or kills it (SIGKILL).
-    fn signal(&mut self, kill: bool);
     /// When the launch's harness last wrote an event (ms since the epoch).
     fn last_event_ms(&self, launch: &Launch) -> Option<i64>;
     /// Rewrites the heartbeat while `launch` runs ([`beat_busy`]); a failure
@@ -229,15 +228,9 @@ pub trait Driver {
     /// Releases the attempt in the launch's session with a handoff
     /// `summary`; an attempt that is no longer active counts as released.
     fn release(&mut self, launch: &Launch, lease: &Lease, summary: &str) -> Result<()>;
-    /// This boot's id.
-    fn boot_id(&self) -> String;
-    /// Whether a recorded launch may still be running.
-    fn may_be_alive(&self, record: &LaunchRecord) -> bool;
     /// Whether the launch's `$RUN` holds the regular file `name` (a state
     /// marker), never following a symlink.
     fn has_marker(&self, launch: &Launch, name: &str) -> bool;
-    /// Removes the launch's clone and run directory.
-    fn discard(&mut self, launch: &Launch) -> Result<()>;
     /// Milliseconds since the epoch.
     fn now_ms(&self) -> i64;
     /// Sleeps for `duration`.
@@ -367,7 +360,7 @@ pub fn sweep_terminal(driver: &mut impl Driver, config: &Config) {
         let launch = Launch::at(config, driver.project(), unknown, session);
         if LaunchRecord::load(config, &session).is_none()
             && driver.has_marker(&launch, TERMINAL_MARKER)
-            && let Err(error) = driver.discard(&launch)
+            && let Err(error) = driver.host().cleanup(&launch)
         {
             eprintln!("agentc-supervisor run: sweep: {error:#}");
         }
@@ -547,10 +540,10 @@ pub fn excluded(next: &Value) -> Vec<String> {
 /// anything else and released with a handoff however the launch ends,
 /// unless the agent submitted it (the submission ended it already).
 fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i32> {
-    driver.create(launch).context("create clone and run")?;
+    let intent = (driver.host().prepare(launch)).context("create clone and run")?;
     ensure!(!driver.stopping(), "the loop is stopping; no new claims");
     let lease = driver.claim(launch).context("claim")?;
-    let mut record = LaunchRecord::new(launch, &lease, driver.boot_id(), driver.now_ms());
+    let mut record = LaunchRecord::new(launch, &lease, &intent, driver.now_ms());
     let result = (record.save(config).context("record the launch"))
         .and_then(|()| run_claimed(driver, config, launch, &mut record, lease));
     let cost = record::settle_cost(driver, config, launch, &mut record);
@@ -603,8 +596,8 @@ fn run_claimed(
     lease: Lease,
 ) -> Result<lease::Ended> {
     prepare_claimed(driver, launch, &lease)?;
-    let (pid, ticks) = driver.start(launch).context("launch")?;
-    (record.pid, record.start_ticks) = (Some(pid), ticks);
+    let identity = driver.host().start(launch).context("launch")?;
+    record.identify(&identity);
     if let Err(error) = record.save(config) {
         eprintln!("agentc-supervisor run: {error:#}");
     }
@@ -661,7 +654,7 @@ pub fn remove_finished(driver: &mut impl Driver, launch: &Launch) -> Result<bool
     if driver.has_marker(launch, STARTED_MARKER) && !driver.has_marker(launch, TERMINAL_MARKER) {
         return Ok(false);
     }
-    driver.discard(launch)?;
+    driver.host().cleanup(launch)?;
     Ok(true)
 }
 

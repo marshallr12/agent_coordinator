@@ -413,7 +413,9 @@ pub fn generated_file(path: &Path, contents: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::launch::prepare_run;
-    use crate::profile::{self, Harness};
+    #[cfg(unix)]
+    use crate::profile;
+    use crate::profile::Harness;
     use uuid::Uuid;
 
     fn config(root: &Path) -> Config {
@@ -441,6 +443,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn completed(config: &Config, role: Role, name: &str, finished: u128) -> LaunchSpec {
         let spec = spec(config, role, name);
         let state = RunState::prepare(&spec, config).unwrap();
@@ -463,6 +466,7 @@ mod tests {
         spec
     }
 
+    #[cfg(unix)]
     #[test]
     fn launches_have_private_homes_and_independent_seeded_cargo_caches() {
         let root = tempfile::tempdir().unwrap();
@@ -556,6 +560,7 @@ mod tests {
         assert!(!config.state_dir.join("impl/cargo").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn preparation_is_idempotent_until_started_and_excludes_concurrent_use() {
         let root = tempfile::tempdir().unwrap();
@@ -572,6 +577,7 @@ mod tests {
         assert!(!spec.run.join(TERMINAL).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn retention_keeps_five_terminal_runs_and_preserves_active_unknown_and_other_roles() {
         let root = tempfile::tempdir().unwrap();
@@ -607,6 +613,7 @@ mod tests {
         assert!(prepare_run(&terminal[0], &config).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn retention_excludes_locked_and_current_even_with_terminal_records() {
         let root = tempfile::tempdir().unwrap();
@@ -635,6 +642,7 @@ mod tests {
         assert!(!StatePaths::new(&locked.run).root.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn concurrent_preparations_prune_expired_state_without_touching_active_runs() {
         let root = tempfile::tempdir().unwrap();

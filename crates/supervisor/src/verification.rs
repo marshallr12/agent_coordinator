@@ -118,6 +118,7 @@ mod tests {
         assert!(environment(&other, &config).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn description_points_at_the_run_session_not_the_login() {
         let described = describe(&spec(Role::Reviewer), &config()).unwrap();

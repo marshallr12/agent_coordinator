@@ -1,4 +1,5 @@
 use super::*;
+use crate::host_runtime::{LaunchIdentity, Observation, Recovery, StartIntent};
 use std::fs;
 
 /// A coordinator and host stand-in with a fake clock: one queued `next`,
@@ -191,10 +192,8 @@ impl Driver for Fake {
         Ok(self.free)
     }
 
-    fn create(&mut self, launch: &Launch) -> Result<()> {
-        self.steps.push("create".into());
-        fs::create_dir_all(&launch.clone)?;
-        Ok(fs::create_dir_all(&launch.run)?)
+    fn host(&mut self) -> &mut dyn HostRuntime {
+        self
     }
 
     fn instructions(&mut self, _launch: &Launch) -> Vec<(String, String)> {
@@ -222,37 +221,6 @@ impl Driver for Fake {
         self.steps.push(format!("register:{}", lease.attempt));
         anyhow::ensure!(!self.fail_register, "checkout_registered");
         Ok(fs::create_dir_all(launch.checkout())?)
-    }
-
-    fn start(&mut self, launch: &Launch) -> Result<(u32, Option<u64>)> {
-        self.steps.push("start".into());
-        anyhow::ensure!(!self.fail_start, "spawn launch-root: no such file");
-        fs::write(launch.run.join(".state-started"), "s")?;
-        fs::write(launch.run.join("events.jsonl"), &self.events)?;
-        fs::write(launch.run.join("stderr.log"), &self.stderr)?;
-        self.running = Some(launch.clone());
-        self.pids.insert(4242, 77);
-        Ok((4242, Some(77)))
-    }
-
-    fn exited(&mut self) -> Option<i32> {
-        let launch = self.running.as_ref()?;
-        if self.exit_at.is_none_or(|at| self.now < at) {
-            return None;
-        }
-        fs::write(launch.run.join(".state-terminal.json"), "{}").ok()?;
-        (self.running, self.exit_at) = (None, None);
-        self.pids.remove(&4242);
-        Some(0)
-    }
-
-    fn signal(&mut self, kill: bool) {
-        self.steps
-            .push(format!("signal:{}", if kill { "kill" } else { "term" }));
-        let grace = if kill { Some(0) } else { self.term_exit_ms };
-        if let Some(grace) = grace {
-            self.exit_at = Some(self.now + grace);
-        }
     }
 
     fn last_event_ms(&self, _launch: &Launch) -> Option<i64> {
@@ -291,27 +259,8 @@ impl Driver for Fake {
         Ok(())
     }
 
-    fn boot_id(&self) -> String {
-        "boot-1".into()
-    }
-
-    fn may_be_alive(&self, launch: &LaunchRecord) -> bool {
-        let ticks = |pid| self.pids.get(&pid).copied();
-        record::may_be_alive(launch, "boot-1", ticks, self.now)
-    }
-
     fn has_marker(&self, launch: &Launch, name: &str) -> bool {
         launch.run.join(name).is_file()
-    }
-
-    fn discard(&mut self, launch: &Launch) -> Result<()> {
-        for path in [&launch.clone, &launch.run] {
-            match fs::remove_dir_all(path) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error)?,
-                _ => {}
-            }
-        }
-        Ok(())
     }
 
     fn now_ms(&self) -> i64 {
@@ -333,6 +282,87 @@ impl Driver for Fake {
 
     fn credential_expiry_ms(&self, _harness: Harness) -> Option<i64> {
         self.expiry
+    }
+}
+
+/// The fake's host side: directories on disk, one pid on boot `boot-1`.
+impl HostRuntime for Fake {
+    fn prepare(&mut self, launch: &Launch) -> Result<StartIntent> {
+        self.steps.push("create".into());
+        fs::create_dir_all(&launch.clone)?;
+        fs::create_dir_all(&launch.run)?;
+        Ok(StartIntent {
+            boot_id: "boot-1".into(),
+            ..StartIntent::default()
+        })
+    }
+
+    fn start(&mut self, launch: &Launch) -> Result<LaunchIdentity> {
+        self.steps.push("start".into());
+        anyhow::ensure!(!self.fail_start, "spawn launch-root: no such file");
+        fs::write(launch.run.join(".state-started"), "s")?;
+        fs::write(launch.run.join("events.jsonl"), &self.events)?;
+        fs::write(launch.run.join("stderr.log"), &self.stderr)?;
+        self.running = Some(launch.clone());
+        self.pids.insert(4242, 77);
+        Ok(LaunchIdentity {
+            pid: 4242,
+            started: Some(77),
+        })
+    }
+
+    fn observe(&mut self, _launch: &Launch) -> Observation {
+        let Some(launch) = self.running.as_ref() else {
+            return Observation::Running;
+        };
+        if self.exit_at.is_none_or(|at| self.now < at) {
+            return Observation::Running;
+        }
+        if fs::write(launch.run.join(".state-terminal.json"), "{}").is_err() {
+            return Observation::Running;
+        }
+        (self.running, self.exit_at) = (None, None);
+        self.pids.remove(&4242);
+        Observation::Exited { code: 0 }
+    }
+
+    fn request_stop(&mut self, _launch: &Launch) {
+        self.steps.push("signal:term".into());
+        if let Some(grace) = self.term_exit_ms {
+            self.exit_at = Some(self.now + grace);
+        }
+    }
+
+    fn terminate(&mut self, _launch: &Launch) {
+        self.steps.push("signal:kill".into());
+        self.exit_at = Some(self.now);
+    }
+
+    fn recover(&self, launch: &LaunchRecord, now_ms: i64) -> Recovery {
+        let ticks = |pid| self.pids.get(&pid).copied();
+        if record::may_be_alive(launch, "boot-1", ticks, now_ms) {
+            Recovery::MayBeRunning
+        } else {
+            Recovery::Ended
+        }
+    }
+
+    fn cleanup(&mut self, launch: &Launch) -> Result<()> {
+        for path in [&launch.clone, &launch.run] {
+            match fs::remove_dir_all(path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What a host runtime fixes for a launch on boot `boot`.
+fn on_boot(boot: &str) -> StartIntent {
+    StartIntent {
+        boot_id: boot.to_owned(),
+        ..StartIntent::default()
     }
 }
 
@@ -378,7 +408,7 @@ fn one_iteration_claims_prepares_launches_and_cleans_up() {
     assert!(LaunchRecord::load_all(&config(dir.path())).is_empty());
     assert!(fake.prompt.contains("Task: `t1` (revision 7)"));
     assert!(fake.prompt.contains("--attempt a1") && fake.prompt.contains("--generation 3"));
-    let checkout = dir.path().join("impl/clones");
+    let checkout = dir.path().join("impl").join("clones");
     assert!(fake.prompt.contains(&checkout.display().to_string()));
     assert!(fake.prompt.contains("<task-title>Fix it</task-title>"));
     let lower = fake.prompt.to_ascii_lowercase();
@@ -760,7 +790,7 @@ fn crashed(dir: &Path, boot: &str) -> LaunchRecord {
     fs::create_dir_all(&launch.clone).unwrap();
     fs::create_dir_all(&launch.run).unwrap();
     fs::write(launch.run.join(".state-started"), "s").unwrap();
-    let mut record = LaunchRecord::new(&launch, &Fake::lease(), boot.into(), 0);
+    let mut record = LaunchRecord::new(&launch, &Fake::lease(), &on_boot(boot), 0);
     (record.pid, record.start_ticks) = (Some(4242), Some(77));
     record.save(&config(dir)).unwrap();
     record
@@ -797,12 +827,18 @@ fn a_launch_from_an_earlier_boot_is_released() {
     assert_eq!(fake.steps, ["release", "next:impl"]);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn liveness_needs_this_boot_and_the_same_process_start() {
     let (pid, boot) = (std::process::id(), record::boot_id());
     let alive =
         |record: &LaunchRecord, now| record::may_be_alive(record, &boot, record::start_ticks, now);
-    let mut record = LaunchRecord::new(&planned(Path::new("/x")), &Fake::lease(), boot.clone(), 0);
+    let mut record = LaunchRecord::new(
+        &planned(Path::new("/x")),
+        &Fake::lease(),
+        &on_boot(&boot),
+        0,
+    );
     assert!(alive(&record, record::NO_PID_GRACE_MS));
     assert!(!alive(&record, record::NO_PID_GRACE_MS + 1));
     (record.pid, record.start_ticks) = (Some(pid), record::start_ticks(pid));
@@ -1009,7 +1045,7 @@ fn a_crashed_canary_launch_is_released_in_its_own_project() {
     fs::create_dir_all(&launch.clone).unwrap();
     fs::create_dir_all(&launch.run).unwrap();
     fs::write(launch.run.join(".state-started"), "s").unwrap();
-    let record = LaunchRecord::new(&launch, &Fake::lease(), "boot-0".into(), 0);
+    let record = LaunchRecord::new(&launch, &Fake::lease(), &on_boot("boot-0"), 0);
     assert_eq!(record.project.as_deref(), Some("canary"));
     record.save(&settings).unwrap();
     let mut fake = Fake::with_canary();

@@ -22,6 +22,7 @@
 //! supervisor.
 use super::renewal::AttemptEnded;
 use super::{Driver, Launch, RunConfig};
+use crate::host_runtime::Observation;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::time::Duration;
@@ -183,7 +184,7 @@ pub fn supervise(
 ) -> Ended {
     let mut watch = Watch::new(driver.now_ms(), &lease);
     loop {
-        if let Some(code) = driver.exited() {
+        if let Observation::Exited { code } = driver.host().observe(launch) {
             let (drained, submitted) = (watch.drain_reason, watch.submitted);
             return Ended {
                 code,
@@ -197,7 +198,7 @@ pub fn supervise(
             let every = i64::try_from(BEAT_EVERY.as_millis()).unwrap_or(i64::MAX);
             watch.beat_at = now.saturating_add(every);
         }
-        drain(driver, &mut watch, settings, now);
+        drain(driver, launch, &mut watch, settings, now);
         if watch.drain_reason.is_none() && watch.renew_at.is_some_and(|at| now >= at) {
             renew(driver, launch, &mut lease, &mut watch, settings, now);
         }
@@ -221,8 +222,14 @@ fn backoff(lease: &Lease, failures: u32) -> i64 {
 }
 
 /// Once the launch must drain (a failed gate or a stop request), asks it to
-/// end (SIGTERM) and kills it once `drain_seconds` have passed.
-fn drain(driver: &mut impl Driver, watch: &mut Watch, settings: &RunConfig, now: i64) {
+/// end (SIGTERM on Linux) and kills it once `drain_seconds` have passed.
+fn drain(
+    driver: &mut impl Driver,
+    launch: &Launch,
+    watch: &mut Watch,
+    settings: &RunConfig,
+    now: i64,
+) {
     if watch.drain_reason.is_none() && driver.stopping() {
         watch.drain_reason = Some("the host supervisor stopped".into());
     }
@@ -232,12 +239,12 @@ fn drain(driver: &mut impl Driver, watch: &mut Watch, settings: &RunConfig, now:
     match watch.kill_at {
         None => {
             eprintln!("agentc-supervisor run: draining the launch: {reason}");
-            driver.signal(false);
+            driver.host().request_stop(launch);
             let grace = millis_of(settings.drain_seconds, 1000);
             watch.kill_at = Some(now.saturating_add(grace));
         }
         Some(at) if now >= at => {
-            driver.signal(true);
+            driver.host().terminate(launch);
             watch.kill_at = Some(i64::MAX);
         }
         Some(_) => {}

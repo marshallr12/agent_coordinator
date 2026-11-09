@@ -1,21 +1,21 @@
-//! The live [`Driver`]: runs as root, reads `next` with the implementer's
-//! coordinator credential, refreshes the host mirror, and runs every step
-//! that touches the role's files (`clone`, `prepare`, the coordinator CLI) as
-//! the role account. `launch-root` itself runs as root, as by hand. Root's
-//! own reads and writes below the role's directories go through `rooted`;
-//! instruction files come from the root-owned mirror, never the clone.
-//! SIGTERM and SIGINT set a flag the loop polls, so it drains rather than
-//! dies; `launch-root` runs in its own process group, which the drain
-//! signals as a whole.
+//! The live [`Driver`]: runs as root and reads `next` with the implementer's
+//! coordinator credential. Everything it does to the host (refreshing the
+//! mirror, cloning, preparing `$RUN`, running the coordinator CLI as the role
+//! account, `launch-root` and its signals, root's reads and writes below the
+//! role's directories) goes through its [`LinuxHost`], the Linux
+//! [`HostRuntime`]. Instruction files come from the root-owned mirror, never
+//! the clone. SIGTERM and SIGINT set a flag the loop polls, so it drains
+//! rather than dies.
 use super::binding::{self, Binding};
 use super::lease::Lease;
 use super::live_review::LiveReviewer;
-use super::record::{self, LaunchRecord};
 use super::renewal::{self, AttemptEnded, CliError, attempt_state};
 use super::review::ReviewDriver;
-use super::{Driver, Launch, rooted};
+use super::{Driver, Launch};
 use crate::clone;
 use crate::config::Config;
+use crate::host_runtime::HostRuntime;
+use crate::host_runtime::linux::{LinuxHost, Source};
 use crate::profile::{Harness, Role};
 use crate::push_helper::accounts::{self, Account};
 use anyhow::{Context, Result, ensure};
@@ -23,7 +23,6 @@ use coordinator_client::CoordinatorClient;
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Set by SIGTERM or SIGINT: stop claiming, drain the launch and exit.
@@ -34,21 +33,14 @@ const CONFLICT_EXIT: i32 = 5;
 /// Talks to the coordinator and runs commands for one host.
 pub struct LiveDriver {
     config: Config,
-    /// Passed on to `agentc-supervisor` children as `--config`.
-    config_arg: Vec<String>,
+    /// The operating-system side: role commands, role files and the launch.
+    host: LinuxHost,
     runtime: tokio::runtime::Runtime,
     client: CoordinatorClient,
     /// The projects worked on: the main one, then the canary's if any.
     slots: Vec<Slot>,
     /// The slot `next`, [`Driver::project`] and the reviewer act on.
     active: usize,
-    /// Whether coordinator calls may use plain HTTP to loopback.
-    insecure: bool,
-    account: Account,
-    /// The mirror revision the current launch was cloned at.
-    revision: String,
-    /// The running `launch-root`, if any.
-    child: Option<Child>,
     /// Not before this time (ms since the epoch) does a pass that left cost
     /// rows unsent run again ([`live_report::RETRY_AFTER_MS`]).
     report_after_ms: i64,
@@ -56,13 +48,11 @@ pub struct LiveDriver {
     caps_after_ms: i64,
 }
 
-/// One project the loop works on: its binding, the mirror its clones start
-/// from, and its reviewer side when `[run] reviewer` is on.
+/// One project the loop works on: its binding and its reviewer side when
+/// `[run] reviewer` is on. The host runtime holds the project's mirror.
 struct Slot {
     /// The coordinator, project and credential selector worked under.
     binding: Binding,
-    /// The host mirror this project's clones start from.
-    mirror: PathBuf,
     reviewer: Option<LiveReviewer>,
 }
 
@@ -117,33 +107,26 @@ impl LiveDriver {
             bindings.push((extra, canary.mirror_path(config)));
         }
         let account = Account::lookup(Role::Implementer.user(config))?;
-        let credentials = read_credentials(config, &account)?;
-        let shown = role_dir(config).join(CREDENTIALS);
-        let text = String::from_utf8(credentials).context("credentials are not UTF-8")?;
+        let host = LinuxHost::new(config, config_path, account, insecure, sources(&bindings));
+        let shown = host.credentials_path();
+        let text =
+            String::from_utf8(host.read_credentials()?).context("credentials are not UTF-8")?;
         let all: Vec<&Binding> = bindings.iter().map(|(b, _)| b).collect();
         let mut slots = Vec::new();
         for (binding, mirror) in &bindings {
             let reviewer = reviewer(config, config_path, binding, &all, mirror, insecure)?;
             slots.push(Slot {
                 binding: binding.clone(),
-                mirror: mirror.clone(),
                 reviewer,
             });
         }
         Ok(Self {
             config: config.clone(),
-            config_arg: config_path
-                .map(|p| format!("--config={}", p.display()))
-                .into_iter()
-                .collect(),
+            host,
             runtime: tokio::runtime::Runtime::new()?,
             client: crate::shadow::client_from(&text, &shown, &binding.service_url, insecure)?,
             slots,
             active: 0,
-            insecure,
-            account,
-            revision: String::new(),
-            child: None,
             report_after_ms: 0,
             caps_after_ms: 0,
         })
@@ -154,63 +137,11 @@ impl LiveDriver {
         &self.slots[self.active]
     }
 
-    /// The slot working `project` (the active one if none does).
-    fn slot_of(&self, project: &str) -> &Slot {
-        (self.slots.iter())
-            .find(|slot| slot.binding.project_id == project)
-            .unwrap_or_else(|| self.slot())
-    }
-
-    /// Runs `program args` as the implementer in `cwd` and returns its
-    /// stdout; on a non-zero exit fails with the exit code and the CLI's
-    /// error code and message (or stderr), bounded.
-    fn as_role(
-        &self,
-        program: &Path,
-        args: &[String],
-        cwd: &Path,
-        launch: &Launch,
-    ) -> Result<Vec<u8>> {
-        let output = self.run_role(program, args, cwd, launch, b"")?;
-        ensure!(
-            output.status.success(),
-            "{} failed: {}",
-            args.join(" "),
-            CliError::of(&output)
-        );
-        Ok(output.stdout)
-    }
-
-    /// Runs `program args` as the implementer in `cwd` with `input` on its
-    /// standard input and returns its output, whatever its exit.
-    fn run_role(
-        &self,
-        program: &Path,
-        args: &[String],
-        cwd: &Path,
-        launch: &Launch,
-        input: &[u8],
-    ) -> Result<Output> {
-        let mut command = Command::new(program);
-        command.args(args).current_dir(cwd).env_clear();
-        command.envs(role_env(&self.config, launch, self.insecure));
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        accounts::run_as(&mut command, &self.account);
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("run {}", program.display()))?;
-        child.stdin.take().context("stdin")?.write_all(input)?;
-        Ok(child.wait_with_output()?)
-    }
-
     /// Runs the coordinator CLI as the implementer in the launch's clone,
     /// with the launch's session, and returns its JSON stdout.
     fn cli(&self, launch: &Launch, args: &[String]) -> Result<Value> {
         let cli = self.config.bin_dir.join("agent-coordinator");
-        let stdout = self.as_role(&cli, args, &launch.clone, launch)?;
+        let stdout = self.host.as_role(&cli, args, &launch.clone, launch)?;
         serde_json::from_slice(&stdout).context("the CLI printed no JSON")
     }
 
@@ -229,36 +160,6 @@ impl LiveDriver {
                 None
             }
         }
-    }
-
-    /// `relative` below the implementer's directory: `$RUN` or the clone.
-    fn below_role(&self, path: &Path) -> Result<PathBuf> {
-        Ok(path.strip_prefix(role_dir(&self.config))?.to_owned())
-    }
-
-    /// `agentc-supervisor` arguments: `--config`, `subcommand`, then `rest`.
-    fn supervisor_args(&self, subcommand: &str, rest: Vec<String>) -> Vec<String> {
-        let mut args = self.config_arg.clone();
-        args.push(subcommand.into());
-        args.extend(rest);
-        args
-    }
-
-    /// Writes `contents` to a new role-owned mode 0600 file at `name` in
-    /// the launch's `$RUN`, refusing symlinks on the way.
-    fn write_run_file(&self, launch: &Launch, name: &str, contents: &[u8]) -> Result<()> {
-        let relative = self.below_role(&launch.run)?.join(name);
-        let (uid, gid) = (self.account.uid, self.account.gid);
-        rooted::write(&role_dir(&self.config), &relative, contents, uid, gid)
-    }
-
-    /// Copies the role's credential into the launch's coordinator state.
-    fn place_credential(&self, launch: &Launch, credential: &[u8]) -> Result<()> {
-        let run = self.below_role(&launch.run)?;
-        let owner = (self.account.uid, self.account.gid);
-        let base = role_dir(&self.config);
-        let binding = &self.slot_of(&launch.project).binding;
-        place_credential(&base, &run, binding, credential, owner)
     }
 }
 
@@ -307,55 +208,23 @@ impl Driver for LiveDriver {
     }
 
     fn free_bytes(&self) -> Result<u64> {
-        free_bytes(&self.config.state_dir)
+        self.host.free_bytes()
     }
 
-    /// Fetches the mirror, clones its branch head, prepares `$RUN`, and
-    /// copies the role's coordinator credential into the run's state where
-    /// the binding's CLI looks for it.
-    fn create(&mut self, launch: &Launch) -> Result<()> {
-        let mirror = self.slot_of(&launch.project).mirror.clone();
-        clone::git_output(&mirror, &["fetch", "--prune", "--quiet"])?;
-        let head = format!("refs/heads/{}", self.config.run.branch);
-        let sha = clone::git_output(&mirror, &["rev-parse", "--verify", &head])?;
-        self.revision = sha.clone();
-        let origin = clone::git_output(&mirror, &["config", "--get", "remote.origin.url"])?;
-        let program = crate::relay::program(&self.config);
-        let clone = vec![
-            format!("--url={}", mirror.display()),
-            format!("--revision={sha}"),
-            format!("--dest={}", launch.clone.display()),
-            format!("--origin-url={origin}"),
-            format!("--user-name={}", self.config.run.git_name),
-            format!("--user-email={}", self.config.run.git_email),
-        ];
-        let root = Path::new("/");
-        self.as_role(
-            &program,
-            &self.supervisor_args("clone", clone),
-            root,
-            launch,
-        )?;
-        let prepare = self.supervisor_args("prepare", spec_flags(&self.config, launch));
-        self.as_role(&program, &prepare, root, launch)?;
-        let credential = read_credentials(&self.config, &self.account)?;
-        self.place_credential(launch, &credential)
+    fn host(&mut self) -> &mut dyn HostRuntime {
+        &mut self.host
     }
 
     fn instructions(&mut self, launch: &Launch) -> Vec<(String, String)> {
-        let mirror = self.slot_of(&launch.project).mirror.clone();
-        let read = |name: &&str| {
-            Some((
-                (*name).to_owned(),
-                instruction(&mirror, &self.revision, name)?,
-            ))
-        };
+        let mirror = self.host.mirror_of(&launch.project);
+        let revision = self.host.revision();
+        let read = |name: &&str| Some(((*name).to_owned(), instruction(mirror, revision, name)?));
         super::INSTRUCTION_FILES.iter().filter_map(read).collect()
     }
 
     fn install_prompt(&mut self, launch: &Launch, prompt: &str) -> Result<()> {
         let name = crate::profile::run_files::PROMPT;
-        self.write_run_file(launch, name, prompt.as_bytes())
+        self.host.write_run_file(launch, name, prompt.as_bytes())
     }
 
     /// Connects the launch's session and claims the task with the pinned CLI,
@@ -374,61 +243,12 @@ impl Driver for LiveDriver {
     /// launch's session: it adds [`Launch::checkout`] as a worktree of the
     /// clone at the cloned revision and registers it for the attempt.
     fn register(&mut self, launch: &Launch, lease: &Lease) -> Result<()> {
-        let args = checkout_args(launch, lease, &self.revision);
+        let args = checkout_args(launch, lease, self.host.revision());
         self.cli(launch, &args).map(drop)
     }
 
-    /// Spawns `launch-root` as root in a process group of its own.
-    fn start(&mut self, launch: &Launch) -> Result<(u32, Option<u64>)> {
-        use std::os::unix::process::CommandExt;
-        let args = self.supervisor_args("launch-root", spec_flags(&self.config, launch));
-        let program = crate::relay::program(&self.config);
-        let mut command = Command::new(&program);
-        command.args(&args).stdin(Stdio::null()).process_group(0);
-        let child = command.spawn().context("spawn launch-root")?;
-        let pid = child.id();
-        self.child = Some(child);
-        Ok((pid, record::start_ticks(pid)))
-    }
-
-    /// Reaps `launch-root` once it has exited; a wait error keeps waiting.
-    fn exited(&mut self) -> Option<i32> {
-        let status = match self.child.as_mut()?.try_wait() {
-            Ok(status) => status?,
-            Err(error) => {
-                eprintln!("agentc-supervisor run: wait for launch-root: {error}");
-                return None;
-            }
-        };
-        self.child = None;
-        Some(status.code().unwrap_or(-1))
-    }
-
-    /// Signals `launch-root`'s process group while it is unreaped, so the
-    /// group id cannot have been reused.
-    fn signal(&mut self, kill: bool) {
-        let Some(group) = self
-            .child
-            .as_ref()
-            .and_then(|c| libc::pid_t::try_from(c.id()).ok())
-        else {
-            return;
-        };
-        let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
-        // SAFETY: kill takes plain integers and touches no memory.
-        unsafe { libc::kill(-group, signal) };
-    }
-
-    /// The modification time of `$RUN/events.jsonl`, the harness's event
-    /// stream, which `launch` creates as the implementer. The agent could
-    /// touch it, but renewal stays bounded by the budget and the service's
-    /// `max_attempt_seconds`.
     fn last_event_ms(&self, launch: &Launch) -> Option<i64> {
-        let relative = self.below_role(&launch.run).ok()?.join("events.jsonl");
-        let modified =
-            rooted::modified(&role_dir(&self.config), &relative, self.account.uid).ok()?;
-        let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
-        i64::try_from(since.as_millis()).ok()
+        self.host.last_event_ms(launch)
     }
 
     /// Renews through the CLI. A refusal that ends the attempt for good
@@ -438,7 +258,9 @@ impl Driver for LiveDriver {
         let generation = format!("--generation={}", lease.generation);
         let args = [&args.map(String::from)[..], &[generation]].concat();
         let cli = self.config.bin_dir.join("agent-coordinator");
-        let output = self.run_role(&cli, &args, &launch.clone, launch, b"")?;
+        let output = self
+            .host
+            .run_role(&cli, &args, &launch.clone, launch, b"")?;
         if output.status.success() {
             return Lease::parse(&serde_json::from_slice(&output.stdout)?);
         }
@@ -474,7 +296,9 @@ impl Driver for LiveDriver {
             "--input=-".into(),
         ];
         let input = serde_json::to_vec(&serde_json::json!({"summary": summary}))?;
-        let output = self.run_role(&cli, &args, &launch.clone, launch, &input)?;
+        let output = self
+            .host
+            .run_role(&cli, &args, &launch.clone, launch, &input)?;
         let code = output.status.code();
         let stderr = String::from_utf8_lossy(&output.stderr);
         ensure!(
@@ -485,28 +309,8 @@ impl Driver for LiveDriver {
         Ok(())
     }
 
-    fn boot_id(&self) -> String {
-        record::boot_id()
-    }
-
-    fn may_be_alive(&self, launch: &LaunchRecord) -> bool {
-        let now = self.now_ms();
-        record::may_be_alive(launch, &record::boot_id(), record::start_ticks, now)
-    }
-
     fn has_marker(&self, launch: &Launch, name: &str) -> bool {
-        let base = role_dir(&self.config);
-        let relative = self.below_role(&launch.run).map(|run| run.join(name));
-        relative.is_ok_and(|relative| rooted::is_regular(&base, &relative))
-    }
-
-    /// Removes the clone and `$RUN` without following a role-owned symlink.
-    fn discard(&mut self, launch: &Launch) -> Result<()> {
-        let base = role_dir(&self.config);
-        for path in [&launch.clone, &launch.run] {
-            rooted::remove_tree(&base, &self.below_role(path)?)?;
-        }
-        Ok(())
+        self.host.has_marker(launch, name)
     }
 
     fn now_ms(&self) -> i64 {
@@ -536,7 +340,7 @@ impl Driver for LiveDriver {
     }
 
     fn harness_status(&mut self, harness: Harness) -> Result<()> {
-        super::live_health::status(&self.config, &self.account, harness)
+        super::live_health::status(&self.config, self.host.account(), harness)
     }
 
     fn credential_expiry_ms(&self, harness: Harness) -> Option<i64> {
@@ -578,11 +382,11 @@ impl Driver for LiveDriver {
     }
 
     fn events(&self, launch: &Launch) -> Option<Vec<u8>> {
-        super::live_health::events(&self.config, &self.account, launch)
+        super::live_health::events(&self.config, self.host.account(), launch)
     }
 
     fn stderr(&self, launch: &Launch) -> Option<Vec<u8>> {
-        super::live_health::stderr(&self.config, &self.account, launch)
+        super::live_health::stderr(&self.config, self.host.account(), launch)
     }
 }
 
@@ -626,25 +430,13 @@ fn resolve_binding(config: &Config) -> Result<Binding> {
     Binding::parse(&text).context("the mirror's binding")
 }
 
-/// Writes `credential` below `base` into the run `run` (relative to `base`)
-/// at `state/coordinator/` plus [`Binding::credentials`], creating a
-/// `project_name` directory chain first, all owned by `owner` (uid, gid)
-/// and reached without following symlinks.
-fn place_credential(
-    base: &Path,
-    run: &Path,
-    binding: &Binding,
-    credential: &[u8],
-    owner: (u32, u32),
-) -> Result<()> {
-    let home = run.join("state/coordinator");
-    if let Some(name) = &binding.project_name {
-        for directory in [home.join(name), home.join(name).join("config")] {
-            rooted::make_dir(base, &directory, owner.0, owner.1)?;
-        }
-    }
-    let target = home.join(binding.credentials());
-    rooted::write(base, &target, credential, owner.0, owner.1)
+/// The host runtime's sources: each binding with its mirror, in order.
+fn sources(bindings: &[(Binding, PathBuf)]) -> Vec<Source> {
+    let source = |(binding, mirror): &(Binding, PathBuf)| Source {
+        binding: binding.clone(),
+        mirror: mirror.clone(),
+    };
+    bindings.iter().map(source).collect()
 }
 
 /// The host mirror clones come from, `<state_dir>/mirror.git`.
@@ -671,27 +463,8 @@ fn install_binding(path: &Path, text: &str) -> Result<()> {
     std::fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))
 }
 
-/// The implementer's coordinator credential file, relative to its role
-/// directory.
-const CREDENTIALS: &str = "coordinator/credentials.toml";
 /// The largest instruction blob read from the mirror.
 const MAX_BLOB: usize = 1024 * 1024;
-
-/// `<state_dir>/impl`, root-owned.
-fn role_dir(config: &Config) -> PathBuf {
-    config.state_dir.join(Role::Implementer.slug())
-}
-
-/// The implementer's credential file, read without following symlinks.
-fn read_credentials(config: &Config, account: &Account) -> Result<Vec<u8>> {
-    let relative = Path::new(CREDENTIALS);
-    rooted::read(
-        &role_dir(config),
-        relative,
-        account.uid,
-        rooted::MAX_CREDENTIALS,
-    )
-}
 
 /// `text` cut to at most `max` bytes on a character boundary.
 fn truncate(mut text: String, max: usize) -> String {
@@ -701,62 +474,6 @@ fn truncate(mut text: String, max: usize) -> String {
     }
     text.truncate(end);
     text
-}
-
-/// The launch's coordinator state, `$RUN/state/coordinator`.
-fn coordinator_home(launch: &Launch) -> PathBuf {
-    crate::confine::StatePaths::new(&launch.run).coordinator
-}
-
-/// The environment role commands get: the pinned binaries, the role's home,
-/// the egress proxy, the launch's coordinator home and session, the
-/// installed binding, and the insecure-loopback flag when `insecure`.
-fn role_env(config: &Config, launch: &Launch, insecure: bool) -> Vec<(&'static str, String)> {
-    let proxy = config.egress_proxy_url();
-    let home = config.state_dir.join(Role::Implementer.slug()).join("home");
-    let mut env = vec![
-        (
-            "PATH",
-            format!("{}:/usr/bin:/bin", config.bin_dir.display()),
-        ),
-        ("HOME", home.display().to_string()),
-        ("LANG", "C.UTF-8".into()),
-        ("NO_PROXY", "127.0.0.1,localhost".into()),
-        ("HTTPS_PROXY", proxy.clone()),
-        ("https_proxy", proxy),
-        (
-            "AGENT_COORDINATOR_HOME",
-            coordinator_home(launch).display().to_string(),
-        ),
-        ("AGENT_COORDINATOR_SESSION", launch.session_id.to_string()),
-        (
-            binding::REPO_CONFIG_ENV,
-            binding::installed_path_for(config, &launch.project)
-                .display()
-                .to_string(),
-        ),
-    ];
-    if insecure {
-        env.push((binding::INSECURE_ENV, "true".into()));
-    }
-    env
-}
-
-/// The launch arguments `prepare` and `launch-root` share, in the
-/// `--name=value` form no value can turn into another option.
-fn spec_flags(_config: &Config, launch: &Launch) -> Vec<String> {
-    let vendor = &launch.vendor;
-    vec![
-        "--role=implementer".into(),
-        format!("--harness={:?}", vendor.harness).to_lowercase(),
-        format!("--clone={}", launch.clone.display()),
-        format!("--run={}", launch.run.display()),
-        format!("--model={}", vendor.model),
-        format!("--effort={}", vendor.effort),
-        format!("--project={}", launch.project),
-        format!("--task={}", launch.suggestion.task),
-        format!("--session-id={}", launch.session_id),
-    ]
 }
 
 /// `worktree prepare` arguments registering the launch's checkout for the
@@ -775,88 +492,11 @@ fn checkout_args(launch: &Launch, lease: &Lease, revision: &str) -> Vec<String> 
     ]
 }
 
-/// Bytes available to unprivileged users on the filesystem holding `path`.
-#[allow(clippy::useless_conversion)] // The field types differ between targets.
-fn free_bytes(path: &Path) -> Result<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-    // SAFETY: statvfs is plain old data; all-zero is a valid value to overwrite.
-    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `c_path` is NUL-terminated and `stats` is live, writable storage.
-    let status = unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) };
-    let error = std::io::Error::last_os_error();
-    ensure!(status == 0, "statvfs {}: {error}", path.display());
-    Ok(u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::run_loop::Suggestion;
-
-    #[test]
-    fn spec_flags_cannot_become_options() {
-        let suggestion = Suggestion {
-            task: "-x".into(),
-            revision: 1,
-            title: String::new(),
-        };
-        let launch = Launch::plan(&Config::default(), "p", suggestion);
-        let flags = spec_flags(&Config::default(), &launch);
-        assert!(flags.iter().all(|flag| flag.starts_with("--")));
-        assert!(flags.contains(&"--task=-x".to_owned()));
-        assert!(flags.contains(&"--harness=claude".to_owned()));
-    }
-
-    #[test]
-    fn role_commands_use_the_launch_session_and_proxy() {
-        let suggestion = Suggestion {
-            task: "t".into(),
-            revision: 1,
-            title: String::new(),
-        };
-        let launch = Launch::plan(&Config::default(), "p", suggestion);
-        let env = role_env(&Config::default(), &launch, false);
-        let session = launch.session_id.to_string();
-        assert!(env.contains(&("AGENT_COORDINATOR_SESSION", session)));
-        assert!(env.contains(&("HTTPS_PROXY", "http://127.0.0.1:3128".into())));
-        assert!(env.iter().all(|(name, _)| !name.contains("TOKEN")));
-        let binding = "/var/lib/agentc/coordinator-binding.toml".to_owned();
-        assert!(env.contains(&("AGENT_COORDINATOR_REPO_CONFIG", binding)));
-        assert!(env.iter().all(|(name, _)| *name != binding::INSECURE_ENV));
-        let insecure = role_env(&Config::default(), &launch, true);
-        assert!(insecure.contains(&(binding::INSECURE_ENV, "true".into())));
-    }
-
-    #[test]
-    fn role_commands_of_a_canary_launch_read_the_canary_binding_copy() {
-        let mut config = Config::default();
-        config.run.canary_binding = Some(binding::CanaryBinding {
-            service_url: "https://agents.example.com".into(),
-            project_id: "canary".into(),
-            project_name: None,
-            mirror: None,
-        });
-        let suggestion = |task: &str| Suggestion {
-            task: task.into(),
-            revision: 1,
-            title: String::new(),
-        };
-        let repo = |project: &str| {
-            let launch = Launch::plan(&config, project, suggestion("t"));
-            let env = role_env(&config, &launch, false);
-            let (_, path) = env
-                .into_iter()
-                .find(|(name, _)| *name == binding::REPO_CONFIG_ENV)
-                .unwrap();
-            path
-        };
-        assert_eq!(repo("p"), "/var/lib/agentc/coordinator-binding.toml");
-        assert_eq!(
-            repo("canary"),
-            "/var/lib/agentc/coordinator-binding-canary.toml"
-        );
-    }
+    use std::process::Command;
 
     #[test]
     fn a_run_binding_overrides_the_mirror_and_is_checked() {
@@ -870,34 +510,6 @@ mod tests {
         assert_eq!(resolved.project_id, "staging-project");
         config.run.binding.as_mut().unwrap().project_name = Some("../x".into());
         assert!(resolve_binding(&config).is_err());
-    }
-
-    #[test]
-    fn credentials_land_where_the_bindings_cli_reads_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
-        let run = Path::new("runs/s1");
-        std::fs::create_dir_all(base.join(run).join("state/coordinator")).unwrap();
-        // SAFETY: getuid and getgid take no arguments and touch no memory.
-        let owner = unsafe { (libc::getuid(), libc::getgid()) };
-        let mut binding = Binding {
-            service_url: "http://127.0.0.1:18080".into(),
-            project_id: "p".into(),
-            project_name: None,
-        };
-        place_credential(&base, run, &binding, b"legacy", owner).unwrap();
-        let home = base.join(run).join("state/coordinator");
-        assert_eq!(
-            std::fs::read(home.join("credentials.toml")).unwrap(),
-            b"legacy"
-        );
-        binding.project_name = Some("Staging".into());
-        place_credential(&base, run, &binding, b"named", owner).unwrap();
-        let named = home.join("Staging/config/credentials.toml");
-        assert_eq!(std::fs::read(named).unwrap(), b"named");
-        std::fs::remove_dir_all(home.join("Staging")).unwrap();
-        std::os::unix::fs::symlink(base.join("runs"), home.join("Staging")).unwrap();
-        assert!(place_credential(&base, run, &binding, b"x", owner).is_err());
     }
 
     #[test]
@@ -1013,11 +625,5 @@ mod tests {
     fn truncation_keeps_whole_characters() {
         assert_eq!(truncate("a\u{e9}b".into(), 2), "a");
         assert_eq!(truncate("ab".into(), 5), "ab");
-    }
-
-    #[test]
-    fn free_bytes_reads_the_filesystem() {
-        assert!(free_bytes(Path::new("/")).unwrap() > 0);
-        assert!(free_bytes(Path::new("/no/such/path")).is_err());
     }
 }

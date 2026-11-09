@@ -18,6 +18,7 @@ use super::health::Vendor;
 use super::lease::Lease;
 use super::{Driver, Launch, Suggestion};
 use crate::config::Config;
+use crate::host_runtime::{LaunchIdentity, Recovery, StartIntent};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -65,6 +66,20 @@ pub struct LaunchRecord {
     /// project, the only one then).
     #[serde(default)]
     pub project: Option<String>,
+    /// The exact source revision the launch was prepared from, where the
+    /// host runtime records it ([`StartIntent::source`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The exact executable the launch runs, where the runtime records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    /// The launch's container identity, where the host has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    /// The identity of the job owning the launch's processes, where the
+    /// host has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<String>,
 }
 
 /// The root-owned directory of launch records, `<state_dir>/launches`.
@@ -73,15 +88,15 @@ pub fn dir(config: &Config) -> PathBuf {
 }
 
 impl LaunchRecord {
-    /// The record of a launch claimed at `now` on boot `boot_id`, not
-    /// spawned yet.
-    pub fn new(launch: &Launch, lease: &Lease, boot_id: String, now: i64) -> Self {
+    /// The record of a launch claimed at `now`, not spawned yet, carrying
+    /// what the host runtime fixed for it in `intent`.
+    pub fn new(launch: &Launch, lease: &Lease, intent: &StartIntent, now: i64) -> Self {
         Self {
             session_id: launch.session_id,
             task: launch.suggestion.task.clone(),
             attempt: lease.attempt.clone(),
             generation: lease.generation,
-            boot_id,
+            boot_id: intent.boot_id.clone(),
             pid: None,
             start_ticks: None,
             released: false,
@@ -90,7 +105,16 @@ impl LaunchRecord {
             vendor: Some(launch.vendor.clone()),
             cost_recorded: false,
             project: Some(launch.project.clone()),
+            source: intent.source.clone(),
+            executable: intent.executable.clone(),
+            container: intent.container.clone(),
+            job: intent.job.clone(),
         }
+    }
+
+    /// Adds the started launch's operating-system identity.
+    pub fn identify(&mut self, identity: &LaunchIdentity) {
+        (self.pid, self.start_ticks) = (Some(identity.pid), identity.started);
     }
 
     /// `<state_dir>/launches/<session>.json`.
@@ -269,7 +293,8 @@ pub fn reset_retries(config: &Config) {
 pub fn recover(driver: &mut impl Driver, config: &Config) -> Option<String> {
     let mut running = Vec::new();
     for mut record in LaunchRecord::load_all(config) {
-        if driver.may_be_alive(&record) {
+        let now = driver.now_ms();
+        if driver.host().recover(&record, now) == Recovery::MayBeRunning {
             running.push(record.session_id.to_string());
         } else if record.release_failures < MAX_RELEASE_TRIES {
             settle(driver, config, &mut record);
@@ -291,7 +316,7 @@ fn settle(driver: &mut impl Driver, config: &Config, record: &mut LaunchRecord) 
     if !record.released && !release(driver, config, &launch, record, &summary) {
         return;
     }
-    match driver.discard(&launch) {
+    match driver.host().cleanup(&launch) {
         Ok(()) => LaunchRecord::remove(config, &record.session_id),
         Err(error) => eprintln!("agentc-supervisor run: recovery cleanup: {error:#}"),
     }

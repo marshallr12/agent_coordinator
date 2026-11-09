@@ -230,6 +230,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn only_reviewers_may_write_under_their_roles_runs_directory() {
         let writable =
@@ -243,6 +244,7 @@ mod tests {
 
     /// The whole reviewer sandbox document is pinned, so a probed key cannot
     /// drift or vanish without a reviewed test change.
+    #[cfg(unix)]
     #[test]
     fn reviewer_sandbox_document_is_pinned() {
         assert_eq!(

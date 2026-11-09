@@ -10,6 +10,7 @@ use crate::role_settings;
 use crate::verification;
 use anyhow::{Context, Result, ensure};
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::process::Command;
@@ -326,6 +327,7 @@ fn token_file(_role: Role, _config: &Config) -> Result<()> {
 }
 
 /// The metadata `token_facts` judges.
+#[cfg(any(unix, test))]
 struct FileFacts {
     regular: bool,
     uid: u32,
@@ -338,6 +340,7 @@ struct FileFacts {
 /// A token file is a non-empty, regular, single-link file owned by root,
 /// in the role account's group `role_gid`, with mode exactly 0440. Kept
 /// independent of the test runner's ids, like `protection_facts`.
+#[cfg(any(unix, test))]
 fn token_facts(path: &Path, facts: &FileFacts, role_gid: u32) -> Result<()> {
     let path = path.display();
     ensure!(
@@ -444,6 +447,7 @@ fn role_owned(path: &Path, role: Role, config: &Config, file: bool) -> Result<()
 }
 
 /// The role account's uid (`flag` `-u`) or primary gid (`-g`), from `id`.
+#[cfg(unix)]
 fn role_id(role: Role, config: &Config, flag: &str) -> Result<u32> {
     let output = Command::new("id")
         .args([flag, role.user(config)])
@@ -512,9 +516,11 @@ fn private_file_problem(_path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use uuid::Uuid;
 
     /// A loopback address with nothing listening (bound, then released).
+    #[cfg(unix)]
     fn closed_port() -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().to_string()
@@ -582,6 +588,7 @@ mod tests {
         assert!(problems.contains("only implementer launches"), "{problems}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn missing_containment_is_reported_not_skipped() {
         let dir = tempfile::tempdir().unwrap();

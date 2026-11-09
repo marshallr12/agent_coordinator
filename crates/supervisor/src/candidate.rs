@@ -442,6 +442,7 @@ mod tests {
         assert!(text.ends_with("exit \"$STATUS\"\n"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn harness_temp_is_a_tmpfs_and_the_candidate_gets_its_own_temp() {
         let args: Vec<String> = inner_args(&spec(Harness::Claude), &Config::default())
