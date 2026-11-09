@@ -1,9 +1,10 @@
 # Native Windows supervisor: design and prototype
 
-Status: **proposed; the containment prototype gate is blocked; not approved for
-unattended execution**. Task `7011c55f-652e-47d3-a409-7d46420c7eb6` activates a
-native Windows replacement for the abandoned WSL host approach. Its first
-phase, task `a9126e52-654c-4b26-8a7d-7748261d2c4a`, delivers this design and the
+Status: **proposed; phase 2 of the containment prototype is complete; phase 3
+is not started; not approved for unattended execution**. Task
+`7011c55f-652e-47d3-a409-7d46420c7eb6` activates a native Windows replacement
+for the abandoned WSL host approach. Its first phase, task
+`a9126e52-654c-4b26-8a7d-7748261d2c4a`, delivers this design and the
 containment prototype. Task `3787e738-d381-4e4f-96b0-75f7afe22155` prepares
 phase 2. Task `37788fa5-da1c-4a76-80ed-c893d8ae74f3` is phase 3: the
 [host-runtime interface and a Windows launcher](#host-runtime-interface-and-windows-backend)
@@ -460,7 +461,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | --- | --- | --- | --- |
 | 1 | This design and the containment prototype | None | Delivered by task `a9126e52`; the prototype gate is **blocked** |
 | 2 preparation | A role-account mode for the prototype and the owner runbook | Owner decision `df37b339` | Delivered by task `3787e738` |
-| 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test is written (task `96d4927e`) and its owner's run with the prototype launcher is for task `4baa4706` to record. The same runbook, followed with the Rust launcher in phase 3, passed |
+| 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | **Complete.** The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test (task `96d4927e`) **passed** in the owner's run with the prototype launcher on 2026-11-09; task `4baa4706` records it under [Network policy run](#network-policy-run-2026-11-09). The same runbook, followed with the Rust launcher in phase 3, passed |
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
 | 4 | SCM services, lifecycle and recovery acceptance | Phase 3 | Not started |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
@@ -666,13 +667,22 @@ it must.
 
 Only the owner can do this, because step 2 needs elevation. It turns the host
 firewall off for the length of one round, a few seconds, so use a network you
-trust. The owner followed it with the Rust launcher on 2026-11-09; see
-[Role-account run through the launcher](#role-account-run-through-the-launcher-2026-11-09).
+trust. The owner followed it twice on MiniAir on 2026-11-09: with the
+prototype launcher (see [Network policy run](#network-policy-run-2026-11-09))
+and with the Rust launcher (see
+[Role-account run through the launcher](#role-account-run-through-the-launcher-2026-11-09)).
 Treat a
 row that fails for any reason other than the boundary as a defect in this
 procedure, and stop. It needs the role account from the
 [role-account runbook](#owner-runbook-for-the-role-account-run) and a firewall
 that is on for every profile.
+
+The three steps share one clock. The owner step waits one hour for the role
+run, counted from when it prints its command, and the policy step changes
+nothing until the role run asks. Start steps 2 and 3 as soon as step 1 has
+printed; if the hour runs out first, the owner step reports a missing role run
+and ends, the staging directory must be deleted, and the run starts again from
+step 1.
 
 1. In your own shell, not elevated, from the source checkout, start the owner
    step with the conditions. Replace `NEW_REPORT` with a new absolute path
@@ -910,7 +920,71 @@ played every part.
   fails.
 
 Nothing here shows what a launch can reach when the firewall policy is lost;
-only the [runbook](#owner-runbook-for-the-network-policy-test) can.
+only the run below can.
+
+### Network policy run, 2026-11-09
+
+The owner authorized the conditions `baseline` and `profiles-off`, not
+`service-stop`, and followed the
+[runbook](#owner-runbook-for-the-network-policy-test) on MiniAir with the
+account `AgentcProbeRole` kept from the cross-account runs. Registered
+producer `9b6180db-93d3-41d8-bb76-0e1449ffe48a` ran source
+`6be041f0d3249b5d2c1dfe2b2af1c651ddd1928a` as the owner step, not elevated,
+and exited 0. The owner ran the policy step in an elevated shell and started
+the role run with `runas`. The report is coordinator artifact
+`a679dd83-2945-4af8-bc93-29d2cfed3467`, SHA-256
+`8fb0d0c9243bc8830c96ccc2273df2225f1348ed84c0d0b49096f2645353f44d`. It holds
+735 rows, of which 684 are mandatory.
+
+| Group | Mandatory rows | Passed | Failed |
+| --- | --- | --- | --- |
+| Host and owner controls, reader self-test, identity, station, canary integrity, firewall restore | 28 | 28 | 0 |
+| Ordinary AppContainer | 309 | 306 | 3 |
+| Less-privileged AppContainer, the proposed boundary, matrix and two network rounds | 347 | 347 | 0 |
+
+The matrix repeated the cross-account result: `identity.role_account_distinct`
+and `desktop.station_made_by_run` passed, all 57 owner rows were denied, every
+launch was denied the owner's `Environment` key with error 5, and the three
+failures are the ordinary AppContainer's Task Scheduler rows.
+
+The `profiles-off` round is what phase 2 was waiting for:
+
+- The policy step recorded `applied: every profile disabled`, and the role
+  run's own reading agreed: Domain, Private and Public all off, the firewall
+  service running. By the staging directory's timestamps the role run asked
+  for the condition at 15:51:32 local time, the policy step recorded it
+  applied at 15:51:38, the round ended at 15:51:43 and the restore record
+  followed at 15:52:06: the profiles were off for well under a minute.
+- All six host-token controls passed in that state: the host reached its
+  three TCP listeners and its UDP listener, resolved the public name and
+  connected to it.
+- The fresh launch inside the proposed boundary was refused exactly as under
+  the baseline: TCP to loopback IPv4, loopback IPv6, the local network and the
+  public address each failed with error 10013; UDP to loopback failed with
+  error 10013; the lookup failed with error 11003. No listener received
+  anything.
+- `policy.host_firewall_restored` passed: the policy step's record shows
+  `profiles-off` as the one change and a final state equal to the original.
+  The owner's shell and the agent each read every profile enabled and `MpsSvc`
+  running afterwards.
+
+A first attempt the same day, registered producer
+`fd7cfac7-bf4f-400f-9d45-a8586aaa1b76`, produced no valid report. The owner
+step's one-hour wait for the role run ran out twenty seconds before the
+owner's elevated step began, so it reported a missing role run and removed
+its canaries, and the rounds that followed ran against a staging directory
+nobody was waiting on. The elevated step still restored the firewall, which
+was confirmed. The runbook now states the shared clock. The staging directory
+was deleted and the run repeated from step 1.
+
+What this establishes: a launch with no network capability, inside the
+proposed boundary and running as a separate account, stays refused every
+direct TCP, UDP and DNS attempt while every Windows Firewall profile is
+disabled, on this host and build. The refusal does not depend on the profile
+policy. What it does not establish: behavior when the firewall service itself
+is stopped (`service-stop` was not run), behavior of a launch-specific filter
+policy or the production egress broker, which do not exist, and anything
+about a different host or build.
 
 ### Windows backend development runs, 2026-11-09
 
@@ -1003,7 +1077,13 @@ account, a supervisor loop or a provider harness.
 **NO-GO for Windows supervised execution.** A launch running as the owner can
 read the owner's registry, so the single-account gate stays blocked. A launch
 running as a separate role account cannot: the role-account run passed the
-gate for the proposed boundary, with one temporary standard account.
+gate for the proposed boundary, with one temporary standard account, and the
+network policy run showed that its network refusal survives the loss of every
+firewall profile.
+
+Phase 2 is complete: the owner's
+[network policy run](#network-policy-run-2026-11-09) passed. Completing
+phase 2 admits nothing; it only let the next phase begin.
 
 Phase 3 was started on the owner's go-ahead of 2026-11-09. Its interface and
 both backends are written, and the Windows backend reproduces the prototype's
@@ -1026,8 +1106,9 @@ Still unverified, and never to be read as passed:
   account;
 - clipboard and atom separation between launches of one account, which share
   a window station;
-- privileged network policy, and behavior when the firewall service is
-  stopped: the rounds covered disabled profiles only;
+- behavior when the firewall service itself is stopped (the rounds covered
+  disabled profiles only), and any launch-specific filter policy, which
+  does not exist;
 - native provider harness command paths and reviewer candidate interception;
 - production egress and publication brokers;
 - SCM lifecycle, crash recovery and reboot behavior;
@@ -1035,8 +1116,10 @@ Still unverified, and never to be read as passed:
   trees;
 - COM, RPC and broker surfaces beyond the Task Scheduler.
 
-No service, firewall policy, provider login, WSL configuration or production
-admission was changed.
+No service, firewall rule, provider login, WSL configuration or production
+admission was changed. The owner's network policy run disabled the firewall
+profiles for seconds at a time and restored them, as its restore record and
+two independent readings confirm.
 
 ### Earlier findings, 2026-10-25
 

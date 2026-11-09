@@ -19,12 +19,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   registry `Environment` key, so the single-account gate is **blocked**. In
   role-account mode the owner plants canaries and a separate account launches
   the matrix; that cross-account run **passed** the gate for the proposed
-  boundary on 2026-11-09 with one temporary standard account. The prototype
-  also has a test that repeats the network attempts while an elevated owner
-  step disables the firewall profiles; the item below records its run through
-  the Rust launcher. Launches of
-  one account share a window station. No Windows supervised harness or service
-  exists or is
+  boundary on 2026-11-09 with one temporary standard account. The owner's
+  network policy loss run with the prototype launcher **passed** the same
+  day: with every firewall profile disabled, a launch inside the proposed
+  boundary was still refused every direct TCP, UDP and DNS attempt. Phase 2
+  of the design is complete; the item below records the same test run
+  through the Rust launcher in phase 3. Launches of one account share a
+  window station. No Windows supervised harness or service exists or is
   admitted, and the prototype cannot issue a host acceptance receipt.
 
 - The supervisor reaches the operating system through a
