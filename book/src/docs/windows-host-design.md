@@ -202,10 +202,12 @@ observed policy failures are required.
 
 A token with no network capability is the demonstrated equivalent so far: the
 prototype's launches could not reach loopback, the local network, a public
-address or the resolver. What happens when the firewall service or its policy
-is lost is untested. The prototype has a
-[test for it](#network-policy-rounds), which needs the owner in an elevated
-session and has run only without changing anything.
+address or the resolver. The owner ran the
+[network policy loss test](#network-policy-run-2026-11-09) with every
+firewall profile disabled, and the refusal held. What happens when the
+firewall service itself is stopped is untested: the owner did not authorize
+that condition. The test is described under
+[network policy rounds](#network-policy-rounds).
 
 The reviewer harness and candidate commands require distinct package identities
 and separate jobs. Every candidate execution route (shell, file tool, code mode,
@@ -624,8 +626,9 @@ What each step changes on the host:
 | 3 | A run directory under that profile, AppContainer profiles, and one window station with a desktop per launch | The role run deletes the profiles and closes the station; step 5 removes the directory with the profile |
 
 No step installs a service or a firewall rule, changes WSL or reads a real
-credential. A passing run closes the registry finding. It does not finish phase
-2: behavior when network policy is lost needs the test below.
+credential. A passing run closes the registry finding and nothing more. The
+loss of network policy is a separate test, described below and run by the owner
+on 2026-11-09 (see the [Network policy run](#network-policy-run-2026-11-09)).
 
 ### Network policy rounds
 
