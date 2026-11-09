@@ -5,7 +5,10 @@ unattended execution**. Task `7011c55f-652e-47d3-a409-7d46420c7eb6` activates a
 native Windows replacement for the abandoned WSL host approach. Its first
 phase, task `a9126e52-654c-4b26-8a7d-7748261d2c4a`, delivers this design and the
 containment prototype. Task `3787e738-d381-4e4f-96b0-75f7afe22155` prepares
-phase 2. This chapter does not claim that Windows services or a
+phase 2. Task `37788fa5-da1c-4a76-80ed-c893d8ae74f3` is phase 3: the
+[host-runtime interface and a Windows launcher](#host-runtime-interface-and-windows-backend)
+that reuses the prototype's boundary. Its acceptance run under a role account
+has not been done. This chapter does not claim that Windows services or a
 production Windows sandbox are implemented. The
 [current implementation](implementation-status.md) remains authoritative. The
 Linux backend remains supported.
@@ -270,6 +273,11 @@ checkpoints and review orchestration in the existing platform-neutral
 records, not shell command strings. Linux retains its existing implementation
 and acceptance suite while Windows adds a separate backend.
 
+The interface and both backends now exist; see
+[Host-runtime interface and Windows backend](#host-runtime-interface-and-windows-backend)
+for what was built and what was demonstrated. The rest of this section is the
+design they answer to.
+
 Persist start intent, exact executable/source, coordinator attempt/generation,
 package SID and job/runner identity before launch. Serialize writers and use
 protected atomic replacement with flush. A restart observes the saved operation;
@@ -288,6 +296,159 @@ without logon, logoff, stop, preshutdown/reboot, forced service/child crashes,
 network loss and partially completed updates. These are machine acceptance tests,
 not unit-test claims.
 
+## Host-runtime interface and Windows backend
+
+Task `37788fa5-da1c-4a76-80ed-c893d8ae74f3` built these. Everything in this
+section is **implemented**; what a run has **demonstrated** is under
+[Windows backend development runs](#windows-backend-development-runs-2026-11-09).
+
+### The interface
+
+`crates/supervisor/src/host_runtime.rs` defines `HostRuntime`. The live loop
+reaches the operating system only through it, by `run_loop::Driver::host`.
+
+| Operation | What it does | What it returns |
+| --- | --- | --- |
+| `prepare` | Makes the launch's source tree and run directory | `StartIntent`: boot id and, where the host has them, source, executable, container and job identity |
+| `start` | Starts the launch inside the boundary, or fails | `LaunchIdentity`: pid and start time |
+| `observe` | Looks whether the launch ended | `Observation`: running, or exited with a code |
+| `request_stop` | Asks the launch to end by itself | Nothing |
+| `terminate` | Ends the launch and everything it started | Nothing |
+| `recover` | Judges a saved launch record without starting anything | `Recovery`: may be running, or ended |
+| `cleanup` | Removes the launch's tree and run directory | Nothing |
+
+The loop writes the `StartIntent` into the launch record before the start and
+adds the `LaunchIdentity` after it. A failure to look is "running", and
+"ended" needs evidence: a lost observer proves nothing.
+
+`run_loop::Driver` keeps selection, admission, leases, quiet hours, cost,
+checkpoints and review orchestration. The reviewer side
+(`run_loop::live_review`) still runs its launches itself; putting it behind
+the interface belongs to phase 5.
+
+### The Linux backend
+
+`host_runtime::linux::LinuxHost` holds what `run_loop/live.rs` did before:
+the mirror fetch and clone as the role account, `prepare`, the role's
+credential copy, `launch-root` in its own process group, SIGTERM and SIGKILL
+to that group, `/proc` identity and symlink-free removal. `launch-root` still
+starts the candidate-push helper and the reaper. The code moved; it did not
+change. A Linux launch record is written as before: the new optional fields
+are left out when a backend does not set them.
+
+A host with no backend gets `host_runtime::Refusing`. It prepares and starts
+nothing, and it never calls a recorded launch ended.
+
+### The Windows backend
+
+`host_runtime::windows` is the prototype's launcher in Rust, one module per
+layer of the [launch boundary](#launch-boundary).
+
+| Module | Layer |
+| --- | --- |
+| `profile` | A disposable AppContainer profile per launch and its capability SIDs. An existing profile is never adopted |
+| `job` | An unnamed Job Object: kill on close, no breakaway, process and memory limits, every user-interface restriction, no error dialogs |
+| `desktop` | The logon session's window station, made by the launcher, and a private desktop per launch |
+| `process` | Creation with the job list, the security capabilities, the handle list and, for a less-privileged token, the all-application-packages opt-out; an exact environment block; suspended start, read-back, resume |
+| `token` | The read-back: AppContainer flag, package SID and `WIN://NOALLAPPPKG` |
+| `reader` | The handle-based reader, and directory creation with a complete access list |
+| `launcher` | One launcher: its station and every launch it holds |
+| `journal`, `recovery` | The durable launch record and the judgement of a saved one |
+| `runner` | The launcher served to a driver as typed requests |
+
+`WindowsHost` implements `HostRuntime` over one launcher. What a launch runs
+comes from a `Planner` the caller supplies: no provider harness is supported
+on Windows, and nothing in the crate builds a harness launch.
+
+It differs from the prototype in four ways, each stricter or equal.
+
+- A window station the launcher did not make is **refused**. The prototype
+  opened it and reported a failed row.
+- A launch's control and working directories are **created with a complete,
+  protected access list**: the launcher's account, the system, administrators
+  and the launch's package. The prototype added an entry to what the parent
+  directory granted. The working directory carries an inherited low
+  integrity label.
+- A launch's two directories are created by the launcher, never adopted.
+- `request_stop` writes a `stop` file in the control directory, which the
+  launch can read and cannot change. Windows has no signal to send. The probe
+  fixture reads that file; a harness would have to.
+
+The launcher **does not switch accounts**. A launch runs as the account the
+launcher runs as. That account must be a dedicated role account, and the
+report records which account it was.
+
+### The runner and its journal
+
+`agentc-supervisor windows-runner --state-dir DIR` is a hidden subcommand. It
+reads one JSON request per line and answers each with one line. A request
+names an operation and typed arguments; none is a command line for a shell.
+
+| Request | Effect |
+| --- | --- |
+| `identity` | The runner's account and the owner identity of its jobs |
+| `prepare` | Profile, both directories, desktop; a journal entry |
+| `hold_file` | Opens a file with an inheritable handle the runner keeps |
+| `start` | Starts a process; only its log and the listed held handles are inherited |
+| `observe`, `request_stop`, `terminate` | As in the interface |
+| `watch`, `watched_ended` | Watches a process the launch reported, if Windows says it is alive inside the launch's job |
+| `read` | The handle-based reader |
+| `cleanup` | Ends the launch and deletes its desktop and profile |
+| `recover`, `reclaim` | Judges journaled launches; removes what an ended one left |
+
+The runner's job handles are the only ones. When its input ends it exits, the
+handles close and Windows ends every launch.
+
+Before a start, the runner writes the launch's entry (launch, profile,
+package SID, job owner, executable, and the source, attempt and generation
+the driver gave), flushes it and renames it over the old one. After the
+start it adds the pid and creation time the same way.
+
+A restarted runner **never starts a journaled launch**: `prepare` refuses an
+id that has an entry, and `start` needs a `prepare` by the same run. It
+judges the entry instead. A Windows process is identified for good by its
+pid and creation time, and the job owner is recorded as
+`runner:<pid>:<creation time>`. A launch is **ended** only when Windows says
+both that the owner is gone and that the root process is gone. If Windows
+will not answer, or the entry cannot be read, the launch may still be
+running and keeps what it holds. An unreadable entry is reported by name.
+
+### Driving the probe through the launcher
+
+`windows-containment-probe.py --launcher PATH` starts the runner from
+`agentc-supervisor.exe` at `PATH` and makes every launch through it
+(`windows-probe-runner.py`). The driver keeps the canaries, the listeners,
+the broker stub and the accepted value of every row, so a report is judged
+exactly as the prototype's. With `--owner-plant`, the owner's step stages the
+launcher beside the probe and adds `--launcher` to the role account's
+command. The report records the launcher's path and SHA-256, the account it
+ran as and the owner identity of its jobs. Without `--launcher` the prototype
+launcher runs, as before.
+
+### Tests
+
+- `cargo test -p agentc-supervisor` on Windows runs the unit tests of every
+  module and two integration tests, `windows_runner` and `windows_host`.
+  Where another program made the session's window station, as on an
+  interactive desktop, those two check the refusal and nothing else.
+- The portable tests in `windows-containment-probe-test.py` drive the
+  driver's side of the runner protocol against a stand-in runner.
+- The workspace builds on native Windows. Unix-only code is behind
+  `cfg(unix)` or `cfg(target_os = "linux")`: the relay's socket half, the
+  candidate-push helper's command line, and tests that assert Unix paths,
+  ownership or `/proc`.
+
+Two things came up on the way and are recorded here.
+
+- The service's backup wrote files it then flushed through a read-only
+  handle, moved a snapshot with a rename that replaces an empty directory on
+  Windows, and took a Windows lock violation for an internal error. All three
+  are fixed for Windows; Linux is unchanged.
+- The kill switch treats a path it cannot check as set. On Windows a path
+  below a plain file is reported as not found, the same as an absent switch,
+  so that one unreadable case is not told apart there. No Windows supervisor
+  loop exists to be affected; phase 4 has to settle it.
+
 ## Delivery phases and gates
 
 Each phase is an independently reviewed task. A phase starts only when the gate
@@ -298,7 +459,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 1 | This design and the containment prototype | None | Delivered by task `a9126e52`; the prototype gate is **blocked** |
 | 2 preparation | A role-account mode for the prototype and the owner runbook | Owner decision `df37b339` | Delivered by task `3787e738` |
 | 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test is written (task `96d4927e`) and exercised only as a dry run that changes nothing; the owner's run is not started |
-| 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Blocked |
+| 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. **The acceptance run through the new launcher under a role account, with the two network rounds, is not started**, so the phase is not complete |
 | 4 | SCM services, lifecycle and recovery acceptance | Phase 3 | Blocked |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Blocked |
 | 6 | Egress and publication brokers | Phase 3 | Blocked |
@@ -747,6 +908,46 @@ played every part.
 Nothing here shows what a launch can reach when the firewall policy is lost;
 only the [runbook](#owner-runbook-for-the-network-policy-test) can.
 
+### Windows backend development runs, 2026-11-09
+
+These runs exercised the [Windows backend](#the-windows-backend) of task
+`37788fa5` at source `7c2b0f2cd6237f569e9a3298af1417eeb6603cc2` on MiniAir,
+not elevated, as the owner's account. None is a registered producer and none
+has a coordinator artifact. They show that the launcher works; they are not
+acceptance evidence and they prove nothing about a role account.
+
+- **In the owner's desktop session the launcher refuses.** Another program in
+  that logon session had already made the session's window station.
+  `prepare` failed with the typed refusal, no profile, directory or journal
+  entry was left, and a start was refused. The prototype launcher opened that
+  station and went on; the backend does not.
+- **In a fresh logon session of the same account the whole path runs.** The
+  integration tests started `cmd.exe` under a less-privileged token with
+  `registryRead` only. The exit code came back. The process saw exactly the
+  three variables it was given plus four the interpreter adds; Windows itself
+  pointed `LOCALAPPDATA`, `TEMP` and `TMP` at the package's own folder. A
+  write below the working directory succeeded and was read back by handle;
+  writes to the control directory and to a host directory failed. A process
+  that never exits was reported running, was a member of its job, and was
+  gone after the job was terminated. The journal recorded `prepared`,
+  `started` and `ended`, and cleanup deleted the profile.
+- **The matrix through the launcher matches the prototype's single-account
+  result.** The probe driver ran with `--launcher` in a fresh logon session:
+  625 rows. For the less-privileged boundary 279 mandatory rows passed and 3
+  failed, the three `host.registry_environment_open` rows that every
+  same-account run fails. For the ordinary AppContainer 276 passed and 6
+  failed: those three and its three Task Scheduler rows. The contained
+  `cargo test` and `cargo build`, the handle rows, the orphan rows and the
+  direct network rows all passed. No row failed for a reason other than the
+  known two.
+- **A same-account dry run of the owner's step with `--launcher`** staged the
+  launcher, passed it to the role command and failed closed on the window
+  station, as it must in the desktop session.
+
+The fresh logon session was made with `CreateProcessWithLogonW` and
+`LOGON_NETCREDENTIALS_ONLY`, which keeps the caller's identity and needs no
+real credential. It is a development aid, not part of the procedure.
+
 ### Disposition
 
 **NO-GO for Windows supervised execution.** A launch running as the owner can
@@ -754,13 +955,24 @@ read the owner's registry, so the single-account gate stays blocked. A launch
 running as a separate role account cannot: the role-account run passed the
 gate for the proposed boundary, with one temporary standard account.
 
-That does not start phase 3. Phase 2 also needs behavior when network policy
-is lost. The test for it is written and has run only as a dry run that changed
-nothing; the owner's run is the next step. Until phase 2 is complete, no
-runtime, service, broker or installer work starts.
+Phase 3 was started on the owner's go-ahead of 2026-11-09. Its interface and
+both backends are written, and the Windows backend reproduces the prototype's
+single-account result. Phase 3 is **not complete**: the launcher has not run
+under a role account, and its two network rounds have not run. Until that run
+passes, no service, broker or installer work starts.
 
 Still unverified, and never to be read as passed:
 
+- the Rust launcher under a role account: every run of it so far was the
+  owner's account, where the owner-registry rows fail as they do for the
+  prototype;
+- the Rust launcher's network rounds, baseline and with the firewall profiles
+  disabled;
+- a mismatch between the boundary asked for and the one Windows applied: the
+  refusal is unit-tested on reported facts, and no real launch has produced a
+  mismatch;
+- a harness that honors the stop marker: `request_stop` only writes it, and
+  the fixture is the one program that reads it;
 - role service identities: the role account was a temporary standard account
   started with `runas` in the owner's interactive session, not a service
   account;

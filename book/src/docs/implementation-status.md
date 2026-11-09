@@ -27,6 +27,21 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   exists or is
   admitted, and the prototype cannot issue a host acceptance receipt.
 
+- The supervisor reaches the operating system through a
+  [host-runtime interface](windows-host-design.md#host-runtime-interface-and-windows-backend)
+  (`prepare`, `start`, `observe`, `request_stop`, `terminate`, `recover`,
+  `cleanup`). The Linux backend is the previous implementation, moved behind
+  it unchanged. A Windows backend reproduces the prototype's launch boundary
+  in Rust and is served to a driver by the hidden `agentc-supervisor
+  windows-runner` subcommand, which journals each launch before it starts and
+  never starts a journaled launch again. The workspace builds on native
+  Windows. On the one evaluated host the containment matrix run through that
+  backend as the owner's account matched the prototype's single-account
+  result. **It has not run under a role account, and its network rounds have
+  not run**, so phase 3 of the Windows host is not complete. The backend does
+  not switch accounts, supports no provider harness, and is not wired to a
+  Windows supervisor loop or service; none exists.
+
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
   isolated tmpfs; the host harness directory stays hidden. Invalid paths,
