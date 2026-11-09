@@ -43,6 +43,7 @@ def load(name):
 
 
 native = load("windows-probe-native.py")
+owner = load("windows-probe-owner.py")
 
 # A custom capability: the tool directory's access list names it once, so tools
 # need no access entry per launch.
@@ -123,12 +124,21 @@ PEER_ATTACKS = (
     ("broker_connect", "ipc", DENIED),
 )
 INFORMATIONAL = ("path.junction_create", "path.symlink_create", "path.planted", "desktop.clipboard_formats")
+# Role-account mode only: attacks on an owner who is a different account from the launch.
+OWNER_ATTACKS = (
+    ("owner.file_read", "file", DENIED), ("owner.file_write", "file", DENIED),
+    ("owner.dir_list", "file", DENIED), ("owner.credential_read", "credential", DENIED),
+    ("owner.process_open_vm", "process", DENIED), ("owner.process_open_query", "process", DENIED),
+    ("owner.pipe_connect", "ipc", DENIED),
+    ("owner.event_open_local", "ipc", DENIED), ("owner.event_open_global", "ipc", DENIED),
+)
 
 
 # The positive controls that make each denial evidence, by check-name prefix.
 # A denial counts only when the same operation is shown to work where it is
 # authorized: with the host token, or on the launch's own resource.
 CONTROLS = {
+    "owner.": ("control.owner.",),
     "host.file_": ("control.canary_read", "own.write_read"),
     "host.dir_": ("control.canary_read", "own.write_read"),
     "host.profile_list": ("control.canary_read", "own.write_read"),
@@ -241,6 +251,16 @@ def alias_refusals(name):
     return ("error:5", "error:65") if name == "unc_share" else DENIED
 
 
+def owner_checks():
+    """Role-account mode: the owner's targets must be denied to a launch of another account.
+
+    The launch identity's own registry stays readable by design, so that row
+    only records what was seen.
+    """
+    attacks = [Check(key, "worker_to_owner", resource, expected) for key, resource, expected in OWNER_ATTACKS]
+    return attacks + [Check("identity.registry_environment_open", "own", "info", (), False)]
+
+
 def launch_checks(role, peers, facts):
     """Every observation one launch must produce, with its accepted values."""
     checks = [Check(key, "own", "control", ("ok",)) for key in OWN_CONTROLS]
@@ -249,6 +269,7 @@ def launch_checks(role, peers, facts):
     checks += [Check(f"host.alias.{name}", "worker_to_host", "path", alias_refusals(name))
                for name in facts["aliases"]]
     checks += limit_checks(facts["limits"]) + network_checks(facts) + peer_checks(role, peers)
+    checks += owner_checks() if facts.get("owner_rows") else []
     return checks + [Check(key, "own", "info", (), False) for key in INFORMATIONAL]
 
 
@@ -325,6 +346,13 @@ def summary(variant_rows, shared_rows):
             "unverified": list(UNVERIFIED)}
 
 
+def resummarize(rows):
+    """Recompute the verdicts from report rows, for a step that adds rows after the run."""
+    shared = [row for row in rows if row.get("variant", "-") == "-"]
+    variants = {name: [row for row in rows if row.get("variant") == name] for name in VARIANTS}
+    return summary(variants, shared)
+
+
 # --- host-side setup -------------------------------------------------------
 
 
@@ -336,7 +364,9 @@ class Host:
         self.windows = Path(os.environ.get("SystemRoot", "C:/Windows"))
         self.root = Path(tempfile.mkdtemp(prefix="agentc-windows-probe-"))
         self.identifier = uuid.uuid4().hex[:12]
-        self.owner_sid = native.current_user_sid(api)
+        self.identity_sid = native.current_user_sid(api)
+        self.manifest = owner.load_manifest(arguments.owner_manifest) if arguments.owner_manifest else None
+        self.owner_sid = self.manifest["owner_sid"] if self.manifest else self.identity_sid
         self.session = native.session_id(api)
         self.local_appdata = Path(os.environ["LOCALAPPDATA"])
         self.private, self.logs = self.folder("host"), self.folder("logs")
@@ -373,6 +403,12 @@ def newest(directory, required):
 def program_files_x86():
     """The 32-bit Program Files root; a cleared job environment may not define the variable."""
     return Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
+
+
+def use_manifest_tools(host):
+    """Role-account mode: use the tools the owner staged, which this account can read."""
+    for name in ("toolchain", "msvc", "windows_kit"):
+        setattr(host.arguments, name, Path(host.manifest[name]))
 
 
 def locate_toolchain(arguments):
@@ -470,6 +506,10 @@ def plant_canaries(host):
     host.shared = host.folder("all-packages") / "note.txt"
     host.shared.write_bytes(b"granted to all application packages only")
     native.grant(host.windows, host.shared.parent, ALL_APPLICATION_PACKAGES, "RX", recursive=True)
+    if host.manifest:
+        # The owner planted the registry canary in its own hive.
+        host.registry_path = host.manifest["registry_path"]
+        return
     host.registry_path = f"Software\\AgentcProbe-{host.identifier}"
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, host.registry_path) as key:
         winreg.SetValueEx(key, "canary", 0, winreg.REG_SZ, CANARY.decode())
@@ -616,9 +656,20 @@ def object_controls(host):
     }
 
 
+def owner_rows(host):
+    """Role-account mode: the owner's recorded controls and the identity separation itself."""
+    return owner.control_rows(sys.modules[__name__], host.manifest) + [
+        owner.identity_row(sys.modules[__name__], host.owner_sid, host.identity_sid)]
+
+
 def host_controls(host):
     """Show each attacked operation succeeds when authorized, so a denial is evidence."""
-    rows = [host_row(key, "control", attempt(action), "host token") for key, action in object_controls(host).items()]
+    controls = object_controls(host)
+    if host.manifest:
+        # Only the owner can read its registry canary; its manifest carries that control.
+        del controls["control.registry_read"]
+    rows = [host_row(key, "control", attempt(action), "host token") for key, action in controls.items()]
+    rows += owner_rows(host) if host.manifest else []
     for name, listener in host.listeners.items():
         rows.append(host_row(f"control.listener.{name}", "control", reaches(listener), "host token"))
         listener.received.clear()
@@ -720,9 +771,9 @@ class Contained:
         self.sid = self.profile.sid_text
         self.control, self.work = host.folder(variant, name, "control"), host.folder(variant, name, "work")
         self.grant_directories()
-        self.desktop = native.Desktop(host.api, host.owner_sid, self.sid)
+        self.desktop = native.Desktop(host.api, host.identity_sid, self.sid)
         self.broker = native.Broker(host.api, f"agentc-probe-{host.identifier}-{variant}-{name}-broker",
-                                    host.owner_sid, self.sid)
+                                    host.identity_sid, self.sid)
         self.broker.start()
         self.launch = native.Launch(host.api, self.profile, VARIANTS[variant], self.desktop.name, limits)
         self.runs, self.observed, self.orphan, self.ready, self.disposal = 0, {}, None, False, None
@@ -906,7 +957,8 @@ def host_targets(host, contained, peers):
     owner = host.owner_sid
     return {
         "package_sid": contained.sid, "host_dir": host.private, "host_file": host.canary,
-        "host_credential": host.credential, "owner_profile": Path.home(),
+        "host_credential": host.credential,
+        "owner_profile": host.manifest["profile"] if host.manifest else Path.home(),
         "tool_file": host.rust / "bin/rustc.exe", "all_packages_file": host.shared,
         "host_pid": os.getpid(),
         "process_limit": FIXTURE_LIMITS.processes, "memory_limit_mb": FIXTURE_LIMITS.process_memory_mb,
@@ -922,6 +974,7 @@ def spec_lines(host, contained, peers, aliases):
     values = host_targets(host, contained, peers)
     values.update({f"alias.{name}": alias for name, alias in aliases.items()})
     values.update(network_targets(host))
+    values.update(owner.spec_values(host.manifest, host.identity_sid) if host.manifest else {})
     for peer in peers:
         values.update(peer_targets(host, peer))
     return "".join(f"{key}={value}\n" for key, value in values.items())
@@ -935,7 +988,7 @@ def launch_facts(host, contained, aliases):
             "station": contained.desktop.name, "environment": environment, "aliases": aliases,
             "tcp": [key.removeprefix("tcp.") for key in targets if key.startswith("tcp.")],
             "udp": [key.removeprefix("udp.") for key in targets if key.startswith("udp.")],
-            "dns": "dns_name" in targets, "limits": FIXTURE_LIMITS}
+            "dns": "dns_name" in targets, "limits": FIXTURE_LIMITS, "owner_rows": host.manifest is not None}
 
 
 def start_fixtures(host, variant, executable):
@@ -1104,6 +1157,8 @@ def windows_build():
 
 def prepare(host):
     """Create every host-side resource the launches will attack."""
+    if host.manifest:
+        use_manifest_tools(host)
     prepare_tools(host)
     plant_canaries(host)
     host_objects(host)
@@ -1135,6 +1190,8 @@ def cleanup(host):
         if handle:
             host.api.CloseHandle(handle)
     shutil.rmtree(host.root / "tools", ignore_errors=True)
+    if host.manifest:
+        return []
     return [host_row("cleanup.registry_canary_removed", "cleanup", remove_registry_canary(host),
                      "disposable key", False)]
 
@@ -1163,6 +1220,7 @@ def report(host, shared, variants):
     boundaries = {name: {"lpac": boundary.lpac, "capabilities": list(boundary.capabilities)}
                   for name, boundary in VARIANTS.items()}
     return {"schema_version": 2, "recorded_at_unix": time.time(),
+            "mode": "role-account" if host.manifest else "single-account",
             "scope": "disposable prototype; no service, role identity, provider harness or host admission",
             "host": machine, "work_directory": str(host.root), "tools": getattr(host, "tools", {}),
             "source_sha256": source_digests(), "notes": host.notes, "boundaries": boundaries,
@@ -1177,15 +1235,27 @@ def arguments():
     parser.add_argument("--msvc", type=Path, help="MSVC tools root, the directory holding bin and lib")
     parser.add_argument("--windows-kit", type=Path, help="Windows SDK Lib version directory")
     parser.add_argument("--external-name", default="example.com", help="public name for the egress probes")
+    parser.add_argument("--owner-plant", action="store_true",
+                        help="owner's step of role-account mode: plant canaries, stage tools, wait, report")
+    parser.add_argument("--staging", type=Path, help="new directory another account can read (with --owner-plant)")
+    parser.add_argument("--role-account", help="account granted access to the staging directory")
+    parser.add_argument("--role-wait", type=int, default=3600, help="seconds to wait for the role account's run")
+    parser.add_argument("--same-account-dry-run", action="store_true",
+                        help="start the role run as this account; exercises the steps, proves no separation")
+    parser.add_argument("--owner-manifest", type=Path, help="role account's step: the owner's manifest")
     parsed = parser.parse_args()
     if sys.platform != "win32" or not parsed.output.is_absolute():
         parser.error("requires native Windows and an absolute, new output path")
+    if parsed.owner_plant and (parsed.staging is None or not parsed.staging.is_absolute() or parsed.owner_manifest):
+        parser.error("--owner-plant needs an absolute, new --staging directory and no --owner-manifest")
     return parsed
 
 
 def main():
     """Run the prototype and write its report; the exit status is zero only when the gate passes."""
     parsed = arguments()
+    if parsed.owner_plant:
+        return owner.run(sys.modules[__name__], parsed)
     # Exclusive creation before any side effect: existing evidence is never overwritten.
     with parsed.output.open("x", encoding="utf-8") as output:
         host = Host(native.Api(), parsed)
@@ -1193,6 +1263,9 @@ def main():
         record = report(host, shared, variants)
         json.dump(record, output, indent=2)
         output.write("\n")
+    if host.manifest:
+        # Tell the waiting owner step that the report is complete.
+        (parsed.output.parent / "done").write_text("done", encoding="ascii")
     print(json.dumps({key: record[key] for key in ("variants", "prototype_gate", "host_admitted")}, indent=2))
     return 0 if record["prototype_gate"] == "pass" else 1
 

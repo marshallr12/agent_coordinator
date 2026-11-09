@@ -6,6 +6,7 @@ deploy-script job runs this file. The tests at the end need native Windows and
 real NTFS objects; they are skipped elsewhere.
 """
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -16,8 +17,11 @@ import unittest
 
 spec = importlib.util.spec_from_file_location("probe", Path(__file__).with_name("windows-containment-probe.py"))
 probe = importlib.util.module_from_spec(spec)
+# The driver hands itself to its role-account module, so it must be importable by name.
+sys.modules[spec.name] = probe
 spec.loader.exec_module(probe)
 native = probe.native
+owner = probe.owner
 
 PEERS = {"implementer": [("impl-2", "implementer"), ("rev-1", "reviewer")],
          "reviewer": [("impl-1", "implementer"), ("impl-2", "implementer")]}
@@ -189,6 +193,87 @@ class MatrixTests(unittest.TestCase):
     def test_the_candidate_is_one_of_the_evaluated_boundaries(self):
         self.assertIn(probe.CANDIDATE, probe.VARIANTS)
         self.assertTrue(probe.VARIANTS[probe.CANDIDATE].lpac)
+
+
+MANIFEST = {"schema_version": 1, "owner_sid": "S-1-5-21-1-2-3-1001", "profile": "C:/Users/owner",
+            "directory": "C:/owner/canaries", "file": "C:/owner/canaries/canary.txt",
+            "credential": "C:/owner/canaries/credential-standin.txt", "registry_path": "Software/AgentcProbe-x",
+            "pid": 4242, "pipe": "//./pipe/agentc-probe-x-owner", "event": "agentc-probe-x-owner",
+            "toolchain": "C:/staging/toolchain", "msvc": "C:/msvc", "windows_kit": "C:/kit",
+            "controls": {name: True for name in owner.OWNER_CONTROLS}}
+ROLE_SID = "S-1-5-21-1-2-3-1002"
+
+
+class RoleAccountTests(unittest.TestCase):
+    def role_checks(self):
+        return probe.launch_checks("implementer", PEERS["implementer"], {**facts(), "owner_rows": True})
+
+    def test_owner_rows_exist_only_in_role_account_mode(self):
+        single = {check.key for check in probe.launch_checks("implementer", PEERS["implementer"], facts())}
+        role = {check.key: check for check in self.role_checks()}
+        added = set(role) - single
+        self.assertEqual(added, {key for key, _, _ in probe.OWNER_ATTACKS} | {"identity.registry_environment_open"})
+        for key, _, _ in probe.OWNER_ATTACKS:
+            self.assertEqual((role[key].scope, role[key].mandatory, role[key].expected),
+                             ("worker_to_owner", True, probe.DENIED))
+        self.assertFalse(role["identity.registry_environment_open"].mandatory)
+
+    def test_every_owner_attack_names_an_owner_control(self):
+        for key, _, _ in probe.OWNER_ATTACKS:
+            self.assertEqual(probe.controls_for(key), ("control.owner.",))
+        produced = {row["check"] for row in owner.control_rows(probe, MANIFEST)}
+        self.assertTrue(any(check.startswith("control.owner.") for check in produced))
+        self.assertIn("control.registry_read", produced)
+
+    def test_a_failed_or_missing_owner_control_blocks(self):
+        self.assertEqual({row["status"] for row in owner.control_rows(probe, MANIFEST)}, {"pass"})
+        for controls in ({**MANIFEST["controls"], "pipe_connect": False},
+                         {name: True for name in owner.OWNER_CONTROLS if name != "file_read"},
+                         {**MANIFEST["controls"], "event_open": "true"}):
+            rows = owner.control_rows(probe, {**MANIFEST, "controls": controls})
+            self.assertEqual(probe.verdict(rows)["gate"], "blocked")
+
+    def test_a_run_as_the_owner_is_plumbing_evidence_and_blocks(self):
+        same = owner.identity_row(probe, MANIFEST["owner_sid"], MANIFEST["owner_sid"])
+        self.assertEqual((same["status"], same["mandatory"]), ("fail", True))
+        self.assertIn("plumbing evidence only", same["observed"])
+        self.assertEqual(owner.identity_row(probe, MANIFEST["owner_sid"], ROLE_SID)["status"], "pass")
+
+    def test_the_owner_step_can_block_a_passing_role_run(self):
+        rows = all_passing_rows() + probe.tag([probe.host_row("control.canary_read", "control", True, "ok")], "-", "-")
+        both = {"appcontainer": rows, "lpac": rows}
+        passing = [dict(row, variant=name) for name, variant_rows in both.items() for row in variant_rows]
+        self.assertEqual(probe.resummarize(passing)["prototype_gate"], "pass")
+        tampered = probe.tag([probe.host_row("owner.integrity.files_unchanged", "file", False, "changed")], "-", "-")
+        self.assertEqual(probe.resummarize(passing + tampered)["prototype_gate"], "blocked")
+        self.assertEqual(probe.resummarize(tampered)["prototype_gate"], "blocked")
+
+    def test_the_fixture_spec_names_the_owner_targets_and_the_launch_identity(self):
+        values = owner.spec_values(MANIFEST, ROLE_SID)
+        self.assertEqual(values["owner_file"], MANIFEST["file"])
+        self.assertEqual(values["owner_pid"], 4242)
+        self.assertTrue(values["identity_environment_key"].startswith(ROLE_SID))
+        self.assertTrue(values["identity_environment_key"].endswith("Environment"))
+
+    def test_an_incomplete_or_unknown_manifest_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "manifest.json"
+            target.write_text(json.dumps(MANIFEST), encoding="utf-8")
+            self.assertEqual(owner.load_manifest(target)["owner_sid"], MANIFEST["owner_sid"])
+            broken = ({key: value for key, value in MANIFEST.items() if key != "pipe"},
+                      {**MANIFEST, "schema_version": 2},
+                      {**MANIFEST, "controls": {"invented": True}})
+            for manifest in broken:
+                target.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    owner.load_manifest(target)
+
+    def test_the_role_command_runs_the_staged_interpreter_on_the_staged_probe(self):
+        command = owner.role_command(Path("C:/staging"))
+        self.assertTrue(command[0].endswith("python.exe"))
+        self.assertIn("-I", command)
+        self.assertEqual(Path(command[command.index("--owner-manifest") + 1]).name, "manifest.json")
+        self.assertEqual(Path(command[command.index("--output") + 1]).parent.name, "role")
 
 
 class LaunchTests(unittest.TestCase):
