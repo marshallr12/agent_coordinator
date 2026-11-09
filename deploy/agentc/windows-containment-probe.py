@@ -27,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 from typing import NamedTuple
 import uuid
 
@@ -45,6 +46,7 @@ def load(name):
 native = load("windows-probe-native.py")
 owner = load("windows-probe-owner.py")
 policy = load("windows-probe-policy.py")
+runner = load("windows-probe-runner.py")
 
 # A custom capability: the tool directory's access list names it once, so tools
 # need no access entry per launch.
@@ -374,6 +376,10 @@ class Host:
         self.private, self.logs = self.folder("host"), self.folder("logs")
         self.listeners, self.handles, self.notes, self.contained = {}, [], [], []
         self.external, self.station = None, None
+        # With --launcher, the Rust runner makes every launch instead of the prototype launcher.
+        launcher = getattr(arguments, "launcher", None)
+        self.runner = runner.Client(launcher, self.folder("runner-state"), self.logs / "runner.txt") \
+            if launcher else None
         # The fixture each variant built, kept for the network rounds after the matrix.
         self.executables = {}
 
@@ -687,10 +693,23 @@ def host_controls(host):
     return rows + reader_self_test(host) + [elevated]
 
 
+def read_validated(host, root, relative, limit=1 << 20):
+    """Read a worker-written file by handle, with the runner's reader when a runner is in use."""
+    client = getattr(host, "runner", None)
+    if client is None:
+        return native.validated_read(host.api, root, relative, limit=limit)
+    try:
+        return client.read(root, relative, limit)
+    except runner.RunnerError as error:
+        if error.refusal == "path_refused":
+            raise native.PathRefused(str(error)) from error
+        raise OSError(str(error)) from error
+
+
 def refused(host, root, relative):
     """Whether the handle-based reader refuses a path."""
     try:
-        native.validated_read(host.api, root, relative)
+        read_validated(host, root, relative)
     except native.PathRefused:
         return True
     return False
@@ -717,7 +736,7 @@ def race_outcomes(host, area, seconds):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
-            data = native.validated_read(host.api, area, f"flip\\{host.canary.name}")
+            data = read_validated(host, area, f"flip\\{host.canary.name}")
             outcomes["genuine" if data == b"genuine" else "leaked"] += 1
         except native.PathRefused as refusal:
             outcomes["refused_link" if "outside the launch root" in str(refusal) else "absent"] += 1
@@ -760,7 +779,7 @@ def reader_self_test(host):
     os.link(area / "plain.txt", area / "second-name.txt")
     native.run_tool(host.windows, "cmd.exe", ["/d", "/c", "mklink", "/J", str(area / "redirect"), str(host.private)])
     behind = f"redirect\\{host.canary.name}"
-    accepted = attempt(lambda: native.validated_read(host.api, area, "single.txt") == b"single")
+    accepted = attempt(lambda: read_validated(host, area, "single.txt") == b"single")
     return [rename_race_row(host, area),
             host_row("hostpath.self.plain_accepted", "path", accepted, "single-link file"),
             host_row("hostpath.self.hardlink_refused", "path", refused(host, area, "plain.txt"), "two names"),
@@ -777,17 +796,37 @@ class Contained:
 
     def __init__(self, host, variant, name, role, limits):
         self.host, self.variant, self.name, self.role = host, variant, name, role
-        self.profile = native.Profile(host.api, f"agentc.probe.{host.identifier}.{variant}.{name}")
+        profile = f"agentc.probe.{host.identifier}.{variant}.{name}"
+        if host.runner:
+            self.prepare_with_runner(profile, limits)
+        else:
+            self.prepare_with_prototype(profile, limits)
+        self.broker = native.Broker(host.api, f"agentc-probe-{host.identifier}-{variant}-{name}-broker",
+                                    host.identity_sid, self.sid)
+        self.broker.start()
+        self.runs, self.observed, self.orphan, self.ready, self.disposal = 0, {}, None, False, None
+        host.contained.append(self)
+
+    def prepare_with_prototype(self, profile, limits):
+        """The prototype launcher: this process makes the profile, the grants and the desktop."""
+        host, variant, name = self.host, self.variant, self.name
+        self.profile = native.Profile(host.api, profile)
         self.sid = self.profile.sid_text
         self.control, self.work = host.folder(variant, name, "control"), host.folder(variant, name, "work")
         self.grant_directories()
         self.desktop = native.Desktop(host.api, host.shared_station(), host.identity_sid, self.sid)
-        self.broker = native.Broker(host.api, f"agentc-probe-{host.identifier}-{variant}-{name}-broker",
-                                    host.identity_sid, self.sid)
-        self.broker.start()
-        self.launch = native.Launch(host.api, self.profile, VARIANTS[variant], self.desktop.name, limits)
-        self.runs, self.observed, self.orphan, self.ready, self.disposal = 0, {}, None, False, None
-        host.contained.append(self)
+        self.desktop_name = self.desktop.name
+        self.launch = native.Launch(host.api, self.profile, VARIANTS[variant], self.desktop_name, limits)
+
+    def prepare_with_runner(self, profile, limits):
+        """The Rust launcher makes the profile, both directories with their access lists and the desktop."""
+        base = self.host.folder(self.variant, self.name)
+        self.control, self.work = base / "control", base / "work"
+        self.launch = runner.Launch(self.host.runner, f"{self.variant}.{self.name}")
+        prepared = self.host.runner.prepare(self.launch.name, profile, VARIANTS[self.variant], limits,
+                                            self.control, self.work)
+        self.sid, self.desktop_name = prepared["package_sid"], prepared["desktop"]
+        (self.work / "tmp").mkdir()
 
     def grant_directories(self):
         """The launch may read its control directory and modify only its working directory."""
@@ -816,9 +855,15 @@ class Contained:
             self.broker.stop()
             quiescent = self.launch.terminate()
             self.launch.close()
-            self.desktop.close()
-            self.disposal = (quiescent, self.profile.delete())
+            self.disposal = (quiescent, self.delete_profile())
         return self.disposal
+
+    def delete_profile(self):
+        """Close the desktop and delete the profile; zero when the profile is gone."""
+        if self.host.runner:
+            return 0 if self.launch.cleanup() else 1
+        self.desktop.close()
+        return self.profile.delete()
 
 
 def tag(rows, variant, launch):
@@ -837,7 +882,8 @@ def fixture_source():
 def source_digests():
     """Digests of every probe source file, so a report names the exact code that ran."""
     files = [HERE / "windows-containment-probe.py", HERE / "windows-probe-native.py",
-             HERE / "windows-probe-owner.py", HERE / "windows-probe-policy.py"]
+             HERE / "windows-probe-owner.py", HERE / "windows-probe-policy.py",
+             HERE / "windows-probe-runner.py"]
     files += sorted(path for path in fixture_source().rglob("*")
                     if path.is_file() and "target" not in path.parts)
     return {str(path.relative_to(HERE)).replace("\\", "/"): sha256(path) for path in files}
@@ -866,7 +912,7 @@ def export_fixture(host, builder, environment):
 def stage_fixture(host, variant, builder, rows):
     """Copy the worker-built executable, read by handle, into a host-owned read-only directory."""
     try:
-        data = native.validated_read(host.api, builder.work, "fixture-export.exe", limit=64 << 20)
+        data = read_validated(host, builder.work, "fixture-export.exe", limit=64 << 20)
     except (native.PathRefused, OSError) as error:
         rows.append(host_row("workload.fixture_staged", "workload", False, str(error)))
         return None
@@ -918,7 +964,7 @@ def wait_for(predicate, seconds):
 def read_worker_file(host, contained, name):
     """A worker-written file read by handle; None while absent or refused."""
     try:
-        return native.validated_read(host.api, contained.work, name)
+        return read_validated(host, contained.work, name)
     except (native.PathRefused, OSError):
         return None
 
@@ -996,7 +1042,7 @@ def launch_facts(host, contained, aliases):
     targets = network_targets(host)
     environment = environment_values(host.windows, contained.work / "tmp", host.local_appdata)
     return {"package_sid": contained.sid, "lpac": VARIANTS[contained.variant].lpac,
-            "station": contained.desktop.name, "environment": environment, "aliases": aliases,
+            "station": contained.desktop_name, "environment": environment, "aliases": aliases,
             "tcp": [key.removeprefix("tcp.") for key in targets if key.startswith("tcp.")],
             "udp": [key.removeprefix("udp.") for key in targets if key.startswith("udp.")],
             "dns": "dns_name" in targets, "limits": FIXTURE_LIMITS, "owner_rows": host.manifest is not None}
@@ -1080,6 +1126,11 @@ def hold_orphan(host, contained):
     process is alive and a member of this launch's own job.
     """
     pid = number(contained.observed.get("job.orphan_pid", ""))
+    if host.runner:
+        # The runner holds the job, so it answers both questions and keeps the handle.
+        alive = bool(pid) and contained.launch.watch(pid)
+        row = host_row("control.orphan_alive", "control", alive, "descendant running inside the launch's job")
+        return tag([row], contained.variant, contained.name)
     contained.orphan = host.api.OpenProcess(0x00101000, False, pid) if pid else None
     member = native.w.BOOL()
     alive = (bool(contained.orphan) and host.api.WaitForSingleObject(contained.orphan, 0) == 258
@@ -1094,7 +1145,8 @@ def finish(host, contained):
     (contained.control / "stop").write_bytes(b"")
     code = contained.launch.wait(30) if contained.launch.process else None
     rows = [host_row("launch.exit", "control", code == 0, f"exit={code}")] + disposal_rows(contained)
-    reaped = bool(contained.orphan) and host.api.WaitForSingleObject(contained.orphan, 10000) == 0
+    reaped = contained.launch.reaped if host.runner else \
+        bool(contained.orphan) and host.api.WaitForSingleObject(contained.orphan, 10000) == 0
     if contained.orphan:
         host.api.CloseHandle(contained.orphan)
     rows.append(host_row("job.descendants_reaped", "child_escape", reaped, "orphan ended with the job"))
@@ -1124,18 +1176,31 @@ def handle_rows(host, variant, executable):
     """
     probe = Contained(host, variant, "handles", "implementer", FIXTURE_LIMITS)
     environment = environment_values(host.windows, probe.work / "tmp", host.local_appdata)
-    argv = [executable, "read-handle", str(host.held)]
     try:
-        # Both runs share the host's handle, so each starts reading at the beginning.
-        host.api.SetFilePointerEx(host.held, 0, None, 0)
-        passed, _ = probe.run(argv, environment, 30, passed_handles=(host.held,))
-        host.api.SetFilePointerEx(host.held, 0, None, 0)
-        withheld, _ = probe.run(argv, environment, 30)
+        passed, withheld = handle_runs(host, probe, executable, environment)
     finally:
         rows = disposal_rows(probe)
     rows += [host_row("control.listed_handle_readable", "control", passed == 0, f"exit={passed}"),
              host_row("escape.unlisted_handle", "child_escape", withheld in HANDLE_UNUSABLE, f"exit={withheld}")]
     return tag(rows, variant, "handles")
+
+
+def handle_runs(host, probe, executable, environment):
+    """Exit codes of a run that is passed the canary handle and of one that is not."""
+    if host.runner:
+        # The runner opens the canary twice, so each run reads from the beginning.
+        listed, unlisted = probe.launch.hold_file(host.canary), probe.launch.hold_file(host.canary)
+        passed, _ = probe.run([executable, "read-handle", str(listed)], environment, 30,
+                              passed_handles=(listed,))
+        withheld, _ = probe.run([executable, "read-handle", str(unlisted)], environment, 30)
+        return passed, withheld
+    argv = [executable, "read-handle", str(host.held)]
+    # Both runs share the host's handle, so each starts reading at the beginning.
+    host.api.SetFilePointerEx(host.held, 0, None, 0)
+    passed, _ = probe.run(argv, environment, 30, passed_handles=(host.held,))
+    host.api.SetFilePointerEx(host.held, 0, None, 0)
+    withheld, _ = probe.run(argv, environment, 30)
+    return passed, withheld
 
 
 def evaluate(host, variant, aliases):
@@ -1196,6 +1261,8 @@ def cleanup(host):
     """
     for contained in host.contained:
         contained.dispose()
+    if host.runner:
+        host.runner.close()
     if host.station:
         host.station.close()
     for listener in host.listeners.values():
@@ -1223,6 +1290,23 @@ def station_row(station):
     return host_row("desktop.station_made_by_run", "ipc", created, detail)
 
 
+def station_of(host):
+    """The run's window station: the prototype's own, or the one the runner reports having made."""
+    if host.runner:
+        return SimpleNamespace(created=host.runner.station_made)
+    return host.station
+
+
+def launcher_record(host):
+    """Which launcher made the launches, and for the Rust runner exactly which executable and account."""
+    if host.runner is None:
+        return {"kind": "python-prototype"}
+    identity = host.runner.identity
+    return {"kind": "rust-runner", "executable": str(host.runner.executable),
+            "sha256": sha256(host.runner.executable), "account_sid": identity["account_sid"],
+            "job_owner": identity["job_owner"]}
+
+
 def run(host):
     """Execute every variant; returns shared rows and rows per variant."""
     shared, variants = [], {name: [] for name in VARIANTS}
@@ -1238,7 +1322,7 @@ def run(host):
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         shared.append(host_row("setup", "control", False, f"{type(error).__name__}: {error}"))
     finally:
-        shared.append(station_row(host.station))
+        shared.append(station_row(station_of(host)))
         shared += cleanup(host)
     return tag(shared, "-", "-"), variants
 
@@ -1254,6 +1338,7 @@ def report(host, shared, variants):
             "mode": "role-account" if host.manifest else "single-account",
             "scope": "disposable prototype; no service, role identity, provider harness or host admission",
             "host": machine, "work_directory": str(host.root), "tools": getattr(host, "tools", {}),
+            "launcher": launcher_record(host), "launch_identity_sid": host.identity_sid,
             "source_sha256": source_digests(), "notes": host.notes, "boundaries": boundaries,
             **summary(variants, shared), "checks": rows}
 
@@ -1274,6 +1359,9 @@ def arguments():
     parser.add_argument("--same-account-dry-run", action="store_true",
                         help="start the role run as this account; exercises the steps, proves no separation")
     parser.add_argument("--owner-manifest", type=Path, help="role account's step: the owner's manifest")
+    parser.add_argument("--launcher", type=Path,
+                        help="agentc-supervisor.exe: make every launch with its windows-runner "
+                             "instead of the prototype launcher")
     parser.add_argument("--policy-conditions", default="",
                         help="with --owner-plant: comma-separated firewall conditions for network rounds, "
                              "starting with baseline (see windows-probe-policy.py)")

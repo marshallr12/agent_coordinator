@@ -23,6 +23,7 @@ spec.loader.exec_module(probe)
 native = probe.native
 owner = probe.owner
 policy = probe.policy
+runner = probe.runner
 
 PEERS = {"implementer": [("impl-2", "implementer"), ("rev-1", "reviewer")],
          "reviewer": [("impl-1", "implementer"), ("impl-2", "implementer")]}
@@ -515,6 +516,151 @@ class ReaderTests(unittest.TestCase):
                 native.validated_read(self.api, self.root, name)
         with self.assertRaisesRegex(native.PathRefused, "read limit"):
             native.validated_read(self.api, self.root, "plain.txt", limit=2)
+
+
+# A stand-in for `agentc-supervisor windows-runner`: it answers each request
+# line the way the runner does, and records what it was asked in its state
+# directory. The interpreter runs it with the same arguments the client passes.
+FAKE_RUNNER = r'''
+import json, sys
+from pathlib import Path
+state = Path(sys.argv[sys.argv.index("--state-dir") + 1])
+log = (state / "asked.jsonl").open("a", encoding="utf-8")
+for line in sys.stdin:
+    request = json.loads(line)
+    log.write(line)
+    log.flush()
+    op = request["op"]
+    if op == "identity":
+        reply = {"ok": True, "account_sid": "S-1-5-21-9", "job_owner": "runner:1:2", "pid": 1}
+    elif op == "prepare" and request["launch"] == "refused":
+        reply = {"ok": False, "error": "station made by another program", "refusal": "station_not_ours"}
+    elif op == "prepare":
+        reply = {"ok": True, "package_sid": "S-1-15-2-7", "desktop": "S\\D", "job_owner": "runner:1:2"}
+    elif op == "hold_file":
+        reply = {"ok": True, "handle": 432}
+    elif op == "start":
+        reply = {"ok": True, "pid": 77, "created": 5}
+    elif op == "observe":
+        reply = {"ok": True, "state": "exited", "code": 3} if request["wait_ms"] else \
+                {"ok": True, "state": "running"}
+    elif op == "watch":
+        reply = {"ok": True, "alive_in_job": True}
+    elif op == "terminate":
+        reply = {"ok": True, "quiescent": True}
+    elif op == "watched_ended":
+        reply = {"ok": True, "ended": True}
+    elif op == "cleanup":
+        reply = {"ok": True, "profile_deleted": True, "detail": None}
+    elif op == "read" and request["relative"] == "link":
+        reply = {"ok": False, "error": "the path is refused: reparse point", "refusal": "path_refused"}
+    elif op == "read":
+        reply = {"ok": True, "hex": b"plain".hex()}
+    else:
+        reply = {"ok": False, "error": "unknown", "refusal": None}
+    print(json.dumps(reply), flush=True)
+'''
+
+
+class RunnerClientTests(unittest.TestCase):
+    """The driver's side of the runner protocol, against a stand-in runner."""
+
+    def setUp(self):
+        self.area = tempfile.TemporaryDirectory()
+        self.root = Path(self.area.name)
+        script = self.root / "fake-runner.py"
+        script.write_text(FAKE_RUNNER, encoding="utf-8")
+        (self.root / "state").mkdir()
+        # The client runs `<executable> windows-runner --state-dir <dir>`; a
+        # small launcher script lets the interpreter stand in for the executable.
+        self.client = runner.Client.__new__(runner.Client)
+        self.client.executable = script
+        self.client.log = (self.root / "runner.txt").open("wb")
+        self.client.process = subprocess.Popen(
+            [sys.executable, "-I", str(script), "windows-runner", "--state-dir", str(self.root / "state")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.client.log)
+        self.client.identity = self.client.ask("identity")
+        self.client.station_made = False
+        self.addCleanup(self.area.cleanup)
+        self.addCleanup(self.client.close)
+
+    def asked(self):
+        """Every request the stand-in runner received, in order."""
+        text = (self.root / "state" / "asked.jsonl").read_text(encoding="utf-8")
+        return [json.loads(line) for line in text.splitlines()]
+
+    def test_a_launch_is_prepared_with_its_whole_boundary_and_no_command_string(self):
+        boundary, limits = probe.VARIANTS["lpac"], probe.FIXTURE_LIMITS
+        made = self.client.prepare("lpac.impl-1", "agentc.probe.x", boundary, limits, Path("C:/c"), Path("C:/w"))
+        self.assertEqual((made["package_sid"], made["desktop"]), ("S-1-15-2-7", "S\\D"))
+        self.assertTrue(self.client.station_made)
+        spec = self.asked()[-1]["spec"]
+        self.assertEqual(spec["less_privileged"], True)
+        self.assertEqual(spec["capabilities"], ["registryRead", probe.TOOLS_CAPABILITY])
+        self.assertEqual(spec["limits"], {"processes": 24, "process_memory_mb": 512, "job_memory_mb": 1024})
+        launch = runner.Launch(self.client, "lpac.impl-1")
+        launch.start([Path("C:/bin/fixture.exe"), "launch", "impl-1"], Path("C:/w"), {"A": Path("C:/x")},
+                     Path("C:/logs/1.txt"))
+        started = self.asked()[-1]
+        self.assertEqual(started["argv"], [str(Path("C:/bin/fixture.exe")), "launch", "impl-1"])
+        self.assertEqual(started["environment"], {"A": str(Path("C:/x"))})
+        self.assertEqual((launch.pid, started["listed"]), (77, []))
+
+    def test_a_refused_station_stops_the_run_and_is_not_recorded_as_made(self):
+        boundary, limits = probe.VARIANTS["lpac"], probe.FIXTURE_LIMITS
+        with self.assertRaises(RuntimeError) as raised:
+            self.client.prepare("refused", "agentc.probe.x", boundary, limits, Path("C:/c"), Path("C:/w"))
+        self.assertEqual(raised.exception.refusal, "station_not_ours")
+        self.assertFalse(self.client.station_made)
+        host = types.SimpleNamespace(runner=self.client, station=None)
+        self.assertEqual(probe.station_row(probe.station_of(host))["status"], "fail")
+
+    def test_waiting_terminating_and_cleaning_up_report_what_the_runner_saw(self):
+        launch = runner.Launch(self.client, "lpac.impl-1")
+        self.assertIsNone(launch.wait(0))
+        self.assertEqual(launch.wait(1.5), 3)
+        self.assertEqual(self.asked()[-1]["wait_ms"], 1500)
+        self.assertFalse(launch.reaped)
+        self.assertTrue(launch.watch(4242))
+        self.assertTrue(launch.terminate())
+        self.assertTrue(launch.reaped, "the watched descendant's end is recorded when the job is emptied")
+        self.assertTrue(launch.cleanup())
+        self.assertEqual([request["op"] for request in self.asked()[-4:]],
+                         ["watch", "terminate", "watched_ended", "cleanup"])
+
+    def test_only_a_listed_held_handle_is_named_in_a_start(self):
+        launch = runner.Launch(self.client, "lpac.handles")
+        handle = launch.hold_file(Path("C:/host/canary.txt"))
+        launch.start(["fixture.exe", "read-handle", str(handle)], Path("C:/w"), {}, Path("C:/l.txt"), (handle,))
+        self.assertEqual(self.asked()[-1]["listed"], [432])
+        launch.start(["fixture.exe", "read-handle", str(handle)], Path("C:/w"), {}, Path("C:/l.txt"))
+        self.assertEqual(self.asked()[-1]["listed"], [])
+
+    def test_the_reader_goes_through_the_runner_and_keeps_its_refusals(self):
+        host = types.SimpleNamespace(runner=self.client)
+        self.assertEqual(probe.read_validated(host, Path("C:/w"), "plain.txt"), b"plain")
+        with self.assertRaises(native.PathRefused):
+            probe.read_validated(host, Path("C:/w"), "link")
+        self.assertEqual(probe.launcher_record(types.SimpleNamespace(runner=None)), {"kind": "python-prototype"})
+        record = probe.launcher_record(host)
+        self.assertEqual((record["kind"], record["account_sid"]), ("rust-runner", "S-1-5-21-9"))
+        self.assertEqual(len(record["sha256"]), 64)
+
+    def test_a_runner_that_stops_answering_is_an_error_not_a_pass(self):
+        self.client.process.kill()
+        self.client.process.wait()
+        with self.assertRaises(runner.RunnerError):
+            self.client.ask("identity")
+
+
+class StagedLauncherTests(unittest.TestCase):
+    def test_the_role_command_names_the_staged_launcher_only_when_asked(self):
+        plain = owner.role_command(Path("C:/staging"))
+        self.assertNotIn("--launcher", plain)
+        command = owner.role_command(Path("C:/staging"), launcher=True)
+        staged = Path(command[command.index("--launcher") + 1])
+        self.assertEqual((staged.name, staged.parent.name), ("agentc-supervisor.exe", "launcher"))
+        self.assertIn("windows-probe-runner.py", owner.STAGED_SOURCES)
 
 
 if __name__ == "__main__":

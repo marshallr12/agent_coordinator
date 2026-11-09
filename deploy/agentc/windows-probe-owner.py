@@ -32,7 +32,9 @@ MANIFEST_KEYS = ("schema_version", "owner_sid", "profile", "directory", "file", 
                  "registry_path", "pid", "pipe", "event", "toolchain", "msvc", "windows_kit", "controls")
 # Probe files another account needs, relative to this directory.
 STAGED_SOURCES = ("windows-containment-probe.py", "windows-probe-native.py", "windows-probe-owner.py",
-                  "windows-probe-policy.py")
+                  "windows-probe-policy.py", "windows-probe-runner.py")
+# Where the owner stages the Rust launcher, relative to the staging directory.
+STAGED_LAUNCHER = Path("launcher") / "agentc-supervisor.exe"
 # Well-known SIDs kept on the staging tree: local administrators and the system.
 KEPT_SIDS = ("S-1-5-32-544", "S-1-5-18")
 # Parts of a Python installation the probe never imports.
@@ -153,6 +155,9 @@ def stage(probe, staging, arguments):
     copy_sources(staging / "source")
     probe.copy_toolchain(probe.locate_toolchain(arguments), staging / "toolchain")
     (staging / "role").mkdir()
+    if getattr(arguments, "launcher", None):
+        (staging / STAGED_LAUNCHER).parent.mkdir()
+        shutil.copy2(arguments.launcher, staging / STAGED_LAUNCHER)
     if arguments.policy_conditions:
         # Only the owner's elevated step writes here; the role run reads it.
         probe.policy.owner_directory(staging).mkdir()
@@ -177,12 +182,16 @@ def grant_role(probe, windows, staging, account, owner_sid):
             raise RuntimeError(f"could not set access on {step[0]}")
 
 
-def role_command(staging):
-    """The command the role account runs: the staged interpreter on the staged probe."""
-    return [str(staging / "python" / "python.exe"), "-I", "-B",
-            str(staging / "source" / "windows-containment-probe.py"),
-            "--owner-manifest", str(staging / "manifest.json"),
-            "--output", str(staging / "role" / "report.json")]
+def role_command(staging, launcher=False):
+    """The command the role account runs: the staged interpreter on the staged probe.
+
+    With `launcher`, every launch is made by the staged Rust launcher.
+    """
+    command = [str(staging / "python" / "python.exe"), "-I", "-B",
+               str(staging / "source" / "windows-containment-probe.py"),
+               "--owner-manifest", str(staging / "manifest.json"),
+               "--output", str(staging / "role" / "report.json")]
+    return command + (["--launcher", str(staging / STAGED_LAUNCHER)] if launcher else [])
 
 
 def await_role(staging, child, seconds):
@@ -255,7 +264,7 @@ def write_manifest(probe, api, staging, targets, tools, conditions=()):
 
 def start_role_run(arguments, staging):
     """Print the role account's command, or start it as a child for a same-account dry run."""
-    command = role_command(staging)
+    command = role_command(staging, launcher=bool(getattr(arguments, "launcher", None)))
     if arguments.same_account_dry_run:
         return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
