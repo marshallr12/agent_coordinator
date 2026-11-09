@@ -25,6 +25,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import NamedTuple
 import uuid
@@ -235,12 +236,18 @@ def peer_checks(role, peers):
             for name, peer_role in peers for suffix, resource, expected in PEER_ATTACKS]
 
 
+def alias_refusals(name):
+    """Accepted refusals for a path alias: a share path is refused as network access."""
+    return ("error:5", "error:65") if name == "unc_share" else DENIED
+
+
 def launch_checks(role, peers, facts):
     """Every observation one launch must produce, with its accepted values."""
     checks = [Check(key, "own", "control", ("ok",)) for key in OWN_CONTROLS]
     checks += identity_checks(facts)
     checks += [Check(key, "worker_to_host", resource, expected) for key, resource, expected in HOST_ATTACKS]
-    checks += [Check(f"host.alias.{name}", "worker_to_host", "path", DENIED) for name in facts["aliases"]]
+    checks += [Check(f"host.alias.{name}", "worker_to_host", "path", alias_refusals(name))
+               for name in facts["aliases"]]
     checks += limit_checks(facts["limits"]) + network_checks(facts) + peer_checks(role, peers)
     return checks + [Check(key, "own", "info", (), False) for key in INFORMATIONAL]
 
@@ -477,7 +484,8 @@ def candidate_aliases(host):
     return {"upper": path.upper(), "verbatim": "\\\\?\\" + path, "device": "\\\\.\\" + path,
             "globalroot": "\\\\?\\GLOBALROOT" + device.value + path[2:], "short": short.value,
             "trailing_dot": path + ".", "default_stream": path + "::$DATA",
-            "forward_slash": path.replace("\\", "/")}
+            "forward_slash": path.replace("\\", "/"),
+            "unc_share": f"\\\\localhost\\{path[0]}${path[2:]}"}
 
 
 def opens_canary(alias):
@@ -612,7 +620,7 @@ def host_controls(host):
     """Show each attacked operation succeeds when authorized, so a denial is evidence."""
     rows = [host_row(key, "control", attempt(action), "host token") for key, action in object_controls(host).items()]
     for name, listener in host.listeners.items():
-        rows.append(host_row(f"control.listener.{name}", "control", reaches(listener), listener.endpoint()))
+        rows.append(host_row(f"control.listener.{name}", "control", reaches(listener), "host token"))
         listener.received.clear()
     elevated = host_row("host.elevated", "info", False, str(bool(host.api.IsUserAnAdmin())), False)
     return rows + reader_self_test(host) + [elevated]
@@ -627,6 +635,62 @@ def refused(host, root, relative):
     return False
 
 
+# The two junctions the race swaps: one stays inside the reader's root, one leaves it.
+RACE_LINKS = ("inside", "redirect")
+
+
+def flip_between(area, stop):
+    """Swap the name `flip` between the inside and the outside junction until told to stop."""
+    while not stop.is_set():
+        for name in RACE_LINKS:
+            try:
+                os.rename(area / name, area / "flip")
+                os.rename(area / "flip", area / name)
+            except OSError:
+                pass
+
+
+def race_outcomes(host, area, seconds):
+    """Read through `flip` while it is being swapped; count what the reader returned."""
+    outcomes = {"genuine": 0, "refused_link": 0, "absent": 0, "leaked": 0}
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            data = native.validated_read(host.api, area, f"flip\\{host.canary.name}")
+            outcomes["genuine" if data == b"genuine" else "leaked"] += 1
+        except native.PathRefused as refusal:
+            outcomes["refused_link" if "outside the launch root" in str(refusal) else "absent"] += 1
+    return outcomes
+
+
+def restore_flip(area):
+    """Put `flip` back under whichever of its two names is missing."""
+    for name in RACE_LINKS:
+        if os.path.lexists(area / "flip") and not os.path.lexists(area / name):
+            os.rename(area / "flip", area / name)
+
+
+def rename_race_row(host, area):
+    """A path swapped to an outside junction mid-read must never yield the file behind it.
+
+    Both states must be seen, so the row proves the reader met the swap and
+    still returned only the inside file.
+    """
+    store = area / "genuine-store"
+    store.mkdir()
+    (store / host.canary.name).write_bytes(b"genuine")
+    native.run_tool(host.windows, "cmd.exe", ["/d", "/c", "mklink", "/J", str(area / "inside"), str(store)])
+    stop = threading.Event()
+    flipper = threading.Thread(target=flip_between, args=(area, stop), daemon=True)
+    flipper.start()
+    outcomes = race_outcomes(host, area, 2)
+    stop.set()
+    flipper.join(timeout=5)
+    restore_flip(area)
+    passed = outcomes["leaked"] == 0 and outcomes["genuine"] > 0 and outcomes["refused_link"] > 0
+    return host_row("hostpath.self.rename_race_refused", "path", passed, json.dumps(outcomes))
+
+
 def reader_self_test(host):
     """Prove the handle-based reader against real links the host plants itself."""
     area = host.folder("reader-self-test")
@@ -636,7 +700,8 @@ def reader_self_test(host):
     native.run_tool(host.windows, "cmd.exe", ["/d", "/c", "mklink", "/J", str(area / "redirect"), str(host.private)])
     behind = f"redirect\\{host.canary.name}"
     accepted = attempt(lambda: native.validated_read(host.api, area, "single.txt") == b"single")
-    return [host_row("hostpath.self.plain_accepted", "path", accepted, "single-link file"),
+    return [rename_race_row(host, area),
+            host_row("hostpath.self.plain_accepted", "path", accepted, "single-link file"),
             host_row("hostpath.self.hardlink_refused", "path", refused(host, area, "plain.txt"), "two names"),
             host_row("hostpath.self.junction_refused", "path", refused(host, area, "redirect"), "junction"),
             host_row("hostpath.self.parent_junction_refused", "path",
@@ -945,11 +1010,18 @@ def host_observations(host, contained):
 
 
 def hold_orphan(host, contained):
-    """Open the launch's deliberate orphan so its death is observed by handle, not by PID."""
+    """Open the launch's deliberate orphan so its death is observed by handle, not by PID.
+
+    The PID comes from the worker, so it counts only when the OS confirms that
+    process is alive and a member of this launch's own job.
+    """
     pid = number(contained.observed.get("job.orphan_pid", ""))
-    contained.orphan = host.api.OpenProcess(0x00100000, False, pid) if pid else None
-    alive = bool(contained.orphan) and host.api.WaitForSingleObject(contained.orphan, 0) == 258
-    row = host_row("control.orphan_alive", "control", alive, "descendant still running before the job ends")
+    contained.orphan = host.api.OpenProcess(0x00101000, False, pid) if pid else None
+    member = native.w.BOOL()
+    alive = (bool(contained.orphan) and host.api.WaitForSingleObject(contained.orphan, 0) == 258
+             and host.api.IsProcessInJob(contained.orphan, contained.launch.job, native.c.byref(member))
+             and bool(member.value))
+    row = host_row("control.orphan_alive", "control", alive, "descendant running inside the launch's job")
     return tag([row], contained.variant, contained.name)
 
 
@@ -970,7 +1042,7 @@ def received_rows(host, variant):
     rows = []
     for name, listener in host.listeners.items():
         rows.append(host_row(f"net.host_received.{name}", "egress", not listener.received,
-                             f"{len(listener.received)} arrivals at {listener.endpoint()}"))
+                             f"{len(listener.received)} arrivals"))
         listener.received.clear()
     return tag(rows, variant, "-")
 

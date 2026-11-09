@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 
 spec = importlib.util.spec_from_file_location("probe", Path(__file__).with_name("windows-containment-probe.py"))
@@ -160,7 +161,7 @@ class MatrixTests(unittest.TestCase):
                 if check.resource != "control":
                     self.assertTrue(probe.controls_for(check.key), check.key)
         for key in ("escape.unlisted_handle", "net.host_received.loopback4", "hostpath.worker.hardlink_refused",
-                    "workload.cargo_build", "broker.identity_from_os"):
+                    "hostpath.self.rename_race_refused", "workload.cargo_build", "broker.identity_from_os"):
             self.assertTrue(probe.controls_for(key), key)
 
     def test_launch_controls_named_by_attacks_are_in_the_matrix(self):
@@ -175,6 +176,10 @@ class MatrixTests(unittest.TestCase):
                           if check.key == "boundary.all_packages_read") for lpac in (True, False)}
         self.assertEqual((row[True].expected, row[True].scope), (probe.DENIED, "worker_to_host"))
         self.assertEqual((row[False].expected, row[False].resource), (("allowed",), "control"))
+
+    def test_a_share_path_may_be_refused_as_network_access(self):
+        self.assertEqual(probe.alias_refusals("unc_share"), ("error:5", "error:65"))
+        self.assertEqual(probe.alias_refusals("verbatim"), probe.DENIED)
 
     def test_role_pairs_are_named_by_direction(self):
         self.assertEqual(probe.relation("implementer", "reviewer"), "implementer_to_reviewer")
@@ -263,6 +268,14 @@ class ReaderTests(unittest.TestCase):
             native.validated_read(self.api, self.root, "redirect")
         with self.assertRaisesRegex(native.PathRefused, "outside the launch root"):
             native.validated_read(self.api, self.root, "redirect\\canary.txt")
+
+    def test_a_path_swapped_to_an_outside_junction_is_never_read(self):
+        host = types.SimpleNamespace(api=self.api, windows=Path(os.environ["SystemRoot"]),
+                                     canary=self.outside / "canary.txt")
+        self.junction(self.root / "redirect", self.outside)
+        row = probe.rename_race_row(host, self.root)
+        self.assertEqual(row["status"], "pass", row["observed"])
+        self.assertIn('"leaked": 0', row["observed"])
 
     def test_a_root_that_is_itself_a_junction_is_refused(self):
         self.junction(Path(self.area.name) / "linked-root", self.root)
