@@ -356,6 +356,8 @@ def finish(windows, staging, original, changed, observe_only):
 def owner_step(parsed):
     """Serve every condition the manifest lists, then restore and report."""
     windows = Path(os.environ.get("SystemRoot", "C:/Windows"))
+    # The owner's first step writes the manifest once staging is complete.
+    wait_for_file(parsed.staging / "manifest.json", parsed.wait)
     manifest = read_json(parsed.staging / "manifest.json") or {}
     conditions = parse_conditions(",".join(manifest.get("policy_conditions", [])))
     owner_directory(parsed.staging).mkdir(exist_ok=True)
