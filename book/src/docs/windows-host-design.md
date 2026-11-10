@@ -449,10 +449,13 @@ Two things came up on the way and are recorded here.
   handle, moved a snapshot with a rename that replaces an empty directory on
   Windows, and took a Windows lock violation for an internal error. All three
   are fixed for Windows; Linux is unchanged.
-- The kill switch treats a path it cannot check as set. On Windows a path
-  below a plain file is reported as not found, the same as an absent switch,
-  so that one unreadable case is not told apart there. No Windows supervisor
-  loop exists to be affected; phase 4 has to settle it.
+- The kill switch treats a path it cannot check as set. Windows reports a
+  path below a plain file as not found, the same as an absent switch, and
+  phase 3 left that one unreadable case admitted there. Task `0092fc75`
+  settled it: a switch reported not found counts as absent only when its
+  nearest existing ancestor is a directory. Anything else cannot be checked
+  and stops claims, on both platforms. Linux already refused the case and is
+  unchanged.
 
 ## Delivery phases and gates
 
