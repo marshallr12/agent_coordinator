@@ -66,8 +66,13 @@ pub enum Request {
     Watch { launch: String, pid: u32 },
     /// Whether the watched process ended within `wait_ms`.
     WatchedEnded { launch: String, wait_ms: u64 },
-    /// End the launch and delete its desktop and profile.
-    Cleanup { launch: String },
+    /// End the launch and delete its desktop and profile; with
+    /// `remove_directories`, also its control and working directories.
+    Cleanup {
+        launch: String,
+        #[serde(default)]
+        remove_directories: bool,
+    },
     /// Read a worker-written file by handle.
     Read {
         root: PathBuf,
@@ -77,7 +82,11 @@ pub enum Request {
     /// Judge every journaled launch without starting anything.
     Recover,
     /// Delete what an ended launch of an earlier runner left behind.
-    Reclaim { launch: String },
+    Reclaim {
+        launch: String,
+        #[serde(default)]
+        remove_directories: bool,
+    },
 }
 
 impl Request {
@@ -180,7 +189,10 @@ impl Runner {
                 let ended = self.launcher.watched_ended(&launch, patience)?;
                 Ok(json!({ "ended": ended }))
             }
-            Request::Cleanup { launch } => self.cleanup(&launch),
+            Request::Cleanup {
+                launch,
+                remove_directories,
+            } => self.cleanup(&launch, remove_directories),
             Request::Read {
                 root,
                 relative,
@@ -190,7 +202,10 @@ impl Runner {
                 Ok(json!({ "hex": hex::encode(bytes) }))
             }
             Request::Recover => self.recover(),
-            Request::Reclaim { launch } => self.reclaim(&launch),
+            Request::Reclaim {
+                launch,
+                remove_directories,
+            } => self.reclaim(&launch, remove_directories),
             _ => bail!("the request is not handled here"),
         }
     }
@@ -216,6 +231,7 @@ impl Runner {
             "launch {launch} is already journaled; recover it instead of preparing it again"
         );
         let profile = spec.profile.clone();
+        let (control, work) = (spec.control.clone(), spec.work.clone());
         let prepared = self.launcher.prepare(launch, spec)?;
         let entry = Entry {
             launch: launch.to_owned(),
@@ -229,6 +245,8 @@ impl Runner {
             generation,
             pid: None,
             created: None,
+            control: Some(control),
+            work: Some(work),
         };
         self.journal_or_undo(launch, &entry)?;
         Ok(serde_json::to_value(prepared)?)
@@ -301,14 +319,25 @@ impl Runner {
     }
 
     /// Ends the launch, deletes its desktop and profile, then its entry.
-    fn cleanup(&mut self, launch: &str) -> Result<Value> {
-        self.entry(launch)?;
+    /// With `remove`, its two directories go first, and only once the
+    /// launcher no longer holds the launch: a launch that could not be
+    /// ended keeps its directories and its entry, and the request fails.
+    fn cleanup(&mut self, launch: &str, remove: bool) -> Result<Value> {
+        let entry = self.entry(launch)?;
         let deleted = self.launcher.cleanup(launch);
         let profile_deleted = deleted.is_ok();
         let detail = deleted.err().map(|error| format!("{error:#}"));
+        if remove {
+            let held = self.launcher.held().iter().any(|id| id == launch);
+            ensure!(!held, "launch {launch} was not ended: {detail:?}");
+            remove_directories(&entry)?;
+        }
         self.journal.remove(launch)?;
         self.mine.remove(launch);
-        Ok(json!({ "profile_deleted": profile_deleted, "detail": detail }))
+        Ok(
+            json!({ "profile_deleted": profile_deleted, "detail": detail,
+                   "directories_removed": remove }),
+        )
     }
 
     /// Judges every journaled launch. This run's launches are reported as
@@ -329,8 +358,9 @@ impl Runner {
     }
 
     /// Deletes the profile and the entry of an earlier runner's launch,
-    /// only once that launch is judged ended.
-    fn reclaim(&mut self, launch: &str) -> Result<Value> {
+    /// only once that launch is judged ended; with `remove`, also the
+    /// directories its entry names.
+    fn reclaim(&mut self, launch: &str, remove: bool) -> Result<Value> {
         ensure!(
             !self.mine.contains(launch),
             "launch {launch} is held; clean it up"
@@ -346,9 +376,26 @@ impl Runner {
         let name = wide(&entry.profile)?;
         // SAFETY: `name` is NUL-terminated.
         let result = unsafe { DeleteAppContainerProfile(name.as_ptr()) };
+        if remove {
+            remove_directories(&entry)?;
+        }
         self.journal.remove(launch)?;
-        Ok(json!({ "profile_deleted": result == 0 }))
+        Ok(json!({ "profile_deleted": result == 0, "directories_removed": remove }))
     }
+}
+
+/// Removes the control and working directories `entry` names. One that is
+/// already gone counts as removed.
+fn remove_directories(entry: &Entry) -> Result<()> {
+    for directory in [&entry.control, &entry.work].into_iter().flatten() {
+        match std::fs::remove_dir_all(directory) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(error).with_context(|| format!("remove {}", directory.display()))?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 impl Ledger for Runner {
@@ -371,7 +418,7 @@ impl Ledger for Runner {
     }
 
     fn reclaim(&mut self, launch: &str) -> Result<()> {
-        Runner::reclaim(self, launch).map(|_| ())
+        Runner::reclaim(self, launch, false).map(|_| ())
     }
 }
 

@@ -45,6 +45,13 @@ pub struct Entry {
     /// The root process of the last start and its creation time.
     pub pid: Option<u32>,
     pub created: Option<u64>,
+    /// The launch's control and working directories, so the runner can
+    /// remove them when the launch is cleaned up or reclaimed. Absent in
+    /// entries written before they were recorded.
+    #[serde(default)]
+    pub control: Option<PathBuf>,
+    #[serde(default)]
+    pub work: Option<PathBuf>,
 }
 
 /// A directory of entries, one file per launch.
@@ -143,6 +150,8 @@ mod tests {
             generation: Some(4),
             pid: None,
             created: None,
+            control: None,
+            work: Some(PathBuf::from("w")),
         }
     }
 

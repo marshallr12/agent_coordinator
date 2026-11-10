@@ -40,6 +40,7 @@ pub mod process;
 pub mod profile;
 pub mod reader;
 pub mod recovery;
+pub mod remote;
 pub mod runner;
 pub mod runner_service;
 pub mod scm;
