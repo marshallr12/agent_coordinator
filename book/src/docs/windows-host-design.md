@@ -533,7 +533,9 @@ instance of its name with one instance in all, so a second server or a
 squatter on the name makes creation fail, and with remote clients rejected.
 Its access list is protected and has two entries: the service's own account in
 full, and the one configured client SID with read data, write data, read
-attributes and synchronize, and without the right to create pipe instances. A
+attributes, read the security descriptor (added by 4b so the client can
+check the pipe's owner) and synchronize, and without the right to create
+pipe instances. A
 client therefore has to ask for that access when it opens the pipe (an open
 for generic write is refused). A pipe whose list cannot be built or applied is
 not created, and there is no fallback to a default list. Windows names the
@@ -595,6 +597,67 @@ longer than a quarter of a second, running or ending.
 - the supervisor service loop over the pipe, a stand-in coordinator driver
   and the owner runbook, which are 4b's.
 
+### Phase 4b, first part: the supervisor's pipe client and remote host runtime
+
+Task `078703b3-dc8c-4153-92e8-b229d3b5d298` built these. Everything here is
+**implemented** and tested on native Windows in the test's own account.
+**No service was installed, started or configured, and nothing here is
+machine-accepted.** The supervisor service role, the stand-in coordinator
+driver and the owner runbook are the second part of 4b and do not exist yet.
+
+**The pipe client** (`host_runtime::windows::pipe_client`). The supervisor's
+side of the runner's pipe. It opens the pipe asking for exactly the access
+the pipe's list grants a client, and lets the server identify it and no more
+(identification level), so the runner can learn who connected and cannot act
+as the supervisor. Before it writes a byte it asks Windows who **owns** the
+pipe and refuses any owner but the configured runner account: only the
+process that created a pipe owns it, so a pipe a stranger made under the
+runner's name is never sent a request. Ownership is used, and not the token
+of the server process, because one service account cannot open another's
+process. An exchange is one request line and one answer line. An exchange
+that fails leaves the client unusable, because the outcome of the request is
+then unknown.
+
+**The remote host runtime** (`host_runtime::windows::remote`). `RemoteHost`
+implements the [host-runtime interface](#the-interface) for a supervisor that
+holds no launch itself. Each operation is one typed request to the runner;
+what a launch runs comes from a `Planner`, as with `WindowsHost`.
+
+| Operation | Request | What an uncertain answer means |
+| --- | --- | --- |
+| `prepare` | `prepare` | The launch is not prepared; nothing is claimed |
+| `start` | `start`, asked once: the command is forgotten before the request goes out | The start failed as far as the loop knows; it is never asked again |
+| `observe` | `observe` with no wait | Running |
+| `request_stop`, `terminate` | The same | Logged; the launch is not taken to have ended |
+| `recover` | `recover`, then `observe` for a launch the runner holds | May be running |
+| `cleanup` | `recover`, then `cleanup` or `reclaim` with `remove_directories` | Nothing is removed |
+
+`recover` calls a recorded launch ended in three cases only: the runner's
+journal does not name it and has no unreadable entry; Windows says an earlier
+runner's launch ended; or the running runner holds it and it was never
+started or its root process has exited. A runner that cannot be asked, a
+refusal and an unreadable entry all leave the launch possibly running, so it
+keeps what it holds and blocks new claims, as on Linux.
+
+The runner's journal entry now records a launch's control and working
+directories, and its `cleanup` and `reclaim` requests take
+`remove_directories`: the directories belong to the runner's account, so the
+supervisor's account cannot delete them. A launch the runner could not end
+keeps its directories and its entry. The removal is `remove_dir_all` by the
+runner's account inside a tree the launch could write; handle-relative
+deletion there is still [unverified](#disposition).
+
+**Tests.** The client's tests use real pipes: an exchange with a pipe its
+runner owns, the refusal of a pipe owned by another account before anything
+is sent, a missing pipe, and a runner that leaves in the middle of an answer.
+The runtime's tests use a scripted stand-in runner for every uncertain case
+above, and one real runner behind a real pipe, without a launch, so it runs
+on an interactive desktop too.
+
+**Not demonstrated**: a client and a runner in two different real accounts;
+the ownership check against a pipe a second account really made; a launch
+carried through the remote runtime under a role account.
+
 ## Delivery phases and gates
 
 Each phase is an independently reviewed task. A phase starts only when the gate
@@ -607,7 +670,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | **Complete.** The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test (task `96d4927e`) **passed** in the owner's run with the prototype launcher on 2026-11-09; task `4baa4706` records it under [Network policy run](#network-policy-run-2026-11-09). The same runbook, followed with the Rust launcher in phase 3, passed |
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
-| 4b | The supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Not started |
+| 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | First part implemented by task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). The service loop, the stand-in driver and the runbook are not started |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Not started |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
 | 6 | Egress and publication brokers | Phase 3 | Not started |

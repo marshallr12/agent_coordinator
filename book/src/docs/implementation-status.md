@@ -70,6 +70,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   identify any client, which the revision fixed. The supervisor crate's
   tests now pass on native Windows, and the lifecycle core's on Linux too.
 
+- The first part of phase 4b added the supervisor's side of that pipe: a
+  [client](windows-host-design.md#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime)
+  that refuses a pipe the configured runner account does not own, and a host
+  runtime that drives launches only through typed requests to the runner and
+  never takes a failed or unreadable answer for an ended launch. It is
+  tested on native Windows in one account. No Windows supervisor service
+  loop exists yet, no service was installed, and nothing is machine
+  accepted.
+
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
   isolated tmpfs; the host harness directory stays hidden. Invalid paths,
