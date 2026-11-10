@@ -44,13 +44,14 @@ pub struct StandInSettings {
 
 impl Default for StandInSettings {
     fn default() -> Self {
-        let base = PathBuf::from(r"C:\ProgramData\agentc");
+        // Whole literals: joining would put this platform's separator into
+        // a Windows path when the defaults are read on another system.
         Self {
             enabled: false,
-            queue_dir: base.join(r"stand-in\queue"),
-            ledger: base.join(r"stand-in\ledger.jsonl"),
+            queue_dir: PathBuf::from(r"C:\ProgramData\agentc\stand-in\queue"),
+            ledger: PathBuf::from(r"C:\ProgramData\agentc\stand-in\ledger.jsonl"),
             fixture: Vec::new(),
-            launch_root: base.join(r"runner\stand-in-launches"),
+            launch_root: PathBuf::from(r"C:\ProgramData\agentc\runner\stand-in-launches"),
         }
     }
 }
