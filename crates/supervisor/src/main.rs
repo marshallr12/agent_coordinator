@@ -95,6 +95,14 @@ enum Commands {
         #[arg(long)]
         log: Option<PathBuf>,
     },
+    /// Judge the ledger of an acceptance stand-in run: print what it shows
+    /// went wrong as JSON, and exit non-zero when anything did or when the
+    /// ledger holds no event.
+    #[command(hide = true)]
+    StandInJudge {
+        #[arg(long)]
+        ledger: PathBuf,
+    },
     /// Inside a launch's network namespace: relay each loopback `ip:port`
     /// to its host socket, run the command and return its exit code.
     #[command(hide = true)]
@@ -258,6 +266,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 ServiceRole::Supervisor => supervisor_service::run(config)?,
             }
         }
+        Commands::StandInJudge { ledger } => return stand_in_judge(&ledger),
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
             println!("{}", serde_json::to_string_pretty(&shadow::report(&log)?)?);
@@ -274,6 +283,15 @@ fn windows_runner(state_dir: &std::path::Path) -> Result<ExitCode> {
     let (input, output) = (std::io::stdin().lock(), std::io::stdout().lock());
     runner::serve(input, output, state_dir)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Judges a stand-in ledger. An empty or missing ledger is an error, not
+/// a clean run: it shows nothing either way.
+fn stand_in_judge(ledger: &std::path::Path) -> Result<ExitCode> {
+    use agentc_supervisor::service::stand_in::{Ledger, judge};
+    let events = Ledger::at(ledger).events();
+    anyhow::ensure!(!events.is_empty(), "{} holds no event", ledger.display());
+    Ok(report(&judge(&events)))
 }
 
 /// Prints preflight problems as JSON; non-zero exit when any exist.

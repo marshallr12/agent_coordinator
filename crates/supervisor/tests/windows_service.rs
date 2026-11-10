@@ -53,6 +53,38 @@ fn started_from_a_console_the_service_command_refuses_and_says_why() {
     }
 }
 
+/// Runs `stand-in-judge` on `ledger`: whether it exited zero, and its output.
+fn judged(ledger: &Path) -> (bool, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agentc-supervisor"))
+        .args(["stand-in-judge", "--ledger"])
+        .arg(ledger)
+        .output()
+        .unwrap();
+    let text = [output.stdout, output.stderr].concat();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&text).into_owned(),
+    )
+}
+
+#[test]
+fn the_judge_command_passes_a_clean_ledger_and_fails_a_second_launch_or_no_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = dir.path().join("ledger.jsonl");
+    let (ok, said) = judged(&ledger);
+    assert!(!ok && said.contains("holds no event"), "{said}");
+    let run = "{\"event\":\"start\",\"session\":\"s1\",\"task\":\"a\"}\n\
+               {\"event\":\"exited\",\"session\":\"s1\"}\n\
+               {\"event\":\"release\",\"session\":\"s1\"}\n";
+    std::fs::write(&ledger, run).unwrap();
+    let (ok, said) = judged(&ledger);
+    assert!(ok && said.contains("\"ok\":true"), "{said}");
+    let again = "{\"event\":\"start\",\"session\":\"s2\",\"task\":\"a\"}\n";
+    std::fs::write(&ledger, format!("{run}{again}")).unwrap();
+    let (ok, said) = judged(&ledger);
+    assert!(!ok && said.contains("a was launched 2 times"), "{said}");
+}
+
 #[test]
 fn a_request_that_begins_a_launch_is_refused_once_the_service_is_ending() {
     let begins = [

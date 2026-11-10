@@ -75,9 +75,19 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   that refuses a pipe the configured runner account does not own, and a host
   runtime that drives launches only through typed requests to the runner and
   never takes a failed or unreadable answer for an ended launch. It is
-  tested on native Windows in one account. No Windows supervisor service
-  loop exists yet, no service was installed, and nothing is machine
-  accepted.
+  tested on native Windows in one account.
+
+- The second part of phase 4b added the
+  [supervisor's own service role](windows-host-design.md#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook):
+  the existing live loop under the Service Control Manager binding, ending
+  through the loop's own drain and recovery. Without a harness, which is the
+  only supported state on Windows, it claims nothing and says why in its
+  heartbeat. An acceptance stand-in, off by default, replaces the coordinator
+  with a queue directory and a ledger flushed before each effect, and a
+  command judges that ledger for a second launch or a release without an
+  ended launch. The phase 4c owner runbook is written as a proposal. **No
+  service was installed, started or configured, nothing has run under the
+  Service Control Manager, and nothing is machine accepted.**
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the

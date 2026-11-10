@@ -482,7 +482,7 @@ Windows, against a fake clock.
 | --- | --- |
 | `lifecycle` | Running, a stop or preshutdown request that ends admission at once, a drain to a monotonic deadline, termination, and `Stopped { quiescent }`. A preshutdown that arrives during a stop's drain shortens the deadline and never lengthens it. After the deadline a termination has a patience; when it runs out the service stops with `quiescent: false`, which is never made clean later |
 | `control` | What the control handler does with a control code: record stop or preshutdown in an atomic signal and answer. Interrogate records nothing; every other control is "not implemented" |
-| `drain` | Carries a service's launches through the ending: asks each to stop once, empties one whose root ended, terminates what remains at the deadline, and lets the service report stopped in quiescence only when every launch is confirmed ended. A launch whose termination was not confirmed is not terminated again, because a second attempt on a job already closed could be mistaken for an empty job |
+| `drain` | Carries a service's launches through the ending: asks each to stop once, kills one whose root ended, kills what remains at the deadline, and lets the service report stopped in quiescence only when every launch is confirmed ended. Killing does not wait: every remaining launch is killed in one step and later steps only look whether each job has emptied (changed by the second part of 4b; 4a waited for each in turn) |
 | `startup` | Judges every journaled launch: one Windows says ended is reclaimed, one that may still run is left untouched and reported, a failed reclaim and an unreadable file are reported. Its journal interface has no way to start a launch |
 | `pipe_policy` | The pipe's access list as SDDL text and the decision to admit a client from the facts Windows reported |
 | `settings` | The `[windows_service]` configuration |
@@ -658,6 +658,164 @@ on an interactive desktop too.
 the ownership check against a pipe a second account really made; a launch
 carried through the remote runtime under a role account.
 
+### Phase 4b, second part: the supervisor service, the stand-in and the 4c runbook
+
+Task `49aaca03-8d3b-4fe6-b0c4-4d0de68c7b1e` built these. Everything here is
+**implemented** and tested without elevation. **No service was installed,
+started or configured on any machine, and nothing here is machine-accepted.**
+The runbook below is a **proposal** for phase 4c: none of its steps has been
+run.
+
+**The supervisor service** (`host_runtime::windows::supervisor_service`,
+`service::supervisor`). `agentc-supervisor --config FILE windows-service
+--role supervisor` runs the existing live loop (`run_loop::run`) under the
+4a SCM binding. The loop already ends correctly once its driver says it is
+stopping: it claims nothing more, asks a running launch to stop, terminates
+it after `[run] drain_seconds`, releases its attempt and returns, and after a
+restart it settles what it left through the host runtime's `recover`. The
+service's driver, `LoopDriver`, only makes "stopping" follow the stop or
+preshutdown the control handler recorded, and reports a rising checkpoint
+while the loop drains. The service holds no launch: launches are requests to
+the runner over its pipe.
+
+Where the work comes from is one of two things. Neither contacts a
+coordinator.
+
+- **No harness** (the default). No provider harness is supported on
+  Windows, so the service refuses every claim, says so in its heartbeat
+  (`state: "stopped"`, with the reason) and never opens the runner's pipe.
+- **The acceptance stand-in** (`service::stand_in`), off unless
+  `[windows_supervisor.stand_in] enabled = true`. Work is a directory of
+  queued items, one file each. Every launch runs one configured fixture
+  command inside a less-privileged boundary with no capability, in two
+  directories of its own.
+
+**The ledger.** The stand-in appends every claim, renewal and release, and
+every prepare, start, exit, stop request, termination, recovery verdict and
+cleanup, to a ledger, one JSON object per line. Each line is flushed to disk
+**before** the effect it records, and a claim or a start that cannot be
+recorded does not happen. An item is offered until it is claimed and never
+again. `agentc-supervisor stand-in-judge --ledger FILE` reads a ledger and
+reports a task that was asked to start more than once, a release of a launch
+that was started and is not known to have ended, and any unreadable line. It
+exits non-zero for any of those and for a ledger with no event.
+
+**The two 4a advisories.**
+
+- At the drain deadline the runner now kills every remaining launch's job in
+  one step and afterwards only looks whether each has emptied, so the waits
+  share the service's one deadline and the service keeps reporting. A launch
+  Windows never confirms is named in the log when the service gives up.
+- The SCM binding makes its wake event before Windows can call the service's
+  entry point, so that entry point always reports the service stopped once
+  its control handler is registered. A failed start is written to the
+  Windows application event log under the service's name, and the supervisor
+  service sends its diagnostics to `service.log` in its state directory.
+
+A start whose answer was lost may have happened. The remote runtime then asks
+the runner to end the launch, because the loop is about to release the
+attempt; the start is still reported as failed.
+
+**Settings.** Every setting has an in-code default and is shown commented out
+in `deploy/agentc/supervisor-windows.example.toml`.
+
+| Setting | Default |
+| --- | --- |
+| `[windows_supervisor] name` | `agentc-supervisor` |
+| `state_dir` | `C:\ProgramData\agentc\supervisor` (launch records, heartbeat, `service.log`) |
+| `runner_pipe` | `agentc-runner` |
+| `runner_sid` | empty: the service refuses to start, since no pipe could be trusted |
+| `status_interval_seconds` | 3 |
+| `[windows_supervisor.stand_in] enabled` | `false` |
+| `queue_dir` | `C:\ProgramData\agentc\stand-in\queue` |
+| `ledger` | `C:\ProgramData\agentc\stand-in\ledger.jsonl` |
+| `fixture` | empty: the stand-in cannot be enabled without a command |
+| `launch_root` | `C:\ProgramData\agentc\runner\stand-in-launches` |
+
+**Tests.** The loop driver and the stand-in are platform neutral and run on
+Linux and Windows against a scripted host runtime and a clock that only moves
+when the loop waits: without a harness every poll is refused and the
+heartbeat is written; the stand-in feeds the loop one item at a time; a stop
+ends admission, drains the running launch and returns; and a supervisor that
+dies while its launch runs is, after a restart, held back while the launch
+may still run, then releases the attempt once it is judged ended and
+launches only the other item, with a clean ledger. On Windows the service
+command refuses from a console for both roles.
+
+**Not demonstrated**: either service under the Service Control Manager; a
+stand-in launch carried through a real runner; status reports reaching
+Windows during a drain; the event-log trace as a service account (the test
+writes one event as the test's own account).
+
+#### Proposed owner runbook for phase 4c
+
+This is what the owner would run on MiniAir from an **elevated** session.
+It is a proposal: every command is unverified until 4c runs it, and 4c
+records what really happened. Stop at the first step that does not do what
+it says; do not work around it.
+
+1. **Files.** Build `agentc-supervisor.exe` in release mode from the exact
+   commit under test and record its SHA-256. Copy it and the probe fixture to
+   `C:\Program Files\agentc\`. Copy the example configuration there as
+   `supervisor.toml`.
+2. **Register the services, stopped.** Each runs as its own virtual service
+   account, which Windows creates with the service:
+
+   ```text
+   sc.exe create agentc-runner start= demand obj= "NT SERVICE\agentc-runner" binPath= "\"C:\Program Files\agentc\agentc-supervisor.exe\" --config \"C:\Program Files\agentc\supervisor.toml\" windows-service"
+   sc.exe create agentc-supervisor start= demand depend= agentc-runner obj= "NT SERVICE\agentc-supervisor" binPath= "\"C:\Program Files\agentc\agentc-supervisor.exe\" --config \"C:\Program Files\agentc\supervisor.toml\" windows-service --role supervisor"
+   sc.exe showsid agentc-runner
+   sc.exe showsid agentc-supervisor
+   ```
+
+   Put the supervisor's SID in `[windows_service] client_sid` and the
+   runner's in `[windows_supervisor] runner_sid`.
+3. **Directories.** Create `C:\ProgramData\agentc\runner`,
+   `...\runner\stand-in-launches`, `...\supervisor` and `...\stand-in\queue`.
+   Grant the runner's account modify on the two runner directories and the
+   supervisor's account modify on the other two, and nothing to anyone else
+   beyond the system and administrators. Record `icacls` of each.
+4. **Bounded recovery.** `sc.exe failure agentc-runner reset= 86400 actions=
+   restart/60000/restart/60000//` and the same for `agentc-supervisor`: two
+   restarts, then none.
+5. **Start without the stand-in.** Start both. Expect: both `RUNNING`; the
+   runner's `service.log` says `running`; the supervisor's
+   `heartbeat.json` says `state: "stopped"` with the reason that no harness
+   is supported; no pipe client appears in the runner's log. Record the
+   token privileges and groups of both service processes.
+6. **Can the runner launch at all as a service?** This is the first real
+   unknown: the launcher refuses a window station it did not make, and a
+   service account's logon session may already have one. Enable the
+   stand-in with the probe fixture, queue one item, and watch the ledger. If
+   the launch is refused with `station_not_ours`, stop: that is a finding for
+   a new task, not something to configure around.
+7. **Lifecycle rounds**, each with fresh queued items, each ended by
+   `stand-in-judge` on the ledger and by a check that no fixture process, no
+   AppContainer profile of the run and no launch directory is left:
+
+   | Round | Action | Expect |
+   | --- | --- | --- |
+   | Stop | `sc.exe stop agentc-supervisor` during a launch | Admission ends, the launch is asked to stop and ended at the deadline, `STOPPED` with exit code 0 |
+   | Runner stop | `sc.exe stop agentc-runner` during a launch | The runner journals the end and stops clean; the supervisor releases the attempt |
+   | Supervisor crash | Kill the supervisor process during a launch | Windows restarts it; it claims nothing while the launch may run, then releases and goes on |
+   | Runner crash | Kill the runner process during a launch | Windows ends the launch with the job; the restarted runner reclaims it; the supervisor releases |
+   | Child crash | Kill the fixture's root process | The launch is seen exited and released; nothing is left in the job |
+   | Logoff | Log the owner off and on during a launch | Nothing changes for either service |
+   | Reboot | Restart Windows during a launch, with both services set to `auto` | Preshutdown drains within the limit; after boot, without logon, both run and the earlier launch is settled, not started again |
+   | Power loss | Reset the machine without shutdown (a virtual machine, if MiniAir may not be reset) | After boot the earlier launch is settled from the journal and the ledger, not started again |
+
+8. **Record** the ledger, both `service.log` files, the heartbeat, the
+   application event log entries of both services and the `sc.exe qc` and
+   `sc.exe qfailure` output as one pinned artifact, with the commit and the
+   binary's hash.
+9. **Remove.** `sc.exe delete` both services, delete the directories and the
+   two files under `Program Files`, and confirm no AppContainer profile named
+   `agentc.standin.*` is left.
+
+Not covered by this runbook and still open after it: a real coordinator, any
+provider harness, the reviewer side, brokers, the installer, and resource
+caps and quiet hours, which need the real loop's admission to mean anything.
+
 ## Delivery phases and gates
 
 Each phase is an independently reviewed task. A phase starts only when the gate
@@ -670,7 +828,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | **Complete.** The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test (task `96d4927e`) **passed** in the owner's run with the prototype launcher on 2026-11-09; task `4baa4706` records it under [Network policy run](#network-policy-run-2026-11-09). The same runbook, followed with the Rust launcher in phase 3, passed |
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
-| 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | First part implemented by task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). The service loop, the stand-in driver and the runbook are not started |
+| 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Not started |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
@@ -1320,9 +1478,10 @@ Still unverified, and never to be read as passed:
   does not exist;
 - native provider harness command paths and reviewer candidate interception;
 - production egress and publication brokers;
-- SCM lifecycle, crash recovery and reboot behavior: phase 4a implemented
-  the lifecycle and the service, and none of it has run under the Service
-  Control Manager; phase 4c is the acceptance;
+- SCM lifecycle, crash recovery and reboot behavior: phases 4a and 4b
+  implemented the lifecycle and both services, and none of it has run under
+  the Service Control Manager; phase 4c is the acceptance, and its runbook
+  is a proposal;
 - handle-relative creation and deletion by host brokers inside worker-writable
   trees;
 - COM, RPC and broker surfaces beyond the Task Scheduler.
