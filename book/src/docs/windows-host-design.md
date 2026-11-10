@@ -1,7 +1,7 @@
 # Native Windows supervisor: design and prototype
 
 Status: **proposed; phase 2 of the containment prototype is complete; phase 3
-is not started; not approved for unattended execution**. Task
+is under way; not approved for unattended execution**. Task
 `7011c55f-652e-47d3-a409-7d46420c7eb6` activates a native Windows replacement
 for the abandoned WSL host approach. Its first phase, task
 `a9126e52-654c-4b26-8a7d-7748261d2c4a`, delivers this design and the
