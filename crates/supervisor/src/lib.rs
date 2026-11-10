@@ -24,6 +24,7 @@ pub mod relay;
 pub mod role_settings;
 pub mod run_loop;
 pub mod sandbox;
+pub mod service;
 pub mod setup;
 pub mod shadow;
 pub mod staging_login;
