@@ -466,8 +466,13 @@ Service Control Manager really does at boot, logoff, stop, preshutdown and
 reboot, and after a crash, is phase 4c's owner-run acceptance and is not
 claimed. The Windows-only modules (`scm`, `pipe` and `runner_service`, and the
 additions to `runner`) were written on a Linux host that has no Windows
-compiler; the first native Windows build and test run is what verifies them,
-and until it has run they are untested.
+compiler. Their first native build and test run was the task's review on
+MiniAir on 2026-11-10. They compiled without a change. Five pipe tests failed
+for one cause, which the revision fixed: the pipe asked Windows for the
+client's account before anything had been read from the connection, and
+Windows refuses that with error 1368, so no client could have been admitted.
+The same review bounded the waits a client may ask for. The supervisor
+crate's tests pass on native Windows after the revision.
 
 **Lifecycle core** (`crates/supervisor/src/service`, platform neutral). It
 calls no operating system, so its unit tests run the same on Linux and on
@@ -508,7 +513,10 @@ request line at a time, and steps the service's ending between waits, so a
 recorded stop reaches the launches within a quarter of a second. During the
 ending, requests that begin a launch (`prepare`, `hold_file`, `start`) are
 refused with `refusal: "service_stopping"`; requests about a launch that
-exists are still served, with their waits cut to a quarter of a second. At
+exists are still served. A wait a client asks for (`observe`,
+`watched_ended`) is cut to a quarter of a second at all times, running or
+ending, because a longer one would hold the one thread and delay a stop; the
+client sees the launch still running and asks again. At
 the deadline what remains is terminated, and a launch is journaled `ended`
 only when Windows reported its job empty. The service reports stopped
 afterwards. The state directory, by default
@@ -516,7 +524,9 @@ afterwards. The state directory, by default
 service's account, the system and administrators; a directory that already
 exists is used as found, and its access list is its installer's. The service
 logs to `service.log` there. The service still does not switch accounts: a
-launch runs as the account the service runs as.
+launch runs as the account the service runs as. The configuration is found
+only through `--config`: there is no default configuration path on Windows,
+so the command line a service is registered with has to name the file.
 
 **The pipe** (`host_runtime::windows::pipe`). It is created as the first
 instance of its name with one instance in all, so a second server or a
@@ -526,15 +536,19 @@ full, and the one configured client SID with read data, write data, read
 attributes and synchronize, and without the right to create pipe instances. A
 client therefore has to ask for that access when it opens the pipe (an open
 for generic write is refused). A pipe whose list cannot be built or applied is
-not created, and there is no fallback to a default list. When a client
-connects the pipe asks Windows for its process id and, while the serving
-thread impersonates the connection, for the account of the connection's token,
-then reverts; the thread aborts the process if it cannot revert. A client
-whose account or process Windows did not report, or whose account is not the
-configured client or the service's own, is disconnected without a byte read.
-Requests and answers can only pass through a session that exists after that
-check. One client is served at a time; a client that does not read an answer
-for ten seconds is dropped.
+not created, and there is no fallback to a default list. Windows names the
+account of a connection only after something was read from it, so when a
+client connects the pipe first takes in the client's first bytes and keeps
+them unparsed. It then asks Windows for the client's process id and, while
+the serving thread impersonates the connection, for the account of the
+connection's token, then reverts; the thread aborts the process if it cannot
+revert. A client whose account or process Windows did not report, or whose
+account is not the configured client or the service's own, is disconnected
+and its bytes are thrown away: no request of its is looked at and nothing is
+written to it. A client that connects and sends nothing is disconnected
+after ten seconds, unidentified. Requests and answers can only pass through
+a session that exists after that check. One client is served at a time; a
+client that does not read an answer for ten seconds is dropped.
 
 **Settings.** Every setting has an in-code default. The example
 configuration, `deploy/agentc/supervisor-windows.example.toml`, shows each one
@@ -563,8 +577,10 @@ real launch, which on an interactive desktop checks the refusal and nothing
 else. The pipe's tests create real pipes in the test's own account: the
 same-account client is admitted, a second first instance is refused, a client
 the list omits cannot connect, a client the list admits but the policy does not
-list is disconnected unserved, and the narrow entry alone admits the
-configured client.
+list is disconnected unserved, a client that stays silent is dropped
+unidentified, and the narrow entry alone admits the configured client.
+`windows_service` also checks that no wait a client asks for is carried out
+longer than a quarter of a second, running or ending.
 
 **Not demonstrated by 4a** (4c's, or later):
 
@@ -591,7 +607,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | **Complete.** The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test (task `96d4927e`) **passed** in the owner's run with the prototype launcher on 2026-11-09; task `4baa4706` records it under [Network policy run](#network-policy-run-2026-11-09). The same runbook, followed with the Rust launcher in phase 3, passed |
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
-| 4b | The supervisor service loop on Windows over that pipe, the kill switch's unreadable-path case on Windows, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Not started |
+| 4b | The supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Not started |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Not started |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
 | 6 | Egress and publication brokers | Phase 3 | Not started |

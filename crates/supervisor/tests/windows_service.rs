@@ -10,6 +10,7 @@
 #![cfg(windows)]
 
 use agentc_supervisor::host_runtime::windows::runner::{Request, Runner, answer};
+use agentc_supervisor::host_runtime::windows::runner_service::{MAX_WAIT_MS, TICK, admitted};
 use agentc_supervisor::service::drain::{Drain, Fleet};
 use agentc_supervisor::service::lifecycle::{
     Kind, Lifecycle, Limits, Monotonic, Report, Request as Ending, Signal,
@@ -102,21 +103,52 @@ fn a_request_that_begins_a_launch_is_refused_once_the_service_is_ending() {
     }
 }
 
-#[test]
-fn an_ending_service_shortens_the_waits_a_driver_asks_for() {
-    let mut observe = parse_request(json!({"op": "observe", "launch": "l", "wait_ms": 30_000}));
-    observe.limit_wait(250);
-    assert!(
-        format!("{observe:?}").contains("wait_ms: 250"),
-        "{observe:?}"
-    );
-    let mut short = parse_request(json!({"op": "observe", "launch": "l", "wait_ms": 10}));
-    short.limit_wait(250);
-    assert!(format!("{short:?}").contains("wait_ms: 10"), "{short:?}");
+/// The request the service would carry out for `value`, as debug text.
+fn carried_out(life: &mut Lifecycle<Monotonic>, signal: &Signal, value: Value) -> String {
+    let line = value.to_string();
+    format!("{:?}", admitted(life, signal, line.as_bytes()).unwrap())
 }
 
-fn parse_request(value: Value) -> Request {
-    serde_json::from_value(value).unwrap()
+// The service has one thread. A wait longer than a tick would keep a stop
+// recorded meanwhile from being acted on, so no wait is ever longer: not
+// while the service runs, and not while it ends.
+#[test]
+fn no_wait_a_driver_asks_for_holds_the_service_longer_than_a_tick() {
+    let (mut life, signal) = (
+        Lifecycle::new(Monotonic::new(), limits()),
+        Signal::default(),
+    );
+    assert!(Duration::from_millis(MAX_WAIT_MS) <= TICK);
+    let long = [
+        json!({"op": "observe", "launch": "l", "wait_ms": 3_600_000}),
+        json!({"op": "watched_ended", "launch": "l", "wait_ms": u64::MAX}),
+    ];
+    for ending in [false, true] {
+        if ending {
+            signal.request(Ending::Stop);
+        }
+        for request in &long {
+            let carried = carried_out(&mut life, &signal, request.clone());
+            let cut = format!("wait_ms: {MAX_WAIT_MS}");
+            assert!(carried.contains(&cut), "ending {ending}: {carried}");
+        }
+        let short = json!({"op": "observe", "launch": "l", "wait_ms": 10});
+        let carried = carried_out(&mut life, &signal, short);
+        assert!(carried.contains("wait_ms: 10"), "{carried}");
+    }
+}
+
+#[test]
+fn a_line_that_is_no_request_or_begins_a_launch_while_ending_is_not_carried_out() {
+    let (mut life, signal) = (
+        Lifecycle::new(Monotonic::new(), limits()),
+        Signal::default(),
+    );
+    assert!(admitted(&mut life, &signal, b"{\"op\": \"run_anything\"}").is_err());
+    signal.request(Ending::Preshutdown);
+    let hold = json!({"op": "hold_file", "launch": "l", "path": "f"}).to_string();
+    let refused = admitted(&mut life, &signal, hold.as_bytes()).unwrap_err();
+    assert_eq!(answer(Err(refused))["refusal"], "service_stopping");
 }
 
 /// The limits of a service whose launches end within a few seconds.

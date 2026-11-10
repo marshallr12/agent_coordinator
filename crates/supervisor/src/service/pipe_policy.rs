@@ -99,6 +99,10 @@ pub enum Refusal {
     ProcessUnknown,
     /// The account is not one the pipe serves.
     NotAllowed(String),
+    /// The client connected and sent nothing for too long. Windows names a
+    /// connection's account only once something was read from it, so a
+    /// silent client cannot be identified.
+    Silent,
 }
 
 impl std::fmt::Display for Refusal {
@@ -107,6 +111,7 @@ impl std::fmt::Display for Refusal {
             Self::AccountUnknown => write!(f, "Windows did not identify the client's account"),
             Self::ProcessUnknown => write!(f, "Windows did not identify the client's process"),
             Self::NotAllowed(account) => write!(f, "the account {account} is not served"),
+            Self::Silent => write!(f, "the client sent nothing, so it was never identified"),
         }
     }
 }

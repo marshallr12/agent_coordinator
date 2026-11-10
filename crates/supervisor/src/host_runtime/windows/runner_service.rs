@@ -14,13 +14,16 @@
 //! reaches the launches within one [`TICK`]: new `prepare`, `hold_file` and
 //! `start` requests are refused at once, launches are asked to stop, what
 //! remains is terminated at the deadline, and the service reports stopped
-//! only after every launch it held is journaled as ended.
+//! only after every launch it held is journaled as ended. No request may
+//! hold the thread longer than that either: a wait a client asks for is cut
+//! to [`MAX_WAIT_MS`] whatever the service is doing ([`admitted`]), and the
+//! client asks again.
 use super::pipe::{Accepted, Line, Pipe, Session};
 use super::runner::{Request, Runner, answer};
 use super::scm::{self, Host};
 use super::{reader, sddl, token};
 use crate::service::drain::Drain;
-use crate::service::lifecycle::{Lifecycle, Monotonic, Phase, Report};
+use crate::service::lifecycle::{Clock, Lifecycle, Monotonic, Phase, Report, Signal};
 use crate::service::settings::ServiceSettings;
 use crate::service::startup;
 use anyhow::{Context, Result};
@@ -32,8 +35,11 @@ use std::time::{Duration, Instant};
 
 /// How often the worker looks at the service's life while it waits.
 pub const TICK: Duration = Duration::from_millis(250);
-/// The longest a launch-side wait is allowed while the service is ending.
-const ENDING_WAIT_MS: u64 = 250;
+/// The longest a wait a client asks for may hold the serving thread. The
+/// service has one thread, so a longer wait would keep a stop recorded
+/// meanwhile from being acted on. The client sees the launch still running
+/// and asks again.
+pub const MAX_WAIT_MS: u64 = 250;
 /// How long Windows may wait for the service to report that it started.
 const START_HINT: Duration = Duration::from_secs(30);
 
@@ -239,18 +245,25 @@ impl<'a> Hub<'a> {
         }
     }
 
-    /// The answer to one request line. A request that begins a launch is
-    /// refused once the service is ending; a wait is shortened.
+    /// The answer to one request line.
     fn respond(&mut self, line: &[u8]) -> Value {
-        let outcome = serde_json::from_slice::<Request>(line)
-            .context("the request is not one the runner knows")
-            .and_then(|mut request| {
-                self.life.admit(self.host.signal(), request.kind())?;
-                if self.life.phase() != Phase::Running {
-                    request.limit_wait(ENDING_WAIT_MS);
-                }
-                self.runner.handle(request)
-            });
-        answer(outcome)
+        let request = admitted(&mut self.life, self.host.signal(), line);
+        answer(request.and_then(|request| self.runner.handle(request)))
     }
+}
+
+/// The request in `line` as the service will carry it out, or why it will
+/// not. A request that begins a launch is refused once the service is
+/// ending. Every wait is cut to [`MAX_WAIT_MS`], running or ending, so the
+/// serving thread is back at the service's life within one tick.
+pub fn admitted<C: Clock>(
+    life: &mut Lifecycle<C>,
+    signal: &Signal,
+    line: &[u8],
+) -> Result<Request> {
+    let parsed = serde_json::from_slice::<Request>(line);
+    let mut request = parsed.context("the request is not one the runner knows")?;
+    life.admit(signal, request.kind())?;
+    request.limit_wait(MAX_WAIT_MS);
+    Ok(request)
 }

@@ -10,8 +10,13 @@
 //! A connection is served only through a [`Session`], and a session exists
 //! only once Windows has told the pipe which account and which process
 //! connected and [`crate::service::pipe_policy::admit`] accepted them. The
-//! account is read from the connection's own token. A client that cannot be
-//! identified, or is not on the list, is disconnected without a byte read.
+//! account is read from the connection's own token. Windows gives that token
+//! only after something was read from the connection (it fails with error
+//! 1368 before), so the pipe first takes in the client's first bytes and
+//! keeps them unparsed. A client that cannot be identified, or is not on the
+//! list, is disconnected and those bytes are thrown away: no request of its
+//! is looked at and nothing is written to it. A client that connects and
+//! stays silent is disconnected after [`IDENTIFY_PATIENCE`].
 //!
 //! All I/O is overlapped, so the one thread that serves the pipe can also
 //! wake for the service's stop request and keep the drain going.
@@ -22,7 +27,7 @@ use crate::service::pipe_policy::{
     Admitted, Client, ClientFacts, Refusal, admit, descriptor, pipe_path,
 };
 use anyhow::{Context, Result, bail, ensure};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED,
     ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, GetLastError, HANDLE, WAIT_OBJECT_0,
@@ -50,6 +55,9 @@ pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const WRITE_PATIENCE: Duration = Duration::from_secs(10);
 /// One read of a request, at most.
 const CHUNK: usize = 8192;
+/// How long a connected client may stay silent before it is disconnected
+/// unidentified, so it cannot hold the pipe's one instance.
+pub const IDENTIFY_PATIENCE: Duration = Duration::from_secs(10);
 
 /// How an overlapped operation ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +98,17 @@ pub enum Line {
     Closed,
 }
 
+/// What one read from the connected client came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fill {
+    /// Bytes arrived and were added to the pending ones.
+    Read,
+    /// Nothing arrived yet, or the service was woken.
+    Idle,
+    /// The client is gone.
+    Closed,
+}
+
 /// The pipe's one instance.
 pub struct Pipe {
     handle: Handle,
@@ -100,6 +119,10 @@ pub struct Pipe {
     served: Admitted,
     /// Bytes read from the client after the last complete line.
     pending: Vec<u8>,
+    /// When the client that is connected but not yet identified connected.
+    connected: Option<Instant>,
+    /// How long that client may stay silent.
+    identify_patience: Duration,
 }
 
 impl Pipe {
@@ -149,6 +172,8 @@ impl Pipe {
             wake,
             served,
             pending: Vec::new(),
+            connected: None,
+            identify_patience: IDENTIFY_PATIENCE,
         })
     }
 
@@ -229,18 +254,19 @@ impl Pipe {
         bail!("a pipe operation failed with Windows error {code}")
     }
 
-    /// Waits up to `patience` for a client. A client that connects is
-    /// identified at once and is either admitted, as a [`Session`], or
-    /// disconnected.
+    /// Waits up to `patience` for a client, and then for its first bytes.
+    /// Once they arrived the client is identified and is either admitted,
+    /// as a [`Session`], or disconnected. A client still silent when the
+    /// wait ends stays connected for the next call, up to the patience a
+    /// silent client gets.
     pub fn accept(&mut self, patience: Duration) -> Result<Accepted<'_>> {
-        let handle = self.handle.raw();
-        // SAFETY: the pipe handle is live and the structure is the one
-        // `run` passes.
-        let connect = |overlapped| unsafe { ConnectNamedPipe(handle, overlapped) };
-        match self.run(connect, patience, true)? {
-            Io::Done(_) => {}
-            Io::Timeout | Io::Woken => return Ok(Accepted::Idle),
-            Io::Closed => {
+        if self.connected.is_none() && !self.connect(patience)? {
+            return Ok(Accepted::Idle);
+        }
+        match self.fill(patience)? {
+            Fill::Read => {}
+            Fill::Idle => return Ok(self.still_silent()),
+            Fill::Closed => {
                 // A client came and went before it was served.
                 self.disconnect();
                 return Ok(Accepted::Idle);
@@ -248,11 +274,68 @@ impl Pipe {
         }
         let facts = self.identify();
         match admit(&self.served, &facts) {
-            Ok(client) => Ok(Accepted::Client(Session { pipe: self, client })),
+            Ok(client) => {
+                self.connected = None;
+                Ok(Accepted::Client(Session { pipe: self, client }))
+            }
             Err(refusal) => {
                 self.disconnect();
                 Ok(Accepted::Refused(refusal))
             }
+        }
+    }
+
+    /// Waits up to `patience` for a client to connect; true when one did.
+    fn connect(&mut self, patience: Duration) -> Result<bool> {
+        let handle = self.handle.raw();
+        // SAFETY: the pipe handle is live and the structure is the one
+        // `run` passes.
+        let connect = |overlapped| unsafe { ConnectNamedPipe(handle, overlapped) };
+        match self.run(connect, patience, true)? {
+            Io::Done(_) => {
+                self.connected = Some(Instant::now());
+                Ok(true)
+            }
+            Io::Timeout | Io::Woken => Ok(false),
+            Io::Closed => {
+                // A client came and went before it was served.
+                self.disconnect();
+                Ok(false)
+            }
+        }
+    }
+
+    /// What to do with a connected client that has sent nothing yet: keep
+    /// waiting, or disconnect it once its patience ran out.
+    fn still_silent(&mut self) -> Accepted<'_> {
+        let waited = self
+            .connected
+            .map_or(Duration::ZERO, |since| since.elapsed());
+        if waited < self.identify_patience {
+            return Accepted::Idle;
+        }
+        self.disconnect();
+        Accepted::Refused(Refusal::Silent)
+    }
+
+    /// Reads once from the connected client into the pending bytes, waiting
+    /// up to `patience`. The bytes are only stored here, never parsed.
+    fn fill(&mut self, patience: Duration) -> Result<Fill> {
+        let mut chunk = [0_u8; CHUNK];
+        let handle = self.handle.raw();
+        let (pointer, size) = (chunk.as_mut_ptr(), chunk.len() as u32);
+        // SAFETY: `pointer` is writable for `size` bytes and `run` waits for
+        // the read to end before `chunk` goes out of scope.
+        let read = |overlapped| unsafe {
+            ReadFile(handle, pointer, size, std::ptr::null_mut(), overlapped)
+        };
+        match self.run(read, patience, true)? {
+            Io::Done(0) | Io::Closed => Ok(Fill::Closed),
+            Io::Done(count) => {
+                self.pending.extend_from_slice(&chunk[..count as usize]);
+                Ok(Fill::Read)
+            }
+            Io::Timeout | Io::Woken => Ok(Fill::Idle),
         }
     }
 
@@ -276,7 +359,9 @@ impl Pipe {
     }
 
     /// The account of the connected client's token, read while this thread
-    /// impersonates the client and only then.
+    /// impersonates the client and only then. Windows refuses to
+    /// impersonate a connection nothing was read from, so the caller reads
+    /// the client's first bytes before this.
     fn client_account(&self) -> Result<String> {
         // SAFETY: the pipe handle is live and has a connected client.
         let impersonating = unsafe { ImpersonateNamedPipeClient(self.handle.raw()) };
@@ -296,6 +381,7 @@ impl Pipe {
     /// Ends the current client's connection so the pipe can take the next.
     fn disconnect(&mut self) {
         self.pending.clear();
+        self.connected = None;
         // SAFETY: the pipe handle is live. A failure means nobody was
         // connected; the next connect reports anything that matters.
         unsafe { DisconnectNamedPipe(self.handle.raw()) };
@@ -345,21 +431,10 @@ impl Session<'_> {
                 self.pipe.pending.len() <= MAX_REQUEST_BYTES,
                 "a request is longer than {MAX_REQUEST_BYTES} bytes"
             );
-            let mut chunk = [0_u8; CHUNK];
-            let handle = self.pipe.handle.raw();
-            let (pointer, size) = (chunk.as_mut_ptr(), chunk.len() as u32);
-            // SAFETY: `pointer` is writable for `size` bytes and `run` waits
-            // for the read to end before `chunk` goes out of scope.
-            let read = |overlapped| unsafe {
-                ReadFile(handle, pointer, size, std::ptr::null_mut(), overlapped)
-            };
-            match self.pipe.run(read, patience, true)? {
-                Io::Done(0) | Io::Closed => return Ok(Line::Closed),
-                Io::Done(count) => self
-                    .pipe
-                    .pending
-                    .extend_from_slice(&chunk[..count as usize]),
-                Io::Timeout | Io::Woken => return Ok(Line::Idle),
+            match self.pipe.fill(patience)? {
+                Fill::Read => {}
+                Fill::Idle => return Ok(Line::Idle),
+                Fill::Closed => return Ok(Line::Closed),
             }
         }
     }
@@ -543,13 +618,40 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_client_leaves_the_server_free_to_do_other_work() {
+    fn a_client_that_connects_and_stays_silent_is_dropped_unidentified() {
+        let (name, me) = (unique(), me());
+        let mut pipe = Pipe::create(&name, &me, &me, None).unwrap();
+        pipe.identify_patience = Duration::from_millis(300);
+        let quiet = std::thread::spawn({
+            let name = name.clone();
+            move || {
+                let file = client(&name).unwrap();
+                let mut answer = String::new();
+                BufReader::new(file).read_line(&mut answer).unwrap_or(0)
+            }
+        });
+        // The first wait ends with the client connected and still silent.
+        let tick = Duration::from_millis(100);
+        assert!(matches!(pipe.accept(tick).unwrap(), Accepted::Idle));
+        let refused = (0..50).find_map(|_| match pipe.accept(tick).unwrap() {
+            Accepted::Idle => None,
+            Accepted::Refused(refusal) => Some(refusal),
+            Accepted::Client(_) => panic!("a silent client was served"),
+        });
+        assert_eq!(refused, Some(Refusal::Silent));
+        assert_eq!(quiet.join().unwrap(), 0, "the silent client got an answer");
+    }
+
+    #[test]
+    fn a_client_between_requests_leaves_the_server_free_to_do_other_work() {
         let (name, me) = (unique(), me());
         let mut pipe = Pipe::create(&name, &me, &me, None).unwrap();
         let _quiet = std::thread::spawn({
             let name = name.clone();
             move || {
-                let file = client(&name).unwrap();
+                let mut file = client(&name).unwrap();
+                // The start of a request, and then nothing more.
+                file.write_all(b"{").unwrap();
                 std::thread::sleep(Duration::from_millis(800));
                 drop(file);
             }

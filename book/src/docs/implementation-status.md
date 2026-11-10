@@ -65,8 +65,10 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   accepted**: boot, logoff, stop, preshutdown, reboot and crash behavior under
   the Service Control Manager is phase 4c's owner-run acceptance, and the
   supervisor's own service loop over the pipe is phase 4b's. The Windows-only
-  modules had not been compiled or run on Windows when they were written; the
-  lifecycle core's tests run on Linux.
+  modules were written without a Windows compiler; their first native build
+  and test run, in review on 2026-11-10, found that the pipe could not
+  identify any client, which the revision fixed. The supervisor crate's
+  tests now pass on native Windows, and the lifecycle core's on Linux too.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
