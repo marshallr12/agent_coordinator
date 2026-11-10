@@ -449,11 +449,20 @@ impl Fleet for Runner {
             )
     }
 
-    /// Confirmed only when Windows reported the job empty and the end was
-    /// journaled ([`Runner::terminate`]).
-    fn terminate(&mut self, launch: &str) -> Result<bool> {
-        let answer = Runner::terminate(self, launch)?;
-        Ok(answer["quiescent"] == json!(true))
+    fn kill(&mut self, launch: &str) -> Result<()> {
+        self.launcher.kill(launch)
+    }
+
+    /// Confirmed only when Windows reports the launch's job empty; the end
+    /// is journaled before it is confirmed.
+    fn emptied(&mut self, launch: &str) -> Result<bool> {
+        if !self.launcher.emptied(launch)? {
+            return Ok(false);
+        }
+        let mut entry = self.entry(launch)?;
+        entry.stage = Stage::Ended;
+        self.journal.save(&entry)?;
+        Ok(true)
     }
 }
 

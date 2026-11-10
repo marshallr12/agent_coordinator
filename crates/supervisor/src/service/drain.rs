@@ -3,11 +3,14 @@
 //! [`Drain::step`] is called again and again by the service's worker. While
 //! the service runs it does nothing. Once a stop or preshutdown request is
 //! seen it asks each launch to end by itself; a launch whose root ended is
-//! emptied at once; at the deadline it terminates whatever is left. A launch
-//! counts as ended only when [`Fleet::terminate`] says the operating system
-//! confirmed it (and the fleet journaled it), so the service reports itself
-//! stopped in quiescence only when every launch it was responsible for is
-//! confirmed.
+//! killed at once; at the deadline it kills whatever is left. Killing does
+//! not wait: every remaining launch is killed in the same step, and each
+//! later step only looks whether its job has emptied, so the waits run side
+//! by side against the service's one deadline and the service keeps
+//! reporting meanwhile. A launch counts as ended only when
+//! [`Fleet::emptied`] says the operating system confirmed it (and the fleet
+//! journaled it), so the service reports itself stopped in quiescence only
+//! when every launch it was responsible for is confirmed.
 use super::lifecycle::{Clock, Lifecycle, Phase, Report, Signal};
 use anyhow::Result;
 use std::collections::BTreeSet;
@@ -21,10 +24,12 @@ pub trait Fleet {
     /// Whether the root of `launch` has been seen to end. A failure to look
     /// is `false`: a lost observer proves nothing.
     fn root_ended(&mut self, launch: &str) -> bool;
-    /// Ends everything `launch` started. `Ok(true)` only when the operating
-    /// system confirmed that nothing is left and the end was journaled;
+    /// Kills everything `launch` started, without waiting for it to go.
+    fn kill(&mut self, launch: &str) -> Result<()>;
+    /// Whether the operating system confirms that nothing of `launch` is
+    /// left. `Ok(true)` only then, and only once the end was journaled;
     /// anything else leaves the launch unconfirmed.
-    fn terminate(&mut self, launch: &str) -> Result<bool>;
+    fn emptied(&mut self, launch: &str) -> Result<bool>;
 }
 
 /// What one step did.
@@ -41,10 +46,10 @@ pub struct Step {
 pub struct Drain {
     /// Launches already asked to end.
     asked: BTreeSet<String>,
-    /// Launches a termination was attempted on without confirmation. They
-    /// are not terminated again: a second attempt on a job that was closed
-    /// could be mistaken for the job having emptied.
-    tried: BTreeSet<String>,
+    /// Launches that were killed. Each is killed once.
+    killed: BTreeSet<String>,
+    /// Launches a failure to look was already reported for.
+    complained: BTreeSet<String>,
 }
 
 impl Drain {
@@ -82,29 +87,28 @@ impl Drain {
                 life.confirm(fleet.unconfirmed().len());
             }
         }
-        Step {
-            report: life.report(),
-            problems,
+        let report = life.report();
+        if report == (Report::Stopped { quiescent: false }) {
+            let left = fleet.unconfirmed().into_iter();
+            let unconfirmed =
+                |launch| format!("{launch}: the operating system did not confirm an end");
+            problems.extend(left.map(unconfirmed));
         }
+        Step { report, problems }
     }
 
-    /// Terminates `launch` once, noting a failure or an unconfirmed end.
+    /// Kills `launch` if that was not done yet, then looks whether it has
+    /// gone. A failure to kill or to look is noted once.
     fn end(&mut self, fleet: &mut impl Fleet, launch: &str, problems: &mut Vec<String>) {
-        if self.tried.contains(launch) {
-            return;
+        if self.killed.insert(launch.to_owned())
+            && let Err(error) = fleet.kill(launch)
+        {
+            problems.push(format!("terminate {launch}: {error:#}"));
         }
-        match fleet.terminate(launch) {
-            Ok(true) => {}
-            Ok(false) => {
-                self.tried.insert(launch.to_owned());
-                problems.push(format!(
-                    "{launch}: the operating system did not confirm an end"
-                ));
-            }
-            Err(error) => {
-                self.tried.insert(launch.to_owned());
-                problems.push(format!("terminate {launch}: {error:#}"));
-            }
+        if let Err(error) = fleet.emptied(launch)
+            && self.complained.insert(launch.to_owned())
+        {
+            problems.push(format!("look at {launch}: {error:#}"));
         }
     }
 }
@@ -136,6 +140,7 @@ mod tests {
         behaviour: Behaviour,
         asked: bool,
         ended: bool,
+        killed: bool,
         confirmed: bool,
         terminations: u32,
     }
@@ -173,14 +178,19 @@ mod tests {
             self.0[launch].ended
         }
 
-        fn terminate(&mut self, launch: &str) -> Result<bool> {
+        fn kill(&mut self, launch: &str) -> Result<()> {
             let launch = self.0.get_mut(launch).unwrap();
             launch.terminations += 1;
             if launch.behaviour.fails {
                 bail!("access denied");
             }
-            launch.ended = true;
-            launch.confirmed = !launch.behaviour.unconfirmable;
+            launch.killed = true;
+            Ok(())
+        }
+
+        fn emptied(&mut self, launch: &str) -> Result<bool> {
+            let launch = self.0.get_mut(launch).unwrap();
+            launch.confirmed = launch.killed && !launch.behaviour.unconfirmable;
             Ok(launch.confirmed)
         }
     }
@@ -285,6 +295,25 @@ mod tests {
     }
 
     #[test]
+    fn every_remaining_launch_is_killed_in_one_step_before_any_is_waited_for() {
+        let (mut life, clock, signal, mut drain) = service();
+        let slow = Behaviour {
+            unconfirmable: true,
+            ..STUBBORN
+        };
+        let mut pool = Pool::with(&[("a", slow), ("b", STUBBORN), ("c", slow)]);
+        signal.request(Request::Stop);
+        drain.step(&mut life, &signal, &mut pool);
+        clock.advance(30 * S);
+        let step = drain.step(&mut life, &signal, &mut pool);
+        // One step at the deadline killed all three, though `a` never goes.
+        let kills: Vec<u32> = pool.0.values().map(|l| l.terminations).collect();
+        assert_eq!(kills, [1, 1, 1]);
+        assert!(pool.0["b"].confirmed);
+        assert!(matches!(step.report, Report::Stopping { .. }));
+    }
+
+    #[test]
     fn an_end_the_system_did_not_confirm_is_not_a_clean_stop_and_is_not_retried() {
         let (mut life, clock, signal, mut drain) = service();
         let unconfirmable = Behaviour {
@@ -297,12 +326,7 @@ mod tests {
         clock.advance(10 * S);
         let step = drain.step(&mut life, &signal, &mut pool);
         assert_eq!(pool.0["c"].terminations, 1);
-        assert_eq!(step.problems.len(), 1);
-        assert!(
-            step.problems[0].contains("did not confirm"),
-            "{:?}",
-            step.problems
-        );
+        assert!(step.problems.is_empty(), "{:?}", step.problems);
         for _ in 0..4 {
             clock.advance(S);
             let step = drain.step(&mut life, &signal, &mut pool);
@@ -314,6 +338,12 @@ mod tests {
         let last = drain.step(&mut life, &signal, &mut pool);
         assert_eq!(last.report, Report::Stopped { quiescent: false });
         assert_eq!(pool.unconfirmed(), ["c"]);
+        assert_eq!(last.problems.len(), 1);
+        assert!(
+            last.problems[0].contains("did not confirm"),
+            "{:?}",
+            last.problems
+        );
     }
 
     #[test]

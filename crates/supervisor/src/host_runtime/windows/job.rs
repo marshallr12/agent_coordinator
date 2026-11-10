@@ -120,11 +120,16 @@ impl Job {
         (read != 0).then_some(accounting.ActiveProcesses)
     }
 
+    /// Kills every process in the job without waiting for it to empty.
+    pub fn kill(&self) {
+        // SAFETY: the job handle is live; the exit code is a plain integer.
+        unsafe { TerminateJobObject(self.0.raw(), KILLED) };
+    }
+
     /// Kills every process in the job and waits up to `patience` for it to
     /// empty; true when Windows reports no process left.
     pub fn terminate(&self, patience: Duration) -> bool {
-        // SAFETY: the job handle is live; the exit code is a plain integer.
-        unsafe { TerminateJobObject(self.0.raw(), KILLED) };
+        self.kill();
         let deadline = Instant::now() + patience;
         loop {
             if self.active() == Some(0) {

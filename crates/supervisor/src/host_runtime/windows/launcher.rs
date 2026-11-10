@@ -256,6 +256,27 @@ impl Launcher {
         Ok(job.terminate(TERMINATE_PATIENCE))
     }
 
+    /// Kills every process of the launch's current start without waiting
+    /// for its job to empty; the job stays held until [`Launcher::emptied`]
+    /// sees it empty.
+    pub fn kill(&mut self, id: &str) -> Result<()> {
+        if let Some(job) = &self.slot(id)?.job {
+            job.kill();
+        }
+        Ok(())
+    }
+
+    /// Whether the launch's job is empty, as Windows reports it; the job is
+    /// closed once it is. A launch without a job has nothing running.
+    pub fn emptied(&mut self, id: &str) -> Result<bool> {
+        let slot = self.slot(id)?;
+        let empty = slot.job.as_ref().is_none_or(|job| job.active() == Some(0));
+        if empty {
+            slot.job = None;
+        }
+        Ok(empty)
+    }
+
     /// Starts watching process `pid` by handle; true when it is alive and a
     /// member of the launch's current job. The pid comes from the worker,
     /// so it counts only with both facts from Windows.
