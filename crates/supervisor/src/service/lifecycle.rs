@@ -216,10 +216,10 @@ impl<C: Clock> Lifecycle<C> {
             },
             other => other,
         };
-        if let Phase::Terminating { give_up, .. } = self.phase {
-            if now >= give_up {
-                self.phase = Phase::Stopped { quiescent: false };
-            }
+        if let Phase::Terminating { give_up, .. } = self.phase
+            && now >= give_up
+        {
+            self.phase = Phase::Stopped { quiescent: false };
         }
         self.phase
     }
