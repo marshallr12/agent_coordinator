@@ -15,6 +15,9 @@ use super::reader::{PathRefused, validated_read};
 use super::recovery;
 use super::text::wide;
 use crate::host_runtime::Recovery;
+use crate::service::drain::Fleet;
+use crate::service::lifecycle::{Kind, Refused};
+use crate::service::startup::{Judged, Ledger, Verdict};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -75,6 +78,36 @@ pub enum Request {
     Recover,
     /// Delete what an ended launch of an earlier runner left behind.
     Reclaim { launch: String },
+}
+
+impl Request {
+    /// Whether the request begins a launch or acts on one that exists. A
+    /// service that is ending refuses what begins one. Every request is
+    /// named, so a new one cannot be added without deciding which it is.
+    pub fn kind(&self) -> Kind {
+        match self {
+            Self::Prepare { .. } | Self::HoldFile { .. } | Self::Start { .. } => Kind::Begins,
+            Self::Identity
+            | Self::Observe { .. }
+            | Self::RequestStop { .. }
+            | Self::Terminate { .. }
+            | Self::Watch { .. }
+            | Self::WatchedEnded { .. }
+            | Self::Cleanup { .. }
+            | Self::Read { .. }
+            | Self::Recover
+            | Self::Reclaim { .. } => Kind::Continues,
+        }
+    }
+
+    /// Shortens a wait the request asks for to at most `most_ms`, so a
+    /// service that is ending keeps its own time. The driver sees the
+    /// launch still running and asks again.
+    pub fn limit_wait(&mut self, most_ms: u64) {
+        if let Self::Observe { wait_ms, .. } | Self::WatchedEnded { wait_ms, .. } = self {
+            *wait_ms = (*wait_ms).min(most_ms);
+        }
+    }
 }
 
 /// A launcher, its journal and the launches this run prepared.
@@ -318,6 +351,65 @@ impl Runner {
     }
 }
 
+impl Ledger for Runner {
+    /// Every journaled launch with its verdict. A launch this run holds may
+    /// run; any other is judged from its saved identities.
+    fn judge_all(&self) -> Result<(Vec<Judged>, Vec<String>)> {
+        let (entries, unreadable) = self.journal.load_all()?;
+        let judged = entries.into_iter().map(|entry| {
+            let ended = !self.mine.contains(&entry.launch) && verdict(&entry) == "ended";
+            Judged {
+                verdict: if ended {
+                    Verdict::Ended
+                } else {
+                    Verdict::MayRun
+                },
+                launch: entry.launch,
+            }
+        });
+        Ok((judged.collect(), unreadable))
+    }
+
+    fn reclaim(&mut self, launch: &str) -> Result<()> {
+        Runner::reclaim(self, launch).map(|_| ())
+    }
+}
+
+impl Fleet for Runner {
+    /// The launches this run prepared whose end is not journaled.
+    fn unconfirmed(&self) -> Vec<String> {
+        let open = |launch: &&String| {
+            let entry = self.journal.load(launch);
+            entry.is_none_or(|entry| entry.stage != Stage::Ended)
+        };
+        self.mine.iter().filter(open).cloned().collect()
+    }
+
+    fn ask_stop(&mut self, launch: &str) -> Result<()> {
+        self.launcher.request_stop(launch)
+    }
+
+    /// A launch never started has no root to wait for.
+    fn root_ended(&mut self, launch: &str) -> bool {
+        let unstarted = self
+            .journal
+            .load(launch)
+            .is_some_and(|e| e.stage == Stage::Prepared);
+        unstarted
+            || matches!(
+                self.launcher.observe(launch, Duration::ZERO),
+                Ok(Seen::Exited(_))
+            )
+    }
+
+    /// Confirmed only when Windows reported the job empty and the end was
+    /// journaled ([`Runner::terminate`]).
+    fn terminate(&mut self, launch: &str) -> Result<bool> {
+        let answer = Runner::terminate(self, launch)?;
+        Ok(answer["quiescent"] == json!(true))
+    }
+}
+
 /// `ended` or `may_be_running` for an entry this run does not hold.
 fn verdict(entry: &Entry) -> &'static str {
     let root = entry.pid.map(|pid| (pid, entry.created));
@@ -341,6 +433,8 @@ pub fn answer(outcome: Result<Value>) -> Value {
                 Some("station_not_ours")
             } else if error.downcast_ref::<PathRefused>().is_some() {
                 Some("path_refused")
+            } else if error.downcast_ref::<Refused>().is_some() {
+                Some("service_stopping")
             } else {
                 None
             };

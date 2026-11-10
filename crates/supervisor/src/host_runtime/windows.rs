@@ -21,6 +21,11 @@
 //! handle. [`runner`] serves all of it to a driver as typed requests and
 //! journals each launch before it starts ([`journal`], [`recovery`]).
 //!
+//! [`runner_service`] hosts the runner as a Windows service: [`scm`] binds it
+//! to the Service Control Manager, [`pipe`] serves it over a named pipe that
+//! admits one configured client, and the platform-neutral
+//! [`crate::service`] decides its life.
+//!
 //! [`WindowsHost`] is the [`HostRuntime`] over one [`launcher::Launcher`].
 //! No provider harness is supported on Windows yet, so what a launch runs
 //! comes from a [`Planner`] the caller supplies; nothing in this crate
@@ -29,11 +34,14 @@ pub mod desktop;
 pub mod job;
 pub mod journal;
 pub mod launcher;
+pub mod pipe;
 pub mod process;
 pub mod profile;
 pub mod reader;
 pub mod recovery;
 pub mod runner;
+pub mod runner_service;
+pub mod scm;
 pub mod sddl;
 pub mod sys;
 pub mod text;

@@ -113,6 +113,13 @@ enum Commands {
         #[arg(long)]
         state_dir: PathBuf,
     },
+    /// On Windows: run the role runner as a service, served over a named
+    /// pipe to the one configured client (`[windows_service]` in the
+    /// configuration). It must be started by the service manager; from a
+    /// console it refuses.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    WindowsService,
 }
 
 /// Identifies one launch.
@@ -231,6 +238,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::NetnsRelay { .. } => unreachable!("dispatched before loading config"),
         #[cfg(windows)]
         Commands::WindowsRunner { .. } => unreachable!("dispatched before loading config"),
+        #[cfg(windows)]
+        Commands::WindowsService => {
+            use agentc_supervisor::host_runtime::windows::runner_service;
+            runner_service::run(config.windows_service.clone())?
+        }
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
             println!("{}", serde_json::to_string_pretty(&shadow::report(&log)?)?);

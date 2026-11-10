@@ -48,6 +48,12 @@ fn trusted(owner: &str) -> Result<String> {
     ))
 }
 
+/// The runner service's state directory: the owner, the system and
+/// administrators in full and nobody else, inherited by the journal below.
+pub fn state_directory(owner: &str) -> Result<String> {
+    trusted(owner)
+}
+
 /// A launch's control directory: the launch may read it and change nothing.
 pub fn control_directory(owner: &str, package: &str) -> Result<String> {
     let package = checked(package)?;
@@ -103,6 +109,16 @@ mod tests {
             format!("D:(A;;GA;;;{OWNER})(A;;GA;;;{PACKAGE})S:(ML;;NW;;;LW)")
         );
         assert_eq!(desktop(OWNER, PACKAGE).unwrap(), admitted);
+    }
+
+    #[test]
+    fn the_state_directory_belongs_to_its_owner_the_system_and_administrators() {
+        let list = state_directory(OWNER).unwrap();
+        assert_eq!(
+            list,
+            format!("D:P(A;OICI;FA;;;{OWNER})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+        );
+        assert!(state_directory("WD").is_err());
     }
 
     #[test]
