@@ -19,10 +19,10 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   registry `Environment` key, so the single-account gate is **blocked**. In
   role-account mode the owner plants canaries and a separate account launches
   the matrix; that cross-account run **passed** the gate for the proposed
-  boundary on 2026-11-09 with one temporary standard account. Behavior when
-  network policy is lost is untested: the prototype has a test that repeats
-  the network attempts while an elevated owner step disables the firewall
-  profiles, and it has run only as a dry run that changed nothing. Launches of
+  boundary on 2026-11-09 with one temporary standard account. The prototype
+  also has a test that repeats the network attempts while an elevated owner
+  step disables the firewall profiles; the item below records its run through
+  the Rust launcher. Launches of
   one account share a window station. No Windows supervised harness or service
   exists or is
   admitted, and the prototype cannot issue a host acceptance receipt.
@@ -37,8 +37,13 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   never starts a journaled launch again. The workspace builds on native
   Windows. On the one evaluated host the containment matrix run through that
   backend as the owner's account matched the prototype's single-account
-  result. **It has not run under a role account, and its network rounds have
-  not run**, so phase 3 of the Windows host is not complete. The backend does
+  result. Run as a separate temporary standard account on 2026-11-09, the
+  matrix through that backend **passed** the gate for the proposed boundary,
+  and a launch stayed refused every direct connection in a baseline network
+  round and in one with the firewall profiles disabled. That is the
+  [acceptance run](windows-host-design.md#role-account-run-through-the-launcher-2026-11-09)
+  of phase 3 of the Windows host; a stopped firewall service is untested. The
+  backend does
   not switch accounts, supports no provider harness, and is not wired to a
   Windows supervisor loop or service; none exists.
 

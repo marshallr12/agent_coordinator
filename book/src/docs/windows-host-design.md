@@ -251,7 +251,7 @@ only proposed.
 | `check_git`, hardened clone | None |
 | `check_writes`, `check_seeds` | Partial. The host directory, the tool directory and every other launch's directory are denied (`host.file_*`, `host.dir_*`, `host.tool_write`, `peer.*.file_*`). Role state and seeds are untested |
 | `check_codex_sandbox`, `check_claude_sandbox` | Partial. Own writes work; host and cross-launch files, processes, pipes, events and the interactive window station are denied. **The owner's registry is denied only to a launch running as a separate account**: `host.registry_environment_open` fails when the launch runs as the owner and passed in the role-account run |
-| `check_egress` | Partial. Direct TCP over IPv4 and IPv6, loopback, the local network, UDP and DNS are denied to a token with no network capability, and the authorized pipe route works. No WFP policy, allowlist broker or policy-loss test exists |
+| `check_egress` | Partial. Direct TCP over IPv4 and IPv6, loopback, the local network, UDP and DNS are denied to a token with no network capability, and the authorized pipe route works. With the firewall profiles disabled the refusals held in the [launcher's role-account run](#role-account-run-through-the-launcher-2026-11-09). No WFP policy or allowlist broker exists, and a stopped firewall service is untested |
 | `check_claude_launch`, `check_relay_probe`, shell execution | None |
 | `check_claude_token`, `check_candidate_token`, reviewer isolation | Partial. A synthetic credential file is denied, and implementer and reviewer packages cannot reach each other. No real harness, environment or credentialed process was involved |
 | `check_push_kill`, `check_push_launch`, `check_live_helper` | Partial. A per-launch pipe admits only its package, a foreign launch is denied, and the stub takes identity from the client token. No publication broker exists |
@@ -300,7 +300,9 @@ not unit-test claims.
 
 Task `37788fa5-da1c-4a76-80ed-c893d8ae74f3` built these. Everything in this
 section is **implemented**; what a run has **demonstrated** is under
-[Windows backend development runs](#windows-backend-development-runs-2026-11-09).
+[Windows backend development runs](#windows-backend-development-runs-2026-11-09)
+and
+[Role-account run through the launcher](#role-account-run-through-the-launcher-2026-11-09).
 
 ### The interface
 
@@ -458,12 +460,12 @@ before it has passed; a blocked gate stops the phases behind it.
 | --- | --- | --- | --- |
 | 1 | This design and the containment prototype | None | Delivered by task `a9126e52`; the prototype gate is **blocked** |
 | 2 preparation | A role-account mode for the prototype and the owner runbook | Owner decision `df37b339` | Delivered by task `3787e738` |
-| 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test is written (task `96d4927e`) and exercised only as a dry run that changes nothing; the owner's run is not started |
-| 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. **The acceptance run through the new launcher under a role account, with the two network rounds, is not started**, so the phase is not complete |
-| 4 | SCM services, lifecycle and recovery acceptance | Phase 3 | Blocked |
-| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Blocked |
-| 6 | Egress and publication brokers | Phase 3 | Blocked |
-| 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Blocked |
+| 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test is written (task `96d4927e`) and its owner's run with the prototype launcher is for task `4baa4706` to record. The same runbook, followed with the Rust launcher in phase 3, passed |
+| 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
+| 4 | SCM services, lifecycle and recovery acceptance | Phase 3 | Not started |
+| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
+| 6 | Egress and publication brokers | Phase 3 | Not started |
+| 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
 
 No intermediate phase is production acceptance. Independent review and guarded
 integration complete each task; only the final acceptance can admit a host.
@@ -664,7 +666,9 @@ it must.
 
 Only the owner can do this, because step 2 needs elevation. It turns the host
 firewall off for the length of one round, a few seconds, so use a network you
-trust. It has been exercised only as a dry run that changed nothing; treat a
+trust. The owner followed it with the Rust launcher on 2026-11-09; see
+[Role-account run through the launcher](#role-account-run-through-the-launcher-2026-11-09).
+Treat a
 row that fails for any reason other than the boundary as a defect in this
 procedure, and stop. It needs the role account from the
 [role-account runbook](#owner-runbook-for-the-role-account-run) and a firewall
@@ -948,6 +952,52 @@ The fresh logon session was made with `CreateProcessWithLogonW` and
 `LOGON_NETCREDENTIALS_ONLY`, which keeps the caller's identity and needs no
 real credential. It is a development aid, not part of the procedure.
 
+### Role-account run through the launcher, 2026-11-09
+
+This is the acceptance run of task `37788fa5`. Registered producer
+`1efaf336-eb85-4220-afd1-11b642f1c197` (job
+`fdf66d21-728f-4607-819b-72b9c13a3357`) ran the owner step at source
+`c3787158721ea696aab3cf8f6f72e065809f5f85` on MiniAir, not elevated, with
+`--launcher`, `--role-account AgentcProbeRole` and
+`--policy-conditions baseline,profiles-off`. The owner ran the elevated policy
+step and started the role run with `runas`, as the
+[network policy runbook](#owner-runbook-for-the-network-policy-test)
+describes. The report is coordinator artifact
+`6c33cd9d-69c9-42c3-81ca-f44669469450`, SHA-256
+`1ff7795187c59db5085407574fbfac0cced695480bb1bc3f6c8eb4a33e62058f`, pinned.
+
+- **Every launch was made by the Rust launcher as the role account.** The
+  report records the launcher as `rust-runner`, the staged
+  `agentc-supervisor.exe` with SHA-256
+  `3ad144e142306492ebe167eef6898ddcf91eb60a94fb2092bbf41d16e07b4130`, which is
+  the debug build of that source, and the account and launch identity as the
+  SID of `AgentcProbeRole`, a temporary local standard account.
+  `identity.role_account_distinct` passed.
+- **The gate passed for the less-privileged boundary.** The report has 735
+  rows. For that boundary 347 mandatory rows passed and none failed, and the
+  28 mandatory host-side rows passed. `host.registry_environment_open` was
+  `error:5` on all three launches.
+- **Both network rounds ran and were refused.** In the `baseline` round the
+  role run read every firewall profile as on; in the `profiles-off` round it
+  read every profile as off. In each round the six host-token controls
+  passed, the launch's four TCP attempts failed with error 10013, its lookup
+  failed with error 11003, and no listener received anything.
+- **The firewall was restored.** `policy.host_firewall_restored` passed, the
+  policy step's record shows `restored: true`, and every profile read as on
+  afterwards.
+- **The ordinary AppContainer is still not acceptable.** It failed its three
+  Task Scheduler rows and nothing else, as it does under the prototype
+  launcher.
+
+No row failed for a reason other than the boundary. An earlier start of the
+owner step (job `08514664-68e6-45e1-ab85-b7fd2ad5497c`) exited before staging
+anything because the report's directory did not exist; it produced no
+evidence.
+
+This shows one run on one host with a temporary standard account started by
+`runas` in the owner's interactive session. It does not show a service
+account, a supervisor loop or a provider harness.
+
 ### Disposition
 
 **NO-GO for Windows supervised execution.** A launch running as the owner can
@@ -957,17 +1007,15 @@ gate for the proposed boundary, with one temporary standard account.
 
 Phase 3 was started on the owner's go-ahead of 2026-11-09. Its interface and
 both backends are written, and the Windows backend reproduces the prototype's
-single-account result. Phase 3 is **not complete**: the launcher has not run
-under a role account, and its two network rounds have not run. Until that run
-passes, no service, broker or installer work starts.
+single-account result. Run as a separate role account, it passed the gate for
+the proposed boundary, with a baseline network round and one with the
+firewall profiles disabled; see
+[Role-account run through the launcher](#role-account-run-through-the-launcher-2026-11-09).
+That is phase 3's acceptance run. No service, broker or installer work starts
+before the task's review and integration.
 
 Still unverified, and never to be read as passed:
 
-- the Rust launcher under a role account: every run of it so far was the
-  owner's account, where the owner-registry rows fail as they do for the
-  prototype;
-- the Rust launcher's network rounds, baseline and with the firewall profiles
-  disabled;
 - a mismatch between the boundary asked for and the one Windows applied: the
   refusal is unit-tested on reported facts, and no real launch has produced a
   mismatch;
@@ -978,8 +1026,8 @@ Still unverified, and never to be read as passed:
   account;
 - clipboard and atom separation between launches of one account, which share
   a window station;
-- privileged network policy and behavior when the firewall service or its
-  policy is lost;
+- privileged network policy, and behavior when the firewall service is
+  stopped: the rounds covered disabled profiles only;
 - native provider harness command paths and reviewer candidate interception;
 - production egress and publication brokers;
 - SCM lifecycle, crash recovery and reboot behavior;
