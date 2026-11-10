@@ -35,6 +35,7 @@ pub mod job;
 pub mod journal;
 pub mod launcher;
 pub mod pipe;
+pub mod pipe_client;
 pub mod process;
 pub mod profile;
 pub mod reader;

@@ -11,10 +11,13 @@ use anyhow::{Result, ensure};
 /// The most bytes of a pipe's name below `\\.\pipe\`.
 const NAME_LIMIT: usize = 200;
 /// What the one admitted client may do with the pipe: read and write data,
-/// read attributes, and synchronize. Not `FILE_CREATE_PIPE_INSTANCE`
-/// (`0x4`, the same bit as `FILE_APPEND_DATA`): a client must not be able
-/// to make an instance of the server's pipe.
-const CLIENT_RIGHTS: &str = "0x100083";
+/// read attributes, read the pipe's security descriptor (so it can check
+/// who owns the pipe before it trusts it) and synchronize. Not
+/// `FILE_CREATE_PIPE_INSTANCE` (`0x4`, the same bit as `FILE_APPEND_DATA`):
+/// a client must not be able to make an instance of the server's pipe.
+pub const CLIENT_ACCESS: u32 = 0x12_0083;
+/// [`CLIENT_ACCESS`] as the access list spells it.
+const CLIENT_RIGHTS: &str = "0x120083";
 
 /// `sid` if it is plain `S-1-...` SID text. A SID is spliced into SDDL, so
 /// anything else could add an entry of its own.
@@ -219,7 +222,7 @@ mod tests {
         let list = descriptor(RUNNER, CLIENT).unwrap();
         assert_eq!(
             list,
-            format!("D:P(A;;GA;;;{RUNNER})(A;;0x100083;;;{CLIENT})")
+            format!("D:P(A;;GA;;;{RUNNER})(A;;0x120083;;;{CLIENT})")
         );
         assert!(list.starts_with("D:P("), "the list is protected");
         assert_eq!(list.matches("(A;").count(), 2, "exactly two entries");
@@ -233,6 +236,9 @@ mod tests {
     #[test]
     fn the_client_may_not_create_instances_of_the_pipe() {
         let rights = u32::from_str_radix(CLIENT_RIGHTS.trim_start_matches("0x"), 16).unwrap();
+        assert_eq!(rights, CLIENT_ACCESS);
+        let (write_dac, write_owner, delete) = (0x4_0000, 0x8_0000, 0x1_0000);
+        assert_eq!(rights & (write_dac | write_owner | delete), 0);
         let (read, write, create_instance) = (0x1, 0x2, 0x4);
         assert_eq!(rights & read, read);
         assert_eq!(rights & write, write);
