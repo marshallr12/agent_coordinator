@@ -1,5 +1,6 @@
-# agentc-supervisor configuration for the Windows role runner service
-# (`agentc-supervisor --config <this file> windows-service`). Every entry has
+# agentc-supervisor configuration for the two Windows services:
+# the role runner (`agentc-supervisor --config <this file> windows-service`)
+# and the supervisor (`... windows-service --role supervisor`). Every entry has
 # an in-code default; the commented lines show those defaults. Nothing here
 # is installed by this repository: a service is installed only by an owner,
 # from an elevated session.
@@ -29,3 +30,32 @@
 # terminate_patience_seconds = 20
 # Seconds between status reports while the service is stopping.
 # status_interval_seconds = 3
+
+[windows_supervisor]
+# The service's name in the Service Control Manager.
+# name = "agentc-supervisor"
+# Where the loop keeps its launch records, its heartbeat and service.log.
+# state_dir = 'C:\ProgramData\agentc\supervisor'
+# The runner service's pipe, below \\.\pipe\
+# runner_pipe = "agentc-runner"
+# The runner service's account, as SID text. It has no usable default: a pipe
+# that account does not own is never used, and while this is empty the
+# service refuses to start.
+# runner_sid = ""
+# Seconds between status reports while the service is stopping.
+# status_interval_seconds = 3
+
+# The acceptance stand-in. It replaces the coordinator with a directory of
+# queued items and a ledger, for machine acceptance only. While it is off,
+# the supervisor claims nothing: no provider harness is supported on Windows.
+[windows_supervisor.stand_in]
+# enabled = false
+# One file per queued item; the file's name is the item's task id.
+# queue_dir = 'C:\ProgramData\agentc\stand-in\queue'
+# Every claim, renewal, release and launch event, flushed before its effect.
+# ledger = 'C:\ProgramData\agentc\stand-in\ledger.jsonl'
+# The command every stand-in launch runs, as an argument vector. It has no
+# default; the stand-in cannot be enabled without it.
+# fixture = []
+# An existing directory the runner's account can create launch directories in.
+# launch_root = 'C:\ProgramData\agentc\runner\stand-in-launches'

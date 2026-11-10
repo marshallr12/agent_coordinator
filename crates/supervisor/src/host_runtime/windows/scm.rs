@@ -16,11 +16,17 @@ use crate::service::control::{self, on_control};
 use crate::service::lifecycle::{Report, Signal};
 use anyhow::{Result, anyhow, bail};
 use std::ffi::c_void;
+use std::os::windows::io::IntoRawHandle;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, ERROR_SERVICE_SPECIFIC_ERROR, GetLastError, HANDLE,
+};
+use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
+use windows_sys::Win32::System::EventLog::{
+    DeregisterEventSource, EVENTLOG_ERROR_TYPE, RegisterEventSourceW, ReportEventW,
 };
 use windows_sys::Win32::System::Services::{
     ChangeServiceConfig2W, CloseServiceHandle, OpenSCManagerW, OpenServiceW,
@@ -115,6 +121,11 @@ impl Host {
         &self.shared.signal
     }
 
+    /// The same requests, shared with a loop that outlives this borrow.
+    pub fn shared_signal(&self) -> Arc<Signal> {
+        self.shared.signal.clone()
+    }
+
     /// The event the control handler sets, for the worker's waits.
     pub fn wake(&self) -> HANDLE {
         self.shared.wake.0.raw()
@@ -180,45 +191,86 @@ unsafe extern "system" fn handler(
     handled.answer
 }
 
-/// The service's entry point on the thread Windows starts for it.
+/// Records why the service failed: for [`dispatch`] to return, and in the
+/// Windows application event log, which is the one place a service that
+/// has no log of its own yet can leave a trace.
+fn fail(name: &[u16], reason: String) {
+    let _ = trace(name, &reason);
+    *FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+}
+
+/// The service's entry point on the thread Windows starts for it. Once the
+/// control handler is registered it never returns without reporting the
+/// service stopped; before that there is no handle to report through.
 unsafe extern "system" fn service_main(_arguments: u32, _argument_vector: *mut PWSTR) {
-    let Some(name) = NAME.get() else { return };
-    let created = Handle::owned(
-        // SAFETY: no attributes and no name; a manual-reset event, not set.
-        unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) },
-        "CreateEventW",
-    );
-    let Ok(wake) = created else { return };
-    let shared = SHARED.get_or_init(|| Shared {
-        signal: Arc::new(Signal::default()),
-        wake: Event(wake),
-    });
+    let (Some(name), Some(shared)) = (NAME.get(), SHARED.get()) else {
+        return;
+    };
     // SAFETY: the name is NUL-terminated and outlives the call; the
     // handler is a function that lives for the whole process.
     let status =
         unsafe { RegisterServiceCtrlHandlerExW(name.as_ptr(), Some(handler), std::ptr::null()) };
     if status.is_null() {
         let error = last_error("RegisterServiceCtrlHandlerExW");
-        *FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{error:#}"));
-        return;
+        return fail(name, format!("{error:#}"));
     }
     let host = Host { status, shared };
-    let body = BODY.lock().unwrap_or_else(|e| e.into_inner()).take();
-    let Some(body) = body else { return };
-    let outcome = catch_unwind(AssertUnwindSafe(|| body(&host)));
-    let reported = match outcome {
-        Ok(Ok(quiescent)) => host.report(&Report::Stopped { quiescent }),
-        Ok(Err(error)) => {
-            *FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{error:#}"));
-            host.failed()
-        }
-        Err(_) => {
-            *FAILURE.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some("the service stopped on a panic".into());
+    let reported = match run_body(&host) {
+        Ok(quiescent) => host.report(&Report::Stopped { quiescent }),
+        Err(reason) => {
+            fail(name, reason);
             host.failed()
         }
     };
     let _ = reported;
+}
+
+/// Runs the service's body once and says how it ended: whether it stopped
+/// with nothing unconfirmed, or why it failed. A panic is a failure, and so
+/// is a second start in one process, which has no body left to run.
+fn run_body(host: &Host) -> std::result::Result<bool, String> {
+    let body = BODY.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let Some(body) = body else {
+        return Err("the service was started a second time in one process".into());
+    };
+    match catch_unwind(AssertUnwindSafe(|| body(host))) {
+        Ok(Ok(quiescent)) => Ok(quiescent),
+        Ok(Err(error)) => Err(format!("{error:#}")),
+        Err(_) => Err("the service stopped on a panic".into()),
+    }
+}
+
+/// Writes `text` as an error to the Windows application event log under
+/// the source `name` (NUL-terminated). The source need not be registered:
+/// the event then shows the text without a message template.
+pub fn trace(name: &[u16], text: &str) -> Result<()> {
+    let message = wide(text)?;
+    // SAFETY: no server name: the local log; `name` is NUL-terminated.
+    let log = unsafe { RegisterEventSourceW(std::ptr::null(), name.as_ptr()) };
+    if log.is_null() {
+        return Err(last_error("RegisterEventSourceW"));
+    }
+    let strings = [message.as_ptr()];
+    // SAFETY: the log handle is live; one NUL-terminated string is passed
+    // and no user SID or raw data.
+    let written = unsafe {
+        let (none, kind) = (std::ptr::null_mut(), EVENTLOG_ERROR_TYPE);
+        let done = ReportEventW(log, kind, 0, 1, none, 1, 0, strings.as_ptr(), none);
+        DeregisterEventSource(log);
+        done
+    };
+    check(written, "ReportEventW")
+}
+
+/// Sends this process's standard error to the file `path`, appending. A
+/// service has no console, so without this its diagnostics go nowhere.
+/// The file stays open for the life of the process.
+pub fn errors_to(path: &Path) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    let file = options.create(true).append(true).open(path)?;
+    // SAFETY: the handle is a live file handle that is never closed.
+    let set = unsafe { SetStdHandle(STD_ERROR_HANDLE, file.into_raw_handle()) };
+    check(set, "SetStdHandle")
 }
 
 /// Runs `body` as the service called `name`: connects to the Service Control
@@ -232,6 +284,15 @@ pub fn dispatch(
 ) -> Result<()> {
     let mut service_name = wide(name)?;
     let _ = NAME.set(service_name.clone());
+    // The wake event exists before Windows can call the service's entry
+    // point, so that entry point has nothing left that can fail unreported.
+    // SAFETY: no attributes and no name; a manual-reset event, not set.
+    let wake = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+    let wake = Event(Handle::owned(wake, "CreateEventW")?);
+    let _ = SHARED.set(Shared {
+        signal: Arc::new(Signal::default()),
+        wake,
+    });
     *BODY.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(body));
     let table = [
         SERVICE_TABLE_ENTRYW {
@@ -362,6 +423,16 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(refused.contains("service manager"), "{refused}");
+    }
+
+    #[test]
+    fn a_failure_can_be_traced_without_a_registered_source_or_a_log_file() {
+        let name = wide("agentc-test-trace").unwrap();
+        trace(
+            &name,
+            "agentc-supervisor test: a start failure would be shown here",
+        )
+        .unwrap();
     }
 
     #[test]

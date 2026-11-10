@@ -147,6 +147,18 @@ impl<P: Planner, L: Link> RemoteHost<P, L> {
         })
     }
 
+    /// After a start that failed or whose answer was lost, the launch may
+    /// run all the same, and the loop is about to release its attempt. The
+    /// runner is asked to end whatever started; the start stays failed.
+    fn undo_start(&self, launch: &Launch, error: anyhow::Error) -> anyhow::Error {
+        match self.call(Self::about("terminate", launch)) {
+            Ok(_) => error.context("the start failed; the runner ended whatever had started"),
+            Err(second) => error.context(format!(
+                "the start failed and the runner could not be asked to end it ({second:#})"
+            )),
+        }
+    }
+
     /// Whether the root of a launch the runner holds has been seen to end.
     fn root_exited(&self, id: &str) -> bool {
         let observed = self.call(json!({ "op": "observe", "launch": id, "wait_ms": 0 }));
@@ -185,7 +197,10 @@ impl<P: Planner, L: Link> HostRuntime for RemoteHost<P, L> {
         request["directory"] = json!(command.directory);
         request["environment"] = json!(command.environment);
         request["output"] = json!(command.output);
-        let answer = self.call(request)?;
+        let answer = match self.call(request) {
+            Ok(answer) => answer,
+            Err(error) => return Err(self.undo_start(launch, error)),
+        };
         let pid = answer["pid"]
             .as_u64()
             .and_then(|pid| u32::try_from(pid).ok());
@@ -419,6 +434,8 @@ mod tests {
         assert!(again.contains("its start was asked for"), "{again}");
         let starts = fake.ops().iter().filter(|op| *op == "start").count();
         assert_eq!(starts, 1);
+        // The lost start may have run, so the runner was asked to end it.
+        assert_eq!(fake.ops(), ["prepare", "start", "terminate"]);
         assert!(host.start(&self::launch()).is_err(), "an unprepared launch");
     }
 

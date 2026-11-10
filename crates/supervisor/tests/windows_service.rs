@@ -41,13 +41,16 @@ fn cmd() -> String {
 
 #[test]
 fn started_from_a_console_the_service_command_refuses_and_says_why() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agentc-supervisor"))
-        .arg("windows-service")
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let message = String::from_utf8_lossy(&output.stderr);
-    assert!(message.contains("service manager"), "{message}");
+    for role in [&[][..], &["--role", "runner"], &["--role", "supervisor"]] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_agentc-supervisor"))
+            .arg("windows-service")
+            .args(role)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{role:?}");
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(message.contains("service manager"), "{role:?}: {message}");
+    }
 }
 
 #[test]

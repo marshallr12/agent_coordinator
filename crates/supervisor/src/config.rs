@@ -61,6 +61,9 @@ pub struct Config {
     /// The Windows role runner when it runs as a service. Read only by the
     /// hidden `windows-service` subcommand.
     pub windows_service: crate::service::settings::ServiceSettings,
+    /// The Windows supervisor when it runs as a service. Read only by the
+    /// hidden `windows-service --role supervisor` subcommand.
+    pub windows_supervisor: crate::service::supervisor::SupervisorSettings,
 }
 
 /// Where the candidate-push helper is installed and whom it runs as.
@@ -139,6 +142,7 @@ impl Default for Config {
             health: crate::run_loop::health::HealthConfig::default(),
             setup: BTreeMap::new(),
             windows_service: crate::service::settings::ServiceSettings::default(),
+            windows_supervisor: crate::service::supervisor::SupervisorSettings::default(),
         }
     }
 }
@@ -255,8 +259,15 @@ mod tests {
             .lines()
             .filter(|l| !l.starts_with('['))
             .count();
-        let defaults = crate::service::settings::ServiceSettings::default();
-        assert_eq!(toml::Table::try_from(&defaults).unwrap().len(), shown);
+        let runner = crate::service::settings::ServiceSettings::default();
+        let supervisor = crate::service::supervisor::SupervisorSettings::default();
+        let settings = |table: toml::Table| {
+            let nested = table.get("stand_in").and_then(|t| t.as_table());
+            table.len() - usize::from(nested.is_some()) + nested.map_or(0, |t| t.len())
+        };
+        let expected = settings(toml::Table::try_from(&runner).unwrap())
+            + settings(toml::Table::try_from(&supervisor).unwrap());
+        assert_eq!(expected, shown);
     }
 
     #[test]

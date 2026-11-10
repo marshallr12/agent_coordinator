@@ -24,7 +24,9 @@
 //! [`runner_service`] hosts the runner as a Windows service: [`scm`] binds it
 //! to the Service Control Manager, [`pipe`] serves it over a named pipe that
 //! admits one configured client, and the platform-neutral
-//! [`crate::service`] decides its life.
+//! [`crate::service`] decides its life. [`supervisor_service`] hosts the
+//! supervisor's own loop as a second service, which reaches launches only
+//! through that pipe ([`pipe_client`], [`remote`]).
 //!
 //! [`WindowsHost`] is the [`HostRuntime`] over one [`launcher::Launcher`].
 //! No provider harness is supported on Windows yet, so what a launch runs
@@ -45,6 +47,7 @@ pub mod runner;
 pub mod runner_service;
 pub mod scm;
 pub mod sddl;
+pub mod supervisor_service;
 pub mod sys;
 pub mod text;
 pub mod token;

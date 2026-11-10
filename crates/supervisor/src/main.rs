@@ -113,13 +113,25 @@ enum Commands {
         #[arg(long)]
         state_dir: PathBuf,
     },
-    /// On Windows: run the role runner as a service, served over a named
-    /// pipe to the one configured client (`[windows_service]` in the
-    /// configuration). It must be started by the service manager; from a
-    /// console it refuses.
+    /// On Windows: run one role as a service. `runner` serves launches over
+    /// a named pipe to the one configured client (`[windows_service]` in
+    /// the configuration); `supervisor` runs the live loop and reaches
+    /// launches through that pipe (`[windows_supervisor]`). It must be
+    /// started by the service manager; from a console it refuses.
     #[cfg(windows)]
     #[command(hide = true)]
-    WindowsService,
+    WindowsService {
+        #[arg(long, value_enum, default_value = "runner")]
+        role: ServiceRole,
+    },
+}
+
+/// Which Windows service a process is.
+#[cfg(windows)]
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ServiceRole {
+    Runner,
+    Supervisor,
 }
 
 /// Identifies one launch.
@@ -239,9 +251,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
         #[cfg(windows)]
         Commands::WindowsRunner { .. } => unreachable!("dispatched before loading config"),
         #[cfg(windows)]
-        Commands::WindowsService => {
-            use agentc_supervisor::host_runtime::windows::runner_service;
-            runner_service::run(config.windows_service.clone())?
+        Commands::WindowsService { role } => {
+            use agentc_supervisor::host_runtime::windows::{runner_service, supervisor_service};
+            match role {
+                ServiceRole::Runner => runner_service::run(config.windows_service.clone())?,
+                ServiceRole::Supervisor => supervisor_service::run(config)?,
+            }
         }
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
