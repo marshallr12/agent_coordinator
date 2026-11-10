@@ -452,7 +452,130 @@ Two things came up on the way and are recorded here.
 - The kill switch treats a path it cannot check as set. On Windows a path
   below a plain file is reported as not found, the same as an absent switch,
   so that one unreadable case is not told apart there. No Windows supervisor
-  loop exists to be affected; phase 4 has to settle it.
+  loop exists to be affected; phase 4b has to settle it.
+
+### Phase 4a: service lifecycle core, SCM binding and the runner service
+
+Task `e0459185-54d5-464f-a244-162f6fd339d3` built these. Everything here is
+**implemented**. **No service was installed, started or configured on any
+machine, and nothing here is machine-accepted.** What a service under the
+Service Control Manager really does at boot, logoff, stop, preshutdown and
+reboot, and after a crash, is phase 4c's owner-run acceptance and is not
+claimed. The Windows-only modules (`scm`, `pipe` and `runner_service`, and the
+additions to `runner`) were written on a Linux host that has no Windows
+compiler; the first native Windows build and test run is what verifies them,
+and until it has run they are untested.
+
+**Lifecycle core** (`crates/supervisor/src/service`, platform neutral). It
+calls no operating system, so its unit tests run the same on Linux and on
+Windows, against a fake clock.
+
+| Piece | What it decides |
+| --- | --- |
+| `lifecycle` | Running, a stop or preshutdown request that ends admission at once, a drain to a monotonic deadline, termination, and `Stopped { quiescent }`. A preshutdown that arrives during a stop's drain shortens the deadline and never lengthens it. After the deadline a termination has a patience; when it runs out the service stops with `quiescent: false`, which is never made clean later |
+| `control` | What the control handler does with a control code: record stop or preshutdown in an atomic signal and answer. Interrogate records nothing; every other control is "not implemented" |
+| `drain` | Carries a service's launches through the ending: asks each to stop once, empties one whose root ended, terminates what remains at the deadline, and lets the service report stopped in quiescence only when every launch is confirmed ended. A launch whose termination was not confirmed is not terminated again, because a second attempt on a job already closed could be mistaken for an empty job |
+| `startup` | Judges every journaled launch: one Windows says ended is reclaimed, one that may still run is left untouched and reported, a failed reclaim and an unreadable file are reported. Its journal interface has no way to start a launch |
+| `pipe_policy` | The pipe's access list as SDDL text and the decision to admit a client from the facts Windows reported |
+| `settings` | The `[windows_service]` configuration |
+
+**SCM binding** (`host_runtime::windows::scm`, `windows-sys`, no new
+dependency; the `Win32_System_Services` and `Win32_System_Pipes` features were
+added). The hidden subcommand is `agentc-supervisor windows-service`. It
+connects to the Service Control Manager, registers a control handler for stop,
+preshutdown and interrogate, and runs the runner on the service thread. The
+handler records the request, sets the worker's wake event and returns; it does
+no work. Status is reported with a checkpoint and a wait hint on every report
+while the service is stopping, and the service keeps accepting preshutdown
+while it stops. A service that stops with launches Windows did not confirm
+ended reports a service-specific exit code of 1; one that could not start
+reports 2. Started from a console, the dispatcher fails at once and the
+command exits with an error that says it must be started by the service
+manager. At start the service tries to set its own preshutdown time limit from
+`preshutdown_timeout_seconds`; the account it runs as may not be allowed to,
+so a refusal is logged and does not stop the service. Setting the limit as part
+of installation is 4c's.
+
+**The runner as a service** (`host_runtime::windows::runner_service`). It
+starts in this order and reports running only at the end: validate the
+settings, make the state directory, try the preshutdown limit, create the
+pipe, open the runner and judge the journal. A failure at any step stops the
+service. One thread then waits for a client, serves the admitted client one
+request line at a time, and steps the service's ending between waits, so a
+recorded stop reaches the launches within a quarter of a second. During the
+ending, requests that begin a launch (`prepare`, `hold_file`, `start`) are
+refused with `refusal: "service_stopping"`; requests about a launch that
+exists are still served, with their waits cut to a quarter of a second. At
+the deadline what remains is terminated, and a launch is journaled `ended`
+only when Windows reported its job empty. The service reports stopped
+afterwards. The state directory, by default
+`C:\ProgramData\agentc\runner`, is created with an access list for the
+service's account, the system and administrators; a directory that already
+exists is used as found, and its access list is its installer's. The service
+logs to `service.log` there. The service still does not switch accounts: a
+launch runs as the account the service runs as.
+
+**The pipe** (`host_runtime::windows::pipe`). It is created as the first
+instance of its name with one instance in all, so a second server or a
+squatter on the name makes creation fail, and with remote clients rejected.
+Its access list is protected and has two entries: the service's own account in
+full, and the one configured client SID with read data, write data, read
+attributes and synchronize, and without the right to create pipe instances. A
+client therefore has to ask for that access when it opens the pipe (an open
+for generic write is refused). A pipe whose list cannot be built or applied is
+not created, and there is no fallback to a default list. When a client
+connects the pipe asks Windows for its process id and, while the serving
+thread impersonates the connection, for the account of the connection's token,
+then reverts; the thread aborts the process if it cannot revert. A client
+whose account or process Windows did not report, or whose account is not the
+configured client or the service's own, is disconnected without a byte read.
+Requests and answers can only pass through a session that exists after that
+check. One client is served at a time; a client that does not read an answer
+for ten seconds is dropped.
+
+**Settings.** Every setting has an in-code default. The example
+configuration, `deploy/agentc/supervisor-windows.example.toml`, shows each one
+commented out with that default, and a test keeps the file equal to the
+defaults and complete.
+
+| Setting | Default |
+| --- | --- |
+| `name` | `agentc-runner` |
+| `state_dir` | `C:\ProgramData\agentc\runner` |
+| `pipe_name` | `agentc-runner` (the pipe `\\.\pipe\agentc-runner`) |
+| `client_sid` | empty: the service refuses to start, so the pipe never serves nobody in particular |
+| `stop_grace_seconds` | 30 |
+| `preshutdown_grace_seconds` | 60 |
+| `preshutdown_timeout_seconds` | 120; must exceed the preshutdown grace plus the termination patience |
+| `terminate_patience_seconds` | 20 |
+| `status_interval_seconds` | 3 |
+
+**Tests that need no elevation.** The lifecycle, drain, control, start-up and
+pipe-policy tests are portable. On Windows, `windows_service` adds: the
+console refusal through the real binary; the request gate for every request;
+start-up judgment against a journal an ended runner left (ended launches
+reclaimed, a live owner and an unknown owner left untouched, a torn file
+reported, a journaled id never prepared again); and a stop carried through a
+real launch, which on an interactive desktop checks the refusal and nothing
+else. The pipe's tests create real pipes in the test's own account: the
+same-account client is admitted, a second first instance is refused, a client
+the list omits cannot connect, a client the list admits but the policy does not
+list is disconnected unserved, and the narrow entry alone admits the
+configured client.
+
+**Not demonstrated by 4a** (4c's, or later):
+
+- a run under the Service Control Manager, including boot without logon,
+  logoff, stop, preshutdown and reboot, and forced service and child crashes;
+- that the Service Control Manager delivers preshutdown to a service already
+  stopping, and that the account the service runs as may set its own
+  preshutdown limit;
+- the pipe's access list as the service's real account and a different real
+  client account, and a client that really connects from another machine;
+- bounded SCM recovery configuration, which is installation's;
+- the supervisor service loop over the pipe, the kill switch's unreadable-path
+  case on Windows, a stand-in coordinator driver and the owner runbook, which
+  are 4b's.
 
 ## Delivery phases and gates
 
@@ -465,7 +588,9 @@ before it has passed; a blocked gate stops the phases behind it.
 | 2 preparation | A role-account mode for the prototype and the owner runbook | Owner decision `df37b339` | Delivered by task `3787e738` |
 | 2 | The same matrix with launches running as a dedicated role account, plus network policy loss | An owner-controlled elevated session on the target | **Complete.** The role-account matrix **passed** on 2026-11-09 after a fix to the prototype's window station. The network policy loss test (task `96d4927e`) **passed** in the owner's run with the prototype launcher on 2026-11-09; task `4baa4706` records it under [Network policy run](#network-policy-run-2026-11-09). The same runbook, followed with the Rust launcher in phase 3, passed |
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
-| 4 | SCM services, lifecycle and recovery acceptance | Phase 3 | Not started |
+| 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
+| 4b | The supervisor service loop on Windows over that pipe, the kill switch's unreadable-path case on Windows, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Not started |
+| 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Not started |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
@@ -1114,7 +1239,9 @@ Still unverified, and never to be read as passed:
   does not exist;
 - native provider harness command paths and reviewer candidate interception;
 - production egress and publication brokers;
-- SCM lifecycle, crash recovery and reboot behavior;
+- SCM lifecycle, crash recovery and reboot behavior: phase 4a implemented
+  the lifecycle and the service, and none of it has run under the Service
+  Control Manager; phase 4c is the acceptance;
 - handle-relative creation and deletion by host brokers inside worker-writable
   trees;
 - COM, RPC and broker surfaces beyond the Task Scheduler.

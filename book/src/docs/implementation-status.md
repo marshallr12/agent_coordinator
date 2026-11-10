@@ -25,8 +25,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   boundary was still refused every direct TCP, UDP and DNS attempt. Phase 2
   of the design is complete; the item below records the same test run
   through the Rust launcher in phase 3. Launches of one account share a
-  window station. No Windows supervised harness or service exists or is
-  admitted, and the prototype cannot issue a host acceptance receipt.
+  window station. No Windows supervised harness exists, no Windows service is
+  installed or admitted, and the prototype cannot issue a host acceptance
+  receipt.
 
 - The supervisor reaches the operating system through a
   [host-runtime interface](windows-host-design.md#host-runtime-interface-and-windows-backend)
@@ -46,7 +47,26 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   of phase 3 of the Windows host; a stopped firewall service is untested. The
   backend does
   not switch accounts, supports no provider harness, and is not wired to a
-  Windows supervisor loop or service; none exists.
+  Windows supervisor loop; none exists.
+
+- Phase 4a of the Windows host added, in code, a platform-neutral
+  [service lifecycle core](windows-host-design.md#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service)
+  (running, stop and preshutdown, the end of admission, a drain to a
+  monotonic deadline, termination and a quiescence check), a Service Control
+  Manager binding behind the hidden `agentc-supervisor windows-service`
+  subcommand, and the role runner served over a named pipe that is created as
+  the first instance, rejects remote clients, admits only one configured
+  client SID and serves nothing until Windows has confirmed the connected
+  client's identity. At start it judges every journaled launch and reclaims
+  those that ended; at stop or preshutdown it refuses new launches, asks each
+  to stop, terminates the rest at the deadline and reports stopped only after
+  the ends Windows confirmed are journaled. **No service was installed,
+  started or configured on any machine, and nothing here is machine
+  accepted**: boot, logoff, stop, preshutdown, reboot and crash behavior under
+  the Service Control Manager is phase 4c's owner-run acceptance, and the
+  supervisor's own service loop over the pipe is phase 4b's. The Windows-only
+  modules had not been compiled or run on Windows when they were written; the
+  lifecycle core's tests run on Linux.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
