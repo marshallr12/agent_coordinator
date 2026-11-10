@@ -18,4 +18,6 @@ pub mod drain;
 pub mod lifecycle;
 pub mod pipe_policy;
 pub mod settings;
+pub mod stand_in;
 pub mod startup;
+pub mod supervisor;
