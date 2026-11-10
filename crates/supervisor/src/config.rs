@@ -58,6 +58,9 @@ pub struct Config {
     pub health: crate::run_loop::health::HealthConfig,
     /// Host-approved setup command and caches by coordinator project id.
     pub setup: BTreeMap<String, crate::setup::ProjectSetup>,
+    /// The Windows role runner when it runs as a service. Read only by the
+    /// hidden `windows-service` subcommand.
+    pub windows_service: crate::service::settings::ServiceSettings,
 }
 
 /// Where the candidate-push helper is installed and whom it runs as.
@@ -135,6 +138,7 @@ impl Default for Config {
             run: crate::run_loop::RunConfig::default(),
             health: crate::run_loop::health::HealthConfig::default(),
             setup: BTreeMap::new(),
+            windows_service: crate::service::settings::ServiceSettings::default(),
         }
     }
 }
@@ -227,6 +231,32 @@ mod tests {
         for other in [Some("main"), None] {
             assert_eq!(helper.config_for(other), helper.config);
         }
+    }
+
+    /// The example file with its commented settings uncommented.
+    fn uncommented_example() -> String {
+        let text = include_str!("../../../deploy/agentc/supervisor-windows.example.toml");
+        let lines = text
+            .lines()
+            .map(|line| line.strip_prefix("# ").unwrap_or(line));
+        lines
+            .filter(|line| line.starts_with('[') || line.contains(" = "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_windows_example_shows_every_service_setting_at_its_default() {
+        let config: Config = toml::from_str(&uncommented_example()).unwrap();
+        assert_eq!(config, Config::default());
+        // Every setting appears: a new one without an example line is caught
+        // by this count.
+        let shown = uncommented_example()
+            .lines()
+            .filter(|l| !l.starts_with('['))
+            .count();
+        let defaults = crate::service::settings::ServiceSettings::default();
+        assert_eq!(toml::Table::try_from(&defaults).unwrap().len(), shown);
     }
 
     #[test]

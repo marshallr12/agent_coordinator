@@ -1,0 +1,31 @@
+# agentc-supervisor configuration for the Windows role runner service
+# (`agentc-supervisor --config <this file> windows-service`). Every entry has
+# an in-code default; the commented lines show those defaults. Nothing here
+# is installed by this repository: a service is installed only by an owner,
+# from an elevated session.
+[windows_service]
+# The service's name in the Service Control Manager.
+# name = "agentc-runner"
+# Where the runner journals its launches. Created with an access list for the
+# runner's account, the system and administrators only.
+# state_dir = 'C:\ProgramData\agentc\runner'
+# The pipe's name below \\.\pipe\
+# pipe_name = "agentc-runner"
+# The one account whose process may use the pipe, as SID text: the
+# supervisor's service identity. It has no usable default. While it is empty
+# the service refuses to start, so no pipe is ever served to nobody in
+# particular.
+# client_sid = ""
+# Seconds a stop request gives launches to end by themselves.
+# stop_grace_seconds = 30
+# Seconds a preshutdown request gives launches to end by themselves.
+# preshutdown_grace_seconds = 60
+# The time the Service Control Manager gives the service to stop at
+# preshutdown. It must exceed preshutdown_grace_seconds plus
+# terminate_patience_seconds.
+# preshutdown_timeout_seconds = 120
+# Seconds termination may take after the grace before the service gives up
+# waiting for Windows to confirm it.
+# terminate_patience_seconds = 20
+# Seconds between status reports while the service is stopping.
+# status_interval_seconds = 3
