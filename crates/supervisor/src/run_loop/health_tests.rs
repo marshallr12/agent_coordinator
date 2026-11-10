@@ -303,9 +303,20 @@ fn a_codex_fallback_is_skipped_before_claiming_for_a_project_with_setup() {
     assert!(fake.steps.is_empty(), "{:?}", fake.steps);
 }
 
-// Windows reports a path below a plain file as not found, the same as an
-// absent switch, so this unreadable case exists only on Unix.
-#[cfg(unix)]
+#[test]
+fn an_absent_kill_switch_below_missing_directories_is_not_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path());
+    config.health.kill_switch = Some(dir.path().join("not-made/yet/switch"));
+    assert!(matches!(
+        iterate(&mut Fake::new(), &config),
+        Outcome::Launched { .. }
+    ));
+}
+
+// Linux reports a path below a plain file as "not a directory"; Windows
+// reports it as not found, like an absent switch, and the ancestor check
+// tells the two apart.
 #[test]
 fn a_kill_switch_that_cannot_be_checked_counts_as_set() {
     let dir = tempfile::tempdir().unwrap();

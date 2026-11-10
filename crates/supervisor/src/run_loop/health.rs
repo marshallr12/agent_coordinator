@@ -11,7 +11,7 @@ use crate::profile::{Harness, Role};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One day in milliseconds.
 pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -170,17 +170,38 @@ pub fn admit(driver: &mut impl Driver, config: &Config) -> Result<Vendor, String
 }
 
 /// Refuses while the kill switch is set. A path that cannot be checked
-/// (anything but "not found") counts as set, so the switch fails closed.
+/// (anything but a confirmed absence) counts as set, so the switch fails
+/// closed.
 fn switched_off(config: &Config) -> Result<(), String> {
     let switch = kill_switch(config);
     let shown = switch.display();
+    let unchecked =
+        |why: String| format!("the kill switch {shown} cannot be checked ({why}); claims stop");
     match switch.symlink_metadata() {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!(
-            "the kill switch {shown} cannot be checked ({error}); claims stop"
-        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            confirm_absent(&switch).map_err(unchecked)
+        }
+        Err(error) => Err(unchecked(error.to_string())),
         Ok(_) => Err(format!("the kill switch {shown} is set")),
     }
+}
+
+/// Confirms that a path reported "not found" is absent: its nearest existing
+/// ancestor must be a directory. Windows also answers "not found" for a path
+/// below a plain file, where nothing can be looked up at all; Linux says
+/// "not a directory" for that and never gets here. Ancestors that do not
+/// exist yet are passed over, so a missing state directory still reads as an
+/// absent switch.
+fn confirm_absent(path: &Path) -> Result<(), String> {
+    for ancestor in path.ancestors().skip(1) {
+        match ancestor.metadata() {
+            Ok(found) if found.is_dir() => return Ok(()),
+            Ok(_) => return Err(format!("{} is not a directory", ancestor.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", ancestor.display())),
+        }
+    }
+    Ok(())
 }
 
 /// The primary vendor, then the fallback if one is configured.

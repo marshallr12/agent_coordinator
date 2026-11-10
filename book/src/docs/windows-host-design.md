@@ -449,10 +449,13 @@ Two things came up on the way and are recorded here.
   handle, moved a snapshot with a rename that replaces an empty directory on
   Windows, and took a Windows lock violation for an internal error. All three
   are fixed for Windows; Linux is unchanged.
-- The kill switch treats a path it cannot check as set. On Windows a path
-  below a plain file is reported as not found, the same as an absent switch,
-  so that one unreadable case is not told apart there. No Windows supervisor
-  loop exists to be affected; phase 4b has to settle it.
+- The kill switch treats a path it cannot check as set. Windows reports a
+  path below a plain file as not found, the same as an absent switch, and
+  phase 3 left that one unreadable case admitted there. Task `0092fc75`
+  settled it: a switch reported not found counts as absent only when its
+  nearest existing ancestor is a directory. Anything else cannot be checked
+  and stops claims, on both platforms. Linux already refused the case and is
+  unchanged.
 
 ### Phase 4a: service lifecycle core, SCM binding and the runner service
 
@@ -573,9 +576,8 @@ configured client.
 - the pipe's access list as the service's real account and a different real
   client account, and a client that really connects from another machine;
 - bounded SCM recovery configuration, which is installation's;
-- the supervisor service loop over the pipe, the kill switch's unreadable-path
-  case on Windows, a stand-in coordinator driver and the owner runbook, which
-  are 4b's.
+- the supervisor service loop over the pipe, a stand-in coordinator driver
+  and the owner runbook, which are 4b's.
 
 ## Delivery phases and gates
 
