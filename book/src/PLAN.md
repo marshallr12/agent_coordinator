@@ -61,7 +61,8 @@ continues to define the release target. No production deployment has occurred.
   remotes; also support artifact links. Source-worktree bundles are not required.
 - Test the first release for up to 20 projects, 50 simultaneous agent sessions,
   and 100,000 historical tasks across the service.
-- Provide hourly backups, retaining 24 hourly and 30 daily copies, documented
+- Provide hourly backups, retaining the newest copy of each of the 5 most
+  recent days, documented
   off-server copying, and a one-hour restore target.
 - The production host is undecided. Use Ubuntu 24.04 LTS, x86_64, 2 CPU cores,
   and 4 GB RAM as the engineering test baseline, not a selected production host.
@@ -178,7 +179,7 @@ Persistence constraints, operation permissions, and release checks are in
 | Artifact storage | Bounded service uploads for logs/reports, Git remotes for source checkpoints, optional artifact links | **Confirmed by operator, 2026-09-09** |
 | Initial operating size | 20 projects, 50 simultaneous agent sessions, 100,000 historical tasks | **Confirmed by operator, 2026-09-09** |
 | Server baseline | Ubuntu 24.04 LTS, x86_64, 2 CPU cores, 4 GB RAM | **Engineering default; operator's production host is undecided** |
-| Backup/recovery targets | Hourly backups; 24 hourly and 30 daily copies; documented off-server copying; one-hour restore target | **Confirmed by operator, 2026-09-09** |
+| Backup/recovery targets | Hourly backups; the newest copy of each of the 5 most recent days; documented off-server copying; one-hour restore target | **Confirmed by operator, 2026-09-09; retention changed by the operator on 2026-11-11** from 24 hourly and 30 daily copies |
 
 Repository evidence informed these choices. A policy or permission recorded for
 a past task in a reference project is not a new permission for this service or

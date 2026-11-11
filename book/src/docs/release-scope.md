@@ -10,7 +10,7 @@ work are recorded in [implementation status](implementation-status.md).
 | Choice | Selected target | Status |
 | --- | --- | --- |
 | Initial operating size | 20 projects, 50 simultaneous agent sessions, 100,000 historical tasks | Confirmed |
-| Backups | Hourly, retaining 24 hourly and 30 daily copies; documented off-server copying | Confirmed |
+| Backups | Hourly, retaining the newest copy of each of the 5 most recent days; documented off-server copying | Confirmed |
 | Restore | One-hour target in the documented recovery exercise | Confirmed |
 | Server baseline | Ubuntu 24.04 LTS, x86_64, 2 CPU cores, 4 GB RAM | Engineering default; production host undecided |
 

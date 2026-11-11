@@ -58,9 +58,11 @@ checks and dependency audit passed in
 See the live handoff for exact binary identities and validation scope.
 
 The service uses the standard hourly backup and daily maintenance units.
-The live artifact quota is 256 MiB, with a 2-GiB disk reserve; history and
-backup growth still require monitoring. Local retention keeps the represented
-24 hourly and 30 daily snapshots described in the backup contract.
+The live artifact quota is 256 MiB, with a 1-GiB disk reserve
+(`COORDINATOR_ARTIFACT_DISK_RESERVE_BYTES=1073741824` in
+`/etc/agent-coordinator/service.env`); history and backup growth still
+require monitoring. See [Disk state](#disk-state-2026-11-11) for the
+retention this host applies.
 
 The private bucket `gs://sithbit-19b44-agent-coordinator-backups-east` is in
 `us-east1`, with uniform access and public-access prevention. The VM identity
@@ -84,6 +86,36 @@ which adds storage beyond the live snapshot set and counts toward billing.
 Keep the bootstrap administrator password outside source control. The
 administrator is `admin`; change its initial password after first sign-in.
 This deployment does not enroll agents or bind any repository automatically.
+
+### Disk state, 2026-11-11
+
+On 2026-11-11 the 30-GB disk was 93% full and the service refused artifact
+uploads with `artifact_storage_low`: free space had fallen below the 2-GiB
+artifact reserve. The local backup repository held 52 snapshots (15 GB) under
+the earlier 24 hourly and 30 daily rule, each a full copy of about 345 MB. The
+operator had the following done that day; afterwards the disk was 33% used
+with 20 GB available.
+
+- **Reserve.** The artifact disk reserve was lowered from 2 GiB to 1 GiB and
+  the service restarted at 19:22 UTC. The earlier file is kept beside it as
+  `service.env.before-reserve-20261111`.
+- **Snapshots.** Every local snapshot but the newest 5 was removed by hand
+  under the repository lock, and the newest was verified. The transfer helper
+  removes bucket archives absent from the local set, so the off-site copies
+  follow at its next run. The operator accepted that this shortened restore
+  history, on the VM and in the bucket, from 30 days to those 5 snapshots.
+- **Retention.** The [backup contract](backup-contract.md#retention) now keeps
+  the newest snapshot of each of the 5 most recent days. **The installed
+  server predates that change and still applies the 24 hourly and 30 daily
+  rule**, so local snapshots grow again until a server built with the new
+  rule is deployed.
+- **Housekeeping.** Removed: the snap download cache and three disabled snap
+  revisions; the apt package cache; every directory under
+  `/var/lib/agent-coordinator-deployments` except the current deployment's,
+  which holds its rollback; the versioned copies of earlier releases in
+  `/usr/local/bin`; and the September upgrade leftovers in `/var/tmp`. The
+  pre-deployment database copies under
+  `/var/lib/agent-coordinator-backups/rollbacks` were kept.
 
 The general IPv4-based installation instructions below remain an alternative.
 

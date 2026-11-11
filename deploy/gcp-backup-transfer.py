@@ -71,7 +71,7 @@ with (state / '.lock').open('a') as transfer_lock:
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(staged, previous)
-        # Keep the same represented 24-hour/30-day snapshots as the source.
+        # Keep the same snapshots as the source's retention (5 daily).
         retained = {p.name + '.tar.gz' for p in snapshots}
         objects = run(['gcloud','storage','ls',bucket + '/snapshots/','--quiet']).splitlines()
         for item in objects:

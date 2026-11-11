@@ -80,7 +80,8 @@ is Ubuntu 24.04 LTS on x86_64 with 2 CPU cores and 4 GB RAM.
 Provide a database-aware backup command suitable for a systemd timer, using
 [SQLite's supported online snapshot facilities](https://sqlite.org/backup.html). Do not document
 copying only a live database file while ignoring its WAL. The operator selected
-hourly backups, 24 hourly and 30 daily retained copies, documented off-server
+hourly backups, 5 daily retained copies (changed on 2026-11-11 from 24 hourly
+and 30 daily), documented off-server
 copying, and a one-hour restore target.
 The selected log/report uploads require the backup manifest to cover their storage
 and referenced digests as well as database records.
@@ -115,8 +116,7 @@ Each snapshot has its own database image,
 manifest, schema/service versions, timestamps, digests, and completion marker.
 Only publish the completion marker after database integrity and all referenced
 file digests are verified. A partial snapshot is never counted as a usable backup.
-Retain the newest snapshot from each of the most recent 24 hourly buckets plus one successful snapshot for each
-of the most recent 30 days. Prune only complete snapshot directories outside the retention set. Insufficient space or a failed backup leaves prior usable
+Retain the newest successful snapshot from each of the most recent 5 days. Prune only complete snapshot directories outside the retention set. Insufficient space or a failed backup leaves prior usable
 snapshots intact and raises a visible operator alert.
 
 Document copying the completed backup repository to an operator-selected server

@@ -294,8 +294,10 @@ async fn artifact_cleanup_defers_while_a_backup_shared_lock_is_held() {
     assert!(!blob.exists());
 }
 
+/// Retention leaves exactly the newest snapshot of each of the 5 newest days,
+/// however many snapshots a day holds.
 #[tokio::test]
-async fn retention_keeps_24_hourly_and_30_daily_buckets() {
+async fn retention_keeps_the_newest_snapshot_of_each_of_five_days() {
     let fixture = Fixture::new().await;
     let repository = fixture.repository();
     let day = 86_400_000_i64;
@@ -305,25 +307,36 @@ async fn retention_keeps_24_hourly_and_30_daily_buckets() {
         .timestamp_millis();
     // Keep every fixture snapshot after initialization: protected service time
     // correctly clamps a rollback, which would collapse historical buckets.
-    assert!(base - 30 * day > fixture.state.now());
-    for days_ago in (0..=30).rev() {
-        fixture
-            .clock
-            .0
-            .store(base - days_ago * day, Ordering::SeqCst);
-        create_backup(&fixture.state, &repository).await.unwrap();
+    assert!(base - 7 * day > fixture.state.now());
+    let mut newest_of_day = Vec::new();
+    for days_ago in (0..=7).rev() {
+        let mut last = None;
+        for hour_of_day in [1, 9, 17] {
+            let at = base - days_ago * day + hour_of_day * hour;
+            fixture.clock.0.store(at, Ordering::SeqCst);
+            last = Some(create_backup(&fixture.state, &repository).await.unwrap());
+        }
+        newest_of_day.push(snapshot_name(&last.unwrap()));
     }
-    for current_hour in 1..24 {
-        fixture
-            .clock
-            .0
-            .store(base + current_hour * hour, Ordering::SeqCst);
-        create_backup(&fixture.state, &repository).await.unwrap();
-    }
-    assert_eq!(
-        fs::read_dir(repository.join("snapshots")).unwrap().count(),
-        53
-    );
+    let mut expected = newest_of_day.split_off(newest_of_day.len() - 5);
+    expected.sort();
+    assert_eq!(snapshot_names(&repository), expected);
+}
+
+/// The directory name of the snapshot a backup reported.
+fn snapshot_name(created: &serde_json::Value) -> String {
+    let path = PathBuf::from(created["snapshot_path"].as_str().unwrap());
+    path.file_name().unwrap().to_string_lossy().into_owned()
+}
+
+/// The sorted directory names of every snapshot in the repository.
+fn snapshot_names(repository: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(repository.join("snapshots"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }
 
 #[cfg(unix)]
