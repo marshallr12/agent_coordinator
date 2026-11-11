@@ -1,5 +1,5 @@
 use super::*;
-use crate::host_runtime::{LaunchIdentity, Observation, Recovery, StartIntent};
+use crate::host_runtime::{LaunchIdentity, Observation, Recovery, Removed, StartIntent};
 use std::fs;
 
 /// A coordinator and host stand-in with a fake clock: one queued `next`,
@@ -347,14 +347,16 @@ impl HostRuntime for Fake {
         }
     }
 
-    fn cleanup(&mut self, launch: &Launch) -> Result<()> {
+    fn cleanup(&mut self, launch: &Launch) -> Result<Removed> {
+        let mut existed = false;
         for path in [&launch.clone, &launch.run] {
             match fs::remove_dir_all(path) {
+                Ok(()) => existed = true,
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error)?,
-                _ => {}
+                Err(_) => {}
             }
         }
-        Ok(())
+        Ok(Removed::when(existed))
     }
 }
 

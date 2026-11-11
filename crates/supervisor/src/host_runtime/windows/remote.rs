@@ -18,7 +18,9 @@
 use super::Planner;
 use super::pipe_client::Client;
 use super::process::Command;
-use crate::host_runtime::{HostRuntime, LaunchIdentity, Observation, Recovery, StartIntent};
+use crate::host_runtime::{
+    HostRuntime, LaunchIdentity, Observation, Recovery, Removed, StartIntent,
+};
 use crate::run_loop::Launch;
 use crate::run_loop::record::LaunchRecord;
 use anyhow::{Context, Result, bail};
@@ -270,19 +272,21 @@ impl<P: Planner, L: Link> HostRuntime for RemoteHost<P, L> {
     }
 
     /// Has the runner end the launch and remove its desktop, profile and
-    /// directories. A launch that may still run is left whole.
-    fn cleanup(&mut self, launch: &Launch) -> Result<()> {
+    /// directories. A launch that may still run is left whole. A launch
+    /// the runner's journal does not name left nothing there: a prepare
+    /// that fails or is refused removes what it made.
+    fn cleanup(&mut self, launch: &Launch) -> Result<Removed> {
         let id = launch.session_id.to_string();
         self.planned.remove(&launch.session_id);
         let op = match self.standing(&id)? {
-            Standing::Absent => return Ok(()),
+            Standing::Absent => return Ok(Removed::Nothing),
             Standing::Held { .. } => "cleanup",
             Standing::Ended => "reclaim",
             Standing::MayRun => bail!("launch {id} may still run; nothing of it is removed"),
         };
         let mut request = Self::about(op, launch);
         request["remove_directories"] = json!(true);
-        self.call(request).map(|_| ())
+        self.call(request).map(|_| Removed::Launch)
     }
 }
 
@@ -527,17 +531,20 @@ mod tests {
             drop(script);
             let outcome = host.cleanup(&launch);
             let last = fake.0.borrow().asked.last().cloned().unwrap();
-            (outcome.is_ok(), last)
+            (outcome.ok(), last)
         };
-        let (ok, last) = clean(vec![]);
-        assert!(ok && last["op"] == "recover", "nothing to remove: {last}");
-        let (ok, last) = clean(vec![journaled(&launch, "started", "held")]);
-        assert!(ok && last["op"] == "cleanup" && last["remove_directories"] == true);
-        let (ok, last) = clean(vec![journaled(&launch, "started", "ended")]);
-        assert!(ok && last["op"] == "reclaim" && last["remove_directories"] == true);
-        let (ok, last) = clean(vec![journaled(&launch, "started", "may_be_running")]);
+        let (removed, last) = clean(vec![]);
+        assert_eq!(removed, Some(Removed::Nothing), "{last}");
+        assert!(last["op"] == "recover", "nothing to remove: {last}");
+        let (removed, last) = clean(vec![journaled(&launch, "started", "held")]);
+        assert_eq!(removed, Some(Removed::Launch));
+        assert!(last["op"] == "cleanup" && last["remove_directories"] == true);
+        let (removed, last) = clean(vec![journaled(&launch, "started", "ended")]);
+        assert_eq!(removed, Some(Removed::Launch));
+        assert!(last["op"] == "reclaim" && last["remove_directories"] == true);
+        let (removed, last) = clean(vec![journaled(&launch, "started", "may_be_running")]);
         assert!(
-            !ok && last["op"] == "recover",
+            removed.is_none() && last["op"] == "recover",
             "nothing was asked to go: {last}"
         );
     }
@@ -569,12 +576,16 @@ mod tests {
             let launch = launch();
             let mut host = RemoteHost::new(Fixed, PipeLink::new(&name, &me));
             let judged = host.recover(&record(&launch), 0);
-            (judged, host.observe(&launch), host.cleanup(&launch).is_ok())
+            (judged, host.observe(&launch), host.cleanup(&launch).ok())
         });
         serve_one(&mut pipe, &mut runner);
         // Unknown to the runner: ended, nothing to see running, nothing to
         // remove.
-        let expected = (Recovery::Ended, Observation::Running, true);
+        let expected = (
+            Recovery::Ended,
+            Observation::Running,
+            Some(Removed::Nothing),
+        );
         assert_eq!(asker.join().unwrap(), expected);
     }
 

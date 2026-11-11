@@ -89,6 +89,17 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   service was installed, started or configured, nothing has run under the
   Service Control Manager, and nothing is machine accepted.**
 
+- The Windows launcher now
+  [takes over a window station](windows-host-design.md#the-station-of-a-runner-that-is-a-service)
+  that existed before it ran, as a service's does, once Windows confirms the
+  station is the runner's own session's, the runner's process runs in it and
+  is alone in that session, and its owner is trusted; it rewrites the access
+  list and reads it back. Any other existing station is still refused. This
+  is tested on native Windows in a service-like logon session and **has not
+  run under the Service Control Manager**. A prepare that fails or is refused
+  removes the directories it made, and a cleanup reports whether it removed
+  anything.
+
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
   isolated tmpfs; the host harness directory stays hidden. Invalid paths,

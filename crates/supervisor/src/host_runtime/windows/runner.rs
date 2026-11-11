@@ -253,10 +253,12 @@ impl Runner {
     }
 
     /// Journals a just prepared launch; if that fails the launch is undone,
-    /// so nothing exists that the journal does not name.
+    /// directories included, so nothing exists that the journal does not
+    /// name.
     fn journal_or_undo(&mut self, launch: &str, entry: &Entry) -> Result<()> {
         if let Err(error) = self.journal.save(entry) {
             let _ = self.launcher.cleanup(launch);
+            let _ = remove_directories(entry);
             return Err(error);
         }
         self.mine.insert(launch.to_owned());

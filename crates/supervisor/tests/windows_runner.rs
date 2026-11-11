@@ -127,6 +127,10 @@ fn a_launch_runs_contained_is_journaled_and_ends_with_its_job() {
 fn refuses_everything(runner: &mut Runner, case: &Case, state: &Path) {
     eprintln!("another program made this logon session's window station; checking the refusal");
     assert!(!state.join("case.json").exists());
+    assert!(
+        !case.control.exists() && !case.work.exists(),
+        "a refused prepare leaves no launch directory"
+    );
     let started = ask(runner, case.start("exit 0", "refused.txt"));
     assert_eq!(started["ok"], false, "{started}");
     assert!(!case.logs.join("refused.txt").exists());

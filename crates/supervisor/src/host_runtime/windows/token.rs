@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security::{
     GetTokenInformation, PSID, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TokenAppContainerSid,
-    TokenIsAppContainer, TokenSecurityAttributes, TokenUser,
+    TokenIsAppContainer, TokenSecurityAttributes, TokenStatistics, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -19,6 +19,8 @@ const LESS_PRIVILEGED_ATTRIBUTE: &str = "WIN://NOALLAPPPKG";
 const ATTRIBUTES_BYTES: usize = 4096;
 /// Room for a SID-bearing token information block.
 const SID_BYTES: usize = 512;
+/// Room for a token's statistics.
+const STATISTICS_BYTES: usize = 64;
 
 /// Opens `process`'s token for queries.
 pub(crate) fn of_process(process: HANDLE) -> Result<Handle> {
@@ -100,6 +102,23 @@ pub fn current_user_sid() -> Result<String> {
     user_sid(&token)
 }
 
+/// The logon session `token` belongs to, as one 64-bit number. Windows
+/// names a session's unnamed window station after it.
+pub fn logon_session(token: &Handle) -> Result<u64> {
+    let (buffer, filled) = information(token, TokenStatistics, STATISTICS_BYTES)?;
+    anyhow::ensure!(filled >= 16, "the token's statistics are too short");
+    // The statistics start with two 8-byte ids: the token's, then the
+    // logon session's, low half first.
+    Ok(buffer[1])
+}
+
+/// The logon session this process runs in.
+pub fn current_logon_session() -> Result<u64> {
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no close.
+    let token = of_process(unsafe { GetCurrentProcess() })?;
+    logon_session(&token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +132,7 @@ mod tests {
         assert!(!is_appcontainer(&token).unwrap());
         assert_eq!(package_sid(&token).unwrap(), None);
         assert!(!is_less_privileged(&token));
+        let session = logon_session(&token).unwrap();
+        assert!(session != 0 && session == current_logon_session().unwrap());
     }
 }

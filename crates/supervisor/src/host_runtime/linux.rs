@@ -8,7 +8,7 @@
 //!
 //! Nothing here decides what to launch or when: that is the loop's, through
 //! [`HostRuntime`].
-use super::{HostRuntime, LaunchIdentity, Observation, Recovery, StartIntent, rooted};
+use super::{HostRuntime, LaunchIdentity, Observation, Recovery, Removed, StartIntent, rooted};
 use crate::clone;
 use crate::config::Config;
 use crate::profile::Role;
@@ -303,13 +303,16 @@ impl HostRuntime for LinuxHost {
         }
     }
 
-    /// Removes the clone and `$RUN` without following a role-owned symlink.
-    fn cleanup(&mut self, launch: &Launch) -> Result<()> {
+    /// Removes the clone and `$RUN` without following a role-owned symlink,
+    /// and says whether either was there.
+    fn cleanup(&mut self, launch: &Launch) -> Result<Removed> {
         let base = role_dir(&self.config);
+        let mut existed = false;
         for path in [&launch.clone, &launch.run] {
+            existed |= path.symlink_metadata().is_ok();
             rooted::remove_tree(&base, &self.below_role(path)?)?;
         }
-        Ok(())
+        Ok(Removed::when(existed))
     }
 }
 

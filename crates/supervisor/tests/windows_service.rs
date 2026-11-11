@@ -340,6 +340,10 @@ fn a_stop_asks_the_launch_ends_it_at_the_deadline_and_reports_stopped_only_when_
         eprintln!("another program made this logon session's window station; checking the refusal");
         assert!(!state.join("case.json").exists());
         assert!(
+            !case.control.exists() && !case.work.exists(),
+            "a refused prepare leaves no launch directory"
+        );
+        assert!(
             runner.unconfirmed().is_empty(),
             "nothing was prepared, so nothing is held"
         );

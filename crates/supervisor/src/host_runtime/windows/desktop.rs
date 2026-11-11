@@ -5,17 +5,22 @@
 //! and only an administrator may create a named one. A launcher therefore
 //! makes that one station and lists, in its access list, only its own
 //! account and the packages of its live launches. If the station already
-//! exists, another program made it and controls who may open it, so the
-//! launcher refuses ([`StationNotOurs`]). Launches of one launcher share the
-//! station's clipboard and atom table; their desktops are separate.
-use super::sddl;
+//! exists, the launcher takes it over only when Windows confirms that it
+//! was made for this process alone ([`super::adoption`]), which is how a
+//! service finds its station; any other existing station is controlled by
+//! whoever made it, so the launcher refuses ([`StationNotOurs`]). Launches
+//! of one launcher share the station's clipboard and atom table; their
+//! desktops are separate.
 use super::sys::{Descriptor, check, last_error};
 use super::text::wide;
+use super::{adoption, sddl, token};
 use anyhow::{Context, Result};
 use std::ffi::c_void;
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GENERIC_ALL, GetLastError, HANDLE};
-use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetUserObjectSecurity};
+use windows_sys::Win32::Security::{
+    DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, SetUserObjectSecurity,
+};
 use windows_sys::Win32::System::StationsAndDesktops::{
     CloseDesktop, CloseWindowStation, CreateDesktopW, CreateWindowStationW,
     GetProcessWindowStation, GetUserObjectInformationW, HDESK, HWINSTA, SetProcessWindowStation,
@@ -27,16 +32,19 @@ use windows_sys::Win32::UI::WindowsAndMessaging::CWF_CREATE_ONLY;
 /// process-wide state.
 static STATION_SWITCH: Mutex<()> = Mutex::new(());
 
-/// The logon session's window station already existed, so this launcher did
-/// not make it and does not control who may open it.
+/// The logon session's window station already existed and the launcher
+/// could not show that it controls who may open it. The text says which
+/// fact was missing.
 #[derive(Debug)]
-pub struct StationNotOurs;
+pub struct StationNotOurs(pub String);
 
 impl std::fmt::Display for StationNotOurs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            "the logon session's window station was made by another program; \
+        write!(
+            f,
+            "the logon session's window station was made by another program ({}); \
              the launcher starts nothing in a station it does not control",
+            self.0
         )
     }
 }
@@ -71,8 +79,10 @@ pub struct Station {
 unsafe impl Send for Station {}
 
 impl Station {
-    /// Makes the logon session's window station, open to `owner` alone.
-    /// Fails with [`StationNotOurs`] when it already exists.
+    /// Makes the logon session's window station, open to `owner` alone. A
+    /// station that already exists is taken over if it was made for this
+    /// process alone ([`Station::adopt`]) and refused with
+    /// [`StationNotOurs`] otherwise.
     pub fn create(owner: &str) -> Result<Self> {
         let descriptor = Descriptor::parse(&sddl::station(owner, &[])?)?;
         let attributes = descriptor.attributes(false);
@@ -81,9 +91,19 @@ impl Station {
         let handle = unsafe {
             CreateWindowStationW(std::ptr::null(), CWF_CREATE_ONLY, GENERIC_ALL, &attributes)
         };
-        if handle.is_null() {
-            return Err(creation_failure());
+        if !handle.is_null() {
+            return Self::holding(handle, owner);
         }
+        // SAFETY: GetLastError reads thread-local state.
+        if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+            return Err(last_error("CreateWindowStationW"));
+        }
+        Self::adopt(owner)
+    }
+
+    /// The station behind `handle`, which is closed again if its name
+    /// cannot be read.
+    fn holding(handle: HWINSTA, owner: &str) -> Result<Self> {
         let mut station = Self {
             handle,
             owner: owner.to_owned(),
@@ -94,15 +114,46 @@ impl Station {
         Ok(station)
     }
 
+    /// Takes over the station Windows made for this logon session before
+    /// the launcher ran. Every fact [`adoption`] names is checked first;
+    /// then the access list is replaced by the launcher's own, with the
+    /// label a launch needs, and read back. Nothing is changed in a
+    /// station that fails a check.
+    fn adopt(owner: &str) -> Result<Self> {
+        let station = Self::holding(open_existing()?, owner)?;
+        let session = token::current_logon_session()?;
+        // SAFETY: returns this process's current station; it is not closed.
+        let own = object_name(unsafe { GetProcessWindowStation() })?;
+        adoption::is_own(&station.name, &own, session)?;
+        adoption::owner_is_trusted(&adoption::owner(station.handle)?, owner)?;
+        adoption::is_alone(session)?;
+        station.apply(DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)?;
+        station.confirm()?;
+        Ok(station)
+    }
+
+    /// Refuses unless Windows reports the access list the launcher wrote:
+    /// the owner and each admitted package, and nobody else.
+    fn confirm(&self) -> Result<()> {
+        let mut expected = vec![self.owner.clone()];
+        expected.extend(self.packages.iter().cloned());
+        let listed = adoption::allowed(self.handle)?;
+        if listed != expected {
+            let reason = format!("its access list reads back as {listed:?}");
+            return Err(StationNotOurs(reason).into());
+        }
+        Ok(())
+    }
+
     /// The station's name, the first half of a launch's desktop name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Rewrites the access list: the owner and each admitted package.
-    fn apply(&self) -> Result<()> {
+    /// Rewrites the parts of the station's security named in `requested`:
+    /// the access list is the owner and each admitted package.
+    fn apply(&self, requested: u32) -> Result<()> {
         let descriptor = Descriptor::parse(&sddl::station(&self.owner, &self.packages)?)?;
-        let requested = DACL_SECURITY_INFORMATION;
         // SAFETY: the station handle is live; `requested` and the
         // descriptor outlive the call.
         let set = unsafe { SetUserObjectSecurity(self.handle, &requested, descriptor.pointer()) };
@@ -112,14 +163,31 @@ impl Station {
     /// Lets one launch's package open the station.
     pub fn admit(&mut self, package: &str) -> Result<()> {
         self.packages.push(package.to_owned());
-        self.apply()
+        self.apply(DACL_SECURITY_INFORMATION)
     }
 
     /// Withdraws a finished launch's package.
     pub fn dismiss(&mut self, package: &str) -> Result<()> {
         self.packages.retain(|admitted| admitted != package);
-        self.apply()
+        self.apply(DACL_SECURITY_INFORMATION)
     }
+}
+
+/// Opens the logon session's existing station with every right, which
+/// rewriting its access list and label needs. A station Windows will not
+/// open that way is not the launcher's to control.
+fn open_existing() -> Result<HWINSTA> {
+    // SAFETY: an unnamed station, no flags and no attributes: an existing
+    // station is opened as it is.
+    let handle =
+        unsafe { CreateWindowStationW(std::ptr::null(), 0, GENERIC_ALL, std::ptr::null()) };
+    if handle.is_null() {
+        // SAFETY: GetLastError reads thread-local state.
+        let code = unsafe { GetLastError() };
+        let reason = format!("Windows refused full access to it with error {code}");
+        return Err(StationNotOurs(reason).into());
+    }
+    Ok(handle)
 }
 
 impl Drop for Station {
@@ -128,15 +196,6 @@ impl Drop for Station {
         // destroys the station with its last handle.
         unsafe { CloseWindowStation(self.handle) };
     }
-}
-
-/// Why the station was not created: it existed already, or another failure.
-fn creation_failure() -> anyhow::Error {
-    // SAFETY: GetLastError reads thread-local state.
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        return StationNotOurs.into();
-    }
-    last_error("CreateWindowStationW")
 }
 
 /// One launch's private desktop: only the launcher's account and that
