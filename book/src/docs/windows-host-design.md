@@ -110,7 +110,10 @@ why the first is still a requirement and not a result.
    service owner and that package. The launcher makes the logon session's
    window station and lists only the service owner and the packages of its live
    launches. A launcher that finds the station already made by another program
-   does not control who may open it and must refuse. **A station per launch is
+   does not control who may open it and must refuse. A service's logon session
+   always has its station already, so **the runner cannot launch as a
+   service** with this rule ([4c run](#phase-4c-machine-run-2026-11-11)); task
+   `7f6f242d` is to choose a station the runner controls. **A station per launch is
    not established**: it needs a logon session per launch or a named station
    made by an administrator, and neither has been tried.
 5. **Explicit inheritance (demonstrated).** The environment block is an exact
@@ -501,8 +504,9 @@ reports 2. Started from a console, the dispatcher fails at once and the
 command exits with an error that says it must be started by the service
 manager. At start the service tries to set its own preshutdown time limit from
 `preshutdown_timeout_seconds`; the account it runs as may not be allowed to,
-so a refusal is logged and does not stop the service. Setting the limit as part
-of installation is 4c's.
+so a refusal is logged and does not stop the service. Under the SCM in 4c both
+services were refused (error 5), so installation sets the limit; see the
+[4c runbook](#owner-runbook-for-phase-4c).
 
 **The runner as a service** (`host_runtime::windows::runner_service`). It
 starts in this order and reports running only at the end: validate the
@@ -747,12 +751,29 @@ stand-in launch carried through a real runner; status reports reaching
 Windows during a drain; the event-log trace as a service account (the test
 writes one event as the test's own account).
 
-#### Proposed owner runbook for phase 4c
+#### Owner runbook for phase 4c
 
-This is what the owner would run on MiniAir from an **elevated** session.
-It is a proposal: every command is unverified until 4c runs it, and 4c
-records what really happened. Stop at the first step that does not do what
-it says; do not work around it.
+This is what the owner runs on MiniAir from an **elevated** session. Task
+`62d9942f` followed it on 2026-11-11 until step 6 stopped the
+[machine run](#phase-4c-machine-run-2026-11-11). Steps 1 to 6 and 9 below
+are corrected from that run; steps 7 and 8 have still not been run. Stop at
+the first step that does not do what it says; do not work around it.
+
+Corrections from the run:
+
+- Step 3: the ledger is `stand-in\ledger.jsonl`, so the supervisor's account
+  needs modify on `stand-in\` itself; `queue\` inherits it.
+- Step 4 gains the preshutdown time limit. Each service tries to set its own
+  at start and is refused (`OpenServiceW` error 5: a service's account has no
+  `SERVICE_CHANGE_CONFIG` on its own service). That leaves the Windows
+  default of 10 seconds, too short for the drain. `sc.exe` has no verb for
+  it; the owner sets it through `ChangeServiceConfig2W`
+  (`SERVICE_CONFIG_PRESHUTDOWN_INFO`).
+- Record native command output to files. In the run, PowerShell 7's
+  `Start-Transcript` dropped most of the output of `sc.exe` and `icacls`.
+- Step 9: deleting the services leaves each virtual account's profile under
+  `C:\Windows\ServiceProfiles\`. Windows kept both hives loaded after the
+  services stopped, so the profiles can be removed only after a restart.
 
 1. **Files.** Build `agentc-supervisor.exe` in release mode from the exact
    commit under test and record its SHA-256. Copy it and the probe fixture to
@@ -773,11 +794,15 @@ it says; do not work around it.
 3. **Directories.** Create `C:\ProgramData\agentc\runner`,
    `...\runner\stand-in-launches`, `...\supervisor` and `...\stand-in\queue`.
    Grant the runner's account modify on the two runner directories and the
-   supervisor's account modify on the other two, and nothing to anyone else
-   beyond the system and administrators. Record `icacls` of each.
-4. **Bounded recovery.** `sc.exe failure agentc-runner reset= 86400 actions=
-   restart/60000/restart/60000//` and the same for `agentc-supervisor`: two
-   restarts, then none.
+   supervisor's account modify on `...\supervisor` and `...\stand-in` (which
+   holds the ledger and the queue), and nothing to anyone else beyond the
+   system and administrators. Record `icacls` of each.
+4. **Bounded recovery and the preshutdown limit.** `sc.exe failure
+   agentc-runner reset= 86400 actions= restart/60000/restart/60000//` and the
+   same for `agentc-supervisor`: two restarts, then none. Set both services'
+   preshutdown time limit to `preshutdown_timeout_seconds` (120 by default)
+   through `ChangeServiceConfig2W` and read it back with
+   `QueryServiceConfig2W`.
 5. **Start without the stand-in.** Start both. Expect: both `RUNNING`; the
    runner's `service.log` says `running`; the supervisor's
    `heartbeat.json` says `state: "stopped"` with the reason that no harness
@@ -809,12 +834,88 @@ it says; do not work around it.
    `sc.exe qfailure` output as one pinned artifact, with the commit and the
    binary's hash.
 9. **Remove.** `sc.exe delete` both services, delete the directories and the
-   two files under `Program Files`, and confirm no AppContainer profile named
-   `agentc.standin.*` is left.
+   files under `Program Files`, and confirm no AppContainer profile named
+   `agentc.standin.*` is left. After a restart, once Windows reports them
+   unloaded, remove the two virtual accounts' profiles (`Win32_UserProfile`
+   for each service SID).
 
 Not covered by this runbook and still open after it: a real coordinator, any
 provider harness, the reviewer side, brokers, the installer, and resource
 caps and quiet hours, which need the real loop's admission to mean anything.
+
+### Phase 4c machine run, 2026-11-11
+
+Task `62d9942f-7b8c-4f0c-b300-bc5553c7aa15`. The owner ran every step that
+registered, started, stopped or removed a service in an elevated PowerShell 7
+session on MiniAir (Windows 11 Pro 10.0.26300); the agent session prepared
+the scripts, read the results and wrote this record. `agentc-supervisor.exe`
+was built in release mode from `1d2a73eb0ca4393aec8a781519eb9d19a84322a8`,
+SHA-256 `57b5440d4b0f2f55b0ebaa14d789eebe69d94630cc706333cb9263f2f63d9336`;
+the probe fixture's SHA-256 was
+`ec304c355a25ff805b3dffe2756da8984e21ecc8d6991049c9b1834172448ab6`. The
+evidence is coordinator artifact `ARTIFACT_ID_PENDING`, SHA-256
+`ARTIFACT_SHA256_PENDING`. All times are UTC.
+
+**Install (runbook steps 1 to 4), 17:43.** Both services registered stopped,
+demand start, as `NT SERVICE\agentc-runner` and `NT SERVICE\agentc-supervisor`,
+the supervisor depending on the runner, each with two 60-second restarts and
+a one-day reset. The service SIDs matched the ones in the configuration. The
+directories' access lists were exactly as step 3 asks, with the correction
+above. Both services' security descriptors grant service logon users only
+query, interrogate and read-control, which is why neither service can set its
+own preshutdown limit. Read back before it was set, the effective limit was
+10 000 ms on both; the owner set 120 000 ms and it read back as set.
+
+**Start without the stand-in (step 5), 18:20: passed as written.** Both
+`RUNNING`. The runner's log said `start-up: 0 reclaimed, 0 may still run, 0
+failed, 0 unreadable` and `running`, and showed no pipe client. The
+supervisor's heartbeat said `state: "stopped"` with the reason that no
+provider harness is supported on Windows. Both service tokens: their own
+service SID as user, High integrity, session 0, `SERVICE`, `ALL SERVICES`,
+`Users`, `Authenticated Users`, `CONSOLE LOGON` and their logon session; no
+administrators group. Privileges: `SeChangeNotify`, `SeImpersonate` and
+`SeCreateGlobal` enabled; `SeShutdown`, `SeUndock`,
+`SeIncreaseWorkingSet` and `SeTimeZone` present and disabled.
+
+**Can the runner launch as a service (step 6), 18:36: no.** With the stand-in
+on and one item, `probe-1`, queued, the supervisor connected to the runner's
+pipe and the runner served it only after checking its SID (`serving
+S-1-5-80-3306791472-…`). Every prepare was then refused: *the logon session's
+window station was made by another program; the launcher starts nothing in a
+station it does not control*. The launcher only accepts the unnamed station
+of its logon session if it creates it itself (`CreateWindowStationW` with
+`CWF_CREATE_ONLY`); a service's logon session already has one when the
+service starts, so creation fails with `ERROR_ALREADY_EXISTS`. The phase 2 and
+3 role-account runs never met this because their logon session had no
+station yet. The run stopped here as the task requires.
+
+The same step showed a second defect. The runner makes a launch's `-control`
+and `-work` directories before the station step, journals nothing when the
+step fails and does not remove them. The remote runtime's cleanup then finds
+no journal entry, removes nothing, and the ledger still records `cleanup` with
+`ok: true`. The item is never claimed, so the loop prepares it again at every
+poll: from 18:36:18 to 18:43:31 the ledger holds 44 prepares and 44 cleanups
+and 88 launch directories were left. `stand-in-judge` found no problem in the
+ledger, which is right for what it judges: nothing was started or released.
+No fixture process and no AppContainer profile was left.
+
+**Stop and removal, 18:43.** Both services stopped with exit code 0; the
+runner logged `the client is gone` and `stopped: every launch is confirmed
+ended`. The owner deleted both services, `C:\Program Files\agentc` and
+`C:\ProgramData\agentc`, which removed the leftover directories.
+REMOVAL_OF_PROFILES_PENDING
+
+| Item | Result |
+| --- | --- |
+| Registration under two virtual service accounts, failure actions, access lists | **Demonstrated** |
+| Both services start, report running and stop with exit code 0 under the SCM | **Demonstrated** (demand start, stopped by `sc.exe stop`) |
+| Supervisor without a harness claims nothing and says why | **Demonstrated** |
+| The runner's pipe admits the supervisor by SID across two service accounts | **Demonstrated** |
+| The services set their own preshutdown limit | **Failed**: refused with error 5; set by the owner instead |
+| A launch made by the runner as a service | **Failed**: `station_not_ours`; follow-up task `7f6f242d` |
+| A refused prepare leaves nothing behind | **Failed**: two directories per attempt; follow-up task `7f6f242d` |
+| Rounds: supervisor stop, runner stop, supervisor crash, runner crash, child crash, logoff, reboot with preshutdown, power loss | **Not run**: no launch can be made |
+| Boot without logon, orphan cleanup of launches | **Not run** |
 
 ## Delivery phases and gates
 
@@ -829,7 +930,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
-| 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Not started |
+| 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). **Nothing is machine-accepted** |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
