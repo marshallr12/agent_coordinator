@@ -665,10 +665,10 @@ carried through the remote runtime under a role account.
 ### Phase 4b, second part: the supervisor service, the stand-in and the 4c runbook
 
 Task `49aaca03-8d3b-4fe6-b0c4-4d0de68c7b1e` built these. Everything here is
-**implemented** and tested without elevation. **No service was installed,
-started or configured on any machine, and nothing here is machine-accepted.**
-The runbook below is a **proposal** for phase 4c: none of its steps has been
-run.
+**implemented** and tested without elevation. That task installed, started
+and configured no service. Phase 4c has since followed the runbook below as
+far as step 6; the [machine run](#phase-4c-machine-run-2026-11-11) records
+what that showed. **Nothing here is machine-accepted.**
 
 **The supervisor service** (`host_runtime::windows::supervisor_service`,
 `service::supervisor`). `agentc-supervisor --config FILE windows-service
@@ -746,10 +746,11 @@ may still run, then releases the attempt once it is judged ended and
 launches only the other item, with a clean ledger. On Windows the service
 command refuses from a console for both roles.
 
-**Not demonstrated**: either service under the Service Control Manager; a
-stand-in launch carried through a real runner; status reports reaching
-Windows during a drain; the event-log trace as a service account (the test
-writes one event as the test's own account).
+**Not demonstrated by 4b**: either service under the Service Control Manager
+(the [4c run](#phase-4c-machine-run-2026-11-11) later started and stopped
+both); a stand-in launch carried through a real runner; status reports
+reaching Windows during a drain; the event-log trace as a service account
+(the test writes one event as the test's own account).
 
 #### Owner runbook for phase 4c
 
@@ -853,8 +854,11 @@ was built in release mode from `1d2a73eb0ca4393aec8a781519eb9d19a84322a8`,
 SHA-256 `57b5440d4b0f2f55b0ebaa14d789eebe69d94630cc706333cb9263f2f63d9336`;
 the probe fixture's SHA-256 was
 `ec304c355a25ff805b3dffe2756da8984e21ecc8d6991049c9b1834172448ab6`. The
-evidence is coordinator artifact `ARTIFACT_ID_PENDING`, SHA-256
-`ARTIFACT_SHA256_PENDING`. All times are UTC.
+evidence is coordinator artifact `8b0c1cca-fc30-49d1-9912-62f02ea216aa`, SHA-256
+`84d3b5671279c1d8bb9c055f8fd61c3f57b05fea709530193bdf920e58583181`: one zip
+of the run's logs, ledgers, transcripts and removal records with the owner
+scripts, packed by registered job `37bb68a2-d98a-40d7-a9a9-98b6ea97cae6`.
+All times are UTC.
 
 **Install (runbook steps 1 to 4), 17:43.** Both services registered stopped,
 demand start, as `NT SERVICE\agentc-runner` and `NT SERVICE\agentc-supervisor`,
@@ -902,8 +906,12 @@ No fixture process and no AppContainer profile was left.
 **Stop and removal, 18:43.** Both services stopped with exit code 0; the
 runner logged `the client is gone` and `stopped: every launch is confirmed
 ended`. The owner deleted both services, `C:\Program Files\agentc` and
-`C:\ProgramData\agentc`, which removed the leftover directories.
-REMOVAL_OF_PROFILES_PENDING
+`C:\ProgramData\agentc`, which removed the leftover directories. The two
+virtual accounts' profiles stayed: Windows still had both hives loaded, and
+a removal tried at 18:52 was refused for that reason. MiniAir was restarted
+at 18:55; at 19:02 Windows reported both profiles unloaded and the owner
+removed them. No service, profile or profile folder of either account is
+left (`removal-profiles.json`).
 
 | Item | Result |
 | --- | --- |
@@ -1580,9 +1588,10 @@ Still unverified, and never to be read as passed:
 - native provider harness command paths and reviewer candidate interception;
 - production egress and publication brokers;
 - SCM lifecycle, crash recovery and reboot behavior: phases 4a and 4b
-  implemented the lifecycle and both services, and none of it has run under
-  the Service Control Manager; phase 4c is the acceptance, and its runbook
-  is a proposal;
+  implemented the lifecycle and both services. The
+  [phase 4c run](#phase-4c-machine-run-2026-11-11) showed only install, start
+  and clean stop under the Service Control Manager; it made no launch, so no
+  lifecycle round, crash recovery or reboot has been run;
 - handle-relative creation and deletion by host brokers inside worker-writable
   trees;
 - COM, RPC and broker surfaces beyond the Task Scheduler.
