@@ -112,8 +112,10 @@ why the first is still a requirement and not a result.
    launches. A launcher that finds the station already made by another program
    does not control who may open it and must refuse. A service's logon session
    always has its station already, so **the runner cannot launch as a
-   service** with this rule ([4c run](#phase-4c-machine-run-2026-11-11)); task
-   `7f6f242d` is to choose a station the runner controls. **A station per launch is
+   service** with this rule ([4c run](#phase-4c-machine-run-2026-11-11)). Task
+   `7f6f242d` added a [take-over of that station](#the-station-of-a-runner-that-is-a-service),
+   which the [second 4c run](#phase-4c-second-machine-run-2026-11-12) showed
+   Windows does not allow a real service; task `8981c84a` follows. **A station per launch is
    not established**: it needs a logon session per launch or a named station
    made by an administrator, and neither has been tried.
 5. **Explicit inheritance (demonstrated).** The environment block is an exact
@@ -207,10 +209,20 @@ cleanup.
 | A station made before the launcher ran, in a logon session where the runner's process is alone and attached to it, is taken over; Windows then reports that the station and the launch's desktop admit only the runner's account and that launch's package; a launch runs in it and its exit code comes back; cleanup takes the package off again | **Demonstrated** on MiniAir on 2026-11-11 by the `windows_station` test, in a new logon session of the test's account (network-only credentials, nothing elevated). The test's process makes the station first, with Windows' default access list, the way something other than the launcher would |
 | A station the process does not run in, and a session with a second process, are refused; the station's access list is unchanged and no launch directory or journal entry is left | **Demonstrated** by the same test |
 | On an interactive desktop the launcher still refuses | **Demonstrated** by `windows_runner`, `windows_host` and `windows_service` in the owner's desktop session |
-| Under the Service Control Manager: that Windows lets the service's account open its station with every right, who owns that station, that the service's process is alone in its logon session, and that the rewrite and the label succeed on a station Windows made | **Not demonstrated.** Each is checked at adoption and a missing one refuses with its reason. Step 6 of the phase 4c owner runbook is where it shows |
+| Under the Service Control Manager: that Windows lets the service's account open its station with every right, who owns that station, that the service's process is alone in its logon session, and that the rewrite and the label succeed on a station Windows made | **Failed at the first of them** in the [second 4c run](#phase-4c-second-machine-run-2026-11-12): Windows refused the runner's account the open with every right (error 5), so the launcher refused, as designed, before any of the four facts was checked. Who owns that station, what its access list grants the runner and whether the runner is alone in the session are **still not known**; task `8981c84a` |
 
 The mechanism needs no installation step and no privilege, so the runbook's
 installation steps are unchanged; its step 6 says what to expect now.
+
+**It does not work for a real service as written.** The take-over opens the
+existing station with every right (`GENERIC_ALL`) because rewriting the
+access list and the label needs the right to write them. The station the
+test session makes grants its maker that; the station of a service started
+by the Service Control Manager does not grant it to the service's account.
+The launcher's refusal is the intended behaviour for a station it cannot
+control, so the containment did not weaken, but no launch can be made. Task
+`8981c84a-8275-4cca-9018-b7a760b1f582` is to read what that station does
+grant, make the refusal say it, and choose the launch's station from that.
 
 **A refused or failed prepare leaves nothing.** The 4c run also showed that
 the runner made a launch's two directories before the station step and left
@@ -849,8 +861,24 @@ reaching Windows during a drain; the event-log trace as a service account
 This is what the owner runs on MiniAir from an **elevated** session. Task
 `62d9942f` followed it on 2026-11-11 until step 6 stopped the
 [machine run](#phase-4c-machine-run-2026-11-11). Steps 1 to 6 and 9 below
-are corrected from that run; steps 7 and 8 have still not been run. Stop at
+are corrected from that run. Task `7b848696` followed it again on 2026-11-12
+and was stopped by step 6 a second time
+([second machine run](#phase-4c-second-machine-run-2026-11-12)); the
+lifecycle rounds of step 7 have still not been run. Stop at
 the first step that does not do what it says; do not work around it.
+
+Corrections from the second run:
+
+- Step 6: a refusal's text may also say that Windows refused full access to
+  the station (error 5), which is what a real service gets. After a refusal,
+  stop the supervisor service before anything else: the stand-in takes the
+  refused item again at every poll, so the ledger and the log grow until it
+  is stopped.
+- The steps were run from scripts that append each native command, its
+  output and its exit code to a log file, without `Start-Transcript`. That
+  recorded everything.
+- Setting the preshutdown limit in step 4, before the first start, worked:
+  both services read back 120 000 ms.
 
 Corrections from the run:
 
@@ -1023,6 +1051,93 @@ left (`removal-profiles.json`).
 | Rounds: supervisor stop, runner stop, supervisor crash, runner crash, child crash, logoff, reboot with preshutdown, power loss | **Not run**: no launch can be made |
 | Boot without logon, orphan cleanup of launches | **Not run** |
 
+### Phase 4c second machine run, 2026-11-12
+
+Task `7b848696-e197-44b4-a273-e9b4a3c161e4`, on MiniAir (Windows 11 Pro
+10.0.26300), after task `7f6f242d` put the window-station take-over on
+`main`. `agentc-supervisor.exe` was built in release mode from
+`d36ceffdbd2a34126084f148dc9afe869a970c3d`, SHA-256
+`6436dd555dce83c9ea16bca3377b4abf632f6902255d572eceec3a921cc3afd0`; the
+probe fixture's SHA-256 was
+`d8f1cc8f1ce88b748c66413e6fb90cf0a5767375759145b40036d743a056231b`. The
+machine had no `agentc` service, directory or service profile before the
+run. The evidence is coordinator artifact
+`ad0cb3e1-779d-4383-a2c1-95f838530fb7`, SHA-256
+`ae9216cff929c30fe90556f103b648e2b23c87395af8b0d9757883e925ec76f7`: one zip
+of the run's logs, ledgers, registration and removal records with the
+scripts. All times are UTC; the run was on the evening of 2026-11-11 local
+time.
+
+Who ran what: the owner ran runbook steps 1 to 6 as one script in an
+elevated PowerShell 7 session. The stop, the final evidence copy and the
+removal were run by the agent session, which was elevated, after the owner
+said in the session that it may run that script. The owner restarted
+MiniAir; the profile removal after it was run by the agent session, again
+elevated, when the owner told it to continue the task.
+
+**Install (steps 1 to 4), 03:51.** Both services registered stopped, demand
+start, under their virtual accounts, the supervisor depending on the runner,
+with two 60-second restarts and a one-day reset. The service SIDs matched
+the configuration. The directories' access lists were as step 3 asks: the
+system and administrators with full control, the runner's account with
+modify on `runner\` and `runner\stand-in-launches\`, the supervisor's with
+modify on `supervisor\` and `stand-in\`. The owner's script set the
+preshutdown limit of both services to 120 000 ms before the first start and
+it read back as set. At start each service still tried to set its own and
+logged the refusal (`OpenServiceW` error 5), as in the first run.
+
+**Start without the stand-in (step 5), 03:51: passed as written.** Both
+`RUNNING`; the runner logged `start-up: 0 reclaimed, 0 may still run, 0
+failed, 0 unreadable` and `running`; the supervisor refused every claim
+because no provider harness is supported on Windows. Both tokens were
+recorded (`tokens.json`).
+
+**Can the runner launch as a service (step 6), 03:52: no.** The supervisor
+was restarted with the stand-in on and one item, `probe-1`, queued. The
+runner served it after checking its SID. Every prepare was refused:
+
+```text
+the runner refused "prepare": the logon session's window station was made by another program (Windows refused full access to it with error 5); the launcher starts nothing in a station it does not control
+```
+
+The station exists, as in the first run. The take-over then opens it with
+every right, and Windows denied that to `NT SERVICE\agentc-runner`. The
+four facts of the
+[take-over](#the-station-of-a-runner-that-is-a-service) were therefore
+never checked, and the run recorded only the error code: the station's
+owner and access list are not known. The run stopped here as the task
+requires; follow-up task `8981c84a-8275-4cca-9018-b7a760b1f582`.
+
+The refusal left nothing, which the first run did not show. From 03:52:29
+to 03:56:41 the ledger holds 26 `prepare`, 26 `prepare_result` with `ok:
+false` and the text above, and 26 `cleanup` with `ok: true` and `"removed":
+"nothing"`. `stand-in-launches` was empty at both checks, no fixture process
+and no AppContainer profile or folder of the run existed, and
+`stand-in-judge` found no problem. The item was taken again at every
+10-second poll, each time as a new session and without a claim line; whether
+a refused prepare should back off is part of the follow-up task.
+
+**Stop and removal, 03:56.** `sc.exe stop` ended the supervisor and then
+the runner, both with exit code 0; the runner logged `the client is gone`
+and `stopped: every launch is confirmed ended`. Both services,
+`C:\Program Files\agentc` and `C:\ProgramData\agentc` were then deleted and
+confirmed gone (`removal.json`). Windows still had both virtual accounts'
+profiles loaded. After the owner's restart at 04:02, the profile removal at
+04:08 removed both profiles, which the run had created at 03:51, and found
+no `agentc` service, profile or profile folder left
+(`removal-profiles.json`).
+
+| Item | Result |
+| --- | --- |
+| Registration from the recorded commit and hash under two virtual service accounts, failure actions, access lists | **Demonstrated** again |
+| Preshutdown limit set at installation by the owner and read back | **Demonstrated** (120 000 ms on both) |
+| Both services start, run and stop with exit code 0 under the SCM; the pipe admits the supervisor by SID | **Demonstrated** again |
+| A launch made by the runner as a service | **Failed**: Windows refuses the runner full access to its session's window station (error 5); follow-up task `8981c84a` |
+| A refused prepare leaves nothing behind and the ledger says so | **Demonstrated** under the SCM: 26 refusals, nothing left |
+| The four facts of the take-over under the SCM | **Not reached** |
+| Rounds: supervisor stop, runner stop, supervisor crash, runner crash, child crash, logoff, reboot with preshutdown, power loss | **Not run**: no launch can be made |
+| Boot without logon, orphan cleanup of launches | **Not run** |
+
 ## Delivery phases and gates
 
 Each phase is an independently reviewed task. A phase starts only when the gate
@@ -1036,7 +1151,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
-| 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). **Nothing is machine-accepted** |
+| 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` follows. **No lifecycle round has been run and nothing is machine-accepted** |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |

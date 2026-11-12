@@ -110,6 +110,17 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   removes the directories it made, and a cleanup reports whether it removed
   anything.
 
+- Phase 4c's [second machine run](windows-host-design.md#phase-4c-second-machine-run-2026-11-12)
+  on MiniAir, 2026-11-12, installed both services again from the build that
+  carries the take-over, with the preshutdown limit set at installation. The
+  runner **still cannot make a launch as a service**: Windows refuses its
+  account full access to the window station of its logon session (error 5),
+  so the take-over refuses before it checks anything. The refusal left no
+  directory behind and the ledger recorded it, which the first run did not
+  show. What that station grants the runner is not yet known; task `8981c84a`
+  is to read it and choose the launch's station from it. **No lifecycle round
+  was run and nothing is machine accepted.**
+
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
   isolated tmpfs; the host harness directory stays hidden. Invalid paths,
