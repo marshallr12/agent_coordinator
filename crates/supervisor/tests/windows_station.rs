@@ -17,8 +17,10 @@
 //!   nothing in the station and leaves no launch directory.
 #![cfg(windows)]
 
-use agentc_supervisor::host_runtime::windows::adoption::{allowed, companions};
+use agentc_supervisor::host_runtime::windows::adoption::{allowed, companions, station_name};
+use agentc_supervisor::host_runtime::windows::inspection::{EVERY_RIGHT, granted};
 use agentc_supervisor::host_runtime::windows::runner::{Request, Runner, answer};
+use agentc_supervisor::host_runtime::windows::sys::Descriptor;
 use agentc_supervisor::host_runtime::windows::token;
 use serde_json::{Value, json};
 use std::os::windows::process::CommandExt;
@@ -195,18 +197,31 @@ fn become_alone() {
     }
 }
 
-/// Makes the session's unnamed station with the access list Windows gives
-/// by default, as something other than the launcher would; with `attach`,
-/// this process then runs in it.
+/// The security of the station the Service Control Manager made for
+/// `NT SERVICE\agentc-runner` on MiniAir on 2026-11-12, with `me` in the
+/// service account's place: the account owns it and may read and rewrite
+/// its security, but is not granted every right (`WINSTA_ENUMDESKTOPS`,
+/// `WINSTA_WRITEATTRIBUTES`, `WINSTA_ENUMERATE` and `WINSTA_READSCREEN` are
+/// missing), and administrators may enumerate it.
+fn observed_security(me: &str) -> String {
+    format!(
+        "O:{me}G:{me}D:(A;;DCLCSWWPDTSDRCWDWO;;;{me})\
+         (A;OINPIO;CCDCLCSWDTLOSDRCWDWO;;;{me})(A;;CR;;;BA)(A;OINPIO;CCDTLO;;;BA)"
+    )
+}
+
+/// Makes the session's unnamed station with the security the Service
+/// Control Manager gives a service's station ([`observed_security`]), as
+/// something other than the launcher would; with `attach`, this process
+/// then runs in it.
 fn premade_station(attach: bool) -> HWINSTA {
-    // SAFETY: an unnamed station with default attributes.
+    let me = token::current_user_sid().unwrap();
+    let descriptor = Descriptor::parse(&observed_security(&me)).unwrap();
+    let attributes = descriptor.attributes(false);
+    // SAFETY: an unnamed station; `attributes` and the descriptor it
+    // borrows outlive the call.
     let station = unsafe {
-        CreateWindowStationW(
-            std::ptr::null(),
-            CWF_CREATE_ONLY,
-            GENERIC_ALL,
-            std::ptr::null(),
-        )
+        CreateWindowStationW(std::ptr::null(), CWF_CREATE_ONLY, GENERIC_ALL, &attributes)
     };
     assert!(!station.is_null(), "the new session already had a station");
     if attach {
@@ -301,6 +316,17 @@ fn play(role: &str) -> String {
 fn adopts(runner: &mut Runner, case: &Case) -> String {
     let station = premade_station(true);
     let me = token::current_user_sid().unwrap();
+    let name = station_name(token::current_logon_session().unwrap());
+    assert_ne!(
+        granted(&name) & 0x000F_0000,
+        0,
+        "the account may rewrite it"
+    );
+    assert_ne!(
+        granted(&name),
+        EVERY_RIGHT,
+        "and is not granted every right"
+    );
     let prepared = ask(runner, case.prepare());
     assert_eq!(prepared["ok"], true, "{prepared}");
     let package = prepared["package_sid"].as_str().unwrap().to_owned();
@@ -337,7 +363,7 @@ fn refused(runner: &mut Runner, case: &Case, station: HWINSTA, why: &str) -> Str
     assert_eq!(prepared["refusal"], "station_not_ours", "{prepared}");
     let error = prepared["error"].as_str().unwrap();
     assert!(error.contains(why), "{error}");
-    assert!(shows_the_station(error, station), "{error}");
+    assert!(shows_the_station(error), "{error}");
     assert_eq!(listed(station), before, "a refused station is not changed");
     assert!(!case.left(), "a refused prepare leaves no directory");
     let journal = ask(runner, json!({"op": "recover"}));
@@ -345,28 +371,14 @@ fn refused(runner: &mut Runner, case: &Case, station: HWINSTA, why: &str) -> Str
     format!("refused: {error}")
 }
 
-/// Whether the refusal `error` says what Windows shows about `station`:
-/// this account, the station's security and that every right is granted,
-/// which is so for a station this process made itself.
-fn shows_the_station(error: &str, station: HWINSTA) -> bool {
+/// Whether the refusal `error` says what Windows shows about the premade
+/// station: this account, the observed security and the rights that
+/// security withholds from the account.
+fn shows_the_station(error: &str) -> bool {
     let me = token::current_user_sid().unwrap();
-    let first = allowed(station).unwrap().remove(0);
     error.contains(&format!("Windows shows: this process is {me} in"))
-        && error.contains("has security \"O:")
-        && error.contains(&format!(";;;{})", alias(&first)))
-        && error.contains("it grants this process 0x000f037f;")
-}
-
-/// `sid` as SDDL prints it: the two-letter alias of the accounts Windows
-/// lists on a station by default, or the SID itself.
-fn alias(sid: &str) -> &str {
-    match sid {
-        "S-1-1-0" => "WD",
-        "S-1-5-12" => "RC",
-        "S-1-5-18" => "SY",
-        "S-1-5-32-544" => "BA",
-        other => other,
-    }
+        && error.contains(&format!("has security \"{}", observed_security(&me)))
+        && error.contains("(not WINSTA_ENUMDESKTOPS, WINSTA_WRITEATTRIBUTES, ")
 }
 
 /// With a second process in the logon session the station is refused.

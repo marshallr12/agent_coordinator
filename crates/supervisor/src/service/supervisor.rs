@@ -85,9 +85,9 @@ impl SupervisorSettings {
 
 /// Where a supervisor's work comes from.
 pub trait Work {
-    /// Whether launches can run at all; an error stops every claim and is
-    /// the reason the heartbeat shows.
-    fn available(&self) -> Result<()>;
+    /// Whether launches can run at `now_ms`; an error stops every claim
+    /// and is the reason the heartbeat shows.
+    fn available(&self, now_ms: i64) -> Result<()>;
     /// The `next` answer.
     fn next(&mut self) -> Result<Value>;
     fn claim(&mut self, launch: &Launch) -> Result<Lease>;
@@ -100,7 +100,7 @@ pub trait Work {
 pub struct NoHarness;
 
 impl Work for NoHarness {
-    fn available(&self) -> Result<()> {
+    fn available(&self, _now_ms: i64) -> Result<()> {
         bail!(NO_HARNESS)
     }
 
@@ -123,8 +123,12 @@ impl Work for NoHarness {
 }
 
 impl Work for StandIn {
-    fn available(&self) -> Result<()> {
-        Ok(())
+    /// Unavailable while the stand-in waits after failed prepares.
+    fn available(&self, now_ms: i64) -> Result<()> {
+        match self.held(now_ms) {
+            Some(why) => bail!(why),
+            None => Ok(()),
+        }
     }
 
     fn next(&mut self) -> Result<Value> {
@@ -254,7 +258,7 @@ impl<H: HostRuntime, W: Work, P: Pace> Driver for LoopDriver<H, W, P> {
     }
 
     fn harness_status(&mut self, _harness: Harness) -> Result<()> {
-        self.work.available()
+        self.work.available(self.pace.now_ms())
     }
 
     /// A launch on this host leaves no event stream on the supervisor's

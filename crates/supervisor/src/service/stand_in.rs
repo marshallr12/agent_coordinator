@@ -12,6 +12,12 @@
 //!
 //! An item is offered until it is claimed and never again, whatever became
 //! of the claim, so a restart cannot launch it a second time.
+//!
+//! A prepare that fails comes before the claim, so the item stays offered
+//! and nothing is released. The stand-in then takes nothing for a while
+//! ([`StandIn::held`]): 30 seconds after the first failure, twice as long
+//! after each further one in a row, at most ten minutes. The wait is read
+//! from the ledger, so a restart does not shorten it.
 use crate::host_runtime::{
     HostRuntime, LaunchIdentity, Observation, Recovery, Removed, StartIntent,
 };
@@ -67,6 +73,36 @@ impl StandInSettings {
         );
         Ok(())
     }
+}
+
+/// How long nothing is taken after the first failed prepare; each further
+/// failure in a row doubles it.
+const FIRST_HOLD_MS: i64 = 30_000;
+/// The longest wait after failed prepares.
+const LONGEST_HOLD_MS: i64 = 600_000;
+
+/// How long nothing is taken after `failures` failed prepares in a row.
+fn hold_ms(failures: u32) -> i64 {
+    let doublings = failures.saturating_sub(1).min(20);
+    (FIRST_HOLD_MS << doublings).min(LONGEST_HOLD_MS)
+}
+
+/// The prepares that failed in a row at the end of `events`: how many, and
+/// the time and reason of the last. A launch that was asked to start ends
+/// the row, since its prepare succeeded.
+fn failed_in_a_row(events: &[Value]) -> Option<(u32, i64, String)> {
+    let mut row: Option<(u32, i64, String)> = None;
+    for event in events {
+        let failed = event["event"] == "prepare_result" && event["ok"] == false;
+        if failed {
+            let count = row.map_or(0, |(count, _, _)| count) + 1;
+            let reason = event["error"].as_str().unwrap_or("").to_owned();
+            row = Some((count, event["at_ms"].as_i64().unwrap_or(0), reason));
+        } else if event["event"] == "start" {
+            row = None;
+        }
+    }
+    row
 }
 
 /// An append-only file of events.
@@ -132,6 +168,21 @@ impl StandIn {
         claims
             .filter_map(|event| event["task"].as_str().map(str::to_owned))
             .collect()
+    }
+
+    /// Why nothing is taken at `now_ms`, if the last prepares failed and
+    /// the wait after them is not over. Without this a host that refuses
+    /// every prepare is asked again at every poll.
+    pub fn held(&self, now_ms: i64) -> Option<String> {
+        let (failures, at_ms, reason) = failed_in_a_row(&self.ledger.events())?;
+        let left_ms = at_ms + hold_ms(failures) - now_ms;
+        let seconds = (left_ms + 999) / 1000;
+        (left_ms > 0).then(|| {
+            format!(
+                "the last {failures} prepares in a row failed; \
+                 nothing is taken for another {seconds} s: {reason}"
+            )
+        })
     }
 
     /// The queued items in name order: plain file names only, so an item's
@@ -481,6 +532,41 @@ mod tests {
                 .unwrap()
                 .contains("could not be asked")
         );
+    }
+
+    #[test]
+    fn failed_prepares_hold_the_stand_in_off_twice_as_long_each_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::at(&dir.path().join("ledger.jsonl"));
+        let stand_in = StandIn::new(dir.path(), Ledger::at(&ledger.path));
+        assert_eq!(stand_in.held(0), None, "nothing failed yet");
+        let refused = json!({"ok": false, "error": "station_not_ours"});
+        ledger.append("prepare_result", refused.clone()).unwrap();
+        let first = ledger.events()[0]["at_ms"].as_i64().unwrap();
+        let held = stand_in.held(first + 1_000).unwrap();
+        assert!(held.contains("last 1 prepares"), "{held}");
+        assert!(held.ends_with("another 29 s: station_not_ours"), "{held}");
+        assert_eq!(
+            stand_in.held(first + FIRST_HOLD_MS),
+            None,
+            "the wait is over"
+        );
+        ledger.append("prepare_result", refused).unwrap();
+        let second = ledger.events()[1]["at_ms"].as_i64().unwrap();
+        assert!(stand_in.held(second + 59_000).is_some(), "twice as long");
+        assert_eq!(stand_in.held(second + 60_000), None);
+        ledger.append("start", json!({"task": "a"})).unwrap();
+        assert_eq!(stand_in.held(second), None, "a launch that started");
+    }
+
+    #[test]
+    fn the_wait_after_failed_prepares_doubles_up_to_ten_minutes() {
+        let waits: Vec<i64> = [1, 2, 3, 5, 6, 40, u32::MAX]
+            .into_iter()
+            .map(hold_ms)
+            .collect();
+        let expected = [30_000, 60_000, 120_000, 480_000, 600_000, 600_000, 600_000];
+        assert_eq!(waits, expected);
     }
 
     #[test]

@@ -28,6 +28,15 @@ use windows_sys::Win32::System::StationsAndDesktops::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::CWF_CREATE_ONLY;
 
+/// The rights a take-over opens an existing station with: read its name
+/// (`WINSTA_READATTRIBUTES`) and its security (`READ_CONTROL`), rewrite
+/// its access list (`WRITE_DAC`) and set its label, which Windows ties to
+/// `WRITE_OWNER`. The Service Control
+/// Manager's station grants a service's account these and not every right
+/// (observed on 2026-11-12; see `windows-host-design.md`), so asking for
+/// every right before the rewrite is refused.
+const TAKE_OVER: u32 = 0x0002 | 0x0002_0000 | 0x0004_0000 | 0x0008_0000;
+
 /// Held while this process's own window station is switched, which is
 /// process-wide state.
 static STATION_SWITCH: Mutex<()> = Mutex::new(());
@@ -126,7 +135,8 @@ impl Station {
 
     /// The take-over itself; see [`Station::adopt`].
     fn take_over(owner: &str) -> Result<Self> {
-        let station = Self::holding(open_existing()?, owner)?;
+        let limited = open_existing(TAKE_OVER, "the rights to rewrite its access list")?;
+        let mut station = Self::holding(limited, owner)?;
         let session = token::current_logon_session()?;
         // SAFETY: returns this process's current station; it is not closed.
         let own = object_name(unsafe { GetProcessWindowStation() })?;
@@ -135,7 +145,24 @@ impl Station {
         adoption::is_alone(session)?;
         station.apply(DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)?;
         station.confirm()?;
+        station.reopen()?;
         Ok(station)
+    }
+
+    /// Replaces the handle the take-over began with by one that holds
+    /// every right. The rewritten access list grants the launcher's account
+    /// every right, so Windows must now allow this; a launch's desktop is
+    /// made through this handle.
+    fn reopen(&mut self) -> Result<()> {
+        let full = open_existing(
+            GENERIC_ALL,
+            "full access after its access list was rewritten",
+        )?;
+        // SAFETY: the limited handle is owned here and closed exactly once;
+        // the station stays alive through `full`.
+        unsafe { CloseWindowStation(self.handle) };
+        self.handle = full;
+        Ok(())
     }
 
     /// Refuses unless Windows reports the access list the launcher wrote:
@@ -179,18 +206,17 @@ impl Station {
     }
 }
 
-/// Opens the logon session's existing station with every right, which
-/// rewriting its access list and label needs. A station Windows will not
-/// open that way is not the launcher's to control.
-fn open_existing() -> Result<HWINSTA> {
+/// Opens the logon session's existing station with exactly `rights`,
+/// described by `purpose` in the refusal. A station Windows will not open
+/// that way is not the launcher's to control.
+fn open_existing(rights: u32, purpose: &str) -> Result<HWINSTA> {
     // SAFETY: an unnamed station, no flags and no attributes: an existing
     // station is opened as it is.
-    let handle =
-        unsafe { CreateWindowStationW(std::ptr::null(), 0, GENERIC_ALL, std::ptr::null()) };
+    let handle = unsafe { CreateWindowStationW(std::ptr::null(), 0, rights, std::ptr::null()) };
     if handle.is_null() {
         // SAFETY: GetLastError reads thread-local state.
         let code = unsafe { GetLastError() };
-        let reason = format!("Windows refused full access to it with error {code}");
+        let reason = format!("Windows refused it {purpose} with error {code}");
         return Err(StationNotOurs(reason).into());
     }
     Ok(handle)
