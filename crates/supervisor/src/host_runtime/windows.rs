@@ -35,6 +35,7 @@
 //! builds a harness launch for it.
 pub mod adoption;
 pub mod desktop;
+pub mod inspection;
 pub mod job;
 pub mod journal;
 pub mod launcher;

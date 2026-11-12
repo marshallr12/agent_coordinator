@@ -8,7 +8,8 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES};
 use windows_sys::core::BOOL;
@@ -92,12 +93,35 @@ pub(crate) fn sid_text(sid: PSID) -> Result<String> {
         unsafe { ConvertSidToStringSidW(sid, &mut text) },
         "ConvertSidToStringSidW",
     )?;
+    local_text(text)
+}
+
+/// The NUL-terminated UTF-16 string Windows allocated at `text` with
+/// `LocalAlloc`, which is freed here.
+fn local_text(text: *mut u16) -> Result<String> {
     let owned = Local::owned(text.cast());
     // SAFETY: Windows returned a NUL-terminated string that `owned` keeps alive.
     let length = (0..).take_while(|&i| unsafe { *text.add(i) } != 0).count();
     // SAFETY: `length` code units before the terminator are initialized.
     let units = unsafe { std::slice::from_raw_parts(owned.pointer().cast::<u16>(), length) };
-    String::from_utf16(units).context("SID text is not UTF-16")
+    String::from_utf16(units).context("text from Windows is not UTF-16")
+}
+
+/// The `parts` of `descriptor` as SDDL text, the form `sc.exe sdshow` and
+/// `icacls /save` print. `descriptor` must point to a valid descriptor.
+pub(crate) fn descriptor_text(descriptor: PSECURITY_DESCRIPTOR, parts: u32) -> Result<String> {
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `descriptor` is valid; `text` receives a LocalAlloc string;
+    // the length output is optional.
+    let converted = unsafe {
+        let length = std::ptr::null_mut();
+        #[rustfmt::skip]
+        let converted = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, SDDL_REVISION_1, parts, &mut text, length);
+        converted
+    };
+    check(converted, "printing a security descriptor")?;
+    local_text(text)
 }
 
 /// A security descriptor built from SDDL text.

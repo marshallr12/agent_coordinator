@@ -13,7 +13,7 @@
 //! desktops are separate.
 use super::sys::{Descriptor, check, last_error};
 use super::text::wide;
-use super::{adoption, sddl, token};
+use super::{adoption, inspection, sddl, token};
 use anyhow::{Context, Result};
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -52,7 +52,7 @@ impl std::fmt::Display for StationNotOurs {
 impl std::error::Error for StationNotOurs {}
 
 /// The name Windows reports for a station or desktop handle.
-fn object_name(handle: HANDLE) -> Result<String> {
+pub(super) fn object_name(handle: HANDLE) -> Result<String> {
     let mut buffer = [0_u16; 256];
     let (pointer, size) = (
         buffer.as_mut_ptr().cast::<c_void>(),
@@ -118,8 +118,14 @@ impl Station {
     /// the launcher ran. Every fact [`adoption`] names is checked first;
     /// then the access list is replaced by the launcher's own, with the
     /// label a launch needs, and read back. Nothing is changed in a
-    /// station that fails a check.
+    /// station that fails a check, and the refusal says what Windows shows
+    /// about that station ([`inspection`]).
     fn adopt(owner: &str) -> Result<Self> {
+        Self::take_over(owner).map_err(inspection::explained)
+    }
+
+    /// The take-over itself; see [`Station::adopt`].
+    fn take_over(owner: &str) -> Result<Self> {
         let station = Self::holding(open_existing()?, owner)?;
         let session = token::current_logon_session()?;
         // SAFETY: returns this process's current station; it is not closed.

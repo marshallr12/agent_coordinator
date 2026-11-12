@@ -91,7 +91,7 @@ pub fn is_alone(session: u64) -> Result<()> {
 
 /// Part of the security descriptor of the station or desktop `object`, in
 /// an aligned buffer.
-fn descriptor(object: HANDLE, requested: u32) -> Result<Vec<u64>> {
+pub(super) fn descriptor(object: HANDLE, requested: u32) -> Result<Vec<u64>> {
     let mut buffer = vec![0_u64; DESCRIPTOR_BYTES / 8];
     let (pointer, mut needed) = (buffer.as_mut_ptr().cast::<c_void>(), 0_u32);
     // SAFETY: `pointer` is writable for `DESCRIPTOR_BYTES` bytes; `requested`

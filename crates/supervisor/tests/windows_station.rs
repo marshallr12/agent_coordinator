@@ -337,11 +337,36 @@ fn refused(runner: &mut Runner, case: &Case, station: HWINSTA, why: &str) -> Str
     assert_eq!(prepared["refusal"], "station_not_ours", "{prepared}");
     let error = prepared["error"].as_str().unwrap();
     assert!(error.contains(why), "{error}");
+    assert!(shows_the_station(error, station), "{error}");
     assert_eq!(listed(station), before, "a refused station is not changed");
     assert!(!case.left(), "a refused prepare leaves no directory");
     let journal = ask(runner, json!({"op": "recover"}));
     assert_eq!(journal["launches"], json!([]), "{journal}");
     format!("refused: {error}")
+}
+
+/// Whether the refusal `error` says what Windows shows about `station`:
+/// this account, the station's security and that every right is granted,
+/// which is so for a station this process made itself.
+fn shows_the_station(error: &str, station: HWINSTA) -> bool {
+    let me = token::current_user_sid().unwrap();
+    let first = allowed(station).unwrap().remove(0);
+    error.contains(&format!("Windows shows: this process is {me} in"))
+        && error.contains("has security \"O:")
+        && error.contains(&format!(";;;{})", alias(&first)))
+        && error.contains("it grants this process 0x000f037f;")
+}
+
+/// `sid` as SDDL prints it: the two-letter alias of the accounts Windows
+/// lists on a station by default, or the SID itself.
+fn alias(sid: &str) -> &str {
+    match sid {
+        "S-1-1-0" => "WD",
+        "S-1-5-12" => "RC",
+        "S-1-5-18" => "SY",
+        "S-1-5-32-544" => "BA",
+        other => other,
+    }
 }
 
 /// With a second process in the logon session the station is refused.
