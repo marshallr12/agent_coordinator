@@ -149,11 +149,18 @@ impl super::Planner for Fixture {
     }
 }
 
-/// The exact environment of a stand-in launch: where Windows is, and
-/// nothing of the supervisor's own.
+/// The exact environment of a stand-in launch: where Windows is, and a
+/// `LOCALAPPDATA`. Windows refuses to create an AppContainer process whose
+/// environment lacks that name (error 203) and points it at the launch's
+/// own package folder, so the value given here is a path the launch never
+/// sees used, not a grant.
 fn environment() -> BTreeMap<String, String> {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
-    BTreeMap::from([("SystemRoot".to_owned(), root)])
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| format!(r"{root}\Temp"));
+    BTreeMap::from([
+        ("SystemRoot".to_owned(), root),
+        ("LOCALAPPDATA".to_owned(), local),
+    ])
 }
 
 /// The service's clock, waits and disk. While the service is stopping,
@@ -263,7 +270,7 @@ mod tests {
         assert_eq!(command.argv, ["fixture.exe", "run"]);
         assert_eq!(command.directory, spec.work);
         let names: Vec<&String> = command.environment.keys().collect();
-        assert_eq!(names, ["SystemRoot"]);
+        assert_eq!(names, ["LOCALAPPDATA", "SystemRoot"]);
         // The same launch always gets the same plan.
         assert_eq!(fixture.plan(&launch).unwrap().0, spec);
         let other = fixture.plan(&self::launch()).unwrap().0;
