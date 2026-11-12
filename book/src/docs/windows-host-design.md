@@ -115,7 +115,10 @@ why the first is still a requirement and not a result.
    service** with this rule ([4c run](#phase-4c-machine-run-2026-11-11)). Task
    `7f6f242d` added a [take-over of that station](#the-station-of-a-runner-that-is-a-service),
    which the [second 4c run](#phase-4c-second-machine-run-2026-11-12) showed
-   Windows does not allow a real service; task `8981c84a` follows. **A station per launch is
+   Windows does not allow a real service as first written. Task `8981c84a`
+   read what that station grants and opens it with those rights only; with
+   that, the runner [made a launch as a service](#station-observation-and-step-6-2026-11-12).
+   **A station per launch is
    not established**: it needs a logon session per launch or a named station
    made by an administrator, and neither has been tried.
 5. **Explicit inheritance (demonstrated).** The environment block is an exact
@@ -156,16 +159,20 @@ access list it controls, and what was considered.
 
 | Mechanism | What it would establish | What it needs | Verdict |
 | --- | --- | --- | --- |
-| **Take over the session's station after verifying it** | The same as a station the launcher made, from the moment its access list is rewritten: only the runner's account and the packages of its live launches may open it. Nothing about what was in it before | Nothing at installation and no privilege: the checks and the rewrite are the runner's own | **Chosen and implemented.** Demonstrated in a service-like logon session; **not demonstrated under the Service Control Manager** |
+| **Take over the session's station after verifying it** | The same as a station the launcher made, from the moment its access list is rewritten: only the runner's account and the packages of its live launches may open it. Nothing about what was in it before | Nothing at installation and no privilege: the checks and the rewrite are the runner's own | **Chosen and implemented.** Demonstrated in a service-like logon session and, since task `8981c84a`, [under the Service Control Manager](#station-observation-and-step-6-2026-11-12) for one launch |
 | A named station made by an administrator at installation | A station no other program was ever attached to | A window station exists only while a handle to it is open, so installation cannot leave one behind. A privileged process would have to make it at every boot, keep it open and grant the runner the right to rewrite its access list: a new elevated component | Not chosen, not tried |
 | A logon session per launch | A station per launch, so separate clipboards and atom tables: the only mechanism here that would | The runner would create logon sessions, which needs credentials for the account or the privilege to act as part of the operating system. Either changes what the role runner holds | Not chosen, not tried. It stays the route to a station per launch |
 | Keep refusing | Nothing new | The runner could not be a service; it would have to be started in a logon session without a station, which is not a boot-time service | Rejected: it gives up phase 4 |
 
 **The chosen mechanism** (`host_runtime::windows::adoption`). When the
-station already exists, the launcher opens it with every right and uses it
-only if Windows confirms all of the following. Otherwise it refuses with
-`station_not_ours`, as before, and the refusal's text names the fact that was
-missing. A refused station is not changed.
+station already exists, the launcher opens it with the rights the take-over
+needs and no others: to read its name and its security, to rewrite its
+access list, and to set its label (`WINSTA_READATTRIBUTES`, `READ_CONTROL`,
+`WRITE_DAC`, `WRITE_OWNER`). It uses the station only if Windows grants that
+open and confirms all of the following. Otherwise it refuses with
+`station_not_ours`, as before. The refusal's text names the fact that was
+missing and then [what Windows shows](#what-a-refusal-says) about the
+station. A refused station is not changed.
 
 1. Its name is the one Windows gives the unnamed station of this process's
    own logon session, read from the process token.
@@ -183,9 +190,37 @@ missing. A refused station is not changed.
 The launcher then replaces the station's access list with its own, the
 runner's account alone, and sets the low integrity label a launch needs to
 use the station. It reads the list back and refuses unless Windows reports
-exactly that list. From then on the station is handled like one the launcher
-made: a launch's package is added for the launch's life and removed at
-cleanup.
+exactly that list. It then opens the station again with every right, which
+the new list grants its account, and refuses if Windows does not allow
+that; the first handle is closed. From then on the station is handled like
+one the launcher made: a launch's package is added for the launch's life and
+removed at cleanup. A refusal after the rewrite leaves the station with the
+launcher's own list, the runner's account alone, which admits nobody new.
+
+**What the Service Control Manager's station is** (task `8981c84a`,
+[observed on MiniAir](#station-observation-and-step-6-2026-11-12)). The
+first version of the take-over opened the station with every right
+(`GENERIC_ALL`, `0x000f037f` for a window station) and a real service was
+refused with error 5. The station of `NT SERVICE\agentc-runner`'s logon
+session reads:
+
+```text
+O:<runner>G:<runner>D:(A;;DCLCSWWPDTSDRCWDWO;;;<runner>)(A;OINPIO;CCDCLCSWDTLOSDRCWDWO;;;<runner>)(A;;CR;;;BA)(A;OINPIO;CCDTLO;;;BA)S:NO_ACCESS_CONTROL
+```
+
+| Fact | Observed |
+| --- | --- |
+| Owner and group | The runner's own service account, `S-1-5-80-2505214551-…` |
+| Access list | The runner's account: `0x000f006e`. Administrators: `WINSTA_ENUMERATE` only. Two inherit-only entries for desktops made in it. Nobody else; the logon SID is not listed |
+| Label | None |
+| Granted to the runner, each right asked for by itself | `0x000f006e`: `DELETE`, `READ_CONTROL`, `WRITE_DAC`, `WRITE_OWNER`, `WINSTA_READATTRIBUTES`, `WINSTA_ACCESSCLIPBOARD`, `WINSTA_CREATEDESKTOP`, `WINSTA_ACCESSGLOBALATOMS`, `WINSTA_EXITWINDOWS` |
+| Refused to the runner | `WINSTA_ENUMDESKTOPS`, `WINSTA_WRITEATTRIBUTES`, `WINSTA_ENUMERATE`, `WINSTA_READSCREEN` |
+| The runner's process | Runs in that station and is alone in its logon session |
+
+So the runner owns its station and may rewrite its access list and label;
+only an open that also asks for the four refused rights fails. The take-over
+therefore needs no other account, privilege or object: it asks for what it
+uses. All four facts above hold for a real service.
 
 **What this does not establish**, beyond what layer 4 already leaves open:
 
@@ -206,23 +241,36 @@ cleanup.
 
 | Claim | State |
 | --- | --- |
-| A station made before the launcher ran, in a logon session where the runner's process is alone and attached to it, is taken over; Windows then reports that the station and the launch's desktop admit only the runner's account and that launch's package; a launch runs in it and its exit code comes back; cleanup takes the package off again | **Demonstrated** on MiniAir on 2026-11-11 by the `windows_station` test, in a new logon session of the test's account (network-only credentials, nothing elevated). The test's process makes the station first, with Windows' default access list, the way something other than the launcher would |
+| A station made before the launcher ran, in a logon session where the runner's process is alone and attached to it, is taken over; Windows then reports that the station and the launch's desktop admit only the runner's account and that launch's package; a launch runs in it and its exit code comes back; cleanup takes the package off again | **Demonstrated** on MiniAir by the `windows_station` test, in a new logon session of the test's account (network-only credentials). On 2026-11-11 the test's process made the station with Windows' default access list. Since 2026-11-12 it makes it with the security observed above, the test's account in the service account's place, so an open with every right is refused there with error 5 as it was for the real service; the test fails with the first version of the take-over |
 | A station the process does not run in, and a session with a second process, are refused; the station's access list is unchanged and no launch directory or journal entry is left | **Demonstrated** by the same test |
 | On an interactive desktop the launcher still refuses | **Demonstrated** by `windows_runner`, `windows_host` and `windows_service` in the owner's desktop session |
-| Under the Service Control Manager: that Windows lets the service's account open its station with every right, who owns that station, that the service's process is alone in its logon session, and that the rewrite and the label succeed on a station Windows made | **Failed at the first of them** in the [second 4c run](#phase-4c-second-machine-run-2026-11-12): Windows refused the runner's account the open with every right (error 5), so the launcher refused, as designed, before any of the four facts was checked. Who owns that station, what its access list grants the runner and whether the runner is alone in the session are **still not known**; task `8981c84a` |
+| Under the Service Control Manager: who owns the service's station and what it grants, that the service's process is alone in its logon session, and that the rewrite, the label and the open with every right afterwards succeed on a station Windows made | **Demonstrated once** on MiniAir on 2026-11-12 ([record](#station-observation-and-step-6-2026-11-12)): the runner, as a service, took its station over and made one launch, whose exit was seen. The [second 4c run](#phase-4c-second-machine-run-2026-11-12) had failed here, with the first version of the take-over. What Windows reports about the station after the rewrite was checked by the launcher's own read-back, not recorded separately |
+| Launches after the first, a restart of the runner into a station it already rewrote, and every lifecycle round | **Not demonstrated**; the third 4c run is its own task |
 
 The mechanism needs no installation step and no privilege, so the runbook's
 installation steps are unchanged; its step 6 says what to expect now.
 
-**It does not work for a real service as written.** The take-over opens the
-existing station with every right (`GENERIC_ALL`) because rewriting the
-access list and the label needs the right to write them. The station the
-test session makes grants its maker that; the station of a service started
-by the Service Control Manager does not grant it to the service's account.
-The launcher's refusal is the intended behaviour for a station it cannot
-control, so the containment did not weaken, but no launch can be made. Task
-`8981c84a-8275-4cca-9018-b7a760b1f582` is to read what that station does
-grant, make the refusal say it, and choose the launch's station from that.
+#### What a refusal says
+
+Task `8981c84a` (`host_runtime::windows::inspection`). The second 4c run
+recorded only an error code. Every refusal to take a station over now ends
+with what Windows shows, read without changing anything: the station is
+opened by name, which never makes one, with one right at a time.
+
+- the account of the runner's process and the station it runs in;
+- the name of the logon session's station and its owner, group, access list
+  and label as SDDL, the form `sc.exe sdshow` prints;
+- which of the rights `0x000f037f` Windows grants the process on it, each
+  asked for by itself, and the names of those it refuses;
+- the other processes in the logon session.
+
+```text
+the logon session's window station was made by another program (<the fact that was missing>; Windows shows: this process is <account> in <station>; <station> has security "<SDDL>"; of the rights 0x000f037f it grants this process 0x000f006e (not WINSTA_ENUMDESKTOPS, …); other processes in the logon session: []); the launcher starts nothing in a station it does not control
+```
+
+It stays a refusal with `station_not_ours`, and a refused prepare still
+leaves nothing: the service-like test checks the text, the unchanged access
+list and the empty launch root together.
 
 **A refused or failed prepare leaves nothing.** The 4c run also showed that
 the runner made a launch's two directories before the station step and left
@@ -453,6 +501,7 @@ layer of the [launch boundary](#launch-boundary).
 | `job` | An unnamed Job Object: kill on close, no breakaway, process and memory limits, every user-interface restriction, no error dialogs |
 | `desktop` | The logon session's window station, made by the launcher or taken over once verified, and a private desktop per launch |
 | `adoption` | The facts Windows must confirm before an existing station is taken over, and the read-back of a station's or desktop's access list |
+| `inspection` | What Windows shows about a station the launcher refuses: its security, the rights granted and the session's other processes. Read-only |
 | `process` | Creation with the job list, the security capabilities, the handle list and, for a less-privileged token, the all-application-packages opt-out; an exact environment block; suspended start, read-back, resume |
 | `token` | The read-back: AppContainer flag, package SID and `WIN://NOALLAPPPKG` |
 | `reader` | The handle-based reader, and directory creation with a complete access list |
@@ -539,8 +588,10 @@ launcher runs, as before.
   interactive desktop, those two check the refusal, and that it left no
   launch directory, and nothing else.
 - `windows_station` starts itself again in a new logon session of the same
-  account, where the station exists before the launcher runs, and checks
-  the take-over, the two refusals and what each leaves; see
+  account, where the station exists before the launcher runs with the
+  security the Service Control Manager gives a service's station, and checks
+  the take-over, the two refusals, what each refusal says and what it
+  leaves; see
   [the station of a runner that is a service](#the-station-of-a-runner-that-is-a-service).
   A host without the secondary logon service skips it and says so.
 - The portable tests in `windows-containment-probe-test.py` drive the
@@ -808,6 +859,29 @@ reports a task that was asked to start more than once, a release of a launch
 that was started and is not known to have ended, and any unreadable line. It
 exits non-zero for any of those and for a ledger with no event.
 
+**A failed prepare** (decided in task `8981c84a`). The loop prepares a
+launch before it claims the item, so a prepare the runner refuses claims
+nothing and there is nothing to release; the item stays offered. In the
+second 4c run that meant the same refusal at every 10-second poll, 26 times
+in four minutes. The stand-in now **waits**: after a failed prepare it takes
+nothing for 30 seconds, twice as long after each further failure in a row,
+and at most ten minutes. A launch that starts ends the row. The wait is read
+from the ledger's `prepare_result` lines, so a restart of the service does
+not shorten it, and the heartbeat gives it as the reason nothing is claimed
+(`the last N prepares in a row failed; nothing is taken for another S s`,
+with the refusal's text). Releasing or dropping the item was not chosen: the
+stand-in holds no claim to release, and an item that silently leaves the
+queue would hide the refusal from an acceptance run. The loop itself is
+unchanged, on Linux too; this is the stand-in's rule. It is unit-tested on
+both platforms and **has not been seen under the Service Control Manager**:
+the build that carries it made no failed prepare there.
+
+A stand-in launch's environment is `SystemRoot` and `LOCALAPPDATA`. It
+first held `SystemRoot` alone, and the first stand-in launch to reach
+process creation failed with error 203
+([record](#station-observation-and-step-6-2026-11-12)), as
+[layer 5](#launch-boundary) says a block without `LOCALAPPDATA` does.
+
 **The two 4a advisories.**
 
 - At the drain deadline the runner now kills every remaining launch's job in
@@ -864,8 +938,20 @@ This is what the owner runs on MiniAir from an **elevated** session. Task
 are corrected from that run. Task `7b848696` followed it again on 2026-11-12
 and was stopped by step 6 a second time
 ([second machine run](#phase-4c-second-machine-run-2026-11-12)); the
-lifecycle rounds of step 7 have still not been run. Stop at
+lifecycle rounds of step 7 have still not been run. Task `8981c84a` ran
+steps 1 to 6 and 9 a third time on 2026-11-12, and
+[step 6 passed](#station-observation-and-step-6-2026-11-12). Stop at
 the first step that does not do what it says; do not work around it.
+
+Corrections from the third run of step 6:
+
+- Step 6: a refusal's text now ends with what Windows shows about the
+  station; record it whole. After a refusal the stand-in waits before it
+  takes the item again, so the ledger no longer grows at every poll.
+- An item that was claimed is never offered again, even when its launch
+  failed to start; queue a new item for another try.
+- Step 9: the two service profiles again stayed loaded after the services
+  were deleted and need a restart before they can be removed.
 
 Corrections from the second run:
 
@@ -933,11 +1019,12 @@ Corrections from the run:
    session already has a window station. Since task `7f6f242d` the launcher
    takes it over once
    [Windows confirms it is the runner's alone](#the-station-of-a-runner-that-is-a-service);
-   that needs no installation step and has not run under the Service Control
-   Manager. Enable the stand-in with the probe fixture, queue one item, and
+   that needs no installation step and made one launch under the Service
+   Control Manager on 2026-11-12. Enable the stand-in with the probe fixture, queue one item, and
    watch the ledger. Expect one `prepare`, a `start` and an exit. If the
    launch is refused with `station_not_ours`, record the `prepare_result`
-   line, whose text names the fact Windows did not confirm, check that
+   line, whose text names the fact Windows did not confirm and what Windows
+   shows about the station, check that
    `stand-in-launches` is empty and that the `cleanup` line says
    `"removed": "nothing"`, and stop: that is a finding for a new task, not
    something to configure around.
@@ -1137,6 +1224,93 @@ no `agentc` service, profile or profile folder left
 | The four facts of the take-over under the SCM | **Not reached** |
 | Rounds: supervisor stop, runner stop, supervisor crash, runner crash, child crash, logoff, reboot with preshutdown, power loss | **Not run**: no launch can be made |
 | Boot without logon, orphan cleanup of launches | **Not run** |
+
+### Station observation and step 6, 2026-11-12
+
+Task `8981c84a-8275-4cca-9018-b7a760b1f582`, on MiniAir (Windows 11 Pro
+10.0.26300), on the afternoon of 2026-11-12 local time. It is not the third
+4c run: it repeats runbook steps 1 to 6 and 9 to read the station of a real
+service and to try the take-over made from that reading. No lifecycle round
+was run. The machine had no `agentc` service, directory or service profile
+before the run. The evidence is coordinator artifact
+`646343e9-1e07-455c-8a88-a9ae0afd000f`, SHA-256
+`11df19cadfaa9917e6ebaf097308370b9f2cbf10214899576b05373b36037306`: one zip
+of the run's logs, ledgers, registration and removal records with the
+scripts, packed by registered job `b15bfb73-d120-4073-aa67-30822592fd67`.
+All times are UTC.
+
+Who ran what: every script was run by the agent session, which was
+elevated, after the owner said in the session, each time it was asked, that
+it may: the install and first step 6, each replacement of the binary, and
+the removal. The owner has not restarted MiniAir, so the two service
+profiles are still there.
+
+Three release builds of `agentc-supervisor.exe` were used, each from a clean
+checkout of the commit named; the probe fixture's SHA-256 was
+`1d8adbcaeecdaeb19421f9c61d1fa628e8ed443ff65affd554b84be2c3a3e168`.
+
+| Build | Commit | SHA-256 | What it adds |
+| --- | --- | --- | --- |
+| Diagnostic | `e0219df4908d4387e5d11f9f5ab51775fbf145f5` | `19cbccd8b008aac432e66126964963beed3209c3f9b62e37d1385781e9cd4d1f` | The refusal says what Windows shows |
+| Take-over | `a08f29909c6072387f9f9be8ab887368ce81733d` | `20f7a68dc6214f4a99e17f77569893a45e4035b8bdf79e19e83ac0b7b01409b3` | The station is opened with the rights its owner is granted; the stand-in's wait |
+| Environment | `ce61cc92fa2ac74a94a628a48130cc1d35eae4f7` | `03bfad6642afe286d6fc8295ec04648947b9819be79a2a703eb2a9fe71604520` | `LOCALAPPDATA` in a stand-in launch's environment |
+
+**Install and start (steps 1 to 5), 19:00, diagnostic build.** As in the
+second run: both services registered stopped under their virtual accounts,
+the access lists as step 3 asks, the preshutdown limit set to 120 000 ms and
+read back, both `RUNNING`, tokens recorded (`tokens.json`).
+
+**Step 6 with the diagnostic build, 19:00: refused, and the refusal says
+why.** With the stand-in on and `probe-1` queued, both prepares before the
+supervisor was stopped were refused with:
+
+```text
+the runner refused "prepare": the logon session's window station was made by another program (Windows refused full access to it with error 5; Windows shows: this process is S-1-5-80-2505214551-3868131734-2396360996-2952680925-136825992 in Service-0x0-c86f2ae$; Service-0x0-c86f2ae$ has security "O:S-1-5-80-2505214551-3868131734-2396360996-2952680925-136825992G:S-1-5-80-2505214551-3868131734-2396360996-2952680925-136825992D:(A;;DCLCSWWPDTSDRCWDWO;;;S-1-5-80-2505214551-3868131734-2396360996-2952680925-136825992)(A;OINPIO;CCDCLCSWDTLOSDRCWDWO;;;S-1-5-80-2505214551-3868131734-2396360996-2952680925-136825992)(A;;CR;;;BA)(A;OINPIO;CCDTLO;;;BA)S:NO_ACCESS_CONTROL"; of the rights 0x000f037f it grants this process 0x000f006e (not WINSTA_ENUMDESKTOPS, WINSTA_WRITEATTRIBUTES, WINSTA_ENUMERATE, WINSTA_READSCREEN); other processes in the logon session: []); the launcher starts nothing in a station it does not control
+```
+
+What that means is set out under
+[the station of a runner that is a service](#the-station-of-a-runner-that-is-a-service):
+the runner owns its station and may rewrite its access list and label. Each
+refusal left nothing: `cleanup` said `"removed": "nothing"`,
+`stand-in-launches` was empty and `stand-in-judge` found no problem. This
+build did not yet have the stand-in's wait, so the item was taken again
+after 10 seconds.
+
+**Step 6 with the take-over build, 19:08: the station was taken over; the
+launch failed to start for another reason.** Both services were stopped,
+the binary replaced and both started. The prepare succeeded, which it never
+had under the Service Control Manager, `probe-1` was claimed, and the start
+was refused: `CreateProcessW failed with Windows error 203`. The stand-in's
+environment held only `SystemRoot`. The runner ended what it had made, the
+attempt was released and `cleanup` said `"removed": "launch"`; nothing was
+left.
+
+**Step 6 with the environment build, 19:13: passed.** With a new item,
+`probe-2`, the ledger holds `prepare`, `claim`, `start`, `start_result`
+with `ok: true` (process 20048), `exited` with code 0 after 21 seconds (the
+fixture sleeps 20), `release` and `cleanup` with `"removed": "launch"`.
+`probe-1`, claimed before, was not offered again. `stand-in-launches` was
+empty, no fixture process and no AppContainer profile or folder of the run
+existed, and `stand-in-judge` found no problem.
+
+**Stop and removal, 19:21.** Both services stopped; the runner logged
+`stopped: every launch is confirmed ended` each time it was stopped. Both
+services, `C:\Program Files\agentc` and `C:\ProgramData\agentc` were deleted
+and confirmed gone (`removal.json`). Windows still had both virtual
+accounts' profiles loaded, so they were **not removed**; `profiles.ps1` of
+the kit removes them after a restart.
+
+| Item | Result |
+| --- | --- |
+| The owner, access list, label and granted rights of a real service's window station | **Recorded** from the runner's own refusal |
+| The refusal names those facts and leaves nothing behind | **Demonstrated** under the SCM |
+| The take-over under the SCM: the open with the owner's rights, the four facts, the rewrite, the read-back and the open with every right | **Demonstrated** for one runner start and one launch |
+| A launch made by the runner as a service: prepare, start, exit seen, release, cleanup | **Demonstrated** once (`probe-2`, exit code 0) |
+| A failed start after a claim is released and cleaned up | **Demonstrated** once (`probe-1`, error 203) |
+| The stand-in's wait after a refused prepare | **Not seen** under the SCM: no prepare failed with a build that has it |
+| A second launch in the same station, a runner restarted into a station it rewrote | **Not run** as such. The runner was restarted between builds, each time into a new logon session |
+| Rounds: supervisor stop, runner stop, supervisor crash, runner crash, child crash, logoff, reboot with preshutdown, power loss | **Not run**; the third 4c run is its own task |
+| Removal of the two service profiles | **Open** until the owner restarts MiniAir |
 
 ## Delivery phases and gates
 
@@ -1796,9 +1970,9 @@ Still unverified, and never to be read as passed:
 - clipboard and atom separation between launches of one account, which share
   a window station;
 - the take-over of a service's window station under the Service Control
-  Manager: it is demonstrated only in a service-like logon session, and what
-  a station Windows made for a service lets the service's account do is
-  [not shown](#the-station-of-a-runner-that-is-a-service);
+  Manager beyond [one runner start and one launch](#station-observation-and-step-6-2026-11-12):
+  no second launch, no restart into a rewritten station and no lifecycle
+  round has run;
 - behavior when the firewall service itself is stopped (the rounds covered
   disabled profiles only), and any launch-specific filter policy, which
   does not exist;

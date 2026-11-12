@@ -105,8 +105,8 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   station is the runner's own session's, the runner's process runs in it and
   is alone in that session, and its owner is trusted; it rewrites the access
   list and reads it back. Any other existing station is still refused. This
-  is tested on native Windows in a service-like logon session and **has not
-  run under the Service Control Manager**. A prepare that fails or is refused
+  is tested on native Windows in a service-like logon session; it first ran
+  under the Service Control Manager in the two runs below. A prepare that fails or is refused
   removes the directories it made, and a cleanup reports whether it removed
   anything.
 
@@ -117,9 +117,24 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   account full access to the window station of its logon session (error 5),
   so the take-over refuses before it checks anything. The refusal left no
   directory behind and the ledger recorded it, which the first run did not
-  show. What that station grants the runner is not yet known; task `8981c84a`
-  is to read it and choose the launch's station from it. **No lifecycle round
-  was run and nothing is machine accepted.**
+  show. **No lifecycle round was run and nothing is machine accepted.**
+
+- Task `8981c84a` read that station under the Service Control Manager on
+  MiniAir, 2026-11-12
+  ([record](windows-host-design.md#station-observation-and-step-6-2026-11-12)).
+  The runner's own account owns it and may rewrite its access list and
+  label, but is not granted four station rights, so only an open with every
+  right failed. The launcher now opens an existing station with the rights
+  the take-over uses, and a refusal says what Windows shows about the
+  station: owner, access list, label, granted rights and the session's other
+  processes. With that build **the runner made one launch as a service**:
+  prepare, start, exit seen, release and cleanup, with nothing left. The
+  service-like test session now makes its station with the observed
+  security. The acceptance stand-in waits after a failed prepare instead of
+  asking again at every poll, and gives a launch the `LOCALAPPDATA` name
+  Windows requires. **One launch is not acceptance**: no second launch, no
+  restart into a rewritten station and no lifecycle round has run, and the
+  third 4c run is its own task.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
