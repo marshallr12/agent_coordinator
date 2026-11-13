@@ -7,7 +7,8 @@
 //! [`control`] is what the control handler does with a control code,
 //! [`startup`] judges what an earlier run journaled, and [`pipe_policy`]
 //! decides which client a service's named pipe may serve. [`settings`] holds
-//! the service's configuration.
+//! the service's configuration, and [`quiet`] keeps a failure that repeats
+//! from filling the service's log.
 //!
 //! None of it calls an operating system, so it is tested the same way
 //! everywhere. The Windows Service Control Manager binding, the named pipe
@@ -17,6 +18,7 @@ pub mod control;
 pub mod drain;
 pub mod lifecycle;
 pub mod pipe_policy;
+pub mod quiet;
 pub mod settings;
 pub mod stand_in;
 pub mod startup;

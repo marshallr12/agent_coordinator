@@ -160,7 +160,7 @@ pub fn evidence(
         )),
         Err(error) => eprintln!("agentc-supervisor run: keep launch logs: {error:#}"),
     }
-    if ended.code == 0 && ended.drained.is_none() {
+    if ended.code == Some(0) && ended.drained.is_none() {
         text.push_str(&strike(config, launch));
     }
     text

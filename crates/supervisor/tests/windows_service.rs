@@ -75,7 +75,8 @@ fn the_judge_command_passes_a_clean_ledger_and_fails_a_second_launch_or_no_ledge
     assert!(!ok && said.contains("holds no event"), "{said}");
     let run = "{\"event\":\"start\",\"session\":\"s1\",\"task\":\"a\"}\n\
                {\"event\":\"exited\",\"session\":\"s1\"}\n\
-               {\"event\":\"release\",\"session\":\"s1\"}\n";
+               {\"event\":\"release\",\"session\":\"s1\"}\n\
+               {\"event\":\"cleanup\",\"session\":\"s1\",\"ok\":true}\n";
     std::fs::write(&ledger, run).unwrap();
     let (ok, said) = judged(&ledger);
     assert!(ok && said.contains("\"ok\":true"), "{said}");
@@ -83,6 +84,8 @@ fn the_judge_command_passes_a_clean_ledger_and_fails_a_second_launch_or_no_ledge
     std::fs::write(&ledger, format!("{run}{again}")).unwrap();
     let (ok, said) = judged(&ledger);
     assert!(!ok && said.contains("a was launched 2 times"), "{said}");
+    // The second launch was also never released nor cleaned up.
+    assert!(said.contains("s2 was started and never released"), "{said}");
 }
 
 #[test]

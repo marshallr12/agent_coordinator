@@ -547,7 +547,11 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
     let result = (record.save(config).context("record the launch"))
         .and_then(|()| run_claimed(driver, config, launch, &mut record, lease));
     let cost = record::settle_cost(driver, config, launch, &mut record);
-    if submitted(driver, launch, &record, &result) {
+    if let Some(unsettled) = unsettled(&result) {
+        // The launch may still run: no release, and the record stays for
+        // `record::recover` to settle once the host can judge the launch.
+        eprintln!("agentc-supervisor run: {unsettled}");
+    } else if submitted(driver, launch, &record, &result) {
         record::mark_submitted(config, &mut record);
         unsubmitted::submitted(config, &launch.suggestion.task);
     } else {
@@ -555,7 +559,16 @@ fn work(driver: &mut impl Driver, config: &Config, launch: &Launch) -> Result<i3
         let summary = handoff(&result, &cost, &evidence);
         record::release(driver, config, launch, &mut record, &summary);
     }
-    result.map(|ended| ended.code)
+    result.map(|ended| ended.code.unwrap_or(UNSEEN_EXIT_CODE))
+}
+
+/// The exit code reported for a launch whose exit was never seen because
+/// the host no longer knew it ([`crate::host_runtime::Observation::Gone`]).
+pub const UNSEEN_EXIT_CODE: i32 = -1;
+
+/// The [`lease::Unsettled`] a launch ended in, if it did.
+fn unsettled(result: &Result<lease::Ended>) -> Option<&lease::Unsettled> {
+    result.as_ref().err()?.downcast_ref::<lease::Unsettled>()
 }
 
 /// Whether the agent submitted the attempt: a refused renewal showed it, or
@@ -601,7 +614,7 @@ fn run_claimed(
     if let Err(error) = record.save(config) {
         eprintln!("agentc-supervisor run: {error:#}");
     }
-    Ok(lease::supervise(driver, launch, lease, &config.run))
+    Ok(lease::supervise(driver, launch, lease, &config.run)?)
 }
 
 /// The handoff summary a launch's attempt is released with, carrying the
@@ -610,7 +623,12 @@ fn run_claimed(
 fn handoff(result: &Result<lease::Ended>, cost: &str, evidence: &str) -> String {
     let (how, why) = match result {
         Ok(ended) => (
-            format!("the launch exited with code {}", ended.code),
+            match ended.code {
+                Some(code) => format!("the launch exited with code {code}"),
+                None => "the launch ended unseen: the host no longer knew it, \
+                         so its exit code is unknown"
+                    .to_owned(),
+            },
             (ended.drained.as_ref()).map_or(String::new(), |why| format!(" after a drain ({why})")),
         ),
         Err(error) => (format!("the launch failed: {error:#}"), String::new()),

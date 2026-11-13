@@ -307,13 +307,18 @@ impl<H: HostRuntime> HostRuntime for Recorded<H> {
         started
     }
 
+    /// The first end seen is recorded: `exited` with its code, or `gone`
+    /// for a launch the host no longer knew.
     fn observe(&mut self, launch: &Launch) -> Observation {
         let seen = self.inner.observe(launch);
         let session = launch.session_id.to_string();
-        if let Observation::Exited { code } = seen
-            && self.exited.insert(session.clone())
-        {
-            self.note("exited", &session, json!({"code": code}));
+        let event = match seen {
+            Observation::Running => return seen,
+            Observation::Exited { code } => ("exited", json!({"code": code})),
+            Observation::Gone => ("gone", json!({})),
+        };
+        if self.exited.insert(session.clone()) {
+            self.note(event.0, &session, event.1);
         }
         seen
     }
@@ -353,41 +358,95 @@ impl<H: HostRuntime> HostRuntime for Recorded<H> {
     }
 }
 
-/// What a ledger shows went wrong; empty when nothing did.
-///
-/// - A task whose launch was asked to start more than once.
-/// - A release of a launch that was asked to start and is not known to
-///   have ended: no exit was seen, no recovery judged it ended, and its
-///   start is not recorded as failed.
-/// - A line that cannot be read, since it may hide either of the above.
-pub fn judge(events: &[Value]) -> Vec<String> {
-    let mut problems = Vec::new();
-    let mut starts: BTreeMap<String, u32> = BTreeMap::new();
-    let (mut asked, mut ended) = (BTreeSet::new(), BTreeSet::new());
-    for event in events {
+/// What [`judge`] has gathered from the ledger so far, by session.
+#[derive(Default)]
+struct Reading {
+    problems: Vec<String>,
+    /// How often each task was asked to start.
+    starts: BTreeMap<String, u32>,
+    /// Sessions asked to start, in the order they were.
+    asked: Vec<String>,
+    /// Sessions whose launch is known to have ended.
+    ended: BTreeSet<String>,
+    released: BTreeSet<String>,
+    /// Sessions a cleanup succeeded for.
+    cleaned: BTreeSet<String>,
+}
+
+impl Reading {
+    /// Takes in one ledger event.
+    fn take(&mut self, event: &Value) {
         let session = event["session"].as_str().unwrap_or("").to_owned();
-        let over = event["event"] == "exited"
-            || (event["event"] == "recover" && event["verdict"] == "ended")
-            || (event["event"] == "start_result" && event["ok"] == false);
         match event["event"].as_str() {
-            Some("unreadable") => problems.push("the ledger has an unreadable line".to_owned()),
+            Some("unreadable") => (self.problems).push("the ledger has an unreadable line".into()),
             Some("start") => {
                 let task = event["task"].as_str().unwrap_or("").to_owned();
-                *starts.entry(task).or_default() += 1;
-                asked.insert(session);
+                *self.starts.entry(task).or_default() += 1;
+                self.asked.push(session);
             }
-            Some("release") if asked.contains(&session) && !ended.contains(&session) => {
-                problems.push(format!("{session} was released before its launch ended"));
+            Some("release") => {
+                if self.asked.contains(&session) && !self.ended.contains(&session) {
+                    let problem = format!("{session} was released before its launch ended");
+                    self.problems.push(problem);
+                }
+                self.released.insert(session);
             }
-            _ if over => {
-                ended.insert(session);
+            Some("cleanup") if event["ok"] == true => {
+                self.cleaned.insert(session);
+            }
+            _ if ended_by(event) => {
+                self.ended.insert(session);
             }
             _ => {}
         }
     }
-    let twice = starts.into_iter().filter(|(_, count)| *count > 1);
-    problems.extend(twice.map(|(task, count)| format!("{task} was launched {count} times")));
-    problems
+
+    /// The problems, with those only the whole ledger shows: a task
+    /// started more than once, and a launch asked to start that was never
+    /// released or never cleaned up.
+    fn problems(mut self) -> Vec<String> {
+        let twice = self.starts.iter().filter(|(_, count)| **count > 1);
+        let twice = twice.map(|(task, count)| format!("{task} was launched {count} times"));
+        self.problems.extend(twice.collect::<Vec<_>>());
+        for session in &self.asked {
+            if !self.released.contains(session) {
+                (self.problems).push(format!("{session} was started and never released"));
+            }
+            if !self.cleaned.contains(session) {
+                (self.problems).push(format!("{session} was started and never cleaned up"));
+            }
+        }
+        self.problems
+    }
+}
+
+/// Whether `event` shows its session's launch ended: an exit was seen, the
+/// host no longer knew it, recovery judged it ended, or its start is
+/// recorded as failed.
+fn ended_by(event: &Value) -> bool {
+    event["event"] == "exited"
+        || event["event"] == "gone"
+        || (event["event"] == "recover" && event["verdict"] == "ended")
+        || (event["event"] == "start_result" && event["ok"] == false)
+}
+
+/// What a ledger shows went wrong; empty when nothing did. It is meant for
+/// a ledger whose run has ended: a launch still running counts as never
+/// released.
+///
+/// - A task whose launch was asked to start more than once.
+/// - A release of a launch that was asked to start and is not known to
+///   have ended: no exit was seen, the host did not say it was gone, no
+///   recovery judged it ended, and its start is not recorded as failed.
+/// - A launch asked to start that was never released, or never cleaned up
+///   (a cleanup that found nothing to remove counts).
+/// - A line that cannot be read, since it may hide any of the above.
+pub fn judge(events: &[Value]) -> Vec<String> {
+    let mut reading = Reading::default();
+    for event in events {
+        reading.take(event);
+    }
+    reading.problems()
 }
 
 #[cfg(test)]
@@ -400,44 +459,105 @@ mod tests {
         event
     }
 
+    /// The release and the successful cleanup that close `session`.
+    fn closed(session: &str) -> [Value; 2] {
+        [
+            event("release", session, json!({})),
+            event("cleanup", session, json!({"ok": true, "removed": "launch"})),
+        ]
+    }
+
     #[test]
     fn a_clean_run_and_a_recovered_one_show_no_problem() {
         let clean = [
-            event("start", "s1", json!({"task": "a"})),
-            event("start_result", "s1", json!({"ok": true})),
-            event("exited", "s1", json!({"code": 0})),
-            event("release", "s1", json!({})),
-            event("start", "s2", json!({"task": "b"})),
-            event("recover", "s2", json!({"verdict": "may_be_running"})),
-            event("recover", "s2", json!({"verdict": "ended"})),
-            event("release", "s2", json!({})),
+            vec![
+                event("start", "s1", json!({"task": "a"})),
+                event("start_result", "s1", json!({"ok": true})),
+                event("exited", "s1", json!({"code": 0})),
+            ],
+            closed("s1").to_vec(),
+            vec![
+                event("start", "s2", json!({"task": "b"})),
+                event("recover", "s2", json!({"verdict": "may_be_running"})),
+                event("recover", "s2", json!({"verdict": "ended"})),
+            ],
+            closed("s2").to_vec(),
             // Claimed and never started: nothing ran, so nothing to wait for.
-            event("release", "s3", json!({})),
+            vec![event("release", "s3", json!({}))],
             // A start that is recorded as failed did not leave a launch.
-            event("start", "s4", json!({"task": "d"})),
-            event("start_result", "s4", json!({"ok": false})),
-            event("release", "s4", json!({})),
+            vec![
+                event("start", "s4", json!({"task": "d"})),
+                event("start_result", "s4", json!({"ok": false})),
+            ],
+            closed("s4").to_vec(),
+            // The host no longer knew the launch: it ended unseen.
+            vec![
+                event("start", "s5", json!({"task": "e"})),
+                event("gone", "s5", json!({})),
+            ],
+            closed("s5").to_vec(),
         ];
-        assert_eq!(judge(&clean), Vec::<String>::new());
+        assert_eq!(judge(&clean.concat()), Vec::<String>::new());
     }
 
     #[test]
     fn a_second_start_and_a_release_without_an_end_are_found() {
         let twice = [
-            event("start", "s1", json!({"task": "a"})),
-            event("exited", "s1", json!({})),
-            event("start", "s2", json!({"task": "a"})),
-            event("exited", "s2", json!({})),
+            vec![
+                event("start", "s1", json!({"task": "a"})),
+                event("exited", "s1", json!({})),
+            ],
+            closed("s1").to_vec(),
+            vec![
+                event("start", "s2", json!({"task": "a"})),
+                event("exited", "s2", json!({})),
+            ],
+            closed("s2").to_vec(),
         ];
-        assert_eq!(judge(&twice), ["a was launched 2 times"]);
+        assert_eq!(judge(&twice.concat()), ["a was launched 2 times"]);
         let early = [
-            event("start", "s1", json!({"task": "a"})),
-            event("recover", "s1", json!({"verdict": "may_be_running"})),
-            event("release", "s1", json!({})),
-            event("exited", "s1", json!({})),
+            vec![
+                event("start", "s1", json!({"task": "a"})),
+                event("recover", "s1", json!({"verdict": "may_be_running"})),
+            ],
+            closed("s1").to_vec(),
+            vec![event("exited", "s1", json!({}))],
         ];
-        assert_eq!(judge(&early), ["s1 was released before its launch ended"]);
+        assert_eq!(
+            judge(&early.concat()),
+            ["s1 was released before its launch ended"]
+        );
         assert_eq!(judge(&[json!({"event": "unreadable"})]).len(), 1);
+    }
+
+    #[test]
+    fn a_started_launch_never_released_or_never_cleaned_up_is_found() {
+        // The runner-crash round of the third 4c run: the launch was asked
+        // to stop and terminated, and nothing released or removed it.
+        let stuck = [
+            event("start", "s1", json!({"task": "a"})),
+            event("start_result", "s1", json!({"ok": true})),
+            event("renew", "", json!({"attempt": "stand-in-s1"})),
+            event("stop_requested", "s1", json!({})),
+            event("terminate", "s1", json!({})),
+        ];
+        assert_eq!(
+            judge(&stuck),
+            [
+                "s1 was started and never released",
+                "s1 was started and never cleaned up"
+            ]
+        );
+        let failed_cleanup = [
+            event("start", "s2", json!({"task": "b"})),
+            event("exited", "s2", json!({"code": 0})),
+            event("release", "s2", json!({})),
+            event("cleanup", "s2", json!({"ok": false, "error": "refused"})),
+        ];
+        assert_eq!(
+            judge(&failed_cleanup),
+            ["s2 was started and never cleaned up"]
+        );
     }
 
     #[test]

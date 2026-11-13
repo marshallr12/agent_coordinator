@@ -6,7 +6,9 @@
 //! budget_minutes`. Once a gate fails it stops renewing, logs why, and
 //! drains the launch, as it does on a stop request: SIGTERM to its process
 //! group, then SIGKILL after `[run] drain_seconds`; the caller then releases
-//! the attempt. A host suspend counts as wall-clock time, so a suspend longer
+//! the attempt. A killed launch not seen to end within
+//! [`SETTLE_AFTER_TERMINATE`] is [`Unsettled`]: its attempt is not released
+//! and recovery judges it later. A host suspend counts as wall-clock time, so a suspend longer
 //! than the event window drains the launch on resume. A renewal the service
 //! refuses for good ([`AttemptEnded`]: the agent submitted or released the
 //! attempt, or it expired or changed hands) drains the launch the same way at
@@ -41,6 +43,12 @@ pub const BEAT_EVERY: Duration = Duration::from_secs(30);
 pub const RETRY_BASE: Duration = Duration::from_secs(30);
 /// The longest wait between retries of a failed renewal.
 pub const RETRY_CAP: Duration = Duration::from_secs(5 * 60);
+/// How long a terminated launch has to be seen to end. Past it the loop
+/// stops waiting and leaves the launch [`Unsettled`]: a host that cannot
+/// confirm the end (a runner that cannot be asked, or one that refuses
+/// every request about the launch) would otherwise hold the loop, and a
+/// service stop with it, for ever.
+pub const SETTLE_AFTER_TERMINATE: Duration = Duration::from_secs(10);
 
 /// A claimed attempt as the service last described it.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +133,9 @@ struct Watch {
     failures: u32,
     /// When a draining launch is killed; `None` until it drains.
     kill_at: Option<i64>,
+    /// When the loop stops waiting for a terminated launch to end; `None`
+    /// until it is terminated.
+    settle_by: Option<i64>,
     /// Why the launch is draining, once it is.
     drain_reason: Option<String>,
     /// Whether a refused renewal showed the agent submitted the attempt.
@@ -134,12 +145,37 @@ struct Watch {
 /// How a supervised launch ended.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ended {
-    pub code: i32,
+    /// Its exit code; `None` when the host no longer knew the launch
+    /// ([`Observation::Gone`]), so no exit was seen.
+    pub code: Option<i32>,
     /// Why the loop drained it, if it did.
     pub drained: Option<String>,
     /// Whether the agent submitted the attempt, so it needs no release.
     pub submitted: bool,
 }
+
+/// A launch that was terminated and still not seen to end within
+/// [`SETTLE_AFTER_TERMINATE`]. It may still run, so its attempt is not
+/// released and its record stays for recovery to judge on a later pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsettled {
+    /// Why the launch was drained.
+    pub drained: String,
+}
+
+impl std::fmt::Display for Unsettled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the launch was terminated after a drain ({}) and was not seen to end within {} s; \
+             its attempt is left for recovery",
+            self.drained,
+            SETTLE_AFTER_TERMINATE.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for Unsettled {}
 
 impl Watch {
     /// A watch over a launch that started at `now` holding `lease`.
@@ -151,6 +187,7 @@ impl Watch {
             renew_at: Some(now.saturating_add(cadence(lease))),
             failures: 0,
             kill_at: None,
+            settle_by: None,
             drain_reason: None,
             submitted: false,
         }
@@ -174,35 +211,63 @@ fn millis_of(count: u64, unit: i64) -> i64 {
         .saturating_mul(unit)
 }
 
-/// Waits for the running launch to exit, renewing `lease` while every gate
-/// holds and draining the launch on a failed gate or a stop request.
+/// Waits for the running launch to end, renewing `lease` while every gate
+/// holds and draining the launch on a failed gate or a stop request. A
+/// launch terminated by the drain and still not seen to end
+/// [`SETTLE_AFTER_TERMINATE`] later is [`Unsettled`].
 pub fn supervise(
     driver: &mut impl Driver,
     launch: &Launch,
     mut lease: Lease,
     settings: &RunConfig,
-) -> Ended {
+) -> Result<Ended, Unsettled> {
     let mut watch = Watch::new(driver.now_ms(), &lease);
     loop {
-        if let Observation::Exited { code } = driver.host().observe(launch) {
-            let (drained, submitted) = (watch.drain_reason, watch.submitted);
-            return Ended {
-                code,
-                drained,
-                submitted,
-            };
+        if let Some(ended) = seen_end(driver.host().observe(launch), &watch) {
+            return Ok(ended);
         }
         let now = driver.now_ms();
-        if now >= watch.beat_at {
-            driver.heartbeat(launch);
-            let every = i64::try_from(BEAT_EVERY.as_millis()).unwrap_or(i64::MAX);
-            watch.beat_at = now.saturating_add(every);
+        if let Some(unsettled) = gave_up(&watch, now) {
+            return Err(unsettled);
         }
+        beat(driver, launch, &mut watch, now);
         drain(driver, launch, &mut watch, settings, now);
         if watch.drain_reason.is_none() && watch.renew_at.is_some_and(|at| now >= at) {
             renew(driver, launch, &mut lease, &mut watch, settings, now);
         }
         driver.pause(TICK);
+    }
+}
+
+/// The end `seen` shows, if it shows one: an exit with its code, or a
+/// launch the host no longer knows, whose exit code nobody saw.
+fn seen_end(seen: Observation, watch: &Watch) -> Option<Ended> {
+    let code = match seen {
+        Observation::Running => return None,
+        Observation::Exited { code } => Some(code),
+        Observation::Gone => None,
+    };
+    Some(Ended {
+        code,
+        drained: watch.drain_reason.clone(),
+        submitted: watch.submitted,
+    })
+}
+
+/// Whether the loop stops waiting at `now` for a terminated launch.
+fn gave_up(watch: &Watch, now: i64) -> Option<Unsettled> {
+    let due = watch.settle_by.is_some_and(|by| now >= by);
+    due.then(|| Unsettled {
+        drained: watch.drain_reason.clone().unwrap_or_default(),
+    })
+}
+
+/// Rewrites the heartbeat once every [`BEAT_EVERY`].
+fn beat(driver: &mut impl Driver, launch: &Launch, watch: &mut Watch, now: i64) {
+    if now >= watch.beat_at {
+        driver.heartbeat(launch);
+        let every = i64::try_from(BEAT_EVERY.as_millis()).unwrap_or(i64::MAX);
+        watch.beat_at = now.saturating_add(every);
     }
 }
 
@@ -222,7 +287,8 @@ fn backoff(lease: &Lease, failures: u32) -> i64 {
 }
 
 /// Once the launch must drain (a failed gate or a stop request), asks it to
-/// end (SIGTERM on Linux) and kills it once `drain_seconds` have passed.
+/// end (SIGTERM on Linux) and kills it once `drain_seconds` have passed;
+/// from then on the loop waits at most [`SETTLE_AFTER_TERMINATE`] for it.
 fn drain(
     driver: &mut impl Driver,
     launch: &Launch,
@@ -246,6 +312,8 @@ fn drain(
         Some(at) if now >= at => {
             driver.host().terminate(launch);
             watch.kill_at = Some(i64::MAX);
+            let settle = i64::try_from(SETTLE_AFTER_TERMINATE.as_millis()).unwrap_or(i64::MAX);
+            watch.settle_by = Some(now.saturating_add(settle));
         }
         Some(_) => {}
     }
