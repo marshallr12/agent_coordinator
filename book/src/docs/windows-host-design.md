@@ -1043,8 +1043,11 @@ steps 1 to 6 and 9 a third time on 2026-11-12, and
 ([third machine run](#phase-4c-third-machine-run-2026-11-13)): step 6
 passed three times; the stop and supervisor-crash rounds passed, the
 runner-stop round cannot run as written, the runner-crash round failed, and
-the remaining rounds were not run. Stop at the first step that does not do
-what it says; do not work around it.
+the remaining rounds were not run. Task `ec6d901c` ran every step on
+2026-11-14 ([fourth machine run](#phase-4c-fourth-machine-run-2026-11-14)):
+step 6 and every round of step 7 passed, the reboot round on its second
+attempt, and step 9 removed everything after one restart. Stop at the first
+step that does not do what it says; do not work around it.
 
 Corrections from the fourth machine run:
 
@@ -1607,7 +1610,18 @@ release mode (`--locked`, rustc 1.99.1) from a clean checkout of `main` at
 fixture's was
 `fc037078de664908708c640d9ae124ff564efecdb868b8033b9b6150e09d4a15`. Before
 the install the machine had no `agentc` service, directory or service
-profile. All times are UTC.
+profile. The evidence is coordinator artifact
+`d8804bf9-597a-4f15-a118-a7d9aee69b0c`, SHA-256
+`eacb8d164ed50e928a1e17e1bad669dd4cefc94e42908271fb513b578a774b91`: one zip
+of the run's logs, ledgers, both service logs, heartbeats, the services'
+application and Service Control Manager event log entries, the System log
+events of the reboot and power-loss rounds, the sign-in diagnosis,
+`sc.exe qc` and `qfailure` output, token privileges and groups, the
+manifest with the commit and hashes, and the scripts, packed by registered
+job `523f361b-0481-4854-9fee-0e32ca643559`. It was packed from a copy of
+the kit in which the owner's account name is replaced with `OWNER`; its
+`SANITIZED.txt` lists the three files that changed. All times are UTC; the
+run was on the evening of 2026-11-13 local time.
 
 Who ran what: on the owner's instruction, the agent ran every step it could
 from the owner's elevated Claude Code session, without a go-ahead per step.
@@ -1737,6 +1751,29 @@ removed `C:\WINDOWS\ServiceProfiles\agentc-runner` and
 install at 01:28, and found no profile, profile folder or service of either
 account left (`removal-profiles.json`).
 
+| Item | Result |
+| --- | --- |
+| Registration from the recorded commit and hash under two virtual service accounts, failure actions, preshutdown limit, access lists | **Demonstrated** |
+| The runner reads its preshutdown limit back | **Demonstrated**: every start of the runner logs `preshutdown time limit is 120s`; the third run's error 5 is gone (task `76685e6b`) |
+| Step 6 under the SCM: prepare, start, exit seen, release, cleanup | **Demonstrated** three times |
+| Further launches in the same station by the same runner process | **Demonstrated** (`s6-same-station`) |
+| A launch after the runner was stopped and started through the SCM | **Demonstrated** (`s6-after-restart`) |
+| A launch by a runner the SCM restarted after a crash | **Demonstrated**: the child-crash and logoff launches were made by runner process 13516, which Windows started after the runner-crash round |
+| Round: supervisor stop | **Passed** |
+| Round: runner stop, as redefined | **Passed**: refused with 1051, both process ids unchanged, the launch ran to its end and was released and cleaned up |
+| Round: supervisor crash | **Passed** |
+| Round: runner crash | **Passed**: the supervisor released the launch the restarted runner had reclaimed and kept running; task `76685e6b`'s fix holds |
+| Round: child crash | **Passed** |
+| Round: logoff | **Passed** |
+| Round: reboot with preshutdown | **Passed** on the second attempt. The first attempt **failed**: automatic restart sign-on signed the owner in before either service started |
+| Round: power loss | **Passed** |
+| Preshutdown drains within the limit | **Demonstrated** twice: the launch was asked to stop 6 to 7 s after the restart began, ended at the 30-second drain deadline, and Windows shut down 56 to 63 s after the restart began, within 120 000 ms |
+| Boot without logon | **Demonstrated** twice, with automatic restart sign-on off: after the second reboot and after the power loss both services started and settled the earlier launch before the first sign-in, 410 s and 317 s after boot |
+| Orphan cleanup of launches after a reboot and a power loss | **Demonstrated**: each time the restarted runner reclaimed the launch (`start-up: 1 reclaimed`), the supervisor traced `recover:ended release cleanup`, the item was asked to start once, and nothing was left |
+| Every claimed attempt released and cleaned up, checked in the trace | **Demonstrated** for step 6 and every round |
+| The kit's sign-in check for the reboot and power-loss rounds | **Failed** twice and fixed during the run: it counted Windows' own sessions as a sign-in, and it took a sign-in made by `svchost.exe` to be automatic. Both are corrections above the runbook |
+| Removal of both services, both trees and both service profiles | **Demonstrated**, the profiles after one restart |
+
 ## Delivery phases and gates
 
 Each phase is an independently reviewed task. A phase starts only when the gate
@@ -1750,7 +1787,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 3 | Shared host-runtime interface and a Windows launcher that reuses this boundary and fixture | Phase 2 gate passes | Started by task `37788fa5` on the owner's go-ahead of 2026-11-09, after the owner's network policy run that task `4baa4706` records. The interface, the Linux backend behind it and the Windows backend are written and tested. The acceptance run through the new launcher under a role account, with the two network rounds, **passed** on 2026-11-09. The phase is complete when the task's review and integration are |
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
-| 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. **Nothing is machine-accepted** |
+| 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
