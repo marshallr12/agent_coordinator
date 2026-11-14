@@ -97,7 +97,8 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   minute, the stand-in judge also reports a started launch that was never
   released or never cleaned up, and the runner reads back its preshutdown
   limit instead of trying to set it. This is tested on native Windows and
-  Linux; **it has not been machine-run under the Service Control Manager**.
+  Linux, and the fourth 4c run below ran it under the Service Control
+  Manager.
 
 - Phase 4c's [machine run](windows-host-design.md#phase-4c-machine-run-2026-11-11)
   on MiniAir, 2026-11-11, installed both services under their own virtual
@@ -161,6 +162,20 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   crash, logoff, reboot and power loss were not run; task `76685e6b`
   follows. Everything the run created was removed. **Nothing is machine
   accepted.**
+
+- Phase 4c's [fourth machine run](windows-host-design.md#phase-4c-fourth-machine-run-2026-11-14)
+  on MiniAir, 2026-11-14, installed both services from `main` at `29d97e9`,
+  which holds task `76685e6b`'s change. Step 6 passed three times, and
+  **every lifecycle round passed**: supervisor stop, runner stop (redefined
+  to expect Windows' refusal, error 1051), supervisor crash, runner crash,
+  child crash, logoff, reboot with preshutdown and power loss. After the
+  reboot and the power loss both services ran and settled the earlier launch
+  before anyone signed in, and no launch was started twice. The reboot round
+  passed on its second attempt: in the first, Windows' automatic restart
+  sign-on signed the owner in before the services started, and the runbook
+  now has it turned off first. Both services, both trees and both service
+  profiles were removed. The run covers the acceptance stand-in only, not a
+  real coordinator or provider harness.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the

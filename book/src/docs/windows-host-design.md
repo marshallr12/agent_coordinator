@@ -831,8 +831,13 @@ carried through the remote runtime under a role account.
 Task `76685e6b` changed this after the runner-crash round of the third 4c
 machine run (task `4197c362`, MiniAir, 2026-11-13). Everything here is
 **implemented** and tested on native Windows and, where it is platform
-neutral, on Linux; **none of it has been machine-run** under the Service
-Control Manager.
+neutral, on Linux. The
+[fourth machine run](#phase-4c-fourth-machine-run-2026-11-14) (task
+`ec6d901c`, 2026-11-14) ran it under the Service Control Manager: in its
+runner-crash round the supervisor traced `gone release cleanup` and kept
+running, the restarted runner had already removed the launch's directories,
+and every start of the runner read back its preshutdown limit. The other
+rules below were not specifically exercised there.
 
 **What the run showed.** The fixture ended within 3 seconds of the runner's
 death. Windows restarted the runner, and at start it judged the launch ended
