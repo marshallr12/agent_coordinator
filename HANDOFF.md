@@ -1,5 +1,14 @@
 # Core hardening wave — 2026-10-02
 
+## Sessions across a restart — 2026-11-14
+
+Owner instruction for machine runs on MiniAir (phase 4c of task
+`7011c55f`): a session that needs a restart writes the next session's
+prompt to `~/Downloads/prompt.txt` before the restart. **Start the session
+after a restart by reading that prompt file** and following it. Finish every
+session that requires a reboot by rewriting `~/Downloads/prompt.txt` for the
+session that follows the reboot, so the file always describes the next step.
+
 ## Nested reviewer cwd layout — 2026-10-18
 
 Task `ba9b2fb4` addresses the second mxmini canary blocker under owner task

@@ -1046,12 +1046,34 @@ runner-stop round cannot run as written, the runner-crash round failed, and
 the remaining rounds were not run. Stop at the first step that does not do
 what it says; do not work around it.
 
+Corrections from the fourth machine run:
+
+- Step 7, reboot and power loss: before the first half, turn off Windows'
+  automatic restart sign-on, either with the
+  `DisableAutomaticRestartSignOn` policy or with the owner's own setting
+  (Settings > Accounts > Sign-in options, "Use my sign-in info to
+  automatically finish setting up"). With it on, a Start-menu restart signs
+  the owner in seconds after boot and shows only the lock screen, so waiting
+  at that screen does not keep the machine signed out. The sign-in screen
+  must ask for a PIN or password.
+- Step 7, reboot and power loss: Windows' own Window Manager (`DWM-n`) and
+  Font Driver Host (`UMFD-n`) sessions are interactive logon sessions that
+  start at every boot. They are not a sign-in; count only a real account's
+  session.
+- Step 7, reboot and power loss: the logon type and the process that made
+  the sign-in do not show who made it. On MiniAir the owner's own PIN
+  sign-in and automatic restart sign-on both log type 11 by `svchost.exe`.
+  Check instead that automatic restart sign-on was still off and that the
+  first sign-in came at least the waiting time (three minutes) after boot.
+
 Corrections from the third machine run:
 
 - Step 7, runner stop: Windows refuses `sc.exe stop agentc-runner` while
   the supervisor runs (error 1051), because the supervisor is registered
-  with `depend= agentc-runner`. The round cannot run as written; record it
-  as not run until it is redefined.
+  with `depend= agentc-runner`. Task `ec6d901c` redefined the round rather
+  than the dependency: the refusal is what keeps a launch's runner from
+  being stopped under its supervisor, so the round now expects it (see the
+  table below).
 - Step 7, runner crash: until task `76685e6b` is done, this round leaves the
   supervisor holding a launch it can neither settle nor drain, and the
   supervisor then does not stop (`STOP_PENDING`). Run it last; the removal
@@ -1156,7 +1178,7 @@ Corrections from the run:
    | Round | Action | Expect |
    | --- | --- | --- |
    | Stop | `sc.exe stop agentc-supervisor` during a launch | Admission ends, the launch is asked to stop and ended at the deadline, `STOPPED` with exit code 0 |
-   | Runner stop | `sc.exe stop agentc-runner` during a launch | The runner journals the end and stops clean; the supervisor releases the attempt. Windows refuses the stop with error 1051 while the supervisor runs ([third run](#phase-4c-third-machine-run-2026-11-13)) |
+   | Runner stop | `sc.exe stop agentc-runner` during a launch | Windows refuses the stop with error 1051, because the supervisor depends on the runner; both services keep their process ids; the launch runs to its own end and is released and cleaned up as usual (redefined after the [third run](#phase-4c-third-machine-run-2026-11-13)) |
    | Supervisor crash | Kill the supervisor process during a launch | Windows restarts it; it claims nothing while the launch may run, then releases and goes on |
    | Runner crash | Kill the runner process during a launch | Windows ends the launch with the job; the restarted runner reclaims it; the supervisor releases |
    | Child crash | Kill the fixture's root process | The launch is seen exited and released; nothing is left in the job |
@@ -1573,6 +1595,147 @@ such a launch is outstanding, and the runner's refused preshutdown limit.
 | The stand-in's wait after a refused prepare | **Not seen**: no prepare was refused |
 | Boot without logon, orphan cleanup of launches | **Not run** |
 | Removal of both services, both trees and both service profiles | **Demonstrated**, after one restart |
+
+### Phase 4c fourth machine run, 2026-11-14
+
+Task `ec6d901c-1277-40bb-93b7-babaf51d2cc5`, on MiniAir (Windows 11 Pro
+10.0.26300). `agentc-supervisor.exe` and the probe fixture were built in
+release mode (`--locked`, rustc 1.99.1) from a clean checkout of `main` at
+`29d97e9c0b31b013c5778de8604f2cded53d7d9a`, which contains task
+`76685e6b`'s result (`bfb5046`). The binary's SHA-256 was
+`3525bddf3fa556f486c493c9175eeae46fd24b2c7c959b3d47e62df64499069d`; the
+fixture's was
+`fc037078de664908708c640d9ae124ff564efecdb868b8033b9b6150e09d4a15`. Before
+the install the machine had no `agentc` service, directory or service
+profile. All times are UTC.
+
+Who ran what: on the owner's instruction, the agent ran every step it could
+from the owner's elevated Claude Code session, without a go-ahead per step.
+The logoff, reboot and power-loss rounds end that session; only the owner
+signs out, restarts or cuts power.
+
+The kit was the third run's, with two changes. The runner-stop round was
+redefined (see the corrections above the runbook), and every round now
+writes whether the session's trace holds `release` and `cleanup`, because
+`stand-in-judge` saying `ok: true` does not show that the attempt was
+released.
+
+**Install (steps 1 to 5), 01:28: passed as written.** The preshutdown limit
+read back 120 000 ms for both services. The runner's `service.log` says
+`start-up: 0 reclaimed, 0 may still run, 0 failed, 0 unreadable` and
+`running`; the supervisor's heartbeat says `state: "stopped"` with the
+reason that no provider harness is supported on Windows; no pipe client
+appeared.
+
+**Step 6, 01:29 to 01:31: passed three times.** `s6-first`,
+`s6-same-station` (same runner process) and `s6-after-restart` (after both
+services were stopped and started) each traced `prepare claim start
+start_result exited release cleanup` with `removed: launch`.
+
+**Rounds that need no session change, 01:31 to 01:44: all passed.**
+
+| Round | Result |
+| --- | --- |
+| Stop | **Passed**: `... start_result stop_requested terminate exited release cleanup`; the supervisor `STOPPED` with exit code 0; the fixture gone |
+| Runner stop, as redefined | **Passed**: `sc.exe stop agentc-runner` refused with 1051; both services kept their process ids; the launch ran to its own end and traced `exited release cleanup` |
+| Supervisor crash | **Passed**: Windows restarted the supervisor after 60 s (pid 1100 to 9292); the trace shows `recover:may_be_running` while the fixture ran, then `release` and `cleanup`; the second item was claimed only after that |
+| Runner crash | **Passed**: the fixture was gone within 3 s of the runner's death; Windows restarted the runner (pid 20256 to 13516); the supervisor traced `gone release cleanup` (`removed: nothing`, the restarted runner had reclaimed the directories) and kept running. Task `76685e6b`'s fix holds on the machine |
+| Child crash | **Passed**: `exited` with code 1, `release`, `cleanup` with `removed: launch` |
+
+After every round `stand-in-judge` found no problem and no fixture process,
+AppContainer mapping or folder, or launch directory was left.
+
+**Logoff, 01:46 to 01:54: passed.** The owner signed out and in again at
+01:51. Afterwards the runner (pid 13516) and the supervisor (pid 13492) had
+the same process ids and the fixture was still running; an ordinary
+supervisor stop then traced `stop_requested terminate exited release
+cleanup`. The judge found no problem and nothing was left.
+
+**Reboot, first attempt, 01:57 to 02:09: failed.** Both services were set to
+`auto` and a launch was started at 01:57:46. The owner restarted from the
+Start menu at 01:58:51. Preshutdown asked the launch to stop at 01:58:58
+and ended it at 01:59:28, and Windows shut down at 01:59:47, well within
+the 120 000 ms limit. Windows booted at 01:59:56. After boot the supervisor
+traced `recover:ended release cleanup` (`removed: nothing`); the item was
+asked to start once, the fixture was gone, the judge found no problem and
+nothing was left.
+
+The round still does not show what it must: that both services run *without
+logon*. The owner waited three minutes at the screen after boot, as asked,
+but Windows had already signed the owner's account in at 02:00:10, 14 s
+after boot (logon type 11, started by `svchost.exe`). With the owner still
+waiting, that can only be automatic restart sign-on, which then shows only
+the lock screen. The second attempt showed that the logon type and process
+alone do not prove it. The runner started
+at 02:00:15 and the supervisor at 02:00:16, after that sign-in. The kit's
+own check was wrong too: it counted Windows' `DWM-1`, `UMFD-0` and `UMFD-1`
+sessions (02:00:05) as the first sign-in, so its "before sign-in" could
+never have been true. Both are recorded as corrections above the runbook.
+The kit was fixed during the run: `session-before.ps1` refuses the reboot
+and power-loss rounds while automatic restart sign-on is on, and
+`session-after.ps1` counts only a real account's session and logs which
+process made it. The reboot round is run again.
+
+**Reboot, second attempt, 02:17 to 02:29: passed.** The owner turned
+automatic restart sign-on off ("Use my sign-in info to automatically finish
+setting up"), and `session-before.ps1` read it back as off (owner opt-out 1).
+Both services were set to `auto` and a launch was started at 02:17:38. The
+owner restarted from the Start menu at 02:19:20. Preshutdown asked the
+launch to stop at 02:19:26 and ended it at 02:19:56, and Windows shut down
+at 02:20:23, within the 120 000 ms limit. Windows booted at 02:20:38. The
+runner started at 02:20:55 and the supervisor at 02:21:05. The owner waited
+at a sign-in screen that asked for a PIN and signed in at 02:27:28, 6 min
+50 s after boot. That was the only interactive sign-in since boot. At
+02:21:05, before the sign-in, the supervisor traced `recover:ended release
+cleanup` (`removed: nothing`). No System log error named an `agentc`
+service. The item was asked to start once, the fixture was
+gone, the judge found no problem and nothing was left. Both services went
+back to `demand`.
+
+The kit's own check called this a failure: it said that a sign-in made by
+`svchost.exe` means Windows signed in by itself. That rule was wrong. The
+owner's PIN sign-in was logged exactly like the first attempt's automatic
+one: a `4624` event of type 11 by `svchost.exe`, logon process `User32`,
+package `Negotiate`, and the same Winlogon events. The owner confirmed
+having signed in by hand. Only the time after boot, with automatic restart
+sign-on off, tells the two apart. On the owner's decision the round is
+recorded as passed and the check as a finding. `session-after.ps1` now logs
+whether automatic restart sign-on is still off and how many seconds after
+boot the first sign-in came, which must be at least 180.
+
+**Power loss, 02:38 to 02:47: passed.** `session-before.ps1` read
+automatic restart sign-on back as off (owner opt-out 1), both services were
+set to `auto`, and a launch was started at 02:38:55 (fixture pid 12540,
+runner pid 4928, supervisor pid 8384). The owner then held the power button
+until the machine went off, with no shutdown, and powered it on again.
+Windows booted at 02:40:47; the System log has `41` (Kernel-Power, rebooted
+without cleanly shutting down) and `6008` (previous shutdown unexpected).
+The `6008` event gives 02:20:53 as the time of that shutdown, which is
+Windows' last recorded "alive" time, not the moment the power was cut. No
+System log error named an `agentc` service. The runner started at 02:41:06
+and the supervisor at 02:41:13. At 02:41:13, with no preshutdown having run,
+the supervisor traced `recover:ended release cleanup` (`removed: nothing`):
+the launch had ended with the machine and was settled from the journal and
+the ledger. The owner waited at a sign-in screen that asked for a PIN and
+signed in at 02:46:04, 317 s after boot, with automatic restart sign-on
+still off, so both services ran and settled the launch before any sign-in.
+The item was asked to start once, the fixture was gone, the judge found no
+problem and nothing was left. Both services went back to `demand`.
+
+**Record and removal (steps 8 and 9), 02:49 to 02:50: as written.** Both
+services stopped with exit code 0, supervisor first. The final check found
+no problem in the ledger and no fixture process, AppContainer mapping or
+folder, or launch directory left. Both services were deleted, and
+`C:\Program Files\agentc` and `C:\ProgramData\agentc` were removed. As the
+third run's correction to step 9 says, both service profiles were still
+loaded and wait for `profiles.ps1` after a restart.
+
+**Profile removal (step 9), 03:01: as written.** The owner restarted from
+the Start menu at 02:56:52; Windows booted at 02:57:18. `profiles.ps1`
+removed `C:\WINDOWS\ServiceProfiles\agentc-runner` and
+`C:\WINDOWS\ServiceProfiles\agentc-supervisor`, both created by this run's
+install at 01:28, and found no profile, profile folder or service of either
+account left (`removal-profiles.json`).
 
 ## Delivery phases and gates
 
