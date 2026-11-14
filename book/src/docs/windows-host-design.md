@@ -70,7 +70,7 @@ covered by this prototype. A different build needs the same acceptance gates.
 | Python | Native CPython 3.14, stdlib ctypes probe driver | Experiment driver only |
 | Rust/Cargo | Rust 1.99.1, MSVC tools 14.51.36231 and Windows SDK 10.0.26100.0; offline, locked, isolated caches | **Demonstrated** in the prototype: the fixture crate builds and its tests pass inside both candidate boundaries. No worker profile is admitted and the workspace itself is untested |
 | Git | Native pinned Git, no hooks, disabled direct push | Not yet exercised in a Windows launch |
-| Claude implementer/reviewer | Native pinned release with all command paths examined | Unsupported; no Windows interception evidence |
+| Claude implementer/reviewer | Native pinned release with all command paths examined | Unsupported. Phase 5 has [observed the command paths](#native-claude-code-command-paths-2026-11-14) of 2.1.325; no candidate runner exists yet |
 | Codex implementer/reviewer | Native pinned release with all command paths examined | Unsupported; no Windows interception evidence |
 | Browser, MCP and auxiliary tools | Individually pinned and brokered | Unsupported until alternate execution paths are tested |
 
@@ -79,6 +79,35 @@ commit/tree in each acceptance report. An available executable or a generic
 AppContainer test does not qualify a harness. Do not substitute API billing for
 the owner's provider enrollment model. The [earlier Codex evaluation](codex-reviewer-isolation.md)
 is historical Linux evidence, not Windows permission to launch or a WSL fallback.
+
+### Native Claude Code command paths, 2026-11-14
+
+Phase 5 (task `61fe9ca2`) first observed how native Claude Code runs
+commands on MiniAir, before building anything on it. The harness was
+`C:\Users\marsh\.local\bin\claude.exe`, version 2.1.325, SHA-256
+`87e0cb6ae0f4775da388cd3043f4d8097ef961dcddbf55fe90bc61ffc3f57a30`, run as
+the owner from an ordinary (not contained) session with a logging
+`CLAUDE_CODE_SHELL_PREFIX` script in a scratch directory. These are
+**observations of one version as the owner**, not a contained launch.
+
+| Question | Observed |
+| --- | --- |
+| How the prefix is called | Through Git Bash (`/usr/bin/bash`, GNU bash 5.3 for Cygwin/MSYS), with exactly one argument: the whole wrapped command, `source <shell snapshot> ... && eval '<command>' < /dev/null && pwd -P >\| %TEMP%\claude-XXXX-cwd`. This is the form the Linux candidate shell already expects. The prefix must run it with `bash -c`; executing the argument as a program fails with status 127 |
+| Background commands | A `run_in_background` Bash call reaches the prefix the same way |
+| Hooks | Every hook command (user and plugin `SessionStart`, `PreToolUse`, `Stop`, `SessionEnd`) also runs through the prefix. A reviewer launch must therefore run with no hooks of its own, or they run as candidate commands |
+| The native PowerShell tool | **Bypasses the prefix**: a PowerShell call ran in its own process with no prefix call. On Windows it is a candidate route outside the boundary unless it is not offered |
+| Tool allowlist | `--tools Read Glob Grep Bash`, the Linux reviewer allowlist (`role_settings::allow`), leaves exactly those four tools; `--disallowedTools PowerShell` removes only the one named |
+| The Linux reviewer flags | With `--safe-mode --setting-sources user --strict-mcp-config --permission-mode dontAsk --permission-prompts none --tools Read Glob Grep Bash` the harness reported tools `Bash, Glob, Grep, Read`, no MCP server (the account's claude.ai connectors did not attach), no user hook ran, and the one Bash call went through the prefix |
+| What still loaded | Plugins (language servers among them) and skills installed in the owner's profile. A role account's profile holds none; a launch must still be checked for them |
+| The tracked working directory | The cwd file is written by the wrapped command, inside the prefix. As on Linux, the candidate context must not be able to rewrite it after the command, so the shim has to own it |
+
+What this settles: the prefix carries every Bash route that was observed,
+and the one route that bypasses it, the PowerShell tool, is not offered under
+the reviewer allowlist. What it does not settle: whether any other route
+(language-server plugins, file tools reading candidate files with the
+harness's rights) executes candidate code, and how the shim behaves under a
+contained reviewer token. A Claude reviewer on Windows stays refused until
+the candidate runner exists and passes its fixture checks.
 
 ## Launch boundary
 
