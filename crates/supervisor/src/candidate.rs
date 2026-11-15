@@ -22,9 +22,17 @@
 //! stopped with a clear message, and after [`STUCK_CALLS`] such calls in a
 //! row the shell refuses further commands and tells the reviewer to return
 //! its verdict, so a review that cannot make progress ends in bounded time.
+//!
+//! Which launches need this, on which host, is the [`capability`] record;
+//! [`form`] is the command form native Claude Code uses on Windows.
+pub mod capability;
+pub mod form;
+
 use crate::config::Config;
 use crate::confine::{self, StatePaths};
-use crate::profile::{Harness, LaunchSpec, Role, run_files};
+#[cfg(test)]
+use crate::profile::{Harness, Role};
+use crate::profile::{LaunchSpec, run_files};
 use anyhow::{Context, Result, ensure};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -73,9 +81,22 @@ impl Default for Tuning {
     }
 }
 
+/// The capability record's answer for `spec` on a Linux host, where the
+/// harness build and a candidate runner do not enter into it.
+fn on_linux(spec: &LaunchSpec) -> Result<capability::Isolation, String> {
+    capability::decide(&capability::Facts {
+        host: capability::Host::Linux,
+        role: spec.role,
+        harness: spec.harness,
+        build: None,
+        tools: &[],
+        runner: capability::Runner::Missing,
+    })
+}
+
 /// True for launches whose Bash commands run as candidate code.
 pub fn applies(spec: &LaunchSpec) -> bool {
-    spec.role == Role::Reviewer && spec.harness == Harness::Claude
+    on_linux(spec) == Ok(capability::Isolation::Bubblewrap)
 }
 
 /// The generated prefix executable for `spec`.
@@ -101,11 +122,7 @@ pub fn temp(spec: &LaunchSpec) -> PathBuf {
 
 /// Why `spec` cannot isolate candidate code, if it cannot.
 pub fn unsupported(spec: &LaunchSpec) -> Option<String> {
-    (spec.role == Role::Reviewer && spec.harness == Harness::Codex).then(|| {
-        "Codex reviewer launches cannot isolate candidate code from reviewer secrets \
-         (R-P3b.3); use a Claude reviewer"
-            .into()
-    })
+    on_linux(spec).err()
 }
 
 /// The persistent Claude configuration directory of the launch's role.
