@@ -109,6 +109,110 @@ harness's rights) executes candidate code, and how the shim behaves under a
 contained reviewer token. A Claude reviewer on Windows stays refused until
 the candidate runner exists and passes its fixture checks.
 
+### Proposed candidate runner
+
+**Proposal; none of this is implemented yet.** Phase 5 builds it in the
+steps under [phase 5 steps](#phase-5-steps). It reuses the launch boundary:
+the candidate is one more launch of the same runner, with its own package,
+and each command is one start in a fresh job.
+
+**The shim.** A reviewer launch's `CLAUDE_CODE_SHELL_PREFIX` names
+`candidate-shell`, a script the runner writes into the launch's control
+directory, which the launch can read and not change. It runs
+`agentc-supervisor windows-candidate-shell` with the launch's pipe name, clone
+and temp. The shim runs as the reviewer, with the reviewer's token, and does
+four things.
+
+1. It matches its one argument against the form recorded above for the pinned
+   version: the snapshot `source ... 2>/dev/null || true`, the `TEMP`/`TMP`
+   export, the shell option and alias resets, then
+   `eval '<command>' < /dev/null && pwd -P >| <cwd file>`. Anything else,
+   hook commands among them, is refused with status 126 before anything runs.
+   The cwd file must be in the reviewer's temp and named as the Linux
+   `candidate::cwd_guard` allows.
+2. It sends only the eval'd command to the pipe. The snapshot, the reviewer's
+   `TEMP` and the cwd file never reach the candidate. Nothing it needs is
+   lost: the snapshot is already allowed to fail, and the candidate gets its
+   own environment.
+3. It writes the candidate's output and status back to the harness.
+4. It writes the clone's path into the cwd file. The shim owns that file, and
+   the candidate cannot reach the reviewer's temp, so it cannot rewrite it.
+
+**The pipe.** Each reviewer launch gets `agentc-candidate-<launch>`. Its
+access list names the runner's account in full and the reviewer's package
+with the client rights of the [runner pipe](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service).
+The reviewer and the candidate run as the same account, so the account cannot
+tell them apart. Admission therefore reads the package SID from the
+connection's token and requires it to be exactly the reviewer's. A process of
+the account with no package, the candidate's package and another launch's
+package are each refused, and the access list keeps the last two from
+connecting at all. Background calls also arrive through the shim and may run
+beside a foreground one, so the pipe has a small fixed number of instances,
+each served by its own thread. A call beyond that number waits, and is
+refused with a message saying why once its wait runs out.
+
+**The candidate context.** When the runner prepares a reviewer launch it also
+prepares a candidate launch: a second disposable AppContainer profile
+(less privileged, the tool capability, `registryRead`, no network
+capability), its own control and working directories and its own desktop in
+the runner's station. Each command is one start in a fresh job with the
+limits of a launch and the time limit of the Linux shell (`CALL_SECONDS`, and
+`STUCK_CALLS` before further commands are refused). It runs the pinned Git
+Bash with `--noprofile --norc`, from the clone, with an exact environment:
+`PATH` to the pinned Git and toolchain, and `HOME`, `TEMP`, `TMP` and
+`CARGO_HOME` in the candidate's working directory, `LOCALAPPDATA` and the
+system variables Windows needs. Nothing is inherited, so no variable of the
+Linux `UNSET` list can reach it. Output and error go to one log the runner
+creates and the candidate only inherits. The runner returns at most a fixed
+number of bytes of it and says when it cut the rest. When the command ends the
+job is ended, so background processes die with the call, as on Linux, and the
+shim says so when the job still held any.
+
+**Grants.** The clone gets read access for both packages. The candidate may
+write only its own working directory (build output, Cargo home, home and
+temp). The reviewer's control directory, temp, state and pipe grant the
+candidate's package nothing, so the AppContainer access check refuses it.
+Credentials stay out of the registry, because `registryRead` reads the hive
+of the account the launch runs as; a key granted only to the reviewer's
+package is part of the fixture.
+
+**The capability record.** `candidate::applies` and `candidate::unsupported`
+stop testing the harness name alone. A record per host, role, harness and
+version says whether candidate code can be isolated and how. Linux keeps its
+answers unchanged: a Claude reviewer through Bubblewrap, a Codex reviewer
+refused. On Windows a Claude reviewer is admitted only when the harness binary
+is a version with recorded evidence (2.1.325 above, by SHA-256) and the
+candidate runner answers a readiness check. A Codex reviewer, any other
+version and a missing or broken candidate runner are refused, each with its
+reason. The reviewer's command line must hold the Linux reviewer flags and
+exactly the tool allowlist `Read Glob Grep Bash`, so the PowerShell tool is
+never offered.
+
+**Recovery.** The reviewer launch's journal entry records the candidate
+profile too. A launch that ended takes its candidate with it. Reclaim deletes
+both profiles. A restarted runner never serves a candidate pipe for a
+journaled launch.
+
+**Still open.** Whether a language-server plugin or another harness route
+runs candidate code (a role profile holds no plugins, and the launch must
+check that it does not). Whether the reviewer's file tools can be pointed at
+host files through a junction the candidate makes in its writable tree.
+Junctions need no privilege on Windows. The same question exists on Linux
+with symbolic links and is not settled there either.
+
+#### Phase 5 steps
+
+Each step builds, passes its tests and is committed on its own.
+
+| Step | Content | Test |
+| --- | --- | --- |
+| 5a | Parser of the recorded command form and the candidate command it becomes; the capability record, with Linux unchanged | Unit tests on every platform: accepted and refused forms, quoting, cwd-file layouts, the record's answers |
+| 5b | Pipe admission by package SID | Native: the reviewer's package is served; no package, another package and the candidate's package are refused |
+| 5c | The candidate launch: profile, directories, desktop, grants, journal and reclaim; one start per command with the exact environment, the limits and bounded output | Native: a command runs in the candidate package and job, its output and status return, a timed-out command is stopped |
+| 5d | The candidate pipe's threads and the shim subcommand | Native: a harness-shaped command through the shim, the cwd file reset, refusals before anything runs |
+| 5e | Fixture checks | Native: a synthetic credential (environment, file, process, handle, registry) is out of the candidate's reach; it cannot open the reviewer's process, state or pipe, or another launch's; a missing or broken runner refuses the launch |
+| 5f | A real Bash command from native Claude Code 2.1.325 through the prefix in the candidate context; the support matrix, evidence and phases tables | Owner-attended run on MiniAir, the Linux gate on the exact candidate, mdBook build and link checks |
+
 ## Launch boundary
 
 A launch is one disposable process tree. The proposed boundary has five layers.
@@ -1822,7 +1926,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
-| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Not started |
+| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Started by task `61fe9ca2`. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Nothing is implemented |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
 
