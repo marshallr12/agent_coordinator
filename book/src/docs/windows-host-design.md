@@ -112,9 +112,9 @@ the candidate runner exists and passes its fixture checks.
 ### Proposed candidate runner
 
 **Mostly a proposal.** Phase 5 builds it in the steps under
-[phase 5 steps](#phase-5-steps). Only step 5a, the parser of the command form
-and the capability record, is implemented, and nothing calls it on Windows
-yet. It reuses the launch boundary:
+[phase 5 steps](#phase-5-steps). Steps 5a and 5b, the parser of the command
+form, the capability record and pipe admission by package, are implemented,
+and nothing calls them on Windows yet. It reuses the launch boundary:
 the candidate is one more launch of the same runner, with its own package,
 and each command is one start in a fresh job.
 
@@ -223,7 +223,21 @@ quote-free command that was observed. `form::cwd_file` maps the cwd file to
 Windows form and admits only the Linux layouts inside the reviewer's temp.
 `capability::decide` is the record; `candidate::applies` and
 `candidate::unsupported` are now its Linux answers, and their tests are
-unchanged. Steps 5b to 5f are not started.
+unchanged.
+
+Step 5b is implemented in `service::pipe_policy` and the Windows `pipe`.
+`Pipe::for_package` makes a launch's candidate pipe with
+`package_descriptor`'s access list (the runner's account in full, the
+package with the client rights, a low label so a low-integrity
+AppContainer client can write). The pipe opens the connection's token once,
+while impersonating, and reads its account and package after the revert.
+`Admitted::package` serves only the runner's account carrying exactly that
+package. The portable tests cover the right package, another package, no
+package, an unreadable package, forged SID text and another account. The
+native test shows a process of the runner's own account with no package
+connecting, being refused and getting no answer. An AppContainer client
+being served, and another package being kept out by the access list, need a
+real launch and are tested in step 5d. Steps 5c to 5f are not started.
 
 ## Launch boundary
 
@@ -1938,7 +1952,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
-| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Started by task `61fe9ca2`. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Step 5a (command-form parser and capability record) is implemented; nothing reaches a Windows launch yet |
+| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Started by task `61fe9ca2`. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented; nothing reaches a Windows launch yet |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
 

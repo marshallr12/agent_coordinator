@@ -59,10 +59,32 @@ pub fn descriptor(runner: &str, client: &str) -> Result<String> {
     ))
 }
 
-/// The accounts a pipe serves.
+/// A low integrity label that forbids writing up: an AppContainer token runs
+/// at low integrity, and without it could not write its requests.
+const LOW_LABEL: &str = "S:(ML;;NW;;;LW)";
+
+/// The access list of one launch's candidate pipe: `runner` in full and the
+/// launch's `package` as [`CLIENT_RIGHTS`], with a low label. The candidate
+/// and the reviewer run as the runner's account, so the user part of the
+/// check passes for both. Windows then also requires the token's package to
+/// be granted, and only `package` is.
+pub fn package_descriptor(runner: &str, package: &str) -> Result<String> {
+    let (runner, package) = (checked_sid(runner)?, checked_sid(package)?);
+    ensure!(
+        runner != package,
+        "a package cannot be the runner's account"
+    );
+    Ok(format!(
+        "D:P(A;;GA;;;{runner})(A;;{CLIENT_RIGHTS};;;{package}){LOW_LABEL}"
+    ))
+}
+
+/// The accounts a pipe serves and, for a launch's candidate pipe, the one
+/// package its client's token must carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admitted {
     allowed: Vec<String>,
+    package: Option<String>,
 }
 
 impl Admitted {
@@ -72,8 +94,32 @@ impl Admitted {
         if client != runner {
             allowed.push(checked_sid(client)?.to_owned());
         }
-        Ok(Self { allowed })
+        Ok(Self {
+            allowed,
+            package: None,
+        })
     }
+
+    /// A launch's candidate pipe: the runner's account, and only from a
+    /// token of exactly `package`. A token of the account with no package,
+    /// or with another, is refused.
+    pub fn package(runner: &str, package: &str) -> Result<Self> {
+        let allowed = vec![checked_sid(runner)?.to_owned()];
+        let package = Some(checked_sid(package)?.to_owned());
+        Ok(Self { allowed, package })
+    }
+}
+
+/// What Windows said about the AppContainer package of a client's token.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Package {
+    /// Windows was asked and did not answer.
+    #[default]
+    Unknown,
+    /// The token is not an AppContainer token.
+    None,
+    /// The token's package SID.
+    Sid(String),
 }
 
 /// What Windows reported about a connected client. `None` means Windows
@@ -84,6 +130,8 @@ pub struct ClientFacts {
     pub account: Option<String>,
     /// The client's process id, read back from the connection.
     pub process: Option<u32>,
+    /// The package of the client's token, read back from the connection.
+    pub package: Package,
 }
 
 /// A client that was identified and admitted.
@@ -91,6 +139,9 @@ pub struct ClientFacts {
 pub struct Client {
     pub account: String,
     pub process: u32,
+    /// The package the pipe required and the token carried; `None` on a
+    /// pipe that requires none.
+    pub package: Option<String>,
 }
 
 /// Why a client is refused.
@@ -106,6 +157,11 @@ pub enum Refusal {
     /// connection's account only once something was read from it, so a
     /// silent client cannot be identified.
     Silent,
+    /// Windows did not say which package the client's token carries.
+    PackageUnknown,
+    /// The client's token does not carry the package the pipe serves:
+    /// another package, or none.
+    WrongPackage(Option<String>),
 }
 
 impl std::fmt::Display for Refusal {
@@ -115,30 +171,49 @@ impl std::fmt::Display for Refusal {
             Self::ProcessUnknown => write!(f, "Windows did not identify the client's process"),
             Self::NotAllowed(account) => write!(f, "the account {account} is not served"),
             Self::Silent => write!(f, "the client sent nothing, so it was never identified"),
+            Self::PackageUnknown => write!(f, "Windows did not identify the client's package"),
+            Self::WrongPackage(Some(package)) => write!(f, "the package {package} is not served"),
+            Self::WrongPackage(None) => write!(f, "the client has no package and is not served"),
         }
     }
 }
 
 impl std::error::Error for Refusal {}
 
-/// Admits `facts` only when both the account and the process are known and
-/// the account is one `served` lists. The comparison is of SID text as
-/// Windows printed it; a reported value that is not SID text is refused.
+/// Admits `facts` only when both the account and the process are known, the
+/// account is one `served` lists and, where `served` names a package, the
+/// token carries exactly that one. The comparison is of SID text as Windows
+/// printed it; a reported value that is not SID text is refused.
 pub fn admit(served: &Admitted, facts: &ClientFacts) -> Result<Client, Refusal> {
     let account = facts.account.as_deref().ok_or(Refusal::AccountUnknown)?;
     let process = facts.process.ok_or(Refusal::ProcessUnknown)?;
-    let known = checked_sid(account).is_ok();
-    let listed = served
-        .allowed
-        .iter()
-        .any(|sid| sid.eq_ignore_ascii_case(account));
-    if !known || !listed {
+    if !listed(&served.allowed, account) {
         return Err(Refusal::NotAllowed(account.to_owned()));
     }
+    let package = match &served.package {
+        None => None,
+        Some(required) => Some(carried(required, &facts.package)?),
+    };
     Ok(Client {
         account: account.to_owned(),
         process,
+        package,
     })
+}
+
+/// Whether `sid` is SID text that `allowed` lists.
+fn listed(allowed: &[String], sid: &str) -> bool {
+    checked_sid(sid).is_ok() && allowed.iter().any(|a| a.eq_ignore_ascii_case(sid))
+}
+
+/// The token's package when it is exactly `required`, or why not.
+fn carried(required: &str, package: &Package) -> Result<String, Refusal> {
+    match package {
+        Package::Unknown => Err(Refusal::PackageUnknown),
+        Package::None => Err(Refusal::WrongPackage(None)),
+        Package::Sid(sid) if listed(&[required.to_owned()], sid) => Ok(sid.clone()),
+        Package::Sid(sid) => Err(Refusal::WrongPackage(Some(sid.clone()))),
+    }
 }
 
 #[cfg(test)]
@@ -157,7 +232,87 @@ mod tests {
         ClientFacts {
             account: account.map(str::to_owned),
             process,
+            package: Package::Unknown,
         }
+    }
+
+    const PACKAGE: &str = "S-1-15-2-1-2-3-4-5-6-7";
+    const OTHER_PACKAGE: &str = "S-1-15-2-1-2-3-4-5-6-8";
+
+    /// The runner's account with `package` in its token.
+    fn packaged(package: Package) -> ClientFacts {
+        ClientFacts {
+            package,
+            ..facts(Some(RUNNER), Some(9))
+        }
+    }
+
+    #[test]
+    fn a_candidate_pipe_serves_only_its_own_package_of_the_runners_account() {
+        let served = Admitted::package(RUNNER, PACKAGE).unwrap();
+        let client = admit(&served, &packaged(Package::Sid(PACKAGE.into()))).unwrap();
+        assert_eq!(client.package.as_deref(), Some(PACKAGE));
+        let refusals = [
+            (
+                Package::Sid(OTHER_PACKAGE.into()),
+                Refusal::WrongPackage(Some(OTHER_PACKAGE.into())),
+            ),
+            (Package::None, Refusal::WrongPackage(None)),
+            (Package::Unknown, Refusal::PackageUnknown),
+            (
+                Package::Sid(format!("{PACKAGE}0")),
+                Refusal::WrongPackage(Some(format!("{PACKAGE}0"))),
+            ),
+            (
+                Package::Sid("WD".into()),
+                Refusal::WrongPackage(Some("WD".into())),
+            ),
+        ];
+        for (package, refusal) in refusals {
+            assert_eq!(admit(&served, &packaged(package)), Err(refusal));
+        }
+        let stranger = ClientFacts {
+            package: Package::Sid(PACKAGE.into()),
+            ..facts(Some(CLIENT), Some(9))
+        };
+        assert_eq!(
+            admit(&served, &stranger),
+            Err(Refusal::NotAllowed(CLIENT.into()))
+        );
+    }
+
+    #[test]
+    fn an_account_pipe_ignores_the_package() {
+        let client = admit(&served(), &packaged(Package::Unknown)).unwrap();
+        assert_eq!(client.package, None);
+    }
+
+    #[test]
+    fn a_candidate_pipe_list_names_the_runner_and_the_package_with_a_low_label() {
+        let list = package_descriptor(RUNNER, PACKAGE).unwrap();
+        assert_eq!(
+            list,
+            format!("D:P(A;;GA;;;{RUNNER})(A;;0x120083;;;{PACKAGE})S:(ML;;NW;;;LW)")
+        );
+        assert!(package_descriptor(RUNNER, RUNNER).is_err());
+        assert!(package_descriptor(RUNNER, "S-1-15-2)(A;;GA;;;WD").is_err());
+        assert!(Admitted::package(RUNNER, "WD").is_err());
+    }
+
+    #[test]
+    fn package_refusals_say_what_was_wrong() {
+        assert!(
+            Refusal::PackageUnknown
+                .to_string()
+                .contains("did not identify")
+        );
+        assert!(
+            Refusal::WrongPackage(None)
+                .to_string()
+                .contains("no package")
+        );
+        let other = Refusal::WrongPackage(Some(OTHER_PACKAGE.into()));
+        assert!(other.to_string().contains(OTHER_PACKAGE));
     }
 
     #[test]

@@ -24,7 +24,8 @@ use super::sys::{Descriptor, Handle, check, last_error};
 use super::text::wide;
 use super::token;
 use crate::service::pipe_policy::{
-    Admitted, Client, ClientFacts, Refusal, admit, descriptor, pipe_path,
+    Admitted, Client, ClientFacts, Package, Refusal, admit, descriptor, package_descriptor,
+    pipe_path,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::time::{Duration, Instant};
@@ -131,6 +132,21 @@ impl Pipe {
     pub fn create(name: &str, runner: &str, client: &str, wake: Option<HANDLE>) -> Result<Self> {
         let served = Admitted::new(runner, client)?;
         let list = descriptor(runner, client)?;
+        Self::with_policy(name, &list, served, wake)
+    }
+
+    /// Creates the first and only instance of one launch's candidate pipe
+    /// `name`: the access list names `runner` and `package`
+    /// ([`package_descriptor`]), and a client is served only when its token
+    /// is of the runner's account and carries exactly `package`.
+    pub fn for_package(
+        name: &str,
+        runner: &str,
+        package: &str,
+        wake: Option<HANDLE>,
+    ) -> Result<Self> {
+        let served = Admitted::package(runner, package)?;
+        let list = package_descriptor(runner, package)?;
         Self::with_policy(name, &list, served, wake)
     }
 
@@ -342,9 +358,17 @@ impl Pipe {
     /// What Windows says about the connected client. A fact Windows will not
     /// give is `None`, never a guess.
     fn identify(&self) -> ClientFacts {
+        let token = self.client_token();
+        let account = token.as_ref().ok().and_then(|t| token::user_sid(t).ok());
+        let package = match token.as_ref().map(token::package_sid) {
+            Ok(Ok(Some(sid))) => Package::Sid(sid),
+            Ok(Ok(None)) => Package::None,
+            _ => Package::Unknown,
+        };
         ClientFacts {
-            account: self.client_account().ok(),
+            account,
             process: self.client_process().ok(),
+            package,
         }
     }
 
@@ -358,11 +382,12 @@ impl Pipe {
         Ok(process)
     }
 
-    /// The account of the connected client's token, read while this thread
-    /// impersonates the client and only then. Windows refuses to
-    /// impersonate a connection nothing was read from, so the caller reads
-    /// the client's first bytes before this.
-    fn client_account(&self) -> Result<String> {
+    /// The connected client's token, opened while this thread impersonates
+    /// the client and only then; its account and package are read from it
+    /// after the revert. Windows refuses to impersonate a connection nothing
+    /// was read from, so the caller reads the client's first bytes before
+    /// this.
+    fn client_token(&self) -> Result<Handle> {
         // SAFETY: the pipe handle is live and has a connected client.
         let impersonating = unsafe { ImpersonateNamedPipeClient(self.handle.raw()) };
         check(impersonating, "ImpersonateNamedPipeClient")?;
@@ -375,7 +400,7 @@ impl Pipe {
         let thread_token =
             check(opened, "OpenThreadToken").and_then(|()| Handle::owned(raw, "OpenThreadToken"));
         drop(reverting);
-        token::user_sid(&thread_token?)
+        thread_token
     }
 
     /// Ends the current client's connection so the pipe can take the next.
@@ -555,6 +580,36 @@ mod tests {
             Line::Request(b"hello".to_vec())
         );
         talker.join().unwrap();
+    }
+
+    #[test]
+    fn a_candidate_pipe_refuses_the_runners_own_account_without_its_package() {
+        // This process is the runner's account, so the access list lets it
+        // connect; it carries no package, so admission must refuse it and
+        // write it nothing.
+        let (name, me) = (unique(), me());
+        let package = "S-1-15-2-1-2-3-4-5-6-7";
+        let mut pipe = Pipe::for_package(&name, &me, package, None).unwrap();
+        let talker = std::thread::spawn({
+            let name = name.clone();
+            move || {
+                let mut file = client(&name).unwrap();
+                let _ = file.write_all(b"{\"command\":\"true\"}\n");
+                let mut answer = String::new();
+                BufReader::new(file).read_line(&mut answer).unwrap_or(0)
+            }
+        });
+        match pipe.accept(10 * SECOND).unwrap() {
+            Accepted::Refused(Refusal::WrongPackage(None)) => {}
+            Accepted::Refused(other) => panic!("refused for the wrong reason: {other}"),
+            Accepted::Idle => panic!("the client never connected"),
+            Accepted::Client(_) => panic!("a client without the package was served"),
+        }
+        assert_eq!(
+            talker.join().unwrap(),
+            0,
+            "the refused client got an answer"
+        );
     }
 
     #[test]
