@@ -72,6 +72,17 @@ pub fn work_directory(owner: &str, package: &str) -> Result<String> {
     ))
 }
 
+/// A reviewer launch's source tree: the launcher's account fills it, and the
+/// reviewer's and the candidate's packages may read it and change nothing.
+pub fn shared_source(owner: &str, packages: &[&str]) -> Result<String> {
+    let mut list = trusted(owner)?;
+    for package in packages {
+        let package = checked(package)?;
+        list.push_str(&format!("(A;OICI;{READ_EXECUTE};;;{package})"));
+    }
+    Ok(list)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +144,17 @@ mod tests {
         let work = work_directory(OWNER, PACKAGE).unwrap();
         assert!(work.contains(&format!("(A;OICI;0x1301bf;;;{PACKAGE})")));
         assert!(work.ends_with("S:(ML;OICI;NW;;;LW)"));
+    }
+
+    #[test]
+    fn a_shared_source_is_read_only_to_both_packages() {
+        let candidate = "S-1-15-2-1-2-3-4-5-6-8";
+        let list = shared_source(OWNER, &[PACKAGE, candidate]).unwrap();
+        assert!(list.starts_with(&format!("D:P(A;OICI;FA;;;{OWNER})")));
+        for package in [PACKAGE, candidate] {
+            assert!(list.contains(&format!("(A;OICI;0x1200a9;;;{package})")));
+        }
+        assert!(!list.contains("0x1301bf") && !list.contains("S:("));
+        assert!(shared_source(OWNER, &["WD"]).is_err());
     }
 }

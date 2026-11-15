@@ -26,6 +26,9 @@ pub struct Profile {
 
 // SAFETY: the SID is an allocation owned here; any thread may read it.
 unsafe impl Send for Profile {}
+// SAFETY: nothing changes the SID after creation; shared access only reads
+// it, which a reviewer's candidate threads do at the same time.
+unsafe impl Sync for Profile {}
 
 impl Profile {
     /// Creates the profile `name` for the calling account. A name already

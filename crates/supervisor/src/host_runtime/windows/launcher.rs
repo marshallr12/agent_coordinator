@@ -366,6 +366,45 @@ impl Launcher {
     pub fn held(&self) -> Vec<String> {
         self.launches.keys().cloned().collect()
     }
+
+    /// Hands the prepared, never started launch `id` out of the launcher, so
+    /// other threads can start processes in it (a reviewer's candidate). Its
+    /// package stays admitted to the station until [`Launcher::retire`].
+    pub fn detach(&mut self, id: &str) -> Result<Detached> {
+        let slot = self.slot(id)?;
+        ensure!(
+            slot.job.is_none() && slot.root.is_none() && slot.held.is_empty(),
+            "launch {id} was started or holds handles; it cannot be detached"
+        );
+        let slot = self.launches.remove(id).expect("the slot was just found");
+        Ok(Detached {
+            spec: slot.spec,
+            profile: slot.profile,
+            desktop: slot.desktop,
+        })
+    }
+
+    /// Closes a detached launch's desktop, withdraws its package from the
+    /// station and deletes its profile. Its directories stay for the caller.
+    pub fn retire(&mut self, detached: Detached) -> Result<()> {
+        let Detached {
+            profile, desktop, ..
+        } = detached;
+        drop(desktop);
+        if let Some(station) = self.station.as_mut() {
+            station.dismiss(profile.sid_text())?;
+        }
+        profile.delete()
+    }
+}
+
+/// A prepared launch outside the launcher: its boundary, for starts other
+/// threads make. Each start brings its own job and capabilities.
+#[derive(Debug)]
+pub struct Detached {
+    pub spec: LaunchSpec,
+    pub profile: Profile,
+    pub desktop: Desktop,
 }
 
 impl Slot {

@@ -240,6 +240,9 @@ pub struct Desktop {
 
 // SAFETY: a desktop handle is a process-wide value.
 unsafe impl Send for Desktop {}
+// SAFETY: shared access reads only the name; the handle is closed once, on
+// drop, which needs ownership.
+unsafe impl Sync for Desktop {}
 
 impl Desktop {
     /// Admits `package` to `station` and makes the desktop `label` in it.

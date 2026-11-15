@@ -70,7 +70,7 @@ covered by this prototype. A different build needs the same acceptance gates.
 | Python | Native CPython 3.14, stdlib ctypes probe driver | Experiment driver only |
 | Rust/Cargo | Rust 1.99.1, MSVC tools 14.51.36231 and Windows SDK 10.0.26100.0; offline, locked, isolated caches | **Demonstrated** in the prototype: the fixture crate builds and its tests pass inside both candidate boundaries. No worker profile is admitted and the workspace itself is untested |
 | Git | Native pinned Git, no hooks, disabled direct push | Not yet exercised in a Windows launch |
-| Claude implementer/reviewer | Native pinned release with all command paths examined | Unsupported. Phase 5 has [observed the command paths](#native-claude-code-command-paths-2026-11-14) of 2.1.325; no candidate runner exists yet |
+| Claude implementer/reviewer | Native pinned release with all command paths examined | Unsupported. Phase 5 has [observed the command paths](#native-claude-code-command-paths-2026-11-14) of 2.1.325. **Blocked**: its Bash tool runs Git Bash, which [does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14) |
 | Codex implementer/reviewer | Native pinned release with all command paths examined | Unsupported; no Windows interception evidence |
 | Browser, MCP and auxiliary tools | Individually pinned and brokered | Unsupported until alternate execution paths are tested |
 
@@ -109,9 +109,46 @@ harness's rights) executes candidate code, and how the shim behaves under a
 contained reviewer token. A Claude reviewer on Windows stays refused until
 the candidate runner exists and passes its fixture checks.
 
+### Git Bash does not start in an AppContainer, 2026-11-14
+
+Step 5c found a **blocker** for this proposal and for any contained native
+Claude Code launch. On MiniAir, the Git for Windows `bash.exe` (GNU bash
+5.3.15, MSYS2 runtime `msys-2.0.dll`), started through the launcher in a
+full AppContainer and in a less-privileged one, ends during start-up with
+status `0xC0000142` (DLL initialisation failed) after printing
+
+```text
+*** fatal error - NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-<key>): 0xC0000022
+```
+
+`0xC0000022` is access denied. The runtime makes its shared objects in a
+fixed directory under `\BaseNamedObjects` with a native call. Windows moves
+an AppContainer's ordinary named objects into the container's own namespace,
+but not a native call naming that path, so the token is refused. No setting
+of the runtime was found that changes the path. The test
+`git_bash_does_not_start_in_an_appcontainer` in
+`crates/supervisor/tests/windows_candidate.rs` asserts this, so it will say
+when a later runtime starts.
+
+What it means:
+
+- **The candidate** cannot run Git Bash, so the proposal's candidate shell
+  needs another shell that starts in an AppContainer.
+- **The reviewer harness** cannot either. Native Claude Code runs every Bash
+  command, and the shell prefix itself, through Git Bash
+  ([observed](#native-claude-code-command-paths-2026-11-14)), so a Claude
+  Code launch inside the launch boundary has no working Bash tool. That holds
+  for an implementer as much as for a reviewer.
+
+A Claude reviewer and a Claude implementer on Windows stay refused. The
+capability record already refuses both, since nothing reports a ready
+candidate runner.
+
 ### Proposed candidate runner
 
-**Mostly a proposal.** Phase 5 builds it in the steps under
+**Mostly a proposal, now blocked** by
+[Git Bash in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14).
+Phase 5 builds it in the steps under
 [phase 5 steps](#phase-5-steps). Steps 5a and 5b, the parser of the command
 form, the capability record and pipe admission by package, are implemented,
 and nothing calls them on Windows yet. It reuses the launch boundary:
@@ -237,7 +274,27 @@ package, an unreadable package, forged SID text and another account. The
 native test shows a process of the runner's own account with no package
 connecting, being refused and getting no answer. An AppContainer client
 being served, and another package being kept out by the access list, need a
-real launch and are tested in step 5d. Steps 5c to 5f are not started.
+real launch and are tested in step 5d.
+
+Step 5c is implemented and **stopped by the blocker**.
+`host_runtime::windows::candidate` prepares a reviewer launch's candidate
+with it: a second profile (less privileged, refused otherwise), its
+directories and desktop, its writable `home`, `tmp`, `cargo`, `target` and
+`local`, and the source tree, made new with `sddl::shared_source`, which both
+packages may read and neither may change. It is then detached from the
+launcher (`Launcher::detach`, `Launcher::retire`) so that pipe threads can
+use it. `Candidate::run` writes the command to a file in the candidate's
+control directory and starts the shell on that file in a fresh job, with the
+exact environment, the log as the only inherited handle, `CALL_SECONDS` and
+`STUCK_CALLS` as on Linux, output cut at 1 MiB, and a note when processes were
+left running. The runner prepares it from `prepare`'s `candidate` field,
+journals it (`CandidateRecord`) and retires, removes and reclaims it with the
+launch. Unit tests cover the environment, the output bound, the refusal, the
+access list and the journal. The native tests that run commands through it,
+`a_reviewers_candidate_runs_commands_in_its_own_package_and_job` and
+`a_candidate_command_past_its_time_limit_is_stopped_and_repeats_are_refused`,
+are written and **ignored**, because their shell, Git Bash, does not start.
+They have never passed. Steps 5d to 5f are not started.
 
 ## Launch boundary
 
@@ -1952,7 +2009,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
-| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Started by task `61fe9ca2`. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented; nothing reaches a Windows launch yet |
+| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | Started by task `61fe9ca2`. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented but untested end to end: **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14), which also leaves a contained Claude Code launch without its Bash tool |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
 

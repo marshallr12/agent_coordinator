@@ -52,6 +52,22 @@ pub struct Entry {
     pub control: Option<PathBuf>,
     #[serde(default)]
     pub work: Option<PathBuf>,
+    /// A reviewer launch's candidate, which ends and is removed with it.
+    /// Absent for every other launch and in older entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<CandidateRecord>,
+}
+
+/// What a reviewer launch's candidate made, so it can be removed: its
+/// profile, its two directories and the source tree both packages read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateRecord {
+    pub profile: String,
+    pub package_sid: String,
+    pub control: PathBuf,
+    pub work: PathBuf,
+    pub source: PathBuf,
 }
 
 /// A directory of entries, one file per launch.
@@ -152,7 +168,32 @@ mod tests {
             created: None,
             control: None,
             work: Some(PathBuf::from("w")),
+            candidate: None,
         }
+    }
+
+    #[test]
+    fn a_reviewers_candidate_is_saved_with_it_and_older_entries_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(&dir.path().join("launches")).unwrap();
+        let candidate = CandidateRecord {
+            profile: "agentc.test.candidate".into(),
+            package_sid: "S-1-15-2-2".into(),
+            control: "cc".into(),
+            work: "cw".into(),
+            source: "src".into(),
+        };
+        let saved = Entry {
+            candidate: Some(candidate),
+            ..entry("rev-1")
+        };
+        journal.save(&saved).unwrap();
+        assert_eq!(journal.load("rev-1"), Some(saved));
+        let plain = serde_json::to_value(entry("impl-1")).unwrap();
+        assert!(
+            plain.get("candidate").is_none(),
+            "older readers see no new field"
+        );
     }
 
     #[test]

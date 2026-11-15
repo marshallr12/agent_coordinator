@@ -34,6 +34,7 @@
 //! comes from a [`Planner`] the caller supplies; nothing in this crate
 //! builds a harness launch for it.
 pub mod adoption;
+pub mod candidate;
 pub mod desktop;
 pub mod inspection;
 pub mod job;

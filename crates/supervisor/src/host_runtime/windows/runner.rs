@@ -7,8 +7,9 @@
 //! Every launch is journaled before it starts ([`super::journal`]). When the
 //! runner's input ends, the runner exits, its job handles close and Windows
 //! ends every launch it held.
+use super::candidate::{self, Candidate, CandidateSpec, Tuning};
 use super::desktop::StationNotOurs;
-use super::journal::{Entry, Journal, Stage};
+use super::journal::{CandidateRecord, Entry, Journal, Stage};
 use super::launcher::{LaunchSpec, Launcher, Seen, job_owner};
 use super::process::Command;
 use super::reader::{PathRefused, validated_read};
@@ -24,6 +25,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use windows_sys::Win32::Security::Isolation::DeleteAppContainerProfile;
 
@@ -43,6 +45,9 @@ pub enum Request {
         attempt: Option<String>,
         #[serde(default)]
         generation: Option<u64>,
+        /// A reviewer launch's candidate, prepared with it.
+        #[serde(default)]
+        candidate: Option<Box<CandidateSpec>>,
     },
     /// Open a file with an inheritable handle held for the launch.
     HoldFile { launch: String, path: PathBuf },
@@ -124,6 +129,8 @@ pub struct Runner {
     launcher: Launcher,
     journal: Journal,
     mine: BTreeSet<String>,
+    /// The candidates of this run's reviewer launches.
+    candidates: BTreeMap<String, Arc<Candidate>>,
 }
 
 impl Runner {
@@ -133,7 +140,13 @@ impl Runner {
             launcher: Launcher::new()?,
             journal: Journal::open(state)?,
             mine: BTreeSet::new(),
+            candidates: BTreeMap::new(),
         })
+    }
+
+    /// The candidate of this run's reviewer launch `launch`, if it has one.
+    pub fn candidate(&self, launch: &str) -> Option<Arc<Candidate>> {
+        self.candidates.get(launch).cloned()
     }
 
     /// Carries out one request; the answer's fields depend on the request.
@@ -146,7 +159,11 @@ impl Runner {
                 source,
                 attempt,
                 generation,
-            } => self.prepare(&launch, spec, (source, attempt, generation)),
+                candidate,
+            } => {
+                let record = (source, attempt, generation);
+                self.prepare(&launch, spec, record, candidate.map(|spec| *spec))
+            }
             Request::HoldFile { launch, path } => {
                 let handle = self.launcher.hold_file(&launch, &path)?;
                 Ok(json!({ "handle": handle }))
@@ -218,13 +235,15 @@ impl Runner {
         )
     }
 
-    /// Prepares a launch and journals it. An id an earlier runner journaled
-    /// is refused: that launch is judged by `recover`, never started again.
+    /// Prepares a launch, and a reviewer launch's candidate with it, and
+    /// journals both. An id an earlier runner journaled is refused: that
+    /// launch is judged by `recover`, never started again.
     fn prepare(
         &mut self,
         launch: &str,
         spec: LaunchSpec,
         (source, attempt, generation): (Option<String>, Option<String>, Option<u64>),
+        candidate: Option<CandidateSpec>,
     ) -> Result<Value> {
         ensure!(
             self.journal.load(launch).is_none(),
@@ -233,6 +252,14 @@ impl Runner {
         let profile = spec.profile.clone();
         let (control, work) = (spec.control.clone(), spec.work.clone());
         let prepared = self.launcher.prepare(launch, spec)?;
+        let candidate = match candidate {
+            Some(spec) => {
+                let dirs = (control.as_path(), work.as_path());
+                Some(self.prepare_candidate(launch, spec, &prepared.package_sid, dirs)?)
+            }
+            None => None,
+        };
+        let record = candidate.as_ref().map(record_of);
         let entry = Entry {
             launch: launch.to_owned(),
             stage: Stage::Prepared,
@@ -247,22 +274,79 @@ impl Runner {
             created: None,
             control: Some(control),
             work: Some(work),
+            candidate: record,
         };
-        self.journal_or_undo(launch, &entry)?;
-        Ok(serde_json::to_value(prepared)?)
+        self.journal_or_undo(launch, &entry, candidate)?;
+        let mut answer = serde_json::to_value(prepared)?;
+        if let Some(candidate) = &entry.candidate {
+            answer["candidate_package_sid"] = json!(candidate.package_sid);
+        }
+        Ok(answer)
     }
 
-    /// Journals a just prepared launch; if that fails the launch is undone,
-    /// directories included, so nothing exists that the journal does not
-    /// name.
-    fn journal_or_undo(&mut self, launch: &str, entry: &Entry) -> Result<()> {
+    /// Prepares `launch`'s candidate for the reviewer package `reviewer`;
+    /// if that fails the reviewer launch is undone as well.
+    fn prepare_candidate(
+        &mut self,
+        launch: &str,
+        spec: CandidateSpec,
+        reviewer: &str,
+        (control, work): (&Path, &Path),
+    ) -> Result<Candidate> {
+        let prepared = candidate::prepare(
+            &mut self.launcher,
+            launch,
+            spec,
+            reviewer,
+            Tuning::default(),
+        );
+        if prepared.is_err() {
+            let _ = self.launcher.cleanup(launch);
+            for directory in [control, work] {
+                let _ = std::fs::remove_dir_all(directory);
+            }
+        }
+        prepared
+    }
+
+    /// Journals a just prepared launch; if that fails the launch and its
+    /// candidate are undone, directories included, so nothing exists that
+    /// the journal does not name.
+    fn journal_or_undo(
+        &mut self,
+        launch: &str,
+        entry: &Entry,
+        candidate: Option<Candidate>,
+    ) -> Result<()> {
         if let Err(error) = self.journal.save(entry) {
+            if let Some(candidate) = candidate {
+                let _ = candidate.retire(&mut self.launcher);
+            }
             let _ = self.launcher.cleanup(launch);
             let _ = remove_directories(entry);
             return Err(error);
         }
+        if let Some(candidate) = candidate {
+            self.candidates
+                .insert(launch.to_owned(), Arc::new(candidate));
+        }
         self.mine.insert(launch.to_owned());
         Ok(())
+    }
+
+    /// Retires this run's candidate of `launch`, if it has one. A candidate
+    /// still in use by a running command is refused, and kept.
+    fn retire_candidate(&mut self, launch: &str) -> Result<()> {
+        let Some(shared) = self.candidates.remove(launch) else {
+            return Ok(());
+        };
+        match Arc::try_unwrap(shared) {
+            Ok(candidate) => candidate.retire(&mut self.launcher),
+            Err(shared) => {
+                self.candidates.insert(launch.to_owned(), shared);
+                bail!("launch {launch}'s candidate is still running a command")
+            }
+        }
     }
 
     /// This run's journal entry for `launch`.
@@ -326,6 +410,7 @@ impl Runner {
     /// ended keeps its directories and its entry, and the request fails.
     fn cleanup(&mut self, launch: &str, remove: bool) -> Result<Value> {
         let entry = self.entry(launch)?;
+        self.retire_candidate(launch)?;
         let deleted = self.launcher.cleanup(launch);
         let profile_deleted = deleted.is_ok();
         let detail = deleted.err().map(|error| format!("{error:#}"));
@@ -375,21 +460,46 @@ impl Runner {
             verdict(&entry) == "ended",
             "launch {launch} may still run; nothing of it is removed"
         );
-        let name = wide(&entry.profile)?;
-        // SAFETY: `name` is NUL-terminated.
-        let result = unsafe { DeleteAppContainerProfile(name.as_ptr()) };
+        let mut deleted = delete_profile(&entry.profile)?;
+        if let Some(candidate) = &entry.candidate {
+            deleted &= delete_profile(&candidate.profile)?;
+        }
         if remove {
             remove_directories(&entry)?;
         }
         self.journal.remove(launch)?;
-        Ok(json!({ "profile_deleted": result == 0, "directories_removed": remove }))
+        Ok(json!({ "profile_deleted": deleted, "directories_removed": remove }))
     }
 }
 
-/// Removes the control and working directories `entry` names. One that is
-/// already gone counts as removed.
+/// Deletes the AppContainer profile `name`; true when Windows did.
+fn delete_profile(name: &str) -> Result<bool> {
+    let name = wide(name)?;
+    // SAFETY: `name` is NUL-terminated.
+    Ok(unsafe { DeleteAppContainerProfile(name.as_ptr()) } == 0)
+}
+
+/// What the journal keeps of a prepared candidate.
+fn record_of(candidate: &Candidate) -> CandidateRecord {
+    let spec = candidate.spec();
+    CandidateRecord {
+        profile: spec.launch.profile.clone(),
+        package_sid: candidate.package_sid().to_owned(),
+        control: spec.launch.control.clone(),
+        work: spec.launch.work.clone(),
+        source: spec.source.clone(),
+    }
+}
+
+/// Removes the control and working directories `entry` names, and its
+/// candidate's three trees. One that is already gone counts as removed.
 fn remove_directories(entry: &Entry) -> Result<()> {
-    for directory in [&entry.control, &entry.work].into_iter().flatten() {
+    let candidate = entry
+        .candidate
+        .iter()
+        .flat_map(|c| [&c.control, &c.work, &c.source]);
+    let own = [&entry.control, &entry.work].into_iter().flatten();
+    for directory in own.chain(candidate) {
         match std::fs::remove_dir_all(directory) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
                 Err(error).with_context(|| format!("remove {}", directory.display()))?;

@@ -93,6 +93,7 @@ fn entry(launch: &str, owner: &str, control: PathBuf, work: PathBuf) -> Entry {
         created: None,
         control: Some(control),
         work: Some(work),
+        candidate: None,
     }
 }
 

@@ -181,12 +181,16 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   [observed](windows-host-design.md#native-claude-code-command-paths-2026-11-14)
   how native Claude Code 2.1.325 runs commands and
   [proposes a candidate runner](windows-host-design.md#proposed-candidate-runner).
-  Only its first step is implemented: a parser of the recorded command form
-  and a capability record per host, role, harness and build. On Linux the
-  record gives the answers it gave before. On Windows it admits a Claude
-  reviewer only for the recorded build, with only routed tools and a ready
-  candidate runner, but nothing calls it there yet and no Windows reviewer
-  can launch.
+  Three steps are implemented: a parser of the recorded command form and a
+  capability record per host, role, harness and build; pipe admission by
+  package SID; and a reviewer launch's candidate launch in the Windows
+  runner. On Linux the record gives the answers it gave before. On Windows it
+  admits a Claude reviewer only for the recorded build, with only routed
+  tools and a ready candidate runner, but nothing calls it there and no
+  Windows reviewer can launch. The phase is **blocked**:
+  [Git Bash does not start in an AppContainer](windows-host-design.md#git-bash-does-not-start-in-an-appcontainer-2026-11-14),
+  so neither the candidate nor a contained Claude Code launch has a working
+  shell, and the candidate's native tests have never passed.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
