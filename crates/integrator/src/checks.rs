@@ -20,6 +20,11 @@ pub struct RosterCheck {
     pub identity: String,
     pub check_name: String,
     pub workflow_path: String,
+    /// The repository paths the service roster declares as this check's only
+    /// inputs; empty when it declares none. Filled from the service roster
+    /// (`roster.rs`), never read from the repository's roster file.
+    #[serde(default, skip_deserializing)]
+    pub inputs: Vec<String>,
 }
 
 /// One job-level run of a check on a commit.
@@ -506,6 +511,7 @@ mod tests {
             identity: "tests".into(),
             check_name: "Linux tests".into(),
             workflow_path: ".github/workflows/ci.yml".into(),
+            inputs: Vec::new(),
         }]
     }
 
@@ -536,6 +542,7 @@ mod tests {
             identity: "lint".into(),
             check_name: "Lint".into(),
             workflow_path: ".github/workflows/ci.yml".into(),
+            inputs: Vec::new(),
         });
         jobs
     }

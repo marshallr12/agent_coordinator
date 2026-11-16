@@ -10,6 +10,7 @@ mod attribution;
 mod checks;
 #[cfg(test)]
 mod e2e_tests;
+mod exempt;
 mod flake;
 mod gates;
 mod git;

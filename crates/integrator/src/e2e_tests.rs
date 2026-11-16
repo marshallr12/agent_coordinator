@@ -49,6 +49,14 @@ struct Mock {
     authority_refusals: HashMap<String, String>,
     /// While set, the reports route answers 500.
     reports_down: bool,
+    /// The `inputs` the queue's roster declares for the `tests` check.
+    roster_inputs: Vec<String>,
+    /// When set, the exemptions route refuses with this code.
+    exemption_refusal: Option<String>,
+    /// The exemptions the mock recorded.
+    exemptions: Vec<Value>,
+    /// The `target-passed` bodies the mock accepted, with the report id.
+    target_passed: Vec<Value>,
     results: Vec<Value>,
     candidates: Vec<Value>,
     not_mechanical: Vec<Value>,
@@ -129,7 +137,11 @@ async fn queue(State(mock): State<Shared>) -> Reply {
     };
     let queued = mock.ahead.iter().chain(&mock.item);
     let items: Vec<Value> = queued.map(with_results).collect();
-    let roster = json!({"revision": 1, "required_checks": [{"identity": "tests"}]});
+    let mut tests = json!({"identity": "tests"});
+    if !mock.roster_inputs.is_empty() {
+        tests["inputs"] = json!(mock.roster_inputs);
+    }
+    let roster = json!({"revision": 1, "required_checks": [tests]});
     ok(
         json!({"project_id": "p", "roster": roster, "targets": mock.targets, "items": items, "reverts": mock.reverts, "skipped_ineligible": 0, "retry_after_seconds": 30}),
     )
@@ -205,7 +217,8 @@ fn grant(mock: &mut Mock, body: &Value) -> Reply {
         .iter()
         .filter(|r| &r["result_id"] == id && r["conclusion"] == "success")
         .count();
-    if passed < 2 {
+    let exempt = mock.exemptions.iter().any(|e| &e["result_id"] == id);
+    if passed < 2 && !(exempt && passed >= 1) {
         return refuse("checks_not_passed");
     }
     let expires = (chrono::Utc::now() + chrono::Duration::seconds(600)).to_rfc3339();
@@ -289,6 +302,56 @@ async fn reports(State(mock): State<Shared>, headers: HeaderMap, Json(body): Jso
         record["allowed"] = json!(false);
         mock.reports.push(record.clone());
         ok(record)
+    })
+}
+
+/// The open `fix_target` reports, newest first, each created at the
+/// epoch (the fake checks start R's first attempt there).
+async fn open_reports(State(mock): State<Shared>) -> Reply {
+    let mock = mock.lock().unwrap();
+    let open = |r: &&Value| r["kind"] == "fix_target" && r["resolved_at"].is_null();
+    let items: Vec<Value> = mock.reports.iter().filter(open).rev().cloned().collect();
+    let items: Vec<Value> = items
+        .into_iter()
+        .map(|mut r| {
+            r["created_at"] = json!("1970-01-01T00:00:00Z");
+            r
+        })
+        .collect();
+    ok(json!({"project_id": "p", "items": items, "next_before": null}))
+}
+
+/// Records an exemption unless told to refuse; a replay returns the first.
+async fn exemptions(
+    State(mock): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Reply {
+    idempotent(&mock, &headers, body, |mock, body| {
+        if let Some(code) = mock.exemption_refusal.clone() {
+            return refuse(&code);
+        }
+        mock.exemptions.push(body.clone());
+        ok(json!({"exemption_id": format!("ex{}", mock.exemptions.len()), "r": body["r"]}))
+    })
+}
+
+/// Resolves the report and records the passing run.
+async fn target_passed(
+    State(mock): State<Shared>,
+    Path((_, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Reply {
+    idempotent(&mock, &headers, body, |mock, body| {
+        let Some(report) = mock.reports.iter_mut().find(|r| r["id"] == id.as_str()) else {
+            return refuse("report_not_resolvable");
+        };
+        report["resolved_at"] = json!("2026-01-01T00:00:00Z");
+        let mut record = body.clone();
+        record["report_id"] = json!(id);
+        mock.target_passed.push(record);
+        ok(json!({"id": id, "resolved": true}))
     })
 }
 
@@ -378,7 +441,12 @@ async fn serve(mock: Shared) -> String {
         .route(&format!("{base}/push-authority"), post(authority))
         .route(&format!("{base}/observations"), post(observations))
         .route(&format!("{base}/revise"), post(revise))
-        .route(&format!("{base}/reports"), post(reports))
+        .route(&format!("{base}/reports"), post(reports).get(open_reports))
+        .route(
+            &format!("{base}/reports/{{id}}/target-passed"),
+            post(target_passed),
+        )
+        .route(&format!("{base}/exemptions"), post(exemptions))
         .route(&format!("{base}/human-ships"), post(human_ships))
         .route(
             &format!("{base}/reverts/{{id}}/candidate"),
@@ -1872,4 +1940,229 @@ async fn shadow_computes_without_publication_mutations_or_reruns() {
         assert!(m.candidates.is_empty() && m.not_mechanical.is_empty());
     });
     assert_eq!(h.reruns(), 0);
+}
+
+// P6: a check that declares its inputs lets a candidate with unchanged inputs
+// land while the target fails it too; every other case is as before.
+
+/// A pinned harness whose service roster declares `inputs` for "Linux tests".
+async fn declared_harness(inputs: &[&str]) -> (Harness, Remote) {
+    let (h, remote) = pinned_harness().await;
+    h.mock.lock().unwrap().roster_inputs = inputs.iter().map(|p| (*p).to_owned()).collect();
+    (h, remote)
+}
+
+/// Runs cycles until one is not `ChecksPending`, at most `limit`.
+async fn settle(h: &mut Harness, limit: usize) -> Step {
+    for _ in 0..limit {
+        let step = h.cycle().await;
+        if step != Step::ChecksPending {
+            return step;
+        }
+    }
+    Step::ChecksPending
+}
+
+/// True when the step blocks with a reason starting with `prefix`.
+fn blocked_with(step: &Step, prefix: &str) -> bool {
+    matches!(step, Step::Blocked(reason) if reason.starts_with(prefix))
+}
+
+#[tokio::test]
+async fn unchanged_declared_inputs_land_while_the_target_fails_and_record_the_exemption() {
+    let (mut h, remote) = declared_harness(&["base.txt", "absent.lock"]).await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[FAIL]);
+    let x = remote_main(&remote);
+    assert_eq!(settle(&mut h, 5).await, Step::Observed("published".into()));
+    assert_eq!(remote_main(&remote), h.latest_r(), "R landed");
+    assert!(h.peek(|m| m.revises.is_empty()));
+    let exemption = h.peek(|m| m.exemptions[0].clone());
+    assert_eq!(exemption["result_id"], "res1");
+    assert_eq!(exemption["identity"], "tests");
+    assert_eq!(exemption["r"], json!(h.latest_r()));
+    assert_eq!(
+        exemption["x"],
+        json!(x),
+        "the target tip it was judged against"
+    );
+    let report = h.peek(|m| m.reports[0].clone());
+    assert_eq!(report["details"]["verdict"], "target_failing");
+    assert_eq!(exemption["report_id"], report["id"]);
+    let inputs = exemption["inputs"].as_array().unwrap();
+    assert_eq!(inputs[0]["path"], "base.txt");
+    assert_eq!(inputs[0]["r_blob"], inputs[0]["x_blob"]);
+    assert!(inputs[0]["r_blob"].is_string());
+    assert_eq!(inputs[1]["path"], "absent.lock");
+    assert!(inputs[1]["r_blob"].is_null() && inputs[1]["x_blob"].is_null());
+    assert_eq!(h.peek(|m| m.exemptions.len()), 1, "recorded once");
+}
+
+#[tokio::test]
+async fn a_changed_declared_input_must_pass_the_check_as_before() {
+    let (mut h, remote) = declared_harness(&["feature.txt"]).await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[FAIL]);
+    let step = settle(&mut h, 5).await;
+    assert!(blocked_with(&step, "target_failing"), "{step:?}");
+    assert!(h.peek(|m| m.exemptions.is_empty()));
+    assert_eq!(report_kinds(&h), ["fix_target"]);
+    assert_eq!(
+        remote_main(&remote),
+        git(&remote.source, &["rev-parse", "HEAD"])
+    );
+}
+
+#[tokio::test]
+async fn a_check_without_declared_inputs_is_never_exempt() {
+    let (mut h, remote) = declared_harness(&[]).await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[FAIL]);
+    let step = settle(&mut h, 5).await;
+    assert!(blocked_with(&step, "target_failing"), "{step:?}");
+    assert!(h.peek(|m| m.exemptions.is_empty()));
+}
+
+#[tokio::test]
+async fn a_target_without_a_result_or_with_a_stale_one_is_never_exempt() {
+    let (mut h, remote) = declared_harness(&["base.txt"]).await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[]);
+    let step = settle(&mut h, 5).await;
+    assert!(blocked_with(&step, "target_unverified"), "{step:?}");
+    assert!(h.peek(|m| m.exemptions.is_empty()));
+    // A pass on X that predates R's failure is stale, and not a failure.
+    let (mut h, remote) = declared_harness(&["base.txt"]).await;
+    script_stale_target(&h, &remote, &[PASS]);
+    assert_eq!(h.cycle().await, Step::ChecksPending, "R's rerun");
+    h.edit_fake(|file| file.rerun_error = Some("403 actions: write".into()));
+    let step = h.cycle().await;
+    assert!(blocked_with(&step, "target_unverified"), "{step:?}");
+    assert!(h.peek(|m| m.exemptions.is_empty()));
+}
+
+#[tokio::test]
+async fn a_target_that_passes_blames_the_author_even_with_declared_inputs() {
+    let (mut h, remote) = declared_harness(&["base.txt"]).await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[PASS]);
+    assert_eq!(
+        settle(&mut h, 5).await,
+        Step::Revised("check_failed".into())
+    );
+    assert!(h.peek(|m| m.exemptions.is_empty()));
+}
+
+#[tokio::test]
+async fn a_stale_failure_on_the_target_is_rerun_and_the_fresh_result_decides() {
+    let (mut h, remote) = declared_harness(&["base.txt"]).await;
+    script_attempts_at(&h, &remote, &[FAIL, FAIL], (&[FAIL, FAIL], -1000));
+    assert_eq!(h.cycle().await, Step::ChecksPending, "R's rerun");
+    assert_eq!(
+        h.cycle().await,
+        Step::ChecksPending,
+        "X's older failure is rerun"
+    );
+    assert_eq!(h.reruns(), 2);
+    assert!(
+        h.peek(|m| m.exemptions.is_empty()),
+        "not exempt on the old result"
+    );
+    assert_eq!(settle(&mut h, 5).await, Step::Observed("published".into()));
+    assert_eq!(h.reruns(), 2, "X is not rerun again");
+    assert_eq!(h.peek(|m| m.exemptions.len()), 1);
+}
+
+#[tokio::test]
+async fn a_refused_rerun_of_a_stale_target_failure_is_handled_as_before() {
+    let (mut h, remote) = declared_harness(&["base.txt"]).await;
+    script_attempts_at(&h, &remote, &[FAIL, FAIL], (&[FAIL, FAIL], -1000));
+    assert_eq!(h.cycle().await, Step::ChecksPending, "R's rerun");
+    h.edit_fake(|file| file.rerun_error = Some("403 actions: write".into()));
+    let step = h.cycle().await;
+    assert!(blocked_with(&step, "target_failing"), "{step:?}");
+    assert!(h.peek(|m| m.exemptions.is_empty()));
+}
+
+#[tokio::test]
+async fn another_failing_check_on_r_keeps_the_subject_blocked() {
+    let (mut h, remote) = declared_harness(&["base.txt"]).await;
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[FAIL]);
+    let r = h.latest_r();
+    h.script(&r, "Lint", &[FAIL, FAIL]);
+    let x = remote_main(&remote);
+    h.script(&x, "Lint", &[FAIL]);
+    let step = settle(&mut h, 5).await;
+    assert!(blocked_with(&step, "target_failing"), "{step:?}");
+    assert!(
+        matches!(&step, Step::Blocked(r) if r.contains("Lint")),
+        "{step:?}"
+    );
+    assert_eq!(remote_main(&remote), x, "nothing landed");
+}
+
+#[tokio::test]
+async fn a_refused_exemption_leaves_the_failure_as_before() {
+    let (mut h, remote) = declared_harness(&["base.txt"]).await;
+    h.mock.lock().unwrap().exemption_refusal = Some("exemption_refused".into());
+    script_attempts(&h, &remote, &[FAIL, FAIL], &[FAIL]);
+    let step = settle(&mut h, 5).await;
+    assert!(blocked_with(&step, "target_failing"), "{step:?}");
+}
+
+/// An idle harness for `remote` with an open report that "Linux tests" fails
+/// on the target tip, created at the epoch.
+async fn open_target_failing(remote: &Remote, verdict: &str) -> Harness {
+    let h = Harness::idle(remote).await;
+    h.checks(None, &RULES);
+    let details = json!({"verdict": verdict, "repository_url": remote.url,
+        "target_branch": "main", "x": "old", "identity": "tests",
+        "check_name": "Linux tests", "blocks_subject": true});
+    let report = json!({"id": "rep9", "kind": "fix_target", "dedupe_key": "k",
+        "details": details, "resolved_at": null});
+    h.mock.lock().unwrap().reports.push(report);
+    h
+}
+
+#[tokio::test]
+async fn a_pass_on_the_target_tip_after_the_report_resolves_it_once() {
+    let (remote, _) = seeded_remote();
+    let mut h = open_target_failing(&remote, "target_failing").await;
+    let tip = remote_main(&remote);
+    h.script(&tip, "Linux tests", &[PASS]);
+    h.script(&tip, "Lint", &[PASS]);
+    h.edit_fake(|file| {
+        file.started.insert(tip.clone(), 1000);
+    });
+    assert_eq!(h.cycle().await, Step::Idle);
+    let passed = h.peek(|m| m.target_passed.clone());
+    assert_eq!(passed.len(), 1);
+    assert_eq!(passed[0]["report_id"], "rep9");
+    assert_eq!(passed[0]["x"], json!(tip));
+    assert_eq!(passed[0]["conclusion"], "success");
+    assert!(passed[0]["run_id"].is_i64() && passed[0]["started_at"].is_string());
+    assert_eq!(h.cycle().await, Step::Idle);
+    assert_eq!(
+        h.peek(|m| m.target_passed.len()),
+        1,
+        "a resolved report is not sent again"
+    );
+}
+
+#[tokio::test]
+async fn an_old_pass_a_failing_tip_or_another_verdict_resolves_nothing() {
+    let (remote, _) = seeded_remote();
+    let tip = remote_main(&remote);
+    for (verdict, outcome, started) in [
+        ("target_failing", PASS, -1000),
+        ("target_failing", FAIL, 1000),
+        ("target_unverified", PASS, 1000),
+    ] {
+        let mut h = open_target_failing(&remote, verdict).await;
+        h.script(&tip, "Linux tests", &[outcome]);
+        h.script(&tip, "Lint", &[PASS]);
+        h.edit_fake(|file| {
+            file.started.insert(tip.clone(), started);
+        });
+        assert_eq!(h.cycle().await, Step::Idle);
+        assert!(
+            h.peek(|m| m.target_passed.is_empty()),
+            "{verdict} {started}"
+        );
+    }
 }

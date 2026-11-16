@@ -93,6 +93,8 @@ impl<C: ChecksSource> Integrator<C> {
             Err(refusal) => return Ok(Step::Refused(refusal.code)),
         };
         let watched = self.watch_targets(project, &queue).await?;
+        self.resolve_fixed_targets(project, &queue, &watched)
+            .await?;
         let mut last = watched.first_held().unwrap_or(Step::Idle);
         for revert in &queue.reverts {
             let Some(x) = revert.target().and_then(|t| watched.tip(&t.key())) else {

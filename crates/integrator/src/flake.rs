@@ -225,10 +225,7 @@ pub(crate) fn on_target(
         .iter()
         .rev()
         .find(|run| run.conclusion.is_some() && run_outcome(run) != Outcome::NoResult);
-    let fresh = |run: &CheckRun| {
-        let started = run.started_at.as_deref().and_then(parse_time);
-        started.zip(failed_since).is_some_and(|(s, f)| s > f)
-    };
+    let fresh = |run: &CheckRun| started_after(run, failed_since);
     match decided {
         Some(run) if run_outcome(run) == Outcome::Pass && fresh(run) => {
             OnTarget::Passed(run.clone())
@@ -244,6 +241,14 @@ pub(crate) fn on_target(
         None if mine.iter().any(|run| run.conclusion.is_none()) => OnTarget::Running,
         None => OnTarget::Unknown,
     }
+}
+
+/// True when `run` started after `since`; false when either time is
+/// unknown. A result older than the failure it is compared with may predate
+/// a change outside the commit (an advisory database, a toolchain).
+pub(crate) fn started_after(run: &CheckRun, since: Option<DateTime<Utc>>) -> bool {
+    let started = run.started_at.as_deref().and_then(parse_time);
+    started.zip(since).is_some_and(|(s, f)| s > f)
 }
 
 /// The highest attempt seen per run id among `runs`.
@@ -285,6 +290,7 @@ mod tests {
             identity: name.into(),
             check_name: name.into(),
             workflow_path: CI.into(),
+            inputs: Vec::new(),
         }
     }
 

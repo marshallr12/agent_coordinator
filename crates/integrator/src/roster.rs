@@ -28,7 +28,10 @@ pub struct Roster {
 /// Builds the roster at `t0`, failing when a service identity is unmapped
 /// or a mapped workflow file is missing from T0.
 pub fn at_target(mirror: &Path, t0: &str, path: &str, service: &ServiceRoster) -> Result<Roster> {
-    let checks = file_checks(mirror, t0, path)?;
+    let mut checks = file_checks(mirror, t0, path)?;
+    for check in &mut checks {
+        check.inputs = declared_inputs(service, &check.identity);
+    }
     for identity in service_identities(service) {
         if !checks.iter().any(|check| check.identity == identity) {
             bail!("required check {identity:?} has no entry in {path} at {t0}");
@@ -50,6 +53,34 @@ fn file_checks(mirror: &Path, t0: &str, path: &str) -> Result<Vec<RosterCheck>> 
     let file: RosterFile =
         toml::from_str(&text).with_context(|| format!("parse {path} at {t0}"))?;
     Ok(file.required_checks)
+}
+
+/// The input paths the service roster declares for `identity`: its entry's
+/// `inputs`, or none when it has no entry, none declared, or any declared
+/// path is not a plain relative file path (a malformed declaration never
+/// widens what may land).
+fn declared_inputs(service: &ServiceRoster, identity: &str) -> Vec<String> {
+    let entry = service
+        .required_checks
+        .iter()
+        .find(|check| check["identity"] == identity);
+    let listed = entry.and_then(|check| check["inputs"].as_array());
+    let paths: Option<Vec<String>> = listed
+        .into_iter()
+        .flatten()
+        .map(|path| path.as_str().filter(|p| plain_path(p)).map(str::to_owned))
+        .collect();
+    paths.unwrap_or_default()
+}
+
+/// True for a relative `/`-separated file path without `.`, `..` or empty
+/// segments, glob characters, backslashes or control characters.
+fn plain_path(path: &str) -> bool {
+    let odd = |c: char| c.is_control() || "\\*?[]{}".contains(c);
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.chars().any(odd)
+        && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
 /// Identities the service requires (its policy's `required_checks`).
@@ -104,6 +135,47 @@ mod tests {
             40
         );
         assert!(at_target(&remote.source, &t0, path, &service(&["other"])).is_err());
+    }
+
+    /// A service roster of one check "tests" with `inputs` as declared.
+    fn declaring(inputs: Value) -> ServiceRoster {
+        ServiceRoster {
+            revision: 3,
+            required_checks: vec![json!({"identity": "tests", "inputs": inputs})],
+        }
+    }
+
+    #[test]
+    fn declared_inputs_come_from_the_service_roster_only() {
+        let remote = remote();
+        commit(&remote.source, ".github/workflows/ci.yml", "on: push\n");
+        let file = format!("{FILE}inputs = [\"from-the-file\"]\n");
+        let t0 = commit(&remote.source, ".agent-coordinator/roster.toml", &file);
+        let path = ".agent-coordinator/roster.toml";
+        let inputs = |service: &ServiceRoster| {
+            let roster = at_target(&remote.source, &t0, path, service).unwrap();
+            roster.checks[0].inputs.clone()
+        };
+        assert_eq!(
+            inputs(&declaring(json!(["Cargo.lock", "a/b.toml"]))),
+            ["Cargo.lock", "a/b.toml"]
+        );
+        assert!(inputs(&service(&["tests"])).is_empty(), "undeclared: none");
+        for bad in [
+            json!(["/abs"]),
+            json!(["../up"]),
+            json!(["*.lock"]),
+            json!(["a//b"]),
+            json!([7]),
+        ] {
+            assert!(inputs(&declaring(bad.clone())).is_empty(), "{bad}");
+        }
+        let roster =
+            at_target(&remote.source, &t0, path, &declaring(json!(["Cargo.lock"]))).unwrap();
+        assert!(
+            roster.json["required_checks"][0].get("inputs").is_none(),
+            "the pinned roster is unchanged"
+        );
     }
 
     #[test]

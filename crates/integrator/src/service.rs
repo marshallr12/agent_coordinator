@@ -278,6 +278,56 @@ pub struct ReportRecord {
     pub allowed: bool,
 }
 
+/// One declared input path with its blob id in R and in X (`None` when the
+/// path is absent there).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InputBlobs {
+    pub path: String,
+    pub r_blob: Option<String>,
+    pub x_blob: Option<String>,
+}
+
+/// A failing check on R the integrator attests as exempt
+/// (`POST …/integrator/exemptions`): its declared inputs are identical in R
+/// and the target tip X, and the check fails on X too (`report_id` names the
+/// target's `target_failing` report).
+#[derive(Debug, Clone, Serialize)]
+pub struct NewExemption {
+    pub result_id: String,
+    pub identity: String,
+    pub check_name: String,
+    pub r: String,
+    pub x: String,
+    pub report_id: String,
+    pub inputs: Vec<InputBlobs>,
+}
+
+/// A passing run of a check on the target tip, which resolves the open
+/// `target_failing` report of that check
+/// (`POST …/integrator/reports/{id}/target-passed`).
+#[derive(Debug, Clone, Serialize)]
+pub struct TargetPassed {
+    pub x: String,
+    pub run_id: i64,
+    pub run_attempt: i64,
+    pub conclusion: String,
+    pub started_at: String,
+}
+
+/// An open report as the list route returns it.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct OpenReport {
+    pub id: String,
+    pub created_at: String,
+    pub details: Value,
+}
+
+/// One page of reports.
+#[derive(Debug, Deserialize)]
+struct ReportPage {
+    items: Vec<OpenReport>,
+}
+
 /// A failure to get an answer from the service: transport, an error status
 /// that is not a coded 403/409 refusal (such as 401 or 500), or an
 /// undecodable reply. It aborts the cycle instead of skipping one subject
@@ -488,6 +538,56 @@ impl Service {
     pub async fn report(&self, project: &str, report: &NewReport) -> Result<Reply<ReportRecord>> {
         let key = format!("report-{}", uuid::Uuid::new_v4());
         self.post(project, "reports", &json!(report), &key).await
+    }
+
+    /// Records that a failing check on R is exempt (declared inputs
+    /// identical to the target's); the service verifies it again before it
+    /// grants push authority. A replay returns the stored record.
+    pub async fn record_exemption(
+        &self,
+        project: &str,
+        exemption: &NewExemption,
+    ) -> Result<Reply<Value>> {
+        let body = json!(exemption);
+        self.post(
+            project,
+            "exemptions",
+            &body,
+            &body_key("exemption", &body, ""),
+        )
+        .await
+    }
+
+    /// The project's open `fix_target` reports, oldest first.
+    pub async fn open_target_reports(&self, project: &str) -> Result<Reply<Vec<OpenReport>>> {
+        let path = format!("/api/v1/projects/{project}/integrator/reports");
+        let query = [("open", "true".into()), ("kind", "fix_target".into())];
+        let response = self
+            .client
+            .get_query(&path, &query, None)
+            .await
+            .map_err(transport)?;
+        let page: Reply<ReportPage> = decode(response)?;
+        Ok(page.map(|page| page.items.into_iter().rev().collect()))
+    }
+
+    /// Tells the service that the report's check passed on the target tip in
+    /// a run that started after the report was created.
+    pub async fn target_passed(
+        &self,
+        project: &str,
+        report: &str,
+        passed: &TargetPassed,
+    ) -> Result<Reply<Value>> {
+        let body = json!(passed);
+        let key = body_key("target-passed", &body, report);
+        self.post(
+            project,
+            &format!("reports/{report}/target-passed"),
+            &body,
+            &key,
+        )
+        .await
     }
 
     /// Records the files of a commit a human shipped to the target, so the

@@ -18,10 +18,14 @@
 //! result attributes. The report names the X result relied on. A check that [`MAX_RERUNS`] reruns leave undecided, or a rerun
 //! request the checks source refuses, skips the subject with a `flaky`
 //! report; a refusal that only means the run is still going waits instead.
+//! A failure that is `target_failing` on a fresh X result is still exempt
+//! when the service roster declares the check's inputs and they are
+//! identical in R and X (`exempt.rs`): R then proceeds.
 //! A cycle polls R's checks once (and X's only for a reproduced failure)
 //! and never waits for a rerun: a requested rerun keeps the gate at
 //! `ChecksPending` until a newer attempt of its run appears and completes.
 use crate::checks::{CheckRun, ChecksSource};
+use crate::exempt::Exempt;
 use crate::flake::{
     Blame, CheckAttempts, MAX_RERUNS, OnTarget, Verdict, blame, latest_attempts, on_target, verdict,
 };
@@ -33,6 +37,18 @@ use serde_json::{Value, json};
 
 /// Checks paired with their verdicts.
 type Judged<'a> = Vec<(&'a CheckAttempts, Verdict)>;
+
+/// What attributing one reproduced failure found.
+enum Found {
+    /// The check passed on X: the candidate broke it; the evidence text.
+    Author(String),
+    /// X's run is going or was rerun; a later cycle decides.
+    Wait,
+    /// Not the author's and not exempt: the reason the subject is skipped.
+    Target(String),
+    /// Exempt: the declared inputs are unchanged and X fails it too.
+    Exempt,
+}
 
 impl<C: ChecksSource> Integrator<C> {
     /// True while a rerun requested for `result` has not produced a newer
@@ -65,11 +81,10 @@ impl<C: ChecksSource> Integrator<C> {
         self.report_flaky(job, result, &undecided, "no_result")
             .await;
         let reproduced = pick(&judged, Verdict::Reproduced);
-        if !reproduced.is_empty() {
-            return self
-                .attribute_reproduced(job, result, &reproduced)
-                .await
-                .map(Some);
+        if !reproduced.is_empty()
+            && let Some(step) = self.attribute_reproduced(job, result, &reproduced).await?
+        {
+            return Ok(Some(step));
         }
         Ok((!undecided.is_empty()).then(|| Step::Blocked(undecided_reason(result, &undecided))))
     }
@@ -152,31 +167,61 @@ impl<C: ChecksSource> Integrator<C> {
 
     /// Blames the author when any reproduced failure passed on X; waits
     /// while X's run is going; otherwise reports target problems and skips.
+    /// `None` when every reproduced failure is exempt (`exempt.rs`) and R
+    /// may proceed.
     async fn attribute_reproduced(
         &mut self,
         job: &Job,
         result: &ResultRecord,
         reproduced: &[&CheckAttempts],
-    ) -> Result<Step> {
+    ) -> Result<Option<Step>> {
         let (mut author, mut target, mut waiting) = (Vec::new(), Vec::new(), false);
         for check in reproduced {
-            let x = self.target_state(job, check).await?;
-            let blamed = match blame(&x) {
-                Blame::Refresh => self.refresh_target(job, result, &x).await?,
-                blamed => blamed,
-            };
-            match blamed {
-                Blame::Author => author.push(author_evidence(job, result, check, &x)),
-                Blame::Wait => waiting = true,
-                blamed => target.push(self.target_failure(job, result, check, &x, blamed).await),
+            match self.attribute_one(job, result, check).await? {
+                Found::Author(evidence) => author.push(evidence),
+                Found::Target(reason) => target.push(reason),
+                Found::Wait => waiting = true,
+                Found::Exempt => {}
             }
         }
         if !author.is_empty() {
-            return self.author_failed(job, result, &author.join("; ")).await;
+            return self
+                .author_failed(job, result, &author.join("; "))
+                .await
+                .map(Some);
         }
-        Ok(match waiting {
-            true => Step::ChecksPending,
-            false => Step::Blocked(target.join("; ")),
+        Ok(match (waiting, target.is_empty()) {
+            (true, _) => Some(Step::ChecksPending),
+            (false, false) => Some(Step::Blocked(target.join("; "))),
+            (false, true) => None,
+        })
+    }
+
+    /// Attributes one reproduced failure from the same check on X. A failure
+    /// that also fails on X is exempt when the check declares inputs that
+    /// are identical in R and X (`exempt.rs`).
+    async fn attribute_one(
+        &mut self,
+        job: &Job,
+        result: &ResultRecord,
+        check: &CheckAttempts,
+    ) -> Result<Found> {
+        let x = self.target_state(job, check).await?;
+        let blamed = match blame(&x) {
+            Blame::Refresh => self.refresh_target(job, result, &x).await?,
+            blamed => blamed,
+        };
+        Ok(match blamed {
+            Blame::Author => Found::Author(author_evidence(job, result, check, &x)),
+            Blame::Wait => Found::Wait,
+            Blame::Target => match self.exempt_failure(job, result, check, &x).await? {
+                Exempt::Yes => Found::Exempt,
+                Exempt::Wait => Found::Wait,
+                Exempt::No => {
+                    Found::Target(self.target_failure(job, result, check, &x, blamed).await)
+                }
+            },
+            blamed => Found::Target(self.target_failure(job, result, check, &x, blamed).await),
         })
     }
 
@@ -224,6 +269,18 @@ impl<C: ChecksSource> Integrator<C> {
         let OnTarget::Stale { latest, .. } = x else {
             return Ok(Blame::Wait);
         };
+        self.rerun_target(job, result, latest).await
+    }
+
+    /// Reruns X's job `latest` once per attempt, at most [`MAX_RERUNS`]
+    /// times per result, and waits for the new attempt (see
+    /// [`Self::refresh_target`]).
+    pub(crate) async fn rerun_target(
+        &mut self,
+        job: &Job,
+        result: &ResultRecord,
+        latest: &CheckRun,
+    ) -> Result<Blame> {
         let rerun = self.state.rerun_of(&result.id, latest.run_id);
         if rerun.count > 0 && rerun.attempt >= latest.run_attempt {
             return Ok(Blame::Wait);
@@ -316,7 +373,7 @@ fn result_label(run: &CheckRun) -> String {
 
 /// The X result an attribution relied on, for report details: the run id,
 /// attempt, conclusion and completion time, and whether it is a stale pass.
-fn target_result(x: &OnTarget) -> Value {
+pub(crate) fn target_result(x: &OnTarget) -> Value {
     let (run, stale) = match x {
         OnTarget::Passed(run) | OnTarget::Failed(run) => (run, false),
         OnTarget::Stale { passed, .. } => (passed, true),
@@ -389,7 +446,7 @@ fn flaky_report(
 
 /// The `fix_target` report for one check on target tip X, keyed by target,
 /// X, verdict and check so every subject blocked on it shares one report.
-fn fix_target_report(
+pub(crate) fn fix_target_report(
     job: &Job,
     result: &ResultRecord,
     check: &CheckAttempts,

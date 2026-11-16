@@ -239,10 +239,12 @@ async fn check_standing(
     if PASSING.contains(&run.get::<String, _>("conclusion").as_str()) {
         return Ok(CheckStanding::Passed(entry(Value::Null)));
     }
-    Ok(match crate::integrator_fix::exemption_for(c, p, result, check).await? {
-        Ok(exemption) => CheckStanding::Passed(entry(exemption.value())),
-        Err(reason) => CheckStanding::Failed(reason),
-    })
+    Ok(
+        match crate::integrator_fix::exemption_for(c, p, result, check).await? {
+            Ok(exemption) => CheckStanding::Passed(entry(exemption.value())),
+            Err(reason) => CheckStanding::Failed(reason),
+        },
+    )
 }
 
 /// The deciding run of every roster check that passed (or whose failure is

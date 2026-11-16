@@ -279,8 +279,15 @@ async fn target_passed(
         input.run_attempt,
         input.started_at
     );
-    sqlx::query("UPDATE integrator_reports SET resolved_at=?,resolved_by=?,resolution_note=? WHERE id=?")
-        .bind(m.now).bind(&m.actor.id).bind(&note).bind(&id).execute(&mut *m.tx).await?;
+    sqlx::query(
+        "UPDATE integrator_reports SET resolved_at=?,resolved_by=?,resolution_note=? WHERE id=?",
+    )
+    .bind(m.now)
+    .bind(&m.actor.id)
+    .bind(&note)
+    .bind(&id)
+    .execute(&mut *m.tx)
+    .await?;
     let value = json!({"id": id, "resolved": true, "resolution_note": note});
     Ok(response(
         m.finish(value, Some(&p), "integrator.report_auto_resolved", &id)
@@ -406,8 +413,13 @@ async fn report_refusal(
     p: &str,
     (report, check_name, x): (&str, &str, &str),
 ) -> Result<Option<&'static str>, AppError> {
-    let row = sqlx::query("SELECT kind,details_json,resolved_at FROM integrator_reports WHERE id=? AND project_id=?")
-        .bind(report).bind(p).fetch_optional(&mut *c).await?;
+    let row = sqlx::query(
+        "SELECT kind,details_json,resolved_at FROM integrator_reports WHERE id=? AND project_id=?",
+    )
+    .bind(report)
+    .bind(p)
+    .fetch_optional(&mut *c)
+    .await?;
     let Some(row) = row else {
         return Ok(Some("the target report does not exist"));
     };
