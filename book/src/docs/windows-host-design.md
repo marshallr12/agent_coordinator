@@ -147,8 +147,9 @@ candidate runner.
 ### A POSIX shell that starts in an AppContainer, 2026-11-16
 
 Task `d8ae17f5` looked for a shell that does start, on MiniAir, through the
-same launcher. Two shells were tried. Nothing else that is a POSIX shell was
-on the host: Git for Windows also ships `dash.exe` (SHA-256
+same launcher. Two shells were tried. A look at `PATH` and at the usual places (Git for
+Windows, scoop, chocolatey, MSYS2, Cygwin) found no other POSIX shell on the
+host, except that Git for Windows also ships `dash.exe` (SHA-256
 `a5c7d5d3fd27a5ad356e275f200e49ca277a066001f58dfd709dbc615007e1e6`), which
 uses the same `msys-2.0.dll` and was **not tried**.
 
@@ -163,20 +164,29 @@ approval of that exact file, and its hash matches the publisher's
 `SHA256SUM`. The publisher's signature was not checked. It is one program
 with no runtime library of its own, and it runs the shell when its file is
 named `sh.exe`. It is kept outside the repository; the tests find it through
-`AGENTC_TEST_POSIX_SHELL`, refuse a file with another hash, and say that
-nothing was checked where the variable is unset.
+`AGENTC_TEST_POSIX_SHELL`, read it once, refuse bytes with another hash and
+run only the bytes they checked. Where the variable is unset they say on
+standard error that nothing was checked, and the test harness still counts
+them as passed. The pin is the tests' own: the runner starts whatever shell
+its driver names, and nothing in the product checks a hash yet.
 
 **What ran.** `the_pinned_shell_runs_in_an_appcontainer` in
 `crates/supervisor/tests/windows_candidate.rs` copies the file as `sh.exe`
 into a directory only the launch's package may read, and starts it with
 `-c` and this script, once in a full and once in a less-privileged
-AppContainer (`registryRead`, no network capability):
+AppContainer (`registryRead`, no network capability). The launch sets
+`LOCALAPPDATA` and `TMP` to its working directory, sets no `TEMP`, and sets
+`PROBE_KEPT` to `as given`:
 
 ```text
 echo started; echo abc | tr a-c A-C | cat; (exit 3); echo "sub $?";
 x=$(echo inner | sed s/inner/captured/); echo "$x";
 (sleep 1; echo late > bg) & echo early; wait; echo "waited $?"; cat bg;
-case "$TMP" in *\\AC\\Temp) echo rewritten;; *) echo kept;; esac;
+case "$LOCALAPPDATA" in *\\Packages\\*\\AC) echo local-replaced;; *) echo local-kept;; esac;
+case "$TMP" in *\\AC\\Temp) echo tmp-replaced;; *) echo tmp-kept;; esac;
+case "$TEMP" in *\\AC\\Temp) echo temp-added;; *) echo "temp=$TEMP";; esac;
+[ -d "$TMP" ] && echo temp-directory || echo no-temp-directory;
+echo "other=$PROBE_KEPT";
 export TMP=C:/zz; sh -c 'echo "child=$TMP"'; cmd /c "echo cmd=%TMP%"; exit 7
 ```
 
@@ -190,7 +200,11 @@ captured
 early
 waited 0
 late
-rewritten
+local-replaced
+tmp-replaced
+temp-added
+no-temp-directory
+other=as given
 child=C:/zz
 cmd=C:/zz
 ```
@@ -205,8 +219,10 @@ is waited for all work there, and a program that is not the shell
   does not get the `LOCALAPPDATA`, `TEMP` and `TMP` it was given. It gets
   `<the given LOCALAPPDATA>\Packages\<profile>\AC` and that directory's
   `Temp`, which nothing makes, and `TEMP` appears even where none was set.
-  The other variables arrive as given. A value the shell exports does reach
-  its children. Step 5c's "exact environment" was therefore never exact for
+  The probe asserts each of these. A variable Windows has no use for arrived
+  as given, and so did `PATH` and `SystemRoot` in the one full listing that
+  was read by hand and not kept. A value the shell exports does reach its
+  children. Step 5c's "exact environment" was therefore never exact for
   these three; no command had run to show it. The candidate's command file
   now sets the three again before the command.
 - **The job is not empty the moment the shell ends.** It still counts a
@@ -229,7 +245,8 @@ status return, the environment is the candidate's own and holds no
 credential of the runner, a background process is reported and ended, the
 candidate reads the source and cannot write it, cannot read the reviewer's
 control directory, a command past its limit is stopped and the third is
-refused, and cleanup leaves nothing. As before, they run in a new logon
+refused, and cleanup removes the candidate's two trees, the source and the
+reviewer's working directory. As before, they run in a new logon
 session of the developer's account and are a development check, not
 acceptance evidence.
 
@@ -242,7 +259,7 @@ acceptance evidence.
 | --- | --- |
 | Whether the harness accepts it | Yes. With `CLAUDE_CODE_GIT_BASH_PATH` naming a copy of the file called `bash.exe`, the harness started and ran its Bash tool through it (`uname -s` in the prefix said `Windows_NT`). Another file name was not tried |
 | How the prefix is called | As under Git Bash: one argument, the same wrapped command, with the snapshot and the cwd file still written as `/c/Users/...` |
-| The wrapped command run as it is | **Fails.** A prefix that ran its argument with `sh -c` ended with status 2 and no output. Run piece by piece, `source <a file that is not there> 2>/dev/null \|\| true` ends this shell with status 2, as POSIX allows for a special built-in, and the shell cannot open a `/c/...` path at all, so neither the snapshot nor the cwd file can work. `\builtin` is not found, which the form already tolerates. The snapshot file named in that run did not exist afterwards; whether the harness wrote and removed it was not observed |
+| The wrapped command run as it is | **Fails.** A prefix that ran its argument with `sh -c` ended with status 2 and no output. Run piece by piece, `source <a file that is not there> 2>/dev/null \|\| true` ends this shell with status 2, as POSIX allows for a special built-in, and the shell opens no `/c/...` path, to read or to write, so neither the snapshot nor the cwd file can work. `\builtin` is not found, which the form already tolerates. The snapshot file named in a later run did not exist once that run had ended; whether the harness wrote and removed it was not observed |
 | The command through a prefix that does what the shim does | **Works.** A prefix that kept only the eval'd command, ran that in a fresh shell and wrote the cwd file itself returned `MARKER-42` for `echo marker-$((6*7)) \| tr a-z A-Z`, status 5 and `sub` for `(echo sub; exit 5)`, and ran a `run_in_background` call whose file appeared. A `cd ..` in one call did not carry to the next, since the prefix wrote its own directory |
 
 What this settles: the recorded command form reaches the prefix unchanged
@@ -2137,7 +2154,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
-| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15; task `d8ae17f5` qualifies a shell first. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Steps 5d to 5f are not done, no contained Claude Code launch has run, and every Claude launch on Windows is still refused |
+| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Steps 5d to 5f are not done, no contained Claude Code launch has run, and every Claude launch on Windows is still refused |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
 

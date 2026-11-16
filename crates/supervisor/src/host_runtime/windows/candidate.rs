@@ -259,6 +259,7 @@ impl Candidate {
             .transpose()?;
         // The job still counts a process for a moment after the shell
         // ended, so "left running" is what has not gone after a short wait.
+        // A count Windows will not give reads as left running, the safe way.
         let left = ended && !job.empties(SETTLE);
         job.terminate(EMPTY_PATIENCE);
         Ok((status, left))

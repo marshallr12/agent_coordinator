@@ -244,28 +244,34 @@ const SHELL: &str = "AGENTC_TEST_POSIX_SHELL";
 /// build `busybox-w64u-FRP-6354-g5f09fb446.exe`.
 const SHELL_SHA256: &str = "36b266923fc5765b42f5f981319f39568498fba60b53ccf26e8fc1e575e2a9a9";
 
-/// The pinned shell's file, or `None` where [`SHELL`] is unset. A file with
-/// another hash is never run.
-fn pinned_shell() -> Option<PathBuf> {
+/// The pinned shell's bytes, or `None` where [`SHELL`] is unset. A file with
+/// another hash is never run: callers write these bytes, not the file again.
+fn pinned_shell() -> Option<Vec<u8>> {
     use sha2::{Digest, Sha256};
     let path = PathBuf::from(std::env::var_os(SHELL)?);
     let bytes = std::fs::read(&path).unwrap();
     let hash = hex::encode(Sha256::digest(&bytes));
     assert_eq!(hash, SHELL_SHA256, "{} is not the pin", path.display());
-    Some(path)
+    Some(bytes)
 }
 
 /// What the shell probe runs: a pipeline, a subshell, a command
 /// substitution and a background job that is waited for. Then what Windows
-/// made of the `TMP` the launch set, and whether a value the shell exports
-/// reaches a child shell and a program that is not the shell.
+/// made of the variables the launch set (`LOCALAPPDATA` and `TMP` given,
+/// `TEMP` not given, `PROBE_KEPT` as a variable Windows has no use for), and
+/// whether a value the shell exports reaches a child shell and a program
+/// that is not the shell.
 const SHELL_PROBE: &str = "echo started; echo abc | tr a-c A-C | cat; (exit 3); echo \"sub $?\"; \
      x=$(echo inner | sed s/inner/captured/); echo \"$x\"; \
      (sleep 1; echo late > bg) & echo early; wait; echo \"waited $?\"; cat bg; \
-     case \"$TMP\" in *\\\\AC\\\\Temp) echo rewritten;; *) echo kept;; esac; \
+     case \"$LOCALAPPDATA\" in *\\\\Packages\\\\*\\\\AC) echo local-replaced;; *) echo local-kept;; esac; \
+     case \"$TMP\" in *\\\\AC\\\\Temp) echo tmp-replaced;; *) echo tmp-kept;; esac; \
+     case \"$TEMP\" in *\\\\AC\\\\Temp) echo temp-added;; *) echo \"temp=$TEMP\";; esac; \
+     [ -d \"$TMP\" ] && echo temp-directory || echo no-temp-directory; \
+     echo \"other=$PROBE_KEPT\"; \
      export TMP=C:/zz; sh -c 'echo \"child=$TMP\"'; cmd /c \"echo cmd=%TMP%\"; exit 7";
 /// What it must print, in this order.
-const SHELL_PROBE_SAYS: [&str; 10] = [
+const SHELL_PROBE_SAYS: [&str; 14] = [
     "started",
     "ABC",
     "sub 3",
@@ -273,7 +279,11 @@ const SHELL_PROBE_SAYS: [&str; 10] = [
     "early",
     "waited 0",
     "late",
-    "rewritten",
+    "local-replaced",
+    "tmp-replaced",
+    "temp-added",
+    "no-temp-directory",
+    "other=as given",
     "child=C:/zz",
     "cmd=C:/zz",
 ];
@@ -285,8 +295,31 @@ fn the_pinned_shell_runs_in_an_appcontainer() {
     with_the_pinned_shell("shell_probe");
 }
 
-/// Runs [`SHELL_PROBE`] with the pinned shell, copied as `sh.exe` into a
-/// tool directory of a fresh launch, `less` privileged or not.
+/// A tool directory only `package` may read besides the owner, holding the
+/// pinned shell as `sh.exe`.
+fn shell_tools(tools: &Path, package: &str) {
+    let owner = token::current_user_sid().unwrap();
+    let list = sddl::shared_source(&owner, &[package]).unwrap();
+    create_directory(tools, &list).unwrap();
+    std::fs::write(tools.join("sh.exe"), pinned_shell().unwrap()).unwrap();
+}
+
+/// The probe's environment: `LOCALAPPDATA` and `TMP` in `work`, no `TEMP`.
+fn probe_environment(tools: &Path, work: &Path) -> std::collections::BTreeMap<String, String> {
+    let root = std::env::var("SystemRoot").unwrap();
+    let work = work.display().to_string();
+    let pairs = [
+        ("PATH", format!("{};{root}\\System32", tools.display())),
+        ("SystemRoot", root),
+        ("LOCALAPPDATA", work.clone()),
+        ("TMP", work.replace('\\', "/")),
+        ("PROBE_KEPT", "as given".to_owned()),
+    ];
+    pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
+}
+
+/// Runs [`SHELL_PROBE`] with the pinned shell in a fresh launch, `less`
+/// privileged or not.
 fn shell_probe_one(trees: &Trees, launcher: &mut Launcher, less: bool) -> String {
     use agentc_supervisor::host_runtime::windows::process::Command;
     let id = format!("shell-{less}");
@@ -294,38 +327,25 @@ fn shell_probe_one(trees: &Trees, launcher: &mut Launcher, less: bool) -> String
     spec.less_privileged = less;
     let prepared = launcher.prepare(&id, spec.clone()).unwrap();
     let tools = trees.at(&format!("shell-tools-{less}"));
-    let owner = token::current_user_sid().unwrap();
-    let list = sddl::shared_source(&owner, &[&prepared.package_sid]).unwrap();
-    create_directory(&tools, &list).unwrap();
-    std::fs::copy(pinned_shell().unwrap(), tools.join("sh.exe")).unwrap();
-    let root = std::env::var("SystemRoot").unwrap();
-    let work = spec.work.display().to_string();
-    let environment = [
-        ("SystemRoot", root.clone()),
-        ("LOCALAPPDATA", work.clone()),
-        ("TMP", work.replace('\\', "/")),
-        ("PATH", format!("{};{root}\\System32", tools.display())),
-    ];
+    shell_tools(&tools, &prepared.package_sid);
+    let shell = tools.join("sh.exe").display().to_string();
     let log = trees.at(&format!("shell-{less}.log"));
     let command = Command {
-        argv: vec![
-            tools.join("sh.exe").display().to_string(),
-            "-c".into(),
-            SHELL_PROBE.into(),
-        ],
-        directory: spec.work.clone(),
-        environment: environment
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v))
-            .collect(),
+        argv: vec![shell, "-c".into(), SHELL_PROBE.into()],
+        environment: probe_environment(&tools, &spec.work),
+        directory: spec.work,
         output: log.clone(),
     };
     launcher.start(&id, &command, &[]).unwrap();
-    let seen = launcher
-        .observe(&id, std::time::Duration::from_secs(30))
-        .unwrap();
+    let patience = std::time::Duration::from_secs(30);
+    let seen = launcher.observe(&id, patience).unwrap();
     launcher.cleanup(&id).unwrap();
-    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    probe_result(seen, &log, less)
+}
+
+/// Checks the probe's status and lines and returns them.
+fn probe_result(seen: Seen, log: &Path, less: bool) -> String {
+    let said = std::fs::read_to_string(log).unwrap_or_default();
     assert_eq!(seen, Seen::Exited(7), "less={less}: {said}");
     let lines: Vec<&str> = said.lines().map(str::trim).collect();
     assert_eq!(lines, SHELL_PROBE_SAYS, "less={less}: {said}");
@@ -415,10 +435,7 @@ impl Trees {
 /// Makes the tool directory, readable by `package` alone besides the
 /// owner, and copies the shell into it.
 fn tools(trees: &Trees, package: &str) {
-    let owner = token::current_user_sid().unwrap();
-    let list = sddl::shared_source(&owner, &[package]).unwrap();
-    create_directory(&trees.at("tools"), &list).unwrap();
-    std::fs::copy(pinned_shell().unwrap(), trees.at("tools").join("sh.exe")).unwrap();
+    shell_tools(&trees.at("tools"), package);
 }
 
 /// One request to `runner` and its answer line.
