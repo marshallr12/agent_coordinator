@@ -8,10 +8,11 @@
 //! elevated), and the child does the work. This is a development check of
 //! the mechanism, not acceptance evidence.
 //!
-//! The candidate's shell is the pinned Git Bash's `bash.exe` and
-//! `msys-2.0.dll`, copied into a tool directory that only the candidate's
-//! package may read: a less-privileged token reads nothing under
-//! `Program Files`.
+//! The candidate's shell is the pinned busybox-w32 (see [`SHELL`]), copied
+//! as `sh.exe` into a tool directory that only the candidate's package may
+//! read: a less-privileged token reads nothing under `Program Files`. Git
+//! Bash, the shell first tried, does not start in an AppContainer, which
+//! `git_bash_does_not_start_in_an_appcontainer` keeps asserting.
 #![cfg(windows)]
 
 use agentc_supervisor::host_runtime::windows::candidate::{
@@ -128,21 +129,24 @@ fn in_a_new_session(role: &str) {
     eprintln!("{role}: {said}");
 }
 
-/// Why the two candidate tests do not run: see
-/// [`git_bash_does_not_start_in_an_appcontainer`].
-const NO_SHELL: &str = "needs a shell that starts in an AppContainer; Git Bash does not";
-
-#[test]
-#[ignore = "needs a shell that starts in an AppContainer; Git Bash does not"]
-fn a_reviewers_candidate_runs_commands_in_its_own_package_and_job() {
-    eprintln!("{NO_SHELL}");
-    in_a_new_session("commands");
+/// Runs the child as `role` where the pinned shell is installed, and says
+/// so where it is not: nothing was checked there.
+fn with_the_pinned_shell(role: &str) {
+    if pinned_shell().is_none() {
+        eprintln!("{SHELL} is unset; {role} was not checked");
+        return;
+    }
+    in_a_new_session(role);
 }
 
 #[test]
-#[ignore = "needs a shell that starts in an AppContainer; Git Bash does not"]
+fn a_reviewers_candidate_runs_commands_in_its_own_package_and_job() {
+    with_the_pinned_shell("commands");
+}
+
+#[test]
 fn a_candidate_command_past_its_time_limit_is_stopped_and_repeats_are_refused() {
-    in_a_new_session("time_limit");
+    with_the_pinned_shell("time_limit");
 }
 
 /// The blocker found on 2026-11-14: Git Bash's MSYS2 runtime creates its
@@ -278,11 +282,7 @@ const SHELL_PROBE_SAYS: [&str; 10] = [
 /// and runs pipelines, subshells and background jobs there.
 #[test]
 fn the_pinned_shell_runs_in_an_appcontainer() {
-    if pinned_shell().is_none() {
-        eprintln!("{SHELL} is unset; the pinned shell was not checked");
-        return;
-    }
-    in_a_new_session("shell_probe");
+    with_the_pinned_shell("shell_probe");
 }
 
 /// Runs [`SHELL_PROBE`] with the pinned shell, copied as `sh.exe` into a
@@ -406,7 +406,7 @@ impl Trees {
         CandidateSpec {
             launch: self.launch("candidate"),
             source: self.at("source"),
-            bash: self.at("tools").join("bash.exe"),
+            shell: self.at("tools").join("sh.exe"),
             path: vec![self.at("tools"), system.into()],
         }
     }
@@ -418,9 +418,7 @@ fn tools(trees: &Trees, package: &str) {
     let owner = token::current_user_sid().unwrap();
     let list = sddl::shared_source(&owner, &[package]).unwrap();
     create_directory(&trees.at("tools"), &list).unwrap();
-    for file in ["bash.exe", "msys-2.0.dll"] {
-        std::fs::copy(Path::new(GIT_BIN).join(file), trees.at("tools").join(file)).unwrap();
-    }
+    std::fs::copy(pinned_shell().unwrap(), trees.at("tools").join("sh.exe")).unwrap();
 }
 
 /// One request to `runner` and its answer line.
@@ -487,23 +485,22 @@ fn run_basics(candidate: &candidate::Candidate, trees: &Trees) -> String {
         text(&call)
     );
     assert_eq!((call.truncated, call.note.as_deref()), (false, None));
-    // Git Bash shows Windows paths in its own form, so only the tree is
-    // compared; the credential the runner holds must be empty.
+    // The variables are the candidate's own, the three Windows replaced
+    // among them; the credential the runner holds must be empty.
     let call = candidate
-        .run("echo \"[$HOME][$ANTHROPIC_API_KEY]\"; env")
+        .run("echo \"[$HOME][$TEMP][$TMP][$LOCALAPPDATA][$ANTHROPIC_API_KEY]\"; env")
         .unwrap();
     let shown = text(&call);
-    assert!(
-        shown.contains("candidate-work/home]") && shown.contains("[]"),
-        "{shown}"
-    );
+    let work = trees.at("candidate-work").display().to_string();
+    let own = format!(r"[{work}\home][{work}\tmp][{work}\tmp][{work}\local][]");
+    assert!(shown.contains(&own), "{shown}");
     assert!(
         !shown.contains(SYNTHETIC),
         "the credential reached the candidate"
     );
     assert!(trees.at("candidate-work").exists());
     let call = candidate
-        .run("bash --noprofile --norc -c 'while :; do :; done' & exit 0")
+        .run("sh -c 'while :; do :; done' & exit 0")
         .unwrap();
     assert_eq!(call.status, 0, "{}", text(&call));
     assert_eq!(call.note.as_deref(), Some(LEFT_RUNNING), "{}", text(&call));

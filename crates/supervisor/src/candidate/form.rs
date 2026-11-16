@@ -179,7 +179,7 @@ fn harness_layout(name: &str) -> bool {
     }
 }
 
-/// What the candidate's Git Bash runs with `-c`: the harness's command and
+/// What the candidate's shell runs: the harness's command and
 /// nothing of the reviewer's, with standard input closed as the harness
 /// asked. The candidate's directory and environment are the runner's.
 pub fn candidate_script(command: &str) -> String {
@@ -187,7 +187,7 @@ pub fn candidate_script(command: &str) -> String {
 }
 
 /// `text` as one single-quoted POSIX shell word.
-fn single_quoted(text: &str) -> String {
+pub fn single_quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 

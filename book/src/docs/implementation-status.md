@@ -187,11 +187,15 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   runner. On Linux the record gives the answers it gave before. On Windows it
   admits a Claude reviewer only for the recorded build, with only routed
   tools and a ready candidate runner, but nothing calls it there and no
-  Windows reviewer can launch. The phase is **blocked**:
-  [Git Bash does not start in an AppContainer](windows-host-design.md#git-bash-does-not-start-in-an-appcontainer-2026-11-14),
-  so neither the candidate nor a contained Claude Code launch has a working
-  shell, and the candidate's native tests have never passed. Phase 5 closes
-  there; task `d8ae17f5` looks for a shell that starts contained.
+  Windows reviewer can launch. The phase closed **blocked**:
+  [Git Bash does not start in an AppContainer](windows-host-design.md#git-bash-does-not-start-in-an-appcontainer-2026-11-14).
+  Task `d8ae17f5` then found that a pinned busybox-w32 shell
+  [starts there](windows-host-design.md#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16)
+  and that native Claude Code 2.1.325 accepts it behind a prefix that does
+  what the proposed shim does, observed uncontained. With that shell the
+  candidate's native tests pass on MiniAir. The shim, the candidate pipe's
+  threads, the fixture checks and a contained harness run are not done, so
+  every Claude launch on Windows is still refused.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
