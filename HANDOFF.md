@@ -4,7 +4,40 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
+## Current resume point — P6 `d513bc21` DONE as a completed failed evaluation: second NO-GO (2026-11-16 20:20 UTC)
+
+The window `2026-11-02T16:50:00Z` → `2026-11-16T16:50:00Z` closed. P6 `d513bc21` was re-admitted by
+the owner (revision 6), claimed (attempt `1e5dae23`, gen 20), audited, submitted and approved. Done
+means the evaluation ran and its metrics are recorded; it is **not** a readiness pass.
+
+- **Result (NO-GO):** met — 20 human-origin tasks Done, digest 14 runs at one per UTC day, mxmini
+  canaries 14 ok. Failed — median creation→Done **56.77 h** vs 4.12 h (0 of 20 within target);
+  HRI lower bound 3 requires-human `fix_target` reports / 45 finished (`71bf35bf`, `7fda3475` still
+  open, `105baadb`); 4 owner pushes to main vs 2 in the prior 14 days. oracle-1 canaries 12 ok,
+  1 timeout, no row 11-04.
+- **Main latency cause:** "Audit locked dependencies" failing on main blocked every landing from
+  window start until the owner pushed `d35fc81d` at 2026-11-04T02:56Z.
+- **Observer was useless:** 1 of 1346 cron samples complete (`authentication_required` in cron).
+  The audit was rebuilt from a read-only production DB snapshot (19:32:16Z, event seq 72278), the
+  oracle-1 journal and the GitHub branch-activity API (which counts real pushes, uncapped).
+- **Evidence:** `~/.local/share/agent-coordinator-autonomy/p6-final-20261116/` (REPORT.md,
+  metrics.json, scripts); artifact `0d3b23cf` (sha256 `a0359760…`, job `c8474895`).
+- **Decisions (owner recorded all in the dashboard; agent prefilled):** `bb9bf99f` Go (gen 7);
+  `b2d5ae10` gen 3 "Keep open and rerun", then gen 4 **"Accept failed evaluation for review"**.
+  Any task-revision change makes both stale again.
+- **Submission** `e6ec1602` (general), review activity `e6d9dc1f`, **approved 20:15:49Z** by
+  oracle-1's supervised reviewer `oracle-1-verdict` (distinct launch) with advisory findings only.
+  It could not open the artifact, database or journal from its sandbox, so the metric values
+  were taken from the submission and not independently recomputed. A local review subagent
+  (`evidence-reviewer`) was spawned but found the activity already claimed and verified nothing.
+- **Host state:** mxmini quiet-hours cron restored byte-for-byte at 19:28:43Z (claims only
+  22:00–07:00 local again); observer crontab line removed.
+- **Open:** report `7fda3475` unresolved; digest shows a stalled queue and 3 stalled tasks
+  (`d2ca0225`, `7011c55f`; P6 itself was the third). Worktrees `ac-d513-p6-{audit,rerun,final}`
+  and their local branches are removed (clean, merged, no remote branches). A third window, if
+  wanted, should be a new task with a corrected latency measure.
+
+## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
 **Window:** `2026-11-02T16:50:00Z` → `2026-11-16T16:50:00Z` (14×86400 s), pinned in
 `~/.local/share/agent-coordinator-autonomy/p6-repair-20261023/window.json` (baseline
