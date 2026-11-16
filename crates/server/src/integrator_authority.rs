@@ -49,8 +49,8 @@ pub fn routes() -> Router<AppState> {
 /// One required check in the roster the integrator read from T0.
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct RosterCheck {
-    identity: String,
-    check_name: String,
+    pub identity: String,
+    pub check_name: String,
     workflow_path: String,
     workflow_blob: String,
 }
@@ -205,21 +205,66 @@ pub(crate) async fn failure_records(
     Ok(records)
 }
 
-/// The deciding success run of every roster check, or a refusal naming the
-/// pending and failed ones.
+/// What one roster check contributes to push authority.
+enum CheckStanding {
+    /// No deciding receipt yet.
+    Pending,
+    /// The deciding run passed, or the failure is exempt: the entry for
+    /// `deciding_runs`.
+    Passed(Value),
+    /// The deciding run failed and no verified exemption covers it; carries
+    /// the reason a recorded exemption was refused, if one was recorded.
+    Failed(Option<&'static str>),
+}
+
+/// Judges one roster check on `result` from its deciding run. A failure
+/// passes only under an exemption the service verifies again itself
+/// (`integrator_fix::verify`); a recorded exemption it refuses is reported.
+async fn check_standing(
+    c: &mut SqliteConnection,
+    p: &str,
+    result: &SqliteRow,
+    check: &RosterCheck,
+) -> Result<CheckStanding, AppError> {
+    let id: String = result.get("id");
+    let Some(run) = deciding_run(c, &id, check).await? else {
+        return Ok(CheckStanding::Pending);
+    };
+    let entry = |extra: Value| {
+        let mut entry = json!({"identity": check.identity, "check_name": check.check_name,
+            "run_id": run.get::<i64, _>("run_id"), "run_attempt": run.get::<i64, _>("run_attempt")});
+        entry["exemption"] = extra;
+        entry
+    };
+    if PASSING.contains(&run.get::<String, _>("conclusion").as_str()) {
+        return Ok(CheckStanding::Passed(entry(Value::Null)));
+    }
+    Ok(match crate::integrator_fix::exemption_for(c, p, result, check).await? {
+        Ok(exemption) => CheckStanding::Passed(entry(exemption.value())),
+        Err(reason) => CheckStanding::Failed(reason),
+    })
+}
+
+/// The deciding run of every roster check that passed (or whose failure is
+/// exempt), or a refusal naming the pending and failed ones.
 async fn deciding_runs(
     c: &mut SqliteConnection,
-    result: &str,
+    p: &str,
+    result: &SqliteRow,
     roster: &[RosterCheck],
 ) -> Result<Vec<Value>, AppError> {
     let (mut passed, mut pending, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+    let mut refused = Vec::new();
     for check in roster {
-        match deciding_run(c, result, check).await? {
-            None => pending.push(check.identity.clone()),
-            Some(run) if PASSING.contains(&run.get::<String, _>("conclusion").as_str()) => passed.push(json!({
-                "identity": check.identity, "check_name": check.check_name,
-                "run_id": run.get::<i64, _>("run_id"), "run_attempt": run.get::<i64, _>("run_attempt")})),
-            Some(_) => failed.push(check.identity.clone()),
+        match check_standing(c, p, result, check).await? {
+            CheckStanding::Pending => pending.push(check.identity.clone()),
+            CheckStanding::Passed(entry) => passed.push(entry),
+            CheckStanding::Failed(reason) => {
+                failed.push(check.identity.clone());
+                if let Some(reason) = reason {
+                    refused.push(json!({"identity": check.identity, "reason": reason}));
+                }
+            }
         }
     }
     if pending.is_empty() && failed.is_empty() {
@@ -227,9 +272,9 @@ async fn deciding_runs(
     }
     Err(AppError::conflict(
         "checks_not_passed",
-        "Every roster check needs a deciding success receipt on R.",
+        "Every roster check needs a deciding success receipt on R, or a verified exemption.",
     )
-    .with_details(json!({"pending": pending, "failed": failed})))
+    .with_details(json!({"pending": pending, "failed": failed, "exemption_refused": refused})))
 }
 
 /// Submissions of other tasks whose candidate commit, or whose recorded
@@ -479,7 +524,7 @@ async fn judge(m: &mut Mutation, p: &str, id: &str) -> Result<(Judged, Vec<Value
     let subject = authority_subject(&mut m.tx, p, &result).await?;
     let roster = parse_roster(&serde_json::from_str(result.get("roster_json"))?)?;
     ensure_protected(&roster, &protected_ids(&mut m.tx, p).await?)?;
-    let runs = deciding_runs(&mut m.tx, id, &roster).await?;
+    let runs = deciding_runs(&mut m.tx, p, &result, &roster).await?;
     let range: String = result.get("landing_range_json");
     let foreign = foreign_submissions(&mut m.tx, p, subject.get("task_id"), &range).await?;
     ensure_not_stacked(&mut m.tx, &foreign).await?;

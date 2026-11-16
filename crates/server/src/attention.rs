@@ -1177,6 +1177,7 @@ async fn digest(
             "proceeds_at": timestamp(row.get::<i64, _>("created_at") + DECISION_TIMEOUT_MS),
         })).collect::<Vec<_>>(),
         "held_agent_tasks": held,
+        "exempted_landings": crate::integrator_fix::exemptions_since(&mut c, &project, since, DIGEST_LIMIT).await?,
         "agent_task_weekly_budget": {
             "limit": state.config.agent_task_weekly_budget,
             "admitted_this_week": crate::admission::admitted_in_week(

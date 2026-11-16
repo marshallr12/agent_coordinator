@@ -7,6 +7,112 @@ pub struct RequiredCheck {
     pub identity: String,
     pub version: String,
     pub environment: String,
+    /// The repository paths that are this check's only inputs. Optional:
+    /// absent or empty means the check declares none, and nothing about it
+    /// changes. When declared, a candidate whose paths are byte-identical to
+    /// the target's may land while the target itself fails the check (see
+    /// the operator guide, "Checks that read only declared inputs"). Validate
+    /// with [`validate_check_inputs`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
+}
+
+/// The most input paths one required check may declare.
+pub const MAX_CHECK_INPUTS: usize = 20;
+/// The longest declared input path in bytes.
+pub const MAX_CHECK_INPUT_BYTES: usize = 300;
+
+/// Refuses declared check inputs that are not plain repository file paths:
+/// each must be relative, `/`-separated, free of `.` and `..` segments,
+/// empty segments, backslashes, control characters and glob characters
+/// (`*`, `?`, `[`, `]`, `{`, `}`; globs are not supported), and unique. An
+/// empty list is valid and means no declaration.
+pub fn validate_check_inputs(inputs: &[String]) -> Result<(), String> {
+    if inputs.len() > MAX_CHECK_INPUTS {
+        return Err(format!(
+            "A check declares at most {MAX_CHECK_INPUTS} input paths."
+        ));
+    }
+    for (index, path) in inputs.iter().enumerate() {
+        validate_input_path(path)?;
+        if inputs[..index].contains(path) {
+            return Err(format!("Input path {path:?} is declared twice."));
+        }
+    }
+    Ok(())
+}
+
+/// Checks one declared input path (see [`validate_check_inputs`]).
+fn validate_input_path(path: &str) -> Result<(), String> {
+    let bad = |why: &str| Err(format!("Input path {path:?} is not allowed: {why}."));
+    if path.is_empty() || path.len() > MAX_CHECK_INPUT_BYTES {
+        return bad("it must have 1 to 300 bytes");
+    }
+    if path.starts_with('/') || path.ends_with('/') {
+        return bad("it must be a relative file path without a leading or trailing slash");
+    }
+    if path.chars().any(|c| c.is_control() || c == '\\') {
+        return bad("it must not contain control characters or backslashes");
+    }
+    if path.chars().any(|c| "*?[]{}".contains(c)) {
+        return bad("globs are not supported");
+    }
+    if path.split('/').any(|part| matches!(part, "" | "." | "..")) {
+        return bad("it must not contain empty, . or .. segments");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    #[test]
+    fn plain_relative_paths_are_accepted_and_none_is_valid() {
+        assert!(validate_check_inputs(&[]).is_ok());
+        assert!(validate_check_inputs(&paths(&["Cargo.lock", ".cargo/audit.toml"])).is_ok());
+    }
+
+    #[test]
+    fn globs_escapes_and_duplicates_are_refused() {
+        let bad = [
+            "",
+            "/etc/passwd",
+            "dir/",
+            "../x",
+            "a/./b",
+            "a//b",
+            "a\\b",
+            "*.lock",
+            "a/b?",
+            "a[0]",
+            "{a,b}",
+            "a\nb",
+        ];
+        for path in bad {
+            assert!(validate_check_inputs(&paths(&[path])).is_err(), "{path:?}");
+        }
+        assert!(validate_check_inputs(&paths(&["a", "a"])).is_err());
+        let many: Vec<String> = (0..=MAX_CHECK_INPUTS).map(|i| format!("f{i}")).collect();
+        assert!(validate_check_inputs(&many).is_err());
+    }
+
+    #[test]
+    fn the_field_is_optional_and_omitted_when_empty() {
+        let plain: RequiredCheck =
+            serde_json::from_str(r#"{"identity":"a","version":"1","environment":"e"}"#).unwrap();
+        assert!(plain.inputs.is_empty());
+        assert!(!serde_json::to_string(&plain).unwrap().contains("inputs"));
+        let declared: RequiredCheck = serde_json::from_str(
+            r#"{"identity":"a","version":"1","environment":"e","inputs":["Cargo.lock"]}"#,
+        )
+        .unwrap();
+        assert_eq!(declared.inputs, ["Cargo.lock"]);
+    }
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

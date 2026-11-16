@@ -5778,7 +5778,9 @@ async fn a_blocking_target_report_shows_on_the_task_until_resolved() {
     let actions = workflow["next_actions"].as_array().unwrap();
     assert_eq!(actions.len(), 1, "{workflow}");
     let action = actions[0].as_str().unwrap();
-    assert!(action.contains("fix the target branch"), "{action}");
+    let fix = blocked["fix_task"]["task_id"].as_str().expect("the service opened a fix task");
+    assert!(action.contains(fix), "{action}");
+    assert!(action.contains("resolves itself"), "{action}");
     assert!(action.contains(id.as_str().unwrap()), "{action}");
     assert!(!action.contains("claim the integration"), "{action}");
     assert_eq!(
@@ -7760,4 +7762,342 @@ async fn integration_status_is_absent_for_agent_owned_integration() {
         (json!("integrating"), Value::Null),
         "the agent path keeps its own state"
     );
+}
+
+// P6: a target that fails a required check opens one service fix task, the
+// report resolves itself when the check passes again, and a result whose
+// declared inputs equal the target's may land under a verified exemption.
+
+const TARGET_REPO: &str = "https://example.test/target-fix.git";
+
+/// Details of a `fix_target` report for `check` failing on `x`.
+fn target_details(verdict: &str, check: &str, x: &str) -> Value {
+    json!({"verdict": verdict, "repository_url": TARGET_REPO, "target_branch": "main",
+        "x": x, "check_name": check, "identity": "workspace-tests", "blocks_subject": true,
+        "target_result": {"run_id": 4242, "run_attempt": 1, "conclusion": "failure",
+            "started_at": "2026-11-16T10:00:00Z", "stale": false}})
+}
+
+/// Posts a `fix_target` report and returns the reply's data.
+async fn fix_report(f: &Fixture, i: &Caller, p: &str, key: &str, details: Value) -> Value {
+    let (status, v) = report(f, i, p, "fix_target", key, None, details).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["data"].clone()
+}
+
+/// The tasks of `p` created by the service with admission class `fix_target`.
+async fn service_fix_tasks(f: &Fixture, p: &str) -> Vec<(String, String, i64, String)> {
+    let rows = sqlx::query("SELECT id,description,priority,lifecycle FROM tasks WHERE project_id=? AND origin='service' AND admission_class='fix_target' ORDER BY created_at,id")
+        .bind(p).fetch_all(&f.state.pool).await.unwrap();
+    rows.iter()
+        .map(|r| (r.get("id"), r.get("description"), r.get("priority"), r.get("lifecycle")))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_target_failing_report_opens_one_fix_task_and_never_a_second() {
+    let f = Fixture::new().await;
+    let (p, _, _, i) = integrator_task(&f, "target-fix-open").await;
+    let first = fix_report(&f, &i, &p, "k1", target_details("target_failing", CHECK, T0)).await;
+    let tasks = service_fix_tasks(&f, &p).await;
+    assert_eq!(tasks.len(), 1, "{first}");
+    let (id, description, priority, lifecycle) = tasks[0].clone();
+    assert_eq!(first["fix_task_id"], json!(id));
+    assert_eq!((priority, lifecycle.as_str()), (0, "open"));
+    let report_id = first["id"].as_str().unwrap();
+    for needle in [CHECK, T0, "4242", report_id] {
+        assert!(description.contains(needle), "{needle}: {description}");
+    }
+    let (_, ordinary) = (0, f.task(&p, "code", "Ordinary").await);
+    assert!(priority < ordinary["priority"].as_i64().unwrap(), "above ordinary work");
+    // A deduplicated report opens nothing; neither does a new report for the
+    // same repository, branch and check while the task is unfinished.
+    let again = fix_report(&f, &i, &p, "k1", target_details("target_failing", CHECK, T0)).await;
+    assert_eq!(again["id"], first["id"]);
+    assert!(again.get("fix_task_id").is_none(), "{again}");
+    let moved = "8888888888888888888888888888888888888888";
+    let newer = fix_report(&f, &i, &p, "k2", target_details("target_failing", CHECK, moved)).await;
+    assert!(newer.get("fix_task_id").is_none(), "{newer}");
+    assert_eq!(service_fix_tasks(&f, &p).await.len(), 1);
+    // Another check on the same target is another fix.
+    fix_report(&f, &i, &p, "k3", target_details("target_failing", "Docs", T0)).await;
+    assert_eq!(service_fix_tasks(&f, &p).await.len(), 2);
+    // Once the task is finished a new failure opens a new one.
+    sqlx::query("UPDATE tasks SET lifecycle='done' WHERE id=?").bind(&id).execute(&f.state.pool).await.unwrap();
+    fix_report(&f, &i, &p, "k4", target_details("target_failing", CHECK, "9999999999999999999999999999999999999999")).await;
+    assert_eq!(service_fix_tasks(&f, &p).await.len(), 3);
+    // Only target_failing opens a task.
+    let unverified = fix_report(&f, &i, &p, "k5", target_details("target_unverified", "Lint", T0)).await;
+    assert!(unverified.get("fix_task_id").is_none());
+    assert_eq!(service_fix_tasks(&f, &p).await.len(), 3);
+}
+
+/// Posts `target-passed` for report `id`.
+async fn target_passed(f: &Fixture, i: &Caller, p: &str, id: &Value, started_at: &str) -> (StatusCode, Value) {
+    let path = format!("/api/v1/projects/{p}/integrator/reports/{}/target-passed", id.as_str().unwrap());
+    let body = json!({"x": T0, "run_id": 5151, "run_attempt": 2, "conclusion": "success", "started_at": started_at});
+    f.call(i, "POST", &path, body).await
+}
+
+#[tokio::test]
+async fn a_target_failing_report_resolves_itself_when_the_check_passes_later() {
+    let f = Fixture::new().await;
+    let (p, _, _, i) = integrator_task(&f, "target-fix-resolve").await;
+    let failing = fix_report(&f, &i, &p, "k1", target_details("target_failing", CHECK, T0)).await;
+    let unverified = fix_report(&f, &i, &p, "k2", target_details("target_unverified", CHECK, T0)).await;
+    let flaky = report(&f, &i, &p, "flaky", "k3", None, json!({"verdict": "flaky"})).await.1;
+    let created = f.state.now();
+    let before = coordinator_core::timestamp(created - 1000);
+    let (status, v) = target_passed(&f, &i, &p, &failing["id"], &before).await;
+    assert_eq!((status, v["error"]["code"].clone()), (StatusCode::CONFLICT, json!("pass_not_fresh")));
+    let at_creation = coordinator_core::timestamp(created);
+    let (status, v) = target_passed(&f, &i, &p, &failing["id"], &at_creation).await;
+    assert_eq!(status, StatusCode::CONFLICT, "a run must start after the report: {v}");
+    f.clock.0.fetch_add(60_000, Ordering::SeqCst);
+    let after = coordinator_core::timestamp(f.state.now());
+    // Other verdicts and kinds keep their human resolution.
+    for other in [&unverified["id"], &flaky["data"]["id"]] {
+        let (status, v) = target_passed(&f, &i, &p, other, &after).await;
+        assert_eq!((status, v["error"]["code"].clone()), (StatusCode::CONFLICT, json!("report_not_resolvable")), "{v}");
+    }
+    let (status, v) = target_passed(&f, &f.a, &p, &failing["id"], &after).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "only the integrator attests: {v}");
+    let (status, v) = target_passed(&f, &i, &p, &failing["id"], &after).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (_, shown) = f.call(&f.a, "GET", &format!("/api/v1/projects/{p}/integrator/reports/{}", failing["id"].as_str().unwrap()), Value::Null).await;
+    let note = shown["data"]["resolution_note"].as_str().unwrap();
+    assert!(note.contains("5151") && note.contains("attempt 2"), "{note}");
+    assert!(shown["data"]["resolved_at"].is_string());
+    let (status, v) = target_passed(&f, &i, &p, &failing["id"], &after).await;
+    assert_eq!(
+        (status, v["error"]["code"].clone()),
+        (StatusCode::CONFLICT, json!("report_already_resolved"))
+    );
+    let open = format!("/api/v1/projects/{p}/integrator/reports?open=true&kind=fix_target");
+    let (_, open) = f.call(&f.a, "GET", &open, Value::Null).await;
+    let ids: Vec<&Value> = open["data"]["items"].as_array().unwrap().iter().map(|r| &r["id"]).collect();
+    assert_eq!(ids, [&unverified["id"]], "only the unverified report stays open");
+    let (status, v) = resolve(&f, &f.admin, &p, &unverified["id"], json!({"note": "fixed by hand"})).await;
+    assert_eq!(status, StatusCode::OK, "a human still resolves target_unverified: {v}");
+}
+
+/// Declares `inputs` for the fixture's check in the project's workflow policy.
+async fn declare_inputs(f: &Fixture, p: &str, inputs: &[&str]) {
+    let checks = json!([{"identity": "workspace-tests", "version": "v1", "environment": "linux-ci", "inputs": inputs}]);
+    sqlx::query("UPDATE workflow_policies SET required_checks_json=? WHERE project_id=?")
+        .bind(checks.to_string()).bind(p).execute(&f.state.pool).await.unwrap();
+}
+
+/// A receipt for run attempt `attempt` of the fixture's check on R.
+async fn attempt_receipt(f: &Fixture, i: &Caller, p: &str, result: &str, attempt: i64, conclusion: &str) {
+    let body = json!({"result_id":result,"check_name":CHECK,"run_id":900,"run_attempt":attempt,"head_sha":R,"app_id":15368,"workflow_path":".github/workflows/checks.yml","workflow_blob":BLOB,"conclusion":conclusion});
+    let (status, v) = integrator_post(f, i, p, "receipts", body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+/// The blobs of the declared inputs, identical in R and X unless `differ`.
+fn input_blobs(differ: bool) -> Value {
+    let (a, b) = ("a1".repeat(20), "b2".repeat(20));
+    json!([{"path": "Cargo.lock", "r_blob": a, "x_blob": a},
+        {"path": ".cargo/audit.toml", "r_blob": null, "x_blob": if differ { json!(b) } else { Value::Null }}])
+}
+
+/// An exemption body for the fixture result.
+fn exemption_body(result: &str, report: &Value, inputs: Value) -> Value {
+    json!({"result_id": result, "identity": "workspace-tests", "check_name": CHECK,
+        "r": R, "x": T0, "report_id": report["id"], "inputs": inputs})
+}
+
+/// A result whose check failed twice on R, with a `target_failing` report.
+async fn failing_result(f: &Fixture, name: &str) -> (String, Caller, String, Value) {
+    let (p, _, integration, i) = integrator_task(f, name).await;
+    declare_inputs(f, &p, &["Cargo.lock", ".cargo/audit.toml"]).await;
+    let result = pinned_result(f, &i, &p, &integration["submission_id"], T0).await;
+    attempt_receipt(f, &i, &p, &result, 1, "failure").await;
+    attempt_receipt(f, &i, &p, &result, 2, "failure").await;
+    let mut details = target_details("target_failing", CHECK, T0);
+    details["repository_url"] = json!(format!("https://example.test/{name}.git"));
+    let target = fix_report(f, &i, &p, "k1", details).await;
+    (p, i, result, target)
+}
+
+#[tokio::test]
+async fn push_authority_accepts_a_verified_exemption_and_records_it() {
+    let f = Fixture::new().await;
+    let (p, i, result, target) = failing_result(&f, "exempt-grant").await;
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!((status, v["error"]["code"].clone()), (StatusCode::CONFLICT, json!("checks_not_passed")), "a failure is refused without an exemption");
+    let (status, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &target, input_blobs(false))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, again) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &target, input_blobs(false))).await;
+    assert_eq!((status, &again["data"]["exemption_id"]), (StatusCode::OK, &v["data"]["exemption_id"]), "a retry replays");
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let run = &v["data"]["deciding_runs"][0];
+    assert_eq!(run["exemption"]["report_id"], target["id"], "{v}");
+    assert_eq!(run["exemption"]["x"], T0);
+    assert_eq!(run["exemption"]["inputs"][0]["path"], "Cargo.lock");
+}
+
+#[tokio::test]
+async fn an_exemption_is_refused_unless_the_service_can_verify_every_fact() {
+    let f = Fixture::new().await;
+    let (p, i, result, target) = failing_result(&f, "exempt-refuse").await;
+    let refused = |reason: &str, v: &Value| {
+        assert_eq!(v["error"]["code"], "exemption_refused", "{v}");
+        assert!(v["error"]["details"]["reason"].as_str().unwrap().contains(reason), "{reason}: {v}");
+    };
+    // A declared input differs between R and X.
+    let (_, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &target, input_blobs(true))).await;
+    refused("differs", &v);
+    // The compared paths are not the declared inputs.
+    let partial = json!([{"path": "Cargo.lock", "r_blob": null, "x_blob": null}]);
+    let (_, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &target, partial)).await;
+    refused("not the declared", &v);
+    // The target report is not a failing verdict, names another tip, or is unknown.
+    let unverified = fix_report(&f, &i, &p, "k2", target_details("target_unverified", CHECK, T0)).await;
+    let (_, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &unverified, input_blobs(false))).await;
+    refused("not a target_failing", &v);
+    let moved = fix_report(&f, &i, &p, "k3", target_details("target_failing", CHECK, "8888888888888888888888888888888888888888")).await;
+    let (_, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &moved, input_blobs(false))).await;
+    refused("another check or revision", &v);
+    let unknown = json!({"id": "missing"});
+    let (_, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &unknown, input_blobs(false))).await;
+    refused("does not exist", &v);
+    // R or X other than the result's.
+    let mut body = exemption_body(&result, &target, input_blobs(false));
+    body["x"] = json!("8888888888888888888888888888888888888888");
+    let (_, v) = integrator_post(&f, &i, &p, "exemptions", body).await;
+    refused("another R or target tip", &v);
+    // A check without declared inputs is never exempt.
+    declare_inputs(&f, &p, &[]).await;
+    let (_, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &target, input_blobs(false))).await;
+    refused("declares no inputs", &v);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM integrator_exemptions").fetch_one(&f.state.pool).await.unwrap();
+    assert_eq!(count, 0);
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!((status, v["error"]["details"]["failed"].clone()), (StatusCode::CONFLICT, json!(["workspace-tests"])));
+}
+
+#[tokio::test]
+async fn a_failure_that_is_not_reproduced_or_a_second_failing_check_is_never_exempt() {
+    let f = Fixture::new().await;
+    let (p, _, integration, i) = integrator_task(&f, "exempt-unreproduced").await;
+    declare_inputs(&f, &p, &["Cargo.lock", ".cargo/audit.toml"]).await;
+    let result = pinned_result(&f, &i, &p, &integration["submission_id"], T0).await;
+    attempt_receipt(&f, &i, &p, &result, 1, "failure").await;
+    let target = fix_report(&f, &i, &p, "k1", target_details("target_failing", CHECK, T0)).await;
+    let (_, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &target, input_blobs(false))).await;
+    assert!(v["error"]["details"]["reason"].as_str().unwrap().contains("reproduced"), "{v}");
+    // A second failing check on R keeps the subject refused even when the
+    // first one is exempt.
+    attempt_receipt(&f, &i, &p, &result, 2, "failure").await;
+    let (status, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &target, input_blobs(false))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let other = json!({"identity": "other", "check_name": "Other", "workflow_path": ".github/workflows/checks.yml", "workflow_blob": BLOB});
+    let mut roster = roster();
+    roster["required_checks"].as_array_mut().unwrap().push(other);
+    sqlx::query("UPDATE integrator_results SET roster_json=? WHERE id=?")
+        .bind(roster.to_string()).bind(&result).execute(&f.state.pool).await.unwrap();
+    for attempt in [1, 2] {
+        let body = json!({"result_id":result,"check_name":"Other","run_id":901,"run_attempt":attempt,"head_sha":R,"app_id":15368,"workflow_path":".github/workflows/checks.yml","workflow_blob":BLOB,"conclusion":"failure"});
+        let (status, v) = integrator_post(&f, &i, &p, "receipts", body).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+    }
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!((status, v["error"]["details"]["failed"].clone()), (StatusCode::CONFLICT, json!(["other"])), "{v}");
+}
+
+#[tokio::test]
+async fn a_forged_or_stale_exemption_record_is_refused_by_push_authority() {
+    let f = Fixture::new().await;
+    let (p, i, result, target) = failing_result(&f, "exempt-forged").await;
+    let (status, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &target, input_blobs(false))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let id = v["data"]["exemption_id"].as_str().unwrap().to_owned();
+    let refused_for = |reason: &'static str| {
+        let (f, i, p, result) = (&f, &i, &p, &result);
+        async move {
+            let (status, v) = authority(f, i, p, result).await;
+            assert_eq!((status, v["error"]["code"].clone()), (StatusCode::CONFLICT, json!("checks_not_passed")), "{v}");
+            let why = v["error"]["details"]["exemption_refused"][0]["reason"].as_str().unwrap_or_default().to_owned();
+            assert!(why.contains(reason), "{reason}: {v}");
+        }
+    };
+    // Forged inputs: a row written around the route, with differing blobs.
+    let forged = input_blobs(true);
+    sqlx::query("UPDATE integrator_exemptions SET inputs_json=? WHERE id=?").bind(forged.to_string()).bind(&id).execute(&f.state.pool).await.unwrap();
+    refused_for("differs").await;
+    sqlx::query("UPDATE integrator_exemptions SET inputs_json=? WHERE id=?").bind(input_blobs(false).to_string()).bind(&id).execute(&f.state.pool).await.unwrap();
+    // Forged tip: the record names an X that is not the result's T0.
+    sqlx::query("UPDATE integrator_exemptions SET x='8888888888888888888888888888888888888888' WHERE id=?").bind(&id).execute(&f.state.pool).await.unwrap();
+    refused_for("another R or target tip").await;
+    sqlx::query("UPDATE integrator_exemptions SET x=? WHERE id=?").bind(T0).bind(&id).execute(&f.state.pool).await.unwrap();
+    // Forged report: one that is not a failing target report.
+    let other = fix_report(&f, &i, &p, "k2", target_details("target_unverified", CHECK, T0)).await;
+    sqlx::query("UPDATE integrator_exemptions SET report_id=? WHERE id=?").bind(other["id"].as_str().unwrap()).bind(&id).execute(&f.state.pool).await.unwrap();
+    refused_for("not a target_failing").await;
+    sqlx::query("UPDATE integrator_exemptions SET report_id=? WHERE id=?").bind(target["id"].as_str().unwrap()).bind(&id).execute(&f.state.pool).await.unwrap();
+    // Stale: the target report was resolved (the check passes on the target again).
+    f.clock.0.fetch_add(60_000, Ordering::SeqCst);
+    let after = coordinator_core::timestamp(f.state.now());
+    let (status, v) = target_passed(&f, &i, &p, &target["id"], &after).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    refused_for("was resolved").await;
+    // Changing the declared inputs makes the record stale too.
+    sqlx::query("UPDATE integrator_reports SET resolved_at=NULL,resolution_note=NULL,resolved_by=NULL WHERE id=?").bind(target["id"].as_str().unwrap()).execute(&f.state.pool).await.unwrap();
+    declare_inputs(&f, &p, &["Cargo.lock", "other.txt"]).await;
+    refused_for("not the declared").await;
+    declare_inputs(&f, &p, &["Cargo.lock", ".cargo/audit.toml"]).await;
+    let (status, v) = authority(&f, &i, &p, &result).await;
+    assert_eq!(status, StatusCode::OK, "restored facts are accepted again: {v}");
+}
+
+#[tokio::test]
+async fn the_task_view_and_digest_show_the_exemption_and_the_open_fix_task() {
+    let f = Fixture::new().await;
+    let (p, i, result, target) = failing_result(&f, "exempt-visible").await;
+    let (status, v) = integrator_post(&f, &i, &p, "exemptions", exemption_body(&result, &target, input_blobs(false))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let fix = service_fix_tasks(&f, &p).await[0].0.clone();
+    let submission: String = sqlx::query_scalar("SELECT submission_id FROM integrator_results WHERE id=?").bind(&result).fetch_one(&f.state.pool).await.unwrap();
+    let task: String = sqlx::query_scalar("SELECT task_id FROM submissions WHERE id=?").bind(&submission).fetch_one(&f.state.pool).await.unwrap();
+    let (status, shown) = f.call(&f.a, "GET", &format!("/api/v1/projects/{p}/tasks/{task}"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{shown}");
+    let exemption = &shown["data"]["workflow"]["integration_exemptions"][0];
+    assert_eq!(exemption["check_name"], CHECK, "{shown}");
+    assert_eq!(exemption["target_fix_task"]["task_id"], json!(fix));
+    assert_eq!(exemption["report_id"], target["id"]);
+    let blocked = &shown["data"]["workflow"]["integration_blocked"];
+    assert_eq!(blocked["fix_task"]["task_id"], json!(fix), "{blocked}");
+    let (status, digest) = f.call(&f.admin, "GET", &format!("/api/v1/projects/{p}/digest"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{digest}");
+    let landed = &digest["data"]["exempted_landings"][0];
+    assert_eq!(landed["subject_task"]["task_id"], json!(task), "{digest}");
+    assert_eq!(landed["target_fix_task"]["task_id"], json!(fix));
+}
+
+#[tokio::test]
+async fn a_roster_entry_may_declare_validated_inputs_that_the_api_shows() {
+    let f = Fixture::new().await;
+    let repo = "https://example.test/roster-inputs.git";
+    let p = f.project("roster-inputs", repo).await;
+    let put = |checks: Value| {
+        json!({"expected_revision":0,"canonical_repository_key":repo,"required_checks":checks})
+    };
+    let path = format!("/api/v1/projects/{p}/workflow-policy");
+    for bad in ["*.lock", "/etc/x", "../x", "dir//f", "a/"] {
+        let checks = json!([{"identity":"audit","version":"v1","environment":"ci","inputs":[bad]}]);
+        let (status, v) = f.call(&f.admin, "PUT", &path, put(checks)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {v}");
+    }
+    let checks = json!([
+        {"identity":"audit","version":"v1","environment":"ci","inputs":["Cargo.lock",".cargo/audit.toml"]},
+        {"identity":"tests","version":"v1","environment":"ci"}]);
+    let (status, v) = f.call(&f.admin, "PUT", &path, put(checks)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (_, shown) = f.call(&f.a, "GET", &path, Value::Null).await;
+    let listed = &shown["data"]["required_checks"];
+    assert_eq!(listed[0]["inputs"], json!(["Cargo.lock", ".cargo/audit.toml"]));
+    assert!(listed[1].get("inputs").is_none(), "no declaration, no field: {listed}");
 }

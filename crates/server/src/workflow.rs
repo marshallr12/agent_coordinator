@@ -150,6 +150,8 @@ fn validate_checks(checks: &[RequiredCheck]) -> Result<(), AppError> {
         bounded(&check.identity, "check identity", 255, true)?;
         bounded(&check.version, "check version", 255, true)?;
         bounded(&check.environment, "check environment", 255, true)?;
+        coordinator_core::validate_check_inputs(&check.inputs)
+            .map_err(|message| AppError::bad_request(&message))?;
         if !identities.insert((
             check.identity.clone(),
             check.version.clone(),
@@ -1140,6 +1142,8 @@ pub async fn workflow_snapshot(
         }
         _ => Value::Null,
     };
+    let integration_exemptions =
+        crate::integrator_fix::submission_exemptions(c, project, &submission_id).await?;
     let next_actions = match phase.as_str() {
         "review" => vec!["Claim and decide each required review activity.".to_owned()],
         "integration" => match integration_blocked["action"].as_str() {
@@ -1164,7 +1168,7 @@ pub async fn workflow_snapshot(
         _ => Vec::new(),
     };
     Ok(
-        json!({"submission":sub,"activities":activities,"activities_truncated":activities_truncated,"blockers":blockers,"integration_blocked":integration_blocked,"next_actions":next_actions,"phase":phase,"work_status":work_status}),
+        json!({"submission":sub,"activities":activities,"activities_truncated":activities_truncated,"blockers":blockers,"integration_blocked":integration_blocked,"integration_exemptions":integration_exemptions,"next_actions":next_actions,"phase":phase,"work_status":work_status}),
     )
 }
 

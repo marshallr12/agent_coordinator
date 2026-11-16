@@ -227,9 +227,12 @@ async fn record_report(
     require_integrator_project(&mut m.tx, &p).await?;
     require_references(&mut m.tx, &p, &input).await?;
     let (row, created) = insert_report(&mut m, &p, &input).await?;
-    let (value, record) = (report_value(&row)?, row.get::<String, _>("id"));
+    let (mut value, record) = (report_value(&row)?, row.get::<String, _>("id"));
     if !created {
         return Ok(response(value));
+    }
+    if let Some(task) = crate::integrator_fix::open_for_report(&mut m, &p, &row).await? {
+        value["fix_task_id"] = json!(task);
     }
     Ok(response(
         m.finish(value, Some(&p), "integrator.report_recorded", &record)
@@ -576,6 +579,17 @@ pub(crate) async fn integration_blocked(
     let report = report_value(&row)?;
     let details = &report["details"];
     let (id, kind) = (report["id"].clone(), report["kind"].clone());
+    let target = |key: &str| details[key].as_str().unwrap_or_default();
+    let fix_task = crate::integrator_fix::fix_task_value(
+        c,
+        p,
+        (
+            target("repository_url"),
+            target("target_branch"),
+            target("check_name"),
+        ),
+    )
+    .await?;
     Ok(json!({
         "report_id": id,
         "kind": kind,
@@ -586,15 +600,27 @@ pub(crate) async fn integration_blocked(
         "repository_url": details["repository_url"],
         "target_branch": details["target_branch"],
         "created_at": report["created_at"],
-        "action": blocked_action(&kind, &id, details),
+        "fix_task": fix_task,
+        "action": blocked_action(&kind, &id, details, &fix_task),
     }))
 }
 
-/// What a human must do about the blocking report, for `next_actions`.
-fn blocked_action(kind: &Value, id: &Value, details: &Value) -> String {
+/// What must happen about the blocking report, for `next_actions`: a
+/// `target_failing` report resolves itself once the service-opened fix task
+/// lands and the check passes on the target; any other report needs a human.
+fn blocked_action(kind: &Value, id: &Value, details: &Value, fix_task: &Value) -> String {
     let text =
         |key: &str, fallback: &'static str| details[key].as_str().unwrap_or(fallback).to_owned();
     let id = id.as_str().unwrap_or_default();
+    if kind == "fix_target" && details["verdict"] == "target_failing" {
+        return format!(
+            "Integration is blocked: check {} fails on target {} of {}. The fix task {} repairs              the target; integrator report {id} resolves itself once the check passes on the              target tip. A subject whose declared check inputs are unchanged from the target              still lands.",
+            text("check_name", "(unnamed)"),
+            text("x", "(unknown revision)"),
+            text("target_branch", "the target branch"),
+            fix_task["task_id"].as_str().unwrap_or("(not open)"),
+        );
+    }
     if kind == "fix_target" {
         return format!(
             "Integration is blocked: check {} fails on target {} of {}. A human must fix \

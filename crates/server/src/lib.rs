@@ -16,6 +16,7 @@ pub mod history;
 pub mod imports;
 pub mod integrator;
 pub mod integrator_authority;
+pub mod integrator_fix;
 pub mod integrator_observe;
 pub mod integrator_progress;
 pub mod integrator_reports;
@@ -75,6 +76,7 @@ pub(crate) fn rest_router(state: AppState) -> Router {
         .merge(passkey::routes())
         .merge(integrator::routes())
         .merge(integrator_authority::routes())
+        .merge(integrator_fix::routes())
         .merge(integrator_observe::routes())
         .merge(integrator_progress::routes())
         .merge(integrator_reports::routes())
