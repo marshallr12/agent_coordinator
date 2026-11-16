@@ -36,6 +36,17 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
   (`d2ca0225`, `7011c55f`; P6 itself was the third). Worktrees `ac-d513-p6-{audit,rerun,final}`
   and their local branches are removed (clean, merged, no remote branches). A third window, if
   wanted, should be a new task with a corrected latency measure.
+- **Follow-up 2026-11-16 20:42 UTC (read-only triage plus one new task):**
+  - `7fda3475` is stale: it recorded the 11-09 audit failure at `89f62e96`, fixed by `32bcee0`
+    (task `774c577c`). Audit is green on main `9c88617`. Only the owner can resolve it (dashboard).
+  - Not queue faults: `d2ca0225` is blocked on the owner confirming the autonomy plan is finished;
+    `7011c55f` is a human-delivered parent idle by design. Every open task is human-delivered or
+    owner-gated, so supervisors had nothing eligible (inferred; the digest's stall rule was not read).
+  - The audit broke main three times in the window (11-02, 11-09, 11-13), each cleared by an owner
+    push. Owner chose "auto-fix + pass unchanged locks"; task **`09557c72`** (open, ready, priority 1,
+    agent-origin, admitted 1/14) specifies it. Its roster change for `dependency-audit` is the
+    owner's to apply; deployment is a separate owner step. CLI session `audit-policy-20261116`.
+  - Unfixed warnings on main: rustix 1.1.4, tokio 1.53.1 (unsound), crypto-bigint 0.7.8 (yanked).
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
