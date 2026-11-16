@@ -232,6 +232,94 @@ leaves no result, the report's verdict is `target_unverified`.
 The `fix_target` report's `target_result` and the `check_failed` evidence name the
 tip's run, attempt and completion time that the decision relied on.
 
+### A failing target must not stall every landing
+
+A check can start failing on the target branch with no commit involved: the
+dependency audit reads `Cargo.lock`, `.cargo/audit.toml` and a public advisory
+database, so a newly published advisory fails it on `main` and then on every
+candidate. Two mechanisms keep that from blocking every landing until an owner
+pushes a fix.
+
+**The service opens the fix.** When the integrator stores a `fix_target` report
+with verdict `target_failing`, the service creates one open task in the same
+transaction: origin `service`, admission class `fix_target` (always admitted, not
+counted against the weekly budget), priority 0 (ahead of ordinary work), kind
+`code`. Its description names the check, the target revision, the failing run and
+the report id. A report the service already stored (a deduplicated retry), or an
+existing unfinished (`planned` or `open`) fix task for the same repository, target
+branch and check, creates no second task; once that task is done or canceled, a
+new failure opens a new one. `target_unverified` reports open no task.
+
+**The report resolves itself.** Each cycle the integrator looks at the open
+`target_failing` reports. When the same check passes on the target branch's tip in
+a run that started **after the report was created**, the service resolves the
+report, with a note naming the passing run (`POST …/integrator/reports/{id}/target-passed`).
+It then neither blocks subjects nor counts as requiring a human. `target_unverified`
+reports and every other report kind keep their human resolution.
+
+**Candidates whose audit inputs did not change may land.** A required-check entry
+may declare the repository paths that are the check's **only** inputs:
+
+```json
+{"identity": "dependency-audit", "version": "…", "environment": "…",
+ "inputs": ["Cargo.lock", ".cargo/audit.toml"]}
+```
+
+`inputs` is optional and defaults to none; an entry without it behaves exactly as
+before. Each path must be a relative file path with `/` separators, with no empty,
+`.` or `..` segment, no backslash or control character, and no glob character
+(`* ? [ ] { }`; globs are not supported); at most 20 paths, each at most 300
+bytes, none repeated. A human sets it with the roster edit
+(`PUT …/workflow-policy`), the `checks list` command and the workflow-policy API
+show it, and it is the only place it is read: the repository's
+`.agent-coordinator/roster.toml` cannot declare or override it.
+
+When a required check with declared inputs has a reproduced failure on the
+candidate's result R, the same check fails on the target tip X in a **fresh**
+result (it started after R's first failure of the check; an older failure is
+rerun on X first, like an older pass, at most twice per result), and every
+declared path has the same blob (or is absent) in R and X, the integrator does not
+skip the subject for that check and the integration proceeds. It files the
+target's `target_failing` report (which opens the fix task) and records the
+**exemption**: the check, R, X, each compared path with its blob id in R and X, and
+the id of that report (`POST …/integrator/exemptions`).
+
+The exemption is never applied when a declared input differs between R and X, when
+the verdict would be `target_unverified`, when X's result is stale or missing,
+when the check declares no inputs, or to any other failing check on R; each of
+those is handled as before (a failure that passes on X still revises the author
+with `check_failed`). Push authority does not trust the record: it accepts a
+failing check only when it verifies, from its own records, that the roster
+declares inputs for the check and the record names exactly those paths with equal
+blobs, the result's R and tip are the record's, the check has a reproduced failure
+on R (the deciding attempt and one more failed), and the record's report is an
+unresolved `target_failing` report for the same check and tip whose attested X
+result failed. A forged, tampered or stale record (a changed roster, a resolved
+report, another tip) is refused with `checks_not_passed`, and
+`details.exemption_refused` names why.
+
+The task view (`workflow.integration_exemptions`, with the open `target_fix_task`;
+`integration_blocked.fix_task`) and the digest (`exempted_landings`) show that a
+subject landed under an exemption and that the target has an open fix task.
+
+**Accepted risk.** While the target carries a known advisory, unrelated work
+whose declared inputs are byte-identical to the target's still lands, so the
+target can stay on a known advisory for some hours until the fix task lands. A
+candidate that changes any declared input must still pass the check, so it can
+neither add dependency risk nor hide a fix. The mechanism is only as sound as the
+declaration: list every path the check reads, and nothing else.
+
+**Roster change for `dependency-audit` (owner decision 2026-11-16, applied by the
+owner, not by an agent).** Read the live roster (`agent-coordinator checks list`),
+note its `revision`, and replace the roster with `PUT …/workflow-policy` and
+`{"expected_revision": <revision>, "required_checks": [...]}` where every entry is
+unchanged except the `dependency-audit` entry, which gains
+`"inputs": ["Cargo.lock", ".cargo/audit.toml"]` and keeps its `identity`,
+`version` and `environment`. The repository's `.agent-coordinator/roster.toml`
+needs no change. Finish or reconcile any held integration first, as for any
+roster change. Until it is applied, no check declares inputs and nothing
+changes.
+
 ### Durable candidate checkpoints
 
 Before `submissions code` records a candidate, the native client pushes its

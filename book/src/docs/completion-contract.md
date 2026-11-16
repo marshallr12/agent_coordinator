@@ -10,8 +10,13 @@ field in the saved response.
 
 `GET /api/v1/projects/{project}/workflow-policy` returns
 `{project_id, revision, canonical_repository_key, required_checks}`. A required check is
-`{identity, version, environment}`; all three strings are stable exact-match
-identities. A human changes the roster with
+`{identity, version, environment, inputs?}`; the first three strings are stable exact-match
+identities. `inputs` is an optional list of repository file paths that are the
+check's only inputs (default: none, and then omitted); it is validated as
+relative paths without globs (see the
+[operator guide](operator-guide.md#a-failing-target-must-not-stall-every-landing))
+and lets the integrator land a candidate whose declared inputs equal the target's
+while the target fails the check. A human changes the roster with
 `PUT /api/v1/projects/{project}/workflow-policy` and
 `{expected_revision, required_checks}`. Normal setup derives the shared repository
 identity from the project's URL and reuses an existing saved identity. Public

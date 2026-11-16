@@ -712,6 +712,36 @@ reports and only a human resolves one.
   revert's candidate has no author: when its failure is reproduced and passes
   on the tip, the integrator reports the revert `not-mechanical` with reason
   `check_failed` instead of revising it.
+- When the service stores a `fix_target` report with `verdict` `target_failing`
+  that names its `repository_url`, `target_branch` and `check_name`, it opens
+  one task in the same transaction (origin `service`, `admission_class`
+  `fix_target`, priority 0, kind `code`) whose description names the check, the
+  target revision, the failing run and the report id, and the reply carries its
+  `fix_task_id`. A replayed report, or an unfinished (`planned` or `open`)
+  fix task for the same repository, target branch and check, opens no task;
+  `target_unverified` and every other kind open none.
+- `POST /api/v1/projects/{project_id}/integrator/reports/{report_id}/target-passed`
+  with `{x, run_id, run_attempt, conclusion, started_at}` (integrator only;
+  `conclusion` is `success`, `skipped` or `neutral`) resolves an open
+  `target_failing` report because its check passed on the target tip `x` in a
+  run that started after the report was created (otherwise `pass_not_fresh`),
+  with a resolution note naming the run. Another kind or verdict is
+  `report_not_resolvable`; a resolved report is `report_already_resolved`.
+- `POST /api/v1/projects/{project_id}/integrator/exemptions` with
+  `{result_id, identity, check_name, r, x, report_id, inputs:[{path, r_blob,
+  x_blob}]}` (integrator only) records that a failing check on `r` is exempt
+  because its declared inputs are identical in `r` and the target tip `x` while
+  the check fails on `x` too. The service refuses it (`exemption_refused`,
+  `details.reason`) unless the current roster declares `inputs` for the
+  `identity`, `inputs` names exactly those paths with equal blobs (`null` means
+  absent) in `r` and `x`, `r` and `x` are the result's `r` and `t0`, the check
+  has a reproduced failure on `r`, and `report_id` is an unresolved
+  `target_failing` report of the same check and `x` whose attested result is a
+  failure. One record per result and check; a replay returns the stored one.
+  Push authority repeats every one of those checks and counts the failing check
+  as passed only under such a record, listing it as `deciding_runs[].exemption`;
+  otherwise `checks_not_passed` names the check under `details.failed` and any
+  refused record under `details.exemption_refused`.
 - While a subject is in integration and an open `requires_human` report blocks
   it, the task's workflow view (`workflow` in `tasks show`, the workflow route,
   orientation and the console task page) carries `integration_blocked`, else
@@ -723,8 +753,14 @@ reports and only a human resolves one.
   branch, because the target is what needs fixing (`target_revision` is the
   failing tip, `check_name` the failing check). `next_actions` then holds
   `action` (fix the target, see the report, resolve it) instead of the claim
-  guidance. `blockers` and `work_status` are unchanged. The field is `null`
-  again once a human resolves the report or the subject integrates.
+  guidance (for a `target_failing` report it names the open fix task, which
+  `integration_blocked.fix_task` carries as `{task_id, title}` or `null`, and says the
+  report resolves itself). `blockers` and `work_status` are unchanged. The field is
+  `null` again once the report is resolved or the subject integrates. The same
+  `workflow` also carries `integration_exemptions`: the exemptions recorded on the
+  current submission's results, each `{exemption_id, identity, check_name, r, x,
+  report_id, inputs, result_id, recorded_at, subject_task, target_fix_task}`,
+  and the digest lists those of its window as `exempted_landings`.
 - `GET /api/v1/projects/{project_id}/integrator/reports` lists a project's
   reports, newest first, for any authenticated reader. `open=true` keeps only
   unresolved ones; `limit` is 1 to 1000 (default 200); `before=<report_id>`

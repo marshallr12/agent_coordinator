@@ -212,6 +212,16 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   `integrator-reports` CLI commands and the MCP tools
   `coordinator_integrator_reports_list` and `coordinator_integrator_report_get`.
 
+- A target that fails a required check no longer needs a human to clear every
+  landing: the service opens one always-admitted fix task when a `target_failing`
+  report is stored, resolves that report itself once the check passes on the
+  tip in a later run, and a required-check entry may declare its `inputs`, so a
+  candidate whose declared inputs equal the target's lands under a recorded,
+  independently verified exemption (see the
+  [operator guide](operator-guide.md#a-failing-target-must-not-stall-every-landing)).
+  No roster entry declares inputs until the owner applies the documented roster
+  change, and production deployment is a separate owner-directed step.
+
 - Supervisor hosts report launch cost rows and end-to-end canary results to the
   service per project, idempotently and attributed to the reporting principal and
   host, and the service aggregates them: cost per task and per day (implementer
