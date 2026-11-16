@@ -2757,6 +2757,20 @@
         add(box, el('strong', '', 'Integration blocked'));
         add(box, el('p', '', [`Report ${displayStatus(blocked.kind)}`, blocked.verdict && `verdict ${blocked.verdict}`, blocked.check_name && `check ${blocked.check_name}`, blocked.target_revision && `target revision ${blocked.target_revision}`].filter(Boolean).join(' · ')));
         add(box, el('p', 'muted', `Integrator report ${blocked.report_id}`));
+        if (blocked.fix_task) add(box, el('p', 'muted', `Open fix task ${blocked.fix_task.task_id}: ${blocked.fix_task.title || ''}`));
+        return box;
+      } });
+    }
+    if ((workflow.integration_exemptions || []).length) {
+      const exemptions = workflow.integration_exemptions;
+      items.push({ key: 'integration-exemptions', sig: sig(exemptions), build: () => {
+        const box = el('div', 'inline-alert');
+        add(box, el('strong', '', 'Check exemption'));
+        exemptions.forEach(entry => {
+          const paths = (entry.inputs || []).map(input => input.path).join(', ');
+          add(box, el('p', '', `${entry.check_name} fails on target ${entry.x}; ${paths} are identical in this candidate and the target, so the candidate was not held back.`));
+          add(box, el('p', 'muted', entry.target_fix_task ? `Open fix task ${entry.target_fix_task.task_id}: ${entry.target_fix_task.title || ''}` : 'The target has no open fix task.'));
+        });
         return box;
       } });
     }
