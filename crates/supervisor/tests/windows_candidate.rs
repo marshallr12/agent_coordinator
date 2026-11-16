@@ -113,10 +113,6 @@ static ONE_CHILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// reports success.
 fn in_a_new_session(role: &str) {
     let _one = ONE_CHILD.lock().unwrap_or_else(|held| held.into_inner());
-    if !Path::new(GIT_BIN).join("bash.exe").exists() {
-        eprintln!("no Git Bash at {GIT_BIN}; {role} was not checked");
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let report = dir.path().join("report.txt");
     let Some(started) = start_in_new_session(role, &report) else {
@@ -156,6 +152,10 @@ fn a_candidate_command_past_its_time_limit_is_stopped_and_repeats_are_refused() 
 /// test fails and the candidate tests below can be tried again.
 #[test]
 fn git_bash_does_not_start_in_an_appcontainer() {
+    if !Path::new(GIT_BIN).join("bash.exe").exists() {
+        eprintln!("no Git Bash at {GIT_BIN}; it was not checked");
+        return;
+    }
     in_a_new_session("probe");
 }
 
@@ -233,6 +233,117 @@ fn probe() -> String {
     format!("{full} | {less}")
 }
 
+/// Names the pinned POSIX shell's file on this host; unset where the owner
+/// has not installed it.
+const SHELL: &str = "AGENTC_TEST_POSIX_SHELL";
+/// busybox-w32 FRP-6354-g5f09fb446 (BusyBox 1.39.0), the 64-bit Unicode
+/// build `busybox-w64u-FRP-6354-g5f09fb446.exe`.
+const SHELL_SHA256: &str = "36b266923fc5765b42f5f981319f39568498fba60b53ccf26e8fc1e575e2a9a9";
+
+/// The pinned shell's file, or `None` where [`SHELL`] is unset. A file with
+/// another hash is never run.
+fn pinned_shell() -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let path = PathBuf::from(std::env::var_os(SHELL)?);
+    let bytes = std::fs::read(&path).unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    assert_eq!(hash, SHELL_SHA256, "{} is not the pin", path.display());
+    Some(path)
+}
+
+/// What the shell probe runs: a pipeline, a subshell, a command
+/// substitution and a background job that is waited for. Then what Windows
+/// made of the `TMP` the launch set, and whether a value the shell exports
+/// reaches a child shell and a program that is not the shell.
+const SHELL_PROBE: &str = "echo started; echo abc | tr a-c A-C | cat; (exit 3); echo \"sub $?\"; \
+     x=$(echo inner | sed s/inner/captured/); echo \"$x\"; \
+     (sleep 1; echo late > bg) & echo early; wait; echo \"waited $?\"; cat bg; \
+     case \"$TMP\" in *\\\\AC\\\\Temp) echo rewritten;; *) echo kept;; esac; \
+     export TMP=C:/zz; sh -c 'echo \"child=$TMP\"'; cmd /c \"echo cmd=%TMP%\"; exit 7";
+/// What it must print, in this order.
+const SHELL_PROBE_SAYS: [&str; 10] = [
+    "started",
+    "ABC",
+    "sub 3",
+    "captured",
+    "early",
+    "waited 0",
+    "late",
+    "rewritten",
+    "child=C:/zz",
+    "cmd=C:/zz",
+];
+
+/// The pinned shell starts in an AppContainer, full and less privileged,
+/// and runs pipelines, subshells and background jobs there.
+#[test]
+fn the_pinned_shell_runs_in_an_appcontainer() {
+    if pinned_shell().is_none() {
+        eprintln!("{SHELL} is unset; the pinned shell was not checked");
+        return;
+    }
+    in_a_new_session("shell_probe");
+}
+
+/// Runs [`SHELL_PROBE`] with the pinned shell, copied as `sh.exe` into a
+/// tool directory of a fresh launch, `less` privileged or not.
+fn shell_probe_one(trees: &Trees, launcher: &mut Launcher, less: bool) -> String {
+    use agentc_supervisor::host_runtime::windows::process::Command;
+    let id = format!("shell-{less}");
+    let mut spec = trees.launch(&id);
+    spec.less_privileged = less;
+    let prepared = launcher.prepare(&id, spec.clone()).unwrap();
+    let tools = trees.at(&format!("shell-tools-{less}"));
+    let owner = token::current_user_sid().unwrap();
+    let list = sddl::shared_source(&owner, &[&prepared.package_sid]).unwrap();
+    create_directory(&tools, &list).unwrap();
+    std::fs::copy(pinned_shell().unwrap(), tools.join("sh.exe")).unwrap();
+    let root = std::env::var("SystemRoot").unwrap();
+    let work = spec.work.display().to_string();
+    let environment = [
+        ("SystemRoot", root.clone()),
+        ("LOCALAPPDATA", work.clone()),
+        ("TMP", work.replace('\\', "/")),
+        ("PATH", format!("{};{root}\\System32", tools.display())),
+    ];
+    let log = trees.at(&format!("shell-{less}.log"));
+    let command = Command {
+        argv: vec![
+            tools.join("sh.exe").display().to_string(),
+            "-c".into(),
+            SHELL_PROBE.into(),
+        ],
+        directory: spec.work.clone(),
+        environment: environment
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v))
+            .collect(),
+        output: log.clone(),
+    };
+    launcher.start(&id, &command, &[]).unwrap();
+    let seen = launcher
+        .observe(&id, std::time::Duration::from_secs(30))
+        .unwrap();
+    launcher.cleanup(&id).unwrap();
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(seen, Seen::Exited(7), "less={less}: {said}");
+    let lines: Vec<&str> = said.lines().map(str::trim).collect();
+    assert_eq!(lines, SHELL_PROBE_SAYS, "less={less}: {said}");
+    format!("less_privileged={less}: {lines:?}")
+}
+
+/// Both shell probes.
+fn shell_probe() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let trees = Trees {
+        root: dir.path().to_owned(),
+    };
+    let mut launcher = Launcher::new().unwrap();
+    let full = shell_probe_one(&trees, &mut launcher, false);
+    let less = shell_probe_one(&trees, &mut launcher, true);
+    format!("{full} | {less}")
+}
+
 /// The child's side. Ignored so that it runs only when a test above starts
 /// it, with its role, in a new logon session.
 #[test]
@@ -246,6 +357,7 @@ fn child_in_a_new_logon_session() {
         "commands" => commands(),
         "time_limit" => time_limit(),
         "probe" => probe(),
+        "shell_probe" => shell_probe(),
         other => panic!("no such role: {other}"),
     });
     let said = match &outcome {
