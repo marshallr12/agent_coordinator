@@ -144,6 +144,12 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     `changes_requested` on `b9f49d0a`'s first submission (20:13Z), the implementer resubmitted
     (attempt `baaefcb5`, 20:48Z), second review queued behind a review of `9cf04a5c`. Roster
     still revision 3.
+  - **Next item (owner's choice, go-ahead given):** wait for `b9f49d0a` to land, then roll out
+    main with the in-repo drain check; the owner dispatches the release run. A background
+    watch on the task runs in this session only. The owner updated their Claude on oracle-1 to
+    **2.1.326**; the agents there are still pinned to 2.1.325. The rollout's host-setup will pin
+    2.1.326, so **do not put the old pins back this time** (drop `restore_pin` from the host
+    upgrade scripts); run the containment suite on both hosts afterwards.
     Scripts and output: `~/.local/state/agent-coordinator-evidence/harness-repin-20261117/`.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
