@@ -780,6 +780,39 @@ EOF
 # model = "<codex model id>"
 # effort = "high"
 
+# Choosing the vendor from the usage each account has left, before each claim
+# (default: off, so launches run with [run] and the fallback above after a
+# 429). mode is "off", "claude" or "codex" (the role never leaves that vendor)
+# or "usage" (the vendor with more usage left in its current limit window).
+# [health.selection] is for implementer launches and [health.reviewer_selection]
+# for reviewer launches, each over its own role's account; with the reviewer
+# one off, a review runs with the [run] vendor. A vendor that is exhausted,
+# expired, signed out or not installed is never chosen. Remaining usage comes
+# only from the vendor's own interface: Codex through "codex app-server"
+# (account/rateLimits/read, asked as the role); Claude has none to ask, so its
+# figure is the last rate_limit_event of the role's own launches. A missing,
+# stale or reset reading is unknown, which is neither preferred nor excluded:
+# "order" decides. A vendor's model and effort default to [run] or
+# [health.fallback] when they name it.
+# [health.selection]
+# mode = "off"
+# order = ["claude", "codex"]    # preference: settles ties and unknowns
+# min_remaining_percent = 10.0   # not chosen below this while another is above
+# cache_minutes = 10             # a vendor is asked at most this often
+# stale_minutes = 60             # an older reading counts as unknown
+# [health.selection.claude]      # default: [run] / [health.fallback]
+# model = "<claude model id>"
+# effort = "high"
+# [health.selection.codex]
+# model = "<codex model id>"
+# effort = "high"
+# [health.reviewer_selection]    # the same keys, for reviewer launches
+# mode = "off"
+# order = ["claude", "codex"]
+# min_remaining_percent = 10.0
+# cache_minutes = 10
+# stale_minutes = 60
+
 # Host-approved project setup, run in the launch's sandbox before the
 # harness (Claude launches only); output in \$RUN/setup.log.
 # [setup.<project-id>]

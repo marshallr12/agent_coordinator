@@ -5,6 +5,7 @@
 //! criterion, and posts the verdict with its `review_independence`. Any
 //! failure after the claim releases the review, which queues it again.
 use super::RunConfig;
+use super::select::Choice;
 use crate::profile::Harness;
 use anyhow::{Context, Result, bail, ensure};
 use coordinator_core::workflow::{ReviewFindingInput, ReviewInput};
@@ -47,6 +48,9 @@ pub struct ReviewClaim {
     pub criteria: Vec<String>,
     /// The immutable submission under review, as the service reports it.
     pub submission: Value,
+    /// The vendor the launch runs with and why: its harness decides how the
+    /// verdict is read, and the review's identity and cost name it.
+    pub choice: Choice,
 }
 
 /// The structured verdict a reviewer returns (`profile::review_schema`).
@@ -75,8 +79,14 @@ pub trait ReviewDriver {
     /// `next` for the reviewer principal, leaving out the submissions in
     /// `exclude` (this host's holds; see [`Strikes::held`]).
     fn next_review(&mut self, exclude: &[String]) -> Result<Value>;
-    /// Claims the review in a fresh reviewer-principal session.
-    fn claim_review(&mut self, review: &Review) -> Result<ReviewClaim>;
+    /// The vendor the next review runs with, chosen before the claim. A
+    /// driver without selection of its own runs `settings`' vendor as today.
+    fn choose_vendor(&mut self, settings: &RunConfig) -> Result<Choice, String> {
+        Ok(Choice::unselected(super::health::Vendor::primary(settings)))
+    }
+    /// Claims the review in a fresh reviewer-principal session; the launch
+    /// will run with `choice`.
+    fn claim_review(&mut self, review: &Review, choice: &Choice) -> Result<ReviewClaim>;
     /// Runs the reviewer launch to its end and returns its final output:
     /// Codex's last-message file or Claude's event stream.
     fn run_reviewer(&mut self, review: &Review, claim: &ReviewClaim) -> Result<String>;
@@ -190,7 +200,11 @@ pub fn review(driver: &mut dyn ReviewDriver, settings: &RunConfig) -> ReviewOutc
             failures,
         };
     }
-    let outcome = claim_and_judge(driver, settings.harness, review.clone());
+    let choice = match driver.choose_vendor(settings) {
+        Ok(choice) => choice,
+        Err(reason) => return ReviewOutcome::Failed(format!("no reviewer vendor: {reason}")),
+    };
+    let outcome = claim_and_judge(driver, &choice, review.clone());
     let failed = matches!(outcome, ReviewOutcome::Requeued { .. });
     driver.strikes().record(&review.submission, failed);
     outcome
@@ -199,16 +213,16 @@ pub fn review(driver: &mut dyn ReviewDriver, settings: &RunConfig) -> ReviewOutc
 /// Claims `review`, then posts its verdict or releases it.
 fn claim_and_judge(
     driver: &mut dyn ReviewDriver,
-    harness: Harness,
+    choice: &Choice,
     review: Review,
 ) -> ReviewOutcome {
-    let claim = match driver.claim_review(&review) {
+    let claim = match driver.claim_review(&review, choice) {
         Ok(claim) => claim,
         Err(error) => {
             return ReviewOutcome::Failed(format!("claim {}: {error:#}", review.activity));
         }
     };
-    match judge(driver, harness, &review, &claim) {
+    match judge(driver, &review, &claim) {
         Ok(decision) => ReviewOutcome::Decided {
             activity: review.activity,
             decision,
@@ -218,14 +232,9 @@ fn claim_and_judge(
 }
 
 /// Runs the reviewer, checks its verdict and posts it; returns the decision.
-fn judge(
-    driver: &mut dyn ReviewDriver,
-    harness: Harness,
-    review: &Review,
-    claim: &ReviewClaim,
-) -> Result<String> {
+fn judge(driver: &mut dyn ReviewDriver, review: &Review, claim: &ReviewClaim) -> Result<String> {
     let output = driver.run_reviewer(review, claim)?;
-    let verdict = final_verdict(harness, &output)?;
+    let verdict = final_verdict(claim.choice.vendor.harness, &output)?;
     verdict.check(claim)?;
     let input = verdict.input(claim, &review.submission)?;
     driver

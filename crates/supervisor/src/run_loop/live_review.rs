@@ -5,11 +5,12 @@
 //! own clone at the candidate revision, gets no coordinator credential, and
 //! is removed with its `$RUN` once its final output has been read.
 use super::binding::{self, Binding};
-use super::health::Vendor;
+use super::health::{self, Probe, VendorState};
 use super::live;
 use super::review::{self, Review, ReviewClaim, ReviewDriver, Strikes};
 use super::review_cost::{self, ReviewLaunch};
 use super::rooted;
+use super::select::{self, Choice, Mode};
 use crate::clone;
 use crate::config::Config;
 use crate::profile::{Harness, Role, run_files};
@@ -252,7 +253,7 @@ impl LiveReviewer {
         let relative = paths.relative(&paths.run)?.join(run_files::PROMPT);
         rooted::write(&paths.role, &relative, prompt.as_bytes(), uid, gid)?;
         self.run_launch(paths, review, claim)?;
-        self.final_output(paths)
+        self.final_output(paths, claim.choice.vendor.harness)
     }
 
     /// The instruction files at the submission's base revision, which the
@@ -270,6 +271,7 @@ impl LiveReviewer {
     /// group after [`MAX_REVIEW`] or on a stop request, and refreshing the
     /// heartbeat meanwhile.
     fn run_launch(&self, paths: &Paths, review: &Review, claim: &ReviewClaim) -> Result<()> {
+        let choice = claim.choice.recorded();
         use std::os::unix::process::CommandExt;
         let mut args = self.config_arg.clone();
         args.push("launch-root".into());
@@ -280,7 +282,8 @@ impl LiveReviewer {
         let path = super::heartbeat_path(&self.config);
         let mut beat = || {
             let role = Role::Reviewer.slug();
-            if let Err(error) = super::beat_busy(&path, role, &review.subject) {
+            let beat = super::beat_busy_with(&path, role, &review.subject, choice.as_ref());
+            if let Err(error) = beat {
                 eprintln!("agentc-supervisor run: heartbeat: {error:#}");
             }
         };
@@ -295,7 +298,8 @@ impl LiveReviewer {
             task: review.subject.clone(),
             activity: review.activity.clone(),
             attempt: claim.attempt.clone(),
-            vendor: Vendor::primary(&self.config.run),
+            vendor: claim.choice.vendor.clone(),
+            choice: claim.choice.recorded(),
             boot_id: super::record::boot_id(),
             recorded_ms: now_ms(),
         }
@@ -320,8 +324,8 @@ impl LiveReviewer {
 
     /// Codex's last-message file or Claude's event stream, read as root
     /// without following the reviewer's symlinks.
-    fn final_output(&self, paths: &Paths) -> Result<String> {
-        let name = match self.config.run.harness {
+    fn final_output(&self, paths: &Paths, harness: Harness) -> Result<String> {
+        let name = match harness {
             Harness::Codex => run_files::LAST_MESSAGE,
             Harness::Claude => "events.jsonl",
         };
@@ -332,14 +336,14 @@ impl LiveReviewer {
 
     /// `prepare` and `launch-root` flags for a reviewer launch.
     fn spec_flags(&self, paths: &Paths, claim: &ReviewClaim) -> Vec<String> {
-        let run = &self.config.run;
+        let vendor = &claim.choice.vendor;
         vec![
             "--role=reviewer".into(),
-            format!("--harness={:?}", run.harness).to_lowercase(),
+            format!("--harness={:?}", vendor.harness).to_lowercase(),
             format!("--clone={}", paths.clone.display()),
             format!("--run={}", paths.run.display()),
-            format!("--model={}", run.model),
-            format!("--effort={}", run.effort),
+            format!("--model={}", vendor.model),
+            format!("--effort={}", vendor.effort),
             format!("--project={}", self.project),
             format!("--session-id={}", claim.session),
         ]
@@ -391,7 +395,48 @@ impl LiveReviewer {
     }
 }
 
+impl Probe for LiveReviewer {
+    fn role(&self) -> Role {
+        Role::Reviewer
+    }
+
+    fn now_ms(&self) -> i64 {
+        now_ms()
+    }
+
+    fn installed(&self, harness: Harness) -> bool {
+        super::live_health::installed(&self.config, harness)
+    }
+
+    fn signed_in(&mut self, harness: Harness) -> Result<()> {
+        let role = Role::Reviewer;
+        super::live_health::status(&self.config, &self.account, role, harness)
+    }
+
+    fn expiry_ms(&self, harness: Harness) -> Option<i64> {
+        super::live_health::expiry_ms(&self.config, Role::Reviewer, harness)
+    }
+
+    fn poll_usage(&mut self, harness: Harness) -> Result<Option<Vec<super::usage::Window>>> {
+        let role = Role::Reviewer;
+        super::live_health::poll_usage(&self.config, &self.account, role, harness)
+    }
+}
+
 impl ReviewDriver for LiveReviewer {
+    /// With `[health.reviewer_selection]` off, the primary vendor as ever;
+    /// otherwise the reviewer's own selection, over the reviewer's own
+    /// account and credential.
+    fn choose_vendor(&mut self, settings: &super::RunConfig) -> Result<Choice, String> {
+        let config = self.config.clone();
+        let selection = config.health.selection(Role::Reviewer);
+        if selection.mode == Mode::Off {
+            return Ok(Choice::unselected(health::Vendor::primary(settings)));
+        }
+        let state = VendorState::load(&config);
+        select::choose(self, &config, selection, &state)
+    }
+
     fn next_review(&mut self, exclude: &[String]) -> Result<Value> {
         let call = crate::shadow::fetch_next(
             &self.client,
@@ -404,7 +449,7 @@ impl ReviewDriver for LiveReviewer {
 
     /// Reads the submission and criteria, then connects a fresh session and
     /// claims through a root-owned checkout the CLI verifies the candidate in.
-    fn claim_review(&mut self, review: &Review) -> Result<ReviewClaim> {
+    fn claim_review(&mut self, review: &Review, choice: &Choice) -> Result<ReviewClaim> {
         let workflow = self.get(&format!("tasks/{}/workflow", review.subject))?;
         let submission = current_submission(review, &workflow)?;
         let task = self.get(&format!("tasks/{}", review.subject))?;
@@ -414,7 +459,7 @@ impl ReviewDriver for LiveReviewer {
             .join(session.to_string());
         let claimed = self
             .checkout(&checkout)
-            .and_then(|()| self.claim_in(review, session, &checkout));
+            .and_then(|()| self.claim_in(review, session, &checkout, choice));
         let _ = std::fs::remove_dir_all(&checkout);
         let lookup = || self.get(&format!("workflow-activities/{}", review.activity));
         let summary = "agentc-supervisor could not read its claim; the review is queued again.";
@@ -428,6 +473,7 @@ impl ReviewDriver for LiveReviewer {
             session,
             criteria: review::strings(task["acceptance_criteria"].as_array().map_or(&[], |v| v)),
             submission,
+            choice: choice.clone(),
         })
     }
 
@@ -528,10 +574,16 @@ fn attempt_of(attempt: &Value) -> Option<(String, u64)> {
 
 impl LiveReviewer {
     /// Connects `session` and claims the review with its pinned revisions.
-    fn claim_in(&self, review: &Review, session: Uuid, checkout: &Path) -> Result<Value> {
+    fn claim_in(
+        &self,
+        review: &Review,
+        session: Uuid,
+        checkout: &Path,
+        choice: &Choice,
+    ) -> Result<Value> {
         let harness = format!(
             "--harness=agentc-supervisor-reviewer-{:?}",
-            self.config.run.harness
+            choice.vendor.harness
         );
         self.cli(
             session,

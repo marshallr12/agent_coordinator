@@ -41,6 +41,12 @@ struct Fake {
     unhealthy: Vec<Harness>,
     /// When every harness credential expires, if known.
     expiry: Option<i64>,
+    /// Harnesses whose binary is not installed.
+    missing: Vec<Harness>,
+    /// The usage windows each harness's own interface reports, and how
+    /// often each was asked.
+    usage: Vec<(Harness, Vec<usage::Window>)>,
+    polls: Vec<Harness>,
     /// From when renewals fail, and how: the attempt ended (`Some`) or a
     /// transient failure (`None`).
     renew_fails: Option<(i64, Option<renewal::AttemptEnded>)>,
@@ -100,6 +106,9 @@ impl Fake {
             stderr: String::new(),
             unhealthy: Vec::new(),
             expiry: None,
+            missing: Vec::new(),
+            usage: Vec::new(),
+            polls: Vec::new(),
             renew_fails: None,
             renew_heals: None,
             renew_after_seconds: 60,
@@ -282,6 +291,16 @@ impl Driver for Fake {
 
     fn credential_expiry_ms(&self, _harness: Harness) -> Option<i64> {
         self.expiry
+    }
+
+    fn installed(&self, harness: Harness) -> bool {
+        !self.missing.contains(&harness)
+    }
+
+    fn poll_usage(&mut self, harness: Harness) -> Result<Option<Vec<usage::Window>>> {
+        self.polls.push(harness);
+        let found = self.usage.iter().find(|(h, _)| *h == harness);
+        Ok(found.map(|(_, windows)| windows.clone()))
     }
 }
 
@@ -586,6 +605,7 @@ fn a_busy_heartbeat_is_not_a_stale_refusal() {
     let refused = Outcome::Held("task t1 is held".into());
     let skipped = Skipped {
         tasks: vec!["t1".into()],
+        ..Skipped::default()
     };
     beat_with(&path, 7, &refused, &skipped).unwrap();
     let idle = read();
@@ -617,6 +637,7 @@ fn the_heartbeat_tells_a_host_wide_stop_from_local_holds_and_bounds_the_list() {
     assert!(stopped.get("hold").is_none());
     let many = Skipped {
         tasks: (0..30).map(|n| format!("t{n}")).collect(),
+        ..Skipped::default()
     };
     beat_with(&path, 2, &Outcome::Idle, &many).unwrap();
     let held = read();

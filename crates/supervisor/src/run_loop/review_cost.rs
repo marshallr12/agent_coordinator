@@ -33,6 +33,9 @@ pub struct ReviewLaunch {
     pub activity: String,
     pub attempt: String,
     pub vendor: Vendor,
+    /// The selection that chose the vendor, when the reviewer's was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<super::select::Choice>,
     pub boot_id: String,
     /// When the record was written (ms since the epoch).
     pub recorded_ms: i64,
@@ -146,6 +149,7 @@ mod tests {
                 model: "claude-opus-5-5".into(),
                 effort: "high".into(),
             },
+            choice: None,
             boot_id: "boot-1".into(),
             recorded_ms,
         }
@@ -200,6 +204,59 @@ mod tests {
             (Some(7), Some(1.25))
         );
         assert_eq!(row["at_ms"], 99);
+    }
+
+    #[test]
+    fn a_review_row_names_the_harness_that_ran_and_the_selection_behind_it() {
+        use crate::run_loop::select::{Choice, Mode};
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(dir.path());
+        let mut codex = launch(Uuid::new_v4(), 0);
+        codex.vendor = Vendor {
+            harness: Harness::Codex,
+            model: "gpt-5.5".into(),
+            effort: "high".into(),
+        };
+        codex.choice = Some(Choice {
+            vendor: codex.vendor.clone(),
+            rule: "more_remaining".into(),
+            readings: vec!["codex 90% left".into()],
+        });
+        let turn =
+            json!({"type": "turn.completed", "usage": {"input_tokens": 9, "output_tokens": 4}});
+        assert!(settle(
+            &config,
+            &codex,
+            Some(turn.to_string().as_bytes()),
+            5
+        ));
+        let unchosen = launch(Uuid::new_v4(), 0);
+        assert!(settle(&config, &unchosen, Some(&result(1.0)), 6));
+        let [first, second] = &rows(&config)[..] else {
+            panic!("{:?}", rows(&config));
+        };
+        assert_eq!(
+            (&first["harness"], &first["model"]),
+            (&json!("codex"), &json!("gpt-5.5"))
+        );
+        assert_eq!(first["selection"]["rule"], "more_remaining");
+        assert_eq!(second["harness"], "claude");
+        assert!(second.get("selection").is_none());
+        // With the reviewer's selection on, its 429 marks its own account.
+        config.health.reviewer_selection.mode = Mode::Usage;
+        let limited = json!({"type": "rate_limit_event",
+            "rate_limit_info": {"status": "rejected", "resetsAt": 9}});
+        assert!(settle(
+            &config,
+            &launch(Uuid::new_v4(), 0),
+            Some(limited.to_string().as_bytes()),
+            7
+        ));
+        let marks = fs::read_to_string(dir.path().join("vendors.json")).unwrap();
+        assert!(
+            marks.contains("reviewer-claude") && !marks.contains("\"claude\""),
+            "{marks}"
+        );
     }
 
     /// Claude `assistant` events as a launch killed before its result leaves

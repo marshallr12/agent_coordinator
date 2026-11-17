@@ -58,6 +58,9 @@ pub struct LaunchRecord {
     /// The vendor the launch ran with (absent in older records: `[run]`).
     #[serde(default)]
     pub vendor: Option<Vendor>,
+    /// The selection that chose the vendor, when `[health.selection]` was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<super::select::Choice>,
     /// Whether the launch's cost is in the ledger, so it is never counted
     /// twice when a failed release is retried by recovery.
     #[serde(default)]
@@ -103,6 +106,7 @@ impl LaunchRecord {
             recorded_ms: now,
             release_failures: 0,
             vendor: Some(launch.vendor.clone()),
+            choice: launch.choice.clone(),
             cost_recorded: false,
             project: Some(launch.project.clone()),
             source: intent.source.clone(),
@@ -178,6 +182,7 @@ impl LaunchRecord {
         match &self.vendor {
             Some(vendor) => Launch {
                 vendor: vendor.clone(),
+                choice: self.choice.clone(),
                 ..launch
             },
             None => launch,

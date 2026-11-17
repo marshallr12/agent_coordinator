@@ -4,7 +4,11 @@
 //! exhausted (`<state_dir>/vendors.json`), once its credential has expired,
 //! or when its own sign-in check (`claude auth status` / `codex login
 //! status`) fails; the loop then routes to the configured fallback vendor.
+//! With `[health.selection]` on, [`super::select`] instead chooses among the
+//! usable vendors by the usage each account has left.
 //! Once a day the loop warns about credentials that expire soon.
+use super::select::{self, Choice, Mode, SelectionConfig};
+use super::usage::Window;
 use super::{Driver, RunConfig};
 use crate::config::Config;
 use crate::profile::{Harness, Role};
@@ -35,6 +39,10 @@ pub struct HealthConfig {
     pub implementer_daily_usd: f64,
     /// Daily spend cap (USD, last 24 hours) for reviewer launches; 0 disables.
     pub reviewer_daily_usd: f64,
+    /// Choosing the implementer's vendor by remaining usage (default: off).
+    pub selection: SelectionConfig,
+    /// The same for reviewer launches, settable independently (default: off).
+    pub reviewer_selection: SelectionConfig,
 }
 
 impl Default for HealthConfig {
@@ -49,6 +57,8 @@ impl Default for HealthConfig {
             expiry_warn_days: 14,
             implementer_daily_usd: 150.0,
             reviewer_daily_usd: 50.0,
+            selection: SelectionConfig::default(),
+            reviewer_selection: SelectionConfig::default(),
         }
     }
 }
@@ -59,6 +69,14 @@ impl HealthConfig {
         match role {
             Role::Implementer => self.implementer_daily_usd,
             Role::Reviewer => self.reviewer_daily_usd,
+        }
+    }
+
+    /// The selection settings of `role`.
+    pub fn selection(&self, role: Role) -> &SelectionConfig {
+        match role {
+            Role::Implementer => &self.selection,
+            Role::Reviewer => &self.reviewer_selection,
         }
     }
 }
@@ -100,7 +118,7 @@ pub fn name(harness: Harness) -> &'static str {
 /// Per-host vendor state that outlives one poll, `<state_dir>/vendors.json`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct VendorState {
+pub struct VendorState {
     /// Until when (ms since the epoch) each harness is exhausted.
     exhausted_until: BTreeMap<String, i64>,
     /// When the daily credential-expiry check last ran.
@@ -114,7 +132,7 @@ impl VendorState {
     }
 
     /// The saved state; a missing or unreadable file is an empty state.
-    fn load(config: &Config) -> Self {
+    pub fn load(config: &Config) -> Self {
         let bytes = std::fs::read(Self::path(config)).unwrap_or_default();
         serde_json::from_slice(&bytes).unwrap_or_default()
     }
@@ -132,11 +150,28 @@ impl VendorState {
 /// Marks `harness` exhausted until `until` (ms since the epoch), so the
 /// loop routes to the other vendor meanwhile.
 pub fn mark_exhausted(config: &Config, harness: Harness, until: i64) {
+    mark_exhausted_for(config, Role::Implementer, harness, until);
+}
+
+/// The key of `harness` in the exhausted marks of `role`: the harness's own
+/// name for the implementer (as ever), `reviewer-<name>` for the reviewer,
+/// whose account is a different one.
+fn exhausted_key(role: Role, harness: Harness) -> String {
+    match role {
+        Role::Implementer => name(harness).into(),
+        Role::Reviewer => format!("reviewer-{}", name(harness)),
+    }
+}
+
+/// [`mark_exhausted`] for the account of `role`.
+pub fn mark_exhausted_for(config: &Config, role: Role, harness: Harness, until: i64) {
     let mut state = VendorState::load(config);
-    state.exhausted_until.insert(name(harness).into(), until);
+    state
+        .exhausted_until
+        .insert(exhausted_key(role, harness), until);
     eprintln!(
         "agentc-supervisor run: {} hit a rate limit; exhausted until {}",
-        name(harness),
+        exhausted_key(role, harness),
         shown(until)
     );
     if let Err(error) = state.save(config) {
@@ -151,22 +186,99 @@ pub fn kill_switch(config: &Config) -> PathBuf {
 }
 
 /// Why no claim may start now, or else the vendor the next launch runs
-/// with. Checked every poll, so setting the kill switch stops new claims
-/// within one poll.
-pub fn admit(driver: &mut impl Driver, config: &Config) -> Result<Vendor, String> {
+/// with, and the selection behind it when `[health.selection]` is on.
+/// Checked every poll, so setting the kill switch stops new claims within
+/// one poll.
+pub fn admit(
+    driver: &mut impl Driver,
+    config: &Config,
+) -> Result<(Vendor, Option<Choice>), String> {
     switched_off(config)?;
     let now = driver.now_ms();
     capped(config, Role::Implementer, now)?;
     let mut state = VendorState::load(config);
     warn_daily(driver, config, &mut state, now);
+    let selection = config.health.selection(Role::Implementer);
+    if selection.mode != Mode::Off {
+        let mut probe = AsImplementer { driver, config };
+        let choice = select::choose(&mut probe, config, selection, &state)?;
+        return Ok((choice.vendor.clone(), Some(choice)));
+    }
     let mut reasons = Vec::new();
     for vendor in vendors(config) {
-        match unusable(driver, config, &state, &vendor, now) {
-            None => return Ok(vendor),
+        let mut probe = AsImplementer { driver, config };
+        match unusable(&mut probe, &state, &vendor, now) {
+            None => return Ok((vendor, None)),
             Some(reason) => reasons.push(reason),
         }
     }
     Err(format!("no vendor is usable: {}", reasons.join("; ")))
+}
+
+/// What the checks on a vendor need from the host, as one role: the
+/// implementer through the [`Driver`], the reviewer through its own side.
+pub trait Probe {
+    /// The role whose account is checked.
+    fn role(&self) -> Role;
+    /// Milliseconds since the epoch.
+    fn now_ms(&self) -> i64;
+    /// Why `harness` cannot take this launch for a reason of its project.
+    fn refuses(&self, _harness: Harness) -> Option<String> {
+        None
+    }
+    /// Whether the harness's pinned binary is installed.
+    fn installed(&self, harness: Harness) -> bool;
+    /// Whether the role is signed in at `harness`.
+    fn signed_in(&mut self, harness: Harness) -> Result<()>;
+    /// When the role's credential at `harness` expires, if known.
+    fn expiry_ms(&self, harness: Harness) -> Option<i64>;
+    /// Asks the vendor for the account's usage windows, without spending
+    /// inference; `None` when the vendor has no such interface.
+    fn poll_usage(&mut self, _harness: Harness) -> Result<Option<Vec<Window>>> {
+        Ok(None)
+    }
+}
+
+/// The implementer's checks, through the loop's driver.
+struct AsImplementer<'a, D: Driver + ?Sized> {
+    driver: &'a mut D,
+    config: &'a Config,
+}
+
+impl<D: Driver + ?Sized> Probe for AsImplementer<'_, D> {
+    fn role(&self) -> Role {
+        Role::Implementer
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.driver.now_ms()
+    }
+
+    fn refuses(&self, harness: Harness) -> Option<String> {
+        let project = self.driver.project();
+        (!crate::setup::can_run(self.config, project, harness)).then(|| {
+            format!(
+                "{} cannot run project {project}'s setup command (no Bubblewrap sandbox)",
+                name(harness)
+            )
+        })
+    }
+
+    fn installed(&self, harness: Harness) -> bool {
+        self.driver.installed(harness)
+    }
+
+    fn signed_in(&mut self, harness: Harness) -> Result<()> {
+        self.driver.harness_status(harness)
+    }
+
+    fn expiry_ms(&self, harness: Harness) -> Option<i64> {
+        self.driver.credential_expiry_ms(harness)
+    }
+
+    fn poll_usage(&mut self, harness: Harness) -> Result<Option<Vec<Window>>> {
+        self.driver.poll_usage(harness)
+    }
 }
 
 /// Refuses while the kill switch is set. A path that cannot be checked
@@ -226,29 +338,26 @@ pub fn capped(config: &Config, role: Role, now: i64) -> Result<(), String> {
 }
 
 /// Why `vendor` cannot run a launch now, if it cannot.
-fn unusable(
-    driver: &mut impl Driver,
-    config: &Config,
+pub fn unusable(
+    probe: &mut dyn Probe,
     state: &VendorState,
     vendor: &Vendor,
     now: i64,
 ) -> Option<String> {
     let name = name(vendor.harness);
-    if !crate::setup::can_run(config, driver.project(), vendor.harness) {
-        return Some(format!(
-            "{name} cannot run project {}'s setup command (no Bubblewrap sandbox)",
-            driver.project()
-        ));
+    if let Some(reason) = probe.refuses(vendor.harness) {
+        return Some(reason);
     }
-    if let Some(until) = state.exhausted_until.get(name).filter(|&&at| at > now) {
+    let key = exhausted_key(probe.role(), vendor.harness);
+    if let Some(until) = state.exhausted_until.get(&key).filter(|&&at| at > now) {
         return Some(format!("{name} is exhausted until {}", shown(*until)));
     }
-    if let Some(expiry) = driver.credential_expiry_ms(vendor.harness)
+    if let Some(expiry) = probe.expiry_ms(vendor.harness)
         && expiry <= now
     {
         return Some(format!("{name}'s credential expired at {}", shown(expiry)));
     }
-    let status = driver.harness_status(vendor.harness);
+    let status = probe.signed_in(vendor.harness);
     status
         .err()
         .map(|error| format!("{name} is not signed in: {error:#}"))
