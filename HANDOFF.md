@@ -98,6 +98,14 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     `4705310` or fail `client_upgrade_required`.
   - Evidence and scripts: `~/.local/state/agent-coordinator-evidence/c1b7f538-ce6c-4c2b-a945-17c1787ac7f8/`
     (`r1/`, `r2/` hold the refused runs).
+  - **Task `c1b7f538` Done:** submission `dc58d5fe`, artifact `94fadbe1`, review `641b0270` approved
+    19:22:54Z by subagent `deploy-reviewer` (same owner id as the submitter; production-side
+    claims were taken from the R3 report). Its findings, both confirmed afterwards:
+    (1) host-setup installed **Rust 1.100.0** on mxmini (the owner's rustc) and made it the agents'
+    default; before, only 1.99.0 / 1.99.1 were there. Not reverted — **owner decision**; oracle-1
+    stays on 1.98.1. (2) On oracle-1 the CLI copies in `rollback-host-4705310-20261117` are an
+    intermediate `4705310` build (`3bc5d7b8…`), not the old CLI; the real pre-rollout CLI
+    (`25a03fe3…`) is in `rollback-cli-4705310-20261117`. mxmini's copies are correct.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
