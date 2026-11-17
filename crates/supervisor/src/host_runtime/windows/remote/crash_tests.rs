@@ -89,6 +89,7 @@ fn entry(launch: &str, owner: &str, control: PathBuf, work: PathBuf) -> Entry {
         source: None,
         attempt: None,
         generation: None,
+        role: None,
         pid: None,
         created: None,
         control: Some(control),

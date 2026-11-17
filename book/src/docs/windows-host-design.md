@@ -912,8 +912,10 @@ The prototype demonstrated the first half of this contract with a stub. Each
 launch has a pipe whose access list names its package SID. The stub impersonates
 the connected client, reads the package SID from the client token, reverts, and
 answers with that SID while the client claims to be another launch. A foreign
-launch cannot open the pipe at all. Service SIDs, launch generations and
-coordinator authority are proposed and untested.
+launch cannot open the pipe at all. Step 6a gave each launch's broker pipe a
+grant with a role and a generation ([phase 6 steps](#phase-6-steps)). Service
+SIDs, a check of the generation against the coordinator and coordinator
+authority are proposed and untested.
 
 | Interface | Permitted operation | Required rejection/probe |
 | --- | --- | --- |
@@ -945,6 +947,52 @@ and separate jobs. Every candidate execution route (shell, file tool, code mode,
 MCP, browser and child helper) must preserve the boundary. If a native harness
 cannot reliably route all such operations through it, that harness/role remains
 unsupported. Separate Windows service accounts alone do not meet this condition.
+
+### Phase 6 steps
+
+Phase 6 adds the egress broker and the publication broker, which a launch
+reaches over named pipes of its own. The owner decided on 2026-11-17 to split
+it into the steps below, to check a launch's coordinator authority by
+asking the supervisor service over its own pipe, and to leave a stopped
+firewall service untested. Each step builds, passes its tests and is committed
+on its own.
+
+| Step | Content | Test |
+| --- | --- | --- |
+| 6a | Byte streams on pipe sessions; a broker pipe per launch whose identity comes from the client's token and the broker's registry; the launch's role on the Windows prepare path | Native: a launch is served its own grant whatever its request claims; another package, the same account without the package and the remote form of the path are refused; closing a launch ends its session and removes its pipe |
+| 6b | The egress broker over the pipe, and a native probe of loopback inside one AppContainer package | Native: an allowed route works through the broker; the refusals in the acceptance map |
+| 6c | The publication broker, which asks the supervisor service over its pipe whether each request still has coordinator authority; the CLI's Windows candidate-checkpoint client | Native: a reviewer call, a foreign launch and a request without current authority are refused |
+| 6d | Both brokers as virtual service accounts | Owner-attended run on MiniAir |
+
+Step 6a is implemented in the Windows `pipe` and `broker` modules and in
+`service::pipe_policy`. A pipe session reads a byte stream
+(`Session::read`), bytes already read first, and splits into a `Reader` and
+a `Writer` that a reading thread and a writing thread use at once; reads and
+writes each have their own event. `broker_descriptor` writes a broker pipe's access list: the
+broker's account owns it, the launch's account and its package each get the
+client rights, the NETWORK SID is denied, the list is protected and carries
+the low label. `Admitted::launch` serves only the launch's account carrying
+exactly its package. A `Broker` keeps each launch's `Grant` (launch, role,
+account, package, generation) in a registry keyed by package SID, serves the
+launch's pipe with one thread per instance and hands each admitted session
+to its handler with the grant the registry holds for the token's package.
+Opening a launch again gives it a higher generation; closing it ends a
+session still going and removes the pipe's name. The runner's `prepare`
+takes an optional role and journals it; the supervisor's remote host sends
+the run loop's launches as implementers, and sends no attempt or generation
+because its launches carry none.
+
+What 6a demonstrates on MiniAir, with launches running as the owner in a new
+logon session (`crates/supervisor/tests/windows_broker.rs`): a launch whose
+request claims another launch, role and generation is answered with its own
+grant; another launch's package is denied the pipe (error 5) while its own
+pipe serves it; and closing a launch ends its session that is still going and
+removes the pipe's name. The `broker` module's tests show that the owner's
+account without the package is refused, that the remote form of the pipe's
+path (`\\localhost\pipe\...`) is denied while a pipe that accepts remote
+clients is reachable that way, and that opening a launch again raises its
+generation. Nothing in 6a checks a grant against the coordinator, no broker
+runs as a service account, and no egress or publication broker exists.
 
 ## Linux P2 parity and acceptance map
 

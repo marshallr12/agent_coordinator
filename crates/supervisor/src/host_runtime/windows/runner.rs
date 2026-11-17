@@ -7,11 +7,12 @@
 //! Every launch is journaled before it starts ([`super::journal`]). When the
 //! runner's input ends, the runner exits, its job handles close and Windows
 //! ends every launch it held.
+use super::broker::Role;
 use super::candidate::{self, Candidate, CandidateSpec, Tuning};
 use super::candidate_pipe::{self, Server};
 use super::desktop::StationNotOurs;
 use super::journal::{CandidateRecord, Entry, Journal, Stage};
-use super::launcher::{LaunchSpec, Launcher, Seen, job_owner};
+use super::launcher::{LaunchSpec, Launcher, Prepared, Seen, job_owner};
 use super::process::Command;
 use super::reader::{PathRefused, validated_read};
 use super::recovery;
@@ -47,6 +48,9 @@ pub enum Request {
         attempt: Option<String>,
         #[serde(default)]
         generation: Option<u64>,
+        /// The side of the review the launch works on, journaled with it.
+        #[serde(default)]
+        role: Option<Role>,
         /// A reviewer launch's candidate, prepared with it.
         #[serde(default)]
         candidate: Option<Box<CandidateSpec>>,
@@ -130,6 +134,42 @@ impl Request {
     }
 }
 
+/// What the caller of `prepare` says a launch is for: the exact source
+/// revision, the coordinator attempt and generation, and the side of the
+/// review. Journaled, not checked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Purpose {
+    source: Option<String>,
+    attempt: Option<String>,
+    generation: Option<u64>,
+    role: Option<Role>,
+}
+
+impl Purpose {
+    /// The journal entry of `launch`, just `prepared` in the AppContainer
+    /// profile `profile` for this purpose, with no directories, candidate
+    /// or start recorded yet.
+    fn entry(self, launch: &str, profile: String, prepared: &Prepared) -> Entry {
+        Entry {
+            launch: launch.to_owned(),
+            stage: Stage::Prepared,
+            profile,
+            package_sid: prepared.package_sid.clone(),
+            job_owner: prepared.job_owner.clone(),
+            executable: None,
+            source: self.source,
+            attempt: self.attempt,
+            generation: self.generation,
+            role: self.role,
+            pid: None,
+            created: None,
+            control: None,
+            work: None,
+            candidate: None,
+        }
+    }
+}
+
 /// A launcher, its journal and the launches this run prepared.
 pub struct Runner {
     launcher: Launcher,
@@ -188,10 +228,16 @@ impl Runner {
                 source,
                 attempt,
                 generation,
+                role,
                 candidate,
             } => {
-                let record = (source, attempt, generation);
-                self.prepare(&launch, spec, record, candidate.map(|spec| *spec))
+                let purpose = Purpose {
+                    source,
+                    attempt,
+                    generation,
+                    role,
+                };
+                self.prepare(&launch, spec, purpose, candidate.map(|spec| *spec))
             }
             Request::HoldFile { launch, path } => {
                 let handle = self.launcher.hold_file(&launch, &path)?;
@@ -272,7 +318,7 @@ impl Runner {
         &mut self,
         launch: &str,
         spec: LaunchSpec,
-        (source, attempt, generation): (Option<String>, Option<String>, Option<u64>),
+        purpose: Purpose,
         candidate: Option<CandidateSpec>,
     ) -> Result<Value> {
         ensure!(
@@ -295,20 +341,10 @@ impl Runner {
             .as_ref()
             .map(|served| record_of(&served.candidate));
         let entry = Entry {
-            launch: launch.to_owned(),
-            stage: Stage::Prepared,
-            profile,
-            package_sid: prepared.package_sid.clone(),
-            job_owner: prepared.job_owner.clone(),
-            executable: None,
-            source,
-            attempt,
-            generation,
-            pid: None,
-            created: None,
             control: Some(control),
             work: Some(work),
             candidate: record,
+            ..purpose.entry(launch, profile, &prepared)
         };
         self.journal_or_undo(launch, &entry, candidate)?;
         let mut answer = serde_json::to_value(prepared)?;
@@ -756,4 +792,72 @@ pub fn serve(input: impl BufRead, mut output: impl Write, state: &Path) -> Resul
         output.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `prepare` request with `extra` fields besides the required ones,
+    /// as the runner parses it.
+    fn parsed(extra: Value) -> serde_json::Result<Request> {
+        let mut request = json!({"op": "prepare", "launch": "l1",
+            "spec": {"profile": "agentc.test", "less_privileged": true, "capabilities": [],
+                     "limits": {"processes": 4, "process_memory_mb": 64, "job_memory_mb": 128},
+                     "control": "c", "work": "w"}});
+        for (name, value) in extra.as_object().unwrap() {
+            request[name] = value.clone();
+        }
+        serde_json::from_value(request)
+    }
+
+    /// [`parsed`], which must succeed.
+    fn prepare(extra: Value) -> Request {
+        parsed(extra).unwrap()
+    }
+
+    /// The role a `prepare` request carries.
+    fn role_of(request: Request) -> Option<Role> {
+        let Request::Prepare { role, .. } = request else {
+            panic!("not a prepare request");
+        };
+        role
+    }
+
+    #[test]
+    fn a_prepare_request_may_name_a_role_and_older_ones_name_none() {
+        assert_eq!(role_of(prepare(json!({}))), None);
+        let named = prepare(json!({"role": "reviewer", "attempt": "a1", "generation": 2}));
+        assert_eq!(role_of(named), Some(Role::Reviewer));
+        assert!(parsed(json!({"role": "owner"})).is_err(), "an unknown role");
+    }
+
+    #[test]
+    fn the_purpose_of_a_launch_is_journaled_as_given() {
+        let prepared = Prepared {
+            package_sid: "S-1-15-2-1".into(),
+            desktop: r"s\d".into(),
+            job_owner: "runner:10:500".into(),
+        };
+        let purpose = Purpose {
+            source: Some("6be041f".into()),
+            attempt: Some("a1".into()),
+            generation: Some(4),
+            role: Some(Role::Implementer),
+        };
+        let entry = purpose.entry("impl-1", "agentc.test".into(), &prepared);
+        assert_eq!(entry.role, Some(Role::Implementer));
+        let kept = (
+            entry.source.as_deref(),
+            entry.attempt.as_deref(),
+            entry.generation,
+        );
+        assert_eq!(kept, (Some("6be041f"), Some("a1"), Some(4)));
+        assert_eq!(
+            (entry.launch.as_str(), entry.profile.as_str()),
+            ("impl-1", "agentc.test")
+        );
+        assert_eq!(entry.package_sid, prepared.package_sid);
+        assert_eq!(entry.stage, Stage::Prepared);
+    }
 }
