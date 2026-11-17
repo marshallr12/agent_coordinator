@@ -162,6 +162,31 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     same Claude and/or Codex options apply to reviewers: a review launch today always uses the
     primary vendor (`live_review.rs`, `Vendor::primary`) and ignores `[health.fallback]`.
     Scripts and output: `~/.local/state/agent-coordinator-evidence/harness-repin-20261117/`.
+  - **Rollout of main `29407ea` IN PREPARATION (22:45Z; nothing on production or the hosts is
+    changed yet).** `b9f49d0a` landed 22:35Z (`034ca9b`, `29407ea`). Rollout task **`d8fdc1a6`**
+    (human-delivered, claimed by CLI session `open-items-20261117`, attempt `6d1e3687`, gen 1;
+    `renew.sh` runs in this session only, so a new session must restart it or re-claim).
+    Evidence and scripts: `~/.local/state/agent-coordinator-evidence/d8fdc1a6-f3e9-43cb-848c-eed087594128/`
+    (derived from `c1b7f538`'s; `rollout.py` reads the release run id from `run-id.txt`).
+    Worktrees at `29407ea`: mxmini `~/src/worktrees/ac-d8fdc1a6-rollout` (built,
+    `target/host-1.98.1/release`, hashes in `mxmini-SHA256SUMS`), oracle-1
+    `/home/ubuntu/src/worktrees/agentc-rollout-29407ea` (build log
+    `/home/ubuntu/agentc-rollout-29407ea-build.log`, hashes go in
+    `/home/ubuntu/agentc-rollout-29407ea-SHA256SUMS`). No migration since `4705310`.
+    - **Waiting on the owner:** dispatch `gh workflow run release.yml -R marshallr12/agent_coordinator
+      --ref main` (not done at 22:45Z), and end MINIAIR's active attempt on `13ae81c1`
+      (`codex-miniair`) before the swap: any task's current attempt blocks the drain check.
+    - **Drain check finding:** the in-repo `scripts/drain_check.py` passes dead job `a92ce565`
+      but blocks on two parked `recovery_required` activities (`2aba7a54`, `2e12b535`; their
+      tasks are in another project). Owner decision 22:41Z: carry the 2026-10-28 rule once —
+      `remote_upgrade.py` runs the script byte-identical and proceeds only when every blocking
+      row is `recovery_required`. Task **`c69f31b5`** (open, agent-origin) puts the rule in the
+      script. Read-only preflight output: `drain-preflight-1.txt`.
+    - **Then:** set `deploy-drain-d8fdc1a6` on both hosts once the release run is dispatched
+      (mxmini's marker is `quiet-hours` now and must be put back after), wait for idle,
+      `verify_release.py`, `verify_packages.py`, `start-rollout.sh`, then `oracle-upgrade.sh`
+      and `mxmini-upgrade.sh` (no old-pin restore; containment suite included), clear the
+      markers, publish evidence, subagent review.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
