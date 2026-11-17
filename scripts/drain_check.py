@@ -9,8 +9,13 @@ never block it. The database is opened read-only (SQLite `mode=ro` plus
 2 the check could not run (a missing file, an unknown schema or a failed read; it
 never reports "drained" without having read every category).
 
-Every category prints its count; every blocking row prints its ids and state, never
-task text, summaries, evidence or credentials.
+Every category prints its count; every blocking or parked row prints its ids and state,
+never task text, summaries, evidence or credentials.
+
+A `recovery_required` activity is parked, not blocking: it runs nothing, holds no lease
+and survives a service restart unchanged (owner decision of 2026-10-28), so swapping the
+service cannot harm it. It is still read, counted and printed, on a `parked` line instead
+of a `blocking` line, and it never makes the status 1. Every other category blocks.
 
 A job blocks only by the service's own rule (crates/server/src/jobs.rs): its state is
 not `succeeded`, `failed` or `not_started`, and `reconciled_at IS NULL`. A reconciled
@@ -35,6 +40,8 @@ class Category(NamedTuple):
     sql: str
     binds: tuple[str, ...]
     labels: tuple[str, ...]
+    # A parked category is reported but never makes the exit status 1.
+    parked: bool = False
 
 
 CATEGORIES = (
@@ -88,12 +95,13 @@ CATEGORIES = (
     ),
     Category(
         "recovery_required",
-        "a recovery-required activity",
+        "a parked recovery-required activity; reported, does not block",
         "SELECT w.id, w.subject_task_id, w.state FROM workflow_activities w"
         " WHERE w.state = 'recovery_required'"
         " AND w.subject_task_id != ? AND w.activity_task_id != ? ORDER BY w.created_at, w.id",
         ("task", "task"),
         ("activity", "subject_task"),
+        parked=True,
     ),
     Category(
         "publication_intents",
@@ -133,15 +141,22 @@ def check(connection: sqlite3.Connection, own: dict[str, str]) -> list[tuple[Cat
 
 
 def report(results: list[tuple[Category, list[tuple]]], out) -> int:
-    blocked = 0
+    blocked = parked = 0
     for category, rows in results:
         print(f"{category.name}: {len(rows)} ({category.description})", file=out)
-        blocked += len(rows)
+        if category.parked:
+            parked += len(rows)
+        else:
+            blocked += len(rows)
     for category, rows in results:
         for row in rows:
             fields = " ".join(f"{label}={value}" for label, value in zip(category.labels, row))
-            print(f"blocking {category.name}: {fields} state={row[-1]}", file=out)
-    print("drained" if not blocked else f"not drained: {blocked} blocking row(s)", file=out)
+            kind = "parked" if category.parked else "blocking"
+            print(f"{kind} {category.name}: {fields} state={row[-1]}", file=out)
+    summary = "drained" if not blocked else f"not drained: {blocked} blocking row(s)"
+    if parked:
+        summary += f"; {parked} parked row(s) do not block"
+    print(summary, file=out)
     return BLOCKED if blocked else DRAINED
 
 

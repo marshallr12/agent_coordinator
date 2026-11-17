@@ -123,14 +123,19 @@ python3 -I scripts/drain_check.py /var/lib/agent-coordinator/coordinator.sqlite3
 It opens the database read-only, prints a count for every category (another
 task's current attempt in any state, unreconciled jobs, held reservations, held
 integrations, active integrations, recovery-required activities and
-unresolved publication intents) and the ids and states of each blocking row,
-never task text or credentials. Its non-job categories follow
+unresolved publication intents) and the ids and states of each blocking or
+parked row, never task text or credentials. Its non-job categories follow
 `deploy/agentc/integrator-preflight.py`: a task's current attempt blocks even
 when expired, blocked or submitted, and a publication intent blocks until it has
 a reconciliation or a result that is not `uncertain`. It exits 0 when drained, 1 while anything blocks, and 2 when it
 could not read the database; the deploy proceeds only on 0. The deploy's own
 task, attempt, job and reservation, and integration activities for its own task,
 never block it.
+
+A recovery-required activity is reported on a `parked` line and does not block:
+it runs nothing, holds no lease and survives a service restart unchanged, so
+swapping the service cannot harm it. The final line says how many rows were
+parked.
 
 A job blocks the drain only when its state is not `succeeded`, `failed` or
 `not_started` and its `reconciled_at` is unset, which is the service's own rule
