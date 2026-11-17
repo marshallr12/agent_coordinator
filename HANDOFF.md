@@ -106,7 +106,7 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     stays on 1.98.1. (2) On oracle-1 the CLI copies in `rollback-host-4705310-20261117` are an
     intermediate `4705310` build (`3bc5d7b8…`), not the old CLI; the real pre-rollout CLI
     (`25a03fe3…`) is in `rollback-cli-4705310-20261117`. mxmini's copies are correct.
-- **Update 2026-11-17 20:05 UTC — owner's choices on the four open items:**
+- **Update 2026-11-17 19:40 UTC — owner's choices on the four open items:**
   - `84e85336`: in review at 19:27Z (submission `8240c5ec`, review activity `3966d1fc` claimed,
     lease to 20:16:36Z), integration queued, not landed.
   - **Roster change:** owner chose a direct request. Ready, **not sent** (the owner runs it):
@@ -119,14 +119,19 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     roster save still drops `inputs` until `84e85336` is deployed.
   - **mxmini Rust 1.100.0:** keep. No action.
   - **Harness pins:** owner chose to move the agents to the installed versions (mxmini has
-    Claude 2.1.326, Codex 0.169.0). **Not done:** host change, needs the owner's go-ahead and a
-    containment-suite run on each host afterwards.
-  - **Dead job `a92ce565`:** owner chose to clear it. **Not done**, and there is no first-party
-    way: the service already treats a reconciled job as not live (`jobs.rs`: live means
-    non-terminal state and `reconciled_at IS NULL`), only the job's own reporter can post a
-    terminal observation, and the alternative is a hand edit of the production database. The
-    deploy check in `remote_upgrade.py` (evidence directory only, not in the repository) is
-    stricter than the service. Put back to the owner.
+    Claude 2.1.326, Codex 0.169.0); see the go-ahead below.
+  - **Dead job `a92ce565`:** there is no first-party way to clear it: the service already treats
+    a reconciled job as not live (`jobs.rs`: live means non-terminal state and `reconciled_at IS
+    NULL`), only the job's own reporter can post a terminal observation, and the alternative is
+    a hand edit of the production database. The owner then chose to align the deploy check
+    instead: task **`b9f49d0a`** (open, ready, agent-origin, CLI session `open-items-20261117`)
+    puts the drain check in the repository with the service's job rule. Until it lands, the
+    next deploy still needs the narrowed `remote_upgrade.py` from the `c1b7f538` evidence
+    directory; that script is on mxmini only, so an implementer elsewhere cannot read it.
+  - **Harness pins, owner go-ahead given:** after `84e85336`'s review ends, mxmini first, then
+    oracle-1 only if mxmini's containment suite passes. Script (assumptions checked read-only):
+    `~/.local/state/agent-coordinator-evidence/harness-repin-20261117/mxmini-repin.sh`; it
+    re-runs host-setup with the installed `4705310` binaries and restores on failure. Not run yet.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
