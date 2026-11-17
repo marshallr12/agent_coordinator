@@ -121,10 +121,13 @@ python3 -I scripts/drain_check.py /var/lib/agent-coordinator/coordinator.sqlite3
 ```
 
 It opens the database read-only, prints a count for every category (another
-task's active attempt, unreconciled jobs, held reservations, held integrations,
-active integrations, recovery-required activities and unreconciled publication
-intents) and the ids and states of each blocking row, never task text or
-credentials. It exits 0 when drained, 1 while anything blocks, and 2 when it
+task's current attempt in any state, unreconciled jobs, held reservations, held
+integrations, active integrations, recovery-required activities and
+unresolved publication intents) and the ids and states of each blocking row,
+never task text or credentials. Its non-job categories follow
+`deploy/agentc/integrator-preflight.py`: a task's current attempt blocks even
+when expired, blocked or submitted, and a publication intent blocks until it has
+a reconciliation or a result that is not `uncertain`. It exits 0 when drained, 1 while anything blocks, and 2 when it
 could not read the database; the deploy proceeds only on 0. The deploy's own
 task, attempt, job and reservation, and integration activities for its own task,
 never block it.
@@ -133,6 +136,10 @@ A job blocks the drain only when its state is not `succeeded`, `failed` or
 `not_started` and its `reconciled_at` is unset, which is the service's own rule
 for a live job (a reconciled job keeps its last state forever, so state alone
 does not make it live).
+
+The script's tests are `deploy/agentc/drain-check-test.py`, which the *Deploy
+script tests* job runs with every other `deploy/agentc/*-test.py`; run
+`python3 -I deploy/agentc/drain-check-test.py` after changing the script.
 
 ## Supervised launch seed layout
 

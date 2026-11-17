@@ -40,9 +40,13 @@ class Category(NamedTuple):
 CATEGORIES = (
     Category(
         "attempts",
-        "another task's active attempt",
-        "SELECT a.id, a.task_id, a.state FROM attempts a"
-        " WHERE a.state = 'active' AND a.task_id != ? AND a.id != ? ORDER BY a.created_at, a.id",
+        "another task's current attempt, whatever its state",
+        # An expired or revoked current attempt still needs recovery, so the task's
+        # pointer blocks, not the attempt's `active` state (deploy/agentc/integrator-preflight.py).
+        "SELECT t.current_attempt_id, t.id, COALESCE(a.state, 'missing') FROM tasks t"
+        " LEFT JOIN attempts a ON a.id = t.current_attempt_id"
+        " WHERE t.current_attempt_id IS NOT NULL AND t.id != ? AND t.current_attempt_id != ?"
+        " ORDER BY t.created_at, t.id",
         ("task", "attempt"),
         ("attempt", "task"),
     ),
@@ -93,12 +97,13 @@ CATEGORIES = (
     ),
     Category(
         "publication_intents",
-        "a publication intent with no reconciliation and no published result",
-        "SELECT p.activity_id, p.submission_id, 'unreconciled' FROM publication_intents p"
+        "a publication intent with no reconciliation whose result is missing or uncertain",
+        "SELECT p.activity_id, p.submission_id, COALESCE(i.publication_state, 'no_result')"
+        " FROM publication_intents p"
         " JOIN workflow_activities w ON w.id = p.activity_id"
-        " WHERE NOT EXISTS (SELECT 1 FROM publication_reconciliations r WHERE r.activity_id = p.activity_id)"
-        " AND NOT EXISTS (SELECT 1 FROM integration_results i"
-        "   WHERE i.activity_id = p.activity_id AND i.publication_state = 'published')"
+        " LEFT JOIN integration_results i ON i.activity_id = p.activity_id"
+        " LEFT JOIN publication_reconciliations r ON r.activity_id = p.activity_id"
+        " WHERE (i.activity_id IS NULL OR i.publication_state = 'uncertain') AND r.activity_id IS NULL"
         " AND w.subject_task_id != ? AND w.activity_task_id != ? ORDER BY p.created_at, p.activity_id",
         ("task", "task"),
         ("activity", "submission"),

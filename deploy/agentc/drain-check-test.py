@@ -11,10 +11,11 @@ import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
-SPEC = importlib.util.spec_from_file_location("drain_check", HERE / "drain_check.py")
+ROOT = HERE.parent.parent
+SPEC = importlib.util.spec_from_file_location("drain_check", ROOT / "scripts" / "drain_check.py")
 drain = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(drain)
-MIGRATIONS = sorted((HERE.parent / "crates" / "server" / "migrations").glob("*.sql"))
+MIGRATIONS = sorted((ROOT / "crates" / "server" / "migrations").glob("*.sql"))
 
 OWN = {"task": "own-task", "attempt": "own-attempt", "job": "own-job", "reservation": "own-res"}
 SECRET = "SECRET-TASK-TEXT"
@@ -38,6 +39,12 @@ def attempt(connection, id, task, state="active"):
     insert(connection, "attempts", id=id, project_id="p", task_id=task, owner_id="o", session_id="s",
            generation=1, state=state, mode="work", expires_at=1, last_heartbeat_at=1,
            last_progress_at=1, created_at=1)
+
+
+def task(connection, id, current_attempt=None):
+    insert(connection, "tasks", id=id, project_id="p", title=SECRET, description=SECRET,
+           acceptance_json="[]", kind="code", priority=1, lifecycle="open", created_at=1,
+           ready_since=1, current_attempt_id=current_attempt)
 
 
 def reservation(connection, id, attempt_id, state="held"):
@@ -141,15 +148,36 @@ class DrainCheckTest(unittest.TestCase):
         job(self.db, OWN["job"], state="running", pid=1, sequence=1)
         self.assert_drained()
 
-    def test_another_tasks_active_attempt_blocks_but_own_does_not(self):
+    def test_another_tasks_current_attempt_blocks_but_own_does_not(self):
         attempt(self.db, OWN["attempt"], OWN["task"])
+        task(self.db, OWN["task"], OWN["attempt"])
         self.assert_drained()
         attempt(self.db, "a-other", "t-other")
+        task(self.db, "t-other", "a-other")
         self.assert_blocked("attempts", "a-other", "t-other", "state=active")
 
-    def test_ended_attempts_do_not_block(self):
-        for index, state in enumerate(("released", "blocked", "expired", "canceled", "submitted")):
-            attempt(self.db, f"a-{state}", f"t-{index}", state)
+    def test_current_attempt_blocks_in_every_state(self):
+        # Expired, blocked and submitted current attempts still need recovery or
+        # integration, so the task's pointer blocks, as in integrator-preflight.py.
+        for state in ("released", "blocked", "expired", "canceled", "submitted", "active"):
+            with self.subTest(state=state):
+                attempt(self.db, "a-cur", "t-cur", state)
+                task(self.db, "t-cur", "a-cur")
+                out = self.assert_blocked("attempts", "a-cur", "t-cur", f"state={state}")
+                self.assertIn("attempt=a-cur task=t-cur", out)
+                self.db.execute("DELETE FROM tasks")
+                self.db.execute("DELETE FROM attempts WHERE id = 'a-cur'")
+                self.db.commit()
+
+    def test_attempts_without_a_current_pointer_do_not_block(self):
+        # An ended attempt that no task points at is history, not live work.
+        attempt(self.db, "a-active-unpointed", "t-x", "active")
+        task(self.db, "t-x")
+        self.assert_drained()
+
+    def test_own_attempt_pointed_at_by_another_task_does_not_block(self):
+        attempt(self.db, OWN["attempt"], "t-x")
+        task(self.db, "t-x", OWN["attempt"])
         self.assert_drained()
 
     def test_held_reservation_blocks_but_own_and_released_do_not(self):
@@ -183,7 +211,34 @@ class DrainCheckTest(unittest.TestCase):
     def test_unreconciled_publication_intent_blocks(self):
         activity(self.db, "w-pub", "t-sub", "t-act", state="completed")
         self.add_intent("w-pub")
-        self.assert_blocked("publication_intents", "w-pub", "sub-w-pub", "state=unreconciled")
+        self.assert_blocked("publication_intents", "w-pub", "sub-w-pub", "state=no_result")
+
+    def add_result(self, activity_id, state):
+        insert(self.db, "integration_results", activity_id=activity_id, submission_id="sub-" + activity_id,
+               attempt_id="a-old", publication_state=state, observed_target_revision="o",
+               result_revision="r", result_tree="rt", check_job_ids_json="[]", summary="s",
+               reported_by="o", created_at=2)
+
+    def test_uncertain_publication_result_blocks(self):
+        activity(self.db, "w-unc", "t-sub", "t-act", state="completed")
+        self.add_intent("w-unc")
+        self.add_result("w-unc", "uncertain")
+        self.assert_blocked("publication_intents", "w-unc", "sub-w-unc", "state=uncertain")
+
+    def test_uncertain_result_reconciled_does_not_block(self):
+        activity(self.db, "w-unc", "t-sub", "t-act", state="completed")
+        self.add_intent("w-unc")
+        self.add_result("w-unc", "uncertain")
+        insert(self.db, "publication_reconciliations", activity_id="w-unc", submission_id="sub-w-unc",
+               disposition="not_published", observed_target_revision="r", observed_target_tree="rt",
+               evidence="e", actor_id="o", created_at=3)
+        self.assert_drained()
+
+    def test_not_published_result_does_not_block(self):
+        activity(self.db, "w-np", "t-sub", "t-act", state="completed")
+        self.add_intent("w-np")
+        self.add_result("w-np", "not_published")
+        self.assert_drained()
 
     def add_intent(self, activity_id):
         insert(self.db, "publication_intents", activity_id=activity_id, submission_id="sub-" + activity_id,
@@ -198,10 +253,7 @@ class DrainCheckTest(unittest.TestCase):
                evidence="e", actor_id="o", created_at=2)
         activity(self.db, "w-pub", "t-sub2", "t-act2", state="completed")
         self.add_intent("w-pub")
-        insert(self.db, "integration_results", activity_id="w-pub", submission_id="sub-w-pub",
-               attempt_id="a-old", publication_state="published", observed_target_revision="o",
-               result_revision="r", result_tree="rt", check_job_ids_json="[]", summary="s",
-               reported_by="o", created_at=2)
+        self.add_result("w-pub", "published")
         self.assert_drained()
 
     def test_own_task_activities_do_not_block(self):
@@ -216,6 +268,7 @@ class DrainCheckTest(unittest.TestCase):
 
     def test_every_blocking_row_is_reported_with_every_count(self):
         attempt(self.db, "a-other", "t-other")
+        task(self.db, "t-other", "a-other")
         job(self.db, "j-live")
         reservation(self.db, "r-other", "a-other")
         activity(self.db, "w-rec", "t-sub", "t-act", state="recovery_required")
@@ -227,9 +280,7 @@ class DrainCheckTest(unittest.TestCase):
             self.assertIn(text, out)
 
     def test_output_has_no_task_text(self):
-        insert(self.db, "tasks", id="t-other", project_id="p", title=SECRET, description=SECRET,
-               acceptance_json="[]", kind="code", priority=1, lifecycle="open", created_at=1,
-               ready_since=1)
+        task(self.db, "t-other", "a-other")
         attempt(self.db, "a-other", "t-other")
         code, out, err = self.run_check()
         self.assertEqual(code, 1)
