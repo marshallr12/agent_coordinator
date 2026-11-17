@@ -47,6 +47,17 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     agent-origin, admitted 1/14) specifies it. Its roster change for `dependency-audit` is the
     owner's to apply; deployment is a separate owner step. CLI session `audit-policy-20261116`.
   - Unfixed warnings on main: rustix 1.1.4, tokio 1.53.1 (unsound), crypto-bigint 0.7.8 (yanked).
+- **Update 2026-11-17 04:30 UTC:**
+  - `09557c72` is **Done**; it landed on main as `61a222c`, `33316ce`, `227fe87`, `135d034` (not
+    reviewed by this session). Not active in production: the `dependency-audit` roster change
+    (declare `Cargo.lock`, `.cargo/audit.toml`) and the deploy are the owner's.
+  - Warnings fix: task **`5e094f6d`** (human-delivered, owner go-ahead), attempt `85ac9b7f`,
+    candidate `4705310` on main `4eb2db9` (Cargo.lock only: rustix 1.1.6, tokio 1.54.1,
+    crypto-bigint 0.7.11, ctutils 0.4.8). Local gate and smoke green (1207 tests). Submission
+    `e422b44c`; review `a9c79683` and integration `b5f35ce5` queued at 04:27Z. Worktree
+    `~/src/worktrees/ac-5e094f6d-deps` (branch `ac/5e094f6d-deps`) to remove once it lands.
+  - `scripts/smoke.py` refuses a dirty tree ("candidate build is dirty or lacks build
+    provenance"); commit before running it.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
