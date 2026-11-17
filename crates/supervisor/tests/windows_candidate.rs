@@ -382,6 +382,7 @@ fn child_in_a_new_logon_session() {
         "fixture" => fixture(),
         "reach" => reach(),
         "harness_probe" => harness_probe(),
+        "harness_command" => harness_command(),
         other => panic!("no such role: {other}"),
     });
     let said = match &outcome {
@@ -1483,4 +1484,208 @@ fn harness_probe() -> String {
     let full = harness_probe_one(&trees, &mut runner, false);
     let less = harness_probe_one(&trees, &mut runner, true);
     format!("{full} | {less}")
+}
+
+/// Names a copy of the owner's Claude Code credential file for the one
+/// owner-attended run of step 5f. Unset everywhere else, so the run, which
+/// uses the network and the owner's subscription, never starts by itself.
+const LOGIN: &str = "AGENTC_TEST_CLAUDE_LOGIN";
+
+/// What the harness is asked to run: it writes a file in the candidate's
+/// temp, so where it ran can be checked, and prints a marker it computes.
+const ASKED: &str = "echo ran > \"$TEMP/harness-ran\"; echo marker-$((6*7)) | tr a-z A-Z";
+
+/// Step 5f: one real Bash command from native Claude Code inside a
+/// less-privileged reviewer launch with network, through the prefix script
+/// and the shim into its candidate, which has none. Owner-attended only.
+#[test]
+fn native_claude_code_runs_a_bash_command_in_its_candidate() {
+    if std::env::var_os(CLAUDE).is_none() || std::env::var_os(LOGIN).is_none() {
+        eprintln!("{CLAUDE} or {LOGIN} is unset; harness_command was not checked");
+        return;
+    }
+    in_a_new_session("harness_command");
+}
+
+/// The temp Windows gives a process of the AppContainer `profile` whose
+/// `LOCALAPPDATA` is `local`: `<local>\Packages\<profile>\AC\Temp` (seen
+/// 2026-11-16). Nothing makes it, so the caller does.
+fn substituted_temp(local: &Path, profile: &str) -> PathBuf {
+    local.join("Packages").join(profile).join("AC").join("Temp")
+}
+
+/// The reviewer's tool directory for the harness: the pinned shell as
+/// `sh.exe` and as `bash.exe` (the harness's shell), the shim, the harness
+/// copy and a prefix that logs its arguments before the runner's script.
+fn harness_tools(trees: &Trees, package: &str) {
+    let tools = trees.at("reviewer-tools");
+    shell_tools(&tools, package);
+    std::fs::copy(tools.join("sh.exe"), tools.join("bash.exe")).unwrap();
+    let program = env!("CARGO_BIN_EXE_agentc-supervisor");
+    std::fs::copy(program, tools.join("agentc-supervisor.exe")).unwrap();
+    std::fs::copy(std::env::var_os(CLAUDE).unwrap(), tools.join("claude.exe")).unwrap();
+    let log = slashed(&trees.at("reviewer-work").join("prefix.log"));
+    let script = slashed(&trees.at("reviewer-control").join("candidate-shell"));
+    let text = format!(
+        "#!/bin/sh\n{{ echo \"args=$# TEMP=$TEMP\"; printf '%s\\n' \"$1\"; echo ---; }} >> '{log}'\n\
+         exec '{script}' \"$@\"\n"
+    );
+    std::fs::write(tools.join("logging-prefix"), text).unwrap();
+}
+
+/// The reviewer's Claude Code configuration directory in its working
+/// directory: the reviewer's permission rules and the credential copy.
+/// Claude's own sandbox, which needs Bubblewrap, stays off on Windows.
+fn harness_config(trees: &Trees) -> PathBuf {
+    use agentc_supervisor::profile::Role;
+    let config = trees.at("reviewer-work").join("claude-config");
+    std::fs::create_dir(&config).unwrap();
+    let state = trees.at("state");
+    let mut settings = agentc_supervisor::role_settings::settings(Role::Reviewer, &state);
+    settings["sandbox"] = json!({"enabled": false});
+    std::fs::write(config.join("settings.json"), settings.to_string()).unwrap();
+    std::fs::copy(
+        std::env::var_os(LOGIN).unwrap(),
+        config.join(".credentials.json"),
+    )
+    .unwrap();
+    config
+}
+
+/// The harness's command line: the Linux reviewer flags and tool allowlist,
+/// asked to run [`ASKED`] once.
+fn harness_argv(trees: &Trees) -> Value {
+    let prompt = format!(
+        "Use the Bash tool exactly once to run this command, then reply with its output \
+         and nothing else: {ASKED}"
+    );
+    let program = trees.at("reviewer-tools").join("claude.exe");
+    json!([
+        program,
+        prompt,
+        "-p",
+        "--safe-mode",
+        "--setting-sources",
+        "user",
+        "--permission-mode",
+        "dontAsk",
+        "--permission-prompts",
+        "none",
+        "--strict-mcp-config",
+        "--model",
+        "sonnet",
+        "--tools",
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash"
+    ])
+}
+
+/// The variables the harness gets besides [`launch_environment`]'s.
+fn harness_environment(trees: &Trees, config: &Path) -> Vec<(&'static str, String)> {
+    let work = trees.at("reviewer-work").display().to_string();
+    let tools = trees.at("reviewer-tools");
+    vec![
+        ("USERPROFILE", work.clone()),
+        ("HOME", work.clone()),
+        ("APPDATA", work),
+        ("CLAUDE_CONFIG_DIR", config.display().to_string()),
+        (
+            "CLAUDE_CODE_GIT_BASH_PATH",
+            tools.join("bash.exe").display().to_string(),
+        ),
+        (
+            "CLAUDE_CODE_SHELL_PREFIX",
+            slashed(&tools.join("logging-prefix")),
+        ),
+        ("DISABLE_AUTOUPDATER", "1".into()),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
+    ]
+}
+
+/// Runs the harness in the reviewer launch until it ends and returns its
+/// state, exit code and what it printed.
+fn run_harness(runner: &mut Runner, trees: &Trees, config: &Path) -> (Value, String) {
+    let extra = harness_environment(trees, config);
+    let pairs: Vec<(&str, &str)> = extra.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    start_in_launch(
+        runner,
+        trees,
+        "reviewer",
+        harness_argv(trees),
+        (&pairs, &[]),
+    );
+    let seen = ask(
+        runner,
+        json!({"op": "observe", "launch": "reviewer", "wait_ms": 240_000}),
+    );
+    if seen["state"] != "exited" {
+        ask(runner, json!({"op": "terminate", "launch": "reviewer"}));
+        ask(
+            runner,
+            json!({"op": "observe", "launch": "reviewer", "wait_ms": 10_000}),
+        );
+    }
+    let said = std::fs::read_to_string(trees.at("reviewer.log")).unwrap_or_default();
+    (seen, said)
+}
+
+/// Removes the credential copy and the whole configuration directory, and
+/// says whether the harness had changed the copy (a refreshed login).
+fn forget_login(config: &Path) -> bool {
+    let original = std::fs::read(std::env::var_os(LOGIN).unwrap()).unwrap();
+    let copy = std::fs::read(config.join(".credentials.json")).unwrap_or_default();
+    std::fs::remove_dir_all(config).unwrap();
+    assert!(!config.exists(), "the credential copy was left");
+    copy != original
+}
+
+/// Prepares the reviewer launch, with `internetClient`, and its candidate,
+/// without it; the reviewer's temp is the one Windows will substitute.
+fn prepare_harness(runner: &mut Runner, trees: &Trees) -> PathBuf {
+    let mut spec = trees.launch("reviewer");
+    spec.capabilities.push("internetClient".into());
+    let mut candidate = trees.candidate();
+    let temp = substituted_temp(&trees.at("reviewer-work"), &spec.profile);
+    candidate.reviewer_temp = temp.clone();
+    let request = json!({"op": "prepare", "launch": "reviewer", "spec": spec,
+                         "candidate": candidate});
+    let prepared = ask(runner, request);
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    tools(trees, prepared["candidate_package_sid"].as_str().unwrap());
+    harness_tools(trees, prepared["package_sid"].as_str().unwrap());
+    std::fs::create_dir_all(&temp).unwrap();
+    temp
+}
+
+/// The harness_command role: see the test that starts it.
+fn harness_command() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let trees = Trees {
+        root: dir.path().to_owned(),
+    };
+    let mut runner = Runner::new(&trees.at("state")).unwrap();
+    let temp = prepare_harness(&mut runner, &trees);
+    let config = harness_config(&trees);
+    let (seen, said) = run_harness(&mut runner, &trees, &config);
+    let refreshed = forget_login(&config);
+    let prefix =
+        std::fs::read_to_string(trees.at("reviewer-work").join("prefix.log")).unwrap_or_default();
+    let ran = trees
+        .at("candidate-work")
+        .join("tmp")
+        .join("harness-ran")
+        .exists();
+    let cleanup = json!({"op": "cleanup", "launch": "reviewer", "remove_directories": true});
+    assert_eq!(ask(&mut runner, cleanup)["ok"], true);
+    let seen_all = format!(
+        "{seen}; temp {}; refreshed {refreshed}; ran in candidate {ran}; \
+         said {:?}; prefix {prefix:?}",
+        temp.display(),
+        said.trim()
+    );
+    assert!(seen["state"] == "exited" && seen["code"] == 0, "{seen_all}");
+    assert!(ran && said.contains("MARKER-42"), "{seen_all}");
+    seen_all
 }

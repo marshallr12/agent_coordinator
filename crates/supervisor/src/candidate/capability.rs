@@ -38,11 +38,13 @@ pub struct Recorded {
     pub evidence: &'static str,
 }
 
-/// Native Claude Code builds whose command paths were observed on Windows.
+/// Native Claude Code builds whose Bash command was observed going through
+/// the prefix into the candidate from inside a contained reviewer launch on
+/// Windows. 2.1.325, whose form was seen only outside a launch, is not one.
 pub const WINDOWS_CLAUDE: &[Recorded] = &[Recorded {
-    version: "2.1.325",
-    sha256: "87e0cb6ae0f4775da388cd3043f4d8097ef961dcddbf55fe90bc61ffc3f57a30",
-    evidence: "windows-host-design.md, Native Claude Code command paths, 2026-11-14",
+    version: "2.1.326",
+    sha256: "44e85ac6d3e36b924a0d631d3f69c13a6907491115d71e97c8eb6160c82b2aed",
+    evidence: "windows-host-design.md, Native Claude Code in a contained reviewer launch, 2026-11-17",
 }];
 
 /// POSIX shells with recorded evidence that they start and run inside an
@@ -161,7 +163,9 @@ fn routed(tools: &[&str]) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const SHA: &str = "87e0cb6ae0f4775da388cd3043f4d8097ef961dcddbf55fe90bc61ffc3f57a30";
+    const SHA: &str = "44e85ac6d3e36b924a0d631d3f69c13a6907491115d71e97c8eb6160c82b2aed";
+    /// 2.1.325, whose form was observed only outside a launch.
+    const UNCONTAINED: &str = "87e0cb6ae0f4775da388cd3043f4d8097ef961dcddbf55fe90bc61ffc3f57a30";
 
     /// A ready Windows Claude reviewer of the recorded build.
     fn windows() -> Facts<'static> {
@@ -169,7 +173,7 @@ mod tests {
             host: Host::Windows,
             role: Role::Reviewer,
             harness: Harness::Claude,
-            build: Some(("2.1.325", SHA)),
+            build: Some(("2.1.326", SHA)),
             tools: ROUTED_TOOLS,
             runner: Runner::Ready,
         }
@@ -212,8 +216,8 @@ mod tests {
         assert_eq!(decide(&windows()), Ok(Isolation::CandidateRunner));
         let upper = Facts {
             build: Some((
-                "2.1.325",
-                "87E0CB6AE0F4775DA388CD3043F4D8097EF961DCDDBF55FE90BC61FFC3F57A30",
+                "2.1.326",
+                "44E85AC6D3E36B924A0D631D3F69C13A6907491115D71E97C8EB6160C82B2AED",
             )),
             ..windows()
         };
@@ -239,14 +243,14 @@ mod tests {
             ),
             (
                 Facts {
-                    build: Some(("2.1.326", SHA)),
+                    build: Some(("2.1.325", UNCONTAINED)),
                     ..windows()
                 },
-                "2.1.326",
+                "2.1.325",
             ),
             (
                 Facts {
-                    build: Some(("2.1.325", "00")),
+                    build: Some(("2.1.326", "00")),
                     ..windows()
                 },
                 "no recorded",

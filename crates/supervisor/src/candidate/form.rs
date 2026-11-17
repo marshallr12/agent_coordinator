@@ -2,7 +2,9 @@
 //! and the candidate command it becomes (phase 5, step 5a).
 //!
 //! Recorded for Claude Code 2.1.325 on MiniAir (design doc, "Native Claude
-//! Code command paths, 2026-11-14"): Git Bash runs the prefix with exactly
+//! Code command paths, 2026-11-14") and seen unchanged from 2.1.326 inside a
+//! contained reviewer launch ("Native Claude Code in a contained reviewer
+//! launch, 2026-11-17"): the harness's shell runs the prefix with exactly
 //! one argument,
 //!
 //! ```text

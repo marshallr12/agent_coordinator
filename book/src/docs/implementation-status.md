@@ -186,8 +186,7 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   package SID; and a reviewer launch's candidate launch in the Windows
   runner. On Linux the record gives the answers it gave before. On Windows it
   admits a Claude reviewer only for the recorded build, with only routed
-  tools and a ready candidate runner, but nothing calls it there and no
-  Windows reviewer can launch. The phase closed **blocked**:
+  tools and a ready candidate runner. The phase first closed **blocked**:
   [Git Bash does not start in an AppContainer](windows-host-design.md#git-bash-does-not-start-in-an-appcontainer-2026-11-14).
   Task `d8ae17f5` then found that a pinned busybox-w32 shell
   [starts there](windows-host-design.md#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16)
@@ -199,8 +198,12 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   native test. A second native test shows a synthetic credential, the
   reviewer's process and pipe, another launch and the runner out of the
   candidate's reach, and the runner refuses to start a launch whose
-  candidate runner is broken. A contained harness run is not done, so every
-  Claude launch on Windows is still refused.
+  candidate runner is broken. In one owner-attended run, native Claude Code
+  2.1.326
+  [ran inside a contained reviewer launch](windows-host-design.md#native-claude-code-in-a-contained-reviewer-launch-2026-11-17)
+  and its Bash command went through the prefix and the shim into the
+  candidate. The capability record admits only that build. No Windows driver
+  calls the record yet, so no product Claude launch runs on Windows.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
