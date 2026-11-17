@@ -106,6 +106,27 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     stays on 1.98.1. (2) On oracle-1 the CLI copies in `rollback-host-4705310-20261117` are an
     intermediate `4705310` build (`3bc5d7b8…`), not the old CLI; the real pre-rollout CLI
     (`25a03fe3…`) is in `rollback-cli-4705310-20261117`. mxmini's copies are correct.
+- **Update 2026-11-17 20:05 UTC — owner's choices on the four open items:**
+  - `84e85336`: in review at 19:27Z (submission `8240c5ec`, review activity `3966d1fc` claimed,
+    lease to 20:16:36Z), integration queued, not landed.
+  - **Roster change:** owner chose a direct request. Ready, **not sent** (the owner runs it):
+    `~/.local/state/agent-coordinator-evidence/roster-inputs-request/declare-audit-inputs.js`, a
+    snippet for the dashboard's browser console while signed in. It refuses unless the roster is
+    at revision 3 with exactly one `dependency-audit` entry. Tested by
+    `test_declare_audit_inputs.mjs` there (real server built at `4705310`, real dashboard login
+    in headless Chrome): signed-out refusal, save to revision 4, second-run refusal. A roster
+    revision is not a pin (`pins_current`), so in-flight submissions do not go stale. A dashboard
+    roster save still drops `inputs` until `84e85336` is deployed.
+  - **mxmini Rust 1.100.0:** keep. No action.
+  - **Harness pins:** owner chose to move the agents to the installed versions (mxmini has
+    Claude 2.1.326, Codex 0.169.0). **Not done:** host change, needs the owner's go-ahead and a
+    containment-suite run on each host afterwards.
+  - **Dead job `a92ce565`:** owner chose to clear it. **Not done**, and there is no first-party
+    way: the service already treats a reconciled job as not live (`jobs.rs`: live means
+    non-terminal state and `reconciled_at IS NULL`), only the job's own reporter can post a
+    terminal observation, and the alternative is a hand edit of the production database. The
+    deploy check in `remote_upgrade.py` (evidence directory only, not in the repository) is
+    stricter than the service. Put back to the owner.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
