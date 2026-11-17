@@ -54,8 +54,10 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
   - Warnings fix: task **`5e094f6d`** (human-delivered, owner go-ahead), attempt `85ac9b7f`,
     candidate `4705310` on main `4eb2db9` (Cargo.lock only: rustix 1.1.6, tokio 1.54.1,
     crypto-bigint 0.7.11, ctutils 0.4.8). Local gate and smoke green (1207 tests). Submission
-    `e422b44c`; review `a9c79683` and integration `b5f35ce5` queued at 04:27Z. Worktree
-    `~/src/worktrees/ac-5e094f6d-deps` (branch `ac/5e094f6d-deps`) to remove once it lands.
+    `e422b44c`; review `a9c79683` approved by a supervised reviewer, which reported two
+    `cargo test` failures in its sandbox that it reproduced on base `4eb2db9` (not seen locally).
+    **Landed on main as `4705310` at ~05:13Z; task Done.** Main CI on `4705310` was still
+    running at 05:14Z. Worktree and local branch removed.
   - `scripts/smoke.py` refuses a dirty tree ("candidate build is dirty or lacks build
     provenance"); commit before running it.
 
