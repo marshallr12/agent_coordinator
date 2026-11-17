@@ -23,8 +23,9 @@ use super::profile::Capabilities;
 use super::reader::create_directory;
 use super::sddl;
 use super::sys::check;
+use crate::candidate::capability::{self, Runner};
 use crate::candidate::{CALL_SECONDS, STUCK_CALLS};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -47,6 +48,8 @@ const SETTLE: Duration = Duration::from_secs(2);
 /// How often a running command's wait looks whether the candidate is
 /// being retired.
 const SLICE: Duration = Duration::from_millis(250);
+/// What the readiness check's command prints.
+const READY: &str = "agentc-candidate-ready";
 /// Why a command is not run, or is cut short, once the launch is ending.
 pub const RETIRING: &str = "the launch is ending; its candidate runs no more commands";
 /// The variables Windows replaces in a process it starts in an
@@ -252,6 +255,37 @@ impl Candidate {
         let _ = std::fs::remove_file(&log);
         ensure!(!self.is_retiring(), RETIRING);
         call
+    }
+
+    /// Whether the candidate can run commands now: the readiness check of
+    /// the capability record. Anything short of a recorded shell that runs
+    /// a command and returns its output is broken, with the reason.
+    pub fn ready(&self) -> Runner {
+        match self.check() {
+            Ok(()) => Runner::Ready,
+            Err(error) => Runner::Broken(format!("{error:#}")),
+        }
+    }
+
+    /// Fails unless the shell's file is a recorded build and a command run
+    /// with it in the candidate returns [`READY`]. The file is hashed when
+    /// this is asked, not at every command: only the runner's account can
+    /// change the directory it is in.
+    fn check(&self) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let shell = &self.spec.shell;
+        let bytes = std::fs::read(shell).with_context(|| format!("read {}", shell.display()))?;
+        let hash = hex::encode(Sha256::digest(&bytes));
+        capability::recorded_shell(&hash).map_err(|why| anyhow!(why))?;
+        let call = self.run(&format!("echo {READY}"))?;
+        let said = String::from_utf8_lossy(&call.output);
+        ensure!(
+            call.status == 0 && said.trim() == READY,
+            "its shell ended with status {} and said {:?}",
+            call.status,
+            said.trim()
+        );
+        Ok(())
     }
 
     /// Stops the candidate for good: a command that has not started is

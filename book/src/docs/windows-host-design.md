@@ -490,6 +490,64 @@ The same run showed that Windows refuses to start a process in an
 AppContainer whose environment holds no `LOCALAPPDATA` (`CreateProcessW`
 error 203).
 
+Step 5e is implemented (task `9cf04a5c`, 2026-11-17).
+
+- **The readiness check.** `Candidate::ready` is the check the capability
+  record asks for. It hashes the candidate's shell and requires a shell
+  with recorded evidence (`capability::WINDOWS_SHELLS`, the pinned
+  busybox-w32 by SHA-256), then runs one command in the candidate and
+  requires its output and status. Anything else is `Broken` with the
+  reason. The runner answers it as the request `candidate_ready`: `ready`,
+  `broken` with the reason, or `missing` for a launch prepared without a
+  candidate. The hash is taken when the check is asked, not at every
+  command; the shell's directory can be changed only by the runner's
+  account.
+- **A broken runner refuses the launch.** The runner refuses to start a
+  launch whose candidate is broken, before the start is journaled. A launch
+  prepared without a candidate is not a reviewer launch to the runner; the
+  driver's capability record refuses a reviewer whose runner is missing.
+
+The native test
+`a_reviewers_credential_and_processes_are_out_of_its_candidates_reach`
+**passes** on MiniAir with the pinned shell. It prepares two reviewer
+launches, each with its candidate, all four less privileged. Before the
+candidate's shell exists the readiness check says broken, the reviewer's
+start is refused and nothing is started; a launch without a candidate
+answers missing; `capability::decide` refuses a reviewer for both. Then a
+synthetic credential is put in the reviewer's environment, in a file in
+its control directory and one in its working directory, in a file only the
+runner's account can open, whose handle the reviewer inherits, and in a
+registry key of the account's hive that only the account and the
+reviewer's package may read. One probe program then runs twice, in the
+reviewer and in its candidate, and tries the same list:
+
+| Target | From the reviewer | From its candidate |
+| --- | --- | --- |
+| The credential file in the reviewer's control directory | read | error 5 |
+| The credential file in the reviewer's working directory | read | error 5 |
+| The registry key granted to the reviewer's package | read | error 5 |
+| The reviewer's candidate pipe | opened | error 5 |
+| The reviewer's root process, to query, to read its memory, to take a handle out | opened, each | error 5, each |
+| The file only the runner's account can open, by path | error 5 | error 5 |
+| A handle to that file among the process's own handles | present | absent |
+| The other launch's two credential files, its pipe and its root process | error 5, each | error 5, each |
+| The runner's process | error 5 | error 5 |
+
+Error 5 is access denied. The candidate's own handles were its command
+file, its log and its starting directory, and its environment did not hold
+the credential. The reviewer's column is the control: the same program
+reaches what is the reviewer's own, so the candidate's refusals are not a
+probe that cannot work. As with the other native tests this runs in a new
+logon session of the developer's account, which is elevated here, and is a
+development check, not acceptance evidence. **Not checked:** a credential
+in the reviewer's memory other than through opening its process, window
+messages between the two desktops, and the junction question left open
+under [the proposed runner](#proposed-candidate-runner).
+
+The probe first guessed handle values, and a process in an AppContainer
+that does so ends with an invalid-handle exception (`0xC0000008`); it now
+reads its own handle table.
+
 On the owner's decision of 2026-11-15, phase 5 **closed at step 5c**. Task `d8ae17f5` then found
 [a shell that starts inside an AppContainer](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16)
 and that native Claude Code accepts behind a shim-like prefix. With it, and
@@ -498,7 +556,7 @@ showed (the shell's start, three variables Windows replaces, and when a job
 counts as not empty), the two tests **pass** on MiniAir and are no longer
 ignored. `CandidateSpec`'s `bash` field is now `shell`. The owner chose on
 2026-11-17 to do the remaining steps before phase 6, as task `9cf04a5c`.
-Step 5d is done as described above; steps 5e and 5f are not.
+Steps 5d and 5e are done as described above; step 5f is not.
 
 ## Launch boundary
 
@@ -2213,7 +2271,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4a | Service lifecycle core, SCM binding and the role runner as a service behind a secured named pipe | Phase 3 | Implemented by task `e0459185`; see [Phase 4a](#phase-4a-service-lifecycle-core-scm-binding-and-the-runner-service). **No service was installed and nothing is machine-accepted** |
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
-| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim), whose native test passes. Steps 5e and 5f are not done, no contained Claude Code launch has run, and every Claude launch on Windows is still refused |
+| 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim) and step 5e (the readiness check and the fixture checks), whose native tests pass. Step 5f is not done, no contained Claude Code launch has run, and every Claude launch on Windows is still refused |
 | 6 | Egress and publication brokers | Phase 3 | Not started |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
 

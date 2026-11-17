@@ -16,6 +16,7 @@ use super::process::Command;
 use super::reader::{PathRefused, validated_read};
 use super::recovery;
 use super::text::wide;
+use crate::candidate::capability::Runner as Readiness;
 use crate::host_runtime::Recovery;
 use crate::service::drain::Fleet;
 use crate::service::lifecycle::{Kind, Refused};
@@ -85,6 +86,9 @@ pub enum Request {
         relative: PathBuf,
         limit: usize,
     },
+    /// Whether the launch's candidate runner can run commands now: the
+    /// readiness check of the capability record.
+    CandidateReady { launch: String },
     /// Judge every journaled launch without starting anything.
     Recover,
     /// Delete what an ended launch of an earlier runner left behind.
@@ -110,6 +114,7 @@ impl Request {
             | Self::WatchedEnded { .. }
             | Self::Cleanup { .. }
             | Self::Read { .. }
+            | Self::CandidateReady { .. }
             | Self::Recover
             | Self::Reclaim { .. } => Kind::Continues,
         }
@@ -242,6 +247,7 @@ impl Runner {
                 let bytes = validated_read(&root, &relative, limit)?;
                 Ok(json!({ "hex": hex::encode(bytes) }))
             }
+            Request::CandidateReady { launch } => Ok(ready_answer(&self.readiness(&launch))),
             Request::Recover => self.recover(),
             Request::Reclaim {
                 launch,
@@ -419,6 +425,30 @@ impl Runner {
         }
     }
 
+    /// Whether `launch`'s candidate runner can run commands now. A launch
+    /// prepared without a candidate has none; one whose pipe is no longer
+    /// served, or whose shell does not answer, is broken.
+    fn readiness(&self, launch: &str) -> Readiness {
+        match self.candidates.get(launch) {
+            None => Readiness::Missing,
+            Some(served) if served.server.is_none() => {
+                Readiness::Broken("its pipe is no longer served".into())
+            }
+            Some(served) => served.candidate.ready(),
+        }
+    }
+
+    /// Refuses to start a launch whose candidate runner is broken: a
+    /// reviewer must never run where its commands cannot reach a candidate.
+    /// A launch without a candidate is not a reviewer launch to the runner;
+    /// the driver's capability record refuses a reviewer without one.
+    fn refuse_broken_candidate(&self, launch: &str) -> Result<()> {
+        if let Readiness::Broken(why) = self.readiness(launch) {
+            bail!("the candidate runner is broken ({why}); launch {launch} is refused");
+        }
+        Ok(())
+    }
+
     /// This run's journal entry for `launch`.
     fn entry(&self, launch: &str) -> Result<Entry> {
         ensure!(
@@ -433,6 +463,7 @@ impl Runner {
     fn start(&mut self, launch: &str, command: &Command, listed: &[u64]) -> Result<Value> {
         let mut entry = self.entry(launch)?;
         ensure!(!self.launcher.runs(launch)?, "launch {launch} already runs");
+        self.refuse_broken_candidate(launch)?;
         entry.stage = Stage::Starting;
         entry.executable = command.argv.first().cloned();
         (entry.pid, entry.created) = (None, None);
@@ -561,6 +592,16 @@ fn write_script(launch: &str, spec: &CandidateSpec, control: &Path) -> Result<()
     );
     let script = control.join(shim::SCRIPT_NAME);
     std::fs::write(&script, text).with_context(|| format!("write {}", script.display()))
+}
+
+/// The answer to a readiness request: `ready`, `missing` or `broken`, and
+/// for a broken runner why.
+fn ready_answer(readiness: &Readiness) -> Value {
+    match readiness {
+        Readiness::Ready => json!({ "runner": "ready" }),
+        Readiness::Missing => json!({ "runner": "missing" }),
+        Readiness::Broken(why) => json!({ "runner": "broken", "detail": why }),
+    }
 }
 
 /// What the journal keeps of a prepared candidate.

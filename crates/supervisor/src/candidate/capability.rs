@@ -45,6 +45,27 @@ pub const WINDOWS_CLAUDE: &[Recorded] = &[Recorded {
     evidence: "windows-host-design.md, Native Claude Code command paths, 2026-11-14",
 }];
 
+/// POSIX shells with recorded evidence that they start and run inside an
+/// AppContainer on Windows. A candidate whose shell is any other file is
+/// not ready.
+pub const WINDOWS_SHELLS: &[Recorded] = &[Recorded {
+    version: "busybox-w32 FRP-6354-g5f09fb446 (BusyBox 1.39.0), 64-bit Unicode",
+    sha256: "36b266923fc5765b42f5f981319f39568498fba60b53ccf26e8fc1e575e2a9a9",
+    evidence: "windows-host-design.md, A POSIX shell that starts in an AppContainer, 2026-11-16",
+}];
+
+/// The recorded shell whose file has the hash `sha256`, or why a file with
+/// that hash may not run candidate commands.
+pub fn recorded_shell(sha256: &str) -> Result<&'static Recorded, String> {
+    let known = |shell: &&Recorded| shell.sha256.eq_ignore_ascii_case(sha256);
+    WINDOWS_SHELLS.iter().find(known).ok_or_else(|| {
+        format!(
+            "the candidate's shell (SHA-256 {sha256}) has no recorded evidence that it runs \
+             in an AppContainer; only a recorded shell may run candidate commands"
+        )
+    })
+}
+
 /// Tools a reviewer may be offered on Windows: the file tools, which run no
 /// code, and Bash, which reaches the prefix. The PowerShell tool bypasses
 /// the prefix, so it and any other tool are refused.
@@ -256,6 +277,15 @@ mod tests {
             let refusal = decide(&facts).unwrap_err();
             assert!(refusal.contains(reason), "{refusal}");
         }
+    }
+
+    #[test]
+    fn only_a_recorded_shell_may_run_candidate_commands() {
+        let pinned = WINDOWS_SHELLS[0].sha256;
+        assert!(recorded_shell(pinned).is_ok());
+        assert!(recorded_shell(&pinned.to_uppercase()).is_ok());
+        let refusal = recorded_shell(SHA).unwrap_err();
+        assert!(refusal.contains(SHA) && refusal.contains("no recorded evidence"));
     }
 
     #[test]

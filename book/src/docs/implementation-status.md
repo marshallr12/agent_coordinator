@@ -196,8 +196,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   candidate's native tests pass on MiniAir. Task `9cf04a5c` added the
   candidate pipe's threads and the `windows-candidate-shell` shim; a
   harness-shaped command runs through them from a real reviewer launch in a
-  native test. The fixture checks and a contained harness run are not done,
-  so every Claude launch on Windows is still refused.
+  native test. A second native test shows a synthetic credential, the
+  reviewer's process and pipe, another launch and the runner out of the
+  candidate's reach, and the runner refuses to start a launch whose
+  candidate runner is broken. A contained harness run is not done, so every
+  Claude launch on Windows is still refused.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
