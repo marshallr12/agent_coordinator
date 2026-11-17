@@ -132,11 +132,14 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     if mxmini passes). `84e85336` review approved 19:41:05Z, integration queued.
     **mxmini DONE 19:42:30Z:** Claude 2.1.326 / Codex 0.169.0, containment 104 PASS, core
     binaries unchanged, quiet-hours marker unchanged; rollback `/opt/agentc/rollback-harness-20261117`.
-    **oracle-1 IN PROGRESS:** kill switch `harness-repin-20261117` set 19:43:23Z; an implementer
-    launch on `b9f49d0a` (attempt `1ab0b225`) is still running and is not cut off. When idle run
-    `sudo bash /home/ubuntu/oracle-repin-20261117.sh` (to Claude 2.1.325 / Codex 0.169.0; it
-    restores on failure and removes the kill switch either way). **If this session ends first,
-    the kill switch must be removed by hand or oracle-1 claims nothing.**
+    **oracle-1 DONE 20:11:28Z:** Claude 2.1.325 (the owner's installed version there, one patch
+    behind mxmini) / Codex 0.169.0, containment 113 PASS, core binaries unchanged. Kill switch
+    `harness-repin-20261117` was set 19:43:23Z, the launch on `b9f49d0a` finished by itself, and
+    the switch is removed; `agentc-run` and both integrator units active. Rollback
+    `/opt/agentc/rollback-harness-20261117` on each host.
+  - **State 20:11Z:** `84e85336` **Done**, landed on main as `f210a59` (the integrator ran
+    during the drain); **not deployed**, so the dashboard roster dialog still drops `inputs`.
+    `b9f49d0a` submitted by oracle-1, waiting for review. Roster snippet still not run by the owner.
     Scripts and output: `~/.local/state/agent-coordinator-evidence/harness-repin-20261117/`.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
