@@ -140,6 +140,10 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
   - **State 20:11Z:** `84e85336` **Done**, landed on main as `f210a59` (the integrator ran
     during the drain); **not deployed**, so the dashboard roster dialog still drops `inputs`.
     `b9f49d0a` submitted by oracle-1, waiting for review. Roster snippet still not run by the owner.
+  - **State 20:49Z:** oracle-1 works end to end on the new pins: its reviewer decided
+    `changes_requested` on `b9f49d0a`'s first submission (20:13Z), the implementer resubmitted
+    (attempt `baaefcb5`, 20:48Z), second review queued behind a review of `9cf04a5c`. Roster
+    still revision 3.
     Scripts and output: `~/.local/state/agent-coordinator-evidence/harness-repin-20261117/`.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
