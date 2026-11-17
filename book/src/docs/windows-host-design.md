@@ -548,6 +548,17 @@ The probe first guessed handle values, and a process in an AppContainer
 that does so ends with an invalid-handle exception (`0xC0000008`); it now
 reads its own handle table.
 
+**Toward step 5f (2026-11-17).** The host updated its native Claude Code to
+2.1.326 (SHA-256
+`44e85ac6d3e36b924a0d631d3f69c13a6907491115d71e97c8eb6160c82b2aed`) on
+2026-11-16, and the recorded build 2.1.325 is no longer on it. Build
+2.1.326 starts in a full and in a less-privileged AppContainer, from a
+copy only the launch's package may read, and prints its version with
+status 0 (`native_claude_code_reports_its_version_inside_a_launch`, which
+runs only where `AGENTC_TEST_CLAUDE` names the file). It was asked for
+nothing else: no session, no network, no credential. Its command form was
+**not observed**, so the capability record does not list it.
+
 On the owner's decision of 2026-11-15, phase 5 **closed at step 5c**. Task `d8ae17f5` then found
 [a shell that starts inside an AppContainer](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16)
 and that native Claude Code accepts behind a shim-like prefix. With it, and

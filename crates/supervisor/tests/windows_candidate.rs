@@ -381,6 +381,7 @@ fn child_in_a_new_logon_session() {
         "shim" => shim(),
         "fixture" => fixture(),
         "reach" => reach(),
+        "harness_probe" => harness_probe(),
         other => panic!("no such role: {other}"),
     });
     let said = match &outcome {
@@ -1406,4 +1407,80 @@ fn fixture() -> String {
     }
     drop(fixture);
     format!("{readiness} || reviewer: {control:?} || candidate: {reached:?}")
+}
+
+/// Names a native Claude Code executable on this host; unset where the
+/// owner has none to probe.
+const CLAUDE: &str = "AGENTC_TEST_CLAUDE";
+
+/// Step 5f groundwork: whether native Claude Code starts at all inside a
+/// launch, full and less privileged. It only asks for the version: no
+/// network, no credential and no session.
+#[test]
+fn native_claude_code_reports_its_version_inside_a_launch() {
+    if std::env::var_os(CLAUDE).is_none() {
+        eprintln!("{CLAUDE} is unset; harness_probe was not checked");
+        return;
+    }
+    in_a_new_session("harness_probe");
+}
+
+/// Runs `claude.exe --version` in a fresh launch, `less` privileged or
+/// not, from a copy only that launch's package may read, and returns how
+/// it ended and what it printed.
+fn harness_probe_one(trees: &Trees, runner: &mut Runner, less: bool) -> String {
+    let launch = format!("harness-{less}");
+    let mut spec = trees.launch(&launch);
+    spec.less_privileged = less;
+    let prepared = ask(
+        runner,
+        json!({"op": "prepare", "launch": launch, "spec": spec}),
+    );
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    let tools = trees.at(&format!("{launch}-tools"));
+    let owner = token::current_user_sid().unwrap();
+    let package = prepared["package_sid"].as_str().unwrap();
+    create_directory(&tools, &sddl::shared_source(&owner, &[package]).unwrap()).unwrap();
+    let program = tools.join("claude.exe");
+    std::fs::copy(std::env::var_os(CLAUDE).unwrap(), &program).unwrap();
+    let work = trees.at(&format!("{launch}-work")).display().to_string();
+    let home = [
+        ("USERPROFILE", work.as_str()),
+        ("HOME", &work),
+        ("APPDATA", &work),
+    ];
+    start_in_launch(
+        runner,
+        trees,
+        &launch,
+        json!([program, "--version"]),
+        (&home, &[]),
+    );
+    let seen = ask(
+        runner,
+        json!({"op": "observe", "launch": launch, "wait_ms": 120_000}),
+    );
+    let said = std::fs::read_to_string(trees.at(&format!("{launch}.log"))).unwrap_or_default();
+    let cleanup = json!({"op": "cleanup", "launch": launch, "remove_directories": true});
+    assert_eq!(ask(runner, cleanup)["ok"], true);
+    let ended_well = seen["state"] == "exited" && seen["code"] == 0;
+    assert!(ended_well, "less_privileged={less}: {seen}: {said}");
+    assert!(
+        said.contains("(Claude Code)"),
+        "less_privileged={less}: {said}"
+    );
+    format!("less_privileged={less}: {seen} said {:?}", said.trim())
+}
+
+/// Both harness probes. Each must end by itself with status 0 and a
+/// version line, as observed on MiniAir on 2026-11-17.
+fn harness_probe() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let trees = Trees {
+        root: dir.path().to_owned(),
+    };
+    let mut runner = Runner::new(&trees.at("state")).unwrap();
+    let full = harness_probe_one(&trees, &mut runner, false);
+    let less = harness_probe_one(&trees, &mut runner, true);
+    format!("{full} | {less}")
 }
