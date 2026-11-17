@@ -153,6 +153,11 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
   - **Task `6faa1251`** created at the owner's request (open, ready, agent-origin): make an
     unused harness optional in host-setup, the containment suite and the updater. Neither host
     launches Codex today; only the installer and the suite require it, not the supervisor.
+  - **Task `610a5031`** created at the owner's request (open, ready, agent-origin): the
+    supervisor picks Claude or Codex before each claim from each account's remaining usage
+    (opt-in). Today it only switches after a 429 / expired credential / failed sign-in, and only
+    to `[health.fallback]`, which neither host configures. Whether the vendors expose a
+    remaining-usage figure is unverified; the task makes the implementer establish it.
     Scripts and output: `~/.local/state/agent-coordinator-evidence/harness-repin-20261117/`.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
