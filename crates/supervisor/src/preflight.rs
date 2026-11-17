@@ -632,6 +632,58 @@ mod tests {
             assert!(problems.contains(expected), "{expected}: {problems}");
         }
     }
+    /// A host with one harness installed (host-setup.sh skips the other: no
+    /// binary, no pin) must still preflight launches of the installed one, for
+    /// either role: a launch is checked for the harness it names and no other.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_is_checked_only_for_its_own_harness() {
+        for (role, harness, pins, absent) in [
+            (
+                Role::Reviewer,
+                Harness::Claude,
+                "claude = \"2.1.326\"",
+                "codex",
+            ),
+            (
+                Role::Implementer,
+                Harness::Claude,
+                "claude = \"2.1.326\"",
+                "codex",
+            ),
+            (
+                Role::Implementer,
+                Harness::Codex,
+                "codex = \"0.169.0\"",
+                "claude",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let spec = LaunchSpec {
+                role,
+                harness,
+                clone: dir.path().join("clone"),
+                run: dir.path().join("clone/run"),
+                model: "m".into(),
+                effort: "low".into(),
+                session_id: Uuid::nil(),
+                project: None,
+                task: None,
+                push_socket: None,
+            };
+            let mut config: Config = toml::from_str(&format!("[pinned]\n{pins}\n")).unwrap();
+            config.bin_dir = dir.path().into();
+            config.state_dir = dir.path().into();
+            assert!(!pinned(harness, &config).is_empty());
+            let problems = check(&spec, &config).join("\n");
+            assert!(problems.contains("not installed"), "{role:?}: {problems}");
+            assert!(
+                !problems.to_lowercase().contains(absent),
+                "{role:?} {harness:?} mentions {absent}: {problems}"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn seed_protection_requires_root_and_unreplaceable_parents_without_privileged_tests() {

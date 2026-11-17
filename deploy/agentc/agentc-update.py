@@ -19,7 +19,7 @@ Nothing live changes until the bundle verifies. It then:
 
 A bundle that carries harness binaries (harness.json) gets a second, staged
 step once the core update is promoted: the new claude/codex binaries and their
-pins in supervisor.toml replace the old ones while the supervisor is drained,
+pins in supervisor.toml replace the old ones (a harness the host does not have is skipped) while the supervisor is drained,
 and are promoted only when preflight, the canary and containment-suite.sh all
 pass; otherwise the old binaries and pins come back. A rejected release is
 remembered and not retried until --retry or a newer release. A launch is never
@@ -123,13 +123,24 @@ class Settings:
         self.as_impl = shlex.split(args.as_impl)
         self.canary = args.canary_command or DEFAULT_CANARY
         self.canary_is_default = args.canary_command is None
-        self.canary_harnesses = args.canary_harnesses.replace(",", " ").split()
+        self.canary_harnesses = (args.canary_harnesses.replace(",", " ").split()
+                                 if args.canary_harnesses is not None else self.default_harnesses())
         self.suite = args.suite_command
         self.ntfy_topic = args.ntfy_topic
         self.ntfy_url = args.ntfy_url
         self.allow_insecure_loopback = args.allow_insecure_loopback
         self.canary_timeout_minutes = args.canary_timeout_minutes
         self.mirror_branch = args.mirror_branch
+
+    def default_harnesses(self):
+        """The harness canaried when E2E_HARNESSES names none: claude, unless this host has only codex."""
+        installed = self.installed_harnesses()
+        return ["claude"] if not installed or "claude" in installed else installed
+
+    def installed_harnesses(self):
+        """The harnesses this host has: those with a binary under <prefix>/bin (host-setup.sh
+        installs only the harnesses its owner has)."""
+        return [name for name in HARNESSES if (self.bin / name).is_file()]
 
     @property
     def bin(self):
@@ -721,8 +732,13 @@ def update_harness(settings, state, tag, release_dir, window):
     """The staged harness step: new binaries and pins go in while the supervisor is drained and
     are promoted only if preflight, the canary and the containment suite pass."""
     wanted = harness_manifest(release_dir)
+    # A harness the host does not have (host-setup.sh skips one its owner has not installed) is
+    # neither staged nor pinned.
+    absent = [name for name in wanted if name not in settings.installed_harnesses()]
+    if absent:
+        log(f"not staging {', '.join(absent)}: not installed on this host")
     changes = {name: (file, version) for name, (file, version) in wanted.items()
-               if not (settings.bin / name).is_file() or sha256(settings.bin / name) != sha256(file)}
+               if name not in absent and sha256(settings.bin / name) != sha256(file)}
     if not changes:
         state["harness"] = {**state["harness"], "release": bare_version(tag)}
         return
@@ -978,7 +994,7 @@ def parse(argv):
         "UPDATE_AS_IMPL", "setpriv --reuid=agentc-impl --regid=agentc-impl --init-groups "
         "env -i PATH=/usr/bin:/bin HOME=/var/lib/agentc/impl/home"))
     parser.add_argument("--canary-command", default=env("UPDATE_CANARY_COMMAND", None))
-    parser.add_argument("--canary-harnesses", default=env("E2E_HARNESSES", "claude"))
+    parser.add_argument("--canary-harnesses", default=env("E2E_HARNESSES", None))
     parser.add_argument("--canary-timeout-minutes", type=float, default=env("E2E_TIMEOUT_MINUTES", 90.0, float))
     parser.add_argument("--suite-command", default=env("UPDATE_SUITE_COMMAND"))
     parser.add_argument("--mirror-branch", default=env("UPDATE_MIRROR_BRANCH", "main"))

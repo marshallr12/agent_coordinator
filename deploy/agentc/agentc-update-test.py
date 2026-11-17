@@ -492,6 +492,42 @@ class HarnessUpdates(Host):
         self.assertIn(f"claude {OLD}", self.live("claude"))
         self.assertIn(f'claude = "{OLD}"', self.config.read_text())
 
+    def publish_both(self):
+        self.releases.publish(NEW, release_files(NEW, harness={"claude": ("2.0", claude("2.0")), "codex": ("1.0", claude("1.0"))}))
+
+    def test_a_harness_the_host_does_not_have_is_neither_staged_nor_pinned(self):
+        # host-setup.sh leaves no binary and no pin for a harness its owner has not installed.
+        self.config.write_text('bin_dir = "/opt/agentc"\n\n[pinned]\nclaude = "%s"\n\n[push_helper]\nprogram = "x"\n' % OLD)
+        self.publish_both()
+        self.assertEqual(self.run_update(), 0, self.stderr)
+        self.assertIn("claude 2.0", self.live("claude"))
+        self.assertFalse((self.prefix / "bin/codex").exists())
+        self.assertIn('claude = "2.0"', self.config.read_text())
+        self.assertNotIn("codex", self.config.read_text())
+        self.assertIn("not staging codex: not installed on this host", self.stderr)
+        self.assertIn("harness promoted", self.results()[-1]["detail"])
+
+    def test_a_host_with_only_codex_stages_only_codex_and_canaries_it(self):
+        (self.prefix / "bin/claude").unlink()
+        write_exec(self.prefix / "bin/codex", claude("0.9"))
+        self.config.write_text('bin_dir = "/opt/agentc"\n\n[pinned]\ncodex = "0.9"\n\n[push_helper]\nprogram = "x"\n')
+        self.publish_both()
+        self.assertEqual(self.run_update("--canary-harnesses", "codex"), 0, self.stderr)
+        self.assertFalse((self.prefix / "bin/claude").exists())
+        self.assertIn("claude 1.0", self.live("codex"))
+        self.assertIn('codex = "1.0"', self.config.read_text())
+        self.assertNotIn("claude", self.config.read_text())
+        self.assertIn("canary codex", self.events())
+
+    def test_a_host_with_both_harnesses_stages_both(self):
+        write_exec(self.prefix / "bin/codex", claude("0.9"))
+        self.publish_both()
+        self.assertEqual(self.run_update(), 0, self.stderr)
+        self.assertIn("claude 2.0", self.live("claude"))
+        self.assertIn("claude 1.0", self.live("codex"))
+        self.assertIn('codex = "1.0"', self.config.read_text())
+        self.assertNotIn("not staging", self.stderr)
+
     def test_a_failing_core_canary_skips_the_harness_stage(self):
         self.publish(sup=supervisor(NEW, canary_ok=False))
         self.assertEqual(self.run_update(), 1, self.stderr)
@@ -532,6 +568,21 @@ class Helpers(unittest.TestCase):
                          (update.DEFAULT_REPO, "/opt/agentc", "/etc/agentc"))
         self.assertTrue(settings.canary_is_default and settings.harness_updates)
         self.assertEqual(settings.drain_seconds, update.DEFAULT_DRAIN_MINUTES * 60)
+
+    def test_the_canary_harness_defaults_to_one_the_host_has(self):
+        with mock.patch.dict(os.environ, clear=True):
+            for installed, expected in ((["claude", "codex"], ["claude"]), (["claude"], ["claude"]),
+                                        (["codex"], ["codex"]), ([], ["claude"])):
+                with tempfile.TemporaryDirectory() as prefix:
+                    (Path(prefix) / "bin").mkdir()
+                    for name in installed:
+                        (Path(prefix) / "bin" / name).write_text("x")
+                    settings = update.Settings(update.parse(["--prefix", prefix]))
+                    self.assertEqual(settings.canary_harnesses, expected, installed)
+            settings = update.Settings(update.parse(["--canary-harnesses", "claude codex"]))
+            self.assertEqual(settings.canary_harnesses, ["claude", "codex"])
+        with mock.patch.dict(os.environ, {"E2E_HARNESSES": "codex,claude"}, clear=True):
+            self.assertEqual(update.Settings(update.parse([])).canary_harnesses, ["codex", "claude"])
 
     def test_settings_come_from_update_variables(self):
         with mock.patch.dict(os.environ, {"UPDATE_REPO": "a/b", "UPDATE_KEEP": "5", "UPDATE_HARNESS": "0"}, clear=True):
