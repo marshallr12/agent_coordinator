@@ -60,6 +60,44 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     running at 05:14Z. Worktree and local branch removed.
   - `scripts/smoke.py` refuses a dirty tree ("candidate build is dirty or lacks build
     provenance"); commit before running it.
+- **Update 2026-11-17 19:20 UTC — full rollout of main `4705310` DONE (owner: "do the deploy"; task
+  `c1b7f538`, attempt `9ffd2570`):**
+  - Main CI is green on `4705310`. The two base failures the reviewer saw (`a9c79683`):
+    `candidate::shell_tests::host_cwd_symlinks_and_nonregular_targets_are_refused` is
+    environment-caused (socket path over 108 bytes under a long TMPDIR);
+    `serve::tests::a_client_outside_the_launch_is_refused_without_minting` (agentc-push) is a
+    load-dependent BrokenPipe race, 2/960 on base, **not** sandbox-only and unfixed.
+  - Reviewed `09557c72`'s four commits read-only: logic sound. Findings: the dashboard roster
+    editor drops a check's `inputs` on save (task **`84e85336`**, submitted by oracle-1, in review);
+    no first-party way to send the roster `PUT`; blob equality is attested, not verified
+    (advisory); a stale doc reference in a `crates/core/src/workflow.rs` comment.
+  - Production, both hosts' CLI/supervisor/push and oracle-1's integrators now run **`4705310`**
+    (over `39c22d8` / `e5b670d`); migration `0047` applied (schema 46 → 47). Release run
+    `44126235877` (owner-dispatched) passed with full load acceptance. Drain marker
+    `deploy-drain-c1b7f538` set 16:32:20Z, idle 17:09:16Z, 0 launches killed, cleared 19:13:37Z.
+    R1 (job `47afc789`) refused safely on MINIAIR's active attempt on `9cf04a5c` (owner had it
+    released; resume from its checkpoint, branch `task-9cf04a5c` at `734766a`). R2 (job `a8e5b303`)
+    refused on dead job `a92ce565` (registered 11-09, never started, already reconciled, task
+    done). R3 (job `964f0616`) succeeded after `remote_upgrade.py` was narrowed to exempt a
+    registered job with no pid, sequence 0, a reconciliation and an inactive attempt
+    (**agent's call, not an owner decision**; it will block every future deploy until cleared
+    or the exemption is kept). Pre/post backups and off-server copies verified.
+  - Rollback: production `/var/lib/agent-coordinator-deployments/claude-c1b7f538-4705310-20261117-r3`;
+    CLIs `/opt/agentc/rollback-cli-4705310-20261117`; hosts `/opt/agentc/rollback-host-4705310-20261117`.
+    Host sources: mxmini `~/src/worktrees/ac-c1b7f538-rollout` (native x86_64), oracle-1
+    `/home/ubuntu/src/worktrees/agentc-rollout-4705310` (native aarch64, `APPARMOR_BWRAP=1
+    UPDATE_TIMER=0`). Containment: oracle-1 113 PASS, mxmini 104 PASS. mxmini quiet hours
+    unchanged (22:00–07:00; marker back to `quiet-hours`).
+  - Agent harness pins kept at **Claude 2.1.319 / Codex 0.166.0** on both hosts (agent's call):
+    host-setup re-pinned the owner's 2.1.326 / 2.1.325 and 0.169.0, and the upgrade scripts put
+    the old binaries and `supervisor.toml` lines back.
+  - **Owner's next step:** apply the `dependency-audit` roster change — `PUT
+    /api/v1/projects/<project>/workflow-policy` with `expected_revision: 3` and `inputs:
+    ["Cargo.lock", ".cargo/audit.toml"]` on that check. Until `84e85336` lands and is deployed, a
+    dashboard roster save drops `inputs` again. Other workstations' CLIs (MINIAIR) must move to
+    `4705310` or fail `client_upgrade_required`.
+  - Evidence and scripts: `~/.local/state/agent-coordinator-evidence/c1b7f538-ce6c-4c2b-a945-17c1787ac7f8/`
+    (`r1/`, `r2/` hold the refused runs).
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
