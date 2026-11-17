@@ -150,6 +150,9 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     **2.1.326**; the agents there are still pinned to 2.1.325. The rollout's host-setup will pin
     2.1.326, so **do not put the old pins back this time** (drop `restore_pin` from the host
     upgrade scripts); run the containment suite on both hosts afterwards.
+  - **Task `6faa1251`** created at the owner's request (open, ready, agent-origin): make an
+    unused harness optional in host-setup, the containment suite and the updater. Neither host
+    launches Codex today; only the installer and the suite require it, not the supervisor.
     Scripts and output: `~/.local/state/agent-coordinator-evidence/harness-repin-20261117/`.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
