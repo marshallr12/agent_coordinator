@@ -105,7 +105,7 @@ fn open(name: &str) -> Result<File> {
 }
 
 /// The SID text of the pipe's owner, as Windows reports it for the handle.
-fn owner_sid(pipe: &File) -> Result<String> {
+pub(super) fn owner_sid(pipe: &File) -> Result<String> {
     let mut owner: PSID = std::ptr::null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: the handle is live; `owner` receives a pointer into the

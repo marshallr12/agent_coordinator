@@ -193,9 +193,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   [starts there](windows-host-design.md#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16)
   and that native Claude Code 2.1.325 accepts it behind a prefix that does
   what the proposed shim does, observed uncontained. With that shell the
-  candidate's native tests pass on MiniAir. The shim, the candidate pipe's
-  threads, the fixture checks and a contained harness run are not done, so
-  every Claude launch on Windows is still refused.
+  candidate's native tests pass on MiniAir. Task `9cf04a5c` added the
+  candidate pipe's threads and the `windows-candidate-shell` shim; a
+  harness-shaped command runs through them from a real reviewer launch in a
+  native test. The fixture checks and a contained harness run are not done,
+  so every Claude launch on Windows is still refused.
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the

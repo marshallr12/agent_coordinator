@@ -142,9 +142,20 @@ pub fn cwd_file(wrapped: &Wrapped, temp: &str) -> Result<String, &'static str> {
     Ok(format!("{temp}\\{}", name.replace('/', "\\")))
 }
 
+/// The recorded argument as the harness writes it, for a `command` that is
+/// already one quoted shell word. `temp` is in Windows form; `snapshot` and
+/// `cwd_file` are in Git Bash form. Tests of the shim build their
+/// harness-shaped commands with it.
+pub fn recorded(snapshot: &str, temp: &str, command: &str, cwd_file: &str) -> String {
+    format!(
+        "source {snapshot} 2>/dev/null || true && export TEMP='{temp}' TMP='{temp}' && \
+         {RESETS} && eval {command} < /dev/null && pwd -P >| {cwd_file}"
+    )
+}
+
 /// `C:\a\b` as Git Bash writes it, `/c/a/b`; `None` for anything that is
 /// not a plain absolute path on a drive.
-fn git_bash_path(windows: &str) -> Option<String> {
+pub fn git_bash_path(windows: &str) -> Option<String> {
     let mut parts = windows.trim_end_matches('\\').split('\\');
     let drive = parts.next()?.strip_suffix(':')?;
     let letter = drive.chars().next().filter(char::is_ascii_alphabetic)?;
@@ -200,10 +211,7 @@ mod tests {
 
     /// The recorded argument with `command` (already quoted) and `cwd`.
     fn recorded(command: &str, cwd: &str) -> String {
-        format!(
-            "source {SNAPSHOT} 2>/dev/null || true && export TEMP='{TEMP}' TMP='{TEMP}' && \
-             {RESETS} && eval {command} < /dev/null && pwd -P >| {cwd}"
-        )
+        super::recorded(SNAPSHOT, TEMP, command, cwd)
     }
 
     const CWD: &str = "/c/Users/role/AppData/Local/Temp/claude-884c-cwd";

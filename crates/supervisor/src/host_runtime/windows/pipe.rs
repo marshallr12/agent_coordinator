@@ -5,7 +5,10 @@
 //! only the runner and the configured client account
 //! ([`crate::service::pipe_policy::descriptor`]). A pipe that cannot be
 //! created that way is not created at all: there is no pipe with a default
-//! access list to fall back on.
+//! access list to fall back on. A reviewer launch's candidate pipe
+//! ([`Pipe::package_instances`]) is the one pipe with several instances,
+//! each made by this process under the same access list and served by its
+//! own thread.
 //!
 //! A connection is served only through a [`Session`], and a session exists
 //! only once Windows has told the pipe which account and which process
@@ -110,7 +113,25 @@ enum Fill {
     Closed,
 }
 
-/// The pipe's one instance.
+/// Which instance of a pipe to create and how many the pipe may have.
+#[derive(Debug, Clone, Copy)]
+struct Shape {
+    /// Whether this must be the first instance of the name.
+    first: bool,
+    /// The most instances of the name, the same for each of them.
+    count: u32,
+}
+
+impl Shape {
+    /// The only instance of its name.
+    const ALONE: Self = Self {
+        first: true,
+        count: 1,
+    };
+}
+
+/// One instance of a pipe: the only one, or one of a launch's candidate
+/// pipe.
 pub struct Pipe {
     handle: Handle,
     event: Handle,
@@ -125,6 +146,11 @@ pub struct Pipe {
     /// How long that client may stay silent.
     identify_patience: Duration,
 }
+
+// SAFETY: every field is owned by the instance except `wake`, a kernel
+// handle whose owner outlives the thread that serves the instance; a handle
+// is a process-wide value any thread may wait on.
+unsafe impl Send for Pipe {}
 
 impl Pipe {
     /// Creates the first and only instance of the pipe `name`, secured for
@@ -150,6 +176,27 @@ impl Pipe {
         Self::with_policy(name, &list, served, wake)
     }
 
+    /// As [`Pipe::for_package`] with `count` instances of the pipe, each to
+    /// be served by its own thread, so that many clients are served at
+    /// once. The first is created as the name's first instance and the rest
+    /// join it; a name somebody else holds is never joined.
+    pub fn package_instances(
+        name: &str,
+        runner: &str,
+        package: &str,
+        count: u32,
+        wake: Option<HANDLE>,
+    ) -> Result<Vec<Self>> {
+        ensure!(count > 0, "a pipe needs at least one instance");
+        let served = Admitted::package(runner, package)?;
+        let list = package_descriptor(runner, package)?;
+        let instance = |first| {
+            let shape = Shape { first, count };
+            Self::shaped(name, &list, served.clone(), wake, shape)
+        };
+        (0..count).map(|index| instance(index == 0)).collect()
+    }
+
     /// As [`Pipe::create`] with an access list and a policy given apart; the
     /// service always derives both from the same two SIDs.
     fn with_policy(
@@ -158,28 +205,44 @@ impl Pipe {
         served: Admitted,
         wake: Option<HANDLE>,
     ) -> Result<Self> {
+        Self::shaped(name, access_list, served, wake, Shape::ALONE)
+    }
+
+    /// One instance of the pipe `name` as `shape` says.
+    fn shaped(
+        name: &str,
+        access_list: &str,
+        served: Admitted,
+        wake: Option<HANDLE>,
+        shape: Shape,
+    ) -> Result<Self> {
         let path = wide(&pipe_path(name)?)?;
         let security = Descriptor::parse(access_list)
             .context("the pipe's access list cannot be built; the pipe is not created")?;
         let attributes = security.attributes(false);
-        let open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED;
+        let first = if shape.first {
+            FILE_FLAG_FIRST_PIPE_INSTANCE
+        } else {
+            0
+        };
+        let open_mode = PIPE_ACCESS_DUPLEX | first | FILE_FLAG_OVERLAPPED;
         let mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
         // SAFETY: the name is NUL-terminated; the attributes and the
-        // descriptor they borrow outlive the call. One instance, so one
+        // descriptor they borrow outlive the call. Each instance serves one
         // client at a time; the default time-out is unused.
         let raw = unsafe {
             CreateNamedPipeW(
                 path.as_ptr(),
                 open_mode,
                 mode,
-                1,
+                shape.count,
                 BUFFER_BYTES,
                 BUFFER_BYTES,
                 0,
                 &attributes,
             )
         };
-        let handle = Handle::owned(raw, "creating the pipe as its first instance")?;
+        let handle = Handle::owned(raw, "creating an instance of the pipe")?;
         // SAFETY: no attributes and no name; a manual-reset event, not set.
         let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
         Ok(Self {
@@ -617,6 +680,32 @@ mod tests {
         let (name, me) = (unique(), me());
         let _first = Pipe::create(&name, &me, &me, None).unwrap();
         assert!(Pipe::create(&name, &me, &me, None).is_err());
+    }
+
+    #[test]
+    fn every_instance_serves_a_client_and_one_more_finds_the_pipe_busy() {
+        // No client here carries the package, so each is refused; what
+        // matters is that two are connected at once and a third is not.
+        const ERROR_PIPE_BUSY: i32 = 231;
+        let (name, me) = (unique(), me());
+        let package = "S-1-15-2-1-2-3-4-5-6-7";
+        let mut pipes = Pipe::package_instances(&name, &me, package, 2, None).unwrap();
+        assert!(Pipe::for_package(&name, &me, package, None).is_err());
+        let mut clients = [client(&name).unwrap(), client(&name).unwrap()];
+        let busy = client(&name).unwrap_err();
+        assert_eq!(busy.raw_os_error(), Some(ERROR_PIPE_BUSY), "{busy}");
+        // The clients stay connected until both were judged: Windows names
+        // a connection's account only while its client is there.
+        for held in &mut clients {
+            held.write_all(b"x\n").unwrap();
+        }
+        for pipe in &mut pipes {
+            let refused = pipe.accept(10 * SECOND).unwrap();
+            assert!(matches!(
+                refused,
+                Accepted::Refused(Refusal::WrongPackage(None))
+            ));
+        }
     }
 
     #[test]

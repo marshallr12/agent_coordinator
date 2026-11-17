@@ -378,6 +378,7 @@ fn child_in_a_new_logon_session() {
         "time_limit" => time_limit(),
         "probe" => probe(),
         "shell_probe" => shell_probe(),
+        "shim" => shim(),
         other => panic!("no such role: {other}"),
     });
     let said = match &outcome {
@@ -427,6 +428,8 @@ impl Trees {
             launch: self.launch("candidate"),
             source: self.at("source"),
             shell: self.at("tools").join("sh.exe"),
+            shim: self.at("reviewer-tools").join("agentc-supervisor.exe"),
+            reviewer_temp: self.at("reviewer-work").join("tmp"),
             path: vec![self.at("tools"), system.into()],
         }
     }
@@ -549,6 +552,260 @@ fn run_grants(candidate: &candidate::Candidate, trees: &Trees) -> String {
     );
     assert!(!text(&stolen).contains(SYNTHETIC));
     format!("source write refused: {}", text(&into_source).trim())
+}
+
+/// Step 5d: harness-shaped commands from a real reviewer launch through the
+/// prefix script and the shim into the candidate, the refusals that come
+/// before anything runs, a call that finds every command slot taken, and
+/// the packages the pipe's access list keeps out.
+#[test]
+fn a_harness_shaped_command_runs_through_the_shim_and_others_are_refused() {
+    with_the_pinned_shell("shim");
+}
+
+/// `path` as the pinned shell writes it.
+fn slashed(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
+/// The reviewer's tool directory, readable by its `package` alone besides
+/// the owner: the pinned shell, the supervisor program as its shim, and
+/// one file per harness argument the reviewer's script passes on.
+fn reviewer_tools(trees: &Trees, package: &str) {
+    use agentc_supervisor::candidate::form::{git_bash_path, recorded};
+    let tools = trees.at("reviewer-tools");
+    shell_tools(&tools, package);
+    let program = env!("CARGO_BIN_EXE_agentc-supervisor");
+    std::fs::copy(program, tools.join("agentc-supervisor.exe")).unwrap();
+    let temp = trees.at("reviewer-work").join("tmp");
+    std::fs::create_dir(&temp).unwrap();
+    let temp = temp.display().to_string();
+    let inside = format!("{}/claude-1a2b-cwd", git_bash_path(&temp).unwrap());
+    let argument = |command: &str, cwd: &str| recorded("/c/none/snapshot.sh", &temp, command, cwd);
+    let files = [
+        (
+            "good",
+            argument(
+                "'echo out; echo err >&2; echo x > \"$TEMP/good-ran\"; exit 3'",
+                &inside,
+            ),
+        ),
+        ("cd", argument("'cd \"$TEMP\" && echo moved'", &inside)),
+        ("slow", argument("'sleep 8'", &inside)),
+        (
+            "outside",
+            argument(
+                "'echo x > \"$TEMP/outside-ran\"'",
+                "/c/Windows/claude-1a2b-cwd",
+            ),
+        ),
+        ("hook", "echo x > hook-ran".to_owned()),
+    ];
+    for (name, text) in files {
+        std::fs::write(tools.join(name), text).unwrap();
+    }
+}
+
+/// What the reviewer's shell runs: each argument through the prefix script
+/// as the harness would pass it, and a fifth call while four slow ones hold
+/// every command slot.
+fn reviewer_script(trees: &Trees, pipe: &str) -> String {
+    let tools = slashed(&trees.at("reviewer-tools"));
+    let cwd = slashed(
+        &trees
+            .at("reviewer-work")
+            .join("tmp")
+            .join("claude-1a2b-cwd"),
+    );
+    let prefix = slashed(&trees.at("reviewer-control").join("candidate-shell"));
+    let temp = trees.at("reviewer-work").join("tmp").display().to_string();
+    let source = trees.at("source").display().to_string();
+    format!(
+        "p='{prefix}'; t='{tools}'; \
+         \"$p\" \"$(cat $t/good)\"; echo \"good=$?\"; cat '{cwd}'; \
+         \"$p\" \"$(cat $t/cd)\"; echo \"cd=$?\"; cat '{cwd}'; \
+         \"$p\" \"$(cat $t/hook)\"; echo \"hook=$?\"; \
+         \"$p\" \"$(cat $t/outside)\"; echo \"outside=$?\"; \
+         \"$p\" \"$(cat $t/good)\" extra; echo \"two=$?\"; \
+         for i in 1 2 3 4; do \"$p\" \"$(cat $t/slow)\" & done; sleep 3; \
+         $t/agentc-supervisor.exe windows-candidate-shell --pipe {pipe} --temp '{temp}' \
+         --clone '{source}' --wait-seconds 1 -- \"$(cat $t/good)\"; echo \"busy=$?\"; wait; \
+         echo done"
+    )
+}
+
+/// The environment of a process the test starts in a launch whose working
+/// directory is `work`. `LOCALAPPDATA` must be there: Windows refuses to
+/// start a process in an AppContainer without it (error 203, seen
+/// 2026-11-17), since it derives the package's folders from it.
+fn launch_environment(path: &Path, work: &Path) -> serde_json::Map<String, Value> {
+    let root = std::env::var("SystemRoot").unwrap();
+    let pairs = [
+        ("PATH", format!("{};{root}\\System32", path.display())),
+        ("SystemRoot", root),
+        ("LOCALAPPDATA", work.display().to_string()),
+    ];
+    pairs
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), json!(v)))
+        .collect()
+}
+
+/// Starts `argv` as the root of `launch`, waits for it and returns its exit
+/// code and what it wrote.
+fn run_in_launch(runner: &mut Runner, trees: &Trees, launch: &str, argv: Value) -> (u64, String) {
+    let log = trees.at(&format!("{launch}.log"));
+    let (tools, work) = (format!("{launch}-tools"), format!("{launch}-work"));
+    let environment = launch_environment(&trees.at(&tools), &trees.at(&work));
+    let start = json!({"op": "start", "launch": launch, "argv": argv,
+        "directory": trees.at(&work), "environment": environment, "output": log});
+    let started = ask(runner, start);
+    assert_eq!(started["ok"], true, "{started}");
+    let seen = ask(
+        runner,
+        json!({"op": "observe", "launch": launch, "wait_ms": 120_000}),
+    );
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(seen["state"], "exited", "{seen}: {said}");
+    (seen["code"].as_u64().unwrap(), said)
+}
+
+/// Checks what the reviewer's script printed, line by line where the order
+/// is fixed.
+fn check_reviewer(said: &str, trees: &Trees) {
+    use agentc_supervisor::candidate::form::{CWD_OUTSIDE, NOT_THE_FORM, git_bash_path};
+    use agentc_supervisor::candidate::shim::NOT_ONE_ARGUMENT;
+    let source = git_bash_path(&trees.at("source").display().to_string()).unwrap();
+    let refused = |why: &str| format!("candidate-shell: refused: {why}");
+    let wanted = [
+        "out".to_owned(),
+        "err".to_owned(),
+        "good=3".to_owned(),
+        source.clone(),
+        "moved".to_owned(),
+        "cd=0".to_owned(),
+        source,
+        refused(NOT_THE_FORM),
+        "hook=126".to_owned(),
+        refused(CWD_OUTSIDE),
+        "outside=126".to_owned(),
+        refused(NOT_ONE_ARGUMENT),
+        "two=126".to_owned(),
+    ];
+    let lines: Vec<&str> = said.lines().map(str::trim).collect();
+    assert_eq!(lines[..wanted.len()], wanted, "{said}");
+    let rest = lines[wanted.len()..].join("\n");
+    assert!(
+        rest.contains("every command slot of this review was still taken"),
+        "{said}"
+    );
+    assert!(
+        rest.contains("busy=126") && rest.ends_with("done"),
+        "{said}"
+    );
+}
+
+/// The shim's arguments for a caller that is not the reviewer: a call for
+/// `pipe` that the shim itself accepts, so only the pipe can refuse it.
+fn stranger_arguments(pipe: &str) -> Vec<String> {
+    use agentc_supervisor::candidate::form::recorded;
+    let temp = r"C:\none\tmp";
+    let cwd = "/c/none/tmp/claude-1a2b-cwd";
+    let argument = recorded("/c/none/s.sh", temp, "'echo stranger-ran'", cwd);
+    let fixed = ["windows-candidate-shell", "--pipe", pipe, "--temp", temp];
+    let rest = ["--clone", r"C:\none\src", "--wait-seconds", "1", "--"];
+    let words = fixed.iter().chain(&rest).map(|word| word.to_string());
+    words.chain([argument]).collect()
+}
+
+/// Asserts that a stranger's shim ended refused because Windows would not
+/// let it open the pipe, and that its command never ran.
+fn assert_kept_out(who: &str, status: u64, said: &str) {
+    assert_eq!(status, 126, "{who}: {said}");
+    let denied = said.contains("open the candidate pipe") && said.contains("os error 5");
+    assert!(denied, "{who} was not refused by the access list: {said}");
+    assert!(
+        !said.contains("stranger-ran"),
+        "{who}'s command ran: {said}"
+    );
+}
+
+/// The candidate's own package cannot open its reviewer's pipe.
+fn candidate_is_kept_out(runner: &Runner, trees: &Trees, pipe: &str) -> String {
+    use agentc_supervisor::candidate::form::single_quoted;
+    let program = env!("CARGO_BIN_EXE_agentc-supervisor");
+    std::fs::copy(program, trees.at("tools").join("agentc-supervisor.exe")).unwrap();
+    let words: Vec<String> = stranger_arguments(pipe)
+        .iter()
+        .map(|word| single_quoted(word))
+        .collect();
+    let candidate = runner.candidate("reviewer").unwrap();
+    let call = candidate
+        .run(&format!("agentc-supervisor.exe {}", words.join(" ")))
+        .unwrap();
+    assert_kept_out("the candidate", u64::from(call.status), &text(&call));
+    text(&call).trim().to_owned()
+}
+
+/// Another launch's package cannot open the pipe either.
+fn another_launch_is_kept_out(runner: &mut Runner, trees: &Trees, pipe: &str) -> String {
+    let other = json!({"op": "prepare", "launch": "other", "spec": trees.launch("other")});
+    let prepared = ask(runner, other);
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    let owner = token::current_user_sid().unwrap();
+    let package = prepared["package_sid"].as_str().unwrap();
+    let list = sddl::shared_source(&owner, &[package]).unwrap();
+    create_directory(&trees.at("other-tools"), &list).unwrap();
+    let program = trees.at("other-tools").join("agentc-supervisor.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_agentc-supervisor"), &program).unwrap();
+    let mut argv = vec![program.display().to_string()];
+    argv.extend(stranger_arguments(pipe));
+    let (code, said) = run_in_launch(runner, trees, "other", json!(argv));
+    assert_kept_out("another launch", code, &said);
+    let cleanup = json!({"op": "cleanup", "launch": "other", "remove_directories": true});
+    assert_eq!(ask(runner, cleanup)["ok"], true);
+    said.trim().to_owned()
+}
+
+/// The reviewer's own package was served; the candidate's package and
+/// another launch's package cannot even open the pipe.
+fn check_strangers(runner: &mut Runner, trees: &Trees, pipe: &str) -> String {
+    let own = candidate_is_kept_out(runner, trees, pipe);
+    let other = another_launch_is_kept_out(runner, trees, pipe);
+    format!("candidate: {own:?}; other launch: {other:?}")
+}
+
+/// The shim role: see the test that starts it.
+fn shim() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let trees = Trees {
+        root: dir.path().to_owned(),
+    };
+    let mut runner = Runner::new(&trees.at("state")).unwrap();
+    let request = json!({"op": "prepare", "launch": "reviewer", "spec": trees.launch("reviewer"),
+                         "candidate": trees.candidate()});
+    let prepared = ask(&mut runner, request);
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    tools(&trees, prepared["candidate_package_sid"].as_str().unwrap());
+    reviewer_tools(&trees, prepared["package_sid"].as_str().unwrap());
+    let pipe = "agentc-candidate-reviewer";
+    let shell = trees.at("reviewer-tools").join("sh.exe");
+    let argv = json!([shell, "-c", reviewer_script(&trees, pipe)]);
+    let (code, said) = run_in_launch(&mut runner, &trees, "reviewer", argv);
+    assert_eq!(code, 0, "{said}");
+    check_reviewer(&said, &trees);
+    let ran = trees.at("candidate-work").join("tmp");
+    assert!(
+        ran.join("good-ran").exists(),
+        "the accepted command did not run"
+    );
+    assert!(!ran.join("outside-ran").exists(), "a refused command ran");
+    assert!(!trees.at("source").join("hook-ran").exists(), "a hook ran");
+    let strangers = check_strangers(&mut runner, &trees, pipe);
+    let cleanup = json!({"op": "cleanup", "launch": "reviewer", "remove_directories": true});
+    let cleaned = ask(&mut runner, cleanup);
+    assert_eq!(cleaned["ok"], true, "{cleaned}");
+    format!("{:?} | {strangers}", said.trim())
 }
 
 /// A command past a short time limit is stopped with the limit's status;

@@ -8,6 +8,7 @@
 //! runner's input ends, the runner exits, its job handles close and Windows
 //! ends every launch it held.
 use super::candidate::{self, Candidate, CandidateSpec, Tuning};
+use super::candidate_pipe::{self, Server};
 use super::desktop::StationNotOurs;
 use super::journal::{CandidateRecord, Entry, Journal, Stage};
 use super::launcher::{LaunchSpec, Launcher, Seen, job_owner};
@@ -130,7 +131,29 @@ pub struct Runner {
     journal: Journal,
     mine: BTreeSet<String>,
     /// The candidates of this run's reviewer launches.
-    candidates: BTreeMap<String, Arc<Candidate>>,
+    candidates: BTreeMap<String, Served>,
+}
+
+/// A reviewer launch's candidate and the threads that serve its pipe.
+struct Served {
+    candidate: Arc<Candidate>,
+    /// `None` once the threads were stopped and the candidate could not be
+    /// retired yet.
+    server: Option<Server>,
+}
+
+impl Served {
+    /// Stops the pipe's threads, which ends a running command, and hands
+    /// the candidate back alone when nothing else holds it.
+    fn into_candidate(mut self) -> Result<Candidate, Self> {
+        if let Some(server) = self.server.take() {
+            server.stop();
+        }
+        Arc::try_unwrap(self.candidate).map_err(|candidate| Self {
+            candidate,
+            server: None,
+        })
+    }
 }
 
 impl Runner {
@@ -146,7 +169,8 @@ impl Runner {
 
     /// The candidate of this run's reviewer launch `launch`, if it has one.
     pub fn candidate(&self, launch: &str) -> Option<Arc<Candidate>> {
-        self.candidates.get(launch).cloned()
+        let served = self.candidates.get(launch)?;
+        Some(served.candidate.clone())
     }
 
     /// Carries out one request; the answer's fields depend on the request.
@@ -255,11 +279,15 @@ impl Runner {
         let candidate = match candidate {
             Some(spec) => {
                 let dirs = (control.as_path(), work.as_path());
-                Some(self.prepare_candidate(launch, spec, &prepared.package_sid, dirs)?)
+                let reviewer = prepared.package_sid.as_str();
+                let candidate = self.prepare_candidate(launch, spec, reviewer, dirs)?;
+                Some(self.serve_candidate(launch, candidate, reviewer, dirs)?)
             }
             None => None,
         };
-        let record = candidate.as_ref().map(record_of);
+        let record = candidate
+            .as_ref()
+            .map(|served| record_of(&served.candidate));
         let entry = Entry {
             launch: launch.to_owned(),
             stage: Stage::Prepared,
@@ -309,6 +337,47 @@ impl Runner {
         prepared
     }
 
+    /// Writes the reviewer launch's prefix script into its control
+    /// directory and starts the threads of its candidate pipe, which admits
+    /// only the package `reviewer`. If either fails, the candidate and the
+    /// reviewer launch are undone, directories included.
+    fn serve_candidate(
+        &mut self,
+        launch: &str,
+        candidate: Candidate,
+        reviewer: &str,
+        (control, work): (&Path, &Path),
+    ) -> Result<Served> {
+        let candidate = Arc::new(candidate);
+        let owner = self.launcher.owner().to_owned();
+        let served = write_script(launch, candidate.spec(), control)
+            .and_then(|()| Server::start(launch, &owner, reviewer, candidate.clone()));
+        match served {
+            Ok(server) => Ok(Served {
+                candidate,
+                server: Some(server),
+            }),
+            Err(error) => {
+                self.undo_candidate(launch, candidate, &[control, work]);
+                Err(error)
+            }
+        }
+    }
+
+    /// Retires a candidate nothing serves yet, removes its trees, and ends
+    /// its reviewer launch and removes `directories`.
+    fn undo_candidate(&mut self, launch: &str, candidate: Arc<Candidate>, directories: &[&Path]) {
+        let spec = candidate.spec().clone();
+        if let Ok(candidate) = Arc::try_unwrap(candidate) {
+            let _ = candidate.retire(&mut self.launcher);
+        }
+        candidate::remove_trees(&spec);
+        let _ = self.launcher.cleanup(launch);
+        for directory in directories {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+
     /// Journals a just prepared launch; if that fails the launch and its
     /// candidate are undone, directories included, so nothing exists that
     /// the journal does not name.
@@ -316,35 +385,36 @@ impl Runner {
         &mut self,
         launch: &str,
         entry: &Entry,
-        candidate: Option<Candidate>,
+        candidate: Option<Served>,
     ) -> Result<()> {
         if let Err(error) = self.journal.save(entry) {
-            if let Some(candidate) = candidate {
+            if let Some(Ok(candidate)) = candidate.map(Served::into_candidate) {
                 let _ = candidate.retire(&mut self.launcher);
             }
             let _ = self.launcher.cleanup(launch);
             let _ = remove_directories(entry);
             return Err(error);
         }
-        if let Some(candidate) = candidate {
-            self.candidates
-                .insert(launch.to_owned(), Arc::new(candidate));
+        if let Some(served) = candidate {
+            self.candidates.insert(launch.to_owned(), served);
         }
         self.mine.insert(launch.to_owned());
         Ok(())
     }
 
-    /// Retires this run's candidate of `launch`, if it has one. A candidate
-    /// still in use by a running command is refused, and kept.
+    /// Retires this run's candidate of `launch`, if it has one: its pipe's
+    /// threads end, a command still running is ended, and the candidate
+    /// goes. A candidate something else still holds is refused, and kept
+    /// with its pipe closed.
     fn retire_candidate(&mut self, launch: &str) -> Result<()> {
-        let Some(shared) = self.candidates.remove(launch) else {
+        let Some(served) = self.candidates.remove(launch) else {
             return Ok(());
         };
-        match Arc::try_unwrap(shared) {
+        match served.into_candidate() {
             Ok(candidate) => candidate.retire(&mut self.launcher),
-            Err(shared) => {
-                self.candidates.insert(launch.to_owned(), shared);
-                bail!("launch {launch}'s candidate is still running a command")
+            Err(served) => {
+                self.candidates.insert(launch.to_owned(), served);
+                bail!("launch {launch}'s candidate is still in use")
             }
         }
     }
@@ -477,6 +547,20 @@ fn delete_profile(name: &str) -> Result<bool> {
     let name = wide(name)?;
     // SAFETY: `name` is NUL-terminated.
     Ok(unsafe { DeleteAppContainerProfile(name.as_ptr()) } == 0)
+}
+
+/// Writes `launch`'s prefix script ([`shim::script`]) into the reviewer's
+/// control directory `control`, which the reviewer may read and not change.
+fn write_script(launch: &str, spec: &CandidateSpec, control: &Path) -> Result<()> {
+    use crate::candidate::shim;
+    let text = shim::script(
+        &spec.shim.display().to_string(),
+        &candidate_pipe::pipe_name(launch),
+        &spec.reviewer_temp.display().to_string(),
+        &spec.source.display().to_string(),
+    );
+    let script = control.join(shim::SCRIPT_NAME);
+    std::fs::write(&script, text).with_context(|| format!("write {}", script.display()))
 }
 
 /// What the journal keeps of a prepared candidate.
