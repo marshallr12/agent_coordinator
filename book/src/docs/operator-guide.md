@@ -270,7 +270,12 @@ before. Each path must be a relative file path with `/` separators, with no empt
 `.` or `..` segment, no backslash or control character, and no glob character
 (`* ? [ ] { }`; globs are not supported); at most 20 paths, each at most 300
 bytes, none repeated. A human sets it with the roster edit
-(`PUT …/workflow-policy`), the `checks list` command and the workflow-policy API
+(`PUT …/workflow-policy`), which the dashboard's **Required checks** dialog sends
+(one path per line in each entry's **Declared inputs** box; the dialog shows the
+saved paths, sends them back unchanged when they are not edited, and shows the
+service's reason when it refuses a path). The list must name every repository path
+the check reads and nothing else: a path the check reads but the list omits can
+let a candidate land on a result that does not apply to it. The `checks list` command and the workflow-policy API
 show it, and it is the only place it is read: the repository's
 `.agent-coordinator/roster.toml` cannot declare or override it.
 

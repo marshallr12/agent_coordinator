@@ -318,6 +318,17 @@ empty-state text, Clear filters, the project reset and mobile width in a
 fixture-backed browser. Run it with
 `CHROME_BIN=/path/to/chrome node scripts/test_task_filters.mjs`.
 
+## Required checks dialog
+
+The **Required checks** dialog shows each roster entry's declared `inputs` in a
+**Declared inputs** box, one path per line, and sends them back with the roster
+`PUT`; an entry with none is sent without an `inputs` key. When the service refuses
+the roster (a glob, a `..` segment, a repeated path), the dialog stays open with
+every value as typed and shows the service's reason.
+`scripts/test_roster_inputs.mjs` verifies the round trip, editing and the refusal
+in a fixture-backed browser. Run it with
+`CHROME_BIN=/path/to/chrome node scripts/test_roster_inputs.mjs`.
+
 ## Saved task views
 
 The **Views** controls under the task toolbar save the status, kind, origin,

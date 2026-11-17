@@ -11,7 +11,7 @@ pub struct RequiredCheck {
     /// absent or empty means the check declares none, and nothing about it
     /// changes. When declared, a candidate whose paths are byte-identical to
     /// the target's may land while the target itself fails the check (see
-    /// the operator guide, "Checks that read only declared inputs"). Validate
+    /// the operator guide, "A failing target must not stall every landing"). Validate
     /// with [`validate_check_inputs`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,

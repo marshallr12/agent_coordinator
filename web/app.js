@@ -2525,6 +2525,7 @@
     canonical_repository_key: 'Copy the saved identity from a project using the same repository. This advanced administrator setting links aliases that cannot be inferred, such as custom SSH hosts. Existing workflow evidence and shared bindings prevent unsafe changes.',
     identity: 'Copy check_identity exactly from the producer configuration used with jobs run. Example only: workspace-tests. A producer must be configured, registered and run on a workstation or CI runner; saving this roster does not create or run it.',
     version: 'Copy check_version exactly from the registered producer. This identifies the check definition, such as its commands and configuration, not the application version. Example only: v1. A different definition version needs a matching roster entry.',
+    inputs: 'Optional. Declaring inputs lets a candidate whose declared paths are byte-identical to the target branch’s land while the target itself fails this check, for example when a newly published advisory fails a dependency audit. The list must name every repository path the check reads and nothing else: a path the check reads but the list omits can let a candidate land on a result that does not apply to it. Enter one relative file path per line, with / separators and no globs or .. segments, at most 20 paths of at most 300 bytes, none repeated. Leave it empty to declare none; the check then behaves as before. Example only: Cargo.lock.',
     environment: 'Copy check_environment exactly from the registered producer. This label identifies its validation environment; the service does not choose or start a runner from this value. Example only: linux-ci. Use the actual configured label, including its case.',
     review_mode: 'Independent agent requires a reviewer who did not contribute. Human requires a person. Both requires both reviews; Either accepts one independent agent or human review. None removes the review requirement. Required code checks still apply.',
     automatic_integration: 'When allowed, agents may integrate a candidate after required reviews and checks pass. Otherwise a human must authorize each candidate before integration. This setting does not create or run checks.',
@@ -2914,7 +2915,7 @@
       ]);
       if (projectId !== state.projectId || currentActor !== actorId()) return;
       const policy = policyReply.data, project = orientationReply.data.project;
-      const view = workflowDialog('Required checks', 'Configure at least one required check. Saving this roster does not create or run checks. Changing it makes existing candidates require reconciliation. The examples in Help are explanations, not configured checks.');
+      const view = workflowDialog('Required checks', 'Configure at least one required check. A check may also declare inputs: the repository paths it reads, which let a candidate that leaves them unchanged land while the target fails that check. The list must name every repository path the check reads and nothing else. Saving this roster does not create or run checks. Changing it makes existing candidates require reconciliation. The examples in Help are explanations, not configured checks.');
       const rules = el('button', 'button subtle', `Review: ${displayStatus(project.review_mode)} · ${project.automatic_integration ? 'Automatic integration allowed' : 'Human integration authorization required'}`);
       rules.type = 'button'; rules.addEventListener('click', () => { view.dialog.close(); openReviewSettings(project); }); add(view.form, rules);
       add(view.form, el('p', 'repo repository-summary', `Repository: ${project.repository_url}`));
@@ -2934,14 +2935,24 @@
           caption.htmlFor = id; input.id = id; input.name = name; input.value = check[name] || ''; input.required = true; input.maxLength = 255;
           add(wrap, caption); add(wrap, input); contextualHelp(wrap, input, label, SETUP_HELP[name], helpPanels); add(row, wrap);
         }
-        const remove = el('button', 'button subtle', 'Remove'); remove.type = 'button'; remove.addEventListener('click', () => row.remove()); add(row, remove); add(row, helpPanels); add(rows, row);
+        const inputsWrap = el('div', 'check-inputs'), inputsId = `check-${row.dataset.row}-inputs`, inputsCaption = el('label', '', 'Declared inputs (optional, one path per line)'), inputsField = el('textarea');
+        inputsCaption.htmlFor = inputsId; inputsField.id = inputsId; inputsField.name = 'inputs'; inputsField.rows = 2; inputsField.spellcheck = false; inputsField.value = (check.inputs || []).join('\n');
+        add(inputsWrap, inputsCaption); add(inputsWrap, inputsField); contextualHelp(inputsWrap, inputsField, 'Declared inputs', SETUP_HELP.inputs, helpPanels);
+        const remove = el('button', 'button subtle', 'Remove'); remove.type = 'button'; remove.addEventListener('click', () => row.remove()); add(row, remove); add(row, inputsWrap); add(row, helpPanels); add(rows, row);
       };
       const checks = policy.required_checks || []; (checks.length ? checks : [{}]).forEach(addRow);
       const more = el('button', 'button subtle', 'Add required check'); more.type = 'button'; more.addEventListener('click', () => { if (rows.children.length < 100) addRow(); }); add(view.form, more);
+      const refusal = el('p', 'inline-alert error'); refusal.setAttribute('role', 'alert'); show(refusal, false); add(view.form, refusal);
       view.finish('Save check roster', (_, dialog) => {
         if (!rows.children.length) { setGlobalAlert('Configure at least one required check.', 'error'); return; }
-        const required_checks = Array.from(rows.children).map(row => Object.fromEntries(Array.from(row.querySelectorAll('input')).map(input => [input.name,input.value.trim()])));
-        dialog.close(); startMutation(`${projectPath(projectId)}/workflow-policy`, {expected_revision:policy.revision || 0, required_checks}, 'check roster', async () => { await loadProjects(); setGlobalAlert('Check roster saved. Agents must read the updated workflow policy.', 'success'); }, 'PUT', null, {projectId});
+        const required_checks = Array.from(rows.children).map(row => {
+          const entry = Object.fromEntries(Array.from(row.querySelectorAll('input')).map(input => [input.name,input.value.trim()]));
+          const inputs = row.querySelector('textarea[name="inputs"]').value.split('\n').map(line => line.trim()).filter(Boolean);
+          if (inputs.length) entry.inputs = inputs;
+          return entry;
+        });
+        refusal.textContent = ''; show(refusal, false);
+        startMutation(`${projectPath(projectId)}/workflow-policy`, {expected_revision:policy.revision || 0, required_checks}, 'check roster', async () => { dialog.close(); await loadProjects(); setGlobalAlert('Check roster saved. Agents must read the updated workflow policy.', 'success'); }, 'PUT', error => { if (error.status === 401 || error.code === 'authentication_required') return; refusal.textContent = errorMessage(error); show(refusal, true); setGlobalAlert('', 'success'); }, {projectId});
       });
     } catch (error) { setGlobalAlert(errorMessage(error), 'error'); }
   }
