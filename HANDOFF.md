@@ -158,6 +158,9 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     (opt-in). Today it only switches after a 429 / expired credential / failed sign-in, and only
     to `[health.fallback]`, which neither host configures. Whether the vendors expose a
     remaining-usage figure is unverified; the task makes the implementer establish it.
+    Both `6faa1251` and `610a5031` were edited to revision 2 on the owner's instruction that the
+    same Claude and/or Codex options apply to reviewers: a review launch today always uses the
+    primary vendor (`live_review.rs`, `Vendor::primary`) and ignores `[health.fallback]`.
     Scripts and output: `~/.local/state/agent-coordinator-evidence/harness-repin-20261117/`.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
