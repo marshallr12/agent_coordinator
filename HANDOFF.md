@@ -185,6 +185,11 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       Containment was verified with a copy that only splits that `local` statement (oracle-1 113
       PASS, mxmini 104 PASS; copy in the evidence directory, `suite-patched/`). Fix task
       **`eed6ebd4`** (open, priority 1). Until it lands, a host updater run fails its suite step.
+    - **Task `d8fdc1a6` is submitted, review NOT decided** (02:45Z): submission `e0294dc8`, review
+      activity `b0d1b968` queued (project policy 7, workflow policy 0). A review subagent verified
+      the evidence read-only and would approve, but its `connect --subagent reviewer` was denied
+      by the Claude Code permission classifier; nothing was worked around. Owner's call how the
+      review is done. Draft decision (schema unchecked) was in the session scratchpad only.
     - Evidence: `~/.local/state/agent-coordinator-evidence/d8fdc1a6-f3e9-43cb-848c-eed087594128/`,
       artifact `37b27e7d`. The dashboard roster dialog now keeps a check's `inputs` (`f210a59`
       is deployed). Roster still at revision 3 unless the owner has run the snippet. MINIAIR's
