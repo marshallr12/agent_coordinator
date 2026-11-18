@@ -133,7 +133,7 @@ unsafe impl Sync for Halt {}
 
 impl Halt {
     /// An event nobody has set.
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         // SAFETY: no attributes and no name; a manual-reset event, not set.
         let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
         Ok(Self {
@@ -143,7 +143,7 @@ impl Halt {
     }
 
     /// Asks every thread to end and wakes the ones that wait.
-    fn ask(&self) -> Result<()> {
+    pub(crate) fn ask(&self) -> Result<()> {
         self.asked.store(true, Ordering::SeqCst);
         // SAFETY: the event handle is live.
         check(unsafe { SetEvent(self.event.raw()) }, "SetEvent")
@@ -254,6 +254,16 @@ impl Broker {
         let above = last.checked_add(1);
         let above = above.with_context(|| format!("{} has no generation left", grant.launch))?;
         Ok(grant.generation.max(above))
+    }
+
+    /// The broker's service name, which its pipes' names carry.
+    pub fn service(&self) -> &str {
+        &self.service
+    }
+
+    /// The account the broker runs as, which owns its pipes.
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
 
     /// The launches this broker serves, in id order.

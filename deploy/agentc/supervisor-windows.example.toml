@@ -30,6 +30,16 @@
 # terminate_patience_seconds = 20
 # Seconds between status reports while the service is stopping.
 # status_interval_seconds = 3
+# The egress broker's control pipe, below \\.\pipe\ (for example
+# "agentc-egress-control"). Empty: no launch is offered brokered egress, and
+# a launch still has no network at all. Set: every launch must be admitted
+# by the broker before it starts; a launch the broker refuses, or whose
+# broker is not running, is not started.
+# egress_control_pipe = ""
+# The egress broker's account, as SID text. Required with
+# egress_control_pipe: the runner uses the control pipe only when this
+# account owns it.
+# egress_broker_sid = ""
 
 [windows_supervisor]
 # The service's name in the Service Control Manager.

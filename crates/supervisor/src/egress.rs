@@ -29,8 +29,38 @@ pub const DEFAULT_ALLOW: &[&str] = &[
     "static.crates.io",
 ];
 
-const MAX_HEAD: usize = 8 * 1024;
-const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest request head a client may send before its CONNECT is judged.
+pub const MAX_HEAD: usize = 8 * 1024;
+/// How long a client has to send its whole request head.
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// The answer to a request that is refused; nothing is contacted upstream.
+pub const FORBIDDEN: &[u8] = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+/// The answer once the tunnel to an allowed destination is open.
+pub const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+
+/// Where the request head in `bytes` ends (just past its blank line), if
+/// it is complete.
+pub fn head_end(bytes: &[u8]) -> Option<usize> {
+    let end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
+    Some(end + 4)
+}
+
+/// The host a request head asks to tunnel to, when it is a CONNECT to port
+/// 443 of a host `allow` lists; `None` for anything to refuse.
+pub fn permitted_target(head: &str, allow: &[String]) -> Option<String> {
+    connect_target(head).filter(|host| allowed(host, allow))
+}
+
+/// As the proxy's own resolution, blocking: `host:443`'s publicly routable
+/// addresses only, so an allowlisted name cannot be pointed at loopback or
+/// the local network. A name that does not resolve has none.
+pub fn public_addresses_blocking(host: &str) -> Vec<SocketAddr> {
+    use std::net::ToSocketAddrs;
+    match (host, 443).to_socket_addrs() {
+        Ok(resolved) => resolved.filter(|a| public_address(a.ip())).collect(),
+        Err(_) => Vec::new(),
+    }
+}
 
 /// Whether `host` matches an allowlist entry (exact, or `.suffix`).
 pub fn allowed(host: &str, allow: &[String]) -> bool {
@@ -81,15 +111,11 @@ async fn handle(mut client: TcpStream, allow: &[String]) -> Result<()> {
     };
     log(target.as_deref().unwrap_or("-"), !addresses.is_empty());
     if addresses.is_empty() {
-        client
-            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
-            .await?;
+        client.write_all(FORBIDDEN).await?;
         return Ok(());
     }
     let mut upstream = TcpStream::connect(&addresses[..]).await?;
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await?;
+    client.write_all(ESTABLISHED).await?;
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
     Ok(())
 }
@@ -208,6 +234,26 @@ mod tests {
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await.unwrap();
         reply
+    }
+
+    #[test]
+    fn a_head_ends_at_its_blank_line_and_only_allowed_connects_are_permitted() {
+        assert_eq!(head_end(b"CONNECT a:443 HTTP/1.1\r\n\r\nrest"), Some(26));
+        assert_eq!(head_end(b"CONNECT a:443 HTTP/1.1\r\n"), None);
+        let permitted = |head: &str| permitted_target(head, &list());
+        assert_eq!(
+            permitted("CONNECT github.com:443 HTTP/1.1\r\n\r\n").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(permitted("CONNECT example.com:443 HTTP/1.1\r\n\r\n"), None);
+        assert_eq!(permitted("CONNECT github.com:80 HTTP/1.1\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn blocking_resolution_keeps_no_local_address() {
+        assert!(public_addresses_blocking("localhost").is_empty());
+        assert!(public_addresses_blocking("127.0.0.1").is_empty());
+        assert!(public_addresses_blocking("no-such-host.invalid").is_empty());
     }
 
     #[tokio::test]

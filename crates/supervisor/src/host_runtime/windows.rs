@@ -37,10 +37,13 @@
 //! builds a harness launch for it.
 pub mod adoption;
 pub mod broker;
+pub mod broker_control;
 pub mod candidate;
 pub mod candidate_pipe;
 pub mod candidate_shell;
 pub mod desktop;
+pub mod egress_admission;
+pub mod egress_broker;
 pub mod inspection;
 pub mod job;
 pub mod journal;

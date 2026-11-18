@@ -33,8 +33,8 @@ use super::sys::{Descriptor, Handle, check, last_error};
 use super::text::wide;
 use super::token;
 use crate::service::pipe_policy::{
-    Admitted, Client, ClientFacts, Package, Refusal, admit, broker_descriptor, descriptor,
-    package_descriptor, pipe_path,
+    Admitted, Client, ClientFacts, Package, Refusal, admit, broker_descriptor, control_descriptor,
+    descriptor, package_descriptor, pipe_path,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::time::{Duration, Instant};
@@ -415,6 +415,16 @@ impl Pipe {
         let served = Admitted::launch(account, package)?;
         let list = broker_descriptor(broker, account, package)?;
         Self::instances(name, &list, &served, count, wake)
+    }
+
+    /// The first and only instance of a broker's control pipe `name`. The
+    /// broker's account `broker` owns it ([`control_descriptor`]), so the
+    /// runner can tell it from a pipe somebody else made under the name,
+    /// and only the runner's account `client` is served.
+    pub fn control(name: &str, broker: &str, client: &str, wake: Option<HANDLE>) -> Result<Self> {
+        let served = Admitted::new(client, client)?;
+        let list = control_descriptor(broker, client)?;
+        Self::with_policy(name, &list, served, wake)
     }
 
     /// `count` instances of the pipe `name` under `access_list` and the

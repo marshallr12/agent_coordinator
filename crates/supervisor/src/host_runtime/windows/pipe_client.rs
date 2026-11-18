@@ -42,14 +42,15 @@ pub struct Client {
 
 impl Client {
     /// Connects to the pipe `name` and verifies that the account `runner`
-    /// (SID text) owns it. A pipe owned by anyone else is closed unused.
+    /// (SID text) owns it: the runner service's, or a broker's for its
+    /// control pipe. A pipe owned by anyone else is closed unused.
     pub fn connect(name: &str, runner: &str) -> Result<Self> {
         let runner = checked_sid(runner)?;
         let file = open(name)?;
         let owner = owner_sid(&file).context("the pipe's owner cannot be read; it is not used")?;
         ensure!(
             owner.eq_ignore_ascii_case(runner),
-            "the pipe {name} is owned by {owner}, not by the runner account {runner}; \
+            "the pipe {name} is owned by {owner}, not by the serving account {runner}; \
              it is not used"
         );
         let server_process = server_process(&file)?;
@@ -101,7 +102,7 @@ fn open(name: &str) -> Result<File> {
     options
         .access_mode(CLIENT_ACCESS)
         .security_qos_flags(SECURITY_IDENTIFICATION);
-    (options.open(&path)).with_context(|| format!("open the runner's pipe {path}"))
+    (options.open(&path)).with_context(|| format!("open the pipe {path}"))
 }
 
 /// The SID text of the pipe's owner, as Windows reports it for the handle.
@@ -200,7 +201,7 @@ mod tests {
         let mut pipe = Pipe::create(&name, &me, &me, None).unwrap();
         let expected = "S-1-5-21-111-222-333-1111";
         let refused = Client::connect(&name, expected).unwrap_err().to_string();
-        assert!(refused.contains("not by the runner account"), "{refused}");
+        assert!(refused.contains("not by the serving account"), "{refused}");
         // The server saw at most a connection that sent nothing.
         match pipe.accept(Duration::from_millis(200)).unwrap() {
             Accepted::Idle | Accepted::Refused(_) => {}

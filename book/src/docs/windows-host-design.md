@@ -994,6 +994,55 @@ clients is reachable that way, and that opening a launch again raises its
 generation. Nothing in 6a checks a grant against the coordinator, no broker
 runs as a service account, and no egress or publication broker exists.
 
+Step 6b is implemented in the Windows `egress_broker`, `broker_control` and
+`egress_admission` modules. The egress broker's handler reads one HTTP
+request head from a launch's session and applies the Linux proxy's policy
+(`egress`): only `CONNECT host:443` to a host on the allowlist is honoured,
+the broker resolves the name and contacts only a publicly routable address,
+and everything else is answered 403 with nothing contacted. An honoured
+request becomes a byte tunnel over the split session; whichever side ends
+first ends the other, and closing the launch ends it at once. After its
+last bytes the handler waits up to five seconds for the client to leave,
+because disconnecting a pipe discards what the client has not read. Each
+decision is a JSON line naming the launch and the role from the grant.
+
+The runner reaches a broker over the broker's control pipe, which the
+broker's account owns and only the runner's account may open; the runner
+refuses the pipe when another account owns it. An `open` names the launch,
+its role, its package and a generation, and the launch's account is the
+account Windows reports for the control client, not a request field. When
+`windows_service.egress_control_pipe` and `egress_broker_sid` are set, the
+runner has every launch admitted before it starts and passes the launch its
+pipe's path in `AGENTC_EGRESS_PIPE`. A missing broker, a pipe another
+account owns, a launch with no role and a refusal each keep the launch from
+starting, with no fallback. The two settings are empty by default, and then
+no launch is offered egress at all.
+
+What 6b demonstrates on MiniAir, with the broker and launches running as the
+owner in a new logon session (`crates/supervisor/tests/windows_egress.rs`,
+2026-11-18):
+
+| Probe from inside the launch | Result |
+| --- | --- |
+| CONNECT to the allowed name over the egress pipe | 200; bytes echoed through the tunnel by the test's listener on loopback |
+| CONNECT to another host, to port 22, an absolute-URL GET, a CONNECT without a version | 403 each; the broker contacted nothing |
+| Direct TCP to the same listener over IPv4 and IPv6 loopback | Error 10013; only the broker's tunnel reached it |
+| UDP to a receiver on loopback | Error 10013; nothing arrived, while the host's own datagram did |
+| Resolving a name the host resolves | Error 11003 |
+| A tunnel held open while the launch is closed through the control pipe | Ended at once (error 233, the pipe broken); opening the pipe again gives error 2 |
+| Binding a listener on IPv4 loopback inside the launch | **Error 10013**: the probe of loopback within one package stops here |
+
+The last row is the probe the owner asked for. A launch whose token has no
+network capability cannot even listen on loopback, so a shim inside a
+launch's own package cannot offer a harness a loopback proxy address
+without a network capability, which this design does not allow as a
+workaround. How harness provider traffic reaches the broker is left to a
+later phase. The `egress_broker` and `egress_admission` module tests show
+that the public upstream never reaches a local address, that a head that is
+too long gets no answer, that a destination's last bytes still arrive, and
+that a missing broker, a control pipe another account owns and a launch
+with no role are each refused.
+
 ## Linux P2 parity and acceptance map
 
 The source inventory is `deploy/agentc/containment-suite.sh` plus the supervisor's
@@ -1033,8 +1082,8 @@ only proposed.
 | `check_git`, hardened clone | None |
 | `check_writes`, `check_seeds` | Partial. The host directory, the tool directory and every other launch's directory are denied (`host.file_*`, `host.dir_*`, `host.tool_write`, `peer.*.file_*`). Role state and seeds are untested |
 | `check_codex_sandbox`, `check_claude_sandbox` | Partial. Own writes work; host and cross-launch files, processes, pipes, events and the interactive window station are denied. **The owner's registry is denied only to a launch running as a separate account**: `host.registry_environment_open` fails when the launch runs as the owner and passed in the role-account run |
-| `check_egress` | Partial. Direct TCP over IPv4 and IPv6, loopback, the local network, UDP and DNS are denied to a token with no network capability, and the authorized pipe route works. With the firewall profiles disabled the refusals held in the [launcher's role-account run](#role-account-run-through-the-launcher-2026-11-09). No WFP policy or allowlist broker exists, and a stopped firewall service is untested |
-| `check_claude_launch`, `check_relay_probe`, shell execution | Partial. Native Claude Code 2.1.326 ran in a less-privileged reviewer launch, and its Bash command went through the prefix and the shim into the candidate ([step 5f](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17)). The network and the credential were given for that one owner-attended run, and no broker exists. The candidate runner's readiness check refuses a broken runner (step 5e) |
+| `check_egress` | Partial. Direct TCP over IPv4 and IPv6, loopback, the local network, UDP and DNS are denied to a token with no network capability, and the authorized pipe route works. With the firewall profiles disabled the refusals held in the [launcher's role-account run](#role-account-run-through-the-launcher-2026-11-09). Since [step 6b](#phase-6-steps) an allowlist egress broker serves each launch over its pipe: an allowed CONNECT is tunnelled, and another host, another port, a request that is not a CONNECT and a malformed one get 403 with nothing contacted, while a direct connection from the launch to the broker's own destination fails. The broker runs as the owner in that test, not as a service account. No WFP policy exists, and a stopped firewall service is untested |
+| `check_claude_launch`, `check_relay_probe`, shell execution | Partial. Native Claude Code 2.1.326 ran in a less-privileged reviewer launch, and its Bash command went through the prefix and the shim into the candidate ([step 5f](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17)). The network and the credential were given for that one owner-attended run, and no harness has run through the egress broker. The candidate runner's readiness check refuses a broken runner (step 5e). With an egress broker configured, the runner refuses to start a launch the broker does not admit or whose broker is missing (step 6b) |
 | `check_claude_token`, `check_candidate_token`, reviewer isolation | Partial. A synthetic credential file is denied, and implementer and reviewer packages cannot reach each other. In step 5e a synthetic credential in the reviewer's environment, files, inherited handle and registry was out of its candidate's reach, and so were the reviewer's process, its pipe, another launch and the runner. Whether the candidate can reach the real credential the harness held in step 5f was not probed |
 | `check_push_kill`, `check_push_launch`, `check_live_helper` | Partial. A per-launch pipe admits only its package, a foreign launch is denied, and the stub takes identity from the client token. No publication broker exists |
 | `check_push_key`, `check_attention_token` | Partial. The synthetic credential stand-in is denied to every launch |
@@ -2427,7 +2476,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Steps 5a to 5f done**; the phase is complete when task `9cf04a5c`'s review and integration are. It first **closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim) and step 5e (the readiness check and the fixture checks), whose native tests pass. In step 5f, an owner-attended run [inside a contained reviewer launch](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17) sent a Bash command from native Claude Code 2.1.326 in the recorded form through the prefix and the shim into the candidate. The capability record now admits only that build. No Windows driver calls the record, so no product Claude launch runs on Windows. The [items still open](#phase-5-steps) include the process a job still counts after the shell ends |
-| 6 | Egress and publication brokers | Phase 3 | Not started |
+| 6 | Egress and publication brokers | Phase 3 | In progress (task `13ae81c1`): steps 6a and 6b are implemented; see [phase 6 steps](#phase-6-steps) |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
 
 No intermediate phase is production acceptance. Independent review and guarded

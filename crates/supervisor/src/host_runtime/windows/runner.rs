@@ -11,6 +11,7 @@ use super::broker::Role;
 use super::candidate::{self, Candidate, CandidateSpec, Tuning};
 use super::candidate_pipe::{self, Server};
 use super::desktop::StationNotOurs;
+use super::egress_admission::EgressRoute;
 use super::journal::{CandidateRecord, Entry, Journal, Stage};
 use super::launcher::{LaunchSpec, Launcher, Prepared, Seen, job_owner};
 use super::process::Command;
@@ -177,6 +178,10 @@ pub struct Runner {
     mine: BTreeSet<String>,
     /// The candidates of this run's reviewer launches.
     candidates: BTreeMap<String, Served>,
+    /// The egress broker every launch must be admitted by, if any.
+    egress: Option<EgressRoute>,
+    /// This run's launches the egress broker admitted.
+    egressing: BTreeSet<String>,
 }
 
 /// A reviewer launch's candidate and the threads that serve its pipe.
@@ -209,7 +214,16 @@ impl Runner {
             journal: Journal::open(state)?,
             mine: BTreeSet::new(),
             candidates: BTreeMap::new(),
+            egress: None,
+            egressing: BTreeSet::new(),
         })
+    }
+
+    /// This runner, having every launch admitted by the egress broker
+    /// `route` before it starts; `None` offers no launch brokered egress.
+    pub fn with_egress(mut self, route: Option<EgressRoute>) -> Self {
+        self.egress = route;
+        self
     }
 
     /// The candidate of this run's reviewer launch `launch`, if it has one.
@@ -494,17 +508,57 @@ impl Runner {
         (self.journal.load(launch)).with_context(|| format!("launch {launch} has no journal entry"))
     }
 
-    /// Journals the intent to start, starts, then journals the identity
-    /// Windows gave the launch. A refused start leaves nothing running.
+    /// Starts a prepared launch once its candidate runner and, when one is
+    /// configured, the egress broker allow it. A start that fails gives up
+    /// the broker's admission again.
     fn start(&mut self, launch: &str, command: &Command, listed: &[u64]) -> Result<Value> {
-        let mut entry = self.entry(launch)?;
+        let entry = self.entry(launch)?;
         ensure!(!self.launcher.runs(launch)?, "launch {launch} already runs");
         self.refuse_broken_candidate(launch)?;
+        let command = self.admit_egress(&entry, command)?;
+        let started = self.start_admitted(entry, &command, listed);
+        if started.is_err() {
+            self.release_egress(launch);
+        }
+        started
+    }
+
+    /// `command`, admitted by the egress broker when one is configured: a
+    /// launch the broker does not admit is refused here.
+    fn admit_egress(&mut self, entry: &Entry, command: &Command) -> Result<Command> {
+        let Some(route) = &self.egress else {
+            return Ok(command.clone());
+        };
+        let admitted = route.admit(entry, command)?;
+        self.egressing.insert(entry.launch.clone());
+        Ok(admitted)
+    }
+
+    /// Asks the egress broker to stop serving `launch` if it admitted it in
+    /// this run; what went wrong, if anything. The broker ends the launch's
+    /// tunnels and removes its pipe.
+    fn release_egress(&mut self, launch: &str) -> Option<String> {
+        let route = self.egress.as_ref()?;
+        if !self.egressing.remove(launch) {
+            return None;
+        }
+        let released = route.release(launch);
+        released.err().map(|error| format!("{error:#}"))
+    }
+
+    /// Journals the intent to start, starts, then journals the identity
+    /// Windows gave the launch. A refused start leaves nothing running.
+    fn start_admitted(
+        &mut self,
+        mut entry: Entry,
+        command: &Command,
+        listed: &[u64],
+    ) -> Result<Value> {
         entry.stage = Stage::Starting;
         entry.executable = command.argv.first().cloned();
         (entry.pid, entry.created) = (None, None);
         self.journal.save(&entry)?;
-        let started = match self.launcher.start(launch, command, listed) {
+        let started = match self.launcher.start(&entry.launch, command, listed) {
             Ok(started) => started,
             Err(error) => {
                 entry.stage = Stage::Prepared;
@@ -548,6 +602,7 @@ impl Runner {
     fn cleanup(&mut self, launch: &str, remove: bool) -> Result<Value> {
         let entry = self.entry(launch)?;
         self.retire_candidate(launch)?;
+        let egress = self.release_egress(launch);
         let deleted = self.launcher.cleanup(launch);
         let profile_deleted = deleted.is_ok();
         let detail = deleted.err().map(|error| format!("{error:#}"));
@@ -560,7 +615,7 @@ impl Runner {
         self.mine.remove(launch);
         Ok(
             json!({ "profile_deleted": profile_deleted, "detail": detail,
-                   "directories_removed": remove }),
+                   "directories_removed": remove, "egress_detail": egress }),
         )
     }
 
@@ -605,7 +660,20 @@ impl Runner {
             remove_directories(&entry)?;
         }
         self.journal.remove(launch)?;
-        Ok(json!({ "profile_deleted": deleted, "directories_removed": remove }))
+        let egress = self.release_earlier_egress(launch);
+        Ok(
+            json!({ "profile_deleted": deleted, "directories_removed": remove,
+                   "egress_detail": egress }),
+        )
+    }
+
+    /// Asks the egress broker, if one is configured, to stop serving an
+    /// earlier runner's ended launch, which it may still list; what went
+    /// wrong, if anything. A broker that never served it says so and that
+    /// is no error.
+    fn release_earlier_egress(&self, launch: &str) -> Option<String> {
+        let released = self.egress.as_ref()?.release(launch);
+        released.err().map(|error| format!("{error:#}"))
     }
 }
 

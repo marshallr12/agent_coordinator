@@ -112,6 +112,24 @@ pub fn broker_descriptor(broker: &str, account: &str, package: &str) -> Result<S
     ))
 }
 
+/// The access list of a broker's control pipe, through which the runner
+/// opens and closes launches: `broker` owns it and has it in full, the
+/// runner's account `client` gets [`CLIENT_RIGHTS`], and a NETWORK token is
+/// denied. The owner is written out because the runner trusts the pipe only
+/// when the broker's account owns it: the Windows pipe client checks that
+/// before it sends anything.
+pub fn control_descriptor(broker: &str, client: &str) -> Result<String> {
+    let (broker, client) = (checked_sid(broker)?, checked_sid(client)?);
+    let client = if client == broker {
+        String::new()
+    } else {
+        format!("(A;;{CLIENT_RIGHTS};;;{client})")
+    };
+    Ok(format!(
+        "O:{broker}D:P(D;;GA;;;{NETWORK})(A;;GA;;;{broker}){client}"
+    ))
+}
+
 /// The accounts a pipe serves and, for a launch's candidate pipe, the one
 /// package its client's token must carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,6 +383,24 @@ mod tests {
                  (A;;0x120083;;;{PACKAGE})S:(ML;;NW;;;LW)"
             )
         );
+    }
+
+    #[test]
+    fn a_control_pipe_list_is_owned_by_the_broker_and_lets_in_only_the_runner() {
+        let list = control_descriptor(BROKER, CLIENT).unwrap();
+        assert_eq!(
+            list,
+            format!("O:{BROKER}D:P(D;;GA;;;S-1-5-2)(A;;GA;;;{BROKER})(A;;0x120083;;;{CLIENT})")
+        );
+        let same = control_descriptor(CLIENT, CLIENT).unwrap();
+        assert_eq!(
+            same,
+            format!("O:{CLIENT}D:P(D;;GA;;;S-1-5-2)(A;;GA;;;{CLIENT})")
+        );
+        for forged in ["", "WD", "S-1-5-80)(A;;GA;;;WD"] {
+            assert!(control_descriptor(forged, CLIENT).is_err(), "{forged:?}");
+            assert!(control_descriptor(BROKER, forged).is_err(), "{forged:?}");
+        }
     }
 
     #[test]
