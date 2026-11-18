@@ -196,6 +196,14 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       artifact `37b27e7d`. The dashboard roster dialog now keeps a check's `inputs` (`f210a59`
       is deployed). Roster still at revision 3 unless the owner has run the snippet. MINIAIR's
       CLI must move to `818a7b1`.
+  - **Update 2026-11-18 04:50 UTC:** `eed6ebd4` is Done (03:40:15Z), on main as **`f8bddba`**
+    (suite fix plus a `set -u` test). Not deployed: both hosts still carry the `818a7b1` suite;
+    mxmini's updater picks it up, oracle-1 (`UPDATE_TIMER=0`) gets it at the next rollout. Both
+    reviewer CLI sessions from the `d8fdc1a6` review are closed. **Roster change pending the
+    owner's click:** the dashboard's Required checks dialog was filled (dependency-audit declared
+    inputs `Cargo.lock`, `.cargo/audit.toml`; other checks untouched) but only the owner saves
+    it; confirm with a workflow-policy read that the roster is at revision 4 (needs the owner's
+    go-ahead, like any production read). The owner is updating MINIAIR's CLI themselves.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
