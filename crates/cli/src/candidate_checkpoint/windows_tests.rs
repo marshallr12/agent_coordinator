@@ -218,3 +218,42 @@ fn a_pipe_nobody_serves_is_a_retryable_unavailable_helper() {
         "candidate_push_unavailable"
     );
 }
+
+#[test]
+fn a_candidate_is_bundled_before_the_pipe_is_opened() {
+    // The broker drops a client silent for ten seconds after it connects,
+    // so a bundle that cannot be made must fail without ever connecting.
+    let fixture = fixture();
+    let path = pipe_path();
+    let server = serving(&path, |stream| {
+        let _ = std::io::Read::read_to_end(stream, &mut Vec::new());
+        None
+    });
+    let snapshot = capture_clean_snapshot(&fixture.checkout, &fixture.remote).unwrap();
+    let unknown_base = "0123456789abcdef0123456789abcdef01234567";
+    let failure = send_to_helper(
+        Path::new(&path),
+        &snapshot,
+        unknown_base,
+        PushKind::Candidate,
+    );
+    assert_eq!(
+        failure.unwrap_err().exit,
+        2,
+        "a bundle error is invalid input"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let connected = server.is_finished();
+    // Release the server thread, still waiting for its first client.
+    drop(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path),
+    );
+    let _ = server.join();
+    assert!(
+        !connected,
+        "the client connected before its bundle was made"
+    );
+}

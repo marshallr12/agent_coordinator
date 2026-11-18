@@ -74,6 +74,14 @@ fn a_launch_whose_authority_ended_or_cannot_be_asked_publishes_nothing() {
     in_a_new_session("lost");
 }
 
+/// The runner refuses to start an implementer launch while its publication
+/// broker is missing and gives back the launch's egress admission, starts it
+/// with its pipe once the broker serves, and never offers a reviewer one.
+#[test]
+fn the_runner_starts_an_implementer_only_once_the_publication_broker_admits_it() {
+    in_a_new_session("runner");
+}
+
 /// The child's side. Ignored so that it runs only when a test above starts
 /// it, with its role, in a new logon session or inside a launch.
 #[test]
@@ -82,6 +90,7 @@ fn child_in_a_new_logon_session() {
     child_main(|role| match role {
         "publication" => publication(),
         "lost" => lost(),
+        "runner" => runner::admitted_starts(),
         "client" => client(),
         other => panic!("no such role: {other}"),
     });
@@ -603,5 +612,128 @@ fn describe(line: &str) -> String {
             reply["revision"].as_str().unwrap()
         ),
         _ => format!("refused {}", reply["code"].as_str().unwrap_or("?")),
+    }
+}
+
+// ---- The runner's side ----
+
+mod runner {
+    use super::*;
+    use agentc_supervisor::host_runtime::windows::broker::{Grant, Halt, Handler, pipe_name};
+    use agentc_supervisor::host_runtime::windows::egress_admission::BrokerRoute;
+    use agentc_supervisor::host_runtime::windows::pipe::Session;
+    use agentc_supervisor::host_runtime::windows::runner::{Request, Runner, answer};
+    use serde_json::{Value, json};
+
+    /// A broker whose launches never connect in this test.
+    struct Unused;
+
+    impl Handler for Unused {
+        fn serve(&self, _: &Grant, _: &mut Session<'_>, _: &Halt) -> anyhow::Result<()> {
+            anyhow::bail!("no launch connects in this test")
+        }
+    }
+
+    /// Serves a broker `service` with no live handler on the control pipe
+    /// `name` until dropped.
+    fn broker(service: &str, name: &str) -> Serving {
+        let broker = Broker::new(service, &me(), Arc::new(Unused)).unwrap();
+        let mut control = Control::new(name, broker, &me(), None).unwrap();
+        Serving::start(move |stop| control.serve_one(Duration::from_millis(100), stop).unwrap())
+    }
+
+    /// Sends one request and returns the runner's answer line.
+    fn ask(runner: &mut Runner, request: Value) -> Value {
+        let parsed = serde_json::from_value::<Request>(request).map_err(anyhow::Error::from);
+        answer(parsed.and_then(|request| runner.handle(request)))
+    }
+
+    /// `ask`, failing unless the runner answered `ok`.
+    fn ok(runner: &mut Runner, request: Value) -> Value {
+        let reply = ask(runner, request.clone());
+        assert_eq!(reply["ok"], true, "{request} -> {reply}");
+        reply
+    }
+
+    /// The `prepare` request of `launch` working as `role` on [`TASK`].
+    fn prepare(root: &Path, launch: &str, role: &str) -> Value {
+        std::fs::create_dir_all(root.join(launch)).unwrap();
+        let profile = format!("agentc.test.{}", uuid::Uuid::new_v4().simple());
+        let limits = json!({"processes": 8, "process_memory_mb": 256, "job_memory_mb": 512});
+        json!({"op": "prepare", "launch": launch, "role": role, "task": TASK,
+               "spec": {"profile": profile, "less_privileged": true,
+                        "capabilities": ["registryRead"], "limits": limits,
+                        "control": root.join(launch).join("control"),
+                        "work": root.join(launch).join("work")}})
+    }
+
+    /// The `start` request of `launch`, printing its publication pipe.
+    fn start(root: &Path, launch: &str) -> Value {
+        let system = std::env::var("SystemRoot").unwrap();
+        let cmd = format!("{system}\\System32\\cmd.exe");
+        let script = format!("echo pipe=%{PUBLICATION_VARIABLE}%");
+        let work = root.join(launch).join("work");
+        json!({"op": "start", "launch": launch, "argv": [cmd, "/d", "/c", script],
+               "directory": work, "output": root.join(format!("{launch}.log")),
+               "environment": {"SystemRoot": system, "LOCALAPPDATA": work}})
+    }
+
+    /// Starts `launch`, waits for it to end and returns its log.
+    fn run(runner: &mut Runner, root: &Path, launch: &str) -> String {
+        ok(runner, start(root, launch));
+        let wait = json!({"op": "observe", "launch": launch, "wait_ms": 30_000});
+        assert_eq!(ok(runner, wait)["state"], "exited");
+        ok(runner, json!({"op": "terminate", "launch": launch}));
+        std::fs::read_to_string(root.join(format!("{launch}.log"))).unwrap()
+    }
+
+    /// The whole test.
+    pub fn admitted_starts() -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, unique) = (dir.path(), uuid::Uuid::new_v4().simple());
+        let names = [
+            format!("agentc-test-egress-{unique}"),
+            format!("agentc-test-pub-{unique}"),
+        ];
+        let _egress = broker("egress", &names[0]);
+        let routes = (
+            BrokerRoute::new(&names[0], &me()),
+            BrokerRoute::publication(&names[1], &me()),
+        );
+        let runner = Runner::new(&root.join("state"))
+            .unwrap()
+            .with_egress(Some(routes.0.unwrap()));
+        let mut runner = runner.with_publication(Some(routes.1.unwrap()));
+        let [implementer, reviewer] = ["run-impl", "run-rev"].map(id);
+        ok(&mut runner, prepare(root, &implementer, "implementer"));
+        let refused = ask(&mut runner, start(root, &implementer)).to_string();
+        assert!(
+            refused.contains("publication broker") && refused.contains("not started"),
+            "{refused}"
+        );
+        let egress = ControlClient::connect(&names[0], &me())
+            .unwrap()
+            .close(&implementer);
+        assert!(!egress.unwrap(), "the egress admission was kept");
+        let _publication = broker("publication", &names[1]);
+        let log = run(&mut runner, root, &implementer);
+        let expected = pipe_path(&pipe_name(SERVICE, &implementer)).unwrap();
+        assert!(log.contains(&format!("pipe={expected}")), "{log}");
+        ok(&mut runner, prepare(root, &reviewer, "reviewer"));
+        let unoffered = run(&mut runner, root, &reviewer);
+        assert!(
+            unoffered.contains(&format!("pipe=%{PUBLICATION_VARIABLE}%")),
+            "{unoffered}"
+        );
+        for launch in [&implementer, &reviewer] {
+            let cleanup = json!({"op": "cleanup", "launch": launch, "remove_directories": true});
+            let cleaned = ok(&mut runner, cleanup);
+            assert_eq!(cleaned["publication_detail"], Value::Null, "{cleaned}");
+        }
+        format!(
+            "implementer: {}; reviewer: {}",
+            log.trim(),
+            unoffered.trim()
+        )
     }
 }
