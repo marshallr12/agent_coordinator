@@ -3,21 +3,38 @@
 //! it, and a launch the broker does not admit is not started.
 //!
 //! Admission fails closed. A broker that is not running, a control pipe
-//! another account owns, a launch with no role and a request the broker
-//! refuses each keep the launch from starting; nothing falls back to an
-//! unbrokered start. The launch learns its pipe's path from
-//! [`PIPE_VARIABLE`]; its token still has no network capability, so the
-//! pipe is its only way out.
+//! another account owns, a launch with no role, a request the broker
+//! refuses and a broker that does not answer within [`CONTROL_PATIENCE`]
+//! each keep the launch from starting; nothing falls back to an unbrokered
+//! start. The launch learns its pipe's path from [`PIPE_VARIABLE`]; its
+//! token still has no network capability, so the pipe is its only way out.
+//!
+//! Every exchange with the broker is bounded by [`CONTROL_PATIENCE`]: the
+//! runner service serves everything on one thread, and a broker that is
+//! busy, wedged or gone must not hold it. A launch whose release failed,
+//! or whose admission ended without an answer, is kept for release and
+//! asked again before the next admission and at the next cleanup.
 use super::broker_control::{ControlClient, Opened};
 use super::egress_broker::PIPE_VARIABLE;
 use super::journal::Entry;
 use super::process::Command;
 use crate::service::pipe_policy::{checked_sid, pipe_path};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
+use std::os::windows::io::AsRawHandle;
+use std::sync::mpsc::RecvTimeoutError;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
 
 /// The generation a launch is admitted at when its caller named none.
 const FIRST_GENERATION: u64 = 1;
+/// The longest one exchange with the broker may hold the runner: reaching
+/// its pipe, the request and the answer together.
+pub const CONTROL_PATIENCE: Duration = Duration::from_secs(1);
+/// How long an exchange that outlasted its patience is cancelled for before
+/// its thread is left to end by itself.
+const CANCEL_PATIENCE: Duration = Duration::from_millis(250);
 
 /// The egress broker a runner has every launch admitted by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,29 +72,65 @@ impl EgressRoute {
     fn open(&self, entry: &Entry) -> Result<Opened> {
         let role = entry.role.context("the launch has no role")?;
         let generation = entry.generation.unwrap_or(FIRST_GENERATION);
-        let mut control = self.connect()?;
-        control.open(&entry.launch, role, &entry.package_sid, generation)
+        let (launch, package) = (entry.launch.clone(), entry.package_sid.clone());
+        self.within(move |control| control.open(&launch, role, &package, generation))
     }
 
     /// Asks the broker to stop serving `launch`, which ends its tunnels and
     /// removes its pipe; false when the broker served none.
     pub fn release(&self, launch: &str) -> Result<bool> {
-        self.connect()?.close(launch)
+        let launch = launch.to_owned();
+        self.within(move |control| control.close(&launch))
     }
 
-    /// A connection to the broker's control pipe, which its account owns.
-    fn connect(&self) -> Result<ControlClient> {
-        ControlClient::connect(&self.control_pipe, &self.broker_sid)
-            .with_context(|| format!("reach the egress broker's pipe {}", self.control_pipe))
+    /// Runs `ask` on a connection to the broker's control pipe, which its
+    /// account owns, on a thread of its own, and waits for it at most
+    /// [`CONTROL_PATIENCE`]. An exchange still running then is cancelled,
+    /// and its outcome is unknown.
+    fn within<T: Send + 'static>(
+        &self,
+        ask: impl FnOnce(&mut ControlClient) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let (pipe, broker) = (self.control_pipe.clone(), self.broker_sid.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let reached = ControlClient::connect(&pipe, &broker)
+                .with_context(|| format!("reach the egress broker's pipe {pipe}"));
+            let _ = sender.send(reached.and_then(|mut control| ask(&mut control)));
+        });
+        match receiver.recv_timeout(CONTROL_PATIENCE) {
+            Ok(answer) => answer,
+            Err(RecvTimeoutError::Timeout) => {
+                cancel(&worker);
+                bail!("the egress broker did not answer within {CONTROL_PATIENCE:?}")
+            }
+            Err(RecvTimeoutError::Disconnected) => bail!("the broker exchange ended unheard"),
+        }
     }
 }
 
-/// A runner's egress broker, if it has one, and the launches of this run
-/// the broker admitted and has not yet been seen to release.
+/// Cancels the blocking pipe I/O of `worker`, an exchange that outlasted
+/// its patience, until it ends or [`CANCEL_PATIENCE`] passes; a thread that
+/// still runs then ends by itself when the broker answers or goes.
+fn cancel(worker: &JoinHandle<()>) {
+    let deadline = Instant::now() + CANCEL_PATIENCE;
+    while !worker.is_finished() && Instant::now() < deadline {
+        // SAFETY: the handle is the worker thread's own and outlives the
+        // call; cancelling I/O it is not doing has no effect.
+        unsafe { CancelSynchronousIo(worker.as_raw_handle()) };
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A runner's egress broker, if it has one, the launches of this run the
+/// broker admitted, and the launches still to be released.
 #[derive(Debug, Default)]
 pub struct Admissions {
     route: Option<EgressRoute>,
     admitted: BTreeSet<String>,
+    /// Launches whose release failed or whose admission ended without an
+    /// answer: the broker may still serve them.
+    unreleased: BTreeSet<String>,
 }
 
 impl Admissions {
@@ -85,36 +138,67 @@ impl Admissions {
     pub fn new(route: Option<EgressRoute>) -> Self {
         Self {
             route,
-            admitted: BTreeSet::new(),
+            ..Self::default()
         }
     }
 
     /// `command` as `entry`'s launch starts with it: unchanged without a
     /// broker, and with a broker only once the broker admitted the launch.
-    /// An error means the launch must not start.
+    /// An error means the launch must not start; the broker may still have
+    /// admitted it, so it is kept for release.
     pub fn admit(&mut self, entry: &Entry, command: &Command) -> Result<Command> {
-        let Some(route) = &self.route else {
+        let Some(route) = self.route.clone() else {
             return Ok(command.clone());
         };
-        let admitted = route.admit(entry, command)?;
-        self.admitted.insert(entry.launch.clone());
-        Ok(admitted)
+        self.sweep();
+        let admitted = route.admit(entry, command);
+        let set = match admitted {
+            Ok(_) => &mut self.admitted,
+            Err(_) => &mut self.unreleased,
+        };
+        set.insert(entry.launch.clone());
+        admitted
     }
 
-    /// Asks the broker to stop serving this run's admitted `launch`; what
-    /// went wrong, if anything. The launch stays recorded as admitted until
-    /// a release succeeds, so a later cleanup asks again.
+    /// Asks the broker to stop serving this run's `launch`, then retries the
+    /// other launches still to be released; what went wrong with `launch`,
+    /// if anything. A launch whose release fails is kept and asked again.
     pub fn release(&mut self, launch: &str) -> Option<String> {
+        if self.admitted.remove(launch) {
+            self.unreleased.insert(launch.to_owned());
+        }
+        let failed = self.release_one(launch);
+        if failed.is_none() {
+            self.sweep();
+        }
+        failed
+    }
+
+    /// Asks the broker to release `launch` if it is still to be released;
+    /// what went wrong, if anything.
+    fn release_one(&mut self, launch: &str) -> Option<String> {
         let route = self.route.as_ref()?;
-        if !self.admitted.contains(launch) {
+        if !self.unreleased.contains(launch) {
             return None;
         }
         match route.release(launch) {
             Ok(_) => {
-                self.admitted.remove(launch);
+                self.unreleased.remove(launch);
                 None
             }
             Err(error) => Some(format!("{error:#}")),
+        }
+    }
+
+    /// Retries the launches still to be released, in order, and stops at
+    /// the first that fails: the broker is then most likely not there, and
+    /// each try may take [`CONTROL_PATIENCE`].
+    pub fn sweep(&mut self) {
+        let waiting: Vec<String> = self.unreleased.iter().cloned().collect();
+        for launch in waiting {
+            if self.release_one(&launch).is_some() {
+                break;
+            }
         }
     }
 
@@ -126,9 +210,14 @@ impl Admissions {
         released.err().map(|error| format!("{error:#}"))
     }
 
-    /// Whether `launch` is recorded as admitted and not yet released.
+    /// Whether `launch` is admitted or still to be released.
     pub fn holds(&self, launch: &str) -> bool {
-        self.admitted.contains(launch)
+        self.admitted.contains(launch) || self.unreleased.contains(launch)
+    }
+
+    /// Whether `launch` is still to be released.
+    pub fn unreleased(&self, launch: &str) -> bool {
+        self.unreleased.contains(launch)
     }
 }
 
@@ -137,14 +226,13 @@ mod tests {
     use super::super::broker::{Broker, Grant, Halt, Handler, Role};
     use super::super::broker_control::Control;
     use super::super::journal::Stage;
-    use super::super::pipe::Session;
+    use super::super::pipe::{Accepted, Pipe, Session};
     use super::super::token;
     use super::*;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
 
     /// A handler nobody reaches in these tests.
     struct Unused;
@@ -279,12 +367,64 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_launch_is_not_recorded_as_admitted() {
+    fn a_refused_launch_is_not_admitted_and_is_kept_for_release() {
+        // The broker may have admitted a launch whose answer was lost, so
+        // the runner asks it to release every launch it did not confirm.
         let route = EgressRoute::new(&unique(), &me()).unwrap();
         let mut admissions = Admissions::new(Some(route));
         let refused = admissions.admit(&entry(Some(Role::Implementer)), &command());
         assert!(refused.is_err());
-        assert!(!admissions.holds(&id()));
+        assert!(admissions.unreleased(&id()));
+    }
+
+    /// Serves the control pipe `name` with a broker that reads one request
+    /// and never answers, until the test ends.
+    fn silent_broker(name: &str) {
+        let mut pipe = Pipe::control(name, &me(), &me(), None).unwrap();
+        std::thread::spawn(move || {
+            let Ok(Accepted::Client(mut session)) = pipe.accept(Duration::from_secs(10)) else {
+                return;
+            };
+            let _ = session.read_line(Duration::from_secs(10));
+            std::thread::sleep(Duration::from_secs(60));
+        });
+    }
+
+    #[test]
+    fn a_broker_that_never_answers_holds_the_runner_only_for_the_patience() {
+        let name = unique();
+        silent_broker(&name);
+        let route = EgressRoute::new(&name, &me()).unwrap();
+        let started = Instant::now();
+        let released = route.release(&id());
+        let took = started.elapsed();
+        let error = format!("{:#}", released.unwrap_err());
+        assert!(error.contains("did not answer"), "{error}");
+        let most = CONTROL_PATIENCE + CANCEL_PATIENCE + Duration::from_millis(500);
+        assert!(took < most, "the release took {took:?}");
+    }
+
+    #[test]
+    fn launches_left_unreleased_are_released_before_the_next_admission() {
+        let name = unique();
+        let route = EgressRoute::new(&name, &me()).unwrap();
+        let mut admissions = Admissions::new(Some(route));
+        let mut earlier = entry(Some(Role::Implementer));
+        earlier.launch = format!("{}-earlier", id());
+        earlier.package_sid = "S-1-15-2-1-2-3-4-5-6-8".into();
+        assert!(
+            admissions.admit(&earlier, &command()).is_err(),
+            "no broker yet"
+        );
+        let done = Arc::new(AtomicBool::new(false));
+        let server = broker_serving(&name, done.clone());
+        admissions
+            .admit(&entry(Some(Role::Implementer)), &command())
+            .unwrap();
+        assert!(!admissions.unreleased(&earlier.launch), "not swept");
+        assert!(admissions.holds(&id()));
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
     }
 
     #[test]

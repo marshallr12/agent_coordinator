@@ -224,6 +224,11 @@ impl Runner {
         self
     }
 
+    /// The runner's egress admissions, for a caller that reports on them.
+    pub fn egress(&self) -> &Admissions {
+        &self.egress
+    }
+
     /// The candidate of this run's reviewer launch `launch`, if it has one.
     pub fn candidate(&self, launch: &str) -> Option<Arc<Candidate>> {
         let served = self.candidates.get(launch)?;

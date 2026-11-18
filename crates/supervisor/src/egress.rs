@@ -144,16 +144,19 @@ pub fn public_address(ip: IpAddr) -> bool {
 }
 
 /// The IPv4 address an IPv6 address stands for: IPv4-mapped
-/// (`::ffff:a.b.c.d`), IPv4-compatible (`::a.b.c.d`) or NAT64 with the
-/// well-known prefix (`64:ff9b::a.b.c.d`).
+/// (`::ffff:a.b.c.d`), IPv4-translated (`::ffff:0:a.b.c.d`),
+/// IPv4-compatible (`::a.b.c.d`), NAT64 with the well-known prefix
+/// (`64:ff9b::a.b.c.d`) or 6to4 (`2002:aabb:ccdd::`).
 fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     let segments = ip.segments();
-    let [.., high, low] = segments;
+    let v4 = |high: u16, low: u16| Ipv4Addr::from((u32::from(high) << 16) | u32::from(low));
+    let tail = v4(segments[6], segments[7]);
     let compatible = segments[..6] == [0; 6];
+    let translated = segments[..6] == [0, 0, 0, 0, 0xffff, 0];
     let nat64 = segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0];
-    let embedded = Ipv4Addr::from((u32::from(high) << 16) | u32::from(low));
-    ip.to_ipv4_mapped()
-        .or((compatible || nat64).then_some(embedded))
+    let six_to_four = (segments[0] == 0x2002).then(|| v4(segments[1], segments[2]));
+    let carried = (compatible || translated || nat64).then_some(tail);
+    ip.to_ipv4_mapped().or(carried).or(six_to_four)
 }
 
 /// IPv4 addresses that are not local, private, reserved or non-unicast.
@@ -174,15 +177,19 @@ fn public_v4(ip: Ipv4Addr) -> bool {
         || reserved)
 }
 
-/// IPv6 addresses that are not local, unique-local or non-unicast.
+/// IPv6 addresses that are not local, unique-local or non-unicast, and not
+/// the local-use NAT64 prefix, whose translation is the local network's.
 fn public_v6(ip: Ipv6Addr) -> bool {
-    let site_local = (ip.segments()[0] & 0xffc0) == 0xfec0; // fec0::/10
+    let segments = ip.segments();
+    let site_local = (segments[0] & 0xffc0) == 0xfec0; // fec0::/10
+    let local_nat64 = segments[..3] == [0x64, 0xff9b, 1]; // 64:ff9b:1::/48
     !(ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || ip.is_unique_local()
         || ip.is_unicast_link_local()
-        || site_local)
+        || site_local
+        || local_nat64)
 }
 
 /// Reads until the blank line that ends the request head.
@@ -316,6 +323,10 @@ mod tests {
             "198.18.0.1",
             "198.19.255.255",
             "240.0.0.1",
+            "64:ff9b:1::a00:1",
+            "2002:7f00:1::",
+            "2002:c0a8:101::1",
+            "::ffff:0:7f00:1",
         ] {
             assert!(!public_address(local.parse().unwrap()), "{local}");
         }
@@ -332,6 +343,7 @@ mod tests {
             "64:ff9b::101:101",
             "198.20.0.1",
             "223.255.255.1",
+            "2002:101:101::1",
         ] {
             assert!(public_address(public.parse().unwrap()), "{public}");
         }

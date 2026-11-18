@@ -125,18 +125,18 @@ impl Handler for Egress {
         if halt.asked() {
             return Ok(());
         }
-        let Some(stream) = route else {
-            session.split().1.write_all(egress::FORBIDDEN)?;
-            return linger(session, halt);
+        let answer = match &route {
+            Some(_) => egress::ESTABLISHED,
+            None => egress::FORBIDDEN,
         };
-        session.split().1.write_all(egress::ESTABLISHED)?;
-        let carried = tunnel(session, stream, &early, halt);
+        session.split().1.write_all(answer)?;
+        let carried = route.map(|stream| tunnel(session, stream, &early, halt));
         // A tunnel the broker ended fails its pending write; that is the
         // close working, not an error of the session.
         if halt.asked() {
             return Ok(());
         }
-        carried?;
+        carried.transpose()?;
         linger(session, halt)
     }
 }

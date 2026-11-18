@@ -1012,8 +1012,11 @@ five seconds for the client to leave, because disconnecting a pipe
 discards what the client has not read. Each decision is a JSON line naming
 the launch and the role from the grant. The public-address check shared
 with the Linux proxy also judges an IPv6 address by the IPv4 address it
-carries (IPv4-compatible and the NAT64 well-known prefix as well as
-IPv4-mapped) and refuses 198.18.0.0/15 and 240.0.0.0/4.
+carries (IPv4-mapped, IPv4-translated, IPv4-compatible, the NAT64
+well-known prefix and 6to4), refuses the local-use NAT64 prefix
+64:ff9b:1::/48, and refuses 198.18.0.0/15 and 240.0.0.0/4. A host whose
+resolver hands out fake addresses from 198.18.0.0/15 therefore gets no
+egress through either proxy.
 
 The runner reaches a broker over the broker's control pipe, which the
 broker's account owns and only the runner's account may open; the runner
@@ -1024,11 +1027,17 @@ account Windows reports for the control client, not a request field. When
 runner has every launch admitted before it starts and passes the launch its
 pipe's path in `AGENTC_EGRESS_PIPE`. A missing broker, a pipe another
 account owns, a launch with no role and a refusal each keep the launch from
-starting, with no fallback. A launch stays recorded as admitted until the
-broker confirms its release, so a release that fails is asked again at
-cleanup. The control pipe has one instance; a client that finds it busy
-waits up to five seconds for it rather than failing. The two settings are
-empty by default, and then no launch is offered egress at all.
+starting, with no fallback. The runner service serves everything on one
+thread, so each exchange with the broker (reaching its pipe, the request
+and the answer) is bounded to one second on a thread of its own, and an
+exchange still running then is cancelled: a broker that is busy, wedged or
+gone refuses the launch rather than holding the runner. A launch whose
+release failed, or whose admission ended without an answer, is kept for
+release and asked again before the next admission and after the next
+successful release, whether or not its journal entry is still there. The
+control pipe has one instance; a client that finds it busy waits for it
+within that bound rather than failing at once. The two settings are empty
+by default, and then no launch is offered egress at all.
 
 What 6b demonstrates on MiniAir, with the broker and launches running as the
 owner in a new logon session (`crates/supervisor/tests/windows_egress.rs`,
@@ -1056,8 +1065,13 @@ a close ends a tunnel whose destination stopped reading and a session still
 waiting for its destination within two seconds, that a client pausing for
 eleven seconds still gets every byte, that a hundred back-to-back admissions
 and releases on the one control pipe instance all arrive, that a failed
-release is kept for the next one, and that a missing broker, a control pipe
-another account owns and a launch with no role are each refused.
+release is kept for the next one, that a broker that never answers holds
+the caller for about a second, and that a missing broker, a control pipe
+another account owns and a launch with no role are each refused. The
+native runner test drives a real runner: a start with no broker serving is
+refused and the launch stays prepared, a start the broker admits runs with
+its pipe in `AGENTC_EGRESS_PIPE`, a cleanup while the broker is gone keeps
+the launch for release, and the next admission releases it.
 
 ## Linux P2 parity and acceptance map
 

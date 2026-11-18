@@ -76,6 +76,15 @@ fn a_launch_listening_on_loopback_is_probed_from_its_own_package() {
     in_a_new_session("loopback");
 }
 
+/// The runner refuses to start a launch while its egress broker is not
+/// there, starts it with its pipe once the broker admits it, keeps a
+/// release the broker missed during cleanup and makes it before the next
+/// admission.
+#[test]
+fn the_runner_starts_a_launch_only_once_the_broker_admits_it() {
+    in_a_new_session("runner");
+}
+
 /// The child's side. Ignored so that it runs only when a test above starts
 /// it, with its role, in a new logon session or inside a launch.
 #[test]
@@ -85,6 +94,7 @@ fn child_in_a_new_logon_session() {
         "routed" => routed(),
         "lost" => lost(),
         "loopback" => loopback(),
+        "runner" => runner::admitted_starts(),
         "client" => client(),
         "peer" => peer(),
         other => panic!("no such role: {other}"),
@@ -179,9 +189,13 @@ impl Served {
     /// Serves a broker running as this account, its sessions going to an
     /// egress handler that allows [`ALLOWED`] through `upstream`.
     fn start(upstream: Arc<ToListener>) -> Self {
-        let me = token::current_user_sid().unwrap();
         let id = uuid::Uuid::new_v4().simple();
-        let name = format!("{}-{id}", control_pipe_name("test"));
+        Self::named(&format!("{}-{id}", control_pipe_name("test")), upstream)
+    }
+
+    /// As [`Served::start`] on the control pipe `name`.
+    fn named(name: &str, upstream: Arc<ToListener>) -> Self {
+        let (me, name) = (token::current_user_sid().unwrap(), name.to_owned());
         let egress = Egress::new(vec![ALLOWED.into()], upstream);
         let broker = Broker::new(SERVICE, &me, Arc::new(egress)).unwrap();
         let control = Control::new(&name, broker, &me, None).unwrap();
@@ -601,5 +615,148 @@ fn peer() -> String {
     match TcpStream::connect_timeout(&address, ATTEMPT) {
         Ok(_) => "connected".into(),
         Err(error) => failed(&error),
+    }
+}
+
+/// Test (runner): the runner's own admission of its launches, through
+/// real prepare, start, observe and cleanup requests.
+mod runner {
+    use super::*;
+    use agentc_supervisor::host_runtime::windows::broker::pipe_name;
+    use agentc_supervisor::host_runtime::windows::egress_admission::EgressRoute;
+    use agentc_supervisor::host_runtime::windows::runner::{Request, Runner, answer};
+    use serde_json::{Value, json};
+    use std::path::{Path, PathBuf};
+
+    /// Sends one request and returns the runner's answer line.
+    fn ask(runner: &mut Runner, request: Value) -> Value {
+        let parsed = serde_json::from_value::<Request>(request).map_err(anyhow::Error::from);
+        answer(parsed.and_then(|request| runner.handle(request)))
+    }
+
+    /// `ask`, failing the test unless the runner answered `ok`.
+    fn ok(runner: &mut Runner, request: Value) -> Value {
+        let reply = ask(runner, request.clone());
+        assert_eq!(reply["ok"], true, "{request} -> {reply}");
+        reply
+    }
+
+    /// One launch of the runner below `root`.
+    struct Case {
+        launch: String,
+        root: PathBuf,
+    }
+
+    impl Case {
+        /// The launch `launch`, its directories below `root`.
+        fn new(root: &Path, launch: &str) -> Self {
+            let root = root.join(launch);
+            std::fs::create_dir_all(root.join("logs")).unwrap();
+            let launch = launch.to_owned();
+            Self { launch, root }
+        }
+
+        /// The `prepare` request of an implementer launch.
+        fn prepare(&self) -> Value {
+            let profile = format!("agentc.test.{}", uuid::Uuid::new_v4().simple());
+            let limits = json!({"processes": 8, "process_memory_mb": 256, "job_memory_mb": 512});
+            json!({"op": "prepare", "launch": self.launch, "role": "implementer",
+                   "spec": {"profile": profile, "less_privileged": true,
+                            "capabilities": ["registryRead"], "limits": limits,
+                            "control": self.root.join("control"),
+                            "work": self.root.join("work")}})
+        }
+
+        /// The `start` request that prints the launch's egress pipe.
+        fn start(&self) -> Value {
+            let root = std::env::var("SystemRoot").unwrap();
+            let cmd = format!("{root}\\System32\\cmd.exe");
+            let script = format!("echo pipe=%{PIPE_VARIABLE}%");
+            let work = self.root.join("work");
+            json!({"op": "start", "launch": self.launch, "argv": [cmd, "/d", "/c", script],
+                   "directory": work, "output": self.log(),
+                   "environment": {"SystemRoot": root, "LOCALAPPDATA": work}})
+        }
+
+        /// The launch's log.
+        fn log(&self) -> PathBuf {
+            self.root.join("logs").join("start.log")
+        }
+
+        /// The stage the journal in `state` records for the launch.
+        fn stage(&self, state: &Path) -> String {
+            let bytes = std::fs::read(state.join(format!("{}.json", self.launch))).unwrap();
+            let entry: Value = serde_json::from_slice(&bytes).unwrap();
+            entry["stage"].as_str().unwrap().to_owned()
+        }
+
+        /// Starts the launch, waits for it to end and returns its log.
+        fn run(&self, runner: &mut Runner) -> String {
+            ok(runner, self.start());
+            let wait = json!({"op": "observe", "launch": self.launch, "wait_ms": 30_000});
+            let seen = ok(runner, wait);
+            assert_eq!(seen["state"], "exited", "{seen}");
+            ok(runner, json!({"op": "terminate", "launch": self.launch}));
+            std::fs::read_to_string(self.log()).unwrap()
+        }
+
+        /// The cleanup request.
+        fn cleanup(&self) -> Value {
+            json!({"op": "cleanup", "launch": self.launch, "remove_directories": true})
+        }
+    }
+
+    /// An upstream for a broker these launches never use.
+    fn unused_upstream() -> Arc<ToListener> {
+        ToListener::to(&Listener::bind("127.0.0.1:0").unwrap())
+    }
+
+    /// The whole test; its steps are the functions below.
+    pub fn admitted_starts() -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, me) = (dir.path().join("state"), token::current_user_sid().unwrap());
+        let id = uuid::Uuid::new_v4().simple();
+        let name = format!("{}-{id}", control_pipe_name("test"));
+        let route = EgressRoute::new(&name, &me).unwrap();
+        let mut runner = Runner::new(&state).unwrap().with_egress(Some(route));
+        let first = Case::new(dir.path(), "egr-run-first");
+        refused_without_a_broker(&mut runner, &first, &state);
+        let served = Served::named(&name, unused_upstream());
+        let log = first.run(&mut runner);
+        let expected = pipe_path(&pipe_name(SERVICE, &first.launch)).unwrap();
+        assert!(log.contains(&format!("pipe={expected}")), "{log}");
+        drop(served);
+        kept_after_a_missed_release(&mut runner, &first);
+        let _served = Served::named(&name, unused_upstream());
+        let second = Case::new(dir.path(), "egr-run-second");
+        ok(&mut runner, second.prepare());
+        second.run(&mut runner);
+        assert!(
+            !runner.egress().unreleased(&first.launch),
+            "the sweep missed it"
+        );
+        let cleaned = ok(&mut runner, second.cleanup());
+        assert_eq!(cleaned["egress_detail"], Value::Null, "{cleaned}");
+        format!("log of the first launch: {}", log.trim())
+    }
+
+    /// With no broker serving the control pipe, a start is refused and the
+    /// launch stays prepared; nothing ran.
+    fn refused_without_a_broker(runner: &mut Runner, case: &Case, state: &Path) {
+        ok(runner, case.prepare());
+        let refused = ask(runner, case.start());
+        assert_eq!(refused["ok"], false, "{refused}");
+        let said = refused.to_string();
+        assert!(said.contains("not started"), "{said}");
+        assert_eq!(case.stage(state), "prepared");
+        assert!(!case.log().exists(), "the launch ran");
+    }
+
+    /// A cleanup while the broker is gone succeeds, says the release
+    /// failed and keeps the launch for release.
+    fn kept_after_a_missed_release(runner: &mut Runner, case: &Case) {
+        let cleaned = ok(runner, case.cleanup());
+        assert!(cleaned["egress_detail"].is_string(), "{cleaned}");
+        assert!(runner.egress().unreleased(&case.launch));
     }
 }
