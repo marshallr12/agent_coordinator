@@ -14,6 +14,7 @@ use super::journal::Entry;
 use super::process::Command;
 use crate::service::pipe_policy::{checked_sid, pipe_path};
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 
 /// The generation a launch is admitted at when its caller named none.
 const FIRST_GENERATION: u64 = 1;
@@ -71,6 +72,66 @@ impl EgressRoute {
     }
 }
 
+/// A runner's egress broker, if it has one, and the launches of this run
+/// the broker admitted and has not yet been seen to release.
+#[derive(Debug, Default)]
+pub struct Admissions {
+    route: Option<EgressRoute>,
+    admitted: BTreeSet<String>,
+}
+
+impl Admissions {
+    /// Admissions through `route`; `None` offers no launch any egress.
+    pub fn new(route: Option<EgressRoute>) -> Self {
+        Self {
+            route,
+            admitted: BTreeSet::new(),
+        }
+    }
+
+    /// `command` as `entry`'s launch starts with it: unchanged without a
+    /// broker, and with a broker only once the broker admitted the launch.
+    /// An error means the launch must not start.
+    pub fn admit(&mut self, entry: &Entry, command: &Command) -> Result<Command> {
+        let Some(route) = &self.route else {
+            return Ok(command.clone());
+        };
+        let admitted = route.admit(entry, command)?;
+        self.admitted.insert(entry.launch.clone());
+        Ok(admitted)
+    }
+
+    /// Asks the broker to stop serving this run's admitted `launch`; what
+    /// went wrong, if anything. The launch stays recorded as admitted until
+    /// a release succeeds, so a later cleanup asks again.
+    pub fn release(&mut self, launch: &str) -> Option<String> {
+        let route = self.route.as_ref()?;
+        if !self.admitted.contains(launch) {
+            return None;
+        }
+        match route.release(launch) {
+            Ok(_) => {
+                self.admitted.remove(launch);
+                None
+            }
+            Err(error) => Some(format!("{error:#}")),
+        }
+    }
+
+    /// Asks the broker, if there is one, to stop serving an earlier
+    /// runner's ended launch, which it may still list; what went wrong, if
+    /// anything. A broker that never served it says so, which is no error.
+    pub fn release_earlier(&self, launch: &str) -> Option<String> {
+        let released = self.route.as_ref()?.release(launch);
+        released.err().map(|error| format!("{error:#}"))
+    }
+
+    /// Whether `launch` is recorded as admitted and not yet released.
+    pub fn holds(&self, launch: &str) -> bool {
+        self.admitted.contains(launch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::broker::{Broker, Grant, Halt, Handler, Role};
@@ -89,19 +150,29 @@ mod tests {
     struct Unused;
 
     impl Handler for Unused {
+        /// Refuses: no test token carries a package, so none is admitted.
         fn serve(&self, _: &Grant, _: &mut Session<'_>, _: &Halt) -> Result<()> {
             anyhow::bail!("no launch reaches this broker")
         }
     }
 
+    /// This process's account, which the test brokers run as.
     fn me() -> String {
         token::current_user_sid().unwrap()
     }
 
-    /// A journal entry of a prepared launch with `role`.
+    /// The launch id of the running test: its broker pipe's name must
+    /// not be another test's, as the tests run at once.
+    fn id() -> String {
+        let test = std::thread::current().name().unwrap_or("main").to_owned();
+        let plain = test.rsplit("::").next().unwrap_or("main").replace('_', "-");
+        format!("adm-{plain}")
+    }
+
+    /// A journal entry of the test's prepared launch with `role`.
     fn entry(role: Option<Role>) -> Entry {
         Entry {
-            launch: "adm-1".into(),
+            launch: id(),
             stage: Stage::Prepared,
             profile: "agentc.test".into(),
             package_sid: "S-1-15-2-1-2-3-4-5-6-7".into(),
@@ -161,11 +232,11 @@ mod tests {
             .admit(&entry(Some(Role::Implementer)), &command())
             .unwrap();
         let pipe = &admitted.environment[PIPE_VARIABLE];
-        assert_eq!(pipe, r"\\.\pipe\agentc-broker-egress-adm-1");
+        assert_eq!(*pipe, format!(r"\\.\pipe\agentc-broker-egress-{}", id()));
         assert_eq!(admitted.environment["A"], "1");
         assert_eq!(admitted.argv, command().argv);
-        assert!(route.release("adm-1").unwrap());
-        assert!(!route.release("adm-1").unwrap());
+        assert!(route.release(&id()).unwrap());
+        assert!(!route.release(&id()).unwrap());
         done.store(true, Ordering::SeqCst);
         server.join().unwrap();
     }
@@ -193,6 +264,64 @@ mod tests {
         let refused = route.admit(&entry(Some(Role::Implementer)), &command());
         let refused = format!("{:#}", refused.unwrap_err());
         assert!(refused.contains("not by the serving account"), "{refused}");
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn without_a_broker_a_command_is_unchanged_and_nothing_is_recorded() {
+        let mut none = Admissions::default();
+        let started = none.admit(&entry(None), &command()).unwrap();
+        assert_eq!(started, command());
+        assert!(!none.holds(&id()));
+        assert_eq!(none.release(&id()), None);
+        assert_eq!(none.release_earlier(&id()), None);
+    }
+
+    #[test]
+    fn a_refused_launch_is_not_recorded_as_admitted() {
+        let route = EgressRoute::new(&unique(), &me()).unwrap();
+        let mut admissions = Admissions::new(Some(route));
+        let refused = admissions.admit(&entry(Some(Role::Implementer)), &command());
+        assert!(refused.is_err());
+        assert!(!admissions.holds(&id()));
+    }
+
+    #[test]
+    fn a_release_that_fails_keeps_the_launch_for_the_next_one() {
+        let name = unique();
+        let route = EgressRoute::new(&name, &me()).unwrap();
+        let mut admissions = Admissions::new(Some(route));
+        let done = Arc::new(AtomicBool::new(false));
+        let server = broker_serving(&name, done.clone());
+        admissions
+            .admit(&entry(Some(Role::Implementer)), &command())
+            .unwrap();
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        let failed = admissions.release(&id());
+        assert!(failed.is_some(), "the broker is gone");
+        assert!(admissions.holds(&id()), "forgotten after a failed release");
+        let done = Arc::new(AtomicBool::new(false));
+        let server = broker_serving(&name, done.clone());
+        assert_eq!(admissions.release(&id()), None);
+        assert!(!admissions.holds(&id()));
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn back_to_back_exchanges_on_the_one_control_pipe_instance_all_arrive() {
+        let (name, done) = (unique(), Arc::new(AtomicBool::new(false)));
+        let server = broker_serving(&name, done.clone());
+        let route = EgressRoute::new(&name, &me()).unwrap();
+        let launch = entry(Some(Role::Implementer));
+        for round in 0..100 {
+            let admitted = route.admit(&launch, &command());
+            admitted.unwrap_or_else(|error| panic!("admit {round}: {error:#}"));
+            let released = route.release(&id());
+            assert!(released.unwrap_or_else(|error| panic!("release {round}: {error:#}")));
+        }
         done.store(true, Ordering::SeqCst);
         server.join().unwrap();
     }

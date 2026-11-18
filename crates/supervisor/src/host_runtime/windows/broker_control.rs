@@ -168,16 +168,11 @@ impl ControlClient {
         let request = json!({"op": "open", "launch": launch, "role": role,
             "package": package, "generation": generation});
         let answer = self.ask(&request)?;
-        let pipe = answer["pipe"]
-            .as_str()
-            .context("the broker named no pipe")?;
-        let generation = answer["generation"]
-            .as_u64()
-            .context("the broker gave no generation")?;
-        Ok(Opened {
-            pipe: pipe.to_owned(),
-            generation,
-        })
+        let pipe = answer["pipe"].as_str().context("the broker named no pipe");
+        let generation = answer["generation"].as_u64();
+        let generation = generation.context("the broker gave no generation")?;
+        let pipe = pipe?.to_owned();
+        Ok(Opened { pipe, generation })
     }
 
     /// Asks the broker to stop serving `launch`; false when it served none.
@@ -209,11 +204,15 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const PACKAGE: &str = "S-1-15-2-1-2-3-4-5-6-7";
+    /// A package no launch of these tests holds, so only the request's
+    /// own fields can be why it is refused.
+    const FREE_PACKAGE: &str = "S-1-15-2-9-9-9";
 
     /// A handler nobody reaches: no token in these tests carries a package.
     struct Unused;
 
     impl Handler for Unused {
+        /// Refuses: no test token carries a package, so none is admitted.
         fn serve(&self, _: &Grant, _: &mut Session<'_>, _: &Halt) -> Result<()> {
             bail!("no launch reaches this broker")
         }
@@ -284,7 +283,7 @@ mod tests {
             .unwrap();
         assert_eq!(answer["ok"], false, "{answer}");
         let account = client.client.ask(&json!({"op": "open", "launch": "x",
-            "role": "reviewer", "package": PACKAGE, "generation": 1, "account": "S-1-5-18"}));
+            "role": "reviewer", "package": FREE_PACKAGE, "generation": 1, "account": "S-1-5-18"}));
         assert_eq!(
             account.unwrap()["ok"],
             false,

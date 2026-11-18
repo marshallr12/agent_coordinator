@@ -108,6 +108,8 @@ impl ToListener {
 }
 
 impl Upstream for ToListener {
+    /// Connects [`ALLOWED`] to the listener and counts it; reaches nothing
+    /// for any other name.
     fn connect(&self, host: &str) -> anyhow::Result<Option<TcpStream>> {
         if host != ALLOWED {
             return Ok(None);
@@ -366,6 +368,8 @@ fn lost() -> String {
     let started = Instant::now();
     assert!(served.client().close(&own.id).unwrap());
     let took = started.elapsed();
+    // The close is woken by the halt, not found by a tick of the threads.
+    assert!(took < Duration::from_secs(1), "closing took {took:?}");
     let lines = finish(&mut launcher, &own, &report);
     check_lost(&lines);
     launcher.cleanup(&own.id).unwrap();
@@ -380,7 +384,7 @@ fn check_lost(lines: &[String]) {
     assert_eq!(outcome(lines, "reopened"), "error 2", "{lines:?}");
 }
 
-// Test (loopback): the probe of loopback inside one package.
+/// Test (loopback): the probe of loopback inside one package.
 fn loopback() -> String {
     let dir = tempfile::tempdir().unwrap();
     let (trees, mut launcher) = (Trees::new(&dir), Launcher::new().unwrap());

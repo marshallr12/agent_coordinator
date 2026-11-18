@@ -310,8 +310,13 @@ impl Port {
     }
 
     /// Writes all of `bytes`, or fails if the client leaves them unread for
-    /// [`WRITE_PATIENCE`]; with `interruptible` the wake event ends it too.
-    fn write_all(&self, event: &Event, bytes: &[u8], interruptible: bool) -> Result<()> {
+    /// `patience`; with `interruptible` the wake event ends it too.
+    fn write_all(
+        &self,
+        event: &Event,
+        bytes: &[u8],
+        (interruptible, patience): (bool, Duration),
+    ) -> Result<()> {
         let mut rest = bytes;
         while !rest.is_empty() {
             let handle = self.handle.raw();
@@ -322,7 +327,7 @@ impl Port {
             let write = |overlapped| unsafe {
                 WriteFile(handle, pointer, size, std::ptr::null_mut(), overlapped)
             };
-            match self.run(event, write, WRITE_PATIENCE, interruptible)? {
+            match self.run(event, write, patience, interruptible)? {
                 Io::Done(count) if count > 0 => rest = &rest[count as usize..],
                 Io::Timeout => bail!("the client did not read its answer"),
                 Io::Woken => bail!("the session was stopped"),
@@ -693,7 +698,8 @@ impl Session<'_> {
     /// The wake event does not interrupt it, so an answer is written whole
     /// while the service drains.
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
-        self.pipe.port.write_all(&self.pipe.writes, bytes, false)
+        let shape = (false, WRITE_PATIENCE);
+        self.pipe.port.write_all(&self.pipe.writes, bytes, shape)
     }
 
     /// Waits up to `patience` for bytes from the client and returns at most
@@ -764,7 +770,21 @@ impl Writer<'_> {
     /// Unlike [`Session::write_all`], the wake event ends the write: a
     /// stream ends at once when its pipe is stopped.
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
-        self.port.write_all(self.event, bytes, true)
+        self.port
+            .write_all(self.event, bytes, (true, WRITE_PATIENCE))
+    }
+
+    /// Writes all of `bytes` however long the client takes to read them, as
+    /// a stream to a client that applies back-pressure must: only the wake
+    /// event or the client's leaving ends the write. A pipe made without a
+    /// wake event is refused, since nothing could end the write then.
+    pub fn stream_all(&mut self, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            self.port.wake.is_some(),
+            "a pipe without a wake event cannot stream"
+        );
+        self.port
+            .write_all(self.event, bytes, (true, Duration::MAX))
     }
 }
 

@@ -1001,10 +1001,19 @@ request head from a launch's session and applies the Linux proxy's policy
 the broker resolves the name and contacts only a publicly routable address,
 and everything else is answered 403 with nothing contacted. An honoured
 request becomes a byte tunnel over the split session; whichever side ends
-first ends the other, and closing the launch ends it at once. After its
-last bytes the handler waits up to five seconds for the client to leave,
-because disconnecting a pipe discards what the client has not read. Each
-decision is a JSON line naming the launch and the role from the grant.
+first ends the other, and closing the launch ends it at once. No wait of
+the handler outlasts a close: the destination's socket is non-blocking and
+waited on a quarter second at a time, so a destination that stops reading
+holds a tunnel only until then; name resolution and the connect run on a
+thread of their own that a close abandons; and a client that reads slowly
+holds the destination back for as long as it takes, which only a close or
+the client's leaving ends. After its last bytes the handler waits up to
+five seconds for the client to leave, because disconnecting a pipe
+discards what the client has not read. Each decision is a JSON line naming
+the launch and the role from the grant. The public-address check shared
+with the Linux proxy also judges an IPv6 address by the IPv4 address it
+carries (IPv4-compatible and the NAT64 well-known prefix as well as
+IPv4-mapped) and refuses 198.18.0.0/15 and 240.0.0.0/4.
 
 The runner reaches a broker over the broker's control pipe, which the
 broker's account owns and only the runner's account may open; the runner
@@ -1015,8 +1024,11 @@ account Windows reports for the control client, not a request field. When
 runner has every launch admitted before it starts and passes the launch its
 pipe's path in `AGENTC_EGRESS_PIPE`. A missing broker, a pipe another
 account owns, a launch with no role and a refusal each keep the launch from
-starting, with no fallback. The two settings are empty by default, and then
-no launch is offered egress at all.
+starting, with no fallback. A launch stays recorded as admitted until the
+broker confirms its release, so a release that fails is asked again at
+cleanup. The control pipe has one instance; a client that finds it busy
+waits up to five seconds for it rather than failing. The two settings are
+empty by default, and then no launch is offered egress at all.
 
 What 6b demonstrates on MiniAir, with the broker and launches running as the
 owner in a new logon session (`crates/supervisor/tests/windows_egress.rs`,
@@ -1039,9 +1051,13 @@ without a network capability, which this design does not allow as a
 workaround. How harness provider traffic reaches the broker is left to a
 later phase. The `egress_broker` and `egress_admission` module tests show
 that the public upstream never reaches a local address, that a head that is
-too long gets no answer, that a destination's last bytes still arrive, and
-that a missing broker, a control pipe another account owns and a launch
-with no role are each refused.
+too long gets no answer, that a destination's last bytes still arrive, that
+a close ends a tunnel whose destination stopped reading and a session still
+waiting for its destination within two seconds, that a client pausing for
+eleven seconds still gets every byte, that a hundred back-to-back admissions
+and releases on the one control pipe instance all arrive, that a failed
+release is kept for the next one, and that a missing broker, a control pipe
+another account owns and a launch with no role are each refused.
 
 ## Linux P2 parity and acceptance map
 

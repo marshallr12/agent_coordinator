@@ -16,12 +16,17 @@
 use super::broker::{Grant, Halt, Handler};
 use super::pipe::{Reader, Received, Session, Writer};
 use crate::egress;
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::os::windows::io::AsRawSocket;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
+use windows_sys::Win32::Networking::WinSock::{
+    POLLRDNORM, POLLWRNORM, SOCKET, WSAGetLastError, WSAPOLLFD, WSAPoll,
+};
 
 /// The egress broker's service name, which its launch pipes carry.
 pub const SERVICE: &str = "egress";
@@ -49,6 +54,8 @@ pub trait Upstream: Send + Sync {
 pub struct Public;
 
 impl Upstream for Public {
+    /// Resolves `host` and connects to its first public address that
+    /// answers.
     fn connect(&self, host: &str) -> Result<Option<TcpStream>> {
         connect_first(&egress::public_addresses_blocking(host))
     }
@@ -90,10 +97,12 @@ impl Egress {
 
     /// The connection a request `head` is honoured with, if any. An
     /// upstream failure is the same as no route: the client is refused.
-    fn route(&self, grant: &Grant, head: &str) -> Option<TcpStream> {
+    /// The broker's halt ends the wait for the destination at once
+    /// ([`reach`]).
+    fn route(&self, grant: &Grant, head: &str, halt: &Halt) -> Option<TcpStream> {
         let target = egress::permitted_target(head, &self.allow);
         let stream = target.as_deref().and_then(|host| {
-            let reached = self.upstream.connect(host);
+            let reached = reach(&self.upstream, host, halt);
             reached.unwrap_or_else(|error| {
                 eprintln!("agentc-supervisor: egress to {host}: {error:#}");
                 None
@@ -112,11 +121,15 @@ impl Handler for Egress {
         let Some((head, early)) = read_head(session, halt)? else {
             return Ok(());
         };
-        let Some(stream) = self.route(grant, &head) else {
-            session.write_all(egress::FORBIDDEN)?;
+        let route = self.route(grant, &head, halt);
+        if halt.asked() {
+            return Ok(());
+        }
+        let Some(stream) = route else {
+            session.split().1.write_all(egress::FORBIDDEN)?;
             return linger(session, halt);
         };
-        session.write_all(egress::ESTABLISHED)?;
+        session.split().1.write_all(egress::ESTABLISHED)?;
         let carried = tunnel(session, stream, &early, halt);
         // A tunnel the broker ended fails its pending write; that is the
         // close working, not an error of the session.
@@ -125,6 +138,26 @@ impl Handler for Egress {
         }
         carried?;
         linger(session, halt)
+    }
+}
+
+/// Connects to `host` through `upstream` on a thread of its own, so the
+/// broker's halt ends the wait at once: name resolution and a connect
+/// cannot be interrupted. A connection that arrives after the halt is
+/// dropped by that thread, which ends within the connect's own patience.
+fn reach(upstream: &Arc<dyn Upstream>, host: &str, halt: &Halt) -> Result<Option<TcpStream>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (upstream, host) = (Arc::clone(upstream), host.to_owned());
+    std::thread::spawn(move || {
+        let _ = sender.send(upstream.connect(&host));
+    });
+    loop {
+        match receiver.recv_timeout(TICK) {
+            Ok(reached) => return reached,
+            Err(RecvTimeoutError::Timeout) if halt.asked() => return Ok(None),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => bail!("the connecting thread ended unheard"),
+        }
     }
 }
 
@@ -192,56 +225,94 @@ fn split_head(mut bytes: Vec<u8>) -> (String, Vec<u8>) {
     (String::from_utf8_lossy(&bytes).into_owned(), early)
 }
 
+/// What both directions of one tunnel share: the destination's socket,
+/// which is non-blocking so that no wait on it outlasts a tick, and how to
+/// learn that the tunnel is ending.
+struct Ends<'a> {
+    upstream: &'a TcpStream,
+    halt: &'a Halt,
+    ended: AtomicBool,
+}
+
+impl Ends<'_> {
+    /// Whether a tunnel direction should stop: the broker's halt, or the
+    /// other direction ended.
+    fn stopping(&self) -> bool {
+        self.halt.asked() || self.ended.load(Ordering::SeqCst)
+    }
+
+    /// Runs one direction, then marks the tunnel ended and shuts the
+    /// destination's connection, which wakes the other direction's wait.
+    fn ending(&self, direction: impl FnOnce() -> Result<()>) -> Result<()> {
+        let carried = direction();
+        self.ended.store(true, Ordering::SeqCst);
+        let _ = self.upstream.shutdown(Shutdown::Both);
+        carried
+    }
+
+    /// Waits up to a tick for the destination's socket to be ready for
+    /// `events` (or to report an error or hang-up, which the next read or
+    /// write then reports).
+    fn ready(&self, events: i16) -> Result<bool> {
+        let mut polled = WSAPOLLFD {
+            fd: self.upstream.as_raw_socket() as SOCKET,
+            events,
+            revents: 0,
+        };
+        let millis = i32::try_from(TICK.as_millis()).unwrap_or(i32::MAX);
+        // SAFETY: `polled` is one valid entry for the call's duration.
+        let count = unsafe { WSAPoll(&mut polled, 1, millis) };
+        ensure!(count >= 0, "WSAPoll failed with error {}", unsafe {
+            // SAFETY: reads the calling thread's last socket error.
+            WSAGetLastError()
+        });
+        Ok(count > 0)
+    }
+
+    /// Sends all of `bytes` to the destination, unless the tunnel ends
+    /// first; a destination that stops reading holds it only until then.
+    fn send_all(&self, mut bytes: &[u8]) -> Result<()> {
+        while !bytes.is_empty() && !self.stopping() {
+            if !self.ready(POLLWRNORM)? {
+                continue;
+            }
+            match (&mut &*self.upstream).write(bytes) {
+                Ok(count) => bytes = &bytes[count..],
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error).context("write to the destination"),
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Carries bytes between the session and `upstream`: `early` (sent with the
 /// head) first, then the client's bytes up from one thread and the
 /// destination's down from this one. Whichever direction ends first ends
 /// the other within a tick; the broker's halt ends both.
 fn tunnel(session: &mut Session<'_>, upstream: TcpStream, early: &[u8], halt: &Halt) -> Result<()> {
-    upstream.set_read_timeout(Some(TICK))?;
-    let mut sending = upstream.try_clone()?;
-    sending.write_all(early)?;
-    let ended = AtomicBool::new(false);
+    upstream.set_nonblocking(true)?;
+    let ends = Ends {
+        upstream: &upstream,
+        halt,
+        ended: AtomicBool::new(false),
+    };
+    ends.send_all(early)?;
     let (mut reader, mut writer) = session.split();
     std::thread::scope(|scope| {
-        let upward = || up(&mut reader, &mut sending, halt, &ended);
-        let upward = scope.spawn(|| ending(&ended, &upstream, upward));
-        let downward = ending(&ended, &upstream, || {
-            down(&upstream, &mut writer, halt, &ended)
-        });
+        let upward = scope.spawn(|| ends.ending(|| up(&mut reader, &ends)));
+        let downward = ends.ending(|| down(&mut writer, &ends));
         let upward = upward.join();
         let upward = upward.map_err(|_| anyhow!("the tunnel's upward thread panicked"))?;
         downward.and(upward)
     })
 }
 
-/// Runs one direction of a tunnel, then marks the tunnel ended and shuts
-/// the destination's connection, which ends the other direction's read.
-fn ending(
-    ended: &AtomicBool,
-    upstream: &TcpStream,
-    direction: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    let carried = direction();
-    ended.store(true, Ordering::SeqCst);
-    let _ = upstream.shutdown(Shutdown::Both);
-    carried
-}
-
-/// Whether a tunnel direction should stop.
-fn stopping(halt: &Halt, ended: &AtomicBool) -> bool {
-    halt.asked() || ended.load(Ordering::SeqCst)
-}
-
 /// The client's bytes to the destination, until the client leaves.
-fn up(
-    reader: &mut Reader<'_>,
-    sending: &mut TcpStream,
-    halt: &Halt,
-    ended: &AtomicBool,
-) -> Result<()> {
-    while !stopping(halt, ended) {
+fn up(reader: &mut Reader<'_>, ends: &Ends<'_>) -> Result<()> {
+    while !ends.stopping() {
         match reader.read(CHUNK, TICK)? {
-            Received::Data(data) => sending.write_all(&data)?,
+            Received::Data(data) => ends.send_all(&data)?,
             Received::Idle => {}
             Received::Closed => break,
         }
@@ -249,28 +320,23 @@ fn up(
     Ok(())
 }
 
-/// The destination's bytes to the client, until the destination ends.
-fn down(
-    upstream: &TcpStream,
-    writer: &mut Writer<'_>,
-    halt: &Halt,
-    ended: &AtomicBool,
-) -> Result<()> {
-    let (mut upstream, mut buffer) = (upstream, vec![0_u8; CHUNK]);
-    while !stopping(halt, ended) {
-        match upstream.read(&mut buffer) {
+/// The destination's bytes to the client, until the destination ends. A
+/// client that reads slowly holds the destination back, however long, and
+/// only the broker's halt or the client's leaving ends that wait.
+fn down(writer: &mut Writer<'_>, ends: &Ends<'_>) -> Result<()> {
+    let mut buffer = vec![0_u8; CHUNK];
+    while !ends.stopping() {
+        if !ends.ready(POLLRDNORM)? {
+            continue;
+        }
+        match (&mut &*ends.upstream).read(&mut buffer) {
             Ok(0) => break,
-            Ok(count) => writer.write_all(&buffer[..count])?,
-            Err(error) if waited(&error) => {}
+            Ok(count) => writer.stream_all(&buffer[..count])?,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
             Err(error) => return Err(error).context("read from the destination"),
         }
     }
     Ok(())
-}
-
-/// Whether a read error only says that nothing came within the timeout.
-fn waited(error: &std::io::Error) -> bool {
-    matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
 #[cfg(test)]
@@ -285,10 +351,14 @@ mod tests {
     use std::net::TcpListener;
     use std::os::windows::fs::OpenOptionsExt;
     use std::sync::Mutex;
+    use std::thread::JoinHandle;
 
     /// A package no token on this host carries; the handler never checks it.
     const PACKAGE: &str = "S-1-15-2-1-2-3-4-5-6-7";
     const PATIENCE: Duration = Duration::from_secs(10);
+    /// How soon a halt must end a session.
+    const PROMPTLY: Duration = Duration::from_secs(2);
+    const CONNECT: &[u8] = b"CONNECT allowed.test:443 HTTP/1.1\r\n\r\n";
 
     /// Routes names to fixed local addresses and records what it was asked.
     #[derive(Default)]
@@ -298,6 +368,7 @@ mod tests {
     }
 
     impl Upstream for Fixed {
+        /// Records `host` and connects to its fixed address, if any.
         fn connect(&self, host: &str) -> Result<Option<TcpStream>> {
             self.asked.lock().unwrap().push(host.to_owned());
             let address = self.routes.get(host).copied();
@@ -305,16 +376,49 @@ mod tests {
         }
     }
 
+    /// An upstream whose connect takes far longer than any test, like a
+    /// destination that never answers.
+    struct Stalled;
+
+    impl Upstream for Stalled {
+        /// Waits half a minute and reaches nothing.
+        fn connect(&self, _: &str) -> Result<Option<TcpStream>> {
+            std::thread::sleep(Duration::from_secs(30));
+            Ok(None)
+        }
+    }
+
+    /// An upstream whose every connect fails, like a destination whose
+    /// addresses all refuse the connection.
+    struct Refusing;
+
+    impl Upstream for Refusing {
+        /// Fails as a refused connection does.
+        fn connect(&self, _: &str) -> Result<Option<TcpStream>> {
+            let refused = std::io::Error::from(ErrorKind::ConnectionRefused);
+            Err(refused).context("no address of the destination answered")
+        }
+    }
+
     /// A destination that sends back what it gets, then ends when its
     /// client does. Its address.
     fn echo_server() -> SocketAddr {
+        serve_each(|mut stream| {
+            let mut back = stream.try_clone().unwrap();
+            let _ = std::io::copy(&mut stream, &mut back);
+        })
+    }
+
+    /// A destination that runs `each` on every connection, on a thread of
+    /// its own. Its address.
+    fn serve_each(each: impl Fn(TcpStream) + Send + Sync + 'static) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let each = Arc::new(each);
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
-                let mut back = stream.try_clone().unwrap();
-                std::thread::spawn(move || std::io::copy(&mut stream, &mut back));
+            for stream in listener.incoming().flatten() {
+                let each = Arc::clone(&each);
+                std::thread::spawn(move || each(stream));
             }
         });
         address
@@ -329,39 +433,52 @@ mod tests {
         })
     }
 
+    /// A handler allowing `allowed.test` through `upstream`.
+    fn egress(upstream: Arc<dyn Upstream>) -> Egress {
+        Egress::new(vec!["allowed.test".into()], upstream)
+    }
+
     /// A grant of this account for the handler.
     fn grant() -> Grant {
         let me = token::current_user_sid().unwrap();
         Grant::new("egress-test", Role::Implementer, &me, PACKAGE, 1).unwrap()
     }
 
-    /// A pipe of this account and its client, connected.
-    fn pipe_and_client() -> (Pipe, File) {
+    /// A served session: the test's client of it, the thread serving it
+    /// (which returns what `serve` did) and the launch's halt.
+    struct Case {
+        client: File,
+        served: JoinHandle<Result<()>>,
+        halt: Arc<Halt>,
+    }
+
+    /// Serves one client with `egress` on a pipe of this account whose
+    /// wake event is the launch's halt, as the broker's pipes are.
+    fn case(egress: Egress) -> Case {
         let name = format!("agentc-test-egress-{}", uuid::Uuid::new_v4().simple());
-        let me = token::current_user_sid().unwrap();
-        let pipe = Pipe::create(&name, &me, &me, None).unwrap();
+        let (me, halt) = (
+            token::current_user_sid().unwrap(),
+            Arc::new(Halt::new().unwrap()),
+        );
+        let mut pipe = Pipe::create(&name, &me, &me, Some(halt.wake())).unwrap();
         let mut options = OpenOptions::new();
         options.access_mode(CLIENT_ACCESS);
         let client = options.open(pipe_path(&name).unwrap()).unwrap();
-        (pipe, client)
-    }
-
-    /// Serves the client of `pipe` with `egress` on a thread; the thread
-    /// returns what `serve` did. `halt` lets the test close the launch.
-    fn serving(
-        mut pipe: Pipe,
-        egress: Egress,
-        halt: Arc<Halt>,
-    ) -> std::thread::JoinHandle<Result<()>> {
-        std::thread::spawn(move || {
+        let held = Arc::clone(&halt);
+        let served = std::thread::spawn(move || {
             let Accepted::Client(mut session) = pipe.accept(PATIENCE)? else {
                 anyhow::bail!("the client was not admitted");
             };
-            egress.serve(&grant(), &mut session, &halt)
-        })
+            egress.serve(&grant(), &mut session, &held)
+        });
+        Case {
+            client,
+            served,
+            halt,
+        }
     }
 
-    /// Sends `request` and reads the answer's status line.
+    /// Sends `request` and reads the answer's head.
     fn ask(client: &mut File, request: &[u8]) -> String {
         client.write_all(request).unwrap();
         let mut answer = Vec::new();
@@ -372,44 +489,44 @@ mod tests {
         String::from_utf8(answer).unwrap()
     }
 
-    /// Drops `client` and checks that the session it had then ends at once,
-    /// well within the broker's wait for a client to leave.
-    fn leaves(client: File, served: std::thread::JoinHandle<Result<()>>) {
+    /// Drops the client and checks that its session then ends at once, well
+    /// within the broker's wait for a client to leave.
+    fn leaves(case: Case) {
         let started = Instant::now();
-        drop(client);
+        drop(case.client);
+        case.served.join().unwrap().unwrap();
+        let took = started.elapsed();
+        assert!(took < LINGER / 2, "ended {took:?} after the client left");
+    }
+
+    /// Asks the launch's halt and checks that its session ends promptly.
+    fn halted(halt: &Halt, served: JoinHandle<Result<()>>) {
+        let started = Instant::now();
+        halt.ask().unwrap();
         served.join().unwrap().unwrap();
         let took = started.elapsed();
-        assert!(
-            took < LINGER / 2,
-            "the session ended {took:?} after the client left"
-        );
+        assert!(took < PROMPTLY, "the session ended {took:?} after the halt");
     }
 
     /// Whether the pipe has nothing more for the client: it was closed.
     fn ends(client: &mut File) -> bool {
         let mut rest = Vec::new();
-        client
-            .read_to_end(&mut rest)
-            .map_or(true, |_| rest.is_empty())
+        let read = client.read_to_end(&mut rest);
+        read.map_or(true, |_| rest.is_empty())
     }
 
     #[test]
     fn an_allowed_connect_tunnels_both_ways_with_the_bytes_sent_after_its_head() {
         let upstream = fixed(echo_server());
-        let (pipe, mut client) = pipe_and_client();
-        let egress = Egress::new(vec!["allowed.test".into()], upstream.clone());
-        let served = serving(pipe, egress, Arc::new(Halt::new().unwrap()));
-        let answer = ask(
-            &mut client,
-            b"CONNECT allowed.test:443 HTTP/1.1\r\n\r\nearly-",
-        );
+        let mut case = case(egress(upstream.clone()));
+        let request = b"CONNECT allowed.test:443 HTTP/1.1\r\n\r\nearly-";
+        let answer = ask(&mut case.client, request);
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-        client.write_all(b"late").unwrap();
+        case.client.write_all(b"late").unwrap();
         let mut echoed = [0_u8; 10];
-        client.read_exact(&mut echoed).unwrap();
+        case.client.read_exact(&mut echoed).unwrap();
         assert_eq!(&echoed, b"early-late");
-        drop(client);
-        served.join().unwrap().unwrap();
+        leaves(case);
         assert_eq!(*upstream.asked.lock().unwrap(), ["allowed.test"]);
     }
 
@@ -422,30 +539,26 @@ mod tests {
             "CONNECT allowed.test:443 SMTP\r\n\r\n",
         ] {
             let upstream = fixed(echo_server());
-            let (pipe, mut client) = pipe_and_client();
-            let egress = Egress::new(vec!["allowed.test".into()], upstream.clone());
-            let served = serving(pipe, egress, Arc::new(Halt::new().unwrap()));
-            let answer = ask(&mut client, request.as_bytes());
+            let mut case = case(egress(upstream.clone()));
+            let answer = ask(&mut case.client, request.as_bytes());
             assert!(answer.starts_with("HTTP/1.1 403"), "{request}: {answer}");
-            leaves(client, served);
+            leaves(case);
             assert!(upstream.asked.lock().unwrap().is_empty(), "{request}");
         }
     }
 
     #[test]
     fn an_allowed_name_with_no_route_or_no_answer_gets_403() {
-        let closed = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        for allow in ["nowhere.test", "allowed.test"] {
-            let (pipe, mut client) = pipe_and_client();
-            let egress = Egress::new(vec![allow.into()], fixed(closed));
-            let served = serving(pipe, egress, Arc::new(Halt::new().unwrap()));
+        // `nowhere.test` is allowed but has no address; the refusing
+        // upstream stands for one whose addresses do not answer.
+        let no_route: Arc<dyn Upstream> = fixed(echo_server());
+        let no_answer: Arc<dyn Upstream> = Arc::new(Refusing);
+        for (allow, upstream) in [("nowhere.test", no_route), ("allowed.test", no_answer)] {
+            let mut case = case(Egress::new(vec![allow.into()], upstream));
             let request = format!("CONNECT {allow}:443 HTTP/1.1\r\n\r\n");
-            let answer = ask(&mut client, request.as_bytes());
+            let answer = ask(&mut case.client, request.as_bytes());
             assert!(answer.starts_with("HTTP/1.1 403"), "{allow}: {answer}");
-            leaves(client, served);
+            leaves(case);
         }
     }
 
@@ -457,51 +570,105 @@ mod tests {
 
     #[test]
     fn a_head_that_is_too_long_is_refused_without_an_answer() {
-        let (pipe, mut client) = pipe_and_client();
-        let egress = Egress::new(vec!["allowed.test".into()], fixed(echo_server()));
-        let served = serving(pipe, egress, Arc::new(Halt::new().unwrap()));
+        let mut case = case(egress(fixed(echo_server())));
         let long = vec![b'a'; egress::MAX_HEAD + 1];
-        let _ = client.write_all(&long);
-        let error = served.join().unwrap().unwrap_err();
+        let _ = case.client.write_all(&long);
+        let error = case.served.join().unwrap().unwrap_err();
         assert!(error.to_string().contains("too long"), "{error:#}");
-        assert!(ends(&mut client));
+        assert!(ends(&mut case.client));
     }
 
     #[test]
     fn closing_the_launch_ends_a_tunnel_that_is_still_open() {
-        let (pipe, mut client) = pipe_and_client();
-        let halt = Arc::new(Halt::new().unwrap());
-        let egress = Egress::new(vec!["allowed.test".into()], fixed(echo_server()));
-        let served = serving(pipe, egress, halt.clone());
-        let answer = ask(&mut client, b"CONNECT allowed.test:443 HTTP/1.1\r\n\r\n");
+        let mut case = case(egress(fixed(echo_server())));
+        let answer = ask(&mut case.client, CONNECT);
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-        let started = Instant::now();
-        halt.ask().unwrap();
-        served.join().unwrap().unwrap();
+        halted(&case.halt, case.served);
+        assert!(ends(&mut case.client), "the tunnel went on after the close");
+    }
+
+    #[test]
+    fn closing_the_launch_ends_a_tunnel_whose_destination_stopped_reading() {
+        // The destination accepts and never reads, so the broker's sends
+        // stall once the socket's buffers are full.
+        let silent = serve_each(|stream| {
+            std::thread::sleep(Duration::from_secs(60));
+            drop(stream);
+        });
+        let mut case = case(egress(fixed(silent)));
+        let answer = ask(&mut case.client, CONNECT);
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        let mut pushing = case.client.try_clone().unwrap();
+        let pushed = std::thread::spawn(move || {
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut sent = 0_usize;
+            while pushing.write_all(&chunk).is_ok() {
+                sent += chunk.len();
+            }
+            sent
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        halted(&case.halt, case.served);
+        drop(case.client);
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "{:?}",
-            started.elapsed()
+            pushed.join().unwrap() > 0,
+            "nothing was sent before the halt"
         );
-        assert!(ends(&mut client), "the tunnel went on after the close");
+    }
+
+    #[test]
+    fn closing_the_launch_ends_a_session_still_waiting_for_its_destination() {
+        let mut case = case(egress(Arc::new(Stalled)));
+        case.client.write_all(CONNECT).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        halted(&case.halt, case.served);
+    }
+
+    #[test]
+    fn a_client_that_pauses_reading_still_gets_every_byte() {
+        // Longer than a pipe write's patience for an answer.
+        const PAUSE: Duration = Duration::from_secs(11);
+        const SIZE: usize = 1024 * 1024;
+        let sender = serve_each(|mut stream| {
+            let _ = stream.write_all(&vec![b'd'; SIZE]);
+        });
+        let mut case = case(egress(fixed(sender)));
+        let answer = ask(&mut case.client, CONNECT);
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        std::thread::sleep(PAUSE);
+        let mut got = vec![0_u8; SIZE];
+        case.client.read_exact(&mut got).unwrap();
+        assert!(got.iter().all(|&byte| byte == b'd'));
+        leaves(case);
     }
 
     #[test]
     fn a_destination_that_ends_ends_the_session() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+        let address = serve_each(|mut stream| {
             stream.write_all(b"bye").unwrap();
         });
-        let (pipe, mut client) = pipe_and_client();
-        let egress = Egress::new(vec!["allowed.test".into()], fixed(address));
-        let served = serving(pipe, egress, Arc::new(Halt::new().unwrap()));
-        let answer = ask(&mut client, b"CONNECT allowed.test:443 HTTP/1.1\r\n\r\n");
+        let mut case = case(egress(fixed(address)));
+        let answer = ask(&mut case.client, CONNECT);
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
         let mut last = [0_u8; 3];
-        client.read_exact(&mut last).unwrap();
+        case.client.read_exact(&mut last).unwrap();
         assert_eq!(&last, b"bye", "the destination's last bytes were lost");
-        leaves(client, served);
+        leaves(case);
+    }
+
+    #[test]
+    fn a_pipe_without_a_wake_event_cannot_stream() {
+        let name = format!("agentc-test-egress-{}", uuid::Uuid::new_v4().simple());
+        let me = token::current_user_sid().unwrap();
+        let mut pipe = Pipe::create(&name, &me, &me, None).unwrap();
+        let mut options = OpenOptions::new();
+        options.access_mode(CLIENT_ACCESS);
+        let mut client = options.open(pipe_path(&name).unwrap()).unwrap();
+        client.write_all(b"x").unwrap();
+        let Accepted::Client(mut session) = pipe.accept(PATIENCE).unwrap() else {
+            panic!("the client was not admitted");
+        };
+        let refused = session.split().1.stream_all(b"y").unwrap_err();
+        assert!(refused.to_string().contains("wake"), "{refused:#}");
     }
 }

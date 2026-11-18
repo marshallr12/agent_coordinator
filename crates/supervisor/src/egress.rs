@@ -130,30 +130,48 @@ async fn permitted_addresses(host: &str) -> Vec<SocketAddr> {
 }
 
 /// Whether `ip` may be tunnelled to: not loopback, private, link-local,
-/// unspecified, multicast or otherwise local (IPv4-mapped IPv6 included).
+/// unspecified, multicast, reserved or otherwise local. An IPv6 address
+/// that carries an IPv4 one (mapped, compatible or the NAT64 well-known
+/// prefix) is judged by the IPv4 address it reaches.
 pub fn public_address(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => public_v4(v4),
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+        IpAddr::V6(v6) => match embedded_v4(v6) {
             Some(v4) => public_v4(v4),
             None => public_v6(v6),
         },
     }
 }
 
-/// IPv4 addresses that are not local, private or non-unicast.
+/// The IPv4 address an IPv6 address stands for: IPv4-mapped
+/// (`::ffff:a.b.c.d`), IPv4-compatible (`::a.b.c.d`) or NAT64 with the
+/// well-known prefix (`64:ff9b::a.b.c.d`).
+fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = ip.segments();
+    let [.., high, low] = segments;
+    let compatible = segments[..6] == [0; 6];
+    let nat64 = segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0];
+    let embedded = Ipv4Addr::from((u32::from(high) << 16) | u32::from(low));
+    ip.to_ipv4_mapped()
+        .or((compatible || nat64).then_some(embedded))
+}
+
+/// IPv4 addresses that are not local, private, reserved or non-unicast.
 fn public_v4(ip: Ipv4Addr) -> bool {
     let [first, second, ..] = ip.octets();
     let this_network = first == 0;
     let shared = first == 100 && (second & 0xc0) == 64; // 100.64.0.0/10
+    let benchmarking = first == 198 && (second & 0xfe) == 18; // 198.18.0.0/15
+    let reserved = first >= 240; // 240.0.0.0/4, the broadcast address too
     !(ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
         || ip.is_unspecified()
         || ip.is_multicast()
-        || ip.is_broadcast()
         || this_network
-        || shared)
+        || shared
+        || benchmarking
+        || reserved)
 }
 
 /// IPv6 addresses that are not local, unique-local or non-unicast.
@@ -291,6 +309,13 @@ mod tests {
             "::ffff:127.0.0.1",
             "::ffff:10.0.0.1",
             "::ffff:169.254.1.1",
+            "::127.0.0.1",
+            "::10.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "240.0.0.1",
         ] {
             assert!(!public_address(local.parse().unwrap()), "{local}");
         }
@@ -304,6 +329,9 @@ mod tests {
             "100.128.0.1",
             "2606:4700::1111",
             "::ffff:1.1.1.1",
+            "64:ff9b::101:101",
+            "198.20.0.1",
+            "223.255.255.1",
         ] {
             assert!(public_address(public.parse().unwrap()), "{public}");
         }

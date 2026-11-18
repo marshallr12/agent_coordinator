@@ -153,6 +153,12 @@ impl Halt {
     pub fn asked(&self) -> bool {
         self.asked.load(Ordering::SeqCst)
     }
+
+    /// The event [`Halt::ask`] sets, which a pipe of this launch is made
+    /// with as its wake event.
+    pub(crate) fn wake(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.event.raw()
+    }
 }
 
 /// The grants of the launches a broker serves, by package SID.
@@ -290,7 +296,7 @@ impl Broker {
         let halt = Arc::new(Halt::new()?);
         let name = pipe_name(&self.service, &grant.launch);
         let clients = (grant.account.as_str(), grant.package.as_str());
-        let wake = Some(halt.event.raw());
+        let wake = Some(halt.wake());
         let pipes = Pipe::broker_instances(&name, &self.owner, clients, INSTANCES, wake)
             .with_context(|| format!("create the broker pipe {name}"))?;
         self.lock().insert(grant.package.clone(), grant.clone());
