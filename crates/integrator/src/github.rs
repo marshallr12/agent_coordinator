@@ -5,7 +5,7 @@
 //! integrator, `push/askpass.rs` for `agentc-push`), never through a URL or a
 //! file.
 use crate::config::GithubConfig;
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use aws_lc_rs::{rand, signature as sig};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rustls_pki_types::pem::PemObject;
@@ -19,6 +19,10 @@ const TOKEN_MARGIN: Duration = Duration::from_secs(600);
 /// Installation tokens live one hour.
 const TOKEN_LIFETIME: Duration = Duration::from_secs(3600);
 const USER_AGENT: &str = "agentc-integrator";
+/// How many times an idempotent GET is sent when GitHub answers 5xx.
+const GET_ATTEMPTS: u32 = 2;
+/// How long to wait before repeating a GET that got a 5xx reply.
+const GET_RETRY_WAIT: Duration = Duration::from_secs(2);
 
 /// `owner/name` of a GitHub repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +49,7 @@ impl RepoId {
 pub struct GithubApp {
     config: GithubConfig,
     http: reqwest::Client,
+    retry_wait: Duration,
     token: Mutex<Option<(String, Instant)>>,
 }
 
@@ -58,6 +63,7 @@ impl GithubApp {
         Ok(Self {
             config: config.clone(),
             http,
+            retry_wait: GET_RETRY_WAIT,
             token: Mutex::new(None),
         })
     }
@@ -123,11 +129,25 @@ impl GithubApp {
         )
     }
 
-    /// GETs `path` (relative to the API base) with the installation token.
+    /// GETs `path` (relative to the API base) with the installation token. A
+    /// 5xx reply is repeated after a short wait, up to [`GET_ATTEMPTS`]
+    /// sends in all: a GET changes nothing, so repeating it is safe.
     pub async fn get(&self, path: &str) -> Result<Value> {
         let token = self.installation_token().await?;
         let url = format!("{}{path}", self.config.api_base);
-        self.send(self.http.get(url), &token).await
+        let mut attempt = 1;
+        loop {
+            match self
+                .send_once(self.http.get(&url), &token, "GET", path)
+                .await
+            {
+                Err(Failure::Server(_)) if attempt < GET_ATTEMPTS => {
+                    attempt += 1;
+                    tokio::time::sleep(self.retry_wait).await;
+                }
+                other => return other.map_err(Failure::into_error),
+            }
+        }
     }
 
     /// POSTs an empty body to `path` (relative to the API base) with the
@@ -138,24 +158,70 @@ impl GithubApp {
         self.send(self.http.post(url), &token).await
     }
 
-    /// Sends one request with GitHub's headers; non-2xx is an error.
+    /// Sends one request once; non-2xx is an error. `path` names the request
+    /// in the error and is never sent anywhere.
     async fn send(&self, request: reqwest::RequestBuilder, bearer: &str) -> Result<Value> {
+        let (method, path) = request
+            .try_clone()
+            .and_then(|copy| copy.build().ok())
+            .map(|built| (built.method().to_string(), built.url().path().to_owned()))
+            .unwrap_or_default();
+        self.send_once(request, bearer, &method, &path)
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// Sends one request with GitHub's headers. Errors name `method` and
+    /// `path` (relative to the API base, without a query string) and never
+    /// the host or a credential.
+    async fn send_once(
+        &self,
+        request: reqwest::RequestBuilder,
+        bearer: &str,
+        method: &str,
+        path: &str,
+    ) -> Result<Value, Failure> {
+        let path = path.split(['?', '#']).next().unwrap_or_default();
         let response = request
             .bearer_auth(bearer)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
             .await
-            .map_err(|error| anyhow!("GitHub request failed: {}", error.without_url()))?;
+            .map_err(|error| {
+                Failure::Other(anyhow!(
+                    "GitHub request {method} {path} failed: {}",
+                    error.without_url()
+                ))
+            })?;
         let status = response.status();
         let body: Value = response.json().await.unwrap_or(Value::Null);
-        if !status.is_success() {
-            bail!(
-                "GitHub replied {status}: {}",
-                body["message"].as_str().unwrap_or("")
-            );
+        if status.is_success() {
+            return Ok(body);
         }
-        Ok(body)
+        let error = anyhow!(
+            "GitHub replied {status} to {method} {path}: {}",
+            body["message"].as_str().unwrap_or("")
+        );
+        Err(if status.is_server_error() {
+            Failure::Server(error)
+        } else {
+            Failure::Other(error)
+        })
+    }
+}
+
+/// Why one send failed; only a 5xx reply is worth repeating.
+enum Failure {
+    Server(anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl Failure {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Server(error) | Self::Other(error) => error,
+        }
     }
 }
 
@@ -214,6 +280,7 @@ mod tests {
     use aws_lc_rs::rsa::{KeyPair, KeySize};
     use aws_lc_rs::signature::KeyPair as _;
     use base64::engine::general_purpose::STANDARD;
+    use std::sync::Arc;
 
     /// A fresh PKCS#8 PEM key and its public key bytes.
     fn test_key() -> (Vec<u8>, Vec<u8>) {
@@ -251,6 +318,167 @@ mod tests {
         let (pem, _) = test_key();
         assert!(sign_app_jwt(&pem, 0, 0).is_err());
         assert!(sign_app_jwt(b"not a key", 1, 0).is_err());
+    }
+
+    /// Requests the mock GitHub saw, as `METHOD path?query`, and how many
+    /// 502 replies each route still owes.
+    #[derive(Default)]
+    struct Mock {
+        seen: Vec<String>,
+        flaky_failures_left: u32,
+    }
+
+    type Shared = Arc<Mutex<Mock>>;
+
+    /// A mock GitHub on a loopback port: `/flaky` fails `flaky_failures_left`
+    /// times with 502 and then succeeds, `/down` always answers 502,
+    /// `/missing` answers 404, and minting a token always answers 502 except
+    /// for `/app/installations/9/access_tokens` on `ok_mint`.
+    async fn app_with_mock(
+        flaky_failures: u32,
+        ok_mint: bool,
+    ) -> (GithubApp, Shared, tempfile::TempDir) {
+        use axum::extract::{Request, State};
+        use axum::http::StatusCode;
+        use axum::{Json, Router};
+        let mock: Shared = Arc::new(Mutex::new(Mock {
+            seen: Vec::new(),
+            flaky_failures_left: flaky_failures,
+        }));
+        async fn handle(
+            State((mock, ok_mint)): State<(Shared, bool)>,
+            request: Request,
+        ) -> (StatusCode, Json<Value>) {
+            let target = request
+                .uri()
+                .path_and_query()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let mut mock = mock.lock().unwrap();
+            mock.seen.push(format!("{} {target}", request.method()));
+            let bad_gateway = (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"message": "Server Error"})),
+            );
+            match request.uri().path() {
+                "/flaky" if mock.flaky_failures_left > 0 => {
+                    mock.flaky_failures_left -= 1;
+                    bad_gateway
+                }
+                "/flaky" => (StatusCode::OK, Json(json!({"ok": true}))),
+                "/missing" => (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))),
+                "/app/installations/9/access_tokens" if ok_mint => (
+                    StatusCode::CREATED,
+                    Json(json!({"token": "ghs_secret_token"})),
+                ),
+                _ => bad_gateway,
+            }
+        }
+        let router = Router::new()
+            .fallback(handle)
+            .with_state((mock.clone(), ok_mint));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let directory = tempfile::tempdir().unwrap();
+        let (pem, _) = test_key();
+        let private_key = directory.path().join("app.pem");
+        std::fs::write(&private_key, pem).unwrap();
+        let mut app = GithubApp::new(&GithubConfig {
+            api_base,
+            app_id: 7,
+            installation_id: 9,
+            private_key,
+        })
+        .unwrap();
+        app.retry_wait = Duration::from_millis(1);
+        (app, mock, directory)
+    }
+
+    fn seen(mock: &Shared) -> Vec<String> {
+        mock.lock().unwrap().seen.clone()
+    }
+
+    #[tokio::test]
+    async fn a_get_that_gets_a_502_is_repeated_and_can_succeed() {
+        let (app, mock, _key) = app_with_mock(1, true).await;
+        let reply = app.get("/flaky?filter=all").await.unwrap();
+        assert_eq!(reply, json!({"ok": true}));
+        let gets: Vec<String> = seen(&mock)
+            .into_iter()
+            .filter(|line| line.starts_with("GET"))
+            .collect();
+        assert_eq!(gets, ["GET /flaky?filter=all", "GET /flaky?filter=all"]);
+    }
+
+    #[tokio::test]
+    async fn a_get_that_keeps_getting_502_fails_after_a_bounded_number_of_sends() {
+        let (app, mock, _key) = app_with_mock(0, true).await;
+        let error = app.get("/down?filter=all").await.unwrap_err();
+        let gets = seen(&mock)
+            .into_iter()
+            .filter(|line| line.starts_with("GET"))
+            .count();
+        assert_eq!(gets, usize::try_from(GET_ATTEMPTS).unwrap());
+        assert_eq!(
+            format!("{error:#}"),
+            "GitHub replied 502 Bad Gateway to GET /down: Server Error"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_get_that_gets_a_client_error_is_not_repeated() {
+        let (app, mock, _key) = app_with_mock(0, true).await;
+        let error = app.get("/missing").await.unwrap_err();
+        assert!(format!("{error:#}").contains("404 Not Found to GET /missing"));
+        let gets = seen(&mock).iter().filter(|l| l.starts_with("GET")).count();
+        assert_eq!(gets, 1);
+    }
+
+    #[tokio::test]
+    async fn posts_are_not_repeated_after_a_502() {
+        let (app, mock, _key) = app_with_mock(0, true).await;
+        let error = app.post("/down").await.unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "GitHub replied 502 Bad Gateway to POST /down: Server Error"
+        );
+        let (app, mock_mint, _key) = app_with_mock(0, false).await;
+        let error = app.installation_token().await.unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "GitHub replied 502 Bad Gateway to POST /app/installations/9/access_tokens: Server Error"
+        );
+        assert_eq!(seen(&mock_mint).len(), 1, "minting is sent once");
+        let posts = seen(&mock)
+            .iter()
+            .filter(|l| l.starts_with("POST /down"))
+            .count();
+        assert_eq!(posts, 1);
+    }
+
+    #[tokio::test]
+    async fn errors_name_the_path_without_query_host_or_credential() {
+        let (app, _mock, _key) = app_with_mock(0, true).await;
+        let error = app
+            .get("/repos/o/r/actions/runs/1/jobs?filter=all&per_page=100")
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("GET /repos/o/r/actions/runs/1/jobs:"),
+            "{message}"
+        );
+        for leaked in [
+            "filter",
+            "per_page",
+            "127.0.0.1",
+            "ghs_secret_token",
+            "Bearer",
+        ] {
+            assert!(!message.contains(leaked), "{leaked} leaked: {message}");
+        }
     }
 
     #[test]
