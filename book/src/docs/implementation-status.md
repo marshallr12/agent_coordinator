@@ -554,7 +554,9 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   removes one. The sign-in page has **Sign in with a passkey**, which starts the
   same browser session as a password sign-in, and offers to sign in with the
   password and then set a passkey up; a browser that already created one starts
-  the passkey prompt when the page opens signed out. The service accepts ES256
+  the passkey prompt when the page opens signed out. The button stays enabled
+  while that automatic prompt is open; clicking it replaces the automatic prompt
+  with a new one. The service accepts ES256
   credentials with user verification, requests no attestation, keeps only the
   public key, and uses a one-time challenge valid for five minutes. It needs the
   configured public origin's host to be the relay party id, so a browser must open
