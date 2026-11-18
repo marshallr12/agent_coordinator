@@ -248,7 +248,11 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       no reason logged. Suspected, not established: GitHub's ruleset refuses a commit whose
       required check is red, so the exemption cannot land by itself. The same journal has 14
       GitHub `502 Bad Gateway` replies and 4 `coordinator request failed` errors in that hour.
-      No task filed for this yet (owner's call). `74cb2771` should land once `ad3d76ab` does.
+      `74cb2771` should land once `ad3d76ab` does. Owner asked for a task: **`180fab91`** (open,
+      ready, priority 1, agent-origin, admitted 13/14 this week). `NotPublished` means `git push`
+      exited non-zero with the target unchanged (`crates/local/src/git_workflow.rs`); the push
+      output is discarded. The task: establish the cause, log a bounded refusal reason, stop the
+      tight retry, define the exemption under a hosting rule that requires the check.
     - Evidence: `~/.local/state/agent-coordinator-evidence/open-items-20261118/`.
 
 ## Earlier resume points (archived)
