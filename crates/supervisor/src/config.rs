@@ -64,6 +64,12 @@ pub struct Config {
     /// The Windows supervisor when it runs as a service. Read only by the
     /// hidden `windows-service --role supervisor` subcommand.
     pub windows_supervisor: crate::service::supervisor::SupervisorSettings,
+    /// The Windows egress broker when it runs as a service. Read only by
+    /// the hidden `windows-service --role egress` subcommand.
+    pub windows_egress: crate::service::broker_settings::EgressSettings,
+    /// The Windows publication broker when it runs as a service. Read only
+    /// by the hidden `windows-service --role publication` subcommand.
+    pub windows_publication: crate::service::broker_settings::PublicationSettings,
 }
 
 /// Where the candidate-push helper is installed and whom it runs as.
@@ -143,6 +149,8 @@ impl Default for Config {
             setup: BTreeMap::new(),
             windows_service: crate::service::settings::ServiceSettings::default(),
             windows_supervisor: crate::service::supervisor::SupervisorSettings::default(),
+            windows_egress: crate::service::broker_settings::EgressSettings::default(),
+            windows_publication: crate::service::broker_settings::PublicationSettings::default(),
         }
     }
 }
@@ -259,14 +267,15 @@ mod tests {
             .lines()
             .filter(|l| !l.starts_with('['))
             .count();
-        let runner = crate::service::settings::ServiceSettings::default();
-        let supervisor = crate::service::supervisor::SupervisorSettings::default();
+        let defaults = Config::default();
         let settings = |table: toml::Table| {
             let nested = table.get("stand_in").and_then(|t| t.as_table());
             table.len() - usize::from(nested.is_some()) + nested.map_or(0, |t| t.len())
         };
-        let expected = settings(toml::Table::try_from(&runner).unwrap())
-            + settings(toml::Table::try_from(&supervisor).unwrap());
+        let expected = settings(toml::Table::try_from(&defaults.windows_service).unwrap())
+            + settings(toml::Table::try_from(&defaults.windows_supervisor).unwrap())
+            + settings(toml::Table::try_from(&defaults.windows_egress).unwrap())
+            + settings(toml::Table::try_from(&defaults.windows_publication).unwrap());
         assert_eq!(expected, shown);
     }
 

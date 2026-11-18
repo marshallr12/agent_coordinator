@@ -39,6 +39,7 @@ pub mod adoption;
 pub mod authority_pipe;
 pub mod broker;
 pub mod broker_control;
+pub mod broker_service;
 pub mod candidate;
 pub mod candidate_pipe;
 pub mod candidate_shell;
@@ -65,6 +66,7 @@ pub mod supervisor_service;
 pub mod sys;
 pub mod text;
 pub mod token;
+pub mod token_inventory;
 
 use super::{HostRuntime, LaunchIdentity, Observation, Recovery, Removed, StartIntent};
 use crate::run_loop::Launch;

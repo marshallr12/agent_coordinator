@@ -130,7 +130,7 @@ fn preshutdown_line(settings: &ServiceSettings) -> String {
 /// Makes the state directory with an access list for the runner's account,
 /// the system and administrators only. A directory that already exists is
 /// used as found: its access list is its installer's.
-fn ensure_state_directory(directory: &Path, owner: &str) -> Result<()> {
+pub(super) fn ensure_state_directory(directory: &Path, owner: &str) -> Result<()> {
     if directory.exists() {
         return Ok(());
     }
