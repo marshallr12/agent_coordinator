@@ -55,6 +55,29 @@ pub struct Grant {
     /// The coordinator task the launch works on, when its owner named one;
     /// the publication broker names the launch's candidate ref after it.
     task: Option<String>,
+    /// SHA-256 digests (lowercase hex) of the coordinator credentials the
+    /// launch was given, which the publication broker's secret scan
+    /// refuses to publish.
+    known_digests: Vec<String>,
+}
+
+/// The most credential digests one launch's grant may carry.
+pub const MAX_KNOWN_DIGESTS: usize = 16;
+
+/// Refuses `digests` unless each is a SHA-256 digest as 64 lowercase hex
+/// digits and there are at most [`MAX_KNOWN_DIGESTS`] of them.
+pub fn checked_digests(digests: &[String]) -> Result<()> {
+    ensure!(
+        digests.len() <= MAX_KNOWN_DIGESTS,
+        "a launch may carry at most {MAX_KNOWN_DIGESTS} credential digests"
+    );
+    let digest =
+        |d: &String| d.len() == 64 && d.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    ensure!(
+        digests.iter().all(digest),
+        "a credential digest is 64 lowercase hexadecimal digits"
+    );
+    Ok(())
 }
 
 impl Grant {
@@ -76,6 +99,7 @@ impl Grant {
             package: checked_sid(package)?.to_owned(),
             generation,
             task: None,
+            known_digests: Vec::new(),
         })
     }
 
@@ -90,6 +114,19 @@ impl Grant {
     /// The task the launch works on, if its owner named one.
     pub fn task(&self) -> Option<&str> {
         self.task.as_deref()
+    }
+
+    /// This grant for a launch given the credentials `digests` are of
+    /// ([`checked_digests`]).
+    pub fn with_known_digests(mut self, digests: Vec<String>) -> Result<Self> {
+        checked_digests(&digests)?;
+        self.known_digests = digests;
+        Ok(self)
+    }
+
+    /// The digests of the credentials the launch was given.
+    pub fn known_digests(&self) -> &[String] {
+        &self.known_digests
     }
 
     /// The launch's id.
@@ -483,6 +520,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         false
+    }
+
+    #[test]
+    fn a_grant_carries_only_well_formed_credential_digests() {
+        let grant = Grant::new("l", Role::Implementer, "S-1-5-21-1-2-3-1001", PACKAGE, 1).unwrap();
+        assert!(grant.known_digests().is_empty(), "none by default");
+        let digest = "0123456789abcdef".repeat(4);
+        let carried = grant
+            .clone()
+            .with_known_digests(vec![digest.clone()])
+            .unwrap();
+        assert_eq!(carried.known_digests(), std::slice::from_ref(&digest));
+        let malformed = [
+            digest.to_uppercase(),
+            digest[1..].to_owned(),
+            format!("{digest}0"),
+        ];
+        for bad in malformed {
+            assert!(grant.clone().with_known_digests(vec![bad]).is_err());
+        }
+        let too_many = vec![digest; MAX_KNOWN_DIGESTS + 1];
+        assert!(grant.with_known_digests(too_many).is_err());
     }
 
     #[test]

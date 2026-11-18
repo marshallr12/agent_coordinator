@@ -1,5 +1,5 @@
-//! The publication broker with real AppContainer launches (phase 6, step
-//! 6c).
+//! The publication broker with real AppContainer launches (phase 6, steps
+//! 6c and 6d).
 //!
 //! Each test runs in a new logon session of the same account ([`support`]).
 //! There the supervisor's authority pipe and the publication broker's
@@ -17,7 +17,7 @@ mod support;
 use agentc_supervisor::host_runtime::windows::authority_pipe::{AuthorityRoute, AuthorityServer};
 use agentc_supervisor::host_runtime::windows::broker::{Broker, Role};
 use agentc_supervisor::host_runtime::windows::broker_control::{
-    Control, ControlClient, Opened, control_pipe_name,
+    Admission, Control, ControlClient, Opened, control_pipe_name,
 };
 use agentc_supervisor::host_runtime::windows::egress_admission::PUBLICATION_VARIABLE;
 use agentc_supervisor::host_runtime::windows::launcher::Launcher;
@@ -25,6 +25,7 @@ use agentc_supervisor::host_runtime::windows::publication_broker::{Publication, 
 use agentc_supervisor::host_runtime::windows::token;
 use agentc_supervisor::service::authority::{ACTIVE, AttemptReader, AttemptView, Authority, Held};
 use agentc_supervisor::service::pipe_policy::{CLIENT_ACCESS, pipe_path};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
@@ -60,8 +61,9 @@ const BUNDLED_REF: &str = "refs/heads/evil";
 /// ref and nothing else, the same commit again is accepted unchanged and a
 /// wrong tree is refused;
 /// a launch the supervisor holds no attempt for and a reviewer launch are
-/// refused; a foreign launch cannot open another launch's pipe; and once
-/// the launch is closed its pipe is gone.
+/// refused; a foreign launch cannot open another launch's pipe; once the
+/// launch is closed its pipe is gone; and a candidate adding a credential
+/// the launch was given is refused by the secret scan.
 #[test]
 fn only_an_authorized_implementer_launch_publishes_and_only_its_own_ref() {
     in_a_new_session("publication");
@@ -121,14 +123,27 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
 }
 
 /// A bare remote holding a base commit, and a bundle of a candidate on it
-/// whose only ref is [`BUNDLED_REF`].
+/// whose only ref is [`BUNDLED_REF`]; beside it a second candidate on the
+/// base that adds a line holding [`LEAKED_TOKEN`].
 struct Repository {
     remote: PathBuf,
     bundle: PathBuf,
     candidate: String,
     tree: String,
     wrong_tree: String,
+    leak: Bundled,
 }
+
+/// A candidate bundle, its commit and the commit's tree.
+struct Bundled {
+    bundle: PathBuf,
+    commit: String,
+    tree: String,
+}
+
+/// A coordinator token as a launch might be given one: 64 hex digits, the
+/// form whose digest the secret scan checks.
+const LEAKED_TOKEN: &str = "5ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7";
 
 impl Repository {
     /// Makes the remote and the bundle in `trees`, the bundle in `tools`.
@@ -148,27 +163,35 @@ impl Repository {
         );
         let candidate = commit(&checkout, "feature.txt");
         let bundle = tools.join("candidate.bundle");
-        git(&checkout, &["update-ref", BUNDLED_REF, &candidate]);
-        let excluded = format!("^{base}");
-        git(
-            &checkout,
-            &[
-                "bundle",
-                "create",
-                bundle.to_str().unwrap(),
-                BUNDLED_REF,
-                &excluded,
-            ],
-        );
+        bundle_of(&checkout, (&candidate, &base), &bundle);
         let tree_of = |commit: &str| git(&checkout, &["rev-parse", &format!("{commit}^{{tree}}")]);
         let (tree, wrong_tree) = (tree_of(&candidate), tree_of(&base));
+        git(&checkout, &["checkout", "--quiet", "--detach", &base]);
+        let leaked = commit_text(&checkout, "notes.txt", &format!("token {LEAKED_TOKEN}\n"));
+        let leak = Bundled {
+            bundle: tools.join("leak.bundle"),
+            tree: tree_of(&leaked),
+            commit: leaked,
+        };
+        bundle_of(&checkout, (&leak.commit, &base), &leak.bundle);
         Self {
             remote,
             bundle,
             candidate,
             tree,
             wrong_tree,
+            leak,
         }
+    }
+
+    /// What a launch needs to send the leaking candidate.
+    fn leak_variables(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (BUNDLE, self.leak.bundle.display().to_string()),
+            (REVISION, self.leak.commit.clone()),
+            (TREE, self.leak.tree.clone()),
+            (WRONG_TREE, self.wrong_tree.clone()),
+        ]
     }
 
     /// The remote's refs, one `name commit` per line, in name order.
@@ -190,9 +213,25 @@ impl Repository {
     }
 }
 
-/// Commits a file named `name` and returns the commit.
+/// Writes a bundle of `commit` over `base` to `path`, carrying only
+/// [`BUNDLED_REF`].
+fn bundle_of(checkout: &Path, (commit, base): (&str, &str), path: &Path) {
+    git(checkout, &["update-ref", BUNDLED_REF, commit]);
+    let (path, excluded) = (path.to_str().unwrap(), format!("^{base}"));
+    git(
+        checkout,
+        &["bundle", "create", path, BUNDLED_REF, &excluded],
+    );
+}
+
+/// Commits a file named `name` holding its name and returns the commit.
 fn commit(checkout: &Path, name: &str) -> String {
-    std::fs::write(checkout.join(name), name).unwrap();
+    commit_text(checkout, name, name)
+}
+
+/// Commits a file named `name` holding `text` and returns the commit.
+fn commit_text(checkout: &Path, name: &str, text: &str) -> String {
+    std::fs::write(checkout.join(name), text).unwrap();
     git(checkout, &["add", "--", name]);
     let identity = [
         "-c",
@@ -308,10 +347,21 @@ impl Services {
 
     /// Has the broker admit `launch` as `role` working on [`TASK`].
     fn admit(&self, launch: &Launch, role: Role) -> Opened {
-        let opened = self
-            .control()
-            .open_for(&launch.id, role, &launch.package, 1, Some(TASK));
-        opened.unwrap()
+        self.admit_with(launch, role, &[])
+    }
+
+    /// As [`Services::admit`], for a launch given the credentials
+    /// `known_digests` are of.
+    fn admit_with(&self, launch: &Launch, role: Role, known_digests: &[String]) -> Opened {
+        let admission = Admission {
+            launch: &launch.id,
+            role,
+            package: &launch.package,
+            generation: 1,
+            task: Some(TASK),
+            known_digests,
+        };
+        self.control().admit(&admission).unwrap()
     }
 
     /// Records, as the supervisor's loop does at its claim, that `launch`
@@ -348,7 +398,24 @@ fn push(
     (opened, repository): (&Opened, &Repository),
     steps: &str,
 ) -> Vec<String> {
-    let mut variables = repository.variables();
+    push_with(
+        launcher,
+        (launch, tools),
+        opened,
+        repository.variables(),
+        steps,
+    )
+}
+
+/// Runs the `push` probe in `launch` with `steps`, sending what
+/// `variables` name, and returns its report.
+fn push_with(
+    launcher: &mut Launcher,
+    (launch, tools): (&Launch, &Path),
+    opened: &Opened,
+    mut variables: Vec<(&'static str, String)>,
+    steps: &str,
+) -> Vec<String> {
     variables.push((STEPS, steps.to_owned()));
     let report = start_probe(launcher, (launch, tools), "push", (Some(opened), variables));
     finish(launcher, launch, &report)
@@ -363,7 +430,7 @@ fn candidate_ref(launch: &Launch) -> String {
 fn publication() -> String {
     let dir = tempfile::tempdir().unwrap();
     let (trees, mut launcher) = (Trees::new(&dir), Launcher::new().unwrap());
-    let ids = ["a", "b", "rev", "foreign"].map(id);
+    let ids = ["a", "b", "rev", "foreign", "leak"].map(id);
     let launches = ids
         .each_ref()
         .map(|name| prepare(&mut launcher, &trees, name));
@@ -371,12 +438,13 @@ fn publication() -> String {
     let tools = client_tools(&trees, &packages);
     let repository = Repository::new(&trees, &tools);
     let services = Services::start(&trees, &repository.remote);
-    let [own, unheld, reviewer, foreign] = &launches;
+    let [own, unheld, reviewer, foreign, leaker] = &launches;
     let said = [
         authorized(&mut launcher, &services, (own, &tools), &repository),
         unauthorized(&mut launcher, &services, (unheld, &tools), &repository),
         reviewing(&mut launcher, &services, (reviewer, &tools), &repository),
         foreign_open(&mut launcher, &services, (foreign, own), &tools),
+        leaking(&mut launcher, &services, (leaker, &tools), &repository),
     ];
     check_refs(&repository, own);
     for launch in &launches {
@@ -444,6 +512,25 @@ fn reviewing(
         "refused not_authorized",
         "{lines:?}"
     );
+    lines.join(", ")
+}
+
+/// An implementer launch with authority, admitted with the digest of the
+/// credential it was given, whose candidate adds that credential: the
+/// secret scan refuses it and nothing is published.
+fn leaking(
+    launcher: &mut Launcher,
+    services: &Services,
+    (launch, tools): (&Launch, &Path),
+    repository: &Repository,
+) -> String {
+    services.hold(launch);
+    let digest = hex::encode(Sha256::digest(LEAKED_TOKEN.as_bytes()));
+    let opened = services.admit_with(launch, Role::Implementer, &[digest]);
+    let variables = repository.leak_variables();
+    let lines = push_with(launcher, (launch, tools), &opened, variables, "good");
+    let refused = outcome(&lines, "good");
+    assert_eq!(refused, "refused secret_detected", "{lines:?}");
     lines.join(", ")
 }
 

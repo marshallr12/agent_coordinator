@@ -44,6 +44,9 @@ enum Request {
         /// The task the launch works on; absent for a launch with none.
         #[serde(default)]
         task: Option<String>,
+        /// Digests of the credentials the launch was given; none by default.
+        #[serde(default)]
+        known_digests: Vec<String>,
     },
     /// Stop serving `launch`.
     Close { launch: String },
@@ -128,11 +131,13 @@ fn carry_out(broker: &mut Broker, account: &str, request: Request) -> Result<Val
             package,
             generation,
             task,
+            known_digests,
         } => {
             let mut grant = Grant::new(&launch, role, account, &package, generation)?;
             if let Some(task) = &task {
                 grant = grant.with_task(task)?;
             }
+            let grant = grant.with_known_digests(known_digests)?;
             let granted = broker.open(grant)?;
             let pipe = pipe_name(broker.service(), &launch);
             Ok(json!({"pipe": pipe, "generation": granted.generation()}))
@@ -148,6 +153,20 @@ pub struct Opened {
     pub pipe: String,
     /// The generation the broker gave the launch.
     pub generation: u64,
+}
+
+/// Everything an `open` names about a launch.
+#[derive(Debug, Clone, Copy)]
+pub struct Admission<'a> {
+    pub launch: &'a str,
+    pub role: Role,
+    pub package: &'a str,
+    /// The least generation the launch is to have.
+    pub generation: u64,
+    /// The task the launch works on, if any.
+    pub task: Option<&'a str>,
+    /// Digests of the credentials the launch was given.
+    pub known_digests: &'a [String],
 }
 
 /// The runner's side of a control pipe.
@@ -199,11 +218,23 @@ impl ControlClient {
         generation: u64,
         task: Option<&str>,
     ) -> Result<Opened> {
-        let mut request = json!({"op": "open", "launch": launch, "role": role,
-            "package": package, "generation": generation});
-        if let Some(task) = task {
-            request["task"] = json!(task);
-        }
+        let request = Admission {
+            launch,
+            role,
+            package,
+            generation,
+            task,
+            known_digests: &[],
+        };
+        self.admit(&request)
+    }
+
+    /// Asks the broker to serve the launch `admission` describes.
+    pub fn admit(&mut self, admission: &Admission<'_>) -> Result<Opened> {
+        let request = json!({"op": "open", "launch": admission.launch,
+            "role": admission.role, "package": admission.package,
+            "generation": admission.generation, "task": admission.task,
+            "known_digests": admission.known_digests});
         let answer = self.ask(&request)?;
         let pipe = answer["pipe"].as_str().context("the broker named no pipe");
         let generation = answer["generation"].as_u64();

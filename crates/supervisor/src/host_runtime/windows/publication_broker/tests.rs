@@ -88,3 +88,19 @@ fn a_launch_is_published_under_its_own_ref_and_repository() {
     let reserved = publication.spec(&grant(Role::Implementer, Some("wip")), "wip");
     assert!(reserved.is_err(), "the WIP namespace is not a task");
 }
+
+#[test]
+fn a_launch_s_credential_digests_reach_its_secret_scan() {
+    let (publication, _) = broker(Verdict::Current);
+    let plain = publication
+        .spec(&grant(Role::Implementer, Some("t")), "t")
+        .unwrap();
+    assert!(
+        format!("{plain:?}").contains("known_digests: 0"),
+        "{plain:?}"
+    );
+    let digests = vec!["ab".repeat(32), "cd".repeat(32)];
+    let given = grant(Role::Implementer, Some("t")).with_known_digests(digests);
+    let spec = publication.spec(&given.unwrap(), "t").unwrap();
+    assert!(format!("{spec:?}").contains("known_digests: 2"), "{spec:?}");
+}

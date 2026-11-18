@@ -134,10 +134,12 @@ impl Publication {
         serve_one_gated(&mut stream, &spec, &gate)
     }
 
-    /// The helper spec of `grant`'s launch: its own ref and repository.
+    /// The helper spec of `grant`'s launch: its own ref and repository, and
+    /// the digests of its credentials for the secret scan to refuse.
     fn spec(&self, grant: &Grant, task: &str) -> Result<HelperSpec> {
         let work_dir = self.work_root.join(grant.launch());
         let spec = HelperSpec::new(&self.remote, task, grant.launch(), &work_dir)?;
+        let spec = spec.with_known_digests(grant.known_digests().to_vec());
         Ok(spec.with_git_environment(self.git_environment.clone()))
     }
 

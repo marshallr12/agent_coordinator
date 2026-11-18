@@ -21,7 +21,7 @@
 //! or whose admission ended without an answer, is kept for release and
 //! asked again before the next admission and at the next cleanup.
 use super::broker::Role;
-use super::broker_control::{ControlClient, Opened};
+use super::broker_control::{Admission, ControlClient, Opened};
 use super::egress_broker::PIPE_VARIABLE;
 use super::journal::Entry;
 use super::pipe_client;
@@ -133,18 +133,28 @@ impl BrokerRoute {
         Ok(command)
     }
 
-    /// Asks the broker to serve `entry`'s launch, with its task for the
-    /// publication broker.
+    /// Asks the broker to serve `entry`'s launch, with its task and its
+    /// credentials' digests for the publication broker.
     fn open(&self, entry: &Entry) -> Result<Opened> {
         let role = entry.role.context("the launch has no role")?;
         let generation = entry.generation.unwrap_or(FIRST_GENERATION);
-        let task = match self.kind {
-            Brokered::Egress => None,
-            Brokered::Publication => Some(entry.task.clone().context("the launch has no task")?),
+        let (task, digests) = match self.kind {
+            Brokered::Egress => (None, Vec::new()),
+            Brokered::Publication => {
+                let task = entry.task.clone().context("the launch has no task")?;
+                (Some(task), entry.known_digests.clone())
+            }
         };
         let (launch, package) = (entry.launch.clone(), entry.package_sid.clone());
         self.within(move |control| {
-            control.open_for(&launch, role, &package, generation, task.as_deref())
+            control.admit(&Admission {
+                launch: &launch,
+                role,
+                package: &package,
+                generation,
+                task: task.as_deref(),
+                known_digests: &digests,
+            })
         })
     }
 
@@ -359,6 +369,7 @@ mod tests {
             generation: Some(3),
             role,
             task: Some("t-1".into()),
+            known_digests: Vec::new(),
             pid: None,
             created: None,
             control: None,
