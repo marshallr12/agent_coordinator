@@ -168,7 +168,8 @@ check_writes() {
 # claude-config holds no login, and the role cannot take Claude's OAuth
 # refresh lock there.
 check_seeds() {
-  local user=$1 base=$STATE/${1#agentc-} path seeds=("$base" /etc/agentc)
+  local user=$1 base=$STATE/${1#agentc-} path
+  local seeds=("$base" /etc/agentc)
   local files=(/etc/agentc/cargo-config.toml) claude=1
   harness_skipped claude "$user: claude-config seed checks" && claude=0
   if [ "$claude" = 1 ]; then

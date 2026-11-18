@@ -1150,6 +1150,24 @@ as() {{ shift; "$@"; }}
         out = self.suite("pinned_version claude; pinned_version codex", pins=[("codex", "0.169.0")])
         self.assertEqual(out.stdout.split(), ["0.169.0"])
 
+    def test_check_seeds_runs_under_set_u_with_real_bash(self):
+        """`local base=... seeds=("$base")` reads base before bash assigns it, so under `set -u`
+        the suite died after its first checks. Every command is stubbed; the descriptions and
+        arguments that reach expect_fail/expect_ok show which seeds were probed."""
+        for installed, probed in (([("claude", "2.1.326")], ["/var/lib/agentc/impl", "/var/lib/agentc/impl/claude-config", "/etc/agentc"]),
+                                  ([], ["/var/lib/agentc/impl", "/etc/agentc"])):
+            with self.subTest(claude=bool(installed)):
+                out = self.suite("""set -u
+                  expect_fail() { echo "FAILCHECK $1"; }
+                  expect_ok() { echo "OKCHECK $1"; }
+                  check_seeds agentc-impl; echo "done rc=$?" """, pins=installed, installed=installed)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertNotIn("unbound variable", out.stderr)
+                self.assertIn("done rc=0", out.stdout)
+                for path in probed:
+                    self.assertIn(f"FAILCHECK agentc-impl: cannot create entries in protected {path}", out.stdout)
+                self.assertIn("OKCHECK agentc-impl: per-launch Cargo baseline is seeded", out.stdout)
+
     def test_every_harness_specific_check_is_gated_in_main(self):
         main = subprocess.run(["bash", "-c", 'source "$1"; declare -f main', "bash", str(CONTAINMENT)],
                               capture_output=True, text=True).stdout
