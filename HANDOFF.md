@@ -204,6 +204,9 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     inputs `Cargo.lock`, `.cargo/audit.toml`; other checks untouched) but only the owner saves
     it; confirm with a workflow-policy read that the roster is at revision 4 (needs the owner's
     go-ahead, like any production read). The owner is updating MINIAIR's CLI themselves.
+  - **Update 2026-11-18 05:38 UTC — roster change DONE:** the owner saved it; the workflow policy
+    reads revision **4** (`updated_at` 05:38:04Z) with `inputs: ["Cargo.lock", ".cargo/audit.toml"]`
+    on dependency-audit and the other two checks unchanged. Nothing was in flight at the save.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
