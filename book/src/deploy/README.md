@@ -1338,6 +1338,20 @@ not be delivered exits 2 and is retried by the next run. `NTFY_TOKEN`, when set,
 authenticates to ntfy. `deploy/agentc/attention-test.py` tests both against
 local fake servers.
 
+One slow or lost request does not fail a check. A request that times out, is
+reset or is refused is retried: up to `ATTENTION_PROBE_ATTEMPTS` requests in all
+(default 3, `--probe-attempts`, 2 s apart, each limited to
+`ATTENTION_PROBE_TIMEOUT` seconds, default 15), and only when every attempt fails
+does the check fail (`digest probe failed (TimeoutError)`) and page. Each retry
+is logged as `canary: digest request failed (TimeoutError); retry 1 of 2`. A
+digest request that answers but takes longer than `ATTENTION_DIGEST_BUDGET`
+seconds (default 5, `--digest-budget`, `0` turns it off) is logged as
+`canary: digest request took 25.3s (budget 5s)` in the unit's journal and never
+pages, so a still-slow digest stays visible. An HTTP error status is an answer
+and is not retried. See
+[the hourly transfer on the 1-GB VM](../docs/backup-restore-guide.md#the-hourly-transfer-on-the-1-gb-vm)
+for the cause of the 2026-11 timeouts.
+
 #### Digest read tracking and the neglect page
 
 The service records when the owner last read the digest (`last_read_at` in

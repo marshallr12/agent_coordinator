@@ -10,6 +10,8 @@
                         --ntfy-topic TOPIC [--ntfy-url https://ntfy.sh]
                         [--state FILE] [--max-hri N] [--neglect-days N]
                         [--target-block-minutes N] [--target-repage-minutes N]
+                        [--probe-attempts N] [--probe-timeout SECONDS]
+                        [--digest-budget SECONDS]
 
 `digest` reads `GET /api/v1/projects/ID/digest` and prints what the attention
 budget did: reversible decisions that proceeded on their recommendation after
@@ -37,6 +39,14 @@ turns the check off). A digest never read counts from the canary's first run. A
 failing check pages once; it pages again only after it has recovered and
 failed again, or when a different check starts failing. The paged set lives
 in --state (default: next to the heartbeat).
+
+One slow or lost request does not fail a check. A request that times out, is
+reset or is refused is retried, up to --probe-attempts requests in all (default
+3, 2 s apart, each limited to --probe-timeout seconds, default 15); only when
+every attempt fails does the check fail ("digest probe failed (TimeoutError)").
+Each retry is logged. A digest request that answers but takes longer than
+--digest-budget seconds (default 5; 0 turns it off) is logged as
+`canary: digest request took 25.3s (budget 5s)` and never pages.
 
 A red target branch stops all integration, so the canary also reads the open
 integrator reports: a `fix_target` report with `details.blocks_subject`
@@ -76,6 +86,10 @@ sys.dont_write_bytecode = True
 HEALTH_BUDGET_SECONDS = 5.0
 NEXT_BUDGET_SECONDS = 10.0
 HEARTBEAT_MAX_AGE_SECONDS = 300.0
+PROBE_TIMEOUT_SECONDS = 15.0
+PROBE_ATTEMPTS = 3
+PROBE_RETRY_PAUSE_SECONDS = 2.0
+DIGEST_BUDGET_SECONDS = 5.0
 DEFAULT_NTFY = "https://ntfy.sh"
 DEFAULT_URL = "https://agents.sithbit.com"
 DEFAULT_PROJECT = "fe95a6c5-2aad-463f-8446-4366d9a281c7"
@@ -145,6 +159,34 @@ def fetch(url, token=None, timeout=15.0):
     return status, body, elapsed
 
 
+def pause(seconds):
+    """Sleep between probe attempts; tests replace this."""
+    time.sleep(seconds)
+
+
+def probe_fetch(args, url, token=None):
+    """`fetch` for a canary probe: a transport failure (timeout, reset, refused) is retried.
+
+    Up to --probe-attempts requests are made, a few seconds apart; the last
+    failure is raised only when every attempt failed, so one timed-out request
+    does not fail a check. Each retry is logged. An HTTP status is an answer,
+    not a transport failure, and is never retried. The elapsed time returned is
+    that of the attempt that answered.
+    """
+    attempts = max(1, getattr(args, "probe_attempts", 1))
+    timeout = getattr(args, "probe_timeout", PROBE_TIMEOUT_SECONDS)
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch(url, token, timeout=timeout)
+        except OSError as error:
+            if attempt == attempts:
+                raise
+            route = url.split("/api/v1/", 1)[-1].split("?", 1)[0]
+            print(f"canary: {route} request failed ({type(error).__name__}); "
+                  f"retry {attempt} of {attempts - 1}", file=sys.stderr)
+            pause(PROBE_RETRY_PAUSE_SECONDS)
+
+
 def project_url(args, route):
     return f"{args.url.rstrip('/')}/api/v1/projects/{args.project}/{route}"
 
@@ -203,7 +245,11 @@ def render_digest(data, ack_url=None):
 
 def read_digest(args, token, ack_link=False):
     query = f"digest?hours={args.hours}" + ("&ack_link=true" if ack_link else "")
-    status, body, _ = fetch(project_url(args, query), token)
+    status, body, elapsed = probe_fetch(args, project_url(args, query), token)
+    budget = getattr(args, "digest_budget", None)
+    if budget and elapsed > budget:
+        # Visible in the journal, not a failure: the canary does not page on it.
+        print(f"canary: digest request took {elapsed:.1f}s (budget {budget:.0f}s)", file=sys.stderr)
     if status != 200 or not body or "data" not in body:
         raise SystemExit(f"attention: digest request failed with status {status}")
     return body["data"]
@@ -266,7 +312,7 @@ def tls_context():
 
 
 def probe_service(args, token):
-    status, _, elapsed = fetch(f"{args.url.rstrip('/')}/healthz")
+    status, _, elapsed = probe_fetch(args, f"{args.url.rstrip('/')}/healthz")
     if status != 200:
         return f"/healthz answered {status}"
     if elapsed > HEALTH_BUDGET_SECONDS:
@@ -275,7 +321,7 @@ def probe_service(args, token):
 
 
 def probe_next(args, token):
-    status, body, elapsed = fetch(project_url(args, "next?role=implementer"), token)
+    status, body, elapsed = probe_fetch(args, project_url(args, "next?role=implementer"), token)
     if status != 200 or not body or "data" not in body:
         return f"next answered {status}"
     if elapsed > NEXT_BUDGET_SECONDS:
@@ -341,13 +387,14 @@ def blocked_subjects(args, token, report_id):
     count, cursor = 0, None
     for _ in range(SUBJECT_LIST_PAGES):
         query = "tasks?exclude_done=true&limit=200" + (f"&cursor={cursor}" if cursor else "")
-        status, body, _ = fetch(project_url(args, query), token)
+        status, body, _ = probe_fetch(args, project_url(args, query), token)
         if status != 200 or not body or "data" not in body:
             return None
         for task in body["data"]["items"]:
             if task.get("work_status") != "waiting_integration":
                 continue
-            status, flow, _ = fetch(project_url(args, f"tasks/{task['id']}/workflow"), token)
+            status, flow, _ = probe_fetch(
+                args, project_url(args, f"tasks/{task['id']}/workflow"), token)
             if status != 200 or not flow or "data" not in flow:
                 return None
             if (flow["data"].get("integration_blocked") or {}).get("report_id") == report_id:
@@ -362,7 +409,8 @@ def probe_target(args, token):
     """{`target:REPORT`: text} for each blocking fix_target report open longer than the threshold."""
     if not args.target_block_minutes:
         return None
-    status, body, _ = fetch(project_url(args, "integrator/reports?open=true&limit=1000"), token)
+    status, body, _ = probe_fetch(
+        args, project_url(args, "integrator/reports?open=true&limit=1000"), token)
     if status != 200 or not body or "data" not in body:
         return {"target": f"integrator reports answered {status}"}
     failures = {}
@@ -544,6 +592,12 @@ def parse(argv):
     canary.add_argument("--heartbeat", default=env("ATTENTION_HEARTBEAT", DEFAULT_HEARTBEAT))
     canary.add_argument("--heartbeat-max-age", type=float,
                         default=env("ATTENTION_HEARTBEAT_MAX_AGE", HEARTBEAT_MAX_AGE_SECONDS, float))
+    canary.add_argument("--probe-attempts", type=int,
+                        default=env("ATTENTION_PROBE_ATTEMPTS", PROBE_ATTEMPTS, int))
+    canary.add_argument("--probe-timeout", type=float,
+                        default=env("ATTENTION_PROBE_TIMEOUT", PROBE_TIMEOUT_SECONDS, float))
+    canary.add_argument("--digest-budget", type=float,
+                        default=env("ATTENTION_DIGEST_BUDGET", DIGEST_BUDGET_SECONDS, float))
     canary.add_argument("--ntfy-topic", default=env("ATTENTION_NTFY_TOPIC"))
     canary.add_argument("--ntfy-url", default=env("ATTENTION_NTFY_URL", DEFAULT_NTFY))
     canary.add_argument("--state", default=env("ATTENTION_STATE"))
