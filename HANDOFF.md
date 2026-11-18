@@ -182,6 +182,15 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       `remote_upgrade.py` runs the script byte-identical and proceeds only when every blocking
       row is `recovery_required`. Task **`c69f31b5`** (open, agent-origin) puts the rule in the
       script. Read-only preflight output: `drain-preflight-1.txt`.
+    - **RETARGETED to main `818a7b1` (01:40Z 11-18):** main moved 13 commits while waiting
+      (`6faa1251`, `610a5031`, `9cf04a5c`, `c69f31b5` landed; no new migration) and the owner's
+      release run **`44217444217`** is on `818a7b1`. Scripts in the evidence directory now name
+      `818a7b1`; the drain check is that commit's, run unmodified and required to exit 0 (it
+      reports the two parked activities itself; `drain-preflight-2.txt`, exit 0). Worktrees:
+      mxmini same path (fast-forwarded), oracle-1 `/home/ubuntu/src/worktrees/agentc-rollout-818a7b1`
+      (script staged as `/home/ubuntu/oracle-upgrade-818a7b1.sh`). Drain marker
+      `deploy-drain-d8fdc1a6` set on both hosts 01:39:38Z, both idle; MINIAIR's attempt ended.
+      The task text still says `29407ea`; say so in the submission.
     - **Then:** set `deploy-drain-d8fdc1a6` on both hosts once the release run is dispatched
       (mxmini's marker is `quiet-hours` now and must be put back after), wait for idle,
       `verify_release.py`, `verify_packages.py`, `start-rollout.sh`, then `oracle-upgrade.sh`
