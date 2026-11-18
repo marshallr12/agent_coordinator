@@ -11,4 +11,11 @@ UMask=0077
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 ExecStart=/usr/local/sbin/agent-coordinator-backup-transfer
 TimeoutStartSec=45min
-Nice=10
+# The hourly transfer must not starve the service on a 953 MB, one-disk VM
+# (see "Backup transfer and the digest" in book/src/docs/deploy-gcp-e2-micro.md).
+Nice=19
+CPUWeight=20
+IOSchedulingClass=idle
+IOWeight=10
+# Reclaim the transfer's own pages first instead of the service's page cache.
+MemoryHigh=300M

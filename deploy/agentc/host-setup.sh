@@ -1106,6 +1106,9 @@ ATTENTION_MAIL_TO=
 # ATTENTION_NEGLECT_DAYS=3          # page when the digest goes unread this many days (0: off)
 # ATTENTION_TARGET_BLOCK_MINUTES=30    # page when a target_failing/target_unverified block lasts this long (0: off)
 # ATTENTION_TARGET_REPAGE_MINUTES=360  # page again only after this long if the block persists
+# ATTENTION_PROBE_ATTEMPTS=3        # requests per probe before a timeout or reset counts as a failure
+# ATTENTION_PROBE_TIMEOUT=15        # seconds each probe request may take
+# ATTENTION_DIGEST_BUDGET=5         # log (never page) a digest request slower than this many seconds (0: off)
 EOF
 }
 
