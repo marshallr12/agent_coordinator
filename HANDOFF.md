@@ -237,6 +237,18 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       Submission `470c88e2` at 14:32Z; review activity `e9cd7910` given to review subagent
       session `race-reviewer-20261118-sub`; integration `0d505fa7` queued. **Not landed yet**:
       after Done, remove the worktree and branch per the startup guide.
+      Review: oracle-1's supervised reviewer claimed it 17 s after the submission (the subagent
+      stood down, decided nothing) and **approved 14:58:45Z** (distinct launch, reproduced the
+      failure on base and the pass on the candidate; two advisory findings).
+    - **Main's dependency audit is red again (15:15Z), and the auto-fix path is live:** the
+      integrator filed report `61453d56` and the service created fix task **`ad3d76ab`**
+      (`fix_target`, priority 0); oracle-1 implemented it and it was `waiting_review` at 15:54Z.
+      `74cb2771` is judged **exempt** (declared inputs unchanged) but every publication ends
+      `NotPublished` with main still `f8bddba`: 35 attempts in 38 minutes, about one every 40 s,
+      no reason logged. Suspected, not established: GitHub's ruleset refuses a commit whose
+      required check is red, so the exemption cannot land by itself. The same journal has 14
+      GitHub `502 Bad Gateway` replies and 4 `coordinator request failed` errors in that hour.
+      No task filed for this yet (owner's call). `74cb2771` should land once `ad3d76ab` does.
     - Evidence: `~/.local/state/agent-coordinator-evidence/open-items-20261118/`.
 
 ## Earlier resume points (archived)
