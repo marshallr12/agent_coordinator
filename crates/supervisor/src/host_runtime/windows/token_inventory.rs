@@ -7,6 +7,7 @@ use super::token::of_process;
 use anyhow::Result;
 use serde::Serialize;
 use std::ffi::c_void;
+use std::ptr::addr_of;
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, LUID};
 use windows_sys::Win32::Security::{
     GetTokenInformation, LUID_AND_ATTRIBUTES, LookupAccountSidW, LookupPrivilegeNameW, PSID,
@@ -29,28 +30,39 @@ const NAME_CHARS: usize = 256;
 /// One group of a token.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Group {
+    /// The group's SID text.
     pub sid: String,
     /// `DOMAIN\name`, when Windows can name it.
     pub name: Option<String>,
+    /// The group counts in access checks that grant access.
     pub enabled: bool,
+    /// The group only ever denies access.
     pub deny_only: bool,
+    /// The group is the token's integrity label.
     pub integrity: bool,
+    /// The group is the token's logon session SID.
     pub logon_id: bool,
 }
 
 /// One privilege of a token.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Privilege {
+    /// The privilege's name, such as `SeChangeNotifyPrivilege`.
     pub name: String,
+    /// The privilege is enabled, not merely held.
     pub enabled: bool,
 }
 
 /// A token's user, groups and privileges.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Inventory {
+    /// The token's user, as SID text.
     pub user: String,
+    /// `DOMAIN\name` of the user, when Windows can name it.
     pub user_name: Option<String>,
+    /// Every group of the token, in the order Windows lists them.
     pub groups: Vec<Group>,
+    /// Every privilege the token holds, enabled or not.
     pub privileges: Vec<Privilege>,
 }
 
@@ -88,7 +100,8 @@ fn groups(token: &Handle) -> Result<Vec<Group>> {
     // entries, all inside `buffer`.
     let entries = unsafe {
         let count = (*header).GroupCount as usize;
-        std::slice::from_raw_parts((*header).Groups.as_ptr(), count)
+        let first = addr_of!((*header).Groups).cast::<SID_AND_ATTRIBUTES>();
+        std::slice::from_raw_parts(first, count)
     };
     entries.iter().map(group).collect()
 }
@@ -114,7 +127,8 @@ fn privileges(token: &Handle) -> Result<Vec<Privilege>> {
     // PrivilegeCount entries, all inside `buffer`.
     let entries: &[LUID_AND_ATTRIBUTES] = unsafe {
         let count = (*header).PrivilegeCount as usize;
-        std::slice::from_raw_parts((*header).Privileges.as_ptr(), count)
+        let first = addr_of!((*header).Privileges).cast::<LUID_AND_ATTRIBUTES>();
+        std::slice::from_raw_parts(first, count)
     };
     let named = |entry: &LUID_AND_ATTRIBUTES| {
         Ok(Privilege {
@@ -128,6 +142,20 @@ fn privileges(token: &Handle) -> Result<Vec<Privilege>> {
 /// One information class of `token`, in an aligned buffer as large as
 /// Windows says it needs.
 fn information(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<u64>> {
+    let mut needed = size_needed(token, class)?;
+    let mut buffer = vec![0_u64; (needed as usize).div_ceil(8)];
+    let (pointer, size) = (
+        buffer.as_mut_ptr().cast::<c_void>(),
+        (buffer.len() * 8) as u32,
+    );
+    // SAFETY: `pointer` is writable for `size` bytes and `needed` is live.
+    let read = unsafe { GetTokenInformation(token.raw(), class, pointer, size, &mut needed) };
+    check(read, "GetTokenInformation")?;
+    Ok(buffer)
+}
+
+/// How many bytes `class` of `token` needs, as a zero-length query says.
+fn size_needed(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Result<u32> {
     let mut needed = 0_u32;
     // SAFETY: a zero-length query only reports the size needed.
     let sized =
@@ -138,15 +166,7 @@ fn information(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<u64
         sized == 0 && code == ERROR_INSUFFICIENT_BUFFER,
         "GetTokenInformation did not report a size (Windows error {code})"
     );
-    let mut buffer = vec![0_u64; (needed as usize).div_ceil(8)];
-    let (pointer, size) = (
-        buffer.as_mut_ptr().cast::<c_void>(),
-        (buffer.len() * 8) as u32,
-    );
-    // SAFETY: `pointer` is writable for `size` bytes and `needed` is live.
-    let read = unsafe { GetTokenInformation(token.raw(), class, pointer, size, &mut needed) };
-    check(read, "GetTokenInformation")?;
-    Ok(buffer)
+    Ok(needed)
 }
 
 /// The name of the privilege `luid`.
@@ -168,28 +188,32 @@ fn account_name(sid: PSID) -> Option<String> {
     let mut kind: SID_NAME_USE = 0;
     // SAFETY: no system name: this machine; the buffers hold the lengths
     // given and `sid` is a valid SID.
+    #[rustfmt::skip]
     let found = unsafe {
-        let (name_at, domain_at) = (name.as_mut_ptr(), domain.as_mut_ptr());
-        LookupAccountSidW(
-            std::ptr::null(),
-            sid,
-            name_at,
-            &mut name_length,
-            domain_at,
-            &mut domain_length,
-            &mut kind,
-        )
+        LookupAccountSidW(std::ptr::null(), sid, name.as_mut_ptr(), &mut name_length,
+            domain.as_mut_ptr(), &mut domain_length, &mut kind)
     };
+    // On failure the lengths may name the room needed, not what was written.
     if found == 0 {
         return None;
     }
-    let name = String::from_utf16_lossy(&name[..name_length as usize]);
-    let domain = String::from_utf16_lossy(&domain[..domain_length as usize]);
-    Some(if domain.is_empty() {
+    Some(qualified(
+        &name[..name_length as usize],
+        &domain[..domain_length as usize],
+    ))
+}
+
+/// `domain\name`, or `name` alone when the domain is empty.
+fn qualified(name: &[u16], domain: &[u16]) -> String {
+    let (name, domain) = (
+        String::from_utf16_lossy(name),
+        String::from_utf16_lossy(domain),
+    );
+    if domain.is_empty() {
         name
     } else {
         format!(r"{domain}\{name}")
-    })
+    }
 }
 
 #[cfg(test)]

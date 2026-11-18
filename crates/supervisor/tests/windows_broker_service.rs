@@ -100,6 +100,56 @@ fn a_broker_without_a_runner_account_opens_nothing() {
     assert!(!state.exists(), "a refused broker made its directory");
 }
 
+/// `icacls` output for `path`.
+fn icacls(path: &std::path::Path) -> String {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn a_state_directory_made_before_the_broker_loses_a_looser_access_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, me) = (
+        dir.path().join("egress"),
+        token::current_user_sid().unwrap(),
+    );
+    std::fs::create_dir(&state).unwrap();
+    let grant = std::process::Command::new("icacls")
+        .arg(&state)
+        .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+        .output()
+        .unwrap();
+    assert!(grant.status.success() && icacls(&state).contains("Everyone"));
+    let settings = settings(&state, &me);
+    let control = open(settings.core(), egress_broker::SERVICE, handler, None).unwrap();
+    assert!(!icacls(&state).contains("Everyone"), "{}", icacls(&state));
+    drop(control);
+}
+
+#[test]
+fn a_state_directory_another_account_owns_opens_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("egress");
+    std::fs::create_dir(&state).unwrap();
+    let owner = std::process::Command::new("icacls")
+        .arg(&state)
+        .args(["/setowner", "*S-1-1-0"])
+        .output()
+        .unwrap();
+    if !owner.status.success() {
+        // Giving a directory away needs a privilege the account may lack;
+        // the owner check is then shown by the state_directory unit test.
+        return;
+    }
+    let settings = settings(&state, &token::current_user_sid().unwrap());
+    let refused = open(settings.core(), egress_broker::SERVICE, handler, None);
+    let refused = format!("{:#}", refused.err().expect("opened a foreign directory"));
+    assert!(refused.contains("is owned by"), "{refused}");
+}
+
 #[test]
 fn a_control_pipe_another_account_owns_is_never_used_by_the_runner() {
     let dir = tempfile::tempdir().unwrap();

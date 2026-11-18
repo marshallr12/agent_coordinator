@@ -62,6 +62,7 @@ pub mod runner;
 pub mod runner_service;
 pub mod scm;
 pub mod sddl;
+pub mod state_directory;
 pub mod supervisor_service;
 pub mod sys;
 pub mod text;
