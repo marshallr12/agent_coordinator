@@ -35,6 +35,10 @@ pub const CONTROL_PATIENCE: Duration = Duration::from_secs(1);
 /// How long an exchange that outlasted its patience is cancelled for before
 /// its thread is left to end by itself.
 const CANCEL_PATIENCE: Duration = Duration::from_millis(250);
+/// How long an exchange waits for the control pipe's one instance while
+/// another client holds it; within [`CONTROL_PATIENCE`], since that wait
+/// is not one `CancelSynchronousIo` ends.
+const BUSY_PATIENCE: Duration = Duration::from_millis(500);
 
 /// The egress broker a runner has every launch admitted by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +98,9 @@ impl EgressRoute {
         let (pipe, broker) = (self.control_pipe.clone(), self.broker_sid.clone());
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let reached = ControlClient::connect(&pipe, &broker)
+            // A wait for a busy pipe cannot be cancelled, so it is given
+            // less than the exchange's own patience.
+            let reached = ControlClient::connect_within(&pipe, &broker, BUSY_PATIENCE)
                 .with_context(|| format!("reach the egress broker's pipe {pipe}"));
             let _ = sender.send(reached.and_then(|mut control| ask(&mut control)));
         });
@@ -395,13 +401,40 @@ mod tests {
         let name = unique();
         silent_broker(&name);
         let route = EgressRoute::new(&name, &me()).unwrap();
-        let started = Instant::now();
-        let released = route.release(&id());
-        let took = started.elapsed();
-        let error = format!("{:#}", released.unwrap_err());
-        assert!(error.contains("did not answer"), "{error}");
         let most = CONTROL_PATIENCE + CANCEL_PATIENCE + Duration::from_millis(500);
-        assert!(took < most, "the release took {took:?}");
+        // The first exchange waits for an answer; the second finds the one
+        // instance still held by the broker that never answered.
+        for exchange in ["unanswered", "busy"] {
+            let started = Instant::now();
+            let released = route.release(&id());
+            let took = started.elapsed();
+            assert!(released.is_err(), "{exchange}: the release succeeded");
+            assert!(took < most, "{exchange}: the release took {took:?}");
+        }
+    }
+
+    #[test]
+    fn launches_left_unreleased_are_released_after_the_next_release() {
+        let name = unique();
+        let route = EgressRoute::new(&name, &me()).unwrap();
+        let mut admissions = Admissions::new(Some(route));
+        let done = Arc::new(AtomicBool::new(false));
+        let server = broker_serving(&name, done.clone());
+        admissions
+            .admit(&entry(Some(Role::Implementer)), &command())
+            .unwrap();
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        let mut earlier = entry(Some(Role::Implementer));
+        earlier.launch = format!("{}-earlier", id());
+        earlier.package_sid = "S-1-15-2-1-2-3-4-5-6-8".into();
+        assert!(admissions.admit(&earlier, &command()).is_err(), "no broker");
+        let done = Arc::new(AtomicBool::new(false));
+        let server = broker_serving(&name, done.clone());
+        assert_eq!(admissions.release(&id()), None);
+        assert!(!admissions.unreleased(&earlier.launch), "not swept");
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
     }
 
     #[test]

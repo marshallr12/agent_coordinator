@@ -49,8 +49,14 @@ impl Client {
     /// (SID text) owns it: the runner service's, or a broker's for its
     /// control pipe. A pipe owned by anyone else is closed unused.
     pub fn connect(name: &str, runner: &str) -> Result<Self> {
+        Self::connect_within(name, runner, BUSY_PATIENCE)
+    }
+
+    /// As [`Client::connect`], waiting at most `busy` for an instance of a
+    /// pipe whose every instance is serving a client.
+    pub fn connect_within(name: &str, runner: &str, busy: Duration) -> Result<Self> {
         let runner = checked_sid(runner)?;
-        let file = open(name)?;
+        let file = open(name, busy)?;
         let owner = owner_sid(&file).context("the pipe's owner cannot be read; it is not used")?;
         ensure!(
             owner.eq_ignore_ascii_case(runner),
@@ -101,14 +107,14 @@ impl Client {
 /// Opens the pipe `name` with a client's rights. The server may identify
 /// this process on the connection and may not impersonate it further. A
 /// pipe whose every instance is busy, as a server's one instance is
-/// between two clients, is waited for up to [`BUSY_PATIENCE`].
-fn open(name: &str) -> Result<File> {
+/// between two clients, is waited for up to `patience`.
+fn open(name: &str, patience: Duration) -> Result<File> {
     let path = pipe_path(name)?;
     let mut options = OpenOptions::new();
     options
         .access_mode(CLIENT_ACCESS)
         .security_qos_flags(SECURITY_IDENTIFICATION);
-    let deadline = Instant::now() + BUSY_PATIENCE;
+    let deadline = Instant::now() + patience;
     loop {
         let opened = options.open(&path);
         let left = deadline.saturating_duration_since(Instant::now());

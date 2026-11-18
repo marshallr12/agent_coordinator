@@ -156,6 +156,13 @@ impl ControlClient {
         Ok(Self { client })
     }
 
+    /// As [`ControlClient::connect`], waiting at most `busy` for the pipe's
+    /// one instance when another client holds it.
+    pub fn connect_within(name: &str, broker: &str, busy: Duration) -> Result<Self> {
+        let client = pipe_client::Client::connect_within(name, broker, busy)?;
+        Ok(Self { client })
+    }
+
     /// Asks the broker to serve `launch`, which works as `role` and carries
     /// `package`, at a generation of at least `generation`.
     pub fn open(
