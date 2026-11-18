@@ -1,22 +1,30 @@
-//! The runner's side of brokered egress (phase 6, step 6b): with an
-//! egress broker configured, no launch starts until the broker has admitted
-//! it, and a launch the broker does not admit is not started.
+//! The runner's side of brokered egress and publication (phase 6, steps 6b
+//! and 6c): with a broker configured, no launch it serves starts until the
+//! broker has admitted it, and a launch the broker does not admit is not
+//! started.
+//!
+//! The egress broker serves every launch. The publication broker serves
+//! implementer launches only, and is told the task each works on, which
+//! names its candidate ref; a reviewer launch is never offered it.
 //!
 //! Admission fails closed. A broker that is not running, a control pipe
-//! another account owns, a launch with no role, a request the broker
-//! refuses and a broker that does not answer within [`CONTROL_PATIENCE`]
-//! each keep the launch from starting; nothing falls back to an unbrokered
-//! start. The launch learns its pipe's path from [`PIPE_VARIABLE`]; its
-//! token still has no network capability, so the pipe is its only way out.
+//! another account owns, a launch with no role (or, for publication, no
+//! task), a request the broker refuses and a broker that does not answer
+//! within [`CONTROL_PATIENCE`] each keep the launch from starting; nothing
+//! falls back to an unbrokered start. The launch learns its pipe's path
+//! from the broker's variable ([`PIPE_VARIABLE`] for egress,
+//! [`PUBLICATION_VARIABLE`] for publication).
 //!
-//! Every exchange with the broker is bounded by [`CONTROL_PATIENCE`]: the
+//! Every exchange with a broker is bounded by [`CONTROL_PATIENCE`]: the
 //! runner service serves everything on one thread, and a broker that is
 //! busy, wedged or gone must not hold it. A launch whose release failed,
 //! or whose admission ended without an answer, is kept for release and
 //! asked again before the next admission and at the next cleanup.
+use super::broker::Role;
 use super::broker_control::{ControlClient, Opened};
 use super::egress_broker::PIPE_VARIABLE;
 use super::journal::Entry;
+use super::pipe_client;
 use super::process::Command;
 use crate::service::pipe_policy::{checked_sid, pipe_path};
 use anyhow::{Context, Result, bail};
@@ -40,78 +48,151 @@ const CANCEL_PATIENCE: Duration = Duration::from_millis(250);
 /// is not one `CancelSynchronousIo` ends.
 const BUSY_PATIENCE: Duration = Duration::from_millis(500);
 
-/// The egress broker a runner has every launch admitted by.
+/// The variable an implementer launch is told its publication pipe's path
+/// in: the one the CLI's candidate-checkpoint client reads.
+pub const PUBLICATION_VARIABLE: &str = "AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET";
+
+/// Which broker a route reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Brokered {
+    Egress,
+    Publication,
+}
+
+impl Brokered {
+    /// The broker's name in messages.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Egress => "the egress broker",
+            Self::Publication => "the publication broker",
+        }
+    }
+
+    /// The variable a launch is told its pipe in.
+    fn variable(self) -> &'static str {
+        match self {
+            Self::Egress => PIPE_VARIABLE,
+            Self::Publication => PUBLICATION_VARIABLE,
+        }
+    }
+}
+
+/// A broker a runner has launches admitted by.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EgressRoute {
+pub struct BrokerRoute {
+    kind: Brokered,
     control_pipe: String,
     broker_sid: String,
 }
 
-impl EgressRoute {
-    /// The broker serving the control pipe `control_pipe` as the account
-    /// `broker_sid` (SID text).
+/// The egress broker's route, by its former name.
+pub type EgressRoute = BrokerRoute;
+
+impl BrokerRoute {
+    /// The egress broker serving the control pipe `control_pipe` as the
+    /// account `broker_sid` (SID text); it serves every launch.
     pub fn new(control_pipe: &str, broker_sid: &str) -> Result<Self> {
+        Self::of(Brokered::Egress, control_pipe, broker_sid)
+    }
+
+    /// The publication broker serving `control_pipe` as `broker_sid`; it
+    /// serves implementer launches only.
+    pub fn publication(control_pipe: &str, broker_sid: &str) -> Result<Self> {
+        Self::of(Brokered::Publication, control_pipe, broker_sid)
+    }
+
+    /// The `kind` of broker on `control_pipe` running as `broker_sid`.
+    fn of(kind: Brokered, control_pipe: &str, broker_sid: &str) -> Result<Self> {
         pipe_path(control_pipe)?;
         Ok(Self {
+            kind,
             control_pipe: control_pipe.to_owned(),
             broker_sid: checked_sid(broker_sid)?.to_owned(),
         })
     }
 
+    /// Whether this broker serves `entry`'s launch at all: publication is
+    /// never offered to a launch that does not say it is an implementer.
+    pub fn serves(&self, entry: &Entry) -> bool {
+        self.kind == Brokered::Egress || entry.role == Some(Role::Implementer)
+    }
+
     /// Has the broker admit `entry`'s launch and returns `command` with the
-    /// launch's pipe in [`PIPE_VARIABLE`]. An error means the launch must
-    /// not start.
+    /// launch's pipe in the broker's variable. An error means the launch
+    /// must not start.
     pub fn admit(&self, entry: &Entry, command: &Command) -> Result<Command> {
-        let launch = &entry.launch;
-        let opened = self.open(entry).with_context(|| {
-            format!("the egress broker did not admit launch {launch}; it is not started")
-        })?;
+        let (launch, label) = (&entry.launch, self.kind.label());
+        let opened = self
+            .open(entry)
+            .with_context(|| format!("{label} did not admit launch {launch}; it is not started"))?;
         let mut command = command.clone();
         let path = pipe_path(&opened.pipe)?;
-        command.environment.insert(PIPE_VARIABLE.into(), path);
+        command
+            .environment
+            .insert(self.kind.variable().into(), path);
         Ok(command)
     }
 
-    /// Asks the broker to serve `entry`'s launch.
+    /// Asks the broker to serve `entry`'s launch, with its task for the
+    /// publication broker.
     fn open(&self, entry: &Entry) -> Result<Opened> {
         let role = entry.role.context("the launch has no role")?;
         let generation = entry.generation.unwrap_or(FIRST_GENERATION);
+        let task = match self.kind {
+            Brokered::Egress => None,
+            Brokered::Publication => Some(entry.task.clone().context("the launch has no task")?),
+        };
         let (launch, package) = (entry.launch.clone(), entry.package_sid.clone());
-        self.within(move |control| control.open(&launch, role, &package, generation))
+        self.within(move |control| {
+            control.open_for(&launch, role, &package, generation, task.as_deref())
+        })
     }
 
-    /// Asks the broker to stop serving `launch`, which ends its tunnels and
+    /// Asks the broker to stop serving `launch`, which ends its sessions and
     /// removes its pipe; false when the broker served none.
     pub fn release(&self, launch: &str) -> Result<bool> {
         let launch = launch.to_owned();
         self.within(move |control| control.close(&launch))
     }
 
-    /// Runs `ask` on a connection to the broker's control pipe, which its
-    /// account owns, on a thread of its own, and waits for it at most
-    /// [`CONTROL_PATIENCE`]. An exchange still running then is cancelled,
-    /// and its outcome is unknown.
+    /// Runs `ask` on the broker's control pipe within [`CONTROL_PATIENCE`].
     fn within<T: Send + 'static>(
         &self,
         ask: impl FnOnce(&mut ControlClient) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let (pipe, broker) = (self.control_pipe.clone(), self.broker_sid.clone());
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            // A wait for a busy pipe cannot be cancelled, so it is given
-            // less than the exchange's own patience.
-            let reached = ControlClient::connect_within(&pipe, &broker, BUSY_PATIENCE)
-                .with_context(|| format!("reach the egress broker's pipe {pipe}"));
-            let _ = sender.send(reached.and_then(|mut control| ask(&mut control)));
-        });
-        match receiver.recv_timeout(CONTROL_PATIENCE) {
-            Ok(answer) => answer,
-            Err(RecvTimeoutError::Timeout) => {
-                cancel(&worker);
-                bail!("the egress broker did not answer within {CONTROL_PATIENCE:?}")
-            }
-            Err(RecvTimeoutError::Disconnected) => bail!("the broker exchange ended unheard"),
+        let label = self.kind.label();
+        within(label, pipe, broker, move |client| {
+            ask(&mut ControlClient::from(client))
+        })
+    }
+}
+
+/// Runs `ask` on a connection to the pipe `pipe`, which the account `owner`
+/// must own, on a thread of its own, and waits for it at most
+/// [`CONTROL_PATIENCE`]. An exchange still running then is cancelled, and
+/// its outcome is unknown. `label` names the service in messages.
+pub fn within<T: Send + 'static>(
+    label: &'static str,
+    pipe: String,
+    owner: String,
+    ask: impl FnOnce(pipe_client::Client) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        // A wait for a busy pipe cannot be cancelled, so it is given less
+        // than the exchange's own patience.
+        let reached = pipe_client::Client::connect_within(&pipe, &owner, BUSY_PATIENCE)
+            .with_context(|| format!("reach the pipe {pipe} of {label}"));
+        let _ = sender.send(reached.and_then(ask));
+    });
+    match receiver.recv_timeout(CONTROL_PATIENCE) {
+        Ok(answer) => answer,
+        Err(RecvTimeoutError::Timeout) => {
+            cancel(&worker);
+            bail!("{label} did not answer within {CONTROL_PATIENCE:?}")
         }
+        Err(RecvTimeoutError::Disconnected) => bail!("the exchange with {label} ended unheard"),
     }
 }
 
@@ -153,7 +234,7 @@ impl Admissions {
     /// An error means the launch must not start; the broker may still have
     /// admitted it, so it is kept for release.
     pub fn admit(&mut self, entry: &Entry, command: &Command) -> Result<Command> {
-        let Some(route) = self.route.clone() else {
+        let Some(route) = self.route.clone().filter(|route| route.serves(entry)) else {
             return Ok(command.clone());
         };
         self.sweep();
@@ -277,6 +358,7 @@ mod tests {
             attempt: None,
             generation: Some(3),
             role,
+            task: Some("t-1".into()),
             pid: None,
             created: None,
             control: None,

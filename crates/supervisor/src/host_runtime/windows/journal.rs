@@ -48,6 +48,12 @@ pub struct Entry {
     /// older entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
+    /// The coordinator task the caller says the launch works on, which
+    /// names an implementer's candidate ref at the publication broker.
+    /// Recorded, not checked; absent when the caller named none and in
+    /// older entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
     /// The root process of the last start and its creation time.
     pub pid: Option<u32>,
     pub created: Option<u64>,
@@ -171,6 +177,7 @@ mod tests {
             attempt: Some("a1".into()),
             generation: Some(4),
             role: None,
+            task: None,
             pid: None,
             created: None,
             control: None,
@@ -223,6 +230,25 @@ mod tests {
         );
         fs::write(dir.path().join("old-1.json"), older.to_string()).unwrap();
         assert_eq!(journal.load("old-1").map(|e| e.role), Some(None));
+    }
+
+    #[test]
+    fn a_launchs_task_is_saved_and_older_entries_without_one_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let saved = Entry {
+            task: Some("t-1".into()),
+            ..entry("impl-1")
+        };
+        journal.save(&saved).unwrap();
+        assert_eq!(journal.load("impl-1"), Some(saved));
+        let older = serde_json::to_value(entry("old-1")).unwrap();
+        assert!(
+            older.get("task").is_none(),
+            "older readers see no new field"
+        );
+        fs::write(dir.path().join("old-1.json"), older.to_string()).unwrap();
+        assert_eq!(journal.load("old-1").map(|e| e.task), Some(None));
     }
 
     #[test]

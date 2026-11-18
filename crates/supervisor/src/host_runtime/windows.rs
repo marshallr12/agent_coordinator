@@ -36,6 +36,7 @@
 //! comes from a [`Planner`] the caller supplies; nothing in this crate
 //! builds a harness launch for it.
 pub mod adoption;
+pub mod authority_pipe;
 pub mod broker;
 pub mod broker_control;
 pub mod candidate;
@@ -52,6 +53,7 @@ pub mod pipe;
 pub mod pipe_client;
 pub mod process;
 pub mod profile;
+pub mod publication_broker;
 pub mod reader;
 pub mod recovery;
 pub mod remote;

@@ -40,6 +40,15 @@
 # egress_control_pipe: the runner uses the control pipe only when this
 # account owns it.
 # egress_broker_sid = ""
+# The publication broker's control pipe, below \\.\pipe\ (for example
+# "agentc-publication-control"). Empty: no launch is offered brokered
+# publication. Set: every implementer launch must be admitted by the broker
+# before it starts, and is told its pipe in
+# AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET; reviewer launches never are.
+# publication_control_pipe = ""
+# The publication broker's account, as SID text. Required with
+# publication_control_pipe.
+# publication_broker_sid = ""
 
 [windows_supervisor]
 # The service's name in the Service Control Manager.
@@ -54,6 +63,13 @@
 # runner_sid = ""
 # Seconds between status reports while the service is stopping.
 # status_interval_seconds = 3
+# The pipe the publication broker asks, before each push, whether a launch
+# still has coordinator authority; below \\.\pipe\
+# authority_pipe = "agentc-supervisor-authority"
+# The publication broker's account, as SID text: the only client the
+# authority pipe serves. Empty: the pipe is not served, so a broker that asks
+# is refused every push.
+# publication_broker_sid = ""
 
 # The acceptance stand-in. It replaces the coordinator with a directory of
 # queued items and a ledger, for machine acceptance only. While it is off,

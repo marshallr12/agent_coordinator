@@ -48,6 +48,13 @@ pub struct SupervisorSettings {
     pub runner_sid: String,
     /// Seconds between status reports while the service is stopping.
     pub status_interval_seconds: u64,
+    /// The authority pipe the publication broker asks before each push,
+    /// below `\\.\pipe\`.
+    pub authority_pipe: String,
+    /// The publication broker's account, as SID text: the only client the
+    /// authority pipe serves. Empty: the pipe is not served, and a broker
+    /// that asks is refused every push.
+    pub publication_broker_sid: String,
     /// The acceptance stand-in; off by default.
     pub stand_in: StandInSettings,
 }
@@ -60,6 +67,8 @@ impl Default for SupervisorSettings {
             runner_pipe: "agentc-runner".into(),
             runner_sid: String::new(),
             status_interval_seconds: 3,
+            authority_pipe: "agentc-supervisor-authority".into(),
+            publication_broker_sid: String::new(),
             stand_in: StandInSettings::default(),
         }
     }
@@ -80,7 +89,17 @@ impl SupervisorSettings {
             self.status_interval_seconds >= 1,
             "windows_supervisor.status_interval_seconds must be at least 1"
         );
+        pipe_path(&self.authority_pipe)?;
+        if !self.publication_broker_sid.is_empty() {
+            checked_sid(&self.publication_broker_sid)?;
+        }
         self.stand_in.validate()
+    }
+
+    /// The publication broker's account, when the authority pipe is to be
+    /// served to it.
+    pub fn publication_broker(&self) -> Option<&str> {
+        Some(self.publication_broker_sid.as_str()).filter(|sid| !sid.is_empty())
     }
 }
 

@@ -28,6 +28,7 @@ uuid.workspace = true
 libc = "=0.2.189"
 
 [target.'cfg(windows)'.dependencies]
+coordinator-local = { path = "../local" }
 windows-sys.workspace = true
 
 [dev-dependencies]

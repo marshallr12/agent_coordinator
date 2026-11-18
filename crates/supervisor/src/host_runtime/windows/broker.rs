@@ -52,6 +52,9 @@ pub struct Grant {
     account: String,
     package: String,
     generation: u64,
+    /// The coordinator task the launch works on, when its owner named one;
+    /// the publication broker names the launch's candidate ref after it.
+    task: Option<String>,
 }
 
 impl Grant {
@@ -72,7 +75,21 @@ impl Grant {
             account: checked_sid(account)?.to_owned(),
             package: checked_sid(package)?.to_owned(),
             generation,
+            task: None,
         })
+    }
+
+    /// This grant for a launch working on `task`, which must be plain
+    /// enough to name a pipe (letters, digits, `-`, `_`, `.`).
+    pub fn with_task(mut self, task: &str) -> Result<Self> {
+        pipe_path(task).with_context(|| format!("{task:?} cannot name a task"))?;
+        self.task = Some(task.to_owned());
+        Ok(self)
+    }
+
+    /// The task the launch works on, if its owner named one.
+    pub fn task(&self) -> Option<&str> {
+        self.task.as_deref()
     }
 
     /// The launch's id.

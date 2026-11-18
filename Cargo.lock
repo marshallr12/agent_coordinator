@@ -36,6 +36,7 @@ dependencies = [
  "clap",
  "coordinator-client",
  "coordinator-core",
+ "coordinator-local",
  "hex",
  "libc",
  "reqwest",

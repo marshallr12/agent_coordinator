@@ -212,13 +212,16 @@ impl<P: Planner, L: Link> HostRuntime for RemoteHost<P, L> {
     /// Has the runner create the launch's profile, directories and desktop,
     /// and says which package, job owner and executable identify it. The
     /// run loop's launches are implementers, and the runner journals that
-    /// role. A [`Launch`] carries no coordinator attempt or generation, so
-    /// none is sent.
+    /// role and the task, which names the launch's candidate ref at the
+    /// publication broker. A [`Launch`] carries no coordinator attempt or
+    /// generation, so none is sent: the supervisor's own authority record
+    /// ([`crate::service::authority`]) holds them.
     fn prepare(&mut self, launch: &Launch) -> Result<StartIntent> {
         let (spec, command) = self.planner.plan(launch)?;
         let mut request = Self::about("prepare", launch);
         request["spec"] = serde_json::to_value(&spec)?;
         request["role"] = json!(Role::Implementer);
+        request["task"] = json!(launch.suggestion.task);
         let answer = self.call(request)?;
         let text = |field: &str| answer[field].as_str().map(str::to_owned);
         let intent = StartIntent {
@@ -482,6 +485,7 @@ mod tests {
         let asked = fake.0.borrow().asked.clone();
         assert_eq!(asked[0]["spec"]["less_privileged"], true);
         assert_eq!(asked[0]["role"], "implementer");
+        assert_eq!(asked[0]["task"], launch.suggestion.task);
         for unknown in ["attempt", "generation"] {
             assert!(asked[0].get(unknown).is_none(), "{unknown} was sent");
         }
