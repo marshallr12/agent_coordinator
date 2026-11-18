@@ -3,25 +3,35 @@
 //! socket, a push through the per-launch candidate push helper listening on
 //! it. The trusted helper performs authenticated remote readback; the client
 //! checks its exact receipt and the unchanged local snapshot without network.
+//!
+//! On Windows the helper is the publication broker, and the variable names
+//! the launch's local named pipe to it (`\\.\pipe\...`); the protocol is the
+//! same. The pipe is opened for identification only, so the broker can
+//! learn who the client is but never act as it.
 
 use std::path::{Path, PathBuf};
 
 use coordinator_local::candidate_push::{PushKind, PushReceipt};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use coordinator_local::candidate_push::{PushRefusal, RefusalCode};
 use coordinator_local::git_workflow::{
     CandidateCheckpoint, CleanSnapshot, capture_clean_snapshot, checkpoint_candidate,
     scan_candidate_bundle, verify_clean_snapshot,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use serde_json::json;
 
 use crate::Failure;
 
-/// Names the Unix socket of the candidate push helper. When it holds an
+/// Names the candidate push helper's endpoint: a Unix socket, or on Windows
+/// the local named pipe of the publication broker. When it holds an
 /// absolute path (surrounding whitespace is trimmed), code submissions push
 /// through the helper instead of running `git push` themselves.
 pub const CANDIDATE_PUSH_SOCKET_ENV: &str = "AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET";
+/// The prefix of a local named pipe's path, the only Windows endpoint a
+/// helper may have: the remote form `\\host\pipe\...` is refused.
+#[cfg(windows)]
+const LOCAL_PIPE_PREFIX: &str = r"\\.\pipe\";
 
 /// What a code submission checkpoints: the prepared checkout, the configured
 /// repository, the launch's base commit, the caller's `--candidate-ref` (if
@@ -58,22 +68,49 @@ fn helper_socket(value: Option<std::ffi::OsString>) -> Result<Option<PathBuf>, F
             "{CANDIDATE_PUSH_SOCKET_ENV} must be an absolute socket path"
         )));
     }
+    local_endpoint(trimmed)?;
     Ok(Some(PathBuf::from(trimmed)))
 }
 
+/// On Windows, requires `path` to be a local named pipe with a plain name:
+/// `\\.\pipe\` followed by a name without separators.
+#[cfg(windows)]
+fn local_endpoint(path: &str) -> Result<(), Failure> {
+    let name = path
+        .get(..LOCAL_PIPE_PREFIX.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(LOCAL_PIPE_PREFIX))
+        .map(|_| &path[LOCAL_PIPE_PREFIX.len()..]);
+    match name {
+        Some(name) if !name.is_empty() && !name.contains(['\\', '/']) => Ok(()),
+        _ => Err(Failure::invalid(format!(
+            "{CANDIDATE_PUSH_SOCKET_ENV} must name a local pipe, {LOCAL_PIPE_PREFIX}<name>"
+        ))),
+    }
+}
+
+/// Off Windows any absolute path may name a socket.
+#[cfg(not(windows))]
+fn local_endpoint(_path: &str) -> Result<(), Failure> {
+    Ok(())
+}
+
 /// Publishes and verifies the candidate, through the helper at
-/// `helper_socket` when one is given and directly otherwise. Off Unix a
-/// configured helper is refused before the checkout is read.
+/// `helper_socket` when one is given and directly otherwise. On a platform
+/// with neither Unix sockets nor named pipes a configured helper is refused
+/// before the checkout is read.
 pub fn checkpoint(
     request: &CheckpointRequest<'_>,
     helper_socket: Option<&Path>,
 ) -> Result<CandidateCheckpoint, Failure> {
     match helper_socket {
         None => checkpoint_directly(request),
-        Some(socket) if cfg!(unix) => checkpoint_through_helper(request, socket),
+        Some(socket) if HELPERS_SUPPORTED => checkpoint_through_helper(request, socket),
         Some(_) => Err(unsupported_platform()),
     }
 }
+
+/// Whether this platform can reach a candidate push helper.
+const HELPERS_SUPPORTED: bool = cfg!(any(unix, windows));
 
 /// Publishes and verifies a work-in-progress commit. Directly, it pushes to
 /// the request's explicit create-only ref; through the helper, the helper
@@ -84,7 +121,7 @@ pub fn checkpoint_wip(
 ) -> Result<CandidateCheckpoint, Failure> {
     match helper_socket {
         None => checkpoint_directly(request),
-        Some(socket) if cfg!(unix) => publish_through_helper(request, socket, PushKind::Wip),
+        Some(socket) if HELPERS_SUPPORTED => publish_through_helper(request, socket, PushKind::Wip),
         Some(_) => Err(unsupported_platform()),
     }
 }
@@ -200,8 +237,44 @@ fn send_to_helper(
     .map_err(|error| send_failure(&error, &stream))
 }
 
-/// Helper sockets are Unix sockets, so off Unix sending always fails.
-#[cfg(not(unix))]
+/// Opens the publication broker's local pipe `pipe` for reading and writing,
+/// at identification level so the broker cannot impersonate the client, and
+/// sends the snapshot's commit as on Unix.
+#[cfg(windows)]
+fn send_to_helper(
+    pipe: &Path,
+    snapshot: &CleanSnapshot,
+    base_revision: &str,
+    kind: PushKind,
+) -> Result<PushReceipt, Failure> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(pipe);
+    let file = opened.map_err(|error| {
+        Failure::local(
+            7,
+            "candidate_push_unavailable",
+            format!("could not open the publication broker's pipe: {error}"),
+            true,
+        )
+    })?;
+    let mut stream = ObservedStream::new(file);
+    coordinator_local::candidate_push::send_push(
+        &mut stream,
+        &snapshot.checkout,
+        &snapshot.revision,
+        &[base_revision],
+        kind,
+    )
+    .map_err(|error| send_failure(&error, &stream))
+}
+
+/// With neither Unix sockets nor named pipes, sending always fails.
+#[cfg(not(any(unix, windows)))]
 fn send_to_helper(
     _socket: &Path,
     _snapshot: &CleanSnapshot,
@@ -211,17 +284,19 @@ fn send_to_helper(
     Err(unsupported_platform())
 }
 
-/// The invalid-input failure for a helper configured off Unix.
+/// The invalid-input failure for a helper configured where none can be
+/// reached.
 fn unsupported_platform() -> Failure {
     Failure::invalid(format!(
-        "{CANDIDATE_PUSH_SOCKET_ENV} is set, but candidate push helpers need Unix sockets"
+        "{CANDIDATE_PUSH_SOCKET_ENV} is set, but candidate push helpers need Unix sockets \
+         or Windows named pipes"
     ))
 }
 
 /// A stream that records whether it was used, whether an I/O call on it
 /// failed, and whether a read met the end of the stream, so a failed send can
 /// be attributed to the checkout, the connection, or the helper.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct ObservedStream<S> {
     inner: S,
     used: bool,
@@ -229,7 +304,7 @@ struct ObservedStream<S> {
     eof: bool,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl<S> ObservedStream<S> {
     /// Wraps `inner`, not yet used, failed or at its end.
     fn new(inner: S) -> Self {
@@ -252,7 +327,7 @@ impl<S> ObservedStream<S> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl<S: std::io::Read> std::io::Read for ObservedStream<S> {
     /// Reads from the inner stream, recording the outcome; reading nothing
     /// into a non-empty buffer marks the end of the stream.
@@ -263,7 +338,7 @@ impl<S: std::io::Read> std::io::Read for ObservedStream<S> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl<S: std::io::Write> std::io::Write for ObservedStream<S> {
     /// Writes to the inner stream, recording the outcome.
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
@@ -284,7 +359,7 @@ impl<S: std::io::Write> std::io::Write for ObservedStream<S> {
 /// bundle in the checkout: invalid input (exit 2). Anything else, such as a
 /// malformed reply or a receipt naming another commit, tree or ref, is a
 /// non-retryable `candidate_push_protocol_violation` (exit 5).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn send_failure<S>(error: &anyhow::Error, stream: &ObservedStream<S>) -> Failure {
     if let Some(refusal) = error.downcast_ref::<PushRefusal>() {
         return refusal_failure(refusal);
@@ -305,10 +380,12 @@ fn send_failure<S>(error: &anyhow::Error, stream: &ObservedStream<S>) -> Failure
 /// lease conflict and an already published candidate are state conflicts
 /// (exit 5); push and internal helper failures are temporary and retryable
 /// (exit 7); every other refusal is invalid input (exit 2).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn refusal_failure(refusal: &PushRefusal) -> Failure {
     let (exit, retryable) = match refusal.code {
-        RefusalCode::LeaseConflict | RefusalCode::CandidateAlreadyPublished => (5, false),
+        RefusalCode::LeaseConflict
+        | RefusalCode::CandidateAlreadyPublished
+        | RefusalCode::NotAuthorized => (5, false),
         RefusalCode::PushFailed | RefusalCode::Internal => (7, true),
         RefusalCode::BadRequest
         | RefusalCode::TooLarge
@@ -328,7 +405,7 @@ fn refusal_failure(refusal: &PushRefusal) -> Failure {
 
 /// `message` with every control character and bidirectional formatting
 /// character replaced by a space, so helper text cannot drive a terminal.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn printable(message: &str) -> String {
     let unsafe_char = |c: char| {
         c.is_control()
@@ -342,3 +419,6 @@ fn printable(message: &str) -> String {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;
