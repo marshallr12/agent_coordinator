@@ -563,9 +563,25 @@ fn hold() -> String {
         }
         None => "no tunnel".to_owned(),
     };
-    let reopened =
-        open_pipe(&egress_pipe()).map_or_else(|error| failed(&error), |_| "opened".into());
-    format!("held = {said}, {ended}\nreopened = {reopened}")
+    format!("held = {said}, {ended}\nreopened = {}", reopened())
+}
+
+/// How long the hold probe gives the host's close to finish after the
+/// tunnel broke: the session's instance ends first, and the pipe's other
+/// instances only once the broker has joined their threads.
+const CLOSE_PATIENCE: Duration = Duration::from_secs(2);
+
+/// Opens the egress pipe again until it is gone, for at most
+/// [`CLOSE_PATIENCE`]; "opened" when it is still there after that.
+fn reopened() -> String {
+    let started = Instant::now();
+    loop {
+        match open_pipe(&egress_pipe()) {
+            Err(error) => return failed(&error),
+            Ok(_) if started.elapsed() >= CLOSE_PATIENCE => return "opened".into(),
+            Ok(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 /// The loopback probe: a listener on IPv4 loopback inside the launch, and
