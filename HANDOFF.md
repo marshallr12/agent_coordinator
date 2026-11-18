@@ -207,6 +207,37 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
   - **Update 2026-11-18 05:38 UTC — roster change DONE:** the owner saved it; the workflow policy
     reads revision **4** (`updated_at` 05:38:04Z) with `inputs: ["Cargo.lock", ".cargo/audit.toml"]`
     on dependency-audit and the other two checks unchanged. Nothing was in flight at the save.
+  - **Update 2026-11-18 14:40 UTC — four open items taken (owner chose all four; CLI session
+    `open-items-20261118`):**
+    - **HANDOFF pruned** 2406 → 809 lines (`4579a7b`): the 2026-09-29 to 2026-11-02 resume points
+      moved verbatim to `docs/archive/HANDOFF-autonomy-resume-points-2026-09-29-to-2026-11-02.md`.
+    - **P6 third window:** task **`e6685dbf`** created **planned**, human-delivered, general
+      (not admitted, no start time). Owner decisions: latency judged as median **ready→Done** with
+      the 20 value tasks released on a stagger and the baseline recomputed with the same measure;
+      **no cron observer** (audit from durable records, scripts pinned by digest in `window.json`);
+      mxmini **keeps quiet hours**. The owner supplies the 20 tasks and admits it. Preconditions
+      are in the task text. Observer failure cause (inferred, not tested): the coordinator token is
+      exported only in the interactive shell, so cron had none.
+    - **Containment suite `f8bddba`:** there is no installed copy on a host and mxmini has no
+      updater job in cron (only the canary and quiet-hours jobs); the updater takes the suite from
+      a published release's `scripts/`, a rollout from its source tree. So the fix arrives with the
+      next rollout built at `f8bddba` or later; nothing was installed. Verified unmodified
+      (sha256 `1f819504…`): oracle-1 **113 PASS**, mxmini **104 PASS**, 0 FAIL, exit 0 on both.
+      oracle-1 keeps a copy in `/home/ubuntu/agentc-suite-f8bddba/` (two files plus `suite.out`).
+    - **Seen on oracle-1 (not acted on):** `agentc-canary.service` fails intermittently on
+      `digest probe failed (TimeoutError)`: six times on 11-18 UTC, five of them after 11:00. Its
+      every-run failure on stale report `7fda3475` stopped at about 19:40 UTC on 11-17 (so the
+      report looks resolved; not read from the service).
+    - **`agentc-push` test race:** task **`74cb2771`** (human-delivered, attempt `889e112f` gen 1),
+      candidate **`d2da1f0`** on main `f8bddba`, worktree `~/src/worktrees/ac-74cb2771-push-race`,
+      branch `task-74cb2771`. Cause: for a foreign launch the helper refuses without reading and
+      closes; when that beat the test client's write, `exchange_raw`'s `write_all().unwrap()` got
+      EPIPE. Test helper only (the real client `send_push` already reads the reply after a failed
+      send). Forced ordering: fails before, passes after; local gate green (1248 tests).
+      Submission `470c88e2` at 14:32Z; review activity `e9cd7910` given to review subagent
+      session `race-reviewer-20261118-sub`; integration `0d505fa7` queued. **Not landed yet**:
+      after Done, remove the worktree and branch per the startup guide.
+    - Evidence: `~/.local/state/agent-coordinator-evidence/open-items-20261118/`.
 
 ## Earlier resume points (archived)
 
