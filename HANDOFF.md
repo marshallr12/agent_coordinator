@@ -263,6 +263,42 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       `818a7b1`. Open: `180fab91` (ready), `e6685dbf` (planned, owner's 20 tasks and admission),
       the oracle-1 canary's digest-probe timeouts and the GitHub 502s (not investigated).
     - Evidence: `~/.local/state/agent-coordinator-evidence/open-items-20261118/`.
+  - **Update 2026-11-18 19:30 UTC — the three open items closed out (CLI session
+    `resume-20261118b`; owner granted production reads, host reads and writes for these items):**
+    - **`180fab91` is Done** without this session: oracle-1's implementer delivered `c8964e3`
+      (submission `85764748`), merged as **`e7b6ded`**. Push output is captured and redacted into
+      `NotPublished`, refusals back off per (target, result, R, T0) from
+      `refused_push_wait_seconds` (default 120 s, doubling to 1 h), and the workflow spec defines
+      the exemption under a required-check ruleset. The cause was **reproduced, not observed in
+      production**: confirm it from the first `push of R refused (attempt N): …` journal line once
+      a build at `e7b6ded` or later runs on oracle-1. Owner action if exempt subjects should land
+      while the target check is red: add the integrator GitHub App to the ruleset's bypass list
+      (mode Always); not done.
+    - **Main is `57f7341`** (also `9a2fe6f`, passkey sign-in button); production and hosts still
+      run `818a7b1`.
+    - **Canary digest timeouts — cause found, task `cb7c28b0` (planned, priority 2):** chronic, not
+      new: 129 timed-out canary runs since 11-04, 88 of them in minutes :05 to :19 although runs
+      are even across the hour. The production VM's backup transfer starts at :05
+      (`gcp-backup-transfer.py`: gzip of a ~345 MB snapshot, upload, download, verify; `Nice=10`
+      only). Sampled every 10 s from the workstation 18:53 to 19:22 UTC: digest 0.2 to 0.7 s
+      normally, **30 s (client limit) at 19:06:22 and 25.3 s at 19:07:03**, normal from 19:10;
+      `/healthz` under 1.6 s throughout; the :00 backup caused nothing. Which resource starves
+      (CPU, memory, disk, lock) is not established: the VM was not read.
+    - **GitHub 502s — task `9dcd2493` (planned, priority 3):** 39 lines on 11-18, all 15:16 to
+      16:19 UTC in the red-audit loop, plus 2 on 11-13; no GitHub incident that hour. The call is
+      the check lookup's `actions/runs/{id}/jobs?filter=all`. Replayed against the 2-attempt run
+      `44232028827`: 10.65 s then 502 on the first request, 7.3 s on the second, ~1.1 s after;
+      single-attempt runs 0.5 to 0.9 s. A 502 skips the subject for one cycle only.
+    - **New, cause not established — task `c8143834` (planned, priority 2):** both oracle-1
+      integrators log `coordinator request failed: service request failed` (a non-timeout transport
+      error; the text hides the cause): 1 to 22 a day from 11-04, then 26, 72 and 101 on 11-16,
+      11-17 and 11-18. Bursts (11-18 14:04 to 14:32, 17:12 to 18:25), both processes often within
+      seconds of each other, not tied to the :05 window. 475 unauthenticated GETs each of
+      `/healthz` and `/api/v1/info` from oracle-1 (18:56 to 19:22) had no failure.
+    - All three tasks are agent-origin and **planned** (admission was 13/14 this week); the owner
+      admits them. Still open besides: `e6685dbf` (planned, owner's 20 tasks and admission).
+    - Evidence: `~/.local/state/agent-coordinator-evidence/resume-20261118b/` (task inputs and
+      receipts, `latency.log`, `oracle-probe.log`).
 
 ## Earlier resume points (archived)
 
