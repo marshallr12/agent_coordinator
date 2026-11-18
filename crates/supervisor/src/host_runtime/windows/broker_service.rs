@@ -22,12 +22,14 @@ use super::broker::{Broker, Handler};
 use super::broker_control::Control;
 use super::egress_broker::{self, Egress};
 use super::publication_broker::{self, Publication};
+use super::publication_credentials::{GithubCredentials, PushAuthority};
 use super::scm::{self, Host};
 use super::{sddl, state_directory, token, token_inventory};
 use crate::config::Config;
 use crate::service::broker_settings::{BrokerCore, PublicationSettings};
 use crate::service::lifecycle::{Report, Signal};
 use crate::service::quiet::Quiet;
+use agentc_integrator::config::GithubConfig;
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
@@ -76,7 +78,26 @@ pub fn publication(settings: &PublicationSettings) -> Result<Arc<dyn Handler>> {
     let work_root = settings.work_root();
     secure(&work_root)?;
     let publication = Publication::new(&settings.remote, work_root, Arc::new(route));
-    Ok(Arc::new(publication))
+    if !settings.has_app() {
+        return Ok(Arc::new(publication));
+    }
+    Ok(Arc::new(
+        publication.with_push(Arc::new(push_authority(settings)?)),
+    ))
+}
+
+/// The App credentials `settings` name, which Git asks for through this
+/// binary's askpass mode. The key is read and used to sign once here.
+fn push_authority(settings: &PublicationSettings) -> Result<PushAuthority> {
+    let app = GithubConfig {
+        api_base: settings.api_base.clone(),
+        app_id: settings.app_id,
+        installation_id: settings.installation_id,
+        private_key: settings.private_key.clone(),
+    };
+    let credentials = GithubCredentials::new(&app, &settings.remote)?;
+    let askpass = std::env::current_exe()?;
+    PushAuthority::new(Box::new(credentials), &askpass)
 }
 
 /// Secures `directory` for this process's account.

@@ -31,6 +31,7 @@ dependencies = [
 name = "agentc-supervisor"
 version = "0.1.2"
 dependencies = [
+ "agentc-integrator",
  "anyhow",
  "chrono",
  "clap",

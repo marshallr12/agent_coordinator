@@ -55,6 +55,7 @@ pub mod pipe_client;
 pub mod process;
 pub mod profile;
 pub mod publication_broker;
+pub mod publication_credentials;
 pub mod reader;
 pub mod recovery;
 pub mod remote;

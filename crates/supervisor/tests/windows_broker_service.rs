@@ -164,3 +164,55 @@ fn a_control_pipe_another_account_owns_is_never_used_by_the_runner() {
         "a pipe the named broker does not own was used"
     );
 }
+
+/// The supervisor binary, run as Git's askpass helper with `token` and
+/// one `prompt`.
+fn askpass(token: Option<&str>, prompt: &str) -> std::process::Output {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_agentc-supervisor"));
+    command.arg(prompt);
+    command.env_remove(agentc_integrator::push_askpass::TOKEN_VARIABLE);
+    if let Some(token) = token {
+        command.env(agentc_integrator::push_askpass::TOKEN_VARIABLE, token);
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn as_askpass_the_binary_answers_github_prompts_only() {
+    let said = |output: std::process::Output| {
+        let text = String::from_utf8(output.stdout).unwrap();
+        (output.status.success(), text.trim().to_owned())
+    };
+    let user = askpass(Some("ghs_x"), "Username for 'https://github.com': ");
+    assert_eq!(said(user), (true, "x-access-token".to_owned()));
+    let password = askpass(
+        Some("ghs_x"),
+        "Password for 'https://x-access-token@github.com': ",
+    );
+    assert_eq!(said(password), (true, "ghs_x".to_owned()));
+    let elsewhere = askpass(Some("ghs_x"), "Password for 'https://example.com': ");
+    assert_eq!(said(elsewhere), (false, String::new()));
+    // Without the token variable it is the ordinary command line.
+    let plain = askpass(None, "Password for 'https://x-access-token@github.com': ");
+    assert!(!plain.status.success() && !said(plain).1.contains("ghs_x"));
+}
+
+#[test]
+fn git_asks_the_binary_for_a_github_credential_and_gets_the_push_token() {
+    use std::io::Write;
+    let askpass = std::path::Path::new(env!("CARGO_BIN_EXE_agentc-supervisor"));
+    let environment =
+        agentc_integrator::push_askpass::git_environment(askpass, "ghs_push").unwrap();
+    let mut git = std::process::Command::new("git");
+    git.args(["credential", "fill"]).envs(environment);
+    git.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut child = git.spawn().unwrap();
+    let asked = b"protocol=https\nhost=github.com\n\n";
+    child.stdin.take().unwrap().write_all(asked).unwrap();
+    let output = child.wait_with_output().unwrap();
+    let filled = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{filled}");
+    assert!(filled.contains("username=x-access-token"), "{filled}");
+    assert!(filled.contains("password=ghs_push"), "{filled}");
+}

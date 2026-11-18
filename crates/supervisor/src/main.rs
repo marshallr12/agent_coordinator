@@ -224,6 +224,10 @@ impl SpecArgs {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if let Some(code) = publication_askpass() {
+        return code;
+    }
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(error) => {
@@ -231,6 +235,28 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// On Windows, Git runs this binary as the publication broker's askpass
+/// helper: the push's token is in `AGENTC_PUSH_ASKPASS_TOKEN` and the one
+/// argument is Git's prompt. It prints the App user name or the token, for
+/// `github.com` prompts only, as `agentc-push` does on Linux. `None` when
+/// this process is not that helper.
+#[cfg(windows)]
+fn publication_askpass() -> Option<ExitCode> {
+    use agentc_integrator::push_askpass;
+    let marker = std::env::var_os(push_askpass::TOKEN_VARIABLE);
+    let (token, prompt) = push_askpass::invoked_prompt(marker, std::env::args().skip(1))?;
+    Some(match push_askpass::answer(&prompt, &token) {
+        Ok(answer) => {
+            println!("{answer}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("agentc-supervisor: {error:#}");
+            ExitCode::from(1)
+        }
+    })
 }
 
 /// Dispatches one subcommand.

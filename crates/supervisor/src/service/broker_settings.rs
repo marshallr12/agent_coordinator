@@ -109,6 +109,16 @@ pub struct PublicationSettings {
     /// is asked only when this account owns it. Empty: the service refuses
     /// to start.
     pub supervisor_sid: String,
+    /// The push App's id. 0: the broker has no push credentials, and Git
+    /// reaches the remote with none (enough for a local remote only).
+    pub app_id: u64,
+    /// The push App's installation on the repository; set with `app_id`.
+    pub installation_id: u64,
+    /// The push App's PEM private key, readable by the publication
+    /// account alone. Read only when `app_id` is set.
+    pub private_key: PathBuf,
+    /// The GitHub REST API base; HTTPS, since the App JWT is sent to it.
+    pub api_base: String,
 }
 
 impl Default for PublicationSettings {
@@ -121,6 +131,10 @@ impl Default for PublicationSettings {
             remote: String::new(),
             authority_pipe: "agentc-supervisor-authority".into(),
             supervisor_sid: String::new(),
+            app_id: 0,
+            installation_id: 0,
+            private_key: PathBuf::from(r"C:\ProgramData\agentc\publication-key\push-app.pem"),
+            api_base: "https://api.github.com".into(),
         }
     }
 }
@@ -155,6 +169,32 @@ impl PublicationSettings {
             "windows_publication.supervisor_sid names no supervisor account to ask"
         );
         checked_sid(&self.supervisor_sid)?;
+        self.validate_app()
+    }
+
+    /// Whether the broker pushes with an App's tokens.
+    pub fn has_app(&self) -> bool {
+        self.app_id != 0
+    }
+
+    /// Refuses App settings that are half set or would send the App's JWT
+    /// anywhere but HTTPS.
+    fn validate_app(&self) -> Result<()> {
+        ensure!(
+            (self.app_id == 0) == (self.installation_id == 0),
+            "windows_publication.app_id and installation_id are set together or not at all"
+        );
+        if self.has_app() {
+            ensure!(
+                self.api_base.starts_with("https://"),
+                "windows_publication.api_base must be an https:// URL"
+            );
+            ensure!(
+                self.remote.starts_with("https://github.com/"),
+                "windows_publication.remote must be https://github.com/<owner>/<repo>.git \
+                 when the broker pushes with an App"
+            );
+        }
         Ok(())
     }
 }
@@ -206,8 +246,20 @@ mod tests {
     }
 
     #[test]
+    fn push_credentials_are_off_by_default_and_on_with_an_app() {
+        assert!(!publication().has_app());
+        let with_app = PublicationSettings {
+            app_id: 7,
+            installation_id: 8,
+            ..publication()
+        };
+        with_app.validate().unwrap();
+        assert!(with_app.has_app());
+    }
+
+    #[test]
     fn settings_a_broker_could_not_honor_are_refused() {
-        let broken: [fn(&mut PublicationSettings); 8] = [
+        let broken: [fn(&mut PublicationSettings); 12] = [
             |s| s.name.clear(),
             |s| s.state_dir = PathBuf::new(),
             |s| s.control_pipe = r"..\x".into(),
@@ -216,6 +268,16 @@ mod tests {
             |s| s.authority_pipe = r"..\x".into(),
             |s| s.supervisor_sid.clear(),
             |s| s.supervisor_sid = "S-1-5-1)(A;;GA;;;WD".into(),
+            |s| s.app_id = 7,
+            |s| s.installation_id = 8,
+            |s| {
+                (s.app_id, s.installation_id) = (7, 8);
+                s.api_base = "http://api.github.com".into();
+            },
+            |s| {
+                (s.app_id, s.installation_id) = (7, 8);
+                s.remote = "https://example.com/owner/repository.git".into();
+            },
         ];
         for (index, change) in broken.iter().enumerate() {
             let mut settings = publication();

@@ -127,3 +127,17 @@
 # The supervisor service's account, as SID text: the authority pipe is asked
 # only when this account owns it. No usable default.
 # supervisor_sid = ""
+# The push App's id and its installation on the repository, set together.
+# 0: the broker has no push credentials and Git reaches the remote with
+# none, which only a local remote accepts. With an App, every push gets an
+# installation token narrowed to the remote's repository with contents:
+# write, revoked after the push; remote must then be
+# https://github.com/<owner>/<repo>.git.
+# app_id = 0
+# installation_id = 0
+# The App's PEM private key. Give only the publication service's account
+# read access (and the system and administrators full control); the broker
+# reads it at start and stops if it cannot sign with it.
+# private_key = 'C:\ProgramData\agentc\publication-key\push-app.pem'
+# The GitHub REST API base, HTTPS only.
+# api_base = "https://api.github.com"
