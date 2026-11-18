@@ -287,7 +287,13 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       **VM read by the owner at 19:32 UTC (task now revision 2):** the transfer ran 19:05:36 to
       19:09:22, matching the stall to within seconds, on 41 s of CPU in 226 s, so it is not
       CPU-bound; cumulative pressure since boot is io 19,624 s, memory 1,702 s, cpu 713 s. Disk
-      I/O is the likely mechanism. Still missing: pressure figures taken during a transfer.
+      I/O is the likely mechanism.
+      **Readings during the 20:06:02 to 20:08:32 UTC transfer (agent-run, owner's permission):**
+      io pressure full avg10 peaked at 88.0 (20:07:33), memory full at 51.6, cpu some at most
+      5.7; stall added over 151 s was io 87.3 s, memory 32.5 s, cpu 2.2 s. Mechanism: disk I/O
+      saturation with memory pressure on the 953 MB VM, not CPU. Which transfer step peaks is
+      not separated. **`cb7c28b0` admitted by the agent on the owner's instruction at 20:11 UTC:
+      open, ready, revision 4, not held by budget.** `c8143834` and `9dcd2493` remain planned.
     - **GitHub 502s — task `9dcd2493` (planned, priority 3):** 39 lines on 11-18, all 15:16 to
       16:19 UTC in the red-audit loop, plus 2 on 11-13; no GitHub incident that hour. The call is
       the check lookup's `actions/runs/{id}/jobs?filter=all`. Replayed against the 2-attempt run
