@@ -363,7 +363,7 @@ fn publication() -> String {
     let repository = Repository::new(&trees, &tools);
     let services = Services::start(&trees, &repository.remote);
     let [own, unheld, reviewer, foreign] = &launches;
-    let said = vec![
+    let said = [
         authorized(&mut launcher, &services, (own, &tools), &repository),
         unauthorized(&mut launcher, &services, (unheld, &tools), &repository),
         reviewing(&mut launcher, &services, (reviewer, &tools), &repository),
