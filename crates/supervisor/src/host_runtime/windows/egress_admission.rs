@@ -582,6 +582,65 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// Serves a control pipe for a test publication broker until `done`.
+    fn publication_serving(name: &str, done: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+        let broker = Broker::new("publication", &me(), Arc::new(Unused)).unwrap();
+        let mut control = Control::new(name, broker, &me(), None).unwrap();
+        std::thread::spawn(move || {
+            let stop = || done.load(Ordering::SeqCst);
+            while !stop() {
+                (control.serve_one(Duration::from_millis(100), &stop)).unwrap();
+            }
+        })
+    }
+
+    #[test]
+    fn a_reviewer_or_roleless_launch_is_never_offered_publication() {
+        // No broker serves this pipe: a reviewer is not even asked about.
+        let route = BrokerRoute::publication(&unique(), &me()).unwrap();
+        let mut admissions = Admissions::new(Some(route));
+        for role in [Some(Role::Reviewer), None] {
+            let started = admissions.admit(&entry(role), &command()).unwrap();
+            assert_eq!(started, command(), "{role:?}");
+            assert!(!admissions.holds(&id()), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn an_implementer_is_offered_publication_only_with_a_task_and_its_broker() {
+        let missing = BrokerRoute::publication(&unique(), &me()).unwrap();
+        let gone = missing.admit(&entry(Some(Role::Implementer)), &command());
+        let gone = format!("{:#}", gone.unwrap_err());
+        assert!(
+            gone.contains("publication broker") && gone.contains("not started"),
+            "{gone}"
+        );
+        let (name, done) = (unique(), Arc::new(AtomicBool::new(false)));
+        let server = publication_serving(&name, done.clone());
+        let route = BrokerRoute::publication(&name, &me()).unwrap();
+        let taskless = Entry {
+            task: None,
+            ..entry(Some(Role::Implementer))
+        };
+        let refused = format!("{:#}", route.admit(&taskless, &command()).unwrap_err());
+        assert!(refused.contains("no task"), "{refused}");
+        let admitted = route
+            .admit(&entry(Some(Role::Implementer)), &command())
+            .unwrap();
+        let pipe = &admitted.environment[PUBLICATION_VARIABLE];
+        assert_eq!(
+            *pipe,
+            format!(r"\\.\pipe\agentc-broker-publication-{}", id())
+        );
+        assert!(
+            !admitted.environment.contains_key(PIPE_VARIABLE),
+            "no egress pipe"
+        );
+        assert!(route.release(&id()).unwrap());
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+    }
+
     #[test]
     fn a_route_takes_only_a_plain_pipe_name_and_sid_text() {
         assert!(EgressRoute::new(r"..\x", &me()).is_err());

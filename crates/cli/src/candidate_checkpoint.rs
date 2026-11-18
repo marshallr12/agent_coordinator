@@ -237,9 +237,11 @@ fn send_to_helper(
     .map_err(|error| send_failure(&error, &stream))
 }
 
-/// Opens the publication broker's local pipe `pipe` for reading and writing,
-/// at identification level so the broker cannot impersonate the client, and
-/// sends the snapshot's commit as on Unix.
+/// Bundles the snapshot's commit first, then opens the publication broker's
+/// local pipe `pipe` and sends it as on Unix. The broker drops a client
+/// that stays silent for ten seconds after it connects, so the bundling is
+/// never done while connected. The pipe is opened at identification level
+/// so the broker cannot impersonate the client.
 #[cfg(windows)]
 fn send_to_helper(
     pipe: &Path,
@@ -247,6 +249,20 @@ fn send_to_helper(
     base_revision: &str,
     kind: PushKind,
 ) -> Result<PushReceipt, Failure> {
+    use coordinator_local::candidate_push::PreparedPush;
+    let prerequisites = [base_revision];
+    let prepared = PreparedPush::new(&snapshot.checkout, &snapshot.revision, &prerequisites, kind)
+        .map_err(|error| Failure::invalid(format!("could not bundle the candidate: {error:#}")))?;
+    let mut stream = ObservedStream::new(open_pipe(pipe)?);
+    prepared
+        .send(&mut stream)
+        .map_err(|error| send_failure(&error, &stream))
+}
+
+/// Opens the local pipe `pipe` for reading and writing at identification
+/// level; a failure is a retryable unavailable helper.
+#[cfg(windows)]
+fn open_pipe(pipe: &Path) -> Result<std::fs::File, Failure> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
     let opened = std::fs::OpenOptions::new()
@@ -254,23 +270,14 @@ fn send_to_helper(
         .write(true)
         .security_qos_flags(SECURITY_IDENTIFICATION)
         .open(pipe);
-    let file = opened.map_err(|error| {
+    opened.map_err(|error| {
         Failure::local(
             7,
             "candidate_push_unavailable",
             format!("could not open the publication broker's pipe: {error}"),
             true,
         )
-    })?;
-    let mut stream = ObservedStream::new(file);
-    coordinator_local::candidate_push::send_push(
-        &mut stream,
-        &snapshot.checkout,
-        &snapshot.revision,
-        &[base_revision],
-        kind,
-    )
-    .map_err(|error| send_failure(&error, &stream))
+    })
 }
 
 /// With neither Unix sockets nor named pipes, sending always fails.

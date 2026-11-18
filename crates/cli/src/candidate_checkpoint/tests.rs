@@ -434,6 +434,7 @@ fn refusal_codes_map_to_stable_cli_failures() {
         ),
         (RefusalCode::PushFailed, "push_failed", 7, true),
         (RefusalCode::Internal, "internal", 7, true),
+        (RefusalCode::NotAuthorized, "not_authorized", 5, false),
     ];
     for (refusal_code, wire, exit, retryable) in cases {
         let refusal = PushRefusal {

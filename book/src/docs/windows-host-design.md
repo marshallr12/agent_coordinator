@@ -1118,8 +1118,10 @@ before they start, as with egress, sending the task the supervisor's
 `prepare` now carries, and passes the launch its pipe in
 `AGENT_COORDINATOR_CANDIDATE_PUSH_SOCKET`; reviewer launches are never
 admitted. The CLI's candidate-checkpoint client reads the same variable on
-Windows, accepts only a local pipe path (`\\.\pipe\<name>`), opens it for
-identification only, so the broker can learn who the client is but never
+Windows, accepts only a local pipe path (`\\.\pipe\<name>`), bundles the
+candidate before it opens the pipe (a broker pipe drops a client that sends
+nothing for ten seconds after it connects, so a slow bundle must not be made
+while connected), opens it for identification only, so the broker can learn who the client is but never
 act as it, and maps `not_authorized` to a non-retryable state conflict.
 The settings are empty by default: `windows_service.publication_control_pipe`
 and `publication_broker_sid`, `windows_supervisor.authority_pipe` (default
@@ -1161,7 +1163,11 @@ only to a local repository; the broker does not know an implementer's
 coordinator credential digests, so its secret scan refuses only what the
 CLI's own scan refuses before sending; the authority pipe has one instance,
 so concurrent questions wait up to half a second for it and are refused
-after that; and no harness has published through it. Step 6d takes the
+after that; a launch whose agent submitted keeps its authority record (and
+is refused, since its attempt is no longer active) until the service
+restarts; a close that arrives while a push is importing, scanning or
+writing the remote waits for that Git work; and no harness has published
+through it. Step 6d takes the
 service accounts and the push key.
 
 ## Linux P2 parity and acceptance map

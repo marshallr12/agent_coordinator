@@ -400,19 +400,57 @@ pub fn send_push<S: Read + Write>(
     prerequisites: &[&str],
     kind: PushKind,
 ) -> Result<PushReceipt> {
-    let checkout = canonical_git_root(checkout)?;
-    let revision = resolve_exact_commit(&checkout, revision)?;
-    let tree = git_text(&checkout, ["rev-parse", &format!("{revision}^{{tree}}")])?;
-    let bundle = OutgoingBundle::create(&checkout, &revision, prerequisites)?;
-    let sent = send_request(stream, &revision, &tree, kind, &bundle.path);
-    let reply = read_line(stream, MAX_REPLY_LINE).and_then(|line| PushReply::parse(&line));
-    match (sent, reply) {
-        (_, Ok(PushReply::Accepted(receipt))) => {
-            validate_candidate_reference(&checkout, &receipt.reference)?;
-            check_receipt(receipt, &revision, &tree, kind)
+    PreparedPush::new(checkout, revision, prerequisites, kind)?.send(stream)
+}
+
+/// A push whose bundle is made and waiting to be sent. A helper that drops
+/// a client silent for long after it connects (the Windows publication
+/// broker's pipe does after ten seconds) is reached only once this exists,
+/// so the time bundling takes is never spent connected.
+pub struct PreparedPush {
+    checkout: PathBuf,
+    revision: String,
+    tree: String,
+    kind: PushKind,
+    bundle: OutgoingBundle,
+}
+
+impl PreparedPush {
+    /// Resolves `revision` in `checkout` and bundles it minus
+    /// `prerequisites`, as [`send_push`] does before it sends.
+    pub fn new(
+        checkout: &Path,
+        revision: &str,
+        prerequisites: &[&str],
+        kind: PushKind,
+    ) -> Result<Self> {
+        let checkout = canonical_git_root(checkout)?;
+        let revision = resolve_exact_commit(&checkout, revision)?;
+        let tree = git_text(&checkout, ["rev-parse", &format!("{revision}^{{tree}}")])?;
+        let bundle = OutgoingBundle::create(&checkout, &revision, prerequisites)?;
+        Ok(Self {
+            checkout,
+            revision,
+            tree,
+            kind,
+            bundle,
+        })
+    }
+
+    /// Sends the request and the bundle on `stream` and checks the
+    /// helper's receipt; a refusal is a [`PushRefusal`] error.
+    pub fn send<S: Read + Write>(&self, stream: &mut S) -> Result<PushReceipt> {
+        let (revision, tree, kind) = (&self.revision, &self.tree, self.kind);
+        let sent = send_request(stream, revision, tree, kind, &self.bundle.path);
+        let reply = read_line(stream, MAX_REPLY_LINE).and_then(|line| PushReply::parse(&line));
+        match (sent, reply) {
+            (_, Ok(PushReply::Accepted(receipt))) => {
+                validate_candidate_reference(&self.checkout, &receipt.reference)?;
+                check_receipt(receipt, revision, tree, kind)
+            }
+            (_, Ok(PushReply::Refused(refusal))) => Err(refusal.into()),
+            (Err(error), Err(_)) | (Ok(()), Err(error)) => Err(error),
         }
-        (_, Ok(PushReply::Refused(refusal))) => Err(refusal.into()),
-        (Err(error), Err(_)) | (Ok(()), Err(error)) => Err(error),
     }
 }
 
@@ -1161,3 +1199,6 @@ fn read_bundle_header(path: &Path) -> Result<BundleHeader> {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod gate_tests;
