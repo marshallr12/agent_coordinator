@@ -255,12 +255,13 @@ mod tests {
         token::current_user_sid().unwrap()
     }
 
-    /// The launch id of the running test: its broker pipe's name must
-    /// not be another test's, as the tests run at once.
+    /// The launch id of the running test: its broker pipe's name must not
+    /// be another test's, as the tests run at once, nor the same test's in
+    /// another test process, since pipe names are global to the host.
     fn id() -> String {
         let test = std::thread::current().name().unwrap_or("main").to_owned();
         let plain = test.rsplit("::").next().unwrap_or("main").replace('_', "-");
-        format!("adm-{plain}")
+        format!("adm-{plain}-{}", std::process::id())
     }
 
     /// A journal entry of the test's prepared launch with `role`.
