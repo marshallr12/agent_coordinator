@@ -253,6 +253,15 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       exited non-zero with the target unchanged (`crates/local/src/git_workflow.rs`); the push
       output is discarded. The task: establish the cause, log a bounded refusal reason, stop the
       tight retry, define the exemption under a hosting rule that requires the check.
+    - **State 16:40 UTC — both landed, no human step:** fix `ad3d76ab` published as `a425778`
+      at 16:23:05Z (lettre 0.11.24, RUSTSEC-2026-0560..0565) and report `61453d56` resolved itself
+      at 16:23:39Z, 68 minutes after the audit went red. `74cb2771` **Done**, merged as
+      **`f3f92fd`** at 16:33:09Z. Its exempt publication never succeeded (57 refused pushes,
+      15:15Z to 16:13Z), so `180fab91` stands as written. Worktree
+      `ac-74cb2771-push-race` and local branch `task-74cb2771` removed (no remote task branch
+      existed; the candidate ref was left). Main is `f3f92fd`; production and hosts still run
+      `818a7b1`. Open: `180fab91` (ready), `e6685dbf` (planned, owner's 20 tasks and admission),
+      the oracle-1 canary's digest-probe timeouts and the GitHub 502s (not investigated).
     - Evidence: `~/.local/state/agent-coordinator-evidence/open-items-20261118/`.
 
 ## Earlier resume points (archived)
