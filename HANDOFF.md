@@ -162,40 +162,33 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     same Claude and/or Codex options apply to reviewers: a review launch today always uses the
     primary vendor (`live_review.rs`, `Vendor::primary`) and ignores `[health.fallback]`.
     Scripts and output: `~/.local/state/agent-coordinator-evidence/harness-repin-20261117/`.
-  - **Rollout of main `29407ea` IN PREPARATION (22:45Z; nothing on production or the hosts is
-    changed yet).** `b9f49d0a` landed 22:35Z (`034ca9b`, `29407ea`). Rollout task **`d8fdc1a6`**
-    (human-delivered, claimed by CLI session `open-items-20261117`, attempt `6d1e3687`, gen 1;
-    `renew.sh` runs in this session only, so a new session must restart it or re-claim).
-    Evidence and scripts: `~/.local/state/agent-coordinator-evidence/d8fdc1a6-f3e9-43cb-848c-eed087594128/`
-    (derived from `c1b7f538`'s; `rollout.py` reads the release run id from `run-id.txt`).
-    Worktrees at `29407ea`: mxmini `~/src/worktrees/ac-d8fdc1a6-rollout` (built,
-    `target/host-1.98.1/release`, hashes in `mxmini-SHA256SUMS`), oracle-1
-    `/home/ubuntu/src/worktrees/agentc-rollout-29407ea` (build log
-    `/home/ubuntu/agentc-rollout-29407ea-build.log`, hashes go in
-    `/home/ubuntu/agentc-rollout-29407ea-SHA256SUMS`). No migration since `4705310`.
-    - **Waiting on the owner:** dispatch `gh workflow run release.yml -R marshallr12/agent_coordinator
-      --ref main` (not done at 22:45Z), and end MINIAIR's active attempt on `13ae81c1`
-      (`codex-miniair`) before the swap: any task's current attempt blocks the drain check.
-    - **Drain check finding:** the in-repo `scripts/drain_check.py` passes dead job `a92ce565`
-      but blocks on two parked `recovery_required` activities (`2aba7a54`, `2e12b535`; their
-      tasks are in another project). Owner decision 22:41Z: carry the 2026-10-28 rule once —
-      `remote_upgrade.py` runs the script byte-identical and proceeds only when every blocking
-      row is `recovery_required`. Task **`c69f31b5`** (open, agent-origin) puts the rule in the
-      script. Read-only preflight output: `drain-preflight-1.txt`.
-    - **RETARGETED to main `818a7b1` (01:40Z 11-18):** main moved 13 commits while waiting
-      (`6faa1251`, `610a5031`, `9cf04a5c`, `c69f31b5` landed; no new migration) and the owner's
-      release run **`44217444217`** is on `818a7b1`. Scripts in the evidence directory now name
-      `818a7b1`; the drain check is that commit's, run unmodified and required to exit 0 (it
-      reports the two parked activities itself; `drain-preflight-2.txt`, exit 0). Worktrees:
-      mxmini same path (fast-forwarded), oracle-1 `/home/ubuntu/src/worktrees/agentc-rollout-818a7b1`
-      (script staged as `/home/ubuntu/oracle-upgrade-818a7b1.sh`). Drain marker
-      `deploy-drain-d8fdc1a6` set on both hosts 01:39:38Z, both idle; MINIAIR's attempt ended.
-      The task text still says `29407ea`; say so in the submission.
-    - **Then:** set `deploy-drain-d8fdc1a6` on both hosts once the release run is dispatched
-      (mxmini's marker is `quiet-hours` now and must be put back after), wait for idle,
-      `verify_release.py`, `verify_packages.py`, `start-rollout.sh`, then `oracle-upgrade.sh`
-      and `mxmini-upgrade.sh` (no old-pin restore; containment suite included), clear the
-      markers, publish evidence, subagent review.
+  - **Update 2026-11-18 02:40 UTC — full rollout of main `818a7b1` DONE (task `d8fdc1a6`, attempt
+    `6d1e3687`, CLI session `open-items-20261117`):**
+    - Target moved from `29407ea`: main gained 13 commits while waiting (`6faa1251`, `610a5031`,
+      `9cf04a5c`, `c69f31b5` landed; no new migration) and the owner's release run
+      **`44217444217`** (full acceptance) was on `818a7b1`. The task text still says `29407ea`.
+    - Production, both hosts' CLI/supervisor/push and oracle-1's integrators run **`818a7b1`**
+      (over `4705310`). Drain marker `deploy-drain-d8fdc1a6` set 01:39:38Z (both hosts already
+      idle, 0 launches killed), cleared 02:36:03Z; mxmini's marker is back to `quiet-hours`,
+      oracle-1's is absent. Production job `d4fff220` succeeded first try (832 s): the in-repo
+      `scripts/drain_check.py` at `818a7b1` ran unmodified and exited 0 (it lists the two parked
+      `recovery_required` activities `2aba7a54`, `2e12b535` as non-blocking since `c9ce23b`);
+      pre/post backups and off-server copies verified, timers restored.
+    - Rollback: production `/var/lib/agent-coordinator-deployments/claude-d8fdc1a6-818a7b1-20261117/rollback`;
+      CLIs `/opt/agentc/rollback-cli-818a7b1-20261117`; hosts `/opt/agentc/rollback-host-818a7b1-20261117`.
+      Host sources: mxmini `~/src/worktrees/ac-d8fdc1a6-rollout`, oracle-1
+      `/home/ubuntu/src/worktrees/agentc-rollout-818a7b1` (`APPARMOR_BWRAP=1 UPDATE_TIMER=0`).
+    - Harness pins are now whatever host-setup pinned (owner decision): mxmini **Claude 2.1.327 /
+      Codex 0.169.0**, oracle-1 **Claude 2.1.326 / Codex 0.169.0**.
+    - **Containment suite is broken on main:** `deploy/agentc/containment-suite.sh` at `818a7b1`
+      aborts after 14 PASS with `line 171: base: unbound variable` (`check_seeds`, from `deead5b`).
+      Containment was verified with a copy that only splits that `local` statement (oracle-1 113
+      PASS, mxmini 104 PASS; copy in the evidence directory, `suite-patched/`). Fix task
+      **`eed6ebd4`** (open, priority 1). Until it lands, a host updater run fails its suite step.
+    - Evidence: `~/.local/state/agent-coordinator-evidence/d8fdc1a6-f3e9-43cb-848c-eed087594128/`,
+      artifact `37b27e7d`. The dashboard roster dialog now keeps a check's `inputs` (`f210a59`
+      is deployed). Roster still at revision 3 unless the owner has run the snippet. MINIAIR's
+      CLI must move to `818a7b1`.
 
 ## Previous resume point — P6 rerun window RUNNING until 2026-11-16 16:50 UTC (2026-11-02 17:00 UTC)
 
