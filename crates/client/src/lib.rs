@@ -83,6 +83,117 @@ impl fmt::Display for ClientError {
     }
 }
 
+impl ClientError {
+    /// A bounded, fixed-vocabulary class of the underlying transport error,
+    /// or `None` for errors that are not transport errors. The class is
+    /// chosen by inspecting the error's source chain; none of the chain's
+    /// text (which can carry the URL) is ever returned, so it is safe to log.
+    pub fn transport_class(&self) -> Option<&'static str> {
+        match self {
+            Self::Transport(error) => Some(classify_transport(error)),
+            _ => None,
+        }
+    }
+}
+
+/// Classes returned by [`ClientError::transport_class`].
+pub const TRANSPORT_CLASSES: &[&str] = &[
+    "timeout",
+    "tls",
+    "connect",
+    "reset",
+    "unexpected_eof",
+    "http2_stream",
+    "incomplete_response",
+    "body",
+    "decode",
+    "request",
+    "other",
+];
+
+fn classify_transport(error: &reqwest::Error) -> &'static str {
+    let mut io_kind = None;
+    let mut text = String::new();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if io_kind.is_none() {
+            io_kind = cause.downcast_ref::<std::io::Error>().map(|io| io.kind());
+        }
+        text.push_str(&cause.to_string().to_ascii_lowercase());
+        text.push('\n');
+        source = cause.source();
+    }
+    classify_parts(
+        error.is_timeout(),
+        error.is_connect(),
+        error.is_body(),
+        error.is_decode(),
+        error.is_request(),
+        io_kind,
+        &text,
+    )
+}
+
+/// The decision table behind [`classify_transport`], over already extracted
+/// facts so it can be tested without a network.
+fn classify_parts(
+    timeout: bool,
+    connect: bool,
+    body: bool,
+    decode: bool,
+    request: bool,
+    io_kind: Option<std::io::ErrorKind>,
+    text: &str,
+) -> &'static str {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, UnexpectedEof};
+    if timeout {
+        return "timeout";
+    }
+    if ["certificate", "tls", "handshake", "rustls", "peer sent no"]
+        .iter()
+        .any(|needle| text.contains(needle))
+    {
+        return "tls";
+    }
+    if connect {
+        return "connect";
+    }
+    if matches!(
+        io_kind,
+        Some(ConnectionReset | ConnectionAborted | BrokenPipe)
+    ) {
+        return "reset";
+    }
+    if [
+        "stream error",
+        "goaway",
+        "http2",
+        "h2 protocol",
+        "rst_stream",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+    {
+        return "http2_stream";
+    }
+    if text.contains("before message completed") || text.contains("incomplete message") {
+        return "incomplete_response";
+    }
+    if io_kind == Some(UnexpectedEof) {
+        return "unexpected_eof";
+    }
+    if decode {
+        return "decode";
+    }
+    if body {
+        return "body";
+    }
+    if request {
+        return "request";
+    }
+    "other"
+}
+
 impl std::error::Error for ClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -857,5 +968,119 @@ mod tests {
         assert!(matches!(error, ClientError::InvalidResponse(_)));
         assert!(!wrong_digest.exists());
         server.await.unwrap();
+    }
+
+    async fn class_of(address: std::net::SocketAddr) -> &'static str {
+        let client =
+            CoordinatorClient::new(&format!("http://{address}"), "test-secret", true).unwrap();
+        let error = client.get("/api/v1/info", None).await.unwrap_err();
+        let class = error.transport_class().expect("a transport error");
+        assert!(TRANSPORT_CLASSES.contains(&class));
+        class
+    }
+
+    #[tokio::test]
+    async fn refused_connections_are_classed_as_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        assert_eq!(class_of(address).await, "connect");
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_closes_without_answering_is_an_incomplete_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut input = [0_u8; 2048];
+            let _ = stream.read(&mut input).await.unwrap();
+        });
+        assert_eq!(class_of(address).await, "incomplete_response");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_reset_peer_is_classed_as_reset() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut input = [0_u8; 2048];
+            let _ = stream.read(&mut input).await.unwrap();
+            // A zero linger makes the close send RST; it does not block.
+            #[allow(deprecated)]
+            stream.set_linger(Some(Duration::ZERO)).unwrap();
+        });
+        assert_eq!(class_of(address).await, "reset");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_truncated_body_is_classed_as_body_and_leaks_nothing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut input = [0_u8; 2048];
+            let _ = stream.read(&mut input).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"data\"")
+                .await
+                .unwrap();
+        });
+        let client =
+            CoordinatorClient::new(&format!("http://{address}"), "test-secret", true).unwrap();
+        let error = client
+            .get_query("/api/v1/info", &[("x", "secret".into())], None)
+            .await
+            .unwrap_err();
+        let class = error.transport_class().unwrap();
+        assert!(["body", "incomplete_response", "unexpected_eof"].contains(&class));
+        assert!(!class.contains("secret") && !class.contains("127.0.0.1"));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn only_transport_errors_have_a_class() {
+        assert_eq!(ClientError::InvalidHeader("x").transport_class(), None);
+    }
+
+    #[test]
+    fn the_decision_table_names_tls_http2_and_timeouts() {
+        use std::io::ErrorKind;
+        let class = |timeout, connect, io, text| {
+            classify_parts(timeout, connect, false, false, false, io, text)
+        };
+        assert_eq!(class(true, true, None, "tls"), "timeout");
+        assert_eq!(
+            class(false, true, None, "invalid certificate: expired"),
+            "tls"
+        );
+        assert_eq!(
+            class(false, false, None, "received fatal alert: handshake"),
+            "tls"
+        );
+        assert_eq!(
+            class(false, false, None, "stream error received: refused"),
+            "http2_stream"
+        );
+        assert_eq!(
+            class(false, false, None, "http2 error: goaway"),
+            "http2_stream"
+        );
+        assert_eq!(
+            class(false, false, Some(ErrorKind::ConnectionReset), "x"),
+            "reset"
+        );
+        assert_eq!(
+            class(false, false, Some(ErrorKind::UnexpectedEof), "x"),
+            "unexpected_eof"
+        );
+        assert_eq!(class(false, false, None, "x"), "other");
+        for case in [true, false] {
+            let name = classify_parts(false, false, case, !case, false, None, "");
+            assert!(TRANSPORT_CLASSES.contains(&name));
+        }
     }
 }

@@ -628,9 +628,20 @@ fn body_key(prefix: &str, body: &Value, nonce: &str) -> String {
     format!("{prefix}-{}", &hex::encode(digest)[..48])
 }
 
-/// Wraps a transport error without its (possibly credential-bearing) source.
+/// Wraps a transport error without its (possibly credential-bearing) source,
+/// naming only its bounded class (`connect`, `reset`, `tls`, …) so the journal
+/// says why the request failed.
 fn transport(error: coordinator_client::ClientError) -> anyhow::Error {
-    ServiceFailure(format!("coordinator request failed: {error}")).into()
+    ServiceFailure(transport_message(&error)).into()
+}
+
+/// The journal text for a failed request: the client's message plus the
+/// error class, never the error's source chain (it can carry the URL).
+fn transport_message(error: &coordinator_client::ClientError) -> String {
+    match error.transport_class() {
+        Some(class) => format!("coordinator request failed: {error} ({class})"),
+        None => format!("coordinator request failed: {error}"),
+    }
 }
 
 /// Splits a response into data, a coded refusal, or a [`ServiceFailure`].
@@ -681,6 +692,43 @@ mod tests {
         let garbled = decode::<i64>(response(200, json!({"data": "x"}))).unwrap_err();
         assert!(is_service_failure(&garbled));
         assert!(!is_service_failure(&anyhow!("remote ref is not at R")));
+    }
+
+    #[tokio::test]
+    async fn the_journal_line_names_the_class_and_nothing_else() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let refused =
+            CoordinatorClient::new(&format!("http://{address}"), "tok-secret", true).unwrap();
+        let error = refused.get("/api/v1/info", None).await.unwrap_err();
+        let line = format!("{:#}", transport(error));
+        assert_eq!(
+            line,
+            "coordinator request failed: service request failed (connect)"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut input = [0_u8; 2048];
+            let _ = stream.read(&mut input).await.unwrap();
+        });
+        let silent =
+            CoordinatorClient::new(&format!("http://{address}"), "tok-secret", true).unwrap();
+        let error = silent
+            .get_query("/api/v1/info", &[("q", "secret".into())], None)
+            .await
+            .unwrap_err();
+        let line = format!("{:#}", transport(error));
+        assert!(line.ends_with("(incomplete_response)"), "{line}");
+        assert!(
+            !line.contains("tok-secret") && !line.contains("secret") && !line.contains("127.0.0.1")
+        );
+        server.await.unwrap();
     }
 
     #[test]
