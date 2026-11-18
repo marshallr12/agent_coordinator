@@ -11,10 +11,11 @@ use crate::git;
 use crate::integrate::{Integrator, Job, Step};
 use crate::roster::Roster;
 use crate::service::{Ancestry, Observation, ProgressRun, Receipt, Reply, ResultRecord};
+use crate::state::LoopState;
 use crate::state::{Published, TipMove};
 use anyhow::{Context, Result, bail, ensure};
 use coordinator_local::git_workflow::{
-    self, FreshPublicationAuthority, PublicationAuthorizationContext,
+    self, FreshPublicationAuthority, PublicationAuthorizationContext, PublicationOutcome,
 };
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -157,25 +158,75 @@ impl<C: ChecksSource> Integrator<C> {
             result_id: Some(result.id.clone()),
         };
         self.state.record_published(&job.target_key(), entry)?;
-        if let Err(error) = self.try_push(job, result, &grant, sent).await {
-            eprintln!(
-                "agentc-integrator: push of {} not completed: {error:#}",
-                result.r
-            );
+        let refusal = match self.try_push(job, result, &grant, sent).await {
+            Ok(refusal) => refusal,
+            Err(error) => {
+                eprintln!(
+                    "agentc-integrator: push of {} not completed: {error:#}",
+                    result.r
+                );
+                None
+            }
+        };
+        if let Some(reason) = &refusal {
+            self.note_refusal(job, result, reason);
         }
         let nonce = grant["expires_at"].as_str().unwrap_or_default().to_owned();
-        self.observe_and_close(job, result, &nonce).await
+        self.observe_and_close_noting(job, result, &nonce, refusal.as_deref())
+            .await
+    }
+
+    /// Remembers that the remote refused R on T0 so the next cycles wait
+    /// (see [`Integrator::refused_push_wait`]), and puts the reason in the
+    /// journal. A failure to save it is logged and never stops the
+    /// observation that must follow.
+    fn note_refusal(&mut self, job: &Job, result: &ResultRecord, reason: &str) {
+        let key = refusal_key(job, result);
+        let now = chrono::Utc::now().timestamp_millis();
+        let attempts = match self.state.record_refusal(&key, reason, now) {
+            Ok(attempts) => attempts,
+            Err(error) => {
+                eprintln!(
+                    "agentc-integrator: refusal of {} not saved: {error:#}",
+                    result.r
+                );
+                0
+            }
+        };
+        let line = format!(
+            "push of {} refused (attempt {attempts}): {reason}",
+            result.r
+        );
+        eprintln!("agentc-integrator: {line}");
+        self.state.set_note(line);
+    }
+
+    /// The step that skips `result` while its push, refused before for the
+    /// same target tip and result, is backing off; `None` once the wait is
+    /// over or when it was never refused. A new tip or result has another
+    /// key and is never held back.
+    pub(crate) fn refused_push_wait(&self, job: &Job, result: &ResultRecord) -> Option<Step> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let base = self.config.refused_push_wait_seconds;
+        let (left, refusal) = self
+            .state
+            .refusal_wait(&refusal_key(job, result), base, now)?;
+        Some(Step::Blocked(format!(
+            "push of {} refused {} time(s) on target {}; next attempt in {left}s unless the target moves: {}",
+            result.r, refusal.attempts, result.t0, refusal.reason
+        )))
     }
 
     /// Pushes R with a lease on X if the grant names this R and X, time is
     /// left, and the tip is still X. `git_workflow` re-observes around it.
+    /// `Some(reason)` when the push ran and the remote refused it.
     async fn try_push(
-        &self,
+        &mut self,
         job: &Job,
         result: &ResultRecord,
         grant: &Value,
         sent: Instant,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         ensure!(
             grant["r"] == result.r.as_str() && grant["t0"] == result.t0.as_str(),
             "grant names another result"
@@ -194,7 +245,14 @@ impl<C: ChecksSource> Integrator<C> {
             "agentc-integrator: publication of {}: {outcome:?}",
             result.r
         );
-        Ok(())
+        match outcome {
+            PublicationOutcome::NotPublished { reason, .. } => Ok(reason),
+            PublicationOutcome::Published { .. } => {
+                self.state.clear_refusal(&refusal_key(job, result))?;
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Observes the target, attests it, drops local state (every disposition
@@ -207,8 +265,24 @@ impl<C: ChecksSource> Integrator<C> {
         result: &ResultRecord,
         nonce: &str,
     ) -> Result<Step> {
+        self.observe_and_close_noting(job, result, nonce, None)
+            .await
+    }
+
+    /// [`Self::observe_and_close`], with the reason the remote refused the
+    /// push (if it did) in the observation's evidence.
+    async fn observe_and_close_noting(
+        &mut self,
+        job: &Job,
+        result: &ResultRecord,
+        nonce: &str,
+        refusal: Option<&str>,
+    ) -> Result<Step> {
         let (tip, ancestry) = self.ancestry(job, result)?;
-        let data = match self.attest(job, result, (&tip, ancestry), nonce).await? {
+        let attested = self
+            .attest(job, result, (&tip, ancestry), (nonce, refusal))
+            .await?;
+        let data = match attested {
             Ok(data) => data,
             Err(refusal) => return Ok(Step::Refused(refusal.code)),
         };
@@ -229,9 +303,13 @@ impl<C: ChecksSource> Integrator<C> {
         job: &Job,
         result: &ResultRecord,
         (tip, ancestry): (&str, Ancestry),
-        nonce: &str,
+        (nonce, refusal): (&str, Option<&str>),
     ) -> Result<Reply<Value>> {
-        let evidence = format!("ls-remote {} = {tip}", job.target_ref());
+        let mut evidence = format!("ls-remote {} = {tip}", job.target_ref());
+        if let Some(reason) = refusal {
+            evidence.push_str("; push refused: ");
+            evidence.push_str(reason);
+        }
         let observation = Observation {
             result_id: &result.id,
             tip,
@@ -260,6 +338,11 @@ impl<C: ChecksSource> Integrator<C> {
         };
         Ok((tip, ancestry))
     }
+}
+
+/// The key `result`'s refused pushes are remembered under.
+fn refusal_key(job: &Job, result: &ResultRecord) -> String {
+    LoopState::refusal_key(&job.target_key(), &result.id, &result.r, &result.t0)
 }
 
 /// The `publish_prepared` callback: hands over the local authority budget

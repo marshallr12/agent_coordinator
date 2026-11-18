@@ -155,6 +155,11 @@ pub enum PublicationOutcome {
     },
     NotPublished {
         observed: Option<String>,
+        /// Why Git refused the push, bounded and free of credentials; see
+        /// [`bounded_push_refusal`]. `None` when the outcome came from
+        /// observation alone and no push ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     Uncertain {
         observed: Option<String>,
@@ -748,6 +753,7 @@ pub fn reconcile_publication(
     if intent.phase == IntegrationPhase::Prepared {
         Ok(PublicationOutcome::NotPublished {
             observed: observation.revision,
+            reason: None,
         })
     } else {
         Ok(PublicationOutcome::Uncertain {
@@ -890,7 +896,7 @@ where
         save_intent(&paths, &intent, "push_not_started_authority_expired")?;
         bail!("fresh publication authority expired before Git could start");
     }
-    let push = git_raw(
+    let push = git_run(
         &intent.checkout,
         [
             OsString::from("push"),
@@ -901,6 +907,7 @@ where
         ],
         None,
         &[],
+        true,
     )?;
 
     let after = observe_remote_target(&intent.checkout, configured_remote, &intent.target_branch)?;
@@ -927,6 +934,11 @@ where
     } else {
         Ok(PublicationOutcome::NotPublished {
             observed: after.revision,
+            reason: Some(bounded_push_refusal(
+                push.status.code(),
+                &push.stdout,
+                &push.stderr,
+            )),
         })
     }
 }
@@ -1826,7 +1838,26 @@ pub(crate) fn git_raw<I>(
 where
     I: IntoIterator<Item = OsString>,
 {
+    git_run(checkout, arguments, stdin, environment, false)
+}
+
+/// Runs Git like [`git_raw`]; with `capture_stderr` its standard error is
+/// returned in the output instead of discarded. Only a caller that bounds and
+/// redacts it before it leaves the process may ask for it.
+fn git_run<I>(
+    checkout: &Path,
+    arguments: I,
+    stdin: Option<&[u8]>,
+    environment: &[(&str, &str)],
+    capture_stderr: bool,
+) -> Result<Output>
+where
+    I: IntoIterator<Item = OsString>,
+{
     let mut command = git_command(checkout, arguments, environment)?;
+    if capture_stderr {
+        command.stderr(Stdio::piped());
+    }
     if stdin.is_some() {
         command.stdin(Stdio::piped());
     } else {
@@ -1862,6 +1893,76 @@ where
     let mut command = git_command(checkout, arguments, environment)?;
     command.stdin(Stdio::from(stdin));
     command.output().context("run Git")
+}
+
+/// Longest refusal reason [`bounded_push_refusal`] returns, in characters.
+pub const MAX_PUSH_REFUSAL_CHARS: usize = 400;
+
+/// The reason a `git push --porcelain` failed, for a journal line and the
+/// service. Only lines that report a refusal are kept (`remote:` messages,
+/// `!` ref statuses, `error:` and `fatal:`); URLs, anything with userinfo,
+/// well-known token shapes, the word after a credential keyword and any other
+/// long opaque string are replaced, control characters become spaces, and the
+/// whole is cut to [`MAX_PUSH_REFUSAL_CHARS`]. Always returns something: with
+/// nothing reportable it names the exit status.
+pub fn bounded_push_refusal(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static RULES: OnceLock<[Regex; 5]> = OnceLock::new();
+    let [url, userinfo, token, keyword, opaque] = RULES.get_or_init(|| {
+        [
+            r"[A-Za-z][A-Za-z0-9+.\-]*://\S*",
+            r"\S*@\S*",
+            r"(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*",
+            r"(?i)\b(?:(?:authorization|bearer|basic|token|password|passwd|secret|credential|key)s?\b[:=\s]+)+\S+",
+            r"[A-Za-z0-9_+/=\-]{32,}",
+        ]
+        .map(|pattern| Regex::new(pattern).expect("valid refusal rule"))
+    });
+    let mut kept: Vec<String> = Vec::new();
+    for bytes in [stderr, stdout] {
+        for line in String::from_utf8_lossy(bytes).lines() {
+            let line = line.trim();
+            let reports = ["remote:", "!", "error:", "fatal:"]
+                .iter()
+                .any(|prefix| line.starts_with(prefix));
+            if !reports {
+                continue;
+            }
+            let cleaned: String = line
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            let cleaned = url.replace_all(&cleaned, "<url>");
+            let cleaned = userinfo.replace_all(&cleaned, "<redacted>");
+            let cleaned = keyword.replace_all(&cleaned, "<redacted>");
+            let cleaned = token.replace_all(&cleaned, "<redacted>");
+            let cleaned = opaque.replace_all(&cleaned, |found: &regex::Captures| {
+                let text = &found[0];
+                // Full object ids are evidence, not secrets.
+                if text.chars().all(|c| c.is_ascii_hexdigit()) {
+                    text.to_owned()
+                } else {
+                    "<redacted>".to_owned()
+                }
+            });
+            let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !cleaned.is_empty() && kept.last() != Some(&cleaned) {
+                kept.push(cleaned);
+            }
+        }
+    }
+    let status = code.map_or_else(|| "a signal".to_owned(), |code| format!("status {code}"));
+    let mut reason = if kept.is_empty() {
+        format!("git push exited with {status} and reported no reason")
+    } else {
+        format!("git push exited with {status}: {}", kept.join(" | "))
+    };
+    if reason.chars().count() > MAX_PUSH_REFUSAL_CHARS {
+        reason = reason.chars().take(MAX_PUSH_REFUSAL_CHARS - 1).collect();
+        reason.push('…');
+    }
+    reason
 }
 
 /// A Git command in `checkout` with captured stdout, discarded stderr, the
@@ -2721,6 +2822,88 @@ mod tests {
         .unwrap();
         assert_eq!(retried, PublicationOutcome::Published { revision: result });
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A remote that refuses the push the way a hosting rule requiring a
+    /// status check does: a `pre-receive` hook that explains itself on
+    /// stderr and exits non-zero. The text carries a credentialed URL, which
+    /// must never reach the outcome.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_push_reports_a_bounded_credential_free_reason() {
+        use std::os::unix::fs::PermissionsExt;
+        let repository = repository();
+        let candidate = candidate(&repository, "candidate", "candidate\n");
+        let state = repository
+            ._directory
+            .path()
+            .join("refused state")
+            .join("intent.json");
+        prepare_integration(request(&repository, &state, &candidate)).unwrap();
+        let hook = repository.remote.join("hooks").join("pre-receive");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            "#!/bin/sh\n\
+             echo 'GH013: Repository rule violations found for refs/heads/main.' >&2\n\
+             echo '- Required status check \"Audit locked dependencies\" is failing.' >&2\n\
+             echo 'see https://x-access-token:ghs_0123456789abcdef@github.com/o/r/rules' >&2\n\
+             exit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let outcome = publish_prepared(&state, repository.remote.to_str().unwrap(), |_| async {
+            FreshPublicationAuthority::valid_for(Duration::from_secs(30))
+        })
+        .await
+        .unwrap();
+        let PublicationOutcome::NotPublished {
+            observed: Some(observed),
+            reason: Some(reason),
+        } = outcome
+        else {
+            panic!("expected a refused push, got {outcome:?}");
+        };
+        assert_eq!(observed, repository.base, "the target did not move");
+        assert!(reason.contains("Required status check"), "{reason}");
+        assert!(reason.contains("GH013"), "{reason}");
+        assert!(reason.contains("status 1"), "{reason}");
+        for secret in ["ghs_", "x-access-token", "0123456789abcdef"] {
+            assert!(!reason.contains(secret), "{reason}");
+        }
+        assert!(reason.chars().count() <= MAX_PUSH_REFUSAL_CHARS);
+    }
+
+    #[test]
+    fn refusal_text_is_filtered_redacted_and_cut() {
+        let stderr = b"remote: Authorization: Bearer abcDEF123\nremote: ok https://u:p@h/x\n\
+            noise: ignored\nremote: blob ZXhhbXBsZXRva2VuZXhhbXBsZXRva2VuZXhhbXBsZQ\x1b[0m\n\
+            remote: commit 0123456789abcdef0123456789abcdef01234567 rejected\n\
+            remote: commit 0123456789abcdef0123456789abcdef01234567 rejected\n";
+        let stdout = b"!\trefs/heads/x:refs/heads/main\t[remote rejected] (declined)\n";
+        let reason = bounded_push_refusal(Some(1), stdout, stderr);
+        assert!(!reason.contains("Bearer abc"), "{reason}");
+        assert!(!reason.contains("abcDEF123"), "{reason}");
+        assert!(!reason.contains("u:p"), "{reason}");
+        assert!(!reason.contains("ZXhhbXBsZXRva2Vu"), "{reason}");
+        assert!(!reason.contains("noise"), "{reason}");
+        assert!(!reason.contains('\u{1b}'), "{reason}");
+        assert_eq!(
+            reason
+                .matches("0123456789abcdef0123456789abcdef01234567")
+                .count(),
+            1
+        );
+        assert!(reason.contains("[remote rejected] (declined)"), "{reason}");
+        let long = format!("remote: {}", "word ".repeat(500));
+        let cut = bounded_push_refusal(None, b"", long.as_bytes());
+        assert_eq!(cut.chars().count(), MAX_PUSH_REFUSAL_CHARS);
+        assert!(cut.starts_with("git push exited with a signal: remote:"));
+        let silent = bounded_push_refusal(Some(128), b"", b"");
+        assert_eq!(
+            silent,
+            "git push exited with status 128 and reported no reason"
+        );
     }
 
     #[tokio::test]

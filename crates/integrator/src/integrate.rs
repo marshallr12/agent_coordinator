@@ -169,6 +169,10 @@ impl<C: ChecksSource> Integrator<C> {
         if result.r == job.x {
             return self.observe_and_close(job, &result, "").await;
         }
+        if let Some(wait) = self.refused_push_wait(job, &result) {
+            self.discard_local(job)?;
+            return Ok(wait);
+        }
         if let Some(skip) = self.privilege_gate(job, &result).await? {
             return Ok(skip);
         }

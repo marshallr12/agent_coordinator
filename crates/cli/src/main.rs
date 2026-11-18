@@ -1965,6 +1965,7 @@ async fn reconcile_agent_integration(
         ),
         coordinator_local::git_workflow::PublicationOutcome::NotPublished {
             observed: Some(revision),
+            ..
         } => (
             "not_published",
             revision,
@@ -1979,7 +1980,10 @@ async fn reconcile_agent_integration(
             ));
         }
         coordinator_local::git_workflow::PublicationOutcome::Uncertain { .. }
-        | coordinator_local::git_workflow::PublicationOutcome::NotPublished { observed: None } => {
+        | coordinator_local::git_workflow::PublicationOutcome::NotPublished {
+            observed: None,
+            ..
+        } => {
             return Err(Failure::local(
                 5,
                 "publication_uncertain",

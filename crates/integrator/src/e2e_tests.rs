@@ -545,6 +545,25 @@ fn reject_next_push(remote: &Remote) {
     std::fs::write(bare.join("reject"), "").unwrap();
 }
 
+/// Makes the remote refuse every update of `main` the way a hosting rule
+/// that requires a status check does: it explains itself on stderr, with a
+/// credentialed URL that must never be recorded.
+fn refuse_main_updates(remote: &Remote) {
+    let bare = std::path::Path::new(&remote.url);
+    let hook = bare.join("hooks/pre-receive");
+    let script = "#!/bin/sh\nif grep -q ' refs/heads/main$'; then\n\
+        echo 'GH013: Repository rule violations found for refs/heads/main.' >&2\n\
+        echo '- Required status check \"Audit locked dependencies\" is failing.' >&2\n\
+        echo 'see https://x-access-token:ghs_SECRETSECRET@github.com/o/r/rules' >&2\n\
+        exit 1\nfi\nexit 0\n";
+    std::fs::write(&hook, script).unwrap();
+    std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&hook)
+        .status()
+        .unwrap();
+}
+
 /// An integrator over the mock with fake checks.
 struct Harness {
     integrator: Integrator<FakeChecks>,
@@ -659,6 +678,8 @@ fn test_config(state: &std::path::Path) -> Config {
         state_dir: state.to_path_buf(),
         checks: ChecksKind::Fake,
         fake_checks_file: state.join("fake.json"),
+        // Tests that exercise the backoff set their own wait.
+        refused_push_wait_seconds: 0,
         ..Config::default()
     }
 }
@@ -1075,6 +1096,74 @@ async fn a_rejected_push_is_attested_and_retried() {
         "the same pinned R is retried"
     );
     assert_eq!(h.peek(|m| m.observations.len()), 2);
+}
+
+/// A candidate whose push to a remote that refuses `main` updates is
+/// retried only after `wait` seconds.
+async fn refused_everywhere(wait: u64) -> (Harness, Remote, String) {
+    let (remote, base) = seeded_remote();
+    let c = push_candidate(&remote, &base, "feature.txt", "feature\n");
+    advance_main(&remote, "side.txt");
+    refuse_main_updates(&remote);
+    let mut h = Harness::new(item(&remote, &base, &c)).await;
+    h.integrator.config.refused_push_wait_seconds = wait;
+    h.checks(Some("success"), &RULES);
+    (h, remote, base)
+}
+
+#[tokio::test]
+async fn a_refused_push_records_its_reason_and_is_not_retried_every_cycle() {
+    let (mut h, remote, _) = refused_everywhere(3600).await;
+    assert_eq!(h.cycle().await, Step::Observed("not_published".into()));
+    let note = h.integrator.state.take_note().expect("the journal detail");
+    assert!(note.contains("Required status check"), "{note}");
+    let evidence = h.peek(|m| m.observations[0]["evidence"].as_str().unwrap().to_owned());
+    assert!(
+        evidence.contains("push refused: git push exited with status 1"),
+        "{evidence}"
+    );
+    assert!(evidence.contains("Required status check"), "{evidence}");
+    for text in [&note, &evidence] {
+        for secret in ["ghs_", "SECRETSECRET", "x-access-token"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+    }
+    for _ in 0..5 {
+        let step = h.cycle().await;
+        assert!(
+            matches!(&step, Step::Blocked(why) if why.contains("refused 1 time(s)")
+                && why.contains("Required status check")),
+            "{step:?}"
+        );
+    }
+    assert_eq!(h.peek(|m| m.observations.len()), 1, "one hold, not six");
+    assert_eq!(h.peek(|m| m.results.len()), 1);
+    assert!(h.peek(|m| m.results[0]["authority_expires_at"].is_null()));
+    // A moved target is a change: the subject is built and pushed again.
+    let hook = std::path::Path::new(&remote.url).join("hooks/pre-receive");
+    std::fs::remove_file(&hook).unwrap();
+    advance_main(&remote, "more.txt");
+    refuse_main_updates(&remote);
+    assert_eq!(h.cycle().await, Step::Observed("not_published".into()));
+    assert_eq!(h.peek(|m| m.observations.len()), 2);
+    assert_eq!(
+        h.peek(|m| m.results.len()),
+        2,
+        "a new result for the new tip"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_push_backs_off_and_is_tried_again_when_the_wait_is_over() {
+    let (mut h, _remote, _) = refused_everywhere(1).await;
+    assert_eq!(h.cycle().await, Step::Observed("not_published".into()));
+    assert!(matches!(h.cycle().await, Step::Blocked(_)));
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_eq!(h.cycle().await, Step::Observed("not_published".into()));
+    assert_eq!(h.peek(|m| m.observations.len()), 2);
+    let note = h.integrator.state.take_note().unwrap();
+    assert!(note.contains("(attempt 2)"), "{note}");
+    assert!(matches!(h.cycle().await, Step::Blocked(why) if why.contains("refused 2 time(s)")));
 }
 
 #[tokio::test]

@@ -26,6 +26,24 @@ pub fn target_key(url: &str, branch: &str) -> String {
 /// ones landed since its previous observation.
 const MAX_PUBLISHED: usize = 64;
 
+/// Refused pushes remembered; the oldest are dropped first.
+const MAX_REFUSALS: usize = 64;
+/// The longest wait between pushes of one refused result, unless the
+/// configured base wait is longer.
+const MAX_REFUSAL_WAIT_SECONDS: u64 = 3600;
+
+/// What the integrator remembers of a result whose push the remote refused:
+/// how often, when last and the bounded, credential-free reason. Keyed by
+/// target, result id, R and the tip it was built on (see
+/// [`LoopState::refusal_key`]), so a moved target or a new result is never
+/// held back by it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PushRefusal {
+    pub attempts: u32,
+    pub last_millis: i64,
+    pub reason: String,
+}
+
 /// A result granted push authority to this integrator: R, its tip T0 and
 /// the service's result id. `t0` is `None` for an entry stored in
 /// `state.json` as a bare R string; only R itself then counts as the
@@ -99,6 +117,12 @@ pub struct LoopState {
     /// Reruns requested, keyed `<result id>:<run id>`.
     #[serde(default)]
     reruns: BTreeMap<String, RerunRecord>,
+    /// Pushes the remote refused, per [`LoopState::refusal_key`].
+    #[serde(default)]
+    refusals: BTreeMap<String, PushRefusal>,
+    /// A detail for this cycle's log line; never persisted.
+    #[serde(skip)]
+    note: Option<String>,
 }
 
 /// The reruns requested for one workflow run of one result.
@@ -197,6 +221,73 @@ impl LoopState {
         self.save()
     }
 
+    /// The key a refused push is remembered under: the target, the service's
+    /// result id, R and the tip T0 it was built on.
+    pub fn refusal_key(target: &str, result_id: &str, r: &str, t0: &str) -> String {
+        format!("{target}|{result_id}|{r}|{t0}")
+    }
+
+    /// Records that the push for `key` was refused for `reason` at `now`
+    /// (milliseconds since the epoch) and returns the refusals so far.
+    pub fn record_refusal(&mut self, key: &str, reason: &str, now: i64) -> Result<u32> {
+        let attempts = self.refusals.get(key).map_or(0, |known| known.attempts) + 1;
+        let refusal = PushRefusal {
+            attempts,
+            last_millis: now,
+            reason: reason.to_owned(),
+        };
+        self.refusals.insert(key.into(), refusal);
+        while self.refusals.len() > MAX_REFUSALS {
+            let oldest = self
+                .refusals
+                .iter()
+                .min_by_key(|(_, known)| known.last_millis)
+                .map(|(key, _)| key.clone());
+            match oldest {
+                Some(oldest) => self.refusals.remove(&oldest),
+                None => break,
+            };
+        }
+        self.save().map(|()| attempts)
+    }
+
+    /// How long a push refused before must still wait, and the refusal: the
+    /// base wait doubles with every refusal and stops growing at an hour
+    /// (or at the base itself when that is longer). `None` when nothing is
+    /// remembered for `key` or the wait is over.
+    pub fn refusal_wait(
+        &self,
+        key: &str,
+        base_seconds: u64,
+        now: i64,
+    ) -> Option<(u64, &PushRefusal)> {
+        let refusal = self.refusals.get(key)?;
+        let doublings = refusal.attempts.saturating_sub(1).min(16);
+        let cap = MAX_REFUSAL_WAIT_SECONDS.max(base_seconds);
+        let wait = base_seconds.saturating_mul(1 << doublings).min(cap);
+        let waited = u64::try_from(now.saturating_sub(refusal.last_millis) / 1000).unwrap_or(0);
+        let left = wait.saturating_sub(waited);
+        (left > 0).then_some((left, refusal))
+    }
+
+    /// Forgets the refusals of `key` (its result landed).
+    pub fn clear_refusal(&mut self, key: &str) -> Result<()> {
+        if self.refusals.remove(key).is_none() {
+            return Ok(());
+        }
+        self.save()
+    }
+
+    /// Sets the detail of this cycle's log line.
+    pub fn set_note(&mut self, note: String) {
+        self.note = Some(note);
+    }
+
+    /// Takes the detail set during the cycle, if any.
+    pub fn take_note(&mut self) -> Option<String> {
+        self.note.take()
+    }
+
     /// Freezes `target` until a human clears the entry.
     fn freeze(&mut self, target: &str, reason: &str) -> Result<()> {
         self.frozen.insert(target.into(), reason.into());
@@ -276,6 +367,54 @@ mod tests {
         };
         assert_eq!(reloaded.rerun_of("res1", 7), record);
         assert_eq!(reloaded.rerun_of("res2", 7).count, 0);
+    }
+
+    #[test]
+    fn refused_pushes_back_off_doubling_up_to_the_cap_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = LoopState::load(&path).unwrap();
+        let key = LoopState::refusal_key("t", "res", "r", "x");
+        assert!(state.refusal_wait(&key, 60, 0).is_none(), "never refused");
+        let t = 1_000_000;
+        assert_eq!(state.record_refusal(&key, "no", t).unwrap(), 1);
+        let left = |s: &LoopState, at: i64| s.refusal_wait(&key, 60, at).map(|(left, _)| left);
+        assert_eq!(left(&state, t), Some(60));
+        assert_eq!(left(&state, t + 59_000), Some(1));
+        assert_eq!(left(&state, t + 60_000), None, "the wait is over");
+        state.record_refusal(&key, "no", t).unwrap();
+        assert_eq!(left(&state, t), Some(120));
+        for _ in 0..20 {
+            state.record_refusal(&key, "no", t).unwrap();
+        }
+        assert_eq!(left(&state, t), Some(3600), "capped at an hour");
+        let reloaded = LoopState::load(&path).unwrap();
+        let (_, refusal) = reloaded.refusal_wait(&key, 60, t).unwrap();
+        assert_eq!((refusal.attempts, refusal.reason.as_str()), (22, "no"));
+        let other = LoopState::refusal_key("t", "res", "r", "moved");
+        assert!(reloaded.refusal_wait(&other, 60, t).is_none());
+        let mut cleared = reloaded;
+        cleared.clear_refusal(&key).unwrap();
+        assert!(cleared.refusal_wait(&key, 60, t).is_none());
+        let zero = LoopState::load(&path).unwrap();
+        assert!(
+            zero.refusal_wait(&key, 0, t).is_none(),
+            "base 0 never waits"
+        );
+    }
+
+    #[test]
+    fn remembered_refusals_stay_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = LoopState::load(&dir.path().join("state.json")).unwrap();
+        for n in 0..=MAX_REFUSALS {
+            let key = format!("k{n}");
+            state
+                .record_refusal(&key, "no", i64::try_from(n).unwrap())
+                .unwrap();
+        }
+        assert_eq!(state.refusals.len(), MAX_REFUSALS);
+        assert!(!state.refusals.contains_key("k0"), "the oldest is dropped");
     }
 
     /// Records `x` as the tip of `target` when it is a forward move.

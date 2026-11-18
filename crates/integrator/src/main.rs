@@ -189,11 +189,12 @@ async fn run_loop<C: ChecksSource>(
                         }
                     }
                     Err(error) if once => return Err(error),
-                    Err(error) => log(&project, &Err(error)),
+                    Err(error) => log(&project, &Err(error), None),
                 }
             } else {
                 let outcome = integrator.cycle(&project).await;
-                log(&project, &outcome);
+                let note = integrator.state.take_note();
+                log(&project, &outcome, note);
             }
         }
         if once {
@@ -204,9 +205,9 @@ async fn run_loop<C: ChecksSource>(
 }
 
 /// Prints one cycle's outcome as a JSON line (stdout; the service unit logs it).
-fn log(project: &str, outcome: &Result<Step>) {
+fn log(project: &str, outcome: &Result<Step>, note: Option<String>) {
     let (step, detail) = match outcome {
-        Ok(step) => (format!("{step:?}"), String::new()),
+        Ok(step) => (format!("{step:?}"), note.unwrap_or_default()),
         Err(error) => ("Error".to_owned(), format!("{error:#}")),
     };
     let time = chrono::Utc::now().to_rfc3339();
