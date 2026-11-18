@@ -284,6 +284,10 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       normally, **30 s (client limit) at 19:06:22 and 25.3 s at 19:07:03**, normal from 19:10;
       `/healthz` under 1.6 s throughout; the :00 backup caused nothing. Which resource starves
       (CPU, memory, disk, lock) is not established: the VM was not read.
+      **VM read by the owner at 19:32 UTC (task now revision 2):** the transfer ran 19:05:36 to
+      19:09:22, matching the stall to within seconds, on 41 s of CPU in 226 s, so it is not
+      CPU-bound; cumulative pressure since boot is io 19,624 s, memory 1,702 s, cpu 713 s. Disk
+      I/O is the likely mechanism. Still missing: pressure figures taken during a transfer.
     - **GitHub 502s — task `9dcd2493` (planned, priority 3):** 39 lines on 11-18, all 15:16 to
       16:19 UTC in the red-audit loop, plus 2 on 11-13; no GitHub incident that hour. The call is
       the check lookup's `actions/runs/{id}/jobs?filter=all`. Replayed against the 2-attempt run
