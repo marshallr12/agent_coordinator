@@ -45,9 +45,10 @@ use std::time::{Duration, Instant};
 
 /// The publication broker's service name, which its launch pipes carry.
 pub const SERVICE: &str = "publication";
-/// How long a read of a session may wait for the client's next bytes: the
-/// client bundles its candidate after it connects and before it sends, as
-/// on Linux.
+/// How long a read of a session may wait for the client's next bytes once
+/// it has started sending, as the Linux helper's I/O timeout. The first
+/// bytes cannot wait this long: the pipe drops a client silent for ten
+/// seconds after it connects, so the CLI bundles before it connects.
 const IDLE_PATIENCE: Duration = Duration::from_secs(600);
 /// How long one wait for the client lasts before the broker looks whether
 /// the launch is closing.
