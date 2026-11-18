@@ -12,7 +12,7 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/s
 ExecStart=/usr/local/sbin/agent-coordinator-backup-transfer
 TimeoutStartSec=45min
 # The hourly transfer must not starve the service on a 953 MB, one-disk VM
-# (see "Backup transfer and the digest" in book/src/docs/deploy-gcp-e2-micro.md).
+# (see "The hourly transfer on the 1-GB VM" in book/src/docs/backup-restore-guide.md).
 Nice=19
 CPUWeight=20
 IOSchedulingClass=idle

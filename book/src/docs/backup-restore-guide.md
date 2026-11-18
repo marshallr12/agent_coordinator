@@ -237,7 +237,7 @@ journalctl -u agent-coordinator-backup-transfer.service --since '5 min ago' -o c
 and time the digest from a workstation during the run (`curl -s -o /dev/null
 -w '%{time_total}\n' -H "Authorization: Bearer $(cat TOKEN_FILE)"
 URL/api/v1/projects/ID/digest`). The canary's journal line records slow digests
-without paging (see the [attention canary](../deploy/README.md#attention-budget-digest-and-canary)).
+without paging (see "Attention budget: digest and canary" in the Service deployment examples chapter).
 
 ## Back up before a schema upgrade
 
