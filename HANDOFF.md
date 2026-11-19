@@ -363,6 +363,17 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     - Evidence artifact `cc060f56-f4c0-4c9b-97cb-e923214a4f72`; local files in the evidence
       directory named above (`completed-deployment-evidence.json`, `oracle-upgrade.out`,
       `mxmini-upgrade.out`, `drain-cleared.txt`, `daa42f71-*.json`).
+    - **Review: `de1d7ca7` is DONE (approved 21:17:34Z).** The first submission was taken by
+      oracle-1's contained reviewer, which requested changes only for lack of access; the
+      second (`6c26e647`) was approved by a subagent reviewer under its own subagent identity,
+      no `distinct_launch` asserted. The implementer's session issued the claim command under
+      the reviewer's session name to keep the contained reviewer from taking it again; the
+      service's orientation says not to reuse another harness's session proof, so the owner
+      may want a different arrangement (for example human-delivered tasks skipping the
+      supervisor's review queue). Reviewer's notes: on oracle-1 the pre-rollout CLI is in
+      `rollback-cli-f590db8-20261118`; `rollback-host-f590db8-20261118` holds the release-bundle
+      CLI that `rollout.py` installed 19 s before the native build replaced it. VM internals
+      (backups, off-server copies, timers) rest on the job's own output, not re-read.
     - Now possible, owner's: count transport-error classes on oracle-1 (`c8143834`); confirm
       the `180fab91` cause from the first `push of R refused` journal line. Still the owner's:
       the VM steps from `cb7c28b0`, the ruleset bypass, MINIAIR's CLI to `f590db8`, `e6685dbf`.
