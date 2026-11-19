@@ -326,6 +326,12 @@ impl Broker {
         &self.owner
     }
 
+    /// The grant of the open launch `launch`, as the broker recorded it.
+    pub fn grant(&self, launch: &str) -> Option<Arc<Grant>> {
+        let package = &self.open.get(launch)?.package;
+        self.lock().get(package).cloned()
+    }
+
     /// The launches this broker serves, in id order.
     pub fn launches(&self) -> Vec<String> {
         self.open.keys().cloned().collect()

@@ -16,10 +16,12 @@ use std::path::Path;
 #[cfg(windows)]
 pub(crate) const PRIVATE_DIRECTORY_SDDL: &str = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)";
 
-/// Makes the existing directory `path` private to its owner.
+/// Makes the existing directory `path` private to its owner. A trailing
+/// separator is dropped first, since `lstat` of `link/` follows the link.
 pub(crate) fn protect(path: &Path) -> Result<()> {
-    refuse_links(path)?;
-    restrict(path).with_context(|| format!("protect {}", path.display()))
+    let path: std::path::PathBuf = path.components().collect();
+    refuse_links(&path)?;
+    restrict(&path).with_context(|| format!("protect {}", path.display()))
 }
 
 /// Refuses `path` when it is not a plain directory: a symbolic link,
@@ -58,11 +60,21 @@ fn restrict(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The protected access list [`PRIVATE_DIRECTORY_SDDL`].
+/// The protected access list [`PRIVATE_DIRECTORY_SDDL`]. A directory that
+/// already has exactly that list is left alone: setting it again would
+/// walk every file of the repository below it on every push.
 #[cfg(windows)]
 fn restrict(path: &Path) -> Result<()> {
+    if windows::access_list(path)? == PROTECTED_AS_READ {
+        return Ok(());
+    }
     windows::set_access_list(path, PRIVATE_DIRECTORY_SDDL)
 }
+
+/// [`PRIVATE_DIRECTORY_SDDL`] as Windows reads it back, marked
+/// auto-inherited.
+#[cfg(windows)]
+const PROTECTED_AS_READ: &str = "D:PAI(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)";
 
 /// No other platform can protect the directory, so none is used.
 #[cfg(not(any(unix, windows)))]
@@ -78,7 +90,6 @@ pub(crate) mod windows {
     use std::path::Path;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
-    #[cfg(test)]
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
     };
@@ -165,56 +176,43 @@ pub(crate) mod windows {
         Ok(dacl)
     }
 
-    /// `path`'s access list as SDDL text, for tests.
-    #[cfg(test)]
+    /// `path`'s access list as SDDL text.
     pub(crate) fn access_list(path: &Path) -> Result<String> {
         let name = wide(path.as_os_str());
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        let none = null_mut();
         // SAFETY: the name is NUL-terminated; only the descriptor, a
         // LocalAlloc allocation, is asked for.
+        #[rustfmt::skip]
         let status = unsafe {
-            GetNamedSecurityInfoW(
-                name.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                null_mut(),
-                null_mut(),
-                &mut descriptor,
-            )
+            GetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                none, none, null_mut(), null_mut(), &mut descriptor)
         };
         ensure!(
             status == ERROR_SUCCESS,
             "GetNamedSecurityInfoW failed with Windows error {status}"
         );
-        let descriptor = Local(descriptor);
-        text_of(&descriptor)
+        text_of(&Local(descriptor))
     }
 
     /// The access list of `descriptor` as SDDL text.
-    #[cfg(test)]
     fn text_of(descriptor: &Local) -> Result<String> {
         let mut text: *mut u16 = null_mut();
         // SAFETY: the descriptor is live; `text` receives a LocalAlloc
-        // string, freed below.
+        // string, freed when `owned` drops.
+        #[rustfmt::skip]
         let converted = unsafe {
-            ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                descriptor.0,
-                SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
-                &mut text,
-                null_mut(),
-            )
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor.0, SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION, &mut text, null_mut())
         };
         ensure!(converted != 0, "the access list could not be printed");
-        let owned = Local(text.cast());
+        let _owned = Local(text.cast());
         // SAFETY: Windows wrote a NUL-terminated string at `text`.
         let length = (0..).take_while(|&i| unsafe { *text.add(i) } != 0).count();
         // SAFETY: `length` characters precede the NUL.
-        let printed = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
-        drop(owned);
-        Ok(printed)
+        Ok(String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(text, length)
+        }))
     }
 }
 
@@ -278,6 +276,25 @@ mod tests {
         let refused = protect(&junction).unwrap_err().to_string();
         assert!(refused.contains("is a link"), "{refused}");
         assert_eq!(windows::access_list(&target).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_spelled_with_a_trailing_slash_is_refused_and_its_target_left_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (target, link) = (dir.path().join("target"), dir.path().join("link"));
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut spelled = link.into_os_string();
+        spelled.push("/");
+        assert!(
+            protect(Path::new(&spelled)).is_err(),
+            "accepted {spelled:?}"
+        );
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
     }
 
     #[cfg(unix)]

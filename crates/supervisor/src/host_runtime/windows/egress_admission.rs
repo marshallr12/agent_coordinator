@@ -606,6 +606,32 @@ mod tests {
     }
 
     #[test]
+    fn a_publication_admission_carries_the_launch_s_credential_digests() {
+        let (name, done) = (unique(), Arc::new(AtomicBool::new(false)));
+        let broker = Broker::new("publication", &me(), Arc::new(Unused)).unwrap();
+        let mut control = Control::new(&name, broker, &me(), None).unwrap();
+        let stop = done.clone();
+        let server = std::thread::spawn(move || {
+            let stopping = || stop.load(Ordering::SeqCst);
+            while !stopping() {
+                (control.serve_one(Duration::from_millis(100), &stopping)).unwrap();
+            }
+            control
+        });
+        let route = BrokerRoute::publication(&name, &me()).unwrap();
+        let digests = vec!["ab".repeat(32)];
+        let given = Entry {
+            known_digests: digests.clone(),
+            ..entry(Some(Role::Implementer))
+        };
+        route.admit(&given, &command()).unwrap();
+        done.store(true, Ordering::SeqCst);
+        let mut control = server.join().unwrap();
+        let grant = control.broker().grant(&id()).expect("the launch is open");
+        assert_eq!(grant.known_digests(), digests.as_slice());
+    }
+
+    #[test]
     fn a_reviewer_or_roleless_launch_is_never_offered_publication() {
         // No broker serves this pipe: a reviewer is not even asked about.
         let route = BrokerRoute::publication(&unique(), &me()).unwrap();

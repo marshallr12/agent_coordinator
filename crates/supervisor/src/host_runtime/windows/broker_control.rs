@@ -158,8 +158,11 @@ pub struct Opened {
 /// Everything an `open` names about a launch.
 #[derive(Debug, Clone, Copy)]
 pub struct Admission<'a> {
+    /// The launch's id.
     pub launch: &'a str,
+    /// The side of the review the launch works on.
     pub role: Role,
+    /// The launch's AppContainer package SID.
     pub package: &'a str,
     /// The least generation the launch is to have.
     pub generation: u64,
@@ -231,10 +234,16 @@ impl ControlClient {
 
     /// Asks the broker to serve the launch `admission` describes.
     pub fn admit(&mut self, admission: &Admission<'_>) -> Result<Opened> {
-        let request = json!({"op": "open", "launch": admission.launch,
+        let mut request = json!({"op": "open", "launch": admission.launch,
             "role": admission.role, "package": admission.package,
-            "generation": admission.generation, "task": admission.task,
-            "known_digests": admission.known_digests});
+            "generation": admission.generation});
+        // Only what the launch has, so a broker of step 6c still parses it.
+        if let Some(task) = admission.task {
+            request["task"] = json!(task);
+        }
+        if !admission.known_digests.is_empty() {
+            request["known_digests"] = json!(admission.known_digests);
+        }
         let answer = self.ask(&request)?;
         let pipe = answer["pipe"].as_str().context("the broker named no pipe");
         let generation = answer["generation"].as_u64();
