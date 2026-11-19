@@ -95,6 +95,7 @@ fn child_in_a_new_logon_session() {
         "lost" => lost(),
         "loopback" => loopback(),
         "runner" => runner::admitted_starts(),
+        "installed" => installed::host(),
         "client" => client(),
         "peer" => peer(),
         other => panic!("no such role: {other}"),
@@ -426,6 +427,7 @@ fn client() -> String {
         "routes" => routes(),
         "hold" => hold(),
         "loopback" => loopback_probe(),
+        "installed" => installed::probe(),
         other => panic!("no such probe: {other}"),
     }
 }
@@ -774,5 +776,94 @@ mod runner {
         let cleaned = ok(runner, case.cleanup());
         assert!(cleaned["egress_detail"].is_string(), "{cleaned}");
         assert!(runner.egress().unreleased(&case.launch));
+    }
+}
+
+/// Phase 6d, owner-attended: the installed `agentc-egress` service, under
+/// its own virtual service account, serves a launch it admits through its
+/// control pipe. A CONNECT to github.com:443 is answered 200, a host off
+/// the allowlist 403, direct TCP to a public address and name resolution
+/// fail, and once the launch is closed its pipe is gone. The runbook sets
+/// `AGENTC_6D_EGRESS_PIPE` (the control pipe's name) and
+/// `AGENTC_6D_EGRESS_SID` (the service's account), and configures the
+/// service with this account as its runner.
+#[test]
+#[ignore = "owner-attended: needs the installed agentc-egress service"]
+fn the_installed_egress_service_serves_a_launch_under_its_own_account() {
+    in_a_new_session("installed");
+}
+
+mod installed {
+    //! The host's and the launch's sides of the installed-service test.
+    use super::*;
+
+    /// The control pipe and the service's account the runbook names.
+    fn service() -> (String, String) {
+        let variable = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name}"));
+        (
+            variable("AGENTC_6D_EGRESS_PIPE"),
+            variable("AGENTC_6D_EGRESS_SID"),
+        )
+    }
+
+    /// The host's side: admit a launch, run the probe, close it.
+    pub fn host() -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let (trees, mut launcher) = (Trees::new(&dir), Launcher::new().unwrap());
+        let own = prepare(&mut launcher, &trees, "egr-installed");
+        let (pipe, sid) = service();
+        let mut control = ControlClient::connect(&pipe, &sid).unwrap();
+        let opened = control
+            .open(&own.id, Role::Implementer, &own.package, 1)
+            .unwrap();
+        let tools = client_tools(&trees, &[&own.package]);
+        let report = start_probe(
+            &mut launcher,
+            (&own, &tools),
+            "installed",
+            (Some(&opened), Vec::new()),
+        );
+        let lines = finish(&mut launcher, &own, &report);
+        check(&lines);
+        assert!(control.close(&own.id).unwrap());
+        let gone = gone(&pipe_path(&opened.pipe).unwrap());
+        launcher.cleanup(&own.id).unwrap();
+        format!("{}; closed: {gone}", lines.join("; "))
+    }
+
+    /// The probe's report as the acceptance map requires it.
+    fn check(lines: &[String]) {
+        assert_eq!(outcome(lines, "github"), "status 200", "{lines:?}");
+        assert_eq!(outcome(lines, "other_host"), "status 403", "{lines:?}");
+        assert!(outcome(lines, "direct").starts_with("error"), "{lines:?}");
+        assert!(outcome(lines, "dns").starts_with("error"), "{lines:?}");
+    }
+
+    /// Opens `path` until it is gone, for at most two seconds.
+    fn gone(path: &str) -> String {
+        let started = Instant::now();
+        loop {
+            match open_pipe(path) {
+                Err(error) => return failed(&error),
+                Ok(_) if started.elapsed() >= Duration::from_secs(2) => return "opened".into(),
+                Ok(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+    }
+
+    /// The launch's side: one report line per attempt.
+    pub fn probe() -> String {
+        let github = status("CONNECT github.com:443 HTTP/1.1\r\n\r\n");
+        let other = status("CONNECT example.com:443 HTTP/1.1\r\n\r\n");
+        let address: SocketAddr = "140.82.112.3:443".parse().unwrap();
+        let direct = TcpStream::connect_timeout(&address, ATTEMPT)
+            .map_or_else(|e| failed(&e), |_| "connected".into());
+        let lines = [
+            format!("github = {github}"),
+            format!("other_host = {other}"),
+            format!("direct = {direct}"),
+            format!("dns = {}", dns("github.com")),
+        ];
+        lines.join("\n")
     }
 }

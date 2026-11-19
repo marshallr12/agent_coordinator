@@ -59,7 +59,15 @@ pub struct EgressSettings {
     /// The runner service's account, as SID text. Empty: the service
     /// refuses to start.
     pub runner_sid: String,
+    /// Files the egress account must not be able to open, such as the
+    /// publication broker's push key. The service tries each at start and
+    /// refuses to run if it can open one; a file that is not there is
+    /// logged as not checked.
+    pub must_not_open: Vec<PathBuf>,
 }
+
+/// Where the publication broker's push key is by default.
+pub const DEFAULT_PUSH_KEY: &str = r"C:\ProgramData\agentc\publication-key\push-app.pem";
 
 impl Default for EgressSettings {
     fn default() -> Self {
@@ -68,6 +76,7 @@ impl Default for EgressSettings {
             state_dir: PathBuf::from(r"C:\ProgramData\agentc\egress"),
             control_pipe: "agentc-egress-control".into(),
             runner_sid: String::new(),
+            must_not_open: vec![PathBuf::from(DEFAULT_PUSH_KEY)],
         }
     }
 }
@@ -133,7 +142,7 @@ impl Default for PublicationSettings {
             supervisor_sid: String::new(),
             app_id: 0,
             installation_id: 0,
-            private_key: PathBuf::from(r"C:\ProgramData\agentc\publication-key\push-app.pem"),
+            private_key: PathBuf::from(DEFAULT_PUSH_KEY),
             api_base: "https://api.github.com".into(),
         }
     }

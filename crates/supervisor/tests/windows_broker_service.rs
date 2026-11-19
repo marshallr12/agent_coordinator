@@ -216,3 +216,63 @@ fn git_asks_the_binary_for_a_github_credential_and_gets_the_push_token() {
     assert!(filled.contains("username=x-access-token"), "{filled}");
     assert!(filled.contains("password=ghs_push"), "{filled}");
 }
+
+#[test]
+fn the_egress_broker_refuses_to_run_when_it_can_open_a_file_it_must_not() {
+    use agentc_supervisor::host_runtime::windows::broker_service::refuse_openable;
+    let dir = tempfile::tempdir().unwrap();
+    let (key, missing) = (dir.path().join("key.pem"), dir.path().join("missing.pem"));
+    std::fs::write(&key, b"key").unwrap();
+    refuse_openable(std::slice::from_ref(&missing)).unwrap();
+    let refused = refuse_openable(&[missing, key]).unwrap_err().to_string();
+    assert!(
+        refused.contains("key.pem") && refused.contains("must not"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_publication_broker_with_an_app_needs_a_key_it_can_sign_with() {
+    use agentc_supervisor::host_runtime::windows::broker_service::publication;
+    use agentc_supervisor::service::broker_settings::PublicationSettings;
+    let dir = tempfile::tempdir().unwrap();
+    let me = token::current_user_sid().unwrap();
+    let settings = PublicationSettings {
+        state_dir: dir.path().join("publication"),
+        runner_sid: me.clone(),
+        supervisor_sid: me,
+        remote: "https://github.com/owner/repository.git".into(),
+        app_id: 7,
+        installation_id: 8,
+        private_key: dir.path().join("missing.pem"),
+        ..PublicationSettings::default()
+    };
+    let refused = publication(&settings).err().expect("built without its key");
+    assert!(
+        format!("{refused:#}").contains("read the push key"),
+        "{refused:#}"
+    );
+    let without_app = PublicationSettings {
+        app_id: 0,
+        installation_id: 0,
+        ..settings
+    };
+    assert!(publication(&without_app).is_ok());
+}
+
+#[test]
+fn the_publication_broker_drops_variables_that_weaken_a_push() {
+    use agentc_supervisor::host_runtime::windows::broker_service::weakens_a_push;
+    for name in [
+        "GIT_SSL_NO_VERIFY",
+        "git_curl_verbose",
+        "HTTPS_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+    ] {
+        assert!(weakens_a_push(name), "{name}");
+    }
+    for name in ["PATH", "SystemRoot", "TEMP", "USERPROFILE", "ComSpec"] {
+        assert!(!weakens_a_push(name), "{name}");
+    }
+}

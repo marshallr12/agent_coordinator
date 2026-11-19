@@ -83,10 +83,10 @@ fn a_launch_has_one_push_at_a_time_and_gets_its_turn_back() {
 #[test]
 fn a_launch_is_published_under_its_own_ref_and_repository() {
     let (publication, _) = broker(Verdict::Current);
-    let spec = publication.spec(&grant(Role::Implementer, Some("t")), "t", None);
+    let spec = publication.spec(&grant(Role::Implementer, Some("t")), "t");
     let spec = spec.unwrap();
     assert_eq!(spec.reference(), "refs/agent-coordinator/candidates/t/l");
-    let reserved = publication.spec(&grant(Role::Implementer, Some("wip")), "wip", None);
+    let reserved = publication.spec(&grant(Role::Implementer, Some("wip")), "wip");
     assert!(reserved.is_err(), "the WIP namespace is not a task");
 }
 
@@ -94,7 +94,7 @@ fn a_launch_is_published_under_its_own_ref_and_repository() {
 fn a_launch_s_credential_digests_reach_its_secret_scan() {
     let (publication, _) = broker(Verdict::Current);
     let plain = publication
-        .spec(&grant(Role::Implementer, Some("t")), "t", None)
+        .spec(&grant(Role::Implementer, Some("t")), "t")
         .unwrap();
     assert!(
         format!("{plain:?}").contains("known_digests: 0"),
@@ -102,7 +102,7 @@ fn a_launch_s_credential_digests_reach_its_secret_scan() {
     );
     let digests = vec!["ab".repeat(32), "cd".repeat(32)];
     let given = grant(Role::Implementer, Some("t")).with_known_digests(digests);
-    let spec = publication.spec(&given.unwrap(), "t", None).unwrap();
+    let spec = publication.spec(&given.unwrap(), "t").unwrap();
     assert!(format!("{spec:?}").contains("known_digests: 2"), "{spec:?}");
 }
 
@@ -152,8 +152,13 @@ fn no_token_is_minted_for_a_launch_without_authority() {
 fn a_push_s_token_reaches_git_through_askpass_and_is_revoked_after() {
     let (publication, counted) = pushing(Verdict::Current);
     let token = publication.token_for("l", "t").unwrap().unwrap();
-    let spec = publication.spec(&grant(Role::Implementer, Some("t")), "t", Some(&token));
-    let shown = format!("{:?}", spec.unwrap());
+    let spec = publication
+        .spec(&grant(Role::Implementer, Some("t")), "t")
+        .unwrap();
+    let shown = format!(
+        "{:?}",
+        spec.with_git_environment(token.git_environment().unwrap())
+    );
     assert!(
         shown.contains("GIT_ASKPASS") && !shown.contains("token-0"),
         "{shown}"
@@ -190,4 +195,81 @@ fn without_credentials_no_token_is_asked_for() {
         0,
         "the gate is the protocol's"
     );
+}
+
+/// A client's side of a session in memory: what it sent, then what the
+/// broker wrote back.
+struct Duplex {
+    sent: std::io::Cursor<Vec<u8>>,
+    written: Vec<u8>,
+}
+
+impl Read for Duplex {
+    /// The client's bytes, then the end of the stream.
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.sent.read(buffer)
+    }
+}
+
+impl Write for Duplex {
+    /// Keeps what the broker writes.
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.written.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    /// Nothing is buffered.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serves `sent` as one session of launch `l` on task `t` with counted
+/// credentials, returning the reply and the mints made.
+fn served(sent: Vec<u8>) -> (PushReply, u32, u32) {
+    let (publication, counted) = pushing(Verdict::Current);
+    let dir = tempfile::tempdir().unwrap();
+    let publication = Publication {
+        work_root: dir.path().to_path_buf(),
+        ..publication
+    };
+    let spec = publication
+        .spec(&grant(Role::Implementer, Some("t")), "t")
+        .unwrap();
+    let mut duplex = Duplex {
+        sent: std::io::Cursor::new(sent),
+        written: Vec::new(),
+    };
+    let reply = publication
+        .serve_stream("l", "t", spec, &mut duplex)
+        .unwrap();
+    let (minted, revoked) = (
+        counted.minted.load(Ordering::SeqCst),
+        counted.revoked.load(Ordering::SeqCst),
+    );
+    (reply, minted, revoked)
+}
+
+#[test]
+fn a_session_that_is_no_push_request_costs_no_mint() {
+    for sent in [
+        b"not a push request\n".to_vec(),
+        Vec::new(),
+        b"{\"version\":9}\n\0\0\0\0\0\0\0\x01".to_vec(),
+    ] {
+        let (reply, minted, _) = served(sent);
+        assert!(matches!(reply, PushReply::Refused(_)), "{reply:?}");
+        assert_eq!(minted, 0);
+    }
+}
+
+#[test]
+fn a_well_formed_preamble_costs_one_mint_revoked_whatever_the_bundle() {
+    let mut sent = br#"{"version":1,"revision":"0000000000000000000000000000000000000001","tree":"0000000000000000000000000000000000000002"}"#.to_vec();
+    sent.push(b'\n');
+    sent.extend_from_slice(&4_u64.to_be_bytes());
+    sent.extend_from_slice(b"junk");
+    let (reply, minted, revoked) = served(sent);
+    assert!(matches!(reply, PushReply::Refused(_)), "{reply:?}");
+    assert_eq!((minted, revoked), (1, 1));
 }

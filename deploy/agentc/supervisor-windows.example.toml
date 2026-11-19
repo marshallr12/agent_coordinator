@@ -103,6 +103,10 @@
 # The runner service's account, as SID text: the only client the control
 # pipe serves. No usable default.
 # runner_sid = ""
+# Files the egress account must not be able to open. The service tries each
+# at start and refuses to run if it can open one; one that is not there is
+# logged as not checked.
+# must_not_open = ['C:\ProgramData\agentc\publication-key\push-app.pem']
 
 # The publication broker (`... windows-service --role publication`). It
 # publishes an implementer launch's candidate to that launch's own ref on

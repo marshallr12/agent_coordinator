@@ -93,6 +93,7 @@ fn child_in_a_new_logon_session() {
         "publication" => publication(),
         "lost" => lost(),
         "runner" => runner::admitted_starts(),
+        "installed" => installed::host(),
         "client" => client(),
         other => panic!("no such role: {other}"),
     });
@@ -638,6 +639,10 @@ fn client() -> String {
             .map(|step| format!("{step} = {}", push_once(step)))
             .collect::<Vec<_>>()
             .join("\n"),
+        "read" => match File::open(variable(TARGET)) {
+            Ok(_) => "read = opened".into(),
+            Err(error) => format!("read = error {}", error.raw_os_error().unwrap_or(-1)),
+        },
         "open" => match open_pipe(&variable(TARGET)) {
             Ok(_) => "open = opened".into(),
             Err(error) => format!("open = error {}", error.raw_os_error().unwrap_or(-1)),
@@ -822,5 +827,131 @@ mod runner {
             log.trim(),
             unoffered.trim()
         )
+    }
+}
+
+/// Phase 6d, owner-attended: the installed `agentc-publication` service,
+/// under its own virtual service account and with the push App's key,
+/// publishes an authorized implementer launch's candidate to the real
+/// remote under that launch's own ref, and three launches (implementer,
+/// reviewer and candidate) cannot read the key. This test plays the
+/// supervisor (it serves the authority pipe) and the runner, so the
+/// service is configured with this account as both. The runbook sets
+/// `AGENTC_6D_PUBLICATION_PIPE`, `AGENTC_6D_PUBLICATION_SID`,
+/// `AGENTC_6D_AUTHORITY_PIPE`, `AGENTC_6D_CHECKOUT` (a clone of the remote
+/// whose `origin/main` the candidate is made on), `AGENTC_6D_KEY` and
+/// `AGENTC_6D_TASK`, then deletes the published ref.
+#[test]
+#[ignore = "owner-attended: needs the installed agentc-publication service and the push key"]
+fn the_installed_publication_service_publishes_to_the_real_remote() {
+    in_a_new_session("installed");
+}
+
+mod installed {
+    //! The host's side of the installed-service test.
+    use super::*;
+
+    /// One of the runbook's variables.
+    fn setting(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"))
+    }
+
+    /// A candidate commit on the checkout's `origin/main` and its bundle.
+    fn candidate(tools: &Path) -> Bundled {
+        let checkout = PathBuf::from(setting("AGENTC_6D_CHECKOUT"));
+        git(
+            &checkout,
+            &["checkout", "--quiet", "--detach", "origin/main"],
+        );
+        let text = format!("Step 6d acceptance candidate {}\n", uuid::Uuid::new_v4());
+        let commit = commit_text(&checkout, "daa42f71-acceptance.txt", &text);
+        let bundle = tools.join("acceptance.bundle");
+        bundle_of(&checkout, (&commit, "origin/main"), &bundle);
+        let tree = git(&checkout, &["rev-parse", &format!("{commit}^{{tree}}")]);
+        Bundled {
+            bundle,
+            commit,
+            tree,
+        }
+    }
+
+    /// The supervisor's authority pipe for the service's account, with
+    /// `launch` holding an attempt of `task`.
+    fn supervisor(task: &str, launch: &Launch) -> Serving {
+        let authority = Arc::new(Authority::new(Box::new(Reads(Arc::default()))));
+        let held = Held {
+            task: task.into(),
+            attempt: format!("attempt-{}", launch.id),
+            generation: 1,
+        };
+        authority.hold(&launch.id, held);
+        let (pipe, broker) = (
+            setting("AGENTC_6D_AUTHORITY_PIPE"),
+            setting("AGENTC_6D_PUBLICATION_SID"),
+        );
+        let mut server = AuthorityServer::new(&pipe, &me(), &broker, authority, None).unwrap();
+        Serving::start(move |stop| server.serve_one(Duration::from_millis(100), stop).unwrap())
+    }
+
+    /// The host's side: publish through the service, then probe the key.
+    pub fn host() -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let (trees, mut launcher) = (Trees::new(&dir), Launcher::new().unwrap());
+        let launches = ["pub-impl", "pub-rev", "pub-cand"]
+            .map(|name| prepare(&mut launcher, &trees, &id(name)));
+        let packages = launches.each_ref().map(|launch| launch.package.as_str());
+        let tools = client_tools(&trees, &packages);
+        let task = setting("AGENTC_6D_TASK");
+        let _supervisor = supervisor(&task, &launches[0]);
+        let published = publish(&mut launcher, (&launches[0], &tools), &task);
+        let read = launches
+            .each_ref()
+            .map(|launch| read_key(&mut launcher, (launch, &tools)));
+        for launch in &launches {
+            launcher.cleanup(&launch.id).unwrap();
+        }
+        format!("{published}; key: {}", read.join(", "))
+    }
+
+    /// Admits `launch` working on `task` and has it push the candidate;
+    /// the reply must accept it at the launch's own ref.
+    fn publish(launcher: &mut Launcher, (launch, tools): (&Launch, &Path), task: &str) -> String {
+        let candidate = candidate(tools);
+        let (pipe, sid) = (
+            setting("AGENTC_6D_PUBLICATION_PIPE"),
+            setting("AGENTC_6D_PUBLICATION_SID"),
+        );
+        let mut control = ControlClient::connect(&pipe, &sid).unwrap();
+        let opened = control
+            .open_for(
+                &launch.id,
+                Role::Implementer,
+                &launch.package,
+                1,
+                Some(task),
+            )
+            .unwrap();
+        let variables = vec![
+            (BUNDLE, candidate.bundle.display().to_string()),
+            (REVISION, candidate.commit.clone()),
+            (TREE, candidate.tree.clone()),
+            (WRONG_TREE, candidate.tree.clone()),
+        ];
+        let lines = push_with(launcher, (launch, tools), &opened, variables, "good");
+        let reference = format!("refs/agent-coordinator/candidates/{task}/{}", launch.id);
+        let accepted = format!("accepted {reference} {}", candidate.commit);
+        assert_eq!(outcome(&lines, "good"), accepted, "{lines:?}");
+        assert!(control.close(&launch.id).unwrap());
+        format!("published {reference} {}", candidate.commit)
+    }
+
+    /// Whether `launch` can open the push key for reading.
+    fn read_key(launcher: &mut Launcher, (launch, tools): (&Launch, &Path)) -> String {
+        let target = vec![(TARGET, setting("AGENTC_6D_KEY"))];
+        let report = start_probe(launcher, (launch, tools), "read", (None, target));
+        let lines = finish(launcher, launch, &report);
+        let read = outcome(&lines, "read").to_owned();
+        assert_eq!(read, "error 5", "{}: {lines:?}", launch.id);
+        format!("{} {read}", launch.id)
     }
 }

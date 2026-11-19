@@ -145,6 +145,15 @@ impl PushAuthority {
     }
 }
 
+impl PushAuthority {
+    /// The environment of Git children for a session that got no token:
+    /// the askpass program with an empty token, which it refuses, and
+    /// Git's fixed settings, so no other credential is asked for.
+    pub fn untokened_environment(&self) -> Result<Vec<(String, String)>> {
+        push_askpass::git_environment(&self.askpass, "")
+    }
+}
+
 /// One push's token, revoked when dropped.
 pub struct Token<'a> {
     authority: &'a PushAuthority,

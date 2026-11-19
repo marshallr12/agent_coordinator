@@ -25,7 +25,7 @@ mod cli;
 #[cfg(target_os = "linux")]
 mod config;
 #[cfg(target_os = "linux")]
-mod preamble;
+use agentc_integrator::push_preamble as preamble;
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]
