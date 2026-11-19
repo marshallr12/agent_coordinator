@@ -309,6 +309,36 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       admits them. Still open besides: `e6685dbf` (planned, owner's 20 tasks and admission).
     - Evidence: `~/.local/state/agent-coordinator-evidence/resume-20261118b/` (task inputs and
       receipts, `latency.log`, `oracle-probe.log`).
+  - **Update 2026-11-19 00:15 UTC — ROLLOUT OF MAIN `f590db8` IN PROGRESS, hosts drained, waiting
+    on `daa42f71` (owner's choice):**
+    - Landed since 19:30 UTC: `c8143834` (`cd8a777`, error class logging; cause still not
+      established), `9dcd2493` (`463cd39`), `cb7c28b0` (`ca8ccc7`, `8ea72f9`). Main `f590db8`.
+    - Rollout task **`de1d7ca7`** (human-delivered, priority 1), attempt **`449e8d82`** gen 1, CLI
+      session `resume-20261118b`; worktree `~/src/worktrees/ac-de1d7ca7-rollout`; evidence and
+      scripts (adapted from `d8fdc1a6`) in
+      `~/.local/state/agent-coordinator-evidence/de1d7ca7-690a-4081-ae65-87ad839552d5/`.
+      The lease is renewed by `renew.sh` there (stops when `STOP-RENEW` exists; **it dies with
+      the machine or a logout, and the attempt then expires**).
+    - Done: release run **`44420903389`** on `f590db8` passed full acceptance (the agent
+      dispatched it on the owner's instruction); packages downloaded, attested, verified
+      (`verified-packages.json`). Host builds verified: mxmini `target/host-1.98.1/release`
+      (`mxmini-SHA256SUMS`), oracle-1 `/home/ubuntu/src/worktrees/agentc-rollout-f590db8`
+      (`/home/ubuntu/agentc-rollout-f590db8-SHA256SUMS`). No server or migration change since
+      `818a7b1`: binaries-only.
+    - **Drain marker `deploy-drain-de1d7ca7` set on both hosts at 00:08:08Z** (before: mxmini
+      `quiet-hours` root:root 644, oracle-1 absent; `drain-before.txt`). Nothing else changed on
+      production or the hosts.
+    - **Blocked on:** `daa42f71` (Windows phase 6d) holds attempt `c5139e84` from the owner's
+      MINIAIR session, and `scripts/drain_check.py` refuses while another task has a current
+      attempt. The owner chose to wait until it lands. Deploy `f590db8` even if main moves.
+    - **To continue:** when no other task holds an attempt, run `start-rollout.sh` (reserves the
+      production resource and runs `rollout.py` as a job), then `oracle-upgrade.sh` on oracle-1
+      and `mxmini-upgrade.sh` here (both with sudo), then clear the markers (mxmini back to
+      `quiet-hours` outside 22:00-07:00 local, oracle-1 removed), publish evidence, submit, and
+      get a subagent review. **To abandon:** restore the markers the same way, touch
+      `STOP-RENEW`, release the attempt.
+    - Not part of the rollout, still the owner's: the VM steps from `cb7c28b0` (backup guide,
+      'The hourly transfer on the 1-GB VM'), the ruleset bypass from `180fab91`, MINIAIR's CLI.
 
 ## Earlier resume points (archived)
 
