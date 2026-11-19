@@ -339,6 +339,33 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       `STOP-RENEW`, release the attempt.
     - Not part of the rollout, still the owner's: the VM steps from `cb7c28b0` (backup guide,
       'The hourly transfer on the 1-GB VM'), the ruleset bypass from `180fab91`, MINIAIR's CLI.
+  - **Update 2026-11-19 21:15 UTC — ROLLOUT OF MAIN `f590db8` DONE on production and both hosts
+    (task `de1d7ca7` submitted, awaiting review). The 00:15 bullet above is history.**
+    - **Blocker cleared on the owner's instruction:** `daa42f71`'s MINIAIR attempt `c5139e84`
+      expired at 01:28Z and stayed attached in `recovery_required`, so the drain held for about
+      21 hours. This session took a recovery claim, confirmed the pushed work-in-progress ref
+      equals checkpoint revision `a074874` (service-verified), resolved it as `resume` and
+      released it. **`daa42f71` is `ready`, human-delivered, with its work on MINIAIR
+      (`C:/src/worktrees/agent-coordinator-task-daa42f71`, branch `task-daa42f71`); reclaim it
+      from MINIAIR. It still waits for the owner's App ID, installation id and key path.**
+    - Production: job `eb524836` succeeded first run in 923 s (drain check unmodified, exit 0;
+      pre and post backups verified and copied off-server; timers restored).
+      `https://agents.sithbit.com` serves `f590db8`. Rollback:
+      `/var/lib/agent-coordinator-deployments/claude-de1d7ca7-f590db8-20261118/rollback`.
+    - Hosts, both at `f590db8` (CLI, supervisor, push; oracle-1 also integrator), installed
+      checksums equal the builds: mxmini source `~/src/worktrees/ac-de1d7ca7-rollout`, oracle-1
+      source `/home/ubuntu/src/worktrees/agentc-rollout-f590db8`. Rollback on each host:
+      `/opt/agentc/rollback-cli-f590db8-20261118` and `/opt/agentc/rollback-host-f590db8-20261118`.
+      Unmodified containment suite: oracle-1 113 PASS / 0 FAIL / 1 SKIP, mxmini 104 / 0 / 2.
+      Agent pins moved with the owner's installed versions: Claude 2.1.328, Codex 0.170.0.
+    - Markers cleared 21:03:17Z: mxmini `quiet-hours` (cron unchanged, 22:00-07:00), oracle-1
+      absent; all oracle-1 units active. No launch was killed.
+    - Evidence artifact `cc060f56-f4c0-4c9b-97cb-e923214a4f72`; local files in the evidence
+      directory named above (`completed-deployment-evidence.json`, `oracle-upgrade.out`,
+      `mxmini-upgrade.out`, `drain-cleared.txt`, `daa42f71-*.json`).
+    - Now possible, owner's: count transport-error classes on oracle-1 (`c8143834`); confirm
+      the `180fab91` cause from the first `push of R refused` journal line. Still the owner's:
+      the VM steps from `cb7c28b0`, the ruleset bypass, MINIAIR's CLI to `f590db8`, `e6685dbf`.
 
 ## Earlier resume points (archived)
 
