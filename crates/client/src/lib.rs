@@ -254,10 +254,11 @@ impl CoordinatorClient {
         if token.is_empty() {
             return Err(ClientError::InvalidHeader("authorization"));
         }
+        let http = http_client(&origin)?;
         Ok(Self {
             origin,
             token: Some(token),
-            http: http_client()?,
+            http,
         })
     }
 
@@ -265,10 +266,12 @@ impl CoordinatorClient {
         service_origin: &str,
         allow_insecure_loopback: bool,
     ) -> Result<Self, ClientError> {
+        let origin = validate_origin(service_origin, allow_insecure_loopback)?;
+        let http = http_client(&origin)?;
         Ok(Self {
-            origin: validate_origin(service_origin, allow_insecure_loopback)?,
+            origin,
             token: None,
-            http: http_client()?,
+            http,
         })
     }
 
@@ -644,11 +647,65 @@ fn sync_parent(_path: &Path) -> Result<(), ClientError> {
     Ok(())
 }
 
-fn http_client() -> Result<reqwest::Client, ClientError> {
+/// Transport classes that mean the connection died before any response
+/// arrived, so sending the same request again on a new connection is safe:
+/// reads change nothing, and every mutation carries an idempotency key.
+/// Timeouts, TLS, connect and HTTP-level failures are never replayed.
+pub const REPLAYED_CLASSES: &[&str] = &["reset", "incomplete_response", "unexpected_eof"];
+
+/// Extra attempts after the first. Two, because a far side that dropped its
+/// connections silently can leave more than one dead connection in the pool.
+pub const MAX_REPLAYS: u32 = 2;
+
+/// Whether an attempt failed with one of [`REPLAYED_CLASSES`].
+fn failed_before_a_response(error: Option<&(dyn std::error::Error + 'static)>) -> bool {
+    error
+        .and_then(|error| error.downcast_ref::<reqwest::Error>())
+        .is_some_and(|error| REPLAYED_CLASSES.contains(&classify_transport(error)))
+}
+
+/// The service host as a replay scope. reqwest compares it with each
+/// request's URI host; IPv6 brackets and letter case are ignored so the
+/// two spellings of one host cannot disagree.
+struct ServiceHost(String);
+
+impl ServiceHost {
+    /// A host without IPv6 brackets.
+    fn bare(host: &str) -> &str {
+        host.trim_start_matches('[').trim_end_matches(']')
+    }
+}
+
+impl<'a> PartialEq<&'a str> for ServiceHost {
+    fn eq(&self, other: &&'a str) -> bool {
+        Self::bare(&self.0).eq_ignore_ascii_case(Self::bare(other))
+    }
+}
+
+/// The replay policy for requests to the service host: a request whose
+/// connection was reset or closed before a response is sent again, at most
+/// [`MAX_REPLAYS`] times and within the request's overall timeout. A body
+/// that cannot be cloned (a streamed upload) is never replayed by reqwest.
+fn replay_policy(host: ServiceHost) -> reqwest::retry::Builder {
+    reqwest::retry::for_host(host)
+        .max_retries_per_request(MAX_REPLAYS)
+        .classify_fn(|attempt| {
+            if failed_before_a_response(attempt.error()) {
+                attempt.retryable()
+            } else {
+                attempt.success()
+            }
+        })
+}
+
+/// Builds the HTTP client for one validated service origin.
+fn http_client(origin: &Url) -> Result<reqwest::Client, ClientError> {
+    let host = ServiceHost(origin.host_str().unwrap_or_default().to_owned());
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
+        .retry(replay_policy(host))
         .build()
         .map_err(ClientError::Transport)
 }
@@ -762,9 +819,9 @@ fn validate_envelope(status: u16, body: &Value) -> Result<(), ClientError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
 
     #[test]
     fn origin_policy_requires_https_or_explicit_loopback() {
@@ -987,33 +1044,152 @@ mod tests {
         assert_eq!(class_of(address).await, "connect");
     }
 
-    #[tokio::test]
-    async fn a_peer_that_closes_without_answering_is_an_incomplete_response() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut input = [0_u8; 2048];
-            let _ = stream.read(&mut input).await.unwrap();
+    /// A complete success envelope on a connection the server keeps open.
+    fn ok_reply() -> Vec<u8> {
+        let body = r#"{"data":{},"request_id":"r","server_time":"t"}"#;
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ";
+        format!("{head}{}\r\n\r\n{body}", body.len()).into_bytes()
+    }
+
+    /// Whether `seen` holds a whole request: its head and Content-Length body.
+    fn request_complete(seen: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(seen);
+        let Some((head, body)) = text.split_once("\r\n\r\n") else {
+            return false;
+        };
+        let length = head.lines().find_map(|line| {
+            let line = line.to_ascii_lowercase();
+            let value = line.strip_prefix("content-length:")?;
+            value.trim().parse::<usize>().ok()
         });
-        assert_eq!(class_of(address).await, "incomplete_response");
-        server.await.unwrap();
+        body.len() >= length.unwrap_or(0)
+    }
+
+    /// Reads one whole request as text, so a later close cannot race the send.
+    async fn read_request(stream: &mut TcpStream) -> String {
+        let mut seen = Vec::new();
+        let mut chunk = [0_u8; 2048];
+        while !request_complete(&seen) {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0, "the client closed in the middle of a request");
+            seen.extend_from_slice(&chunk[..count]);
+        }
+        String::from_utf8(seen).unwrap()
+    }
+
+    /// Closes with RST instead of FIN: a zero linger does not block.
+    fn reset(stream: TcpStream) {
+        #[allow(deprecated)]
+        stream.set_linger(Some(Duration::ZERO)).unwrap();
+    }
+
+    /// The failure seen in production: the server answers one request, then
+    /// resets the kept-alive connection when the next request arrives, and
+    /// serves whatever comes on a new connection. Returns the request it
+    /// reset and the request it then answered.
+    fn serve_then_reset_once(listener: TcpListener) -> tokio::task::JoinHandle<(String, String)> {
+        tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_request(&mut first).await;
+            first.write_all(&ok_reply()).await.unwrap();
+            let lost = read_request(&mut first).await;
+            reset(first);
+            let (mut second, _) = listener.accept().await.unwrap();
+            let replayed = read_request(&mut second).await;
+            second.write_all(&ok_reply()).await.unwrap();
+            (lost, replayed)
+        })
+    }
+
+    /// Reads a request on every connection and then ends it with `end`,
+    /// counting the connections, until the test aborts the task.
+    fn refuse_every_request(
+        listener: TcpListener,
+        end: fn(TcpStream),
+    ) -> (tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let seen = attempts.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_request(&mut stream).await;
+                seen.fetch_add(1, Ordering::SeqCst);
+                end(stream);
+            }
+        });
+        (server, attempts)
+    }
+
+    async fn loopback_client() -> (CoordinatorClient, TcpListener) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let client = CoordinatorClient::new(&origin, "test-secret", true).unwrap();
+        (client, listener)
     }
 
     #[tokio::test]
-    async fn a_reset_peer_is_classed_as_reset() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut input = [0_u8; 2048];
-            let _ = stream.read(&mut input).await.unwrap();
-            // A zero linger makes the close send RST; it does not block.
-            #[allow(deprecated)]
-            stream.set_linger(Some(Duration::ZERO)).unwrap();
-        });
-        assert_eq!(class_of(address).await, "reset");
-        server.await.unwrap();
+    async fn a_read_reset_on_a_reused_connection_succeeds_on_a_new_one() {
+        let (client, listener) = loopback_client().await;
+        let server = serve_then_reset_once(listener);
+        client.get("/api/v1/info", None).await.unwrap();
+        let reply = client.get("/api/v1/info", None).await.unwrap();
+        assert!(reply.is_success());
+        let (lost, replayed) = server.await.unwrap();
+        assert_eq!(lost, replayed);
+    }
+
+    #[tokio::test]
+    async fn a_reset_mutation_is_replayed_with_the_same_key_and_body() {
+        let (client, listener) = loopback_client().await;
+        let server = serve_then_reset_once(listener);
+        client.get("/api/v1/info", None).await.unwrap();
+        let body = serde_json::json!({"summary": "saved"});
+        let reply = client.mutate("/api/v1/tasks", &body, "key-1", None).await;
+        assert!(reply.unwrap().is_success());
+        let (lost, replayed) = server.await.unwrap();
+        assert_eq!(lost, replayed);
+        assert!(replayed.contains("idempotency-key: key-1\r\n"));
+        assert!(replayed.ends_with(r#"{"summary":"saved"}"#));
+    }
+
+    /// The class of the error left after every permitted attempt failed.
+    async fn class_after(client: &CoordinatorClient) -> &'static str {
+        let error = client.get("/api/v1/info", None).await.unwrap_err();
+        error.transport_class().expect("a transport error")
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_keeps_closing_is_tried_three_times_then_incomplete() {
+        let (client, listener) = loopback_client().await;
+        let (server, attempts) = refuse_every_request(listener, drop);
+        assert_eq!(class_after(&client).await, "incomplete_response");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_keeps_resetting_is_tried_three_times_then_reset() {
+        let (client, listener) = loopback_client().await;
+        let (server, attempts) = refuse_every_request(listener, reset);
+        assert_eq!(class_after(&client).await, "reset");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[test]
+    fn the_replay_scope_matches_one_host_in_either_spelling() {
+        let host = ServiceHost("[::1]".into());
+        assert!(host == "::1" && host == "[::1]");
+        assert!(ServiceHost("Agents.Example".into()) == "agents.example");
+        assert!(ServiceHost("agents.example".into()) != "other.example");
+    }
+
+    #[test]
+    fn only_connection_level_classes_are_replayed() {
+        for class in TRANSPORT_CLASSES {
+            let expected = ["reset", "incomplete_response", "unexpected_eof"].contains(class);
+            assert_eq!(REPLAYED_CLASSES.contains(class), expected, "{class}");
+        }
     }
 
     #[tokio::test]

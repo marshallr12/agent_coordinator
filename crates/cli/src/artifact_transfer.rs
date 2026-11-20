@@ -728,6 +728,9 @@ mod tests {
         let server_available = available.clone();
         let server_request = request.clone();
         let server_artifact = artifact.clone();
+        // The client replays a request closed without a response, so the
+        // first call fails only when every one of its attempts is lost.
+        let lost_posts = 1 + coordinator_client::MAX_REPLAYS as usize;
         let server = tokio::spawn(async move {
             let mut reservation_key = None;
             loop {
@@ -774,8 +777,9 @@ mod tests {
                     } else {
                         reservation_key = Some(key);
                     }
-                    if server_posts.fetch_add(1, Ordering::SeqCst) == 0 {
-                        // Commit happened, but the response disappeared.
+                    if server_posts.fetch_add(1, Ordering::SeqCst) < lost_posts {
+                        // Commit happened, but the response disappeared, for
+                        // the first call's request and each client replay.
                         drop(stream);
                         continue;
                     }
@@ -819,13 +823,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        assert_eq!(posts.load(Ordering::SeqCst), lost_posts);
         fs::write(&source, b"changed source").unwrap();
         let response = publish_at(&context, &source, request.clone(), &journal_dir)
             .await
             .unwrap();
         assert_eq!(artifact_metadata(&response).unwrap()["id"], artifact);
-        assert_eq!(posts.load(Ordering::SeqCst), 2);
+        assert_eq!(posts.load(Ordering::SeqCst), lost_posts + 1);
         assert_eq!(puts.load(Ordering::SeqCst), 1);
         assert_eq!(
             fs::read(journal_dir.join("report.bin")).unwrap(),
@@ -834,7 +838,7 @@ mod tests {
         publish_at(&context, &source, request.clone(), &journal_dir)
             .await
             .unwrap();
-        assert_eq!(posts.load(Ordering::SeqCst), 2);
+        assert_eq!(posts.load(Ordering::SeqCst), lost_posts + 1);
         assert_eq!(puts.load(Ordering::SeqCst), 1);
         let mut changed = request.clone();
         changed["filename"] = "other.json".into();
@@ -849,7 +853,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(posts.load(Ordering::SeqCst), 2);
+        assert_eq!(posts.load(Ordering::SeqCst), lost_posts + 1);
         assert_eq!(puts.load(Ordering::SeqCst), 1);
         server.abort();
     }

@@ -1060,6 +1060,17 @@ clears the pending request. Claim and renewal replay output is passed through
 unchanged, including the service's fresh `current_authority`; callers must not
 treat timing from the original receipt as current authority.
 
+The client itself replays one kind of failure before any of this applies. When
+the connection is reset or closed before a response arrives (transport classes
+`reset`, `incomplete_response` and `unexpected_eof`), the same request, with the
+same idempotency key and body, is sent again on a new connection, at most twice
+more and within the request's 30-second limit. This covers a proxy or network
+path that dropped an idle kept-alive connection without telling the client. A
+read changes nothing and a mutation is deduplicated by its key, so the replay is
+safe. Timeouts, TLS and connect failures, HTTP error statuses and streamed
+uploads are not replayed; they are reported as before. The CLI, the supervisor,
+the integrator and the MCP adapter all use this client.
+
 Exit codes are `0` for success, `2` for invalid input, `3` for authentication or
 setup required, `4` for denied operations, `5` for state or ownership conflicts,
 `6` for unsatisfied requirements, and `7` for transport or temporary service

@@ -712,10 +712,14 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        // The client replays a request closed without an answer, so the
+        // peer stays silent on every connection until the test ends.
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut input = [0_u8; 2048];
-            let _ = stream.read(&mut input).await.unwrap();
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut input = [0_u8; 2048];
+                let _ = stream.read(&mut input).await.unwrap();
+            }
         });
         let silent =
             CoordinatorClient::new(&format!("http://{address}"), "tok-secret", true).unwrap();
@@ -728,7 +732,7 @@ mod tests {
         assert!(
             !line.contains("tok-secret") && !line.contains("secret") && !line.contains("127.0.0.1")
         );
-        server.await.unwrap();
+        server.abort();
     }
 
     #[test]
