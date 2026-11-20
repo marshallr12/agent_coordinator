@@ -432,6 +432,35 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       read them a day later to confirm.
     - Evidence: `~/.local/state/agent-coordinator-evidence/resume-20261120/` (`retry-*.json`,
       `retry-tests-before.log`, `gate-*.log`, `oracle-idle-probe.out`).
+  - **Update 2026-11-20 17:50 UTC — ROLLOUT OF MAIN `c05a052` DONE on production and both hosts
+    (owner: "roll out now"; task `0b9c367a`, human-delivered, attempt `ff049ee2`; the "NOT
+    DEPLOYED" note above is history):**
+    - Release run **`44777650029`** on `c05a052` (dispatched by the agent on the owner's
+      instruction after main's CI passed) succeeded with full load acceptance; packages and
+      both host-bundle attestations verified. Client-only change since `f590db8`, no migration.
+    - Drain marker `deploy-drain-0b9c367a` set on both hosts 16:53:33Z (before: mxmini
+      `quiet-hours`, oracle-1 absent), nothing in flight, 0 launches killed; cleared 17:49:04Z
+      (mxmini `quiet-hours`, byte-identical to before; oracle-1 absent).
+    - Production: job `b5289b4a` succeeded first run in 827 s (repository drain check
+      unmodified, exit 0, the two parked `recovery_required` activities non-blocking; pre and
+      post backups and off-server copies verified; timers restored).
+      `https://agents.sithbit.com` serves `c05a052`. Rollback:
+      `/var/lib/agent-coordinator-deployments/claude-0b9c367a-c05a052-20261120/rollback`.
+    - Hosts, both at `c05a052` (CLI, supervisor, push; oracle-1 also integrators), installed
+      checksums equal the builds: mxmini source `~/src/worktrees/ac-0b9c367a-rollout`
+      (`target/host-1.98.1/release`), oracle-1 source
+      `/home/ubuntu/src/worktrees/agentc-rollout-c05a052` (`APPARMOR_BWRAP=1 UPDATE_TIMER=0`).
+      Rollback on each host: `/opt/agentc/rollback-cli-c05a052-20261120` and
+      `/opt/agentc/rollback-host-c05a052-20261120`. Unmodified containment suite: oracle-1
+      113 PASS / 0 FAIL / 1 SKIP, mxmini 104 / 0 / 2. Agent pins moved with the owner's
+      installed versions: Claude 2.1.329, Codex 0.171.0. All oracle-1 units active; mxmini
+      `agentc-run` running, quiet hours unchanged.
+    - Evidence artifact `2a0bf27e-1c30-41b9-8aaa-c11c78c8110f`; local files and scripts in
+      `~/.local/state/agent-coordinator-evidence/rollout-c05a052/`.
+    - **To confirm the fix:** a day after 17:48Z on 11-20, count `(reset)` lines in the oracle-1
+      integrator journals; expected none (26 in the 18 hours before). Timeouts and 521/522 may
+      still appear (`cb7c28b0`, owner's VM steps).
+    - Still the owner's: MINIAIR's CLI to `c05a052`, the VM steps, the ruleset bypass, `e6685dbf`.
 
 ## Earlier resume points (archived)
 
