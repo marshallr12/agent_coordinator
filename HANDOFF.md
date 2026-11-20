@@ -396,6 +396,42 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       `NotPublished` line exists since the rollout (none since 11-18 22:00Z either); main's
       audit has not been red since. Read again after the next red audit.
     - Evidence: `~/.local/state/agent-coordinator-evidence/resume-20261120/oracle-journal-read.txt`.
+  - **Update 2026-11-20 16:45 UTC — transport resets investigated and fixed on main (owner's goal;
+    task `a1c6d38c`, human-delivered, attempt `7f1139d6`): NOT DEPLOYED.**
+    - **Finding:** the supervisor and both integrators on oracle-1, each on its own kept-alive
+      HTTP/1.1 connection (reqwest without http2; polling every 30 to 60 s), fail within seconds
+      of each other, once each, and succeed on the next cycle (for example 21:48:20.18,
+      21:48:20.64 and 21:48:30.84Z on 11-19). hyper drops a pooled connection when it sees a FIN
+      or RST while idle, so the far side discarded the connections silently and answered the
+      next request with RST; the client sent every request exactly once. **Which hop does it is
+      not established** (a Cloudflare edge restart or a route change are candidates; oracle-1
+      reaches Cloudflare over IPv6). A production log read was blocked by the permission
+      classifier and not retried.
+    - **Ruled out:** an idle timeout. From oracle-1, Cloudflare closes an idle kept-alive
+      connection at 400 s with a clean FIN; connections idle 20 to 330 s were still usable
+      (`oracle-idle-probe.out`). The agents' egress firewall applies only to the agent uids.
+    - **Fix, on main as `c05a052`:** `crates/client` gives reqwest a replay policy scoped to the
+      service host: a request that fails before any response with class `reset`,
+      `incomplete_response` or `unexpected_eof` is sent again on a new connection, at most
+      twice more, inside the 30 s request limit. Safe because reads change nothing and every
+      mutation carries an idempotency key. Timeouts, TLS, connect and HTTP statuses are not
+      replayed. Two tests that assumed one attempt per request were adapted (integrator
+      `service.rs`, CLI `artifact_transfer.rs`); CLI guide paragraph under "Interrupted
+      mutations". Gate on the candidate: fmt, Clippy, 1288 tests, build, smoke, docs all pass.
+    - **Workflow:** the service held the new task under the weekly agent-task budget and refused
+      the agent's admission edit (`admission_budget`, human required); the owner released it.
+      Submission `7be207fe`; review `4d94099e` **approved 16:29:56Z** by oracle-1's supervised
+      reviewer (distinct launch, three advisory findings, one of them the known long-TMPDIR
+      supervisor test failure on base); integrated by oracle-1; task **Done 16:40Z**. Worktree
+      and local branch removed.
+    - **Not addressed:** the 3 timeouts and the HTTP 521/522 at 01:12Z are origin stalls on the
+      1-GB VM (`cb7c28b0`, owner's VM steps).
+    - **Next:** the fix takes effect only after a rollout of `c05a052` or later (service and
+      hosts must share a source commit, so production moves too; client-only change, no
+      migration). Afterwards the integrator journals on oracle-1 should show no `(reset)` line;
+      read them a day later to confirm.
+    - Evidence: `~/.local/state/agent-coordinator-evidence/resume-20261120/` (`retry-*.json`,
+      `retry-tests-before.log`, `gate-*.log`, `oracle-idle-probe.out`).
 
 ## Earlier resume points (archived)
 
