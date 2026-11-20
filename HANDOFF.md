@@ -377,6 +377,25 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     - Now possible, owner's: count transport-error classes on oracle-1 (`c8143834`); confirm
       the `180fab91` cause from the first `push of R refused` journal line. Still the owner's:
       the VM steps from `cb7c28b0`, the ruleset bypass, MINIAIR's CLI to `f590db8`, `e6685dbf`.
+  - **Update 2026-11-20 15:30 UTC — oracle-1 journal reads (owner's pick; read-only; CLI session
+    `resume-20261120`):**
+    - Queue: nothing claimable from mxmini. No task waits for review; `daa42f71` and `7011c55f`
+      are ready but human-delivered Windows work, `d2ca0225` is blocked on the owner, `e6685dbf`
+      is planned. No pending decision. Main is `8a04804` (two canary commits over `f590db8`),
+      CI green; production and hosts unchanged.
+    - **`c8143834` transport errors, now classified** (both integrators, 21:02:18Z on 11-19 to
+      15:22Z on 11-20, about 18 h): **`reset` 26** (13 per unit), **`timeout` 3**, and 4 lines
+      `HTTP 521` / `HTTP 522 did not contain a JSON response body` at 01:12:08 to 01:12:59Z
+      (Cloudflare reporting the origin down, then timed out). 18 of the 26 resets fall in the
+      first 85 minutes after the units started; since 02:00Z there are 3 resets and 3 timeouts.
+      Two timeouts are at 08:07:56 / 08:08:02Z, inside the :05 backup-transfer window. The
+      service sits behind Cloudflare and Caddy. **Cause of the resets is still not
+      established**: which hop closes the connection, and whether it is a reused idle
+      connection, was not tested. No task created.
+    - **`180fab91` cause still unconfirmed:** no `push of R refused`, `not completed` or
+      `NotPublished` line exists since the rollout (none since 11-18 22:00Z either); main's
+      audit has not been red since. Read again after the next red audit.
+    - Evidence: `~/.local/state/agent-coordinator-evidence/resume-20261120/oracle-journal-read.txt`.
 
 ## Earlier resume points (archived)
 
