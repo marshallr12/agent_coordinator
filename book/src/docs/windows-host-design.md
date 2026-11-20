@@ -915,7 +915,15 @@ answers with that SID while the client claims to be another launch. A foreign
 launch cannot open the pipe at all. Step 6a gave each launch's broker pipe a
 grant with a role and a generation, and step 6c checks the coordinator
 authority of each publication request by asking the supervisor ([phase 6
-steps](#phase-6-steps)). Service SIDs are proposed and untested.
+steps](#phase-6-steps)). Since [step 6d](#step-6d-the-brokers-as-services-2026-11-20)
+both brokers run as services under their own virtual accounts: each control
+pipe is owned by its broker's service SID and serves only the configured
+runner account, the runner uses a control pipe only when the configured
+broker account owns it, and the supervisor's authority pipe serves only the
+publication broker's service SID. The owner-attended run exercised those
+checks with the owner's account standing in for the runner and the
+supervisor; the runner's and supervisor's own service SIDs have not been on
+the other end.
 
 | Interface | Permitted operation | Required rejection/probe |
 | --- | --- | --- |
@@ -962,7 +970,7 @@ on its own.
 | 6a | Byte streams on pipe sessions; a broker pipe per launch whose identity comes from the client's token and the broker's registry; the launch's role on the Windows prepare path | Native: a launch is served its own grant whatever its request claims; another package, the same account without the package and the remote form of the path are refused; closing a launch ends its session and removes its pipe |
 | 6b | The egress broker over the pipe, and a native probe of loopback inside one AppContainer package | Native: an allowed route works through the broker; the refusals in the acceptance map |
 | 6c | The publication broker, which asks the supervisor service over its pipe whether each request still has coordinator authority; the CLI's Windows candidate-checkpoint client | Native: a reviewer call, a foreign launch and a request without current authority are refused |
-| 6d | Both brokers as virtual service accounts with SCM entry points; the push key readable only by the publication account, with per-connection scoped tokens; a protected broker work directory; the implementer's credential digests in the secret scan. Follow-up task `daa42f71` | Owner-attended run on MiniAir |
+| 6d | Both brokers as virtual service accounts with SCM entry points; the push key readable only by the publication account, with per-connection scoped tokens; a protected broker work directory; the implementer's credential digests in the secret scan (task `daa42f71`) | Native, and an owner-attended run on MiniAir: each installed service serves a launch under its own account; the push key is refused to the egress account and to three launches; a push to the real remote uses a token revoked afterwards |
 
 Step 6a is implemented in the Windows `pipe` and `broker` modules and in
 `service::pipe_policy`. A pipe session reads a byte stream
@@ -1167,9 +1175,149 @@ after that; a launch whose agent submitted keeps its authority record (and
 is refused, since its attempt is no longer active) until the service
 restarts; a close that arrives while a push is importing, scanning or
 writing the remote waits for that Git work; and no harness has published
-through it. Step 6d, follow-up task `daa42f71`, takes the service accounts,
-the push key and its token minting, the protected work directory and the
-credential digests.
+through it. Step 6d, task `daa42f71`, took the service accounts, the push
+key and its token minting, the protected work directory and the credential
+digests; the rest of that list still stands.
+
+#### Step 6d: the brokers as services (2026-11-20)
+
+Step 6d is implemented in the Windows `broker_service`, `state_directory`,
+`token_inventory` and `publication_credentials` modules, in
+`service::broker_settings`, and in `coordinator_local::private_directory`.
+
+**Service entry points.** `agentc-supervisor windows-service --role egress`
+and `--role publication` run a broker under the Service Control Manager;
+from a console both fail at once. Each takes its account from Windows, never
+from a setting. In order, the service validates its settings, secures its
+state directory, sends its diagnostics to `service.log` there, logs its
+token's user, groups and privileges as one JSON line, builds its handler,
+creates its control pipe for the runner's account and only then reports
+running. A failure at any step stops it. A stop or preshutdown request ends
+the control loop within a quarter second, and closing the broker ends every
+launch's sessions and removes its pipe before the service reports stopped.
+`[windows_egress]` and `[windows_publication]` give every entry a default
+except the accounts and the publication remote, so neither broker starts
+from an empty configuration; `deploy/agentc/supervisor-windows.example.toml`
+shows them.
+
+**State directories.** A missing state directory is made with a protected
+access list for the broker's account, the system and administrators. Every
+default sits below `C:\ProgramData`, where any local user may create a
+directory and own it, so an existing directory is used only when it is a
+plain directory (no link or reparse point) that the broker's account, the
+system or administrators own, and its list is then set again. The
+publication broker's work root is secured the same way.
+
+**Protected work directory.** `private_directory` was a no-op on Windows.
+It now gives each launch's private repository a protected access list
+naming only Owner Rights and the system, inherited below it, and refuses a
+link or junction instead of following it. Administrators are not on that
+list: removing a launch's repository as an administrator needs ownership
+taken first.
+
+**Credential digests.** The supervisor's `prepare` names the digests of the
+coordinator credentials a launch is given (`known_digests`); the runner
+checks their form and journals them, the publication admission's `open`
+carries them, the grant holds them and the broker's secret scan refuses a
+candidate that adds one of those credentials.
+
+**Push credentials.** With `[windows_publication] app_id` and
+`installation_id` set (both 0 by default: no credentials, which only a
+local remote accepts), the broker reads the push App's key at start and
+signs with it, and stops if it cannot. For each push it reads the request
+preamble first, so an empty or malformed session costs no mint; asks the
+supervisor whether the launch may publish; spends one mint from that
+launch's budget; asks GitHub for an installation token narrowed to the
+remote's repository with `contents: write`; pushes through the gated
+protocol; and revokes the token when the push ends, whatever its outcome,
+logging that it did. Git reaches the token only through `GIT_ASKPASS`:
+`agentc-supervisor.exe` answers one github.com prompt when
+`AGENTC_PUSH_ASKPASS_TOKEN` is set. The askpass mode, the mint budget and
+the preamble moved into the integrator library, so the Linux helper
+`agentc-push` and the Windows broker share them. The service removes
+inherited `GIT_*`, proxy and CA-bundle variables before any thread starts;
+Windows needs the rest of its environment, so this is a list of names to
+remove, where the Linux helper keeps only an allowed few. `[windows_egress]
+must_not_open` (default: the push key's path) lists files the egress
+account must not be able to open: the service tries each at start, refuses
+to run if one opens and logs each refusal; a file that is not there is
+logged as not checked.
+
+**The authority pipe keeps one instance.** The publication broker is its
+only client and each question is one short exchange, so the pipe was left
+as it is. Concurrent pushes of several launches were not measured against
+it: a question that waits longer than half a second is refused, which
+fails closed.
+
+**What 6d demonstrates on MiniAir.** The owner-attended run of 2026-11-20
+installed the release binary built from `a074874` as two demand-start
+services, `agentc-egress` and `agentc-publication`, each under its own
+virtual account (`NT SERVICE\agentc-egress`, `NT SERVICE\agentc-publication`),
+from an elevated session. A new private key of the existing push App, made
+for MiniAir, was copied to `C:\ProgramData\agentc\publication-key\push-app.pem`
+with inheritance removed: the publication account may read it, the system
+and administrators have full control. Two ignored native tests
+(`windows_egress` and `windows_publication`, at `7d41049`, which differs
+from `a074874` only in the publication test) then played the runner and the
+supervisor as the owner's account, which both services were configured to
+trust, with launches running as the owner in a new logon session.
+
+| Observation | Result |
+| --- | --- |
+| Both services start, report running and stop under the SCM | Running after `sc.exe start`; stopped with exit code 0 after `sc.exe stop` |
+| Each service's token, from its own log | User: the service's SID. Groups: Everyone, `BUILTIN\Users`, `NT AUTHORITY\SERVICE`, console logon, Authenticated Users, This Organization, LOCAL, its logon session and `NT SERVICE\ALL SERVICES`, at high integrity; not Administrators. Privileges enabled: `SeChangeNotify`, `SeImpersonate`, `SeCreateGlobal`; present but disabled: `SeShutdown`, `SeUndock`, `SeIncreaseWorkingSet`, `SeTimeZone`. Both tokens are alike |
+| State directories the services made | `egress`, `publication` and `publication\work`: the service's account, the system and administrators, full control, nothing inherited |
+| The egress service opens the push key at start | Refused, "Access is denied" (error 5); the service then ran |
+| A launch the egress service admitted: CONNECT to github.com:443 | 200 |
+| The same launch: CONNECT to example.com:443 | 403 |
+| The same launch: direct TCP to a public address; resolving github.com | Error 10013; error 11003 |
+| That launch's egress pipe once the runner closed it | Error 2 |
+| A held implementer launch pushes a candidate commit made on `origin/main` | Accepted at `refs/agent-coordinator/candidates/<task>/<launch>` on `https://github.com/marshallr12/agent_coordinator.git`; the ref read back from the remote at that commit |
+| The publication service's log for that push | `"token":"revoked"`, then the accepted outcome with the launch, task, role and revision |
+| Implementer, reviewer and candidate launches open the push key | Error 5 each |
+
+The first publication run stopped after its push was accepted: the test
+reused the launch that had pushed for a key probe, and a launch starts
+once. The push now has a launch of its own. Three candidate refs were
+published across the runs and all three were deleted from the remote
+afterwards. Both services, `C:\Program Files\agentc` and
+`C:\ProgramData\agentc` (the installed key with it) were removed; the two
+accounts' service profiles were still loaded and stay until a restart.
+
+The native suites, run as the owner, show the rest: `broker_service::open`
+is the start-up without the SCM; a state directory another user owns is
+refused; a launch admitted with a token's digest whose candidate adds that
+token is refused `secret_detected` with nothing published; `git credential
+fill` asks the binary's askpass mode and gets the token; an App without a
+readable key stops the publication handler from being built; a launch
+without authority never causes a mint; and a spent budget and a failed
+mint are refused as the Linux helper words them.
+
+What 6d leaves unverified:
+
+- The tests stood in for the runner and the supervisor as the owner's
+  account. The brokers have not served the installed `agentc-runner` and
+  `agentc-supervisor` services, and no harness has used either broker.
+- The three key probes ran in implementer, reviewer and candidate packages
+  as the owner. The key's access list names no worker account, but launches
+  under the role accounts were not run against it.
+- The token's narrowing is what the broker asks GitHub for (one repository,
+  `contents: write`), and the App itself holds only `contents: write` and
+  `metadata: read` on a selected-repositories installation. The run did not
+  read the minted token's scope back or try the token after its revocation;
+  the log line follows GitHub's accepted revocation call.
+- The installed services were asked only for the accepted paths and the key
+  refusals. Reviewer, foreign-launch, wrong-tree, lost-authority and
+  credential-digest refusals were shown with the broker running as the
+  owner.
+- A closed launch's repository stays below the publication broker's work
+  directory: nothing removes it at close, at stop or at the next start, so
+  the directory grows with every launch that pushes.
+- The services' tokens keep the default service privileges, including
+  `SeImpersonate`; no required-privilege list or bounded recovery was set
+  for the two broker services, and nothing installs them. Phase 7's
+  installer owns the registration, the key's access list and removal.
+- The authority pipe under concurrent pushes, as above.
 
 ## Linux P2 parity and acceptance map
 
@@ -1210,11 +1358,11 @@ only proposed.
 | `check_git`, hardened clone | None |
 | `check_writes`, `check_seeds` | Partial. The host directory, the tool directory and every other launch's directory are denied (`host.file_*`, `host.dir_*`, `host.tool_write`, `peer.*.file_*`). Role state and seeds are untested |
 | `check_codex_sandbox`, `check_claude_sandbox` | Partial. Own writes work; host and cross-launch files, processes, pipes, events and the interactive window station are denied. **The owner's registry is denied only to a launch running as a separate account**: `host.registry_environment_open` fails when the launch runs as the owner and passed in the role-account run |
-| `check_egress` | Partial. Direct TCP over IPv4 and IPv6, loopback, the local network, UDP and DNS are denied to a token with no network capability, and the authorized pipe route works. With the firewall profiles disabled the refusals held in the [launcher's role-account run](#role-account-run-through-the-launcher-2026-11-09). Since [step 6b](#phase-6-steps) an allowlist egress broker serves each launch over its pipe: an allowed CONNECT is tunnelled, and another host, another port, a request that is not a CONNECT and a malformed one get 403 with nothing contacted, while a direct connection from the launch to the broker's own destination fails. The broker runs as the owner in that test, not as a service account. No WFP policy exists, and a stopped firewall service is untested |
+| `check_egress` | Partial. Direct TCP over IPv4 and IPv6, loopback, the local network, UDP and DNS are denied to a token with no network capability, and the authorized pipe route works. With the firewall profiles disabled the refusals held in the [launcher's role-account run](#role-account-run-through-the-launcher-2026-11-09). Since [step 6b](#phase-6-steps) an allowlist egress broker serves each launch over its pipe: an allowed CONNECT is tunnelled, and another host, another port, a request that is not a CONNECT and a malformed one get 403 with nothing contacted, while a direct connection from the launch to the broker's own destination fails. The broker runs as the owner in that test. In [step 6d](#step-6d-the-brokers-as-services-2026-11-20) the installed service `agentc-egress`, under its own virtual account, answered a launch's CONNECT to github.com:443 with 200 and another host with 403, while the launch's direct TCP to a public address and its name resolution failed. No WFP policy exists, and a stopped firewall service is untested |
 | `check_claude_launch`, `check_relay_probe`, shell execution | Partial. Native Claude Code 2.1.326 ran in a less-privileged reviewer launch, and its Bash command went through the prefix and the shim into the candidate ([step 5f](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17)). The network and the credential were given for that one owner-attended run, and no harness has run through the egress broker. The candidate runner's readiness check refuses a broken runner (step 5e). With an egress broker configured, the runner refuses to start a launch the broker does not admit or whose broker is missing (step 6b) |
 | `check_claude_token`, `check_candidate_token`, reviewer isolation | Partial. A synthetic credential file is denied, and implementer and reviewer packages cannot reach each other. In step 5e a synthetic credential in the reviewer's environment, files, inherited handle and registry was out of its candidate's reach, and so were the reviewer's process, its pipe, another launch and the runner. Whether the candidate can reach the real credential the harness held in step 5f was not probed |
-| `check_push_kill`, `check_push_launch`, `check_live_helper` | Partial. A per-launch pipe admits only its package, a foreign launch is denied, and the broker takes identity from the client token. Since [step 6c](#phase-6-steps) a publication broker publishes only an implementer launch's own candidate ref, refuses a reviewer launch, a wrong tree and a launch without current coordinator authority (asked of the supervisor before each push), and a closed launch's pipe is gone. The broker runs as the owner, not as a service account, and has published only to a local repository; the service accounts are follow-up task `daa42f71` |
-| `check_push_key`, `check_attention_token` | Partial. The synthetic credential stand-in is denied to every launch. No push key exists on Windows yet; its ACLs are follow-up task `daa42f71` |
+| `check_push_kill`, `check_push_launch`, `check_live_helper` | Partial. A per-launch pipe admits only its package, a foreign launch is denied, and the broker takes identity from the client token. Since [step 6c](#phase-6-steps) a publication broker publishes only an implementer launch's own candidate ref, refuses a reviewer launch, a wrong tree and a launch without current coordinator authority (asked of the supervisor before each push), and a closed launch's pipe is gone. In [step 6d](#step-6d-the-brokers-as-services-2026-11-20) the broker ran as the service `agentc-publication` under its own virtual account and published a held implementer launch's candidate to the real remote under that launch's own ref, with a token minted for that push and revoked after it. The refusals above were shown with the broker running as the owner; the installed service was asked only for the accepted push. A closed launch's repository stays in the broker's work directory, and no crash sweep exists |
+| `check_push_key`, `check_attention_token` | Partial. The synthetic credential stand-in is denied to every launch. In [step 6d](#step-6d-the-brokers-as-services-2026-11-20) the real push App key sat in a directory whose access list names the publication service's account (read), the system and administrators: the publication service read it and signed with it, the egress service's account was refused it at start (error 5), and three launches (implementer, reviewer and candidate packages) were each refused it (error 5). Those launches ran as the owner; the role accounts of phase 4 were not probed, and there is no attention token on Windows |
 | `check_apparmor_bwrap`, group/tool access | Partial. The launcher refuses a launch whose token or job is not what it asked for, and the Task Scheduler refuses the less-privileged token. Acquiring a service or elevated token is untested |
 | `check_browser_install`, `check_pinned_shell`, `check_browser` | None |
 | `check_cargo_test` | Partial. A real offline `cargo test` and `cargo build` of the fixture crate pass inside both boundaries. The workspace is untested |
@@ -2604,7 +2752,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4b | The supervisor's pipe client and remote host runtime; then the supervisor service loop on Windows over that pipe, a stand-in coordinator driver for acceptance and the owner runbook | 4a | Implemented. First part, task `078703b3`: the [pipe client and the remote host runtime](#phase-4b-first-part-the-supervisors-pipe-client-and-remote-host-runtime). Second part, task `49aaca03`: the [supervisor service, the stand-in and the proposed 4c runbook](#phase-4b-second-part-the-supervisor-service-the-stand-in-and-the-4c-runbook). **No service was installed and nothing is machine-accepted** |
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Steps 5a to 5f done**; the phase is complete when task `9cf04a5c`'s review and integration are. It first **closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim) and step 5e (the readiness check and the fixture checks), whose native tests pass. In step 5f, an owner-attended run [inside a contained reviewer launch](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17) sent a Bash command from native Claude Code 2.1.326 in the recorded form through the prefix and the shim into the candidate. The capability record now admits only that build. No Windows driver calls the record, so no product Claude launch runs on Windows. The [items still open](#phase-5-steps) include the process a job still counts after the shell ends |
-| 6 | Egress and publication brokers | Phase 3 | Steps 6a, 6b and 6c implemented (task `13ae81c1`); step 6d is follow-up task `daa42f71`; see [phase 6 steps](#phase-6-steps) |
+| 6 | Egress and publication brokers | Phase 3 | Steps 6a, 6b and 6c implemented (task `13ae81c1`); step 6d implemented and run by the owner on MiniAir on 2026-11-20 (task `daa42f71`): both brokers served a launch as services under their own virtual accounts, and publication pushed to the real remote with a per-push token. The brokers have not served the installed runner and supervisor services or a harness; see [phase 6 steps](#phase-6-steps) |
 | 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
 
 No intermediate phase is production acceptance. Independent review and guarded
