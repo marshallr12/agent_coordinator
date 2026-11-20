@@ -470,6 +470,22 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       same-launch review. A general submission's review claim takes workflow policy revision 0.
     - First reading after the upgrade (17:48:10 to 17:53Z): 0 failed-request lines on oracle-1.
       `daa42f71` shows `in_progress` (not this session's; MINIAIR).
+    - **Fix verified in production (20:08 UTC):** a control probe from oracle-1 (three kept-alive
+      HTTP/1.1 connections, GET `/healthz` every 30 s, no retry, 17:54:50 to 18:50:15Z) saw
+      **8 resets in 330 requests**, including all three connections within 22 s
+      (18:32:43, 18:32:54, 18:33:05Z), which is the silent-drop pattern. Over 17:48:10 to
+      20:08:45Z the supervisor and both integrators on the new build logged **0 reset lines**
+      (16 in the 35 minutes before the upgrade, 16:50 to 17:24Z). One line remains: a
+      supervisor `service request timed out` at 19:08:24Z, inside the :05 backup-transfer
+      window. Files: `post-upgrade-control.out`, `post-upgrade-journal-2008Z.out` in
+      `~/.local/state/agent-coordinator-evidence/resume-20261120/`.
+    - **Timeouts and 521/522 — waiting on the owner's VM step:** the gentler transfer script
+      and unit from `cb7c28b0` are on main but not installed on the VM. The owner chose to run
+      `~/.local/state/agent-coordinator-evidence/resume-20261120/vm-install-backup-transfer.sh`
+      (copies both files from the `c05a052` worktree, keeps `.before-c05a052` copies, installs,
+      `daemon-reload`, prints the unit's limits; starts nothing). Not confirmed run. Afterwards:
+      sample the digest latency from the workstation across a :05 transfer (as in
+      `resume-20261118b/latency.log`) and read the oracle-1 journals for timeouts.
     - Still the owner's: MINIAIR's CLI to `c05a052`, the VM steps, the ruleset bypass, `e6685dbf`.
 
 ## Earlier resume points (archived)
