@@ -970,7 +970,7 @@ on its own.
 | 6a | Byte streams on pipe sessions; a broker pipe per launch whose identity comes from the client's token and the broker's registry; the launch's role on the Windows prepare path | Native: a launch is served its own grant whatever its request claims; another package, the same account without the package and the remote form of the path are refused; closing a launch ends its session and removes its pipe |
 | 6b | The egress broker over the pipe, and a native probe of loopback inside one AppContainer package | Native: an allowed route works through the broker; the refusals in the acceptance map |
 | 6c | The publication broker, which asks the supervisor service over its pipe whether each request still has coordinator authority; the CLI's Windows candidate-checkpoint client | Native: a reviewer call, a foreign launch and a request without current authority are refused |
-| 6d | Both brokers as virtual service accounts with SCM entry points; the push key readable only by the publication account, with per-connection scoped tokens; a protected broker work directory; the implementer's credential digests in the secret scan (task `daa42f71`) | Native, and an owner-attended run on MiniAir: each installed service serves a launch under its own account; the push key is refused to the egress account and to three launches; a push to the real remote uses a token revoked afterwards |
+| 6d | Both brokers as virtual service accounts with SCM entry points; the push key readable only by the publication account, with per-connection scoped tokens; a protected broker work directory; the secret scan refusing the credential digests a launch is admitted with, which nothing supplies yet (task `daa42f71`) | Native, and an owner-attended run on MiniAir: each installed service serves a launch under its own account; the push key is refused to the egress account and to three launches; a push to the real remote uses a token revoked afterwards |
 
 Step 6a is implemented in the Windows `pipe` and `broker` modules and in
 `service::pipe_policy`. A pipe session reads a byte stream
@@ -1176,8 +1176,8 @@ is refused, since its attempt is no longer active) until the service
 restarts; a close that arrives while a push is importing, scanning or
 writing the remote waits for that Git work; and no harness has published
 through it. Step 6d, task `daa42f71`, took the service accounts, the push
-key and its token minting, the protected work directory and the credential
-digests; the rest of that list still stands.
+key and its token minting, the protected work directory and the broker's
+half of the credential digests; the rest of that list still stands.
 
 #### Step 6d: the brokers as services (2026-11-20)
 
@@ -1215,11 +1215,18 @@ link or junction instead of following it. Administrators are not on that
 list: removing a launch's repository as an administrator needs ownership
 taken first.
 
-**Credential digests.** The supervisor's `prepare` names the digests of the
-coordinator credentials a launch is given (`known_digests`); the runner
-checks their form and journals them, the publication admission's `open`
-carries them, the grant holds them and the broker's secret scan refuses a
-candidate that adds one of those credentials.
+**Credential digests.** The runner's `prepare` accepts the digests of the
+coordinator credentials a launch is given (`known_digests`), checks their
+form and journals them; the publication admission's `open` carries them,
+the grant holds them and the broker's secret scan refuses a candidate that
+adds one of those credentials. **Nothing sends them yet.** The supervisor's
+remote host names no digests in its `prepare`, because a Windows launch is
+given no coordinator credential: the supervisor service has only the
+acceptance stand-in. On the path the services run today the list is
+therefore always empty, and the scan refuses only what the CLI's own scan
+refuses. Whoever gives a Windows launch a coordinator credential must
+compute its digests and send them, as the Linux `launch-root` does from the
+implementer's credential files.
 
 **Push credentials.** With `[windows_publication] app_id` and
 `installation_id` set (both 0 by default: no credentials, which only a
@@ -1257,10 +1264,14 @@ from an elevated session. A new private key of the existing push App, made
 for MiniAir, was copied to `C:\ProgramData\agentc\publication-key\push-app.pem`
 with inheritance removed: the publication account may read it, the system
 and administrators have full control. Two ignored native tests
-(`windows_egress` and `windows_publication`, at `7d41049`, which differs
-from `a074874` only in the publication test) then played the runner and the
+(`windows_egress` and `windows_publication`) then played the runner and the
 supervisor as the owner's account, which both services were configured to
-trust, with launches running as the owner in a new logon session.
+trust, with launches running as the owner in a new logon session. The
+results below are those of the last run of each test, at `7d41049`, which
+differs from `a074874` only in the publication test; the egress test had
+passed with the same result at `a074874`. The run's log does not record
+the commit the binary was built from; it was built in a clean worktree at
+`a074874`.
 
 | Observation | Result |
 | --- | --- |
@@ -1272,9 +1283,9 @@ trust, with launches running as the owner in a new logon session.
 | The same launch: CONNECT to example.com:443 | 403 |
 | The same launch: direct TCP to a public address; resolving github.com | Error 10013; error 11003 |
 | That launch's egress pipe once the runner closed it | Error 2 |
-| A held implementer launch pushes a candidate commit made on `origin/main` | Accepted at `refs/agent-coordinator/candidates/<task>/<launch>` on `https://github.com/marshallr12/agent_coordinator.git`; the ref read back from the remote at that commit |
+| A held implementer launch pushes a candidate commit made on `origin/main` | Accepted at `refs/agent-coordinator/candidates/<task>/<launch>` on `https://github.com/marshallr12/agent_coordinator.git`; `git ls-remote`, run by hand before the refs were deleted, listed the ref at that commit |
 | The publication service's log for that push | `"token":"revoked"`, then the accepted outcome with the launch, task, role and revision |
-| Implementer, reviewer and candidate launches open the push key | Error 5 each |
+| Three further launches, named implementer, reviewer and candidate, open the push key | Error 5 each |
 
 The first publication run stopped after its push was accepted: the test
 reused the launch that had pushed for a key probe, and a launch starts
@@ -1283,6 +1294,12 @@ published across the runs and all three were deleted from the remote
 afterwards. Both services, `C:\Program Files\agentc` and
 `C:\ProgramData\agentc` (the installed key with it) were removed; the two
 accounts' service profiles were still loaded and stay until a restart.
+The first removal stopped after deleting the services: an administrator is
+denied a launch's repository below the work directory, which three launches
+had left there, owned by the publication account. The removal took
+ownership of the work tree and then finished. The key file the owner
+downloaded was only copied, and the key stays registered with the App
+until the owner removes it.
 
 The native suites, run as the owner, show the rest: `broker_service::open`
 is the start-up without the SCM; a state directory another user owns is
@@ -1298,9 +1315,23 @@ What 6d leaves unverified:
 - The tests stood in for the runner and the supervisor as the owner's
   account. The brokers have not served the installed `agentc-runner` and
   `agentc-supervisor` services, and no harness has used either broker.
-- The three key probes ran in implementer, reviewer and candidate packages
-  as the owner. The key's access list names no worker account, but launches
-  under the role accounts were not run against it.
+- The three key probes are alike in everything but their names: each is a
+  less-privileged AppContainer launch with a profile of its own, running as
+  the owner. None was admitted with a role, none came from the candidate
+  runner, and none ran under a role account. The probe has no positive
+  control inside the launch, so error 5 shows that such a package cannot
+  open the key, not that the key's access list is what refuses it. The
+  list itself, as `icacls` printed it, names only the publication account,
+  the system and administrators.
+- No credential digest reaches the broker on the services' own path: the
+  supervisor sends none, as described above. The refusal was shown only
+  with a digest the native test supplied.
+- No launch or role account tried to open the publication broker's work
+  directory or a launch's repository in it. Their access lists name no
+  worker: the work root's was printed by `icacls` at install, and a
+  launch's repository was seen only to deny an administrator and to be
+  owned by the publication account. The protection against the worker
+  roles is those lists, not an observed refusal.
 - The token's narrowing is what the broker asks GitHub for (one repository,
   `contents: write`), and the App itself holds only `contents: write` and
   `metadata: read` on a selected-repositories installation. The run did not
@@ -1362,7 +1393,7 @@ only proposed.
 | `check_claude_launch`, `check_relay_probe`, shell execution | Partial. Native Claude Code 2.1.326 ran in a less-privileged reviewer launch, and its Bash command went through the prefix and the shim into the candidate ([step 5f](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17)). The network and the credential were given for that one owner-attended run, and no harness has run through the egress broker. The candidate runner's readiness check refuses a broken runner (step 5e). With an egress broker configured, the runner refuses to start a launch the broker does not admit or whose broker is missing (step 6b) |
 | `check_claude_token`, `check_candidate_token`, reviewer isolation | Partial. A synthetic credential file is denied, and implementer and reviewer packages cannot reach each other. In step 5e a synthetic credential in the reviewer's environment, files, inherited handle and registry was out of its candidate's reach, and so were the reviewer's process, its pipe, another launch and the runner. Whether the candidate can reach the real credential the harness held in step 5f was not probed |
 | `check_push_kill`, `check_push_launch`, `check_live_helper` | Partial. A per-launch pipe admits only its package, a foreign launch is denied, and the broker takes identity from the client token. Since [step 6c](#phase-6-steps) a publication broker publishes only an implementer launch's own candidate ref, refuses a reviewer launch, a wrong tree and a launch without current coordinator authority (asked of the supervisor before each push), and a closed launch's pipe is gone. In [step 6d](#step-6d-the-brokers-as-services-2026-11-20) the broker ran as the service `agentc-publication` under its own virtual account and published a held implementer launch's candidate to the real remote under that launch's own ref, with a token minted for that push and revoked after it. The refusals above were shown with the broker running as the owner; the installed service was asked only for the accepted push. A closed launch's repository stays in the broker's work directory, and no crash sweep exists |
-| `check_push_key`, `check_attention_token` | Partial. The synthetic credential stand-in is denied to every launch. In [step 6d](#step-6d-the-brokers-as-services-2026-11-20) the real push App key sat in a directory whose access list names the publication service's account (read), the system and administrators: the publication service read it and signed with it, the egress service's account was refused it at start (error 5), and three launches (implementer, reviewer and candidate packages) were each refused it (error 5). Those launches ran as the owner; the role accounts of phase 4 were not probed, and there is no attention token on Windows |
+| `check_push_key`, `check_attention_token` | Partial. The synthetic credential stand-in is denied to every launch. In [step 6d](#step-6d-the-brokers-as-services-2026-11-20) the real push App key sat in a directory whose access list names the publication service's account (read), the system and administrators: the publication service read it and signed with it, the egress service's account was refused it at start (error 5), and three less-privileged launches, named implementer, reviewer and candidate but otherwise alike, were each refused it (error 5). Those launches ran as the owner with no positive control; the role accounts of phase 4 and a real candidate launch were not probed, and there is no attention token on Windows |
 | `check_apparmor_bwrap`, group/tool access | Partial. The launcher refuses a launch whose token or job is not what it asked for, and the Task Scheduler refuses the less-privileged token. Acquiring a service or elevated token is untested |
 | `check_browser_install`, `check_pinned_shell`, `check_browser` | None |
 | `check_cargo_test` | Partial. A real offline `cargo test` and `cargo build` of the fixture crate pass inside both boundaries. The workspace is untested |
