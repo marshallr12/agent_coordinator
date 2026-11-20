@@ -833,8 +833,8 @@ mod runner {
 /// Phase 6d, owner-attended: the installed `agentc-publication` service,
 /// under its own virtual service account and with the push App's key,
 /// publishes an authorized implementer launch's candidate to the real
-/// remote under that launch's own ref, and three launches (implementer,
-/// reviewer and candidate) cannot read the key. This test plays the
+/// remote under that launch's own ref, and three further launches
+/// (implementer, reviewer and candidate) cannot read the key. This test plays the
 /// supervisor (it serves the authority pipe) and the runner, so the
 /// service is configured with this account as both. The runbook sets
 /// `AGENTC_6D_PUBLICATION_PIPE`, `AGENTC_6D_PUBLICATION_SID`,
@@ -894,19 +894,22 @@ mod installed {
     }
 
     /// The host's side: publish through the service, then probe the key.
+    /// A launch starts once, so the push has a launch of its own and the
+    /// three key probes one each.
     pub fn host() -> String {
         let dir = tempfile::tempdir().unwrap();
         let (trees, mut launcher) = (Trees::new(&dir), Launcher::new().unwrap());
-        let launches = ["pub-impl", "pub-rev", "pub-cand"]
+        let launches = ["pub-push", "pub-impl", "pub-rev", "pub-cand"]
             .map(|name| prepare(&mut launcher, &trees, &id(name)));
         let packages = launches.each_ref().map(|launch| launch.package.as_str());
         let tools = client_tools(&trees, &packages);
         let task = setting("AGENTC_6D_TASK");
         let _supervisor = supervisor(&task, &launches[0]);
         let published = publish(&mut launcher, (&launches[0], &tools), &task);
-        let read = launches
-            .each_ref()
-            .map(|launch| read_key(&mut launcher, (launch, &tools)));
+        let read = launches[1..]
+            .iter()
+            .map(|launch| read_key(&mut launcher, (launch, &tools)))
+            .collect::<Vec<_>>();
         for launch in &launches {
             launcher.cleanup(&launch.id).unwrap();
         }
