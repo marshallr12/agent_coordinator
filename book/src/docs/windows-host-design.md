@@ -1350,6 +1350,10 @@ What 6d leaves unverified:
   installer owns the registration, the key's access list and removal.
 - The authority pipe under concurrent pushes, as above.
 
+Follow-up task `f71179f5` takes the launch repositories left behind, the
+missing digests, key and work-directory probes from real worker launches,
+and a run with the installed runner and supervisor services.
+
 ## Linux P2 parity and acceptance map
 
 The source inventory is `deploy/agentc/containment-suite.sh` plus the supervisor's
