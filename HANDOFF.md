@@ -460,6 +460,16 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
     - **To confirm the fix:** a day after 17:48Z on 11-20, count `(reset)` lines in the oracle-1
       integrator journals; expected none (26 in the 18 hours before). Timeouts and 521/522 may
       still appear (`cb7c28b0`, owner's VM steps).
+    - **Review: `0b9c367a` is DONE (approved 17:53:07Z).** Submission `3a74d367`, review
+      activity `a10336f4`, decided by subagent identity `reviewer` (session
+      `deploy-reviewer-20261120-sub`, started before the submission so that it claimed first; no
+      `distinct_launch` asserted). It re-read the artifact, release run, live service, both
+      hosts' checksums, units and markers. Five advisory findings: VM internals rest on the
+      job's report; "no launch killed" rests on the implementer's account; rollback directory
+      contents not opened; the run has six jobs with one skipped (publish assets), not five;
+      same-launch review. A general submission's review claim takes workflow policy revision 0.
+    - First reading after the upgrade (17:48:10 to 17:53Z): 0 failed-request lines on oracle-1.
+      `daa42f71` shows `in_progress` (not this session's; MINIAIR).
     - Still the owner's: MINIAIR's CLI to `c05a052`, the VM steps, the ruleset bypass, `e6685dbf`.
 
 ## Earlier resume points (archived)
