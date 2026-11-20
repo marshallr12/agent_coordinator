@@ -479,14 +479,24 @@ means the evaluation ran and its metrics are recorded; it is **not** a readiness
       supervisor `service request timed out` at 19:08:24Z, inside the :05 backup-transfer
       window. Files: `post-upgrade-control.out`, `post-upgrade-journal-2008Z.out` in
       `~/.local/state/agent-coordinator-evidence/resume-20261120/`.
-    - **Timeouts and 521/522 — waiting on the owner's VM step:** the gentler transfer script
-      and unit from `cb7c28b0` are on main but not installed on the VM. The owner chose to run
+    - **Timeouts and 521/522 — VM transfer step installed and measured (21:13 UTC):** on the
+      owner's instruction the agent ran
       `~/.local/state/agent-coordinator-evidence/resume-20261120/vm-install-backup-transfer.sh`
-      (copies both files from the `c05a052` worktree, keeps `.before-c05a052` copies, installs,
-      `daemon-reload`, prints the unit's limits; starts nothing). Not confirmed run. Afterwards:
-      sample the digest latency from the workstation across a :05 transfer (as in
-      `resume-20261118b/latency.log`) and read the oracle-1 journals for timeouts.
-    - Still the owner's: MINIAIR's CLI to `c05a052`, the VM steps, the ruleset bypass, `e6685dbf`.
+      at 20:09:51 UTC, rc 0: script and unit from `c05a052` installed (sha256 `93165c89…`,
+      `e7c2255d…`), `.before-c05a052` copies kept beside them, `daemon-reload`, nothing started.
+      Unit shows `Nice=19`, `CPUWeight=20`, `IOWeight=10`, `IOSchedulingClass` idle,
+      `MemoryHigh` 300 MB. The VM's disk scheduler is `none`, so the two I/O settings have no
+      effect there; the memory cap and the script's page-cache dropping are what act.
+      First transfer with it: 21:05:27–21:07:48 UTC, `Result=success`, 28.9 s CPU (the new
+      `step …` lines are in its journal). Workstation samples every ~10 s from 21:02:30 to
+      21:12:38 UTC: digest 0.18–0.34 s (0.29 s at most inside the transfer), `healthz` 200 in
+      0.10–0.25 s; the same measurement on 11-18 stalled 25–30 s. oracle-1 journals
+      20:09:51–21:13 UTC: no `service request failed`, timeout or 52x line (one timeout at
+      19:08:24 UTC before the install). One transfer is one sample: re-read the oracle-1
+      journals after a day before calling the stalls closed. Evidence in the same directory:
+      `vm-install.out`, `latency-after-install.log`, `vm-transfer-after-install.out`,
+      `post-install-journal.out`.
+    - Still the owner's: MINIAIR's CLI to `c05a052`, the ruleset bypass, `e6685dbf`.
 
 ## Earlier resume points (archived)
 
