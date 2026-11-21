@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production and both hosts on `c05a052`; backup-transfer stalls under observation (2026-11-21)
+## Current resume point — production and both hosts on `c05a052`; backup-transfer stalls gone over a day of transfers (2026-11-21 21:57 UTC)
 
 The 2026-11-16 to 2026-11-20 updates (P6 second NO-GO, the rollouts of `4705310`, `818a7b1`,
 `f590db8` and `c05a052`, the roster change, the canary, 502 and transport-reset investigations)
@@ -40,13 +40,25 @@ on 2026-11-21. This section keeps only what a new session needs.
   before any response; verified in production against a no-retry control on 2026-11-20 (0 reset
   lines on the new build while the control saw 8 in 330 requests). Which hop drops the idle
   connections is not established.
-- **Backup-transfer stalls (`cb7c28b0`): VM step installed 2026-11-20 20:09:51 UTC, under
-  observation.** The hourly transfer at :05 on the 953 MB VM saturated disk I/O and memory and
+- **Backup-transfer stalls (`cb7c28b0`): VM step installed 2026-11-20 20:09:51 UTC; no stall
+  seen from oracle-1 in the 25 h 47 min since.** The hourly transfer at :05 on the 953 MB VM saturated disk I/O and memory and
   stalled the service 25–30 s (timeouts, HTTP 521/522 from Cloudflare). The unit and script from
   `c05a052` are installed (`.before-c05a052` copies beside them); the VM's disk scheduler is
   `none`, so only `MemoryHigh` 300 MB and the script's page-cache dropping act. The first
   transfer afterwards (21:05:27–21:07:48 UTC) left digest latency at 0.18–0.34 s.
   Evidence: `~/.local/state/agent-coordinator-evidence/resume-20261120/`.
+  **Journal read 2026-11-21 21:56:55 UTC (read-only), window from 20:09:51 UTC on 11-20:**
+  `agentc-integrator@run` (3,037 lines), `agentc-integrator-canary@run` (2,993) and `agentc-run`
+  (164) hold **0** lines matching `request failed`, `timed out`, `timeout`, `HTTP 52x`, `reset`,
+  `push of … refused` or `NotPublished`. `agentc-canary.service` logged 0 `probe failed` lines
+  (14 between 11-19 00:00 UTC and the install). The same patterns over 16:50–20:09:51 UTC on
+  11-20 match 10, 5 and 1 lines (the last is the 19:08:24 supervisor timeout), so the search
+  does find them. The window spans 25 scheduled :05 transfers (21:05 on 11-20 to 21:05 on
+  11-21); that each one ran was taken from the hourly schedule, not read on the VM. All
+  oracle-1 units active. The absence of reset lines over the same window also confirms the
+  `c05a052` replay a day on. Evidence:
+  `~/.local/state/agent-coordinator-evidence/resume-20261121/` (`oracle-journal-read.out`,
+  `oracle-journal-control.out`).
 - **Open, the owner's:**
   - MINIAIR's CLI must move to `c05a052` (else `client_upgrade_required`).
   - Ruleset bypass from `180fab91`: add the integrator GitHub App to the bypass list (mode
