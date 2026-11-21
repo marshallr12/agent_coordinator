@@ -84,6 +84,18 @@ on 2026-11-21. This section keeps only what a new session needs.
       "not before" time; stop flagging a `fix_target` report requires-human while the service's
       fix task is open). Candidates 18–20 (roster tool, review routing, reviewer artifacts) each
       need an owner design choice. The owner selects, imports (human-origin) and admits.
+    - **Owner decisions 2026-11-21:** (1) HRI: fix the flag first, counting rule as in
+      window 2. (2) Stagger: build timed opening first, then schedule the 20 at import, about
+      2 per weekday. (3) The owner reviews `WORKLOAD-PROPOSAL.md` and imports the list
+      themselves; no further drafting unless asked.
+    - **Enabler tasks created** (agent-origin, priority 1, CLI session `resume-20261121`), all
+      three **planned and held by the weekly agent-task budget: the owner releases them in the
+      web dashboard** (an agent's admission edit is refused): **`ff2502e8`** record `opened_at`
+      and start the stall clock there; **`1ee4e53c`** open a planned task at a not-before time
+      (depends on `ff2502e8`); **`6dcb16b6`** no requires-human flag on a `fix_target` report
+      while the service's fix task is open, plus a recorded resolution kind. After they land:
+      roll out main, re-run the precondition check, pin `window.json`, then the owner imports,
+      schedules and admits `e6685dbf`.
     - `daa42f71` (Windows phase 6d) is Done; follow-up `f71179f5` is planned (MINIAIR work).
   - `d2ca0225`: blocked on the owner confirming the autonomy plan is finished.
   - `7011c55f` (native Windows services, parent) and `f71179f5` (phase 6 follow-up, planned):
