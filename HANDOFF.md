@@ -66,12 +66,28 @@ on 2026-11-21. This section keeps only what a new session needs.
   - `e6685dbf` (P6 third window): planned, human-delivered. The owner supplies the 20 value
     tasks and admits it. Decided: median ready→Done, staggered release, baseline recomputed with
     the same measure, no cron observer, mxmini keeps quiet hours.
+    **Preparation done 2026-11-21 (owner's pick; read-only, nothing created in the
+    coordinator)**, files in `~/.local/state/agent-coordinator-evidence/p6-window3-prep/`:
+    - `PRECONDITIONS.md`: met today — main green on the three required checks with production
+      and hosts on `c05a052`, suite fix `f8bddba`, `74cb2771`, report `7fda3475` (resolved
+      automatically 2026-11-17 19:12 UTC; no open requires-human report). **Not met as worded:**
+      the auto-fix ran end to end on 11-18 with no human action, but its report `61453d56` is
+      recorded `requires_human: true`. Start-day items: canaries, re-check of main and reports.
+    - **Baseline recomputed** (`ready-to-done.py`): median ready→Done is **4.1225 h**, equal to
+      creation→Done, because every baseline task was created open; the target stays 4.12 h.
+      Window 2 by the same measure is 56.47 h (56.77 h before). Ready = time of the earliest
+      task revision that is open and ready; the `ready_since` field is not moved on admission
+      and cannot be used. `window.draft.json` holds the draft pin.
+    - `WORKLOAD-PROPOSAL.md` and import file `p6-window3-workload.md`: 20 candidate value tasks,
+      each checked against main `90adaed` by a read-only subagent, plus three enablers
+      recommended before the window (record when a task is opened; open a planned task at a
+      "not before" time; stop flagging a `fix_target` report requires-human while the service's
+      fix task is open). Candidates 18–20 (roster tool, review routing, reviewer artifacts) each
+      need an owner design choice. The owner selects, imports (human-origin) and admits.
+    - `daa42f71` (Windows phase 6d) is Done; follow-up `f71179f5` is planned (MINIAIR work).
   - `d2ca0225`: blocked on the owner confirming the autonomy plan is finished.
-  - `daa42f71` (Windows phase 6d) and its parent `7011c55f`: human-delivered MINIAIR work;
-    `daa42f71` was `in_progress` there on 2026-11-20 and waits for the owner's App ID,
-    installation id and key path.
-  - Report `7fda3475` is stale (fixed by `32bcee0`); only the owner can resolve it in the web
-    dashboard. The canary stopped failing on it on 2026-11-17, so it looks resolved (not read).
+  - `7011c55f` (native Windows services, parent) and `f71179f5` (phase 6 follow-up, planned):
+    human-delivered MINIAIR work.
 - **Open, to watch:**
   - `180fab91` cause unconfirmed in production: after the next red audit on main, read the
     oracle-1 integrator journals for the first `push of R refused (attempt N): …` line.
