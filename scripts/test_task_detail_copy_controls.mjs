@@ -973,7 +973,30 @@ async function checkTaskKind({ evaluate, waitPage, send }) {
     await waitPage(`document.querySelector('#detail-task-revision').textContent === ${JSON.stringify(String(revision + 1))}`, 'saved kind correction');
     assert(kindPatches.at(-1).kind === after && kindPatches.at(-1).expected_revision === revision, 'Task kind save omitted the selection or revision.');
     assert(task.kind === after, 'Task kind was not saved.');
+    assert(!('not_before' in kindPatches.at(-1)), 'An edit that left the schedule alone sent not_before.');
   }
+  // Scheduled opening: a planned task's time is sent as RFC 3339, shown back in local time, and cleared with null.
+  const submitSchedule = async (value) => {
+    const revision = task.revision;
+    await evaluate(`document.querySelector('button[aria-label="Edit task"]').click()`);
+    await waitPage("document.querySelector('dialog[open] #workflow-not_before')", 'schedule field');
+    await evaluate(`(() => { document.querySelector('#workflow-planned').value = 'true'; document.querySelector('#workflow-not_before').value = ${JSON.stringify(value)}; document.querySelector('dialog[open] form').requestSubmit(); })()`);
+    await waitPage(`document.querySelector('#detail-task-revision').textContent === ${JSON.stringify(String(revision + 1))}`, 'saved schedule');
+  };
+  await submitSchedule('2030-01-02T03:04');
+  assert(kindPatches.at(-1).not_before === new Date('2030-01-02T03:04').toISOString() && kindPatches.at(-1).planned === true, 'The schedule was not sent as an RFC 3339 time on a planned task.');
+  // The page rebinds its Edit button to the saved task a moment after the revision shows; retry until it does.
+  let shown = '';
+  for (let tries = 0; tries < 50 && shown !== '2030-01-02T03:04'; tries++) {
+    await evaluate(`document.querySelector('button[aria-label="Edit task"]').click()`);
+    await waitPage("document.querySelector('dialog[open] #workflow-not_before')", 'schedule field');
+    shown = await evaluate("document.querySelector('#workflow-not_before').value");
+    if (shown !== '2030-01-02T03:04') { await evaluate("document.querySelector('dialog[open]').close()"); await new Promise((resolveDelay) => setTimeout(resolveDelay, 100)); }
+  }
+  assert(shown === '2030-01-02T03:04', 'The edit dialog did not show the scheduled time.');
+  await evaluate("document.querySelector('dialog[open]').close()");
+  await submitSchedule('');
+  assert(kindPatches.at(-1).not_before === null, 'Clearing the field did not send null: ' + JSON.stringify(kindPatches.at(-1)));
 }
 
 async function main() {
