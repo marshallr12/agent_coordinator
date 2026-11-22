@@ -266,6 +266,23 @@ pub struct TaskEdit {
     /// Omission preserves the current kind and older idempotent request payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// RFC 3339 time at which the service opens this planned task by itself.
+    /// Omission keeps the current schedule, `null` clears it.
+    #[serde(
+        default,
+        deserialize_with = "present_or_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub not_before: Option<Option<String>>,
+}
+
+/// Distinguishes an absent field (`None`) from an explicit `null` (`Some(None)`).
+fn present_or_null<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// Human-managed authority for an agent principal or role to edit task definitions.

@@ -1374,6 +1374,15 @@ Task edits provide `expected_revision`, `title`, `description`,
 planned tasks may be edited, subject to workflow and policy checks. Changing
 `planned` to false admits work; it does not bypass dependencies or objective gates.
 
+A task edit may also carry `"not_before": "2026-12-01T09:00:00Z"` (RFC 3339) to schedule
+a planned task: once that time passes the service opens it by itself, with no admission
+or claim, and records the opening as a task revision and a `task.opened_by_schedule`
+event. `"not_before": null` clears the schedule and leaves the task planned; omitting the
+field keeps it. `tasks show` prints `not_before` and `not_before_by`. Only a human may
+set, change or clear it on a human-origin task (an agent gets `task_schedule_human_only`);
+a scheduled agent-origin task over the weekly budget is held and retried the next ISO
+week. It cannot be combined with `"planned": false`.
+
 Task-definition grants are project-scoped and default-deny. A principal grant
 contains `{"target_kind":"principal","agent_principal_id":"AGENT_ID"}`; the
 explicit role grant is `{"target_kind":"role","agent_role":"agent"}` and

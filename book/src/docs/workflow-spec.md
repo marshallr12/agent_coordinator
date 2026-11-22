@@ -45,6 +45,12 @@ admitted later. It is stamped once and is not the queue-ordering `ready_since`, 
 is also reset on unblock, on a review that returns the task and when its
 dependencies finish. See the task views in the [API contract](api-contract.md).
 
+A `planned` task may carry a `not_before` time. When the service clock passes it the
+service admits the task itself (`planned` to `open`, with a task revision and a
+`task.opened_by_schedule` event naming the human who scheduled it); dependency, decision
+and objective gates and the weekly agent-task budget apply as for any admission. See
+*Scheduled opening* in the [API contract](api-contract.md).
+
 | Work status | Meaning and next action |
 | --- | --- |
 | `planned` | Outcome is recorded but not admitted to the work queue |

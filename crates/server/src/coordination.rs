@@ -514,6 +514,8 @@ struct Task {
     created_at: i64,
     ready_since: i64,
     opened_at: Option<i64>,
+    not_before: Option<i64>,
+    not_before_by: Option<String>,
     last_progress_at: Option<i64>,
     archived_at: Option<i64>,
     origin: String,
@@ -638,7 +640,7 @@ impl Task {
         "work_status":self.status(now),"blocked_reason":self.blocked_reason,"dependencies_ready":self.dependencies_ready,
         "objective_children_ready":self.objective_children_ready,"decisions_ready":self.decisions_ready,
         "objective_id":self.objective_id,"parent_objective_id":self.parent_objective_id,"parent_objective_required":self.parent_objective_required,
-        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"opened_at":self.opened_at.map(timestamp),"last_progress_at":self.last_progress_at.map(timestamp),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
+        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"opened_at":self.opened_at.map(timestamp),"not_before":self.not_before.map(timestamp),"not_before_by":self.not_before_by,"last_progress_at":self.last_progress_at.map(timestamp),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
         "origin":self.origin,"admission_class":self.admission_class.as_ref().or(self.budget_exempt.as_ref()),"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned","human_delivered":self.human_delivered,"processing":self.processing});
         if self.workflow_phase.as_deref() == Some("integration") {
             value["precondition_hints"] = json!([{
@@ -1513,14 +1515,24 @@ pub(crate) async fn save_task_revision(
     p: &str,
     id: &str,
 ) -> Result<Value, AppError> {
-    let t = task(&mut m.tx, p, id, m.now).await?;
-    let mut value = t.value(m.now);
+    let (now, actor) = (m.now, m.actor.id.clone());
+    save_task_revision_as(&mut m.tx, p, id, now, &actor).await
+}
+async fn save_task_revision_as(
+    c: &mut SqliteConnection,
+    p: &str,
+    id: &str,
+    now: i64,
+    actor_id: &str,
+) -> Result<Value, AppError> {
+    let t = task(c, p, id, now).await?;
+    let mut value = t.value(now);
     value["depends_on"] =
         json!(sqlx::query_scalar::<_, String>(
         "SELECT prerequisite_id FROM task_dependencies WHERE task_id=? ORDER BY prerequisite_id"
-    ).bind(id).fetch_all(&mut *m.tx).await?);
+    ).bind(id).fetch_all(&mut *c).await?);
     sqlx::query("INSERT INTO task_revisions(project_id,task_id,revision,data_json,actor_id,created_at) VALUES(?,?,?,?,?,?)")
-        .bind(p).bind(id).bind(t.revision).bind(value.to_string()).bind(&m.actor.id).bind(m.now).execute(&mut *m.tx).await?;
+        .bind(p).bind(id).bind(t.revision).bind(value.to_string()).bind(actor_id).bind(now).execute(&mut *c).await?;
     Ok(value)
 }
 async fn create_task(
@@ -1716,6 +1728,11 @@ async fn edit_task(
     {
         return Err(AppError::bad_request("kind must be code or general."));
     }
+    let requested_not_before = input
+        .not_before
+        .as_ref()
+        .map(|value| value.as_deref().map(parse_not_before).transpose())
+        .transpose()?;
     let mut m = Mutation::begin(
         &s,
         &auth,
@@ -1776,9 +1793,23 @@ async fn edit_task(
             "Only unowned open or planned tasks can be edited. Preserve active work and reconcile it first.",
         ));
     }
+    let not_before = requested_not_before.unwrap_or(current.not_before);
+    if !input.planned && requested_not_before.is_some_and(|value| value.is_some()) {
+        return Err(AppError::conflict(
+            "not_before_requires_planned",
+            "A not-before time opens a planned task. Keep the task planned to schedule it, or clear not_before to admit it now.",
+        ));
+    }
+    let schedule_changed = not_before != current.not_before;
     let mut agent_grant = None;
     if m.actor.kind == "agent" {
         session(&m.actor)?;
+        if schedule_changed && current.origin != "agent" {
+            return Err(AppError::human_gate(
+                "task_schedule_human_only",
+                "Only a human may set, change or clear not_before on a task that did not originate with an agent.",
+            ));
+        }
         agent_grant = sqlx::query_scalar::<_, String>(
             "SELECT id FROM task_definition_grants WHERE project_id=? AND revoked_at IS NULL \
              AND ((target_kind='principal' AND agent_principal_id=?) OR (target_kind='role' AND agent_role=?)) \
@@ -1813,6 +1844,7 @@ async fn edit_task(
             || current.description != input.description
             || previous_dependencies != requested_dependencies
             || current.priority != input.priority
+            || schedule_changed
             || (current.lifecycle == "planned") != input.planned;
         if definition_changed
             && sqlx::query_scalar::<_, i64>(
@@ -1831,8 +1863,16 @@ async fn edit_task(
         }
     }
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
-    sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,opened_at=CASE WHEN ? THEN NULL ELSE COALESCE(opened_at,?) END,kind=?,revision=revision+1 WHERE id=?")
-        .bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority).bind(if input.planned{"planned"}else{"open"}).bind(input.planned).bind(m.now).bind(kind).bind(&id).execute(&mut *m.tx).await?;
+    // The schedule belongs to the human (or granted agent) who last changed it; admitting the
+    // task by hand ends it.
+    let scheduled = if input.planned { not_before } else { None };
+    let scheduled_by = match scheduled {
+        None => None,
+        Some(_) if schedule_changed => Some(m.actor.id.clone()),
+        Some(_) => current.not_before_by.clone(),
+    };
+    sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,opened_at=CASE WHEN ? THEN NULL ELSE COALESCE(opened_at,?) END,not_before=?,not_before_by=?,kind=?,revision=revision+1 WHERE id=?")
+        .bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority).bind(if input.planned{"planned"}else{"open"}).bind(input.planned).bind(m.now).bind(scheduled).bind(scheduled_by).bind(kind).bind(&id).execute(&mut *m.tx).await?;
     if !input.planned {
         sqlx::query("UPDATE tasks SET budget_held_at=NULL WHERE id=?")
             .bind(&id)
@@ -1851,12 +1891,113 @@ async fn edit_task(
         sqlx::query("INSERT INTO task_definition_revision_grants(project_id,task_id,revision,grant_id) VALUES(?,?,?,?)")
             .bind(&p).bind(&id).bind(current.revision + 1).bind(grant_id).execute(&mut *m.tx).await?;
     }
-    let event_data = json!({"actor_id":m.actor.id,"old_kind":current.kind,"new_kind":kind,"previous_revision":current.revision,"revision":current.revision + 1});
+    let mut event_data = json!({"actor_id":m.actor.id,"old_kind":current.kind,"new_kind":kind,"previous_revision":current.revision,"revision":current.revision + 1});
+    if schedule_changed {
+        event_data["not_before"] = json!(scheduled.map(timestamp));
+        event_data["previous_not_before"] = json!(current.not_before.map(timestamp));
+    }
     Ok(response(
         m.finish_with_event_data(value, &event_data, Some(&p), "task.edited", &id)
             .await?,
     ))
 }
+/// Parses the RFC 3339 `not_before` of an edit into milliseconds.
+fn parse_not_before(text: &str) -> Result<i64, AppError> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .map(|time| time.timestamp_millis())
+        .ok()
+        .filter(|millis| (0..=253_402_300_799_000).contains(millis))
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "not_before must be an RFC 3339 time such as 2026-12-01T09:00:00Z, or null to clear it.",
+            )
+        })
+}
+
+/// Opens, as the service, every planned task whose `not_before` has passed, and returns how many
+/// opened. The effect is the one a human admission has (lifecycle `open`, `opened_at` the moment
+/// of opening, a new task revision and a `task.opened_by_schedule` event, origin unchanged), with
+/// the schedule's author as the recorded actor and the service named in the event as the one who
+/// acted. The weekly budget still applies to an agent-origin task: over budget it stays planned
+/// and held, and is tried again after the ISO week rolls over.
+///
+/// It needs no claim: the authentication middleware calls it before any request is served, and
+/// the service calls it at startup and on a timer, so the task is open on the next read by any
+/// client. Everything happens under SQLite's writer lock, after sampling the clock. The opening
+/// clears `not_before`, so a restart or a repeated call opens nothing twice. A restored service
+/// waits for restore reconciliation, and a clock incident for its reconciliation, first.
+pub async fn open_due_tasks(state: &AppState) -> Result<usize, AppError> {
+    const BATCH: i64 = 100;
+    let now = state.now();
+    let week_start = crate::admission::week_start(now);
+    // The common case takes no writer lock. A task the budget held this week is not due again
+    // before the week rolls over.
+    let due: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE not_before IS NOT NULL AND not_before<=? AND lifecycle='planned' AND (budget_held_at IS NULL OR budget_held_at<?))")
+        .bind(now).bind(week_start).fetch_one(&state.pool).await?;
+    if !due {
+        return Ok(0);
+    }
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let clock = state.sample_clock(&mut tx).await?;
+    let ready: bool = sqlx::query_scalar(
+        "SELECT coordination_state='ready' FROM service_state WHERE singleton=1",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if clock.incident_detected || clock.incident_active || !ready {
+        tx.commit().await?;
+        return Ok(0);
+    }
+    let now = clock.now;
+    let week_start = crate::admission::week_start(now);
+    let rows = sqlx::query("SELECT t.id,t.project_id,t.revision,t.origin,t.admission_class,t.budget_exempt,t.budget_admitted_at,t.not_before,t.not_before_by FROM tasks t JOIN projects pr ON pr.id=t.project_id WHERE t.not_before IS NOT NULL AND t.not_before<=? AND t.lifecycle='planned' AND t.archived_at IS NULL AND t.deleted_at IS NULL AND pr.archived_at IS NULL AND t.not_before_by IS NOT NULL AND (t.budget_held_at IS NULL OR t.budget_held_at<?) ORDER BY t.not_before,t.id LIMIT ?")
+        .bind(now).bind(week_start).bind(BATCH).fetch_all(&mut *tx).await?;
+    let mut opened = 0;
+    for row in rows {
+        let (id, project, by): (String, String, String) = (
+            row.get("id"),
+            row.get("project_id"),
+            row.get("not_before_by"),
+        );
+        let (revision, not_before): (i64, i64) = (row.get("revision"), row.get("not_before"));
+        let admission =
+            crate::admission::admit_scheduled(&mut tx, &state.config, &project, &row, now).await?;
+        let counted = match admission {
+            crate::admission::ScheduledAdmission::Open { counted } => counted,
+            crate::admission::ScheduledAdmission::Hold => {
+                sqlx::query("UPDATE tasks SET budget_held_at=? WHERE id=?")
+                    .bind(now)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,'task.schedule_held',?,?,?)")
+                    .bind(&project).bind(&by).bind(&id)
+                    .bind(json!({"opened_by":"service","scheduled_by":by,"not_before":timestamp(not_before),"reason":"weekly_agent_task_budget"}).to_string())
+                    .bind(now).execute(&mut *tx).await?;
+                continue;
+            }
+        };
+        sqlx::query("UPDATE tasks SET lifecycle='open',opened_at=?,not_before=NULL,not_before_by=NULL,budget_held_at=NULL,budget_admitted_at=CASE WHEN ? THEN ? ELSE budget_admitted_at END,revision=revision+1 WHERE id=?")
+            .bind(now).bind(counted).bind(now).bind(&id).execute(&mut *tx).await?;
+        let mut value = save_task_revision_as(&mut tx, &project, &id, now, &by).await?;
+        value["scheduled_opening"] =
+            json!({"opened_by":"service","scheduled_by":by,"not_before":timestamp(not_before)});
+        sqlx::query("UPDATE task_revisions SET data_json=? WHERE task_id=? AND revision=?")
+            .bind(value.to_string())
+            .bind(&id)
+            .bind(revision + 1)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO events(project_id,actor_id,kind,record_id,data_json,created_at) VALUES(?,?,'task.opened_by_schedule',?,?,?)")
+            .bind(&project).bind(&by).bind(&id)
+            .bind(json!({"opened_by":"service","scheduled_by":by,"not_before":timestamp(not_before),"origin":row.get::<String, _>("origin"),"previous_revision":revision,"revision":revision + 1}).to_string())
+            .bind(now).execute(&mut *tx).await?;
+        opened += 1;
+    }
+    tx.commit().await?;
+    Ok(opened)
+}
+
 async fn unblock_task(
     State(s): State<AppState>,
     auth: Auth,

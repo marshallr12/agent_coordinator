@@ -278,6 +278,38 @@ planned task that an import closes. The dashboard task detail shows it beside th
 created time, or "Opened time not recorded" when it is `null` on a task that is no
 longer planned.
 
+**Scheduled opening.** A planned task may carry `not_before`, an RFC 3339 time; every task
+read shows it (`null` when none) beside `not_before_by`, the principal who set it. Set,
+change or clear it with the task `PATCH` (`TaskEdit`, also `agent-coordinator tasks edit`
+and MCP `coordinator_task_edit`): `"not_before": "2026-12-01T09:00:00Z"` sets it, `null`
+clears it and leaves the task planned, and omitting the field keeps the current schedule
+and old saved request fingerprints. A time that does not parse is `invalid_request`
+(400); a non-null `not_before` together with `"planned": false` is
+`not_before_requires_planned` (409), because admitting the task by hand ends its schedule.
+Only a human may set, change or clear `not_before` on a human-origin or service-origin
+task: an agent is refused with `operation_not_permitted` (403) and `details.gate`
+`task_schedule_human_only`. On an agent-origin task a human may, and an agent may only
+with the task-definition grant and the contributor rules of any definition change. Once
+the service clock reaches `not_before` the service opens the task by itself, exactly as a
+human admission would and without a claim or any admission call: `lifecycle` `open`,
+`opened_at` the moment it is opened (not `not_before`), `not_before` cleared, `origin`
+unchanged, the task revision incremented and saved with the schedule's author as its
+actor (the saved revision carries `scheduled_opening` naming the service as the opener),
+and one `task.opened_by_schedule` event whose actor is the principal who set the schedule
+and whose data has `opened_by: "service"`, `scheduled_by`, `not_before`, `origin` and the
+revisions. Opening runs under the SQLite writer lock after the clock is sampled, before
+any authenticated request is served (so the task is open on the next read by any client,
+including MCP and the CLI) and also at startup and every minute. Because it clears the
+schedule in the same transaction, a restart repeats nothing. A restored service opens
+due tasks only after restore reconciliation (and any clock reconciliation) completes, then
+once. An opened task is claimable only when it is otherwise ready: unmet dependencies,
+required children, a pending scoped decision or a block hold it as for any open task. The
+weekly agent-task budget still applies to an agent-origin task without an admission class:
+opening takes a place of the project's ISO-week budget, unless the task already holds one
+this week, and when the budget is spent the task stays planned, `held_by_budget` is true,
+a `task.schedule_held` event records it once and the digest lists it. The service tries it
+again when the next ISO week begins; a human can release it earlier with an edit.
+
 **Human-delivered tasks.** Every task view carries `human_delivered` (default `false`).
 `POST /api/v1/projects/{project_id}/tasks` accepts `human_delivered: true` to create a
 task a human delivers, and `POST …/tasks/{task_id}/human-delivery` with

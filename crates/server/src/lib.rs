@@ -169,6 +169,10 @@ async fn protect(State(state): State<AppState>, request: Request, next: Next) ->
         match auth::Auth::authenticate(&parts, &state).await {
             Ok(auth) => {
                 parts.extensions.insert(auth);
+                // A planned task whose not-before time passed is open before this request reads it.
+                if let Err(error) = coordination::open_due_tasks(&state).await {
+                    tracing::warn!(code = error.code, "Scheduled task opening failed");
+                }
                 next.run(Request::from_parts(parts, body)).await
             }
             Err(error) => error.into_response(),

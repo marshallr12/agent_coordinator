@@ -1429,15 +1429,17 @@
   }
 
   // Task fields that the operator action buttons read; a change to any other field leaves them alone.
-  const TASK_ACTION_FIELDS = ['id', 'title', 'description', 'acceptance_criteria', 'priority', 'kind', 'lifecycle', 'work_status', 'status', 'archived_at', 'activity_kind', 'current_attempt_id', 'human_delivered', 'revision', 'blocked_reason', 'depends_on', 'dependencies', 'objective_id', 'parent_objective_id'];
+  const TASK_ACTION_FIELDS = ['id', 'title', 'description', 'acceptance_criteria', 'priority', 'kind', 'lifecycle', 'work_status', 'status', 'archived_at', 'activity_kind', 'current_attempt_id', 'human_delivered', 'revision', 'blocked_reason', 'depends_on', 'dependencies', 'objective_id', 'parent_objective_id', 'origin', 'not_before'];
   const pick = (source, fields) => Object.fromEntries(fields.filter((field) => source && field in source).map((field) => [field, source[field]]));
 
   // Created and opened sit together: a planned task has no opened time until it is admitted.
   function renderTaskTimes(task) {
-    patchSection($('detail-task-times'), sig(task.created_at, task.opened_at, task.lifecycle), (target) => {
+    patchSection($('detail-task-times'), sig(task.created_at, task.opened_at, task.lifecycle, task.not_before), (target) => {
       add(target, timedEl('span', '', 'Created ', { at: task.created_at }));
       add(target, document.createTextNode(' · '));
       add(target, task.opened_at ? timedEl('span', '', 'Opened ', { at: task.opened_at }) : el('span', '', task.lifecycle === 'planned' ? 'Not opened yet (planned)' : 'Opened time not recorded'));
+      // A scheduled task opens itself at this time; a budget-held one is retried the next ISO week.
+      if (task.not_before && task.lifecycle === 'planned') { add(target, document.createTextNode(' · ')); add(target, timedEl('span', '', task.held_by_budget ? 'Scheduled to open (held by the weekly agent-task budget) ' : 'Opens automatically ', { at: task.not_before })); }
     });
   }
   // Patches each section of the task page from `state.detail`. Sections own their signatures, so the
@@ -3935,8 +3937,16 @@
     view.field('depends_on','Prerequisite task IDs — one per line',dependencies.map(item => typeof item === 'string' ? item : item.prerequisite_id || item.id).join('\n')).required = false;
     const priority = view.field('priority','Priority (0 highest, 3 lowest)',task.priority,'input'); priority.type = 'number'; priority.min = '0'; priority.max = '3';
     selectField(view,'planned','Admission',task.lifecycle === 'planned',[['true','Keep planned'],['false','Admit to ready queue']]);
+    // A planned task may open itself at a time. Your browser's local time zone applies; leave it empty for none.
+    const localTime = (iso) => { if (!iso) return ''; const date = new Date(iso), pad = (n) => String(n).padStart(2, '0'); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`; };
+    const notBefore = view.field('not_before','Open automatically at (not before) — optional, local time',localTime(task.not_before),'input'); notBefore.type = 'datetime-local'; notBefore.required = false;
+    view.form.appendChild(el('p', 'help-text', 'While the task is kept planned, the service opens it at this time without anyone admitting it, as a human admission would. Only a human may set it on a task a human or the service created. A task from an agent still counts against the weekly agent-task budget when it opens. Clear the field to leave the task planned.'));
     view.finish('Save task', (values, dialog) => {
-      dialog.close(); startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}`, {expected_revision:task.revision,kind:values.get('kind'),title:values.get('title'),description:values.get('description'),acceptance_criteria:lines(values.get('criteria')),depends_on:lines(values.get('depends_on')),priority:Number(values.get('priority')),planned:values.get('planned') === 'true'}, 'task edit', () => loadTaskDetail(), 'PATCH', null, {projectId,taskId});
+      const body = {expected_revision:task.revision,kind:values.get('kind'),title:values.get('title'),description:values.get('description'),acceptance_criteria:lines(values.get('criteria')),depends_on:lines(values.get('depends_on')),priority:Number(values.get('priority')),planned:values.get('planned') === 'true'};
+      // Omitted keeps the schedule, null clears it, a time sets it. Admitting the task ends any schedule on the service side.
+      const chosen = values.get('not_before'), previous = localTime(task.not_before);
+      if (body.planned && chosen !== previous) body.not_before = chosen ? new Date(chosen).toISOString() : null;
+      dialog.close(); startMutation(`${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}`, body, 'task edit', () => loadTaskDetail(), 'PATCH', null, {projectId,taskId});
     });
   }
   async function claimRecovery(task) {

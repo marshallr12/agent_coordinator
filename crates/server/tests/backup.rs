@@ -633,3 +633,87 @@ async fn snapshot_prefix_rejects_missing_altered_future_and_preformat_migrations
         assert!(!destination.exists());
     }
 }
+
+#[tokio::test]
+async fn a_restored_service_opens_a_scheduled_task_whose_time_passed_once() {
+    let fixture = Fixture::new().await;
+    let principal: String =
+        sqlx::query_scalar("SELECT id FROM principals WHERE name='backup-admin'")
+            .fetch_one(&fixture.state.pool)
+            .await
+            .unwrap();
+    let not_before = fixture.state.now() + 3_600_000;
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since,not_before,not_before_by) VALUES('scheduled-task','backup-project','Timed','','[]','general',2,'planned',?,?,?,?)")
+        .bind(fixture.state.now())
+        .bind(fixture.state.now())
+        .bind(not_before)
+        .bind(&principal)
+        .execute(&fixture.state.pool)
+        .await
+        .unwrap();
+    let created = create_backup(&fixture.state, &fixture.repository())
+        .await
+        .unwrap();
+    let snapshot = PathBuf::from(created["snapshot_path"].as_str().unwrap());
+
+    // The backup is restored after the scheduled time.
+    fixture.clock.0.fetch_add(5 * 3_600_000, Ordering::SeqCst);
+    let destination = fixture.directory.path().join("restored-schedule");
+    restore_backup(&snapshot, &destination, "Scheduled opening after restore.")
+        .await
+        .unwrap();
+    let mut restored = AppState::open(Config {
+        database_path: destination.join("coordinator.sqlite3"),
+        public_origin: "http://127.0.0.1:8080".to_owned(),
+        allow_insecure_loopback: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    restored.clock = fixture.clock.clone();
+    // The restored service is paused until its authority is reconciled; nothing opens yet.
+    assert_eq!(
+        coordinator_server::coordination::open_due_tasks(&restored)
+            .await
+            .unwrap(),
+        0
+    );
+    // Restore and clock reconciliation are covered by their own tests; this marks both complete.
+    sqlx::query("UPDATE service_state SET coordination_state='ready'")
+        .execute(&restored.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        coordinator_server::coordination::open_due_tasks(&restored)
+            .await
+            .unwrap(),
+        0,
+        "an unreconciled service clock still holds the opening back"
+    );
+    sqlx::query("UPDATE clock_state SET status='ready'")
+        .execute(&restored.pool)
+        .await
+        .unwrap();
+    for expected in [1, 0] {
+        assert_eq!(
+            coordinator_server::coordination::open_due_tasks(&restored)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    let opened: (String, Option<i64>) =
+        sqlx::query_as("SELECT lifecycle,opened_at FROM tasks WHERE id='scheduled-task'")
+            .fetch_one(&restored.pool)
+            .await
+            .unwrap();
+    assert_eq!(opened, ("open".to_owned(), Some(restored.now())));
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE kind='task.opened_by_schedule' AND record_id='scheduled-task'",
+    )
+    .fetch_one(&restored.pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
+    restored.pool.close().await;
+}

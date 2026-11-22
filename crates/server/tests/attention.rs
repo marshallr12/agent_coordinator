@@ -1873,3 +1873,598 @@ async fn a_parked_canary_task_is_never_a_human_item() {
     assert_eq!(hri["count"], 0, "{hri}");
     assert!(items.is_empty() && queue.is_empty(), "{hri}");
 }
+
+// ---- Scheduled opening (not_before) ----
+
+impl Fixture {
+    fn now(&self) -> i64 {
+        self.clock.0.load(Ordering::SeqCst)
+    }
+
+    /// The PATCH body that keeps `task` as it is, with `extra` fields merged in.
+    fn edit_body(task: &Value, extra: Value) -> Value {
+        let mut body = json!({"expected_revision":task["revision"],"title":task["title"],
+            "description":task["description"],"acceptance_criteria":task["acceptance_criteria"],
+            "priority":task["priority"],"depends_on":task["depends_on"],"planned":true});
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        body
+    }
+
+    fn task_path(project: &str, task: &Value) -> String {
+        format!(
+            "/api/v1/projects/{project}/tasks/{}",
+            task["id"].as_str().unwrap()
+        )
+    }
+
+    async fn read_task(&self, caller: &Caller, project: &str, task: &Value) -> Value {
+        self.ok(caller, "GET", &Self::task_path(project, task), Value::Null)
+            .await
+    }
+
+    /// A planned task `admin` created and scheduled for `at` (milliseconds).
+    async fn scheduled(&self, project: &str, title: &str, at: i64) -> Value {
+        let planned = self
+            .create_task(&self.admin, project, title, json!({"planned":true}))
+            .await;
+        let body = Self::edit_body(
+            &planned,
+            json!({"not_before":coordinator_core::timestamp(at)}),
+        );
+        self.ok(
+            &self.admin,
+            "PATCH",
+            &Self::task_path(project, &planned),
+            body,
+        )
+        .await
+    }
+
+    async fn events_of(&self, kind: &str, task: &Value) -> Vec<(String, Value)> {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT actor_id,data_json FROM events WHERE kind=? AND record_id=? ORDER BY seq",
+        )
+        .bind(kind)
+        .bind(task["id"].as_str().unwrap())
+        .fetch_all(&self.state.pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(actor, data)| (actor, serde_json::from_str(&data).unwrap()))
+        .collect()
+    }
+
+    async fn grant(&self, project: &str, caller: &Caller) {
+        self.ok(
+            &self.admin,
+            "POST",
+            &format!("/api/v1/projects/{project}/task-definition-grants"),
+            json!({"target_kind":"principal","agent_principal_id":caller.principal}),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn a_human_sets_changes_and_clears_not_before_and_it_shows_in_reads() {
+    let f = Fixture::new().await;
+    let p = f.project("schedule-edit").await;
+    let at = f.now() + 2 * HOUR;
+    let scheduled = f.scheduled(&p, "Timed", at).await;
+    assert_eq!(scheduled["lifecycle"], "planned", "{scheduled}");
+    assert_eq!(scheduled["not_before"], coordinator_core::timestamp(at));
+    assert_eq!(scheduled["not_before_by"], f.admin.principal);
+    assert_eq!(scheduled["revision"], 2);
+    let listed = f
+        .ok(
+            &f.admin,
+            "GET",
+            &format!("/api/v1/projects/{p}/tasks"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(
+        listed["items"][0]["not_before"],
+        coordinator_core::timestamp(at),
+        "{listed}"
+    );
+
+    // An edit that says nothing about not_before keeps the schedule.
+    let path = Fixture::task_path(&p, &scheduled);
+    let retitled = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &path,
+            Fixture::edit_body(&scheduled, json!({"title":"Timed, renamed"})),
+        )
+        .await;
+    assert_eq!(retitled["not_before"], coordinator_core::timestamp(at));
+
+    // A change records the new time; clearing leaves the task planned with no schedule.
+    let later = f.now() + 5 * HOUR;
+    let changed = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &path,
+            Fixture::edit_body(
+                &retitled,
+                json!({"not_before":coordinator_core::timestamp(later)}),
+            ),
+        )
+        .await;
+    assert_eq!(changed["not_before"], coordinator_core::timestamp(later));
+    let cleared = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &path,
+            Fixture::edit_body(&changed, json!({"not_before":null})),
+        )
+        .await;
+    assert_eq!(cleared["not_before"], Value::Null, "{cleared}");
+    assert_eq!(cleared["not_before_by"], Value::Null);
+    assert_eq!(cleared["lifecycle"], "planned");
+    f.clock.0.fetch_add(10 * HOUR, Ordering::SeqCst);
+    assert_eq!(
+        f.read_task(&f.admin, &p, &cleared).await["lifecycle"],
+        "planned",
+        "a cleared schedule never opens the task"
+    );
+
+    // Only a planned task can be scheduled, and the time must parse.
+    let (status, refused) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &path,
+            Fixture::edit_body(
+                &cleared,
+                json!({"planned":false,"not_before":coordinator_core::timestamp(later)}),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "not_before_requires_planned");
+    let (status, refused) = f
+        .call(
+            &f.admin,
+            "PATCH",
+            &path,
+            Fixture::edit_body(&cleared, json!({"not_before":"next tuesday"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    // Admitting a scheduled task by hand ends its schedule.
+    let again = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &path,
+            Fixture::edit_body(
+                &cleared,
+                json!({"not_before":coordinator_core::timestamp(f.now() + HOUR)}),
+            ),
+        )
+        .await;
+    let admitted = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &path,
+            Fixture::edit_body(&again, json!({"planned":false})),
+        )
+        .await;
+    assert_eq!(admitted["lifecycle"], "open");
+    assert_eq!(admitted["not_before"], Value::Null, "{admitted}");
+}
+
+#[tokio::test]
+async fn an_agent_cannot_schedule_a_human_task_but_may_schedule_its_own_agent_task() {
+    let f = Fixture::new().await;
+    let p = f.project("schedule-authority").await;
+    f.grant(&p, &f.b).await;
+    let human = f
+        .create_task(&f.admin, &p, "Human's", json!({"planned":true}))
+        .await;
+    assert_eq!(human["origin"], "human");
+    let at = coordinator_core::timestamp(f.now() + HOUR);
+    let path = Fixture::task_path(&p, &human);
+    let (status, refused) = f
+        .call(
+            &f.b,
+            "PATCH",
+            &path,
+            Fixture::edit_body(&human, json!({"not_before":at})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error"]["details"]["gate"], "task_schedule_human_only",
+        "{refused}"
+    );
+    // Neither may it clear a human's schedule.
+    let scheduled = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &path,
+            Fixture::edit_body(&human, json!({"not_before":at})),
+        )
+        .await;
+    let (status, refused) = f
+        .call(
+            &f.b,
+            "PATCH",
+            &path,
+            Fixture::edit_body(&scheduled, json!({"not_before":null})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error"]["details"]["gate"],
+        "task_schedule_human_only"
+    );
+    assert_eq!(
+        f.read_task(&f.admin, &p, &human).await["not_before"],
+        at,
+        "the human's schedule is untouched"
+    );
+
+    // An agent-origin task may be scheduled by an agent holding the grant, or by a human.
+    let agents = f
+        .create_task(&f.a, &p, "Agent's", json!({"planned":true}))
+        .await;
+    assert_eq!(agents["origin"], "agent");
+    let by_agent = f
+        .ok(
+            &f.b,
+            "PATCH",
+            &Fixture::task_path(&p, &agents),
+            Fixture::edit_body(&agents, json!({"not_before":at})),
+        )
+        .await;
+    assert_eq!(by_agent["not_before"], at, "{by_agent}");
+    assert_eq!(by_agent["not_before_by"], f.b.principal);
+}
+
+#[tokio::test]
+async fn a_scheduled_task_opens_by_itself_at_its_time_and_is_claimable() {
+    let f = Fixture::new().await;
+    let p = f.project("schedule-open").await;
+    let at = f.now() + 2 * HOUR;
+    let scheduled = f.scheduled(&p, "Timed release", at).await;
+    assert!(
+        f.next(&f.a, &p).await["action"].is_null(),
+        "a planned task is not offered"
+    );
+
+    f.clock.0.fetch_add(2 * HOUR - 1, Ordering::SeqCst);
+    let early = f.read_task(&f.a, &p, &scheduled).await;
+    assert_eq!(early["lifecycle"], "planned", "{early}");
+    assert_eq!(early["opened_at"], Value::Null);
+    assert!(
+        f.events_of("task.opened_by_schedule", &scheduled)
+            .await
+            .is_empty()
+    );
+
+    // The time passes, then half an hour more before anybody reads: opened_at is the moment
+    // of opening, not the scheduled time.
+    f.clock.0.fetch_add(1 + HOUR / 2, Ordering::SeqCst);
+    let opened_at = f.now();
+    // Any client's read opens it; no admission and no claim is involved.
+    let task = f.read_task(&f.a, &p, &scheduled).await;
+    assert_eq!(task["lifecycle"], "open", "{task}");
+    assert_eq!(task["work_status"], "ready");
+    assert_eq!(task["opened_at"], coordinator_core::timestamp(opened_at));
+    assert_eq!(task["origin"], "human", "origin is unchanged");
+    assert_eq!(
+        task["revision"],
+        scheduled["revision"].as_i64().unwrap() + 1
+    );
+    assert_eq!(task["not_before"], Value::Null);
+    assert_eq!(task["held_by_budget"], false);
+
+    let events = f.events_of("task.opened_by_schedule", &scheduled).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].0, f.admin.principal, "the scheduler is the actor");
+    assert_eq!(events[0].1["opened_by"], "service");
+    assert_eq!(events[0].1["scheduled_by"], f.admin.principal);
+    assert_eq!(events[0].1["not_before"], coordinator_core::timestamp(at));
+    assert_eq!(events[0].1["revision"], task["revision"]);
+    let (actor, saved): (String, String) = sqlx::query_as(
+        "SELECT actor_id,data_json FROM task_revisions WHERE task_id=? AND revision=?",
+    )
+    .bind(task["id"].as_str().unwrap())
+    .bind(task["revision"].as_i64().unwrap())
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(actor, f.admin.principal);
+    let saved: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["lifecycle"], "open");
+    assert_eq!(saved["scheduled_opening"]["opened_by"], "service");
+
+    // Reading again changes nothing, and an agent can claim it.
+    f.read_task(&f.admin, &p, &scheduled).await;
+    assert_eq!(
+        f.events_of("task.opened_by_schedule", &scheduled)
+            .await
+            .len(),
+        1
+    );
+    let attempt = f.claim_offered(&f.a, &p).await;
+    assert_eq!(attempt["task_id"], scheduled["id"]);
+}
+
+#[tokio::test]
+async fn a_scheduled_task_with_unmet_dependencies_or_a_pending_decision_opens_but_waits() {
+    let f = Fixture::new().await;
+    let p = f.project("schedule-blocked").await;
+    let prerequisite = f.task(&p, "Prerequisite").await;
+    let at = f.now() + HOUR;
+    let planned = f
+        .create_task(
+            &f.admin,
+            &p,
+            "Needs the prerequisite",
+            json!({"planned":true,"depends_on":[prerequisite["id"]]}),
+        )
+        .await;
+    let waiting = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &Fixture::task_path(&p, &planned),
+            Fixture::edit_body(
+                &planned,
+                json!({"not_before":coordinator_core::timestamp(at)}),
+            ),
+        )
+        .await;
+    let decided = f.scheduled(&p, "Needs a decision", at).await;
+    f.reversible_decision(&p, &decided, false).await;
+
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let task = f.read_task(&f.a, &p, &waiting).await;
+    assert_eq!(task["lifecycle"], "open", "{task}");
+    assert_eq!(task["opened_at"], coordinator_core::timestamp(f.now()));
+    assert_eq!(task["work_status"], "blocked");
+    assert_eq!(task["dependencies_ready"], false);
+    assert_eq!(task["eligible_to_claim"], false, "{task}");
+    let codes: Vec<&str> = task["preconditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"dependencies_incomplete"), "{codes:?}");
+
+    let task = f.read_task(&f.a, &p, &decided).await;
+    assert_eq!(task["lifecycle"], "open", "{task}");
+    assert_eq!(task["decisions_ready"], false);
+    assert_eq!(task["work_status"], "blocked");
+    assert_eq!(task["eligible_to_claim"], false, "{task}");
+    // The only claimable work is the prerequisite.
+    let attempt = f.claim_offered(&f.a, &p).await;
+    assert_eq!(attempt["task_id"], prerequisite["id"]);
+}
+
+#[tokio::test]
+async fn a_scheduled_agent_task_over_the_weekly_budget_is_held_until_the_week_rolls_over() {
+    let f = Fixture::new().await;
+    let p = f.project("schedule-budget").await;
+    let planned = f
+        .create_task(&f.a, &p, "Agent's timed task", json!({"planned":true}))
+        .await;
+    assert_eq!(planned["held_by_budget"], false, "{planned}");
+    let at = f.now() + HOUR;
+    let scheduled = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &Fixture::task_path(&p, &planned),
+            Fixture::edit_body(
+                &planned,
+                json!({"not_before":coordinator_core::timestamp(at)}),
+            ),
+        )
+        .await;
+    f.admitted(&p, BUDGET).await;
+
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let held = f.read_task(&f.admin, &p, &scheduled).await;
+    assert_eq!(held["lifecycle"], "planned", "{held}");
+    assert_eq!(held["held_by_budget"], true);
+    assert_eq!(held["opened_at"], Value::Null);
+    assert_eq!(
+        held["revision"], scheduled["revision"],
+        "holding is no edit"
+    );
+    assert_eq!(held["not_before"], coordinator_core::timestamp(at));
+    f.read_task(&f.admin, &p, &scheduled).await;
+    let held_events = f.events_of("task.schedule_held", &scheduled).await;
+    assert_eq!(held_events.len(), 1, "held once, not on every read");
+    assert_eq!(held_events[0].1["reason"], "weekly_agent_task_budget");
+    assert!(
+        f.events_of("task.opened_by_schedule", &scheduled)
+            .await
+            .is_empty()
+    );
+    let digest = f.digest(&p).await;
+    assert_eq!(
+        digest["held_agent_tasks"][0]["task_id"], scheduled["id"],
+        "{digest}"
+    );
+    assert_eq!(
+        digest["agent_task_weekly_budget"]["admitted_this_week"],
+        BUDGET
+    );
+
+    // The held task is still held on the last moment of the week, and opens in the next one,
+    // taking the first place of the new week's budget.
+    let next_week = coordinator_server::admission::week_start(f.now()) + WEEK;
+    sqlx::query("UPDATE browser_sessions SET expires_at=?")
+        .bind(next_week + DAY)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    f.clock.0.store(next_week - 1, Ordering::SeqCst);
+    assert_eq!(
+        f.read_task(&f.admin, &p, &scheduled).await["lifecycle"],
+        "planned"
+    );
+    f.clock.0.store(next_week, Ordering::SeqCst);
+    let opened = f.read_task(&f.admin, &p, &scheduled).await;
+    assert_eq!(opened["lifecycle"], "open", "{opened}");
+    assert_eq!(opened["held_by_budget"], false);
+    assert_eq!(opened["origin"], "agent");
+    assert_eq!(opened["opened_at"], coordinator_core::timestamp(next_week));
+    assert_eq!(
+        f.events_of("task.opened_by_schedule", &scheduled)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.digest(&p).await["agent_task_weekly_budget"]["admitted_this_week"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_scheduled_agent_task_within_the_budget_opens_and_takes_a_place() {
+    let f = Fixture::new().await;
+    let p = f.project("schedule-budget-room").await;
+    f.admitted(&p, BUDGET - 1).await;
+    let planned = f
+        .create_task(&f.a, &p, "Last place", json!({"planned":true}))
+        .await;
+    let at = f.now() + HOUR;
+    let scheduled = f
+        .ok(
+            &f.admin,
+            "PATCH",
+            &Fixture::task_path(&p, &planned),
+            Fixture::edit_body(
+                &planned,
+                json!({"not_before":coordinator_core::timestamp(at)}),
+            ),
+        )
+        .await;
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let opened = f.read_task(&f.admin, &p, &scheduled).await;
+    assert_eq!(opened["lifecycle"], "open", "{opened}");
+    assert_eq!(
+        f.digest(&p).await["agent_task_weekly_budget"]["admitted_this_week"],
+        BUDGET
+    );
+    // The place is used: the next agent task is held.
+    let over = f.create_task(&f.a, &p, "One too many", json!({})).await;
+    assert_eq!(over["lifecycle"], "planned", "{over}");
+}
+
+#[tokio::test]
+async fn a_restarted_service_opens_a_task_whose_time_passed_once() {
+    let f = Fixture::new().await;
+    let p = f.project("schedule-restart").await;
+    let scheduled = f.scheduled(&p, "Due while down", f.now() + HOUR).await;
+    let path = f.state.config.database_path.clone();
+    // The service goes down, the time passes, and a new process starts on the same database.
+    f.state.pool.close().await;
+    f.clock.0.fetch_add(3 * HOUR, Ordering::SeqCst);
+    let mut restarted = AppState::open(Config {
+        database_path: path,
+        public_origin: "http://127.0.0.1:8080".into(),
+        allow_insecure_loopback: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    restarted.clock = f.clock.clone();
+    assert_eq!(
+        coordinator_server::coordination::open_due_tasks(&restarted)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        coordinator_server::coordination::open_due_tasks(&restarted)
+            .await
+            .unwrap(),
+        0,
+        "a second pass finds nothing to open"
+    );
+    let task: (String, Option<i64>, i64) =
+        sqlx::query_as("SELECT lifecycle,opened_at,revision FROM tasks WHERE id=?")
+            .bind(scheduled["id"].as_str().unwrap())
+            .fetch_one(&restarted.pool)
+            .await
+            .unwrap();
+    assert_eq!(task, ("open".into(), Some(f.now()), 3));
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE kind='task.opened_by_schedule' AND record_id=?",
+    )
+    .bind(scheduled["id"].as_str().unwrap())
+    .fetch_one(&restarted.pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
+
+    // Another restart afterwards still opens nothing.
+    restarted.pool.close().await;
+    let mut third = AppState::open(Config {
+        database_path: restarted.config.database_path.clone(),
+        public_origin: "http://127.0.0.1:8080".into(),
+        allow_insecure_loopback: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    third.clock = f.clock.clone();
+    assert_eq!(
+        coordinator_server::coordination::open_due_tasks(&third)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn the_sweep_waits_for_a_ready_service() {
+    let f = Fixture::new().await;
+    let p = f.project("schedule-paused").await;
+    let scheduled = f.scheduled(&p, "Paused", f.now() + HOUR).await;
+    f.clock.0.fetch_add(2 * HOUR, Ordering::SeqCst);
+    sqlx::query("UPDATE service_state SET coordination_state='restore_reconciliation',restore_id='test',restored_at=1")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        coordinator_server::coordination::open_due_tasks(&f.state)
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("UPDATE service_state SET coordination_state='ready'")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        coordinator_server::coordination::open_due_tasks(&f.state)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.events_of("task.opened_by_schedule", &scheduled)
+            .await
+            .len(),
+        1
+    );
+}

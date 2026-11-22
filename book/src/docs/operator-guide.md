@@ -360,7 +360,15 @@ identifies the check definition, not the application release. Saving a roster
 neither creates nor runs a producer, and at least one check is required.
 
 Open an unowned task to edit its brief, criteria, priority, prerequisites, and
-admission. Planned tasks remain unavailable until admitted. An edit always names
+admission. Planned tasks remain unavailable until admitted, either by you or by a time:
+while a task is kept planned, **Open automatically at (not before)** schedules it in your
+browser's local time zone, and the service opens it by itself when that time passes, with
+no admission or claim, as your admission would. Clear the field to leave the task planned.
+The task's detail page shows the scheduled time beside its created and opened times. An
+agent cannot schedule a task you or the service created, and a scheduled task from an
+agent still counts against the weekly agent-task budget when it opens (over budget, it is
+held until the next ISO week). An opened task still waits for its dependencies and
+pending decisions. An edit always names
 the revision displayed when the form was opened. Refresh and reconsider a stale
 form instead of overwriting a newer revision. The service prevents active-work,
 workflow, and dependency-cycle bypasses.

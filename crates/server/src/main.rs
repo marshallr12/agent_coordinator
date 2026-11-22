@@ -337,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
                 })?;
             tracing::info!(listen = %state.config.listen, "Agent Coordinator service started");
             tokio::spawn(sweep_decision_timeouts(state.clone()));
+            tokio::spawn(sweep_scheduled_openings(state.clone()));
             axum::serve(listener, router(state).into_make_service())
                 .with_graceful_shutdown(shutdown())
                 .await?;
@@ -398,6 +399,20 @@ async fn sweep_decision_timeouts(state: AppState) {
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "Decision timeout sweep failed"),
+        }
+    }
+}
+
+/// Opens planned tasks whose not-before time passed, at startup and every minute, so a task opens
+/// on schedule even when no client is reading. Every authenticated request also does this first.
+async fn sweep_scheduled_openings(state: AppState) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        match coordinator_server::coordination::open_due_tasks(&state).await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "Planned tasks opened on their schedule"),
+            Err(error) => tracing::warn!(code = error.code, "Scheduled task opening failed"),
         }
     }
 }

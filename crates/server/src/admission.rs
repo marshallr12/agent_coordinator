@@ -247,6 +247,45 @@ pub(crate) async fn admitted_in_week(
     .await?)
 }
 
+/// What the weekly budget decides for a planned task whose not-before time passed.
+pub(crate) enum ScheduledAdmission {
+    /// Open the task; `counted` is true when it takes a place of the budget.
+    Open { counted: bool },
+    /// The budget is spent for this week; the task stays planned and held.
+    Hold,
+}
+
+/// Applies the weekly budget to a scheduled opening at `now`. Only an agent-origin
+/// task without an admission class is budgeted, as at creation; a human's or the
+/// service's task is always opened. A task that already holds a place in the
+/// current week (it was admitted, then returned to planned) takes no second one.
+pub(crate) async fn admit_scheduled(
+    c: &mut SqliteConnection,
+    config: &Config,
+    project: &str,
+    task: &sqlx::sqlite::SqliteRow,
+    now: i64,
+) -> Result<ScheduledAdmission, AppError> {
+    use sqlx::Row;
+    let budgeted = task.get::<String, _>("origin") == Origin::Agent.as_str()
+        && task.get::<Option<String>, _>("admission_class").is_none()
+        && task.get::<Option<String>, _>("budget_exempt").is_none();
+    if !budgeted {
+        return Ok(ScheduledAdmission::Open { counted: false });
+    }
+    let start = week_start(now);
+    let holds_place = task
+        .get::<Option<i64>, _>("budget_admitted_at")
+        .is_some_and(|at| at >= start && at < start + WEEK_MS);
+    if holds_place {
+        return Ok(ScheduledAdmission::Open { counted: false });
+    }
+    if admitted_in_week(c, project, start).await? >= config.agent_task_weekly_budget {
+        return Ok(ScheduledAdmission::Hold);
+    }
+    Ok(ScheduledAdmission::Open { counted: true })
+}
+
 /// Decides whether a task created by `m`'s actor in `project` is held by that
 /// project's budget. Call
 /// it inside the mutation, after the replay check, and then [`record`] the

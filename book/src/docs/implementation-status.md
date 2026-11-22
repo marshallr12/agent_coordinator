@@ -511,6 +511,12 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   holds after a `changes_requested` review returns the task to ready. An interactive
   session or a human still claims it. Existing tasks are unmarked; nothing is inferred
   from titles.
+- Scheduled opening: a planned task may carry `not_before` (set with the task `PATCH`, the
+  dashboard edit dialog or `tasks edit`; migration `0050`). When the service clock passes it
+  the service opens the task itself (task revision and `task.opened_by_schedule` event, the
+  scheduler as actor, `opened_at` the opening time), before any authenticated request, at
+  startup and every minute; the weekly agent-task budget still holds an agent-origin task
+  (`task.schedule_held`, retried the next ISO week). See the API contract.
 - Admission control (P6): tasks record their `origin` (`human`, `agent` or
   `service`) and may carry an `admission_class` (`revert`, `fix_target`,
   `deflake`, `refusal_fix`); service-created reverts and revise follow-ups set
