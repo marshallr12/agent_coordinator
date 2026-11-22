@@ -84,6 +84,16 @@ fn the_runner_starts_an_implementer_only_once_the_publication_broker_admits_it()
     in_a_new_session("runner");
 }
 
+/// The supervisor's `prepare` carries the digest of the coordinator
+/// credential its plan gives a launch, the runner journals it and admits
+/// the launch with it, and the publication broker's secret scan refuses
+/// the candidate that adds that credential; the same candidate from a
+/// launch given no credential is published.
+#[test]
+fn a_credential_the_supervisor_gives_a_launch_is_refused_by_the_brokers_scan() {
+    in_a_new_session("digests");
+}
+
 /// The child's side. Ignored so that it runs only when a test above starts
 /// it, with its role, in a new logon session or inside a launch.
 #[test]
@@ -93,6 +103,7 @@ fn child_in_a_new_logon_session() {
         "publication" => publication(),
         "lost" => lost(),
         "runner" => runner::admitted_starts(),
+        "digests" => digests::sent_and_refused(),
         "installed" => installed::host(),
         "client" => client(),
         other => panic!("no such role: {other}"),
@@ -837,6 +848,202 @@ mod runner {
             log.trim(),
             unoffered.trim()
         )
+    }
+}
+
+mod digests {
+    //! The credential digests' whole path: the supervisor's remote host,
+    //! a runner in this process, the publication broker and its scan.
+    use super::*;
+    use agentc_supervisor::config::Config;
+    use agentc_supervisor::host_runtime::windows::Planner;
+    use agentc_supervisor::host_runtime::windows::egress_admission::BrokerRoute;
+    use agentc_supervisor::host_runtime::windows::launcher::LaunchSpec;
+    use agentc_supervisor::host_runtime::windows::process::Command as Planned;
+    use agentc_supervisor::host_runtime::windows::remote::{Link, RemoteHost};
+    use agentc_supervisor::host_runtime::windows::runner::{Request, Runner, answer};
+    use agentc_supervisor::host_runtime::{HostRuntime, Observation};
+    use agentc_supervisor::run_loop::{Launch as Loop, Suggestion};
+    use serde_json::{Value, json};
+    use std::time::Instant;
+    use support::{CHILD, LAUNCH_PATIENCE, REPORT, ROLE};
+
+    /// The variable a launch's coordinator credential is given in.
+    const CREDENTIAL: &str = "AGENT_COORDINATOR_TOKEN";
+
+    /// The supervisor's link straight into a runner in this process.
+    struct Direct(Runner);
+
+    impl Link for Direct {
+        /// Has the runner handle `request` as its pipe would.
+        fn ask(&mut self, request: &Value) -> anyhow::Result<Value> {
+            let parsed = serde_json::from_value::<Request>(request.clone());
+            let parsed = parsed.map_err(anyhow::Error::from);
+            Ok(answer(parsed.and_then(|request| self.0.handle(request))))
+        }
+    }
+
+    /// Plans the push client for every launch, sending the leaking
+    /// candidate, and gives the launch `given` names [`LEAKED_TOKEN`] as
+    /// its coordinator credential.
+    struct Pushing {
+        root: PathBuf,
+        tools: PathBuf,
+        variables: Vec<(&'static str, String)>,
+        given: uuid::Uuid,
+    }
+
+    impl Pushing {
+        /// The launch's working directory.
+        fn work(&self, launch: &Loop) -> PathBuf {
+            self.root.join(format!("{}-work", launch.session_id))
+        }
+
+        /// What the client reads besides the bundle's variables.
+        fn environment(&self, launch: &Loop) -> Vec<(&'static str, String)> {
+            let (root, work) = (std::env::var("SystemRoot").unwrap(), self.work(launch));
+            let mut environment = vec![
+                ("PATH", format!("{};{root}\\System32", self.tools.display())),
+                ("SystemRoot", root),
+                ("LOCALAPPDATA", work.display().to_string()),
+                (ROLE, "client".to_owned()),
+                (REPORT, work.join("report.txt").display().to_string()),
+                (PROBE, "push".to_owned()),
+                (STEPS, "good".to_owned()),
+            ];
+            if launch.session_id == self.given {
+                environment.push((CREDENTIAL, LEAKED_TOKEN.to_owned()));
+            }
+            environment
+        }
+    }
+
+    impl Planner for Pushing {
+        /// The client in a less-privileged boundary of the launch's own.
+        fn plan(&self, launch: &Loop) -> anyhow::Result<(LaunchSpec, Planned)> {
+            let work = self.work(launch);
+            let limits = json!({"processes": 16, "process_memory_mb": 512, "job_memory_mb": 1024});
+            let spec = LaunchSpec {
+                profile: format!("agentc.test.{}", launch.session_id.simple()),
+                less_privileged: true,
+                capabilities: vec!["registryRead".into()],
+                limits: serde_json::from_value(limits)?,
+                control: self.root.join(format!("{}-control", launch.session_id)),
+                work: work.clone(),
+            };
+            let program = self.tools.join("client.exe").display().to_string();
+            let variables = self.environment(launch).into_iter();
+            let variables = variables.chain(self.variables.clone());
+            let command = Planned {
+                argv: vec![program, CHILD.into(), "--exact".into(), "--ignored".into()],
+                directory: work.clone(),
+                environment: variables.map(|(k, v)| (k.into(), v)).collect(),
+                output: work.join("client.log"),
+            };
+            Ok((spec, command))
+        }
+
+        /// The credential the plan put in the launch's environment.
+        fn coordinator_credentials(&self, launch: &Loop) -> anyhow::Result<Vec<String>> {
+            let given = launch.session_id == self.given;
+            Ok(given.then(|| LEAKED_TOKEN.to_owned()).into_iter().collect())
+        }
+    }
+
+    /// A launch of the supervisor's loop working on [`TASK`].
+    fn planned() -> Loop {
+        let suggestion = Suggestion {
+            task: TASK.into(),
+            revision: 1,
+            title: String::new(),
+        };
+        Loop::plan(&Config::default(), "p", suggestion)
+    }
+
+    /// Starts the prepared `launch`, waits for its client and returns what
+    /// it reported for its one push; `work` is the launch's directory.
+    fn pushed(host: &mut impl HostRuntime, work: &Path, launch: &Loop) -> String {
+        host.start(launch).unwrap();
+        let started = Instant::now();
+        while host.observe(launch) == Observation::Running {
+            assert!(
+                started.elapsed() < LAUNCH_PATIENCE,
+                "the client never ended"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let said = std::fs::read_to_string(work.join("report.txt")).unwrap_or_default();
+        let log = std::fs::read_to_string(work.join("client.log")).unwrap_or_default();
+        let lines = said.strip_prefix("ok: ");
+        let lines = lines.unwrap_or_else(|| panic!("{said}\n{log}"));
+        let lines: Vec<String> = lines.lines().map(str::to_owned).collect();
+        outcome(&lines, "good").to_owned()
+    }
+
+    /// The remote host over a runner that admits launches to `services`'
+    /// publication broker, planning with `planner`.
+    fn host(trees: &Trees, services: &Services, planner: Pushing) -> RemoteHost<Pushing, Direct> {
+        let route = BrokerRoute::publication(&services.control, &me()).unwrap();
+        let runner = Runner::new(&trees.at("state")).unwrap();
+        RemoteHost::new(planner, Direct(runner.with_publication(Some(route))))
+    }
+
+    /// Has the supervisor's authority hold `launch` on [`TASK`].
+    fn hold(services: &Services, launch: &Loop) {
+        let id = launch.session_id.to_string();
+        let held = Held {
+            task: TASK.into(),
+            attempt: format!("attempt-{id}"),
+            generation: 1,
+        };
+        services.authority.hold(&id, held);
+    }
+
+    /// The planner of the test's launches, of which `given` is given the
+    /// credential; the bundle is read from the tool directory.
+    fn planner(trees: &Trees, repository: &Repository, given: &Loop) -> Pushing {
+        let tools = trees.at("tools");
+        let mut variables = repository.leak_variables();
+        variables[0].1 = tools.join("leak.bundle").display().to_string();
+        std::fs::create_dir_all(trees.at("launches")).unwrap();
+        Pushing {
+            root: trees.at("launches"),
+            tools,
+            variables,
+            given: given.session_id,
+        }
+    }
+
+    /// The whole test.
+    pub fn sent_and_refused() -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let (trees, staging) = (Trees::new(&dir), dir.path().join("staging"));
+        std::fs::create_dir(&staging).unwrap();
+        let repository = Repository::new(&trees, &staging);
+        let services = Services::start(&trees, &repository.remote);
+        let (given, plain) = (planned(), planned());
+        let planner = planner(&trees, &repository, &given);
+        let works = [&given, &plain].map(|launch| planner.work(launch));
+        let mut host = host(&trees, &services, planner);
+        let packages = [&given, &plain].map(|launch| {
+            hold(&services, launch);
+            host.prepare(launch).unwrap().container.unwrap()
+        });
+        let tools = client_tools(&trees, &packages.each_ref().map(String::as_str));
+        std::fs::copy(&repository.leak.bundle, tools.join("leak.bundle")).unwrap();
+        let refused = pushed(&mut host, &works[0], &given);
+        assert_eq!(refused, "refused secret_detected", "the launch given it");
+        let accepted = pushed(&mut host, &works[1], &plain);
+        let own = format!("{TASK}/{}", plain.session_id);
+        let expected = format!(
+            "accepted refs/agent-coordinator/candidates/{own} {}",
+            repository.leak.commit
+        );
+        assert_eq!(accepted, expected, "the launch given no credential");
+        for launch in [&given, &plain] {
+            host.cleanup(launch).unwrap();
+        }
+        format!("given: {refused}; given none: {accepted}")
     }
 }
 

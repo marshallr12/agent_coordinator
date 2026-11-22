@@ -80,6 +80,14 @@ pub fn checked_digests(digests: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The SHA-256 digest (lowercase hex) of the coordinator credential
+/// `token`, as `agent-coordinator` and the Linux launch root compute it:
+/// the form [`checked_digests`] accepts.
+pub fn credential_digest(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
 impl Grant {
     /// The grant of `launch`, which works as `role`, runs as `account` and
     /// carries `package` (both SID text). `generation` is the least
@@ -563,6 +571,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         false
+    }
+
+    #[test]
+    fn a_credential_s_digest_is_its_sha_256_in_the_form_a_grant_accepts() {
+        let digest = credential_digest("abc");
+        let known = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(digest, known);
+        assert!(checked_digests(&[digest]).is_ok());
     }
 
     #[test]
