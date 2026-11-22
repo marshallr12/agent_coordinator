@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production and both hosts on `c05a052`; one of three window-3 enablers landed, rollout scripts prepared (2026-11-22 02:50 UTC)
+## Current resume point — production and both hosts on `c05a052`; one of three window-3 enablers landed, rollout scripts prepared (2026-11-22 02:29 UTC)
 
 The 2026-11-16 to 2026-11-20 updates (P6 second NO-GO, the rollouts of `4705310`, `818a7b1`,
 `f590db8` and `c05a052`, the roster change, the canary, 502 and transport-reset investigations)
