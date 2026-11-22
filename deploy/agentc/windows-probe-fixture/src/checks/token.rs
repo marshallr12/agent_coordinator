@@ -8,6 +8,7 @@ use crate::report::Report;
 use std::ffi::c_void;
 use std::io;
 
+const TOKEN_USER: u32 = 1;
 const TOKEN_INTEGRITY_LEVEL: u32 = 25;
 const TOKEN_IS_APP_CONTAINER: u32 = 29;
 const TOKEN_APP_CONTAINER_SID: u32 = 31;
@@ -27,6 +28,11 @@ pub fn run(report: &mut Report) {
 /// The AppContainer package SID of this process, as text.
 pub fn package_sid() -> io::Result<String> {
     sid_field(TOKEN_APP_CONTAINER_SID)
+}
+
+/// The account this process runs as, as SID text.
+pub fn user_sid() -> io::Result<String> {
+    sid_field(TOKEN_USER)
 }
 
 /// Whether this process runs inside an AppContainer.

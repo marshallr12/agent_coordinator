@@ -1,5 +1,6 @@
 //! Every observation one launch makes, grouped by the boundary it tests.
 
+pub mod brokers;
 mod desktop;
 mod files;
 mod ipc;
