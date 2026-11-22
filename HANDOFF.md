@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production and both hosts on `c05a052`; backup-transfer stalls gone over a day of transfers (2026-11-21 21:57 UTC)
+## Current resume point — production and both hosts on `c05a052`; one of three window-3 enablers landed, rollout scripts prepared (2026-11-22 02:50 UTC)
 
 The 2026-11-16 to 2026-11-20 updates (P6 second NO-GO, the rollouts of `4705310`, `818a7b1`,
 `f590db8` and `c05a052`, the roster change, the canary, 502 and transport-reset investigations)
@@ -96,6 +96,23 @@ on 2026-11-21. This section keeps only what a new session needs.
       while the service's fix task is open, plus a recorded resolution kind. After they land:
       roll out main, re-run the precondition check, pin `window.json`, then the owner imports,
       schedules and admits `e6685dbf`.
+    - **Enabler state read 2026-11-22 02:25 UTC** (coordinator CLI only; saved in
+      `~/.local/state/agent-coordinator-evidence/resume-20261122/`): the owner released all
+      three. **`6dcb16b6` Done**, on main as `923cef4` (01:37 UTC) with migration
+      `0048_report_resolution_kind.sql`; not deployed. **`ff2502e8` in progress, second
+      attempt** (changes requested in review 00:36 UTC; re-claimed 02:02 UTC). Its checkpoints
+      also name a migration `0048`, written on a base before `923cef4`: it must be renumbered
+      before it lands. **`1ee4e53c` open, waiting on `ff2502e8`**, no attempt yet.
+    - **Rollout scripts prepared 2026-11-22 (owner's pick; local files only):**
+      `~/.local/state/agent-coordinator-evidence/rollout-main-prep/` (`README.md` first).
+      `render.py --commit … --task … --attempt … --session …` writes the script set for the
+      target commit from templates of the `c05a052` scripts; rendering the `c05a052` values
+      reproduces those scripts except three additions for a rollout with migrations (full
+      release acceptance required, expected schema passed on, pre/post backup schema
+      asserted in `remote_upgrade.py`). Dry render of main `c8656b7`: schema 47 → 48 so far.
+      Rollback with a migration is the pre-upgrade snapshot plus the old binaries (sqlx
+      refuses an unknown applied migration), not the binaries alone. Not done: no rollout
+      task, no release run, no host or production access.
     - `daa42f71` (Windows phase 6d) is Done; follow-up `f71179f5` is planned (MINIAIR work).
   - `d2ca0225`: blocked on the owner confirming the autonomy plan is finished.
   - `7011c55f` (native Windows services, parent) and `f71179f5` (phase 6 follow-up, planned):
