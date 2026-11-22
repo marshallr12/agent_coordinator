@@ -94,6 +94,29 @@ fn a_credential_the_supervisor_gives_a_launch_is_refused_by_the_brokers_scan() {
     in_a_new_session("digests");
 }
 
+/// An implementer launch, a reviewer launch and the reviewer's candidate,
+/// each made by a runner, read a control file and list a control directory
+/// from inside, and are refused a protected key file and the publication
+/// broker's work directory; the implementer, once its push is accepted, is
+/// refused its own repository there. A development check: the runner and
+/// the broker run in the test's process, as this account.
+#[test]
+fn role_launches_reach_their_controls_and_are_refused_the_key_and_the_brokers_work() {
+    if roles::equipped() {
+        in_a_new_session("roles");
+    }
+}
+
+/// Task f71179f5, owner-attended: the same three probes through the
+/// installed `agentc-runner` service, whose launches run as its own
+/// account and are admitted by the installed brokers, against the push key
+/// and the installed publication broker's work directory.
+#[test]
+#[ignore = "owner-attended: needs the installed runner and broker services"]
+fn the_installed_runners_role_launches_are_refused_the_push_key_and_the_brokers_work() {
+    eprintln!("{}", roles::installed());
+}
+
 /// The child's side. Ignored so that it runs only when a test above starts
 /// it, with its role, in a new logon session or inside a launch.
 #[test]
@@ -104,6 +127,7 @@ fn child_in_a_new_logon_session() {
         "lost" => lost(),
         "runner" => runner::admitted_starts(),
         "digests" => digests::sent_and_refused(),
+        "roles" => roles::host(),
         "installed" => installed::host(),
         "client" => client(),
         other => panic!("no such role: {other}"),
@@ -872,7 +896,7 @@ mod digests {
     const CREDENTIAL: &str = "AGENT_COORDINATOR_TOKEN";
 
     /// The supervisor's link straight into a runner in this process.
-    struct Direct(Runner);
+    pub(super) struct Direct(pub(super) Runner);
 
     impl Link for Direct {
         /// Has the runner handle `request` as its pipe would.
@@ -1044,6 +1068,376 @@ mod digests {
             host.cleanup(launch).unwrap();
         }
         format!("given: {refused}; given none: {accepted}")
+    }
+}
+
+mod roles {
+    //! An implementer launch, a reviewer launch and the reviewer's
+    //! candidate, each made by a runner, run the probe fixture's `brokers`
+    //! mode (`deploy/agentc/windows-probe-fixture`): after two reads that
+    //! must work inside the launch, a protected key and the publication
+    //! broker's work directory must each be refused. The candidate's probe
+    //! is a command the reviewer hands its prefix script, so the candidate
+    //! runner makes it. [`host`] is the development check, with the runner
+    //! and the broker in this process as this account; [`installed`] drives
+    //! the installed runner service, whose launches run as its own account.
+    use super::*;
+    use agentc_supervisor::candidate::form::{git_bash_path, recorded};
+    use agentc_supervisor::candidate::shim::SCRIPT_NAME;
+    use agentc_supervisor::host_runtime::windows::egress_admission::BrokerRoute;
+    use agentc_supervisor::host_runtime::windows::reader::create_directory;
+    use agentc_supervisor::host_runtime::windows::remote::{Link, PipeLink};
+    use agentc_supervisor::host_runtime::windows::runner::Runner;
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+
+    /// Names the probe fixture's executable for the development check.
+    pub const FIXTURE: &str = "AGENTC_TEST_PROBE_FIXTURE";
+    /// Names the pinned POSIX shell's file for the development check.
+    pub const SHELL: &str = "AGENTC_TEST_POSIX_SHELL";
+    /// The three probes, in the order they run.
+    const ROLES: [&str; 3] = ["implementer", "reviewer", "candidate"];
+
+    /// Where one run's files are.
+    struct Layout {
+        /// The launches' directories are made below it by the runner.
+        root: PathBuf,
+        /// `fixture.exe` and `sh.exe`, which every launch may read.
+        tools: PathBuf,
+        /// The supervisor program a reviewer runs as its shim.
+        shim: PathBuf,
+        /// The fixture's spec.
+        spec: PathBuf,
+        /// Where each probe leaves its rows; every launch may write there.
+        drop: PathBuf,
+        /// What this run's launches and files are named after.
+        tag: String,
+    }
+
+    /// `path` with forward slashes, as a shell script spells it.
+    fn slashed(path: &Path) -> String {
+        path.display().to_string().replace('\\', "/")
+    }
+
+    impl Layout {
+        /// The id of the run's launch `name`.
+        fn launch(&self, name: &str) -> String {
+            format!("f7-{}-{name}", self.tag)
+        }
+
+        /// The directory `kind` of the run's launch `name`.
+        fn directory(&self, name: &str, kind: &str) -> PathBuf {
+            self.root.join(format!("{}-{kind}", self.launch(name)))
+        }
+
+        /// A less-privileged launch spec for `name`. The implementer has no
+        /// capability, as a stand-in launch has none; the reviewer and its
+        /// candidate have `registryRead`, without which the pinned shell
+        /// does not start (`WSAStartup failed, error 18`).
+        fn launch_spec(&self, name: &str) -> Value {
+            let shell = if name == "implementer" {
+                vec![]
+            } else {
+                vec!["registryRead"]
+            };
+            let limits = json!({"processes": 16, "process_memory_mb": 512, "job_memory_mb": 1024});
+            json!({"profile": format!("agentc.test.{}", uuid::Uuid::new_v4().simple()),
+                   "less_privileged": true, "capabilities": shell, "limits": limits,
+                   "control": self.directory(name, "control"),
+                   "work": self.directory(name, "work")})
+        }
+
+        /// The reviewer's candidate: its own launch, the pinned shell and
+        /// the shim.
+        fn candidate_spec(&self) -> Value {
+            let system = std::env::var("SystemRoot").unwrap() + r"\System32";
+            json!({"launch": self.launch_spec("candidate"),
+                   "source": self.directory("candidate", "source"),
+                   "shell": self.tools.join("sh.exe"), "shim": self.shim,
+                   "reviewer_temp": self.directory("reviewer", "work").join("tmp"),
+                   "path": [self.tools, system]})
+        }
+
+        /// The environment of a launch's root process working in `work`.
+        fn environment(&self, work: &Path) -> Value {
+            let root = std::env::var("SystemRoot").unwrap();
+            json!({"PATH": format!("{};{root}\\System32", self.tools.display()),
+                   "SystemRoot": root, "LOCALAPPDATA": work})
+        }
+
+        /// The fixture's arguments for the probe of `role`, as shell words.
+        /// The probe is named as the role's launch is, so the implementer
+        /// finds its own repository below the broker's work directory.
+        fn probe_words(&self, role: &str) -> String {
+            let (spec, drop) = (slashed(&self.spec), slashed(&self.drop));
+            let name = self.launch(role);
+            format!("fixture.exe brokers \"{spec}\" \"{drop}\" {name}")
+        }
+
+        /// The file holding the argument the reviewer hands its prefix
+        /// script, in the form the harness records.
+        fn argument_file(&self) -> PathBuf {
+            self.drop.join(format!("{}-argument", self.tag))
+        }
+
+        /// Writes [`Layout::argument_file`]: the candidate's probe.
+        fn write_argument(&self) {
+            let temp = self.directory("reviewer", "work").join("tmp");
+            let temp = temp.display().to_string();
+            let inside = format!("{}/claude-1a2b-cwd", git_bash_path(&temp).unwrap());
+            let command = format!("'{}'", self.probe_words("candidate"));
+            let argument = recorded("/c/none/snapshot.sh", &temp, &command, &inside);
+            std::fs::write(self.argument_file(), argument).unwrap();
+        }
+
+        /// What the reviewer's shell runs: its own probe, then the
+        /// candidate's through the prefix script the runner wrote.
+        fn reviewer_script(&self) -> String {
+            let prefix = slashed(&self.directory("reviewer", "control").join(SCRIPT_NAME));
+            let argument = slashed(&self.argument_file());
+            format!(
+                "mkdir -p tmp; {}; echo \"reviewer=$?\"; \
+                 \"{prefix}\" \"$(cat '{argument}')\"; echo \"candidate=$?\"",
+                self.probe_words("reviewer")
+            )
+        }
+
+        /// The rows the probe of `role` left, by key.
+        fn rows(&self, role: &str) -> BTreeMap<String, String> {
+            let path = self.drop.join(format!("{}.txt", self.launch(role)));
+            let text = std::fs::read_to_string(&path);
+            let text = text.unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let pairs = text.lines().filter_map(|line| line.split_once('='));
+            pairs.map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+        }
+    }
+
+    /// Sends `request` and returns the runner's answer, which must be `ok`.
+    fn ok(link: &mut dyn Link, request: Value) -> Value {
+        let answer = link.ask(&request).unwrap();
+        assert_eq!(answer["ok"], true, "{request} -> {answer}");
+        answer
+    }
+
+    /// Prepares the implementer and the reviewer with its candidate and
+    /// returns the three packages.
+    fn prepare(link: &mut dyn Link, layout: &Layout, task: &str) -> [String; 3] {
+        let implementer = json!({"op": "prepare", "launch": layout.launch("implementer"),
+            "role": "implementer", "task": task, "spec": layout.launch_spec("implementer")});
+        let reviewer = json!({"op": "prepare", "launch": layout.launch("reviewer"),
+            "role": "reviewer", "task": task, "spec": layout.launch_spec("reviewer"),
+            "candidate": layout.candidate_spec()});
+        let (first, second) = (ok(link, implementer), ok(link, reviewer));
+        let sid = |answer: &Value, name: &str| answer[name].as_str().unwrap().to_owned();
+        [
+            sid(&first, "package_sid"),
+            sid(&second, "package_sid"),
+            sid(&second, "candidate_package_sid"),
+        ]
+    }
+
+    /// Starts `argv` as the root of the launch `name`, waits for it to end
+    /// and returns its exit code and what it printed.
+    fn run(link: &mut dyn Link, layout: &Layout, name: &str, argv: Value) -> (u64, String) {
+        let (launch, work) = (layout.launch(name), layout.directory(name, "work"));
+        let log = layout.drop.join(format!("{launch}.log"));
+        let start = json!({"op": "start", "launch": launch, "argv": argv, "directory": work,
+            "environment": layout.environment(&work), "output": log});
+        ok(link, start);
+        let seen = ok(
+            link,
+            json!({"op": "observe", "launch": launch, "wait_ms": 120_000}),
+        );
+        let said = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(seen["state"], "exited", "{seen}: {said}");
+        (seen["code"].as_u64().unwrap(), said)
+    }
+
+    /// Runs the three probes and removes the two launches.
+    fn probe(link: &mut dyn Link, layout: &Layout) {
+        layout.write_argument();
+        let fixture = layout.tools.join("fixture.exe");
+        let words = [
+            "brokers".to_owned(),
+            layout.spec.display().to_string(),
+            layout.drop.display().to_string(),
+            layout.launch("implementer"),
+        ];
+        let argv = json!([fixture, words[0], words[1], words[2], words[3]]);
+        let (code, said) = run(link, layout, "implementer", argv);
+        assert_eq!(code, 0, "the implementer's probe: {said}");
+        let ready = json!({"op": "candidate_ready", "launch": layout.launch("reviewer")});
+        let ready = ok(link, ready);
+        assert_eq!(ready["runner"], "ready", "{ready}");
+        let shell = layout.tools.join("sh.exe");
+        let argv = json!([shell, "-c", layout.reviewer_script()]);
+        let (code, said) = run(link, layout, "reviewer", argv);
+        let both = said.contains("reviewer=0") && said.contains("candidate=0");
+        assert!(code == 0 && both, "the reviewer's script: {said}");
+        for name in ["implementer", "reviewer"] {
+            let launch = layout.launch(name);
+            ok(
+                link,
+                json!({"op": "cleanup", "launch": launch, "remove_directories": true}),
+            );
+        }
+    }
+
+    /// Checks one role's rows and returns them as one line: it runs in a
+    /// less-privileged AppContainer in a job, both controls worked, and
+    /// every target it was told to try was refused with error 5.
+    fn check(layout: &Layout, role: &str) -> String {
+        let rows = layout.rows(role);
+        let row = |key: &str| rows.get(key).map(String::as_str).unwrap_or("missing");
+        for control in ["control.file_read", "control.dir_list"] {
+            assert_eq!(row(control), "ok", "{role} {control}: {rows:?}");
+        }
+        assert_eq!(row("token.appcontainer"), "ok", "{role}: {rows:?}");
+        assert_eq!(row("token.lpac"), "value:yes", "{role}: {rows:?}");
+        let refused: Vec<_> = rows
+            .iter()
+            .filter(|(k, _)| k.starts_with("refused."))
+            .collect();
+        assert!(refused.len() >= 2, "{role} tried {refused:?}");
+        for (target, outcome) in refused {
+            assert_eq!(outcome, "error:5", "{role} {target}: {rows:?}");
+        }
+        let shown: Vec<String> = rows.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        format!("{role}: {}", shown.join(" "))
+    }
+
+    /// A directory `packages` may read and, when `write`, change, besides
+    /// this account and the system.
+    fn shared(path: &Path, packages: &[String], write: bool) {
+        let rights = if write { "0x1301bf" } else { "0x1200a9" };
+        let mut list = format!("D:P(A;OICI;FA;;;{})(A;OICI;FA;;;SY)", me());
+        for package in packages {
+            list.push_str(&format!("(A;OICI;{rights};;;{package})"));
+        }
+        create_directory(path, &list).unwrap();
+    }
+
+    /// Fills the development check's tool directory: the fixture, the
+    /// shell, the shim, a control file, the bundle and the spec, whose
+    /// refused targets are a key file and the broker's work directory.
+    fn fill_tools(layout: &Layout, trees: &Trees, repository: &Repository) {
+        let copy = |from: PathBuf, name: &str| {
+            std::fs::copy(&from, layout.tools.join(name))
+                .unwrap_or_else(|error| panic!("copy {}: {error}", from.display()));
+        };
+        copy(std::env::var_os(FIXTURE).unwrap().into(), "fixture.exe");
+        copy(std::env::var_os(SHELL).unwrap().into(), "sh.exe");
+        copy(
+            env!("CARGO_BIN_EXE_agentc-supervisor").into(),
+            "agentc-supervisor.exe",
+        );
+        copy(repository.bundle.clone(), "candidate.bundle");
+        std::fs::write(layout.tools.join("control.txt"), b"control").unwrap();
+        let (tools, work) = (layout.tools.display(), trees.at("broker"));
+        let spec = format!(
+            "control_file={tools}\\control.txt\ncontrol_dir={tools}\n\
+             refused_file.push_key={}\nrefused_dir.publication_work={}\n\
+             bundle={tools}\\candidate.bundle\nrevision={}\ntree={}\nwork_root={}\n",
+            trees.at("key").join("push-app.pem").display(),
+            work.display(),
+            repository.candidate,
+            repository.tree,
+            work.display(),
+        );
+        std::fs::write(&layout.spec, spec).unwrap();
+    }
+
+    /// The development check's layout below `trees`.
+    fn layout(trees: &Trees) -> Layout {
+        let tools = trees.at("tools");
+        std::fs::create_dir_all(trees.at("launches")).unwrap();
+        Layout {
+            root: trees.at("launches"),
+            shim: tools.join("agentc-supervisor.exe"),
+            spec: tools.join("spec.txt"),
+            tools,
+            drop: trees.at("drop"),
+            tag: format!("{}", std::process::id()),
+        }
+    }
+
+    /// Whether the development check's two programs are named; says so
+    /// where they are not, and nothing is checked there.
+    pub fn equipped() -> bool {
+        let named = [FIXTURE, SHELL].map(|name| std::env::var_os(name).is_some());
+        if named != [true, true] {
+            eprintln!("{FIXTURE} or {SHELL} is unset; the role probes were not checked");
+        }
+        named == [true, true]
+    }
+
+    /// The development check: the runner and the publication broker are in
+    /// this process, as this account, and the key is a file of the test's.
+    pub fn host() -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let (trees, staging) = (Trees::new(&dir), dir.path().join("staging"));
+        std::fs::create_dir(&staging).unwrap();
+        let repository = Repository::new(&trees, &staging);
+        shared(&trees.at("broker"), &[], false);
+        let services = Services::start(&trees, &repository.remote);
+        shared(&trees.at("key"), &[], false);
+        std::fs::write(trees.at("key").join("push-app.pem"), b"key").unwrap();
+        let layout = layout(&trees);
+        let route = BrokerRoute::publication(&services.control, &me()).unwrap();
+        let runner = Runner::new(&trees.at("state")).unwrap();
+        let mut link = digests::Direct(runner.with_publication(Some(route)));
+        let packages = prepare(&mut link, &layout, TASK);
+        shared(&layout.tools, &packages, false);
+        shared(&layout.drop, &packages, true);
+        fill_tools(&layout, &trees, &repository);
+        let held = Held {
+            task: TASK.into(),
+            attempt: "attempt-roles".into(),
+            generation: 1,
+        };
+        services.authority.hold(&layout.launch("implementer"), held);
+        probe(&mut link, &layout);
+        let pushed = layout.rows("implementer");
+        let accepted = pushed["publication.push"].contains("\"ok\":true");
+        assert!(accepted, "the implementer's push: {pushed:?}");
+        for row in ["repository.dir_list", "repository.head_read"] {
+            assert_eq!(pushed[row], "error:5", "{row}: {pushed:?}");
+        }
+        ROLES.map(|role| check(&layout, role)).join(" || ")
+    }
+
+    /// The value of the variable `name`, which the runbook sets.
+    fn given(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"))
+    }
+
+    /// Owner-attended: the installed runner service makes the launches,
+    /// which run as its account, and the installed brokers admit them. The
+    /// runbook installs the tools and the spec, whose refused targets are
+    /// the push key and the publication broker's work directory, and sets
+    /// the `AGENTC_F7_*` variables.
+    pub fn installed() -> String {
+        let (runner, tools) = (given("AGENTC_F7_RUNNER_SID"), given("AGENTC_F7_TOOLS"));
+        let layout = Layout {
+            root: given("AGENTC_F7_LAUNCH_ROOT").into(),
+            shim: given("AGENTC_F7_SHIM").into(),
+            spec: given("AGENTC_F7_SPEC").into(),
+            tools: tools.into(),
+            drop: given("AGENTC_F7_DROP").into(),
+            tag: format!("{}", std::process::id()),
+        };
+        let mut link = PipeLink::new(&given("AGENTC_F7_RUNNER_PIPE"), &runner);
+        prepare(&mut link, &layout, &given("AGENTC_F7_TASK"));
+        probe(&mut link, &layout);
+        let said = ROLES.map(|role| {
+            let account = layout.rows(role)["token.user_sid"].clone();
+            assert_eq!(account, format!("value:{runner}"), "{role} runs as");
+            check(&layout, role)
+        });
+        let implementer = layout.rows("implementer");
+        let allowed = &implementer["egress.allowed"];
+        assert!(allowed.contains(" 200"), "egress: {implementer:?}");
+        said.join(" || ")
     }
 }
 
