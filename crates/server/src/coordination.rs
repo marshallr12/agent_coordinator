@@ -513,6 +513,7 @@ struct Task {
     blocked_reason: Option<String>,
     created_at: i64,
     ready_since: i64,
+    opened_at: Option<i64>,
     last_progress_at: Option<i64>,
     archived_at: Option<i64>,
     origin: String,
@@ -637,7 +638,7 @@ impl Task {
         "work_status":self.status(now),"blocked_reason":self.blocked_reason,"dependencies_ready":self.dependencies_ready,
         "objective_children_ready":self.objective_children_ready,"decisions_ready":self.decisions_ready,
         "objective_id":self.objective_id,"parent_objective_id":self.parent_objective_id,"parent_objective_required":self.parent_objective_required,
-        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"last_progress_at":self.last_progress_at.map(timestamp),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
+        "created_at":timestamp(self.created_at),"ready_since":timestamp(self.ready_since),"opened_at":self.opened_at.map(timestamp),"last_progress_at":self.last_progress_at.map(timestamp),"archived_at":self.archived_at.map(timestamp),"preconditions":preconditions,
         "origin":self.origin,"admission_class":self.admission_class.as_ref().or(self.budget_exempt.as_ref()),"held_by_budget":self.budget_held_at.is_some()&&self.lifecycle=="planned","human_delivered":self.human_delivered,"processing":self.processing});
         if self.workflow_phase.as_deref() == Some("integration") {
             value["precondition_hints"] = json!([{
@@ -1562,9 +1563,10 @@ async fn create_task(
         input.admission_evidence.as_ref(),
     )
     .await?;
-    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since,human_delivered) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+    let lifecycle = admission.lifecycle(input.planned);
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since,opened_at,human_delivered) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&id).bind(&p).bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(&input.kind).bind(input.priority)
-        .bind(admission.lifecycle(input.planned)).bind(m.now).bind(m.now).bind(input.human_delivered).execute(&mut *m.tx).await?;
+        .bind(lifecycle).bind(m.now).bind(m.now).bind((lifecycle == "open").then_some(m.now)).bind(input.human_delivered).execute(&mut *m.tx).await?;
     crate::admission::record(&mut m, &id, &admission).await?;
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
     let mut value = save_task_revision(&mut m, &p, &id).await?;
@@ -1829,8 +1831,8 @@ async fn edit_task(
         }
     }
     set_dependencies(&mut m.tx, &p, &id, &input.depends_on).await?;
-    sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,kind=?,revision=revision+1 WHERE id=?")
-        .bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority).bind(if input.planned{"planned"}else{"open"}).bind(kind).bind(&id).execute(&mut *m.tx).await?;
+    sqlx::query("UPDATE tasks SET title=?,description=?,acceptance_json=?,priority=?,lifecycle=?,opened_at=CASE WHEN ? THEN NULL ELSE COALESCE(opened_at,?) END,kind=?,revision=revision+1 WHERE id=?")
+        .bind(&input.title).bind(&input.description).bind(serde_json::to_string(&input.acceptance_criteria)?).bind(input.priority).bind(if input.planned{"planned"}else{"open"}).bind(input.planned).bind(m.now).bind(kind).bind(&id).execute(&mut *m.tx).await?;
     if !input.planned {
         sqlx::query("UPDATE tasks SET budget_held_at=NULL WHERE id=?")
             .bind(&id)
