@@ -1432,12 +1432,21 @@
   const TASK_ACTION_FIELDS = ['id', 'title', 'description', 'acceptance_criteria', 'priority', 'kind', 'lifecycle', 'work_status', 'status', 'archived_at', 'activity_kind', 'current_attempt_id', 'human_delivered', 'revision', 'blocked_reason', 'depends_on', 'dependencies', 'objective_id', 'parent_objective_id'];
   const pick = (source, fields) => Object.fromEntries(fields.filter((field) => source && field in source).map((field) => [field, source[field]]));
 
+  // Created and opened sit together: a planned task has no opened time until it is admitted.
+  function renderTaskTimes(task) {
+    patchSection($('detail-task-times'), sig(task.created_at, task.opened_at, task.lifecycle), (target) => {
+      add(target, timedEl('span', '', 'Created ', { at: task.created_at }));
+      add(target, document.createTextNode(' · '));
+      add(target, task.opened_at ? timedEl('span', '', 'Opened ', { at: task.opened_at }) : el('span', '', task.lifecycle === 'planned' ? 'Not opened yet (planned)' : 'Opened time not recorded'));
+    });
+  }
   // Patches each section of the task page from `state.detail`. Sections own their signatures, so the
   // title, brief and buttons stay put while, say, only the checkpoint trail grows.
   function renderTaskDetail(quiet = false) {
     const data = state.detail || {}; const task = data.task || data; const project = state.projects.find((item) => text(item.id) === state.projectId);
     const title = task.title || 'Untitled task'; const taskId = text(task.id || state.selectedTaskId);
     setText($('detail-project-label'), project?.name || 'Project'); setText($('task-detail-heading'), title); setText($('detail-task-id-value'), taskId); setText($('detail-task-revision'), task.revision || 1); setProp($('compare-revisions-button'), 'disabled', !(Number(task.revision) > 1)); setAttr($('compare-revisions-button'), 'title', Number(task.revision) > 1 ? 'Compare two saved revisions of this task' : 'This task has only one revision'); setText($('detail-description'), task.description || 'No description provided.');
+    renderTaskTimes(task);
     const status = taskStatus(task); paintStatusBadge($('detail-status'), task); setText($('detail-kind'), displayStatus(task.activity_kind || task.kind || 'general'));
     const humanDelivered = $('detail-human-delivered'); show(humanDelivered, Boolean(task.human_delivered)); setAttr(humanDelivered, 'title', 'A human delivers this task. Supervisors never receive or claim it.');
     const readOnly = Boolean(task.archived_at || ['done', 'completed'].includes(status));
@@ -1949,7 +1958,7 @@
     if (state.archivedLoaded) renderArchivedTasks();
     if (state.detail) {
       const data = state.detail, task = data.task || data;
-      paintStatusBadge($('detail-status'), task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
+      renderTaskTimes(task); paintStatusBadge($('detail-status'), task); renderLease(data, task); renderLifecycle(data); renderCheckpoints(data); renderJobEvidence(data); renderWorkflow(data);
     }
     if (state.agentSessionsPage && state.agentSessionsLoaded && state.agentSessionsProjectId === state.projectId) renderAgentSessions(state.agentSessionsPage);
     if (state.reportsLoaded && state.reportsProjectId === state.projectId) renderReports({ items: state.reports, next_before: state.reportsCursor }, false);

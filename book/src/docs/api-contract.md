@@ -254,6 +254,25 @@ this edit path instead of canceling it and creating a replacement.
 when the task has no checkpoint. It is read-only, does not change the task revision, and
 lets a client sort a list without requesting each task's detail.
 
+**Opened time.** Every task read (the REST task views and lists, `agent-coordinator
+tasks show --json` and the MCP task tools, which return the same task object)
+carries `opened_at`: the RFC 3339 time the task became open (claimable), or `null`
+while it is planned. A task created open has `opened_at` equal to `created_at`; a
+task created `planned` takes the time of the edit that admits it (`planned: false`,
+including a human's release of a task the weekly budget held). It is set once, in
+the same transaction as the admission, and never changed by later edits that leave
+the task open, by an unblock, by a review that returns the task for revision, by
+dependency completion or by a claim; editing an open task back to `planned` clears
+it, and the next admission records its own time. `opened_at` differs from
+`ready_since`, which orders the queue and is reset on unblock, when dependencies
+finish and when a review returns the task: `ready_since` is still the creation time
+of an admitted task and the queue order is unchanged. Migration `0048` added the
+column and backfilled it: `null` for planned tasks, otherwise the creation time of
+the task's earliest saved revision whose lifecycle is `open` (the admission time for
+a task created planned), else `created_at` when no revision shows it open (for
+example a task that went from planned straight to done or canceled, or a service
+activity task). The dashboard task detail shows it beside the created time.
+
 **Human-delivered tasks.** Every task view carries `human_delivered` (default `false`).
 `POST /api/v1/projects/{project_id}/tasks` accepts `human_delivered: true` to create a
 task a human delivers, and `POST …/tasks/{task_id}/human-delivery` with
@@ -330,8 +349,10 @@ ready work (an open, unarchived, unblocked task with its dependencies done, no
 live attempt, and not waiting on review or integration) and no task progress,
 meaning a claim, checkpoint, submission, review decision or integration
 authorization or result, for more than N hours. The idle clock starts at the
-later of the last progress and the time the oldest ready task became ready, so
-an empty queue, or one that just filled, does not count. One continuing stall is
+later of the last progress and the time the oldest ready task became ready (never
+before that task's `opened_at`, so a planned task admitted long after creation is not
+counted as stalled for the time it was planned), so an empty queue, or one that just
+filled, does not count. One continuing stall is
 one item, with `ready_tasks`, `idle_hours`, `threshold_hours`,
 `last_progress_at` and `stalled_since`; it clears on the next progress. N
 defaults to 6 hours and is set with `--stall-hours` or `COORDINATOR_STALL_HOURS`
