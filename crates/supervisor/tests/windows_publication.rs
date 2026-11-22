@@ -1090,6 +1090,8 @@ mod roles {
     use agentc_supervisor::host_runtime::windows::runner::Runner;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
+    use std::time::Instant;
+    use support::LAUNCH_PATIENCE;
 
     /// Names the probe fixture's executable for the development check.
     pub const FIXTURE: &str = "AGENTC_TEST_PROBE_FIXTURE";
@@ -1244,13 +1246,37 @@ mod roles {
         let start = json!({"op": "start", "launch": launch, "argv": argv, "directory": work,
             "environment": layout.environment(&work), "output": log});
         ok(link, start);
-        let seen = ok(
-            link,
-            json!({"op": "observe", "launch": launch, "wait_ms": 120_000}),
-        );
+        let seen = ended(link, &launch);
         let said = std::fs::read_to_string(&log).unwrap_or_default();
         assert_eq!(seen["state"], "exited", "{seen}: {said}");
         (seen["code"].as_u64().unwrap(), said)
+    }
+
+    /// Observes `launch` until it is seen to end or [`LAUNCH_PATIENCE`]
+    /// passes, and returns the last answer. A runner that is a service
+    /// shortens each wait, so the driver asks again.
+    fn ended(link: &mut dyn Link, launch: &str) -> Value {
+        let started = Instant::now();
+        loop {
+            let observe = json!({"op": "observe", "launch": launch, "wait_ms": 5_000});
+            let seen = ok(link, observe);
+            if seen["state"] != "running" || started.elapsed() >= LAUNCH_PATIENCE {
+                return seen;
+            }
+        }
+    }
+
+    /// Removes every launch of these probes that the runner still has
+    /// journaled: what a round that stopped early left behind.
+    fn sweep(link: &mut dyn Link) {
+        let journal = ok(link, json!({"op": "recover"}));
+        let launches = journal["launches"].as_array().cloned().unwrap_or_default();
+        let ids = launches.iter().filter_map(|entry| entry["launch"].as_str());
+        for launch in ids.filter(|id| id.starts_with("f7-")) {
+            let cleanup = json!({"op": "cleanup", "launch": launch, "remove_directories": true});
+            let swept = link.ask(&cleanup).unwrap();
+            eprintln!("swept {launch}: {swept}");
+        }
     }
 
     /// Runs the three probes and removes the two launches.
@@ -1427,6 +1453,7 @@ mod roles {
             tag: format!("{}", std::process::id()),
         };
         let mut link = PipeLink::new(&given("AGENTC_F7_RUNNER_PIPE"), &runner);
+        sweep(&mut link);
         prepare(&mut link, &layout, &given("AGENTC_F7_TASK"));
         probe(&mut link, &layout);
         let said = ROLES.map(|role| {
