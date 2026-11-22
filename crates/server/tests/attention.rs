@@ -533,7 +533,7 @@ async fn the_opened_at_migration_backfills_from_revisions_else_created_at() {
         .execute(&mut *connection)
         .await
         .unwrap();
-    sqlx::raw_sql(include_str!("../migrations/0048_task_opened_at.sql"))
+    sqlx::raw_sql(include_str!("../migrations/0049_task_opened_at.sql"))
         .execute(&mut *connection)
         .await
         .unwrap();

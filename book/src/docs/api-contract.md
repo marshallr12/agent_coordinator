@@ -266,7 +266,7 @@ dependency completion or by a claim; editing an open task back to `planned` clea
 it, and the next admission records its own time. `opened_at` differs from
 `ready_since`, which orders the queue and is reset on unblock, when dependencies
 finish and when a review returns the task: `ready_since` is still the creation time
-of an admitted task and the queue order is unchanged. Migration `0048` added the
+of an admitted task and the queue order is unchanged. Migration `0049` added the
 column and backfilled it: `null` for planned tasks, otherwise the creation time of
 the task's earliest saved revision whose lifecycle is `open` (the admission time for
 a task created planned), else `created_at` when no revision shows it open (for
