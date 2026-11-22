@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production and both hosts on `c05a052`; one of three window-3 enablers landed, rollout scripts prepared (2026-11-22 02:29 UTC)
+## Current resume point — production and both hosts on `c05a052`; two of three window-3 enablers landed, the third in review, rollout scripts prepared (2026-11-22 05:20 UTC)
 
 The 2026-11-16 to 2026-11-20 updates (P6 second NO-GO, the rollouts of `4705310`, `818a7b1`,
 `f590db8` and `c05a052`, the roster change, the canary, 502 and transport-reset investigations)
@@ -103,6 +103,20 @@ on 2026-11-21. This section keeps only what a new session needs.
       attempt** (changes requested in review 00:36 UTC; re-claimed 02:02 UTC). Its checkpoints
       also name a migration `0048`, written on a base before `923cef4`: it must be renumbered
       before it lands. **`1ee4e53c` open, waiting on `ff2502e8`**, no attempt yet.
+    - **Enabler state read 2026-11-22 05:20 UTC** (coordinator CLI only; saved in
+      `~/.local/state/agent-coordinator-evidence/resume-20261122b/`; supersedes the 02:25 UTC
+      read for `ff2502e8` and `1ee4e53c`): **`ff2502e8` Done** on its third attempt (ended
+      03:42 UTC), on main as `10df821`, `2dcfde7` and `d8c12d4`; the last renumbers its
+      migration to `0049_task_opened_at.sql`, so main `d8c12d4` holds `0048` and `0049` once
+      each (file listing only). **`1ee4e53c` open, in review:** first attempt 04:36–05:10 UTC,
+      submitted; one review pending, held by `oracle-1-verdict` (lease to 06:10 UTC); not on
+      main. Its checkpoints name migration `0050` (`not_before`, `not_before_by`), the next
+      free number. Because it was not Done the session stopped as instructed: main's required
+      checks were not read, and no rollout step, release run, host or production access took
+      place. **Next:** when `1ee4e53c` is Done and on main, confirm main is green with no
+      duplicate migration number, then put the rollout to the owner (expected schema 47 → 50;
+      the dry render below predates `0049`), asking before any production read, release
+      dispatch or rollout step. The owner imports the 20 value tasks themselves.
     - **Rollout scripts prepared 2026-11-22 (owner's pick; local files only):**
       `~/.local/state/agent-coordinator-evidence/rollout-main-prep/` (`README.md` first).
       `render.py --commit … --task … --attempt … --session …` writes the script set for the
