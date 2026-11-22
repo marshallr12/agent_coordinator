@@ -25,6 +25,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Row, SqliteConnection, sqlite::SqliteRow};
+use std::collections::HashSet;
 
 type Reply = Result<Json<Value>, AppError>;
 
@@ -151,8 +152,11 @@ async fn require_references(
 }
 
 /// Serializes one stored report. `allowed` is true only for a resolved
-/// report whose human decision was `allow`.
-fn report_value(row: &SqliteRow) -> Result<Value, AppError> {
+/// report whose human decision was `allow`. `requires_human` is the stored
+/// flag, except for an open report in `automatic` (see
+/// [`crate::integrator_fix::automatic_report_ids`]), whose own fix task an agent
+/// can still finish. `resolution_kind` is `automatic`, `human` or null.
+fn report_value(row: &SqliteRow, automatic: &HashSet<String>) -> Result<Value, AppError> {
     let decision: Option<String> = row.get("decision");
     let resolved_at: Option<i64> = row.get("resolved_at");
     Ok(json!({
@@ -164,11 +168,13 @@ fn report_value(row: &SqliteRow) -> Result<Value, AppError> {
         "result_id": row.get::<Option<String>, _>("result_id"),
         "dedupe_key": row.get::<String, _>("dedupe_key"),
         "details": serde_json::from_str::<Value>(row.get("details_json"))?,
-        "requires_human": row.get::<i64, _>("requires_human") == 1,
+        "requires_human": row.get::<i64, _>("requires_human") == 1
+            && !automatic.contains(row.get::<&str, _>("id")),
         "created_at": coordinator_core::timestamp(row.get("created_at")),
         "resolved_at": resolved_at.map(coordinator_core::timestamp),
         "resolved_by": row.get::<Option<String>, _>("resolved_by"),
         "resolution_note": row.get::<Option<String>, _>("resolution_note"),
+        "resolution_kind": row.get::<Option<String>, _>("resolution_kind"),
         "decision": decision,
         "allowed": resolved_at.is_some() && decision.as_deref() == Some("allow"),
     }))
@@ -227,12 +233,15 @@ async fn record_report(
     require_integrator_project(&mut m.tx, &p).await?;
     require_references(&mut m.tx, &p, &input).await?;
     let (row, created) = insert_report(&mut m, &p, &input).await?;
-    let (mut value, record) = (report_value(&row)?, row.get::<String, _>("id"));
+    let automatic = crate::integrator_fix::automatic_report_ids(&mut m.tx, &p, m.now).await?;
+    let (mut value, record) = (report_value(&row, &automatic)?, row.get::<String, _>("id"));
     if !created {
         return Ok(response(value));
     }
     if let Some(task) = crate::integrator_fix::open_for_report(&mut m, &p, &row).await? {
+        // The new task is open and unblocked, so the service has this report.
         value["fix_task_id"] = json!(task);
+        value["requires_human"] = json!(false);
     }
     Ok(response(
         m.finish(value, Some(&p), "integrator.report_recorded", &record)
@@ -246,7 +255,8 @@ async fn record_report(
 macro_rules! close_stale_sql {
     ($reason:literal) => {
         concat!(
-            "UPDATE integrator_reports SET resolved_at=?,resolved_by=?,resolution_note=? \
+            "UPDATE integrator_reports SET resolved_at=?,resolved_by=?,resolution_note=?,\
+             resolution_kind='automatic' \
              WHERE project_id=? AND kind='flaky' AND resolved_at IS NULL \
              AND result_id IS NOT NULL AND json_extract(details_json,'$.verdict')='rerun_refused' \
              AND ",
@@ -395,8 +405,8 @@ async fn report_page(
     c: &mut SqliteConnection,
     p: &str,
     filter: &ReportFilter<'_>,
-    before: i64,
-    limit: i64,
+    (before, limit): (i64, i64),
+    automatic: &HashSet<String>,
 ) -> Result<Vec<Value>, AppError> {
     let rows = sqlx::query(
         "SELECT * FROM integrator_reports WHERE project_id=? \
@@ -423,7 +433,9 @@ async fn report_page(
     .bind(limit)
     .fetch_all(&mut *c)
     .await?;
-    rows.iter().map(report_value).collect()
+    rows.iter()
+        .map(|row| report_value(row, automatic))
+        .collect()
 }
 
 /// `GET …/integrator/reports?open=true&task_id=<id>&kind=<kind>&check_name=<name>
@@ -442,7 +454,8 @@ async fn list_reports(
     let mut c = s.pool.acquire().await?;
     require_project(&mut c, &p).await?;
     let before = cursor(&mut c, &p, query.before.as_deref()).await?;
-    let items = report_page(&mut c, &p, &filter, before, limit).await?;
+    let automatic = crate::integrator_fix::automatic_report_ids(&mut c, &p, s.now()).await?;
+    let items = report_page(&mut c, &p, &filter, (before, limit), &automatic).await?;
     let full = i64::try_from(items.len()).unwrap_or(i64::MAX) == limit;
     let next = full
         .then(|| items.last().map(|r| r["id"].clone()))
@@ -467,7 +480,8 @@ async fn show_report(
         .fetch_optional(&mut *c)
         .await?
         .ok_or_else(AppError::not_found)?;
-    Ok(response(report_value(&row)?))
+    let automatic = crate::integrator_fix::automatic_report_ids(&mut c, &p, s.now()).await?;
+    Ok(response(report_value(&row, &automatic)?))
 }
 
 /// Open human-required reports as human-queue items for `next`, oldest
@@ -476,8 +490,9 @@ async fn show_report(
 pub(crate) async fn human_queue_items(
     c: &mut SqliteConnection,
     p: &str,
+    now: i64,
 ) -> Result<Vec<Value>, AppError> {
-    open_human_items(c, p, false).await
+    open_human_items(c, p, false, now).await
 }
 
 /// The same items without those of canary tasks, for the digest's human
@@ -485,30 +500,36 @@ pub(crate) async fn human_queue_items(
 pub(crate) async fn human_queue_items_without_canary(
     c: &mut SqliteConnection,
     p: &str,
+    now: i64,
 ) -> Result<Vec<Value>, AppError> {
-    open_human_items(c, p, true).await
+    open_human_items(c, p, true, now).await
 }
 
 /// The open human-required reports of `p` as items, leaving out those about
-/// canary tasks when `without_canary`.
+/// canary tasks when `without_canary` and those whose own fix task an agent
+/// can still finish at `now`.
 async fn open_human_items(
     c: &mut SqliteConnection,
     p: &str,
     without_canary: bool,
+    now: i64,
 ) -> Result<Vec<Value>, AppError> {
+    let automatic = crate::integrator_fix::automatic_report_ids(c, p, now).await?;
     let rows = sqlx::query(
         "SELECT * FROM integrator_reports WHERE project_id=? AND resolved_at IS NULL \
          AND requires_human=1 AND (?=0 OR task_id IS NULL OR task_id NOT IN \
-         (SELECT id FROM tasks WHERE budget_exempt IS NOT NULL)) ORDER BY rowid LIMIT ?",
+         (SELECT id FROM tasks WHERE budget_exempt IS NOT NULL)) \
+         AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY rowid LIMIT ?",
     )
     .bind(p)
     .bind(without_canary)
+    .bind(json!(automatic).to_string())
     .bind(HUMAN_QUEUE_LIMIT)
     .fetch_all(&mut *c)
     .await?;
     let reports = rows
         .iter()
-        .map(report_value)
+        .map(|row| report_value(row, &automatic))
         .collect::<Result<Vec<_>, _>>()?;
     let mut items = Vec::with_capacity(reports.len());
     for report in reports {
@@ -548,13 +569,16 @@ fn human_item(p: &str, report: Value, task_title: Option<String>) -> Value {
 /// null. A report counts when it names the submission (or a result of it), or
 /// only the task; a `fix_target` report that blocks its subjects counts for
 /// every subject of the same repository and target branch, since the target
-/// is what needs fixing. The newest such report wins. It disappears once a
-/// human resolves it, and the subject leaves integration when it integrates.
+/// is what needs fixing. The newest such report wins, and it blocks while the
+/// service handles it itself (its own fix task is workable) as well as when a
+/// human must act: `requires_human` says which. It disappears once it is
+/// resolved, and the subject leaves integration when it integrates.
 pub(crate) async fn integration_blocked(
     c: &mut SqliteConnection,
     p: &str,
     task_id: &str,
     submission: &Value,
+    now: i64,
 ) -> Result<Value, AppError> {
     let row = sqlx::query(
         "SELECT * FROM integrator_reports WHERE project_id=? AND resolved_at IS NULL \
@@ -576,7 +600,8 @@ pub(crate) async fn integration_blocked(
     let Some(row) = row else {
         return Ok(Value::Null);
     };
-    let report = report_value(&row)?;
+    let automatic = crate::integrator_fix::automatic_report_ids(c, p, now).await?;
+    let report = report_value(&row, &automatic)?;
     let details = &report["details"];
     let (id, kind) = (report["id"].clone(), report["kind"].clone());
     let target = |key: &str| details[key].as_str().unwrap_or_default();
@@ -600,6 +625,7 @@ pub(crate) async fn integration_blocked(
         "repository_url": details["repository_url"],
         "target_branch": details["target_branch"],
         "created_at": report["created_at"],
+        "requires_human": report["requires_human"],
         "fix_task": fix_task,
         "action": blocked_action(&kind, &id, details, &fix_task),
     }))
@@ -614,7 +640,10 @@ fn blocked_action(kind: &Value, id: &Value, details: &Value, fix_task: &Value) -
     let id = id.as_str().unwrap_or_default();
     if kind == "fix_target" && details["verdict"] == "target_failing" {
         return format!(
-            "Integration is blocked: check {} fails on target {} of {}. The fix task {} repairs              the target; integrator report {id} resolves itself once the check passes on the              target tip. A subject whose declared check inputs are unchanged from the target              still lands.",
+            "Integration is blocked: check {} fails on target {} of {}. The fix task {} repairs \
+             the target; integrator report {id} resolves itself once the check passes on the \
+             target tip. A subject whose declared check inputs are unchanged from the target \
+             still lands.",
             text("check_name", "(unnamed)"),
             text("x", "(unknown revision)"),
             text("target_branch", "the target branch"),
@@ -693,7 +722,7 @@ async fn mark_resolved(
     id: &str,
     input: &ResolveInput,
 ) -> Result<SqliteRow, AppError> {
-    sqlx::query("UPDATE integrator_reports SET resolved_at=?,resolved_by=?,resolution_note=?,decision=? WHERE id=?")
+    sqlx::query("UPDATE integrator_reports SET resolved_at=?,resolved_by=?,resolution_note=?,decision=?,resolution_kind='human' WHERE id=?")
         .bind(m.now).bind(&m.actor.id).bind(&input.note).bind(&input.decision).bind(id)
         .execute(&mut *m.tx).await?;
     Ok(sqlx::query("SELECT * FROM integrator_reports WHERE id=?")
@@ -732,7 +761,7 @@ async fn resolve_report(
     require_human(&m.actor)?;
     let row = open_report(&mut m.tx, &p, &id).await?;
     require_decision_fits(row.get("kind"), &input)?;
-    let value = report_value(&mark_resolved(&mut m, &id, &input).await?)?;
+    let value = report_value(&mark_resolved(&mut m, &id, &input).await?, &HashSet::new())?;
     Ok(response(
         m.finish(value, Some(&p), "integrator.report_resolved", &id)
             .await?,

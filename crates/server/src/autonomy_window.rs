@@ -444,21 +444,26 @@ async fn parks(
 }
 
 /// Human-required integrator reports opened in the window: (counted, canary).
+/// An open report whose own fix task an agent can still finish at `now` is not
+/// human-required; a resolved report keeps the flag it was resolved with.
 async fn human_reports(
     c: &mut SqliteConnection,
     p: &str,
-    start: i64,
-    end: i64,
+    (start, end): (i64, i64),
+    now: i64,
 ) -> Result<(i64, i64), AppError> {
+    let automatic = crate::integrator_fix::automatic_report_ids(c, p, now).await?;
     let row = sqlx::query(
         "SELECT COALESCE(sum(r.task_id IS NULL OR t.budget_exempt IS NULL),0) AS counted,\
          COALESCE(sum(t.budget_exempt IS NOT NULL),0) AS canary \
          FROM integrator_reports r LEFT JOIN tasks t ON t.id=r.task_id \
-         WHERE r.project_id=?1 AND r.requires_human=1 AND r.created_at BETWEEN ?2 AND ?3",
+         WHERE r.project_id=?1 AND r.requires_human=1 AND r.created_at BETWEEN ?2 AND ?3 \
+         AND r.id NOT IN (SELECT value FROM json_each(?4))",
     )
     .bind(p)
     .bind(start)
     .bind(end)
+    .bind(serde_json::json!(automatic).to_string())
     .fetch_one(&mut *c)
     .await?;
     Ok((row.get("counted"), row.get("canary")))
@@ -512,7 +517,7 @@ pub(crate) async fn read_window(
     let unclassified = class_count("unclassified");
     let events_total: i64 = by_class.values().sum();
 
-    let (reports, canary_reports) = human_reports(&mut c, &p, start, end).await?;
+    let (reports, canary_reports) = human_reports(&mut c, &p, (start, end), now).await?;
     let parked = parks(&mut c, &p, start, end).await?;
     let (canary_parks, counted_parks): (Vec<_>, Vec<_>) =
         parked.into_iter().partition(|(_, canary)| *canary);

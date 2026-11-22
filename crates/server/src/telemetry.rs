@@ -881,10 +881,17 @@ async fn read_autonomy(
         since,
     )
     .await?;
-    let reports = per_day(&mut c, "SELECT strftime('%Y-%m-%d', r.created_at/1000, 'unixepoch') AS day, count(*) AS n \
+    let automatic = crate::integrator_fix::automatic_report_ids(&mut c, &p, now).await?;
+    let reports = sqlx::query("SELECT strftime('%Y-%m-%d', r.created_at/1000, 'unixepoch') AS day, count(*) AS n \
          FROM integrator_reports r WHERE r.project_id=? AND r.requires_human=1 AND r.created_at>=? \
          AND (r.task_id IS NULL OR r.task_id NOT IN (SELECT id FROM tasks WHERE budget_exempt IS NOT NULL)) \
-         GROUP BY day ORDER BY day", &p, since).await?;
+         AND r.id NOT IN (SELECT value FROM json_each(?)) \
+         GROUP BY day ORDER BY day")
+        .bind(&p).bind(since).bind(json!(automatic).to_string()).fetch_all(&mut *c).await?;
+    let reports: Vec<Value> = reports
+        .iter()
+        .map(|r| json!({"day": r.get::<String, _>("day"), "count": r.get::<i64, _>("n")}))
+        .collect();
     let parks = per_day(&mut c, "SELECT strftime('%Y-%m-%d', v.revised_at/1000, 'unixepoch') AS day, count(*) AS n \
          FROM integrator_revises v JOIN tasks t ON t.id=v.task_id \
          WHERE t.project_id=? AND v.park_reason IS NOT NULL AND v.revised_at>=? AND t.budget_exempt IS NULL \

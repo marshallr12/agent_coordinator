@@ -636,7 +636,10 @@ reports and only a human resolves one.
   for `privilege_gate`, `target_rewritten` and `ruleset_missing`, and for any
   report whose `details.blocks_subject` is `true` (the integrator sets it on
   `fix_target` reports and on `flaky` reports that leave a subject blocked:
-  `no_result` and `rerun_refused`), so a subject never waits unseen. A
+  `no_result` and `rerun_refused`), so a subject never waits unseen. The one
+  exception is a `fix_target` report for which the service opened its own fix
+  task (below): its `requires_human` is `false` while an agent can still do that
+  task, and `true` again when it cannot. A
   `reverted_in_history` revise the service refuses with
   `not_reverted_in_history` is a `fix_target` report with `verdict`
   `not_reverted_in_history`, and the integrator skips the subject. The
@@ -720,12 +723,32 @@ reports and only a human resolves one.
   `fix_task_id`. A replayed report, or an unfinished (`planned` or `open`)
   fix task for the same repository, target branch and check, opens no task;
   `target_unverified` and every other kind open none.
+- A `fix_target` report whose own fix task the service opened (the report named
+  by `integrator_fix_tasks.report_id`) reads `requires_human: false` while that
+  task can still be done by an agent, and is then left out of the human queue
+  (`next`'s `human_queue_items`), the digest's human-required items, the
+  dashboard's blocker list and the human-required counts of the autonomy
+  telemetry and the autonomy window. The task can be done by an agent while its
+  lifecycle is `open` or `done` (a landed fix waits for the check to pass on the
+  target), it is not archived, has no `blocked_reason` (the routine one of a submission in
+  the completion workflow does not count), and the revise limit does not park it. When it is `planned`, `canceled` or `superseded`, archived,
+  blocked, or parked, the report reads `requires_human: true` and enters the
+  human queue; when the task becomes workable again the flag follows, because
+  the service derives it from the task whenever the report is read. A task
+  that has pending scoped decisions still counts as workable here. A
+  `fix_target` report for which no task was opened (the report names no
+  repository, branch or check, an unfinished task already covered its target,
+  the verdict is not `target_failing`) keeps the flag it was stored with.
+  Resolving freezes the flag: an automatic resolution stores `false` when the
+  service was handling the report at that moment and keeps `true` otherwise; a
+  human's resolution leaves the stored flag, so a person's action still counts.
 - `POST /api/v1/projects/{project_id}/integrator/reports/{report_id}/target-passed`
   with `{x, run_id, run_attempt, conclusion, started_at}` (integrator only;
   `conclusion` is `success`, `skipped` or `neutral`) resolves an open
   `target_failing` report because its check passed on the target tip `x` in a
   run that started after the report was created (otherwise `pass_not_fresh`),
-  with a resolution note naming the run. Another kind or verdict is
+  with a resolution note naming the run, `resolution_kind` `automatic`, and the
+  `requires_human` it was frozen with. Another kind or verdict is
   `report_not_resolvable`; a resolved report is `report_already_resolved`.
 - `POST /api/v1/projects/{project_id}/integrator/exemptions` with
   `{result_id, identity, check_name, r, x, report_id, inputs:[{path, r_blob,
@@ -746,8 +769,10 @@ reports and only a human resolves one.
   it, the task's workflow view (`workflow` in `tasks show`, the workflow route,
   orientation and the console task page) carries `integration_blocked`, else
   `null`: `{report_id, kind, verdict, target_revision, result_revision,
-  check_name, repository_url, target_branch, created_at, action}`, from the
-  newest such report. A report blocks the subject when it names the current
+  check_name, repository_url, target_branch, created_at, requires_human,
+  fix_task, action}`, from the newest such report. A report the service handles
+  with its own fix task still blocks the subject; its `requires_human` is then
+  `false`. A report blocks the subject when it names the current
   submission, one of its results, or only the task; a `fix_target` report with
   `blocks_subject` also blocks every subject of the same repository and target
   branch, because the target is what needs fixing (`target_revision` is the
@@ -763,7 +788,14 @@ reports and only a human resolves one.
   and the digest lists those of its window as `exempted_landings`.
 - `GET /api/v1/projects/{project_id}/integrator/reports` lists a project's
   reports, newest first, for any authenticated reader. `open=true` keeps only
-  unresolved ones; `limit` is 1 to 1000 (default 200); `before=<report_id>`
+  unresolved ones (every report carries `resolution_kind`: `automatic` when the
+  service resolved it from its own records, `human` when a person did, null
+  while it is open; a report resolved before the field existed keeps its stored
+  `requires_human` and has `human` when its kind is one only a person resolves,
+  `automatic` when a `flaky` or `fix_target` report was resolved by an agent
+  principal, and null when a `flaky` or `fix_target` report was resolved by a
+  human principal, because a person's resolution and an automatic closure made
+  inside a person's workflow mutation both record that person); `limit` is 1 to 1000 (default 200); `before=<report_id>`
   continues after that report, and each page's `next_before` is the cursor of
   the following page (null on the last). `task_id=<task_id>` keeps only
   reports about that task. `kind=<kind>` keeps only reports of that kind and
@@ -781,7 +813,7 @@ reports and only a human resolves one.
   read these two routes; none of them resolves a report.
 - `POST /api/v1/projects/{project_id}/integrator/reports/{report_id}/resolve`
   with `{note, decision?}` is human-only (other callers get the
-  `integrator_report_resolution` gate). A `privilege_gate` report needs
+  `integrator_report_resolution` gate) and records `resolution_kind` `human`. A `privilege_gate` report needs
   `decision` `allow` (its result may be pushed; the report then shows
   `allowed: true`) or `deny`; other kinds take no decision. A resolved report
   is `report_already_resolved`.
@@ -990,7 +1022,8 @@ only what hosts report, per project, attributed to the reporting principal and
   done); `human_required` (`count`, `by_day`, `per_finished_task`, null when
   nothing finished, and its two sources, `integrator_reports`, human-required
   reports opened in the window, and `parked_subjects`, subjects an integrator
-  revise parked); `parked` (`count` and `items`: the open tasks the revise
+  revise parked; an open `fix_target` report whose own fix task an agent can
+  still do is not counted); `parked` (`count` and `items`: the open tasks the revise
   limit holds from agents now, with `agent_revises_24h` and
   `counted_revises_24h`); `reviews` (`submissions_reviewed`,
   `approved_first_pass`, a task's first submission with no change requested;

@@ -227,7 +227,11 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
 - A target that fails a required check no longer needs a human to clear every
   landing: the service opens one always-admitted fix task when a `target_failing`
   report is stored, resolves that report itself once the check passes on the
-  tip in a later run, and a required-check entry may declare its `inputs`, so a
+  tip in a later run (the report is not requires-human, and so not a human
+  intervention, while that task can still be done by an agent; it becomes
+  requires-human when the task is canceled, archived, blocked or parked, and
+  every report records in `resolution_kind` whether it was resolved
+  automatically or by a person), and a required-check entry may declare its `inputs`, so a
   candidate whose declared inputs equal the target's lands under a recorded,
   independently verified exemption (see the
   [operator guide](operator-guide.md#a-failing-target-must-not-stall-every-landing)).

@@ -1138,7 +1138,7 @@ pub async fn workflow_snapshot(
     };
     let integration_blocked = match phase.as_str() {
         "integration" => {
-            crate::integrator_reports::integration_blocked(c, project, task_id, &sub).await?
+            crate::integrator_reports::integration_blocked(c, project, task_id, &sub, now).await?
         }
         _ => Value::Null,
     };

@@ -125,14 +125,20 @@ fn row(report: &Value) -> String {
     .join("\t")
 }
 
-/// `open`, or when and how a human resolved the report.
+/// `open`, or when the report was resolved with its decision and its
+/// resolution kind (`automatic` or `human`) when it has them.
 fn resolved(report: &Value) -> String {
-    match report.get("resolved_at").and_then(Value::as_str) {
-        None => "open".into(),
-        Some(at) => match report.get("decision").and_then(Value::as_str) {
-            Some(decision) => format!("{at} ({decision})"),
-            None => at.to_owned(),
-        },
+    let Some(at) = report.get("resolved_at").and_then(Value::as_str) else {
+        return "open".into();
+    };
+    let how: Vec<&str> = ["decision", "resolution_kind"]
+        .iter()
+        .filter_map(|name| report.get(name).and_then(Value::as_str))
+        .collect();
+    if how.is_empty() {
+        at.to_owned()
+    } else {
+        format!("{at} ({})", how.join(", "))
     }
 }
 
@@ -201,6 +207,18 @@ mod tests {
             "r1\tprivilege_gate\t-\ttrue\t2026-10-12T10:00:00.000Z\t2026-10-12T11:00:00.000Z (allow)\t-"
         );
         assert_eq!(lines[3], "Next before: r1");
+    }
+
+    #[test]
+    fn a_resolved_report_shows_how_it_was_resolved() {
+        let report =
+            json!({"resolved_at":"2026-10-12T11:00:00.000Z","resolution_kind":"automatic"});
+        assert_eq!(resolved(&report), "2026-10-12T11:00:00.000Z (automatic)");
+        let report = json!({"resolved_at":"2026-10-12T11:00:00.000Z","decision":"deny",
+            "resolution_kind":"human"});
+        assert_eq!(resolved(&report), "2026-10-12T11:00:00.000Z (deny, human)");
+        let historical = json!({"resolved_at":"2026-10-12T11:00:00.000Z","resolution_kind":null});
+        assert_eq!(resolved(&historical), "2026-10-12T11:00:00.000Z");
     }
 
     #[test]
