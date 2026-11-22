@@ -1076,6 +1076,45 @@ async fn opened_at_is_the_admission_time_and_later_changes_leave_it_alone() {
     assert_eq!(after_review.0, Some(admitted_ms));
     assert_eq!(after_review.1, f.clock.0.load(Ordering::SeqCst));
 
+    // Blocking the task and unblocking it resets ready_since but not opened_at.
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let (_, current) = f
+        .call(&f.admin, "GET", &task_path(&admitted), Value::Null)
+        .await;
+    let current = current["data"].clone();
+    let owner = f.claim(&f.a, &p, &current, 1).await;
+    let (status, released) = f
+        .call(&f.a, "POST", &format!("/api/v1/projects/{p}/attempts/{}/release", owner["id"].as_str().unwrap()),
+            json!({"generation":owner["generation"],"summary":"Needs a resource that does not exist yet.","blocked":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{released}");
+    let (_, blocked) = f
+        .call(&f.admin, "GET", &task_path(&admitted), Value::Null)
+        .await;
+    assert!(blocked["data"]["blocked_reason"].is_string(), "{blocked}");
+    assert_eq!(blocked["data"]["opened_at"], opened_at, "{blocked}");
+    f.clock.0.fetch_add(HOUR, Ordering::SeqCst);
+    let (status, unblocked) = f
+        .call(
+            &f.admin,
+            "POST",
+            &format!("{}/unblock", task_path(&admitted)),
+            json!({"expected_revision":blocked["data"]["revision"],"reason":"The resource was created."}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{unblocked}");
+    assert!(
+        unblocked["data"]["task"]["blocked_reason"].is_null(),
+        "{unblocked}"
+    );
+    assert_eq!(
+        unblocked["data"]["task"]["opened_at"], opened_at,
+        "{unblocked}"
+    );
+    let after_unblock = stored(planned_id.clone()).await;
+    assert_eq!(after_unblock.0, Some(admitted_ms));
+    assert_eq!(after_unblock.1, f.clock.0.load(Ordering::SeqCst));
+
     // Returning the task to planned clears it; the next admission records its own time.
     let (_, current) = f
         .call(&f.admin, "GET", &task_path(&admitted), Value::Null)

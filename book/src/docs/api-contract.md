@@ -271,7 +271,12 @@ column and backfilled it: `null` for planned tasks, otherwise the creation time 
 the task's earliest saved revision whose lifecycle is `open` (the admission time for
 a task created planned), else `created_at` when no revision shows it open (for
 example a task that went from planned straight to done or canceled, or a service
-activity task). The dashboard task detail shows it beside the created time.
+activity task). The backfill is therefore approximate for those historical rows: a
+task that was planned and then closed without ever being opened reads `created_at`.
+Going forward such a task keeps `opened_at` `null` (it was never open); this includes a
+planned task that an import closes. The dashboard task detail shows it beside the
+created time, or "Opened time not recorded" when it is `null` on a task that is no
+longer planned.
 
 **Human-delivered tasks.** Every task view carries `human_delivered` (default `false`).
 `POST /api/v1/projects/{project_id}/tasks` accepts `human_delivered: true` to create a
