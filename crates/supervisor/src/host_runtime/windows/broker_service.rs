@@ -130,12 +130,15 @@ fn clear_git_environment() {
 
 /// The publication handler: it asks the supervisor named in `settings`
 /// and keeps each launch's private repository below the work root, which
-/// is secured as the state directory is.
+/// is secured as the state directory is and then emptied: no launch is
+/// open yet, so whatever is there was left by a broker that crashed or
+/// was killed.
 pub fn publication(settings: &PublicationSettings) -> Result<Arc<dyn Handler>> {
     let route = AuthorityRoute::new(&settings.authority_pipe, &settings.supervisor_sid)?;
     let work_root = settings.work_root();
     secure(&work_root)?;
     let publication = Publication::new(&settings.remote, work_root, Arc::new(route));
+    publication.sweep();
     if !settings.has_app() {
         return Ok(Arc::new(publication));
     }

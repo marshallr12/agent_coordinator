@@ -273,3 +273,85 @@ fn a_well_formed_preamble_costs_one_mint_revoked_whatever_the_bundle() {
     assert!(matches!(reply, PushReply::Refused(_)), "{reply:?}");
     assert_eq!((minted, revoked), (1, 1));
 }
+
+/// A broker that keeps its launches' repositories below `root`.
+fn rooted(root: &std::path::Path) -> Publication {
+    let (publication, _) = broker(Verdict::Current);
+    Publication {
+        work_root: root.to_path_buf(),
+        ..publication
+    }
+}
+
+/// Runs Git in `directory` with `input` on its standard input.
+fn git(directory: &std::path::Path, arguments: &[&str], input: &[u8]) {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("git");
+    let child = child.current_dir(directory).args(arguments);
+    let child = child.stdin(Stdio::piped()).stdout(Stdio::null());
+    let mut child = child.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    assert!(child.wait().unwrap().success(), "git {arguments:?}");
+}
+
+/// A bare repository named `launch` below `root` holding one object, as a
+/// push leaves it: Git makes its object files read-only.
+fn repository(root: &std::path::Path, launch: &str) -> PathBuf {
+    let path = root.join(launch);
+    std::fs::create_dir_all(&path).unwrap();
+    git(&path, &["init", "--bare", "--quiet", "."], b"");
+    git(&path, &["hash-object", "-w", "--stdin"], b"an object");
+    path
+}
+
+#[test]
+fn a_closed_launch_s_repository_is_removed_and_another_launch_s_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let publication = rooted(dir.path());
+    let (closed, open) = (repository(dir.path(), "l"), repository(dir.path(), "m"));
+    Handler::closed(&publication, "l");
+    assert!(!closed.exists(), "the closed launch's repository stayed");
+    assert!(open.join("HEAD").exists(), "another launch's went too");
+    Handler::closed(&publication, "never-pushed");
+}
+
+#[test]
+fn a_repository_whose_push_is_under_way_is_kept_until_a_later_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    let publication = rooted(dir.path());
+    let (pushing, idle) = (repository(dir.path(), "l"), repository(dir.path(), "m"));
+    let turn = Turn::take(&publication.busy, "l").expect("a free launch");
+    Handler::closed(&publication, "l");
+    publication.sweep();
+    assert!(pushing.join("HEAD").exists(), "removed under a push");
+    assert!(!idle.exists(), "the sweep left an idle launch's repository");
+    drop(turn);
+    Handler::stopped(&publication);
+    assert!(!pushing.exists(), "the stop left a repository");
+    assert!(
+        Turn::take(&publication.busy, "l").is_some(),
+        "a turn was kept"
+    );
+}
+
+#[test]
+fn a_sweep_empties_the_work_root_without_following_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, outside) = (dir.path().join("work"), dir.path().join("outside"));
+    rooted(&root).sweep();
+    assert!(!root.exists(), "a sweep made the work root");
+    repository(&root, "crashed");
+    std::fs::write(root.join("stray.bundle"), b"x").unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("kept"), b"x").unwrap();
+    let junction = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .args([root.join("link"), outside.clone()])
+        .output()
+        .unwrap();
+    assert!(junction.status.success(), "{junction:?}");
+    rooted(&root).sweep();
+    let left: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().collect();
+    assert!(left.is_empty(), "the sweep left {left:?}");
+    assert!(outside.join("kept").exists(), "the sweep followed a link");
+}

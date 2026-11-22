@@ -448,6 +448,13 @@ fn publication() -> String {
         leaking(&mut launcher, &services, (leaker, &tools), &repository),
     ];
     check_refs(&repository, own);
+    let work = trees.at("broker");
+    assert!(!work.join(&own.id).exists(), "a closed launch's repository");
+    let open = work.join(&leaker.id).join("HEAD");
+    assert!(open.exists(), "an open launch's repository went");
+    drop(services);
+    let left: Vec<_> = std::fs::read_dir(&work).unwrap().flatten().collect();
+    assert!(left.is_empty(), "the stopped broker left {left:?}");
     for launch in &launches {
         launcher.cleanup(&launch.id).unwrap();
     }
@@ -536,7 +543,8 @@ fn leaking(
 }
 
 /// A launch opening another launch's pipe is denied; once that launch is
-/// closed its pipe is gone even for this account.
+/// closed its pipe is gone even for this account, and the publication
+/// test then finds its private repository removed.
 fn foreign_open(
     launcher: &mut Launcher,
     services: &Services,
@@ -554,6 +562,8 @@ fn foreign_open(
     );
     let lines = finish(launcher, foreign, &report);
     assert_eq!(outcome(&lines, "open"), "error 5", "{lines:?}");
+    let pushed = tools.parent().unwrap().join("broker").join(&own.id);
+    assert!(pushed.join("HEAD").exists(), "the launch's repository");
     assert!(services.control().close(&own.id).unwrap());
     let gone = open_pipe(&theirs).unwrap_err();
     assert_eq!(gone.raw_os_error(), Some(2), "{gone}");
