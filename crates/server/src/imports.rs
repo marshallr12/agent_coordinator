@@ -647,9 +647,10 @@ async fn apply(
                         || task.get::<String, _>("lifecycle") != lifecycle
                     {
                         sqlx::query(
-                            "UPDATE tasks SET title=?,lifecycle=?,revision=revision+1 WHERE id=?",
+                            "UPDATE tasks SET title=?,lifecycle=?,opened_at=CASE WHEN ?='planned' THEN NULL ELSE opened_at END,revision=revision+1 WHERE id=?",
                         )
                         .bind(&item.title)
+                        .bind(lifecycle)
                         .bind(lifecycle)
                         .bind(task_id)
                         .execute(&mut *mutation.tx)
@@ -721,8 +722,8 @@ async fn apply(
                     "Imported checklist item remains traceable to {} / {}.",
                     item.source_path, item.section_identity
                 )])?;
-                sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since) VALUES(?,?,?,?,?,'general',2,?,?,?)")
-                    .bind(&task_id).bind(&project).bind(&item.title).bind(description).bind(acceptance).bind(lifecycle).bind(mutation.now).bind(mutation.now).execute(&mut *mutation.tx).await?;
+                sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,created_at,ready_since,opened_at) VALUES(?,?,?,?,?,'general',2,?,?,?,?)")
+                    .bind(&task_id).bind(&project).bind(&item.title).bind(description).bind(acceptance).bind(lifecycle).bind(mutation.now).bind(mutation.now).bind((lifecycle == "open").then_some(mutation.now)).execute(&mut *mutation.tx).await?;
                 sqlx::query("UPDATE tasks SET origin=? WHERE id=?")
                     .bind(crate::admission::Origin::of_principal(&mutation.actor.kind).as_str())
                     .bind(&task_id)

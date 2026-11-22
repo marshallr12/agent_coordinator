@@ -949,7 +949,9 @@ pub(crate) async fn lapsed_activities(
 /// moved on any task (a claim, checkpoint, submission, review or integration
 /// result) for more than `stall_hours` outside the quiet hours. The clock starts
 /// at the later of the last progress and the time the oldest ready task became
-/// ready, so a queue that just filled is not already stalled. The digest is
+/// ready (never before that task's `opened_at`, so a planned task admitted long
+/// after creation is not already stalled), so a queue that just filled is not
+/// already stalled. The digest is
 /// computed on demand, so one continuing stall is one item however long it lasts.
 async fn stalled_queue(
     c: &mut SqliteConnection,
@@ -958,7 +960,7 @@ async fn stalled_queue(
     config: &crate::state::Config,
 ) -> Result<Option<Value>, AppError> {
     let ready = sqlx::query(
-        "SELECT count(*) AS ready,min(t.ready_since) AS since FROM tasks t \
+        "SELECT count(*) AS ready,min(max(t.ready_since,COALESCE(t.opened_at,0))) AS since FROM tasks t \
          WHERE t.project_id=? AND t.lifecycle='open' AND t.archived_at IS NULL \
          AND t.budget_exempt IS NULL AND t.blocked_reason IS NULL \
          AND NOT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks p ON p.id=d.prerequisite_id \

@@ -39,6 +39,12 @@ any other canceled task is archived instead, so its history stays browsable. The
 cancel response reports which with `deleted` or `archived`. Active attempts and
 review/integration workflows block lifecycle changes.
 
+A task's `opened_at` records when it became open: `null` while `planned`, the
+creation time for a task created open and the admission time for a planned task
+admitted later. It is stamped once and is not the queue-ordering `ready_since`, which
+is also reset on unblock, on a review that returns the task and when its
+dependencies finish. See the task views in the [API contract](api-contract.md).
+
 | Work status | Meaning and next action |
 | --- | --- |
 | `planned` | Outcome is recorded but not admitted to the work queue |

@@ -3872,9 +3872,9 @@ async fn create_activity(
         "integration" => "Publish and validate the exact integrated result",
         _ => "Record a decision for the immutable submission",
     }])?;
-    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,revision,generation,blocked_reason,created_at,ready_since,origin) VALUES(?,?,?,?,?,'general',0,'open',1,0,?,?,?,'service')")
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,acceptance_json,kind,priority,lifecycle,revision,generation,blocked_reason,created_at,ready_since,opened_at,origin) VALUES(?,?,?,?,?,'general',0,'open',1,0,?,?,?,?,'service')")
         .bind(&task).bind(project).bind(&title).bind(format!("Internal workflow activity for submission {submission}.")).bind(&acceptance)
-        .bind(Option::<String>::None).bind(now).bind(now).execute(&mut *c).await?;
+        .bind(Option::<String>::None).bind(now).bind(now).bind(now).execute(&mut *c).await?;
     sqlx::query("INSERT INTO task_revisions(project_id,task_id,revision,data_json,actor_id,created_at) \
         SELECT ?,?,1,json_object('title',?,'description',?,'acceptance_criteria',json(?),'kind','general','priority',0,'depends_on',json('[]'),'planned',false),created_by,? FROM submissions WHERE id=?")
         .bind(project).bind(&task).bind(&title).bind(format!("Internal workflow activity for submission {submission}."))
