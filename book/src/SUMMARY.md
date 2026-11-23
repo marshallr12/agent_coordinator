@@ -13,6 +13,7 @@
 # Install and recover
 
 - [Linux release installation](docs/linux-installation.md)
+- [Windows host installation](docs/windows-installation.md)
 - [Service deployment examples](deploy/README.md)
 - [Integrator cutover](docs/integrator-cutover.md)
 - [Build the release package](docs/build-release-package.md)

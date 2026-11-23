@@ -84,7 +84,7 @@ pub fn owner_of(path: &Path) -> Result<String> {
 }
 
 /// Replaces `path`'s access list with the protected one `sddl` holds.
-fn set_access_list(path: &Path, sddl: &str) -> Result<()> {
+pub(crate) fn set_access_list(path: &Path, sddl: &str) -> Result<()> {
     let descriptor = Descriptor::parse(sddl)?;
     let dacl = access_list_of(&descriptor)?;
     let name = super::text::wide(&path.display().to_string())?;

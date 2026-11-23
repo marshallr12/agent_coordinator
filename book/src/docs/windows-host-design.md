@@ -899,6 +899,222 @@ validate final identities again before execution and cleanup. NT aliases,
 case folding, short names, junction swaps and concurrent rename attacks require
 tests. Host brokers must not follow worker-controlled links with service rights.
 
+### Phase 7 steps
+
+Phase 7 turns what the owner did by hand in the runs of tasks `ec6d901c`,
+`daa42f71` and `f71179f5` (with `sc.exe`, `icacls` and a script around
+`ChangeServiceConfig2W`) into an installer. Two owner decisions of
+2026-11-23 shape it:
+
+- **Phase 7 is the installer followed by a gap report.** The real
+  coordinator loop on Windows, a provider harness driver, a WFP policy,
+  resource caps and quiet hours are a separately planned phase 8. Phase 7
+  therefore ends with a host that is installed and described, not with a
+  host that is admitted.
+- **The installer is a Rust subcommand of `agentc-supervisor`**, not a
+  script: `agentc-supervisor windows-host`. It calls the Service Control
+  Manager and the file system directly, so no command line is built for
+  another program to parse and nothing a caller supplies is ever run.
+
+| Step | Content | Task | State |
+| --- | --- | --- | --- |
+| 7a | The installer core: a desired-state model, `windows-host install` and `windows-host status` | `ddeb5d76` | Implemented; see below. **No service the installer registered has been started** |
+| 7b | `windows-host update`, `rollback` and `uninstall`, each stage journaled before it is acted on | `2064cf54` | Not started |
+| 7c | Owner-attended installer acceptance on MiniAir, using only the `windows-host` subcommands, with the stand-in as the workload and the phase 4c lifecycle rounds | `012ff9f2` | Not started |
+| 7d | The host acceptance gap report against the [parity map](#linux-p2-parity-and-acceptance-map) and the phase 8 plan | `748f6c3a` | Not started |
+
+The operator's view of the installer is the
+[Windows host installation](windows-installation.md) chapter. This section
+records the design and what is and is not shown.
+
+#### Step 7a: the installer core (2026-11-23)
+
+Step 7a is implemented in the platform-neutral `windows_installer` module
+and the Windows `host_runtime::windows::installer` module.
+
+**A model, an observation and their difference.** `windows_installer::model`
+builds the desired state of a host from a layout (the program directory,
+the state root and the service name prefix, which default to
+`C:\Program Files\agentc`, `C:\ProgramData\agentc` and `agentc`) and the
+owner's inputs (the remote, the push App's ids, whether its key is
+installed, the start type and the stand-in's command). `observed` holds what
+a host reports. `plan` compares the two and returns either the reasons the
+host must be left alone or a list of changes, one kind per kind of drift:
+a changed command line, start type, dependency, account, recovery setting,
+preshutdown limit or privilege list each gets its own change, a missing
+directory is made, a directory or key whose access list differs gets its
+list set again, and a configuration whose managed entries differ is
+rewritten. None of this calls Windows, so it is compiled and unit-tested on
+Linux as well, against a host kept in memory.
+
+**What an installed host has.**
+
+| Part | Desired state |
+| --- | --- |
+| Binary | `agentc-supervisor.exe` in the program directory, with the SHA-256 of the binary that ran `install` |
+| Services | `agentc-egress`, `agentc-publication`, `agentc-runner`, `agentc-supervisor`: own process, each under its own virtual account `NT SERVICE\<name>`, registered stopped; start on demand unless the owner asks for automatic start; the supervisor depends on the runner |
+| Command line | The installed binary with `--config` naming the installed configuration, `windows-service` and the role. Nothing else is ever registered |
+| Recovery | Two restarts 60 s apart, then none; the failure count resets after one day; no failure program and no restart message |
+| Preshutdown limit | 120 000 ms, set by the installer because a service's own account may not set it |
+| Required privileges | `SeChangeNotifyPrivilege` and `SeImpersonatePrivilege` and no others |
+| Program directory | Protected: the system and administrators in full, `BUILTIN\Users` read and execute |
+| State root, `installer\` | Protected: the system and administrators only |
+| `runner\`, `runner\stand-in-launches\` | The same, and the runner's SID may modify |
+| `supervisor\`, `stand-in\`, `stand-in\queue\` | The same, and the supervisor's SID may modify |
+| `egress\`, `publication\` | The same, and the broker's own SID in full, which it needs to set its directory's list again at each start |
+| `publication-key\` and `push-app.pem` | Only with a push App: the publication SID may read, the system and administrators have full control, nobody else has anything |
+| `supervisor.toml` | Each service is given the others' service SIDs, the broker control pipes and the remote; see below |
+| `installer\manifest.json` | The owner's inputs, so `status` and a later `install` need no arguments |
+
+A service SID is `S-1-5-80-` followed by the SHA-1 of the upper-cased
+service name; the model computes it, and a unit test pins the four SIDs
+`sc.exe showsid` printed on MiniAir on 2026-11-22. Every directory and the
+key are created owned by the Administrators group, whichever administrator
+installs.
+
+**Access lists are compared entry by entry.** A list is its protected flag
+and the set of its entries (type, SID, mask, inheritance flags and whether
+the entry was inherited), read with `GetNamedSecurityInfoW` and `GetAce`.
+SDDL text is only written, never compared, because Windows spells one list
+in several ways and keeps entries in an order of its own. Only the modeled
+directories and the key file are inspected: what a service makes below its
+own directory (`service.log`, the journal, `publication\work`) is not drift.
+The two broker directories are given exactly the list each broker sets on
+its own directory at start, so a started broker leaves nothing for `install`
+to repair.
+
+**Refusals come before any change.** `install` and `status` refuse a
+session that is not elevated before reading anything else. A modeled
+directory that is a link or any other reparse point, a file where a
+directory belongs, and a directory owned by anyone but the system,
+administrators or the service it belongs to are refused, and nothing below
+such a directory is looked at, the manifest included. A key file that is
+missing, empty, larger than 64 KiB, not a plain file or a link is refused,
+as is a wanted key with no key file to copy it from. A configuration the
+services could not load is refused rather than overwritten. A binary that
+differs from the installed one is not put under running services: that is
+an update, step 7b's.
+
+**One change at a time, each on a fresh observation.** `install` observes,
+plans, applies the first change and starts again, until the plan is empty.
+A refusal that appears part-way therefore stops it, and a change is never
+applied to a host that was only checked earlier. A change that was applied
+and is still needed ends the run with an error instead of looping. Each
+change is written to `installer\journal.jsonl` before it is applied and
+again after, flushed; the first lines wait in memory until the installer
+has made that directory. A run that fails part-way leaves the changes it
+applied recorded, and the next run plans from the host as it then is and
+makes the rest.
+
+**The configuration.** The installer manages a fixed set of entries: each
+service's name, state directory and pipe names, the SIDs each service
+trusts, the remote, the push App's ids and key path, the egress broker's
+`must_not_open` list and the stand-in table. It writes one only when its
+value is not the in-code default, so a default installation's file holds
+the service SIDs, the two control pipes the runner admits launches through,
+the remote and the App's ids. Every other entry is the owner's and is kept
+across a rewrite; comments are not. Unit tests load the generated text
+through the same structures the services use and run each service's own
+validation on it.
+
+**The key.** The model holds the key file's path and never its bytes. The
+key is copied (never moved) to a new file created with its final access
+list and owner from its first byte, then renamed into place; an error names
+a path and what Windows said. A later run needs no key file: it checks the
+installed key's access list. A different key file given later replaces the
+installed key whole.
+
+**Token inventory.** `install` and `status` report each service's token
+against the required-privileges list: `not_registered`, `stopped`,
+`inventoried` (with the privileges held, those it may not hold and those it
+lacks) or `not_inventoried` with the reason. A stopped service has no token
+and is reported as stopped, never as a pass. `status` exits non-zero for a
+running service whose token holds a privilege outside the list.
+
+**Tests.** The neutral suite (`windows_installer::tests`) covers the full
+plan of a clean host, the empty plan of an installed one, each kind of
+drift with exactly its repair, every refusal with the host compared before
+and after, a failure at the fourteenth change followed by a run that makes
+the rest, the manifest, and the generated configuration. Native tests on
+MiniAir, which register nothing, cover reading and setting real access
+lists (a list written and read back, a widened list detected and restored,
+a junction), the key copy with its list and a refused link, reading a
+service Windows itself registers, a service that does not exist, this
+process's elevation, and the token of a service running under another
+account. `tests/windows_installer.rs` runs the built binary: `status`
+refuses a junction and a directory it does not trust. One test in that file
+runs `install` for real, with a random service prefix and a temporary tree
+beside any real host, checks the registrations against `sc.exe qc`,
+`qfailure` and `qprivs`, the preshutdown limit and `icacls`, installs
+again, drifts a start type, an access list and a configuration entry, and
+scans everything printed and written for a synthetic key. It registers four
+services, so it is ignored and also refuses to run unless
+`AGENTC_INSTALLER_REGISTERS_SERVICES=1` is set: a machine's owner asks for
+it.
+
+**The native install run on MiniAir, 2026-11-23.** With the owner's consent
+that test was run from an elevated development session, with the debug
+binary of the task's branch. Its first run stopped at the first
+registration: `CreateServiceW` refused the virtual account with error 1057
+because an empty password was passed where Windows wants none. The fifteen
+directory, file and key changes before it had been applied and journaled,
+nothing was registered, and the test removed its tree. With no password
+passed, the second run passed. The test was then extended with the service
+drift and the junction rows below and passed twice more, the last time on
+the committed source:
+
+| Observation | Result |
+| --- | --- |
+| `install` on a tree that does not exist, with a synthetic key file | Exit 0; 31 changes applied: 11 directories, the binary, the manifest, the configuration, the key and 4 changes for each of the 4 services |
+| Each service, from `sc.exe qc`, `query`, `qfailure` and `qprivs` | Own process, demand start, `NT SERVICE\<name>`, the installed binary with `--config` and its role, stopped; the supervisor depends on the runner and no other service on anything; reset period 86 400 s and two restarts after 60 000 ms; exactly the two required privileges |
+| Each service's preshutdown limit, read back through `QueryServiceConfig2W` | 120 s |
+| The key, from `icacls` | The publication account read, the system and administrators full control, three entries and no more; the key file given was left in place |
+| The state root, `runner\` and `egress\`, from `icacls` | Two entries; the runner's SID modify; the egress SID full control |
+| Every service's token in the report | `stopped`: none was ever started |
+| `install` again, with no arguments | Exit 0, nothing applied; `status` exits 0 |
+| The runner set to automatic start with `sc.exe config`, Everyone granted on `egress\` with `icacls`, the remote edited in the configuration | `status` exits 1 and names `set_access_list`, `write_config` (entry `windows_publication.remote`) and `set_start_type`, and changes none of them; `install` applies exactly those three; `status` exits 0 |
+| With `sc.exe`: the egress service's command line replaced and `SeDebugPrivilege` put on its privilege list in place of `SeImpersonatePrivilege`; the publication service's account set to LocalSystem; the runner's recovery set to one restart with a failure program; the supervisor's dependency removed | `status` exits 1 and names `set_bin_path`, `set_privileges`, `set_account`, `set_recovery` and `set_dependencies`; `install` applies exactly those five; `sc.exe` then prints the designed registration again, with no failure program; `status` exits 0 |
+| `install` with a key file that does not exist; `install` onto a state directory given to another account | Each refused with exit 1; no service registered, no program directory made, the state directory left empty |
+| `install` with the program directory a junction, and with the state directory a junction | Each refused with exit 1 as a link; no service registered, the other directory not made, nothing made in the junction's target |
+| Everything the binary printed, refusals included, the journal, the manifest and the configuration | None holds the synthetic key's body; the installed key does |
+| After the test | No `agentc` service is registered; the temporary tree is gone |
+
+The services carried a random prefix (`agentc-t` and ten hex digits) and
+lived under a temporary directory, so this is the installer on the real
+Service Control Manager and file system of MiniAir but not an installation
+of the product's four names in `C:\Program Files\agentc` and
+`C:\ProgramData\agentc`. That is step 7c's.
+
+**What 7a leaves unverified:**
+
+- No service the installer registered has been started. The effect of the
+  required-privileges list on a service's token is therefore not observed:
+  Windows applies it when it starts the service. That is step 7c's.
+- `SeImpersonatePrivilege` stays in the list because every service
+  identifies its pipe client by impersonating it. Whether impersonation at
+  identification level, which needs no privilege, would be enough was not
+  tested.
+- The refusal of a session that is not elevated is shown with the host in
+  memory. The development session on MiniAir is elevated, so the native
+  tests there take the elevated branch.
+- Paths are checked by name, not by an opened handle. Once the two roots
+  are secured only the system and administrators can change the tree, and
+  each change is decided on a fresh observation, but a change of a path
+  between that observation and its use is not excluded.
+- The preshutdown limit is a fixed 120 000 ms for all four services. An
+  owner who raises the runner's `preshutdown_timeout_seconds` gets the
+  runner's own warning at start, not a longer limit.
+- The service SID type and each service's own security descriptor are left
+  as Windows makes them.
+- The program directory's protected access list is new: the kits left that
+  directory inheriting from `Program Files`. No service has started from it
+  and no launch has run against it, so that the services can read it and
+  that a launch cannot are both expected from the list, not observed.
+- The directories the acceptance kits staged for their probes (`probe`,
+  `probe-drop`, `runner\probe-launches`) are not part of the model.
+- Update, rollback and uninstall are step 7b. Until then a host is removed
+  by hand, as in step 9 of the [phase 4c runbook](#owner-runbook-for-phase-4c).
+
 ## Local broker contracts
 
 Named pipes are local-only, reject remote clients, and have an explicit DACL.
@@ -2945,7 +3161,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Steps 5a to 5f done**; the phase is complete when task `9cf04a5c`'s review and integration are. It first **closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim) and step 5e (the readiness check and the fixture checks), whose native tests pass. In step 5f, an owner-attended run [inside a contained reviewer launch](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17) sent a Bash command from native Claude Code 2.1.326 in the recorded form through the prefix and the shim into the candidate. The capability record now admits only that build. No Windows driver calls the record, so no product Claude launch runs on Windows. The [items still open](#phase-5-steps) include the process a job still counts after the shell ends |
 | 6 | Egress and publication brokers | Phase 3 | Steps 6a, 6b and 6c implemented (task `13ae81c1`); step 6d implemented and run by the owner on MiniAir on 2026-11-20 (task `daa42f71`): both brokers served a launch as services under their own virtual accounts, and publication pushed to the real remote with a per-push token. Task `f71179f5` followed on 2026-11-22: the installed supervisor and runner services made a stand-in launch that both installed brokers admitted, launches made by the installed runner were refused the push key and the publication broker's directories, and a closed launch's repository is removed ([follow-up](#step-6d-follow-up-the-services-own-launches-2026-11-22)). No harness has used either broker; see [phase 6 steps](#phase-6-steps) |
-| 7 | Idempotent installer, update/rollback/uninstall, full host acceptance report | Phases 4 to 6 | Not started |
+| 7 | Idempotent installer, update/rollback/uninstall, then a host acceptance gap report; the real coordinator loop, a harness driver, WFP, resource caps and quiet hours are a later phase 8 (owner decision of 2026-11-23) | Phases 4 to 6 | Step 7a implemented (task `ddeb5d76`): `agentc-supervisor windows-host install` and `status`, a desired-state model with a platform-neutral plan, and a Windows backend over the Service Control Manager. **No service the installer registered has been started and nothing is machine-accepted.** Steps 7b (update, rollback, uninstall), 7c (owner-attended acceptance) and 7d (gap report) are not started; see [phase 7 steps](#phase-7-steps) |
 
 No intermediate phase is production acceptance. Independent review and guarded
 integration complete each task; only the final acceptance can admit a host.

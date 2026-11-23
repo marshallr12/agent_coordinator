@@ -31,6 +31,7 @@ pub mod staging_login;
 #[doc(hidden)]
 pub mod test_support;
 pub mod verification;
+pub mod windows_installer;
 
 /// The root-only directory holding each implementer launch's push-helper
 /// directory, `<state_dir>/push`.

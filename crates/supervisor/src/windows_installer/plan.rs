@@ -1,0 +1,383 @@
+//! The difference between a host as observed and the desired state: either
+//! the reasons the installer must leave the host alone, or the changes that
+//! make it the desired one. Each kind of drift has a change of its own, so
+//! a repair touches only what drifted.
+use super::access::{ADMINISTRATORS, SYSTEM};
+use super::config_text;
+use super::model::{Desired, ServiceSpec};
+use super::observed::{KeySource, Observed, PathState, ServiceState};
+use serde::Serialize;
+use std::fmt;
+
+/// One change to a host. It names what to change; the values come from the
+/// desired state when it is applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum Action {
+    /// Make a directory with its access list.
+    CreateDirectory { path: String },
+    /// Replace a directory's or the key's access list.
+    SetAccessList { path: String },
+    /// Copy the binary into the program directory.
+    InstallBinary,
+    /// Record what the owner asked for.
+    WriteManifest,
+    /// Write the configuration; `entries` are the managed ones that differ.
+    WriteConfig { entries: Vec<String> },
+    /// Copy the push App's key from this run's key file.
+    InstallKey,
+    /// Register a service, stopped.
+    CreateService { service: String },
+    /// Set a service's command line.
+    SetBinPath { service: String },
+    /// Set when Windows starts a service.
+    SetStartType { service: String },
+    /// Set the services a service waits for.
+    SetDependencies { service: String },
+    /// Set the account a service runs as.
+    SetAccount { service: String },
+    /// Set what Windows does when a service fails.
+    SetRecovery { service: String },
+    /// Set the time a service gets to stop at preshutdown.
+    SetPreshutdown { service: String },
+    /// Set the only privileges a service's token may hold.
+    SetPrivileges { service: String },
+}
+
+impl Action {
+    /// The service a service change names; `None` for every other change.
+    pub fn service(&self) -> Option<&str> {
+        match self {
+            Self::CreateService { service }
+            | Self::SetBinPath { service }
+            | Self::SetStartType { service }
+            | Self::SetDependencies { service }
+            | Self::SetAccount { service }
+            | Self::SetRecovery { service }
+            | Self::SetPreshutdown { service }
+            | Self::SetPrivileges { service } => Some(service),
+            _ => None,
+        }
+    }
+}
+
+/// A change and why it is needed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Change {
+    /// What to change.
+    #[serde(flatten)]
+    pub action: Action,
+    /// What was found and what is wanted.
+    pub detail: String,
+}
+
+/// A reason the installer changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// This process is not elevated.
+    NotElevated,
+    /// The path is a link or another reparse point.
+    Link(String),
+    /// A file is where a directory belongs.
+    NotADirectory(String),
+    /// A directory is where the key file belongs.
+    NotAFile(String),
+    /// Someone the installer does not trust owns the path.
+    ForeignOwner { path: String, owner: String },
+    /// This run's key file cannot be used.
+    KeySource(String),
+    /// A key is wanted, none is installed and no key file was given.
+    NoKeySource(String),
+    /// The configuration is not one the services could load.
+    ConfigUnreadable(String),
+    /// The installed binary differs while these services run from it.
+    BinaryInUse(Vec<String>),
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotElevated => write!(f, "this session is not elevated; run it as administrator"),
+            Self::Link(path) => write!(f, "{path} is a link or reparse point"),
+            Self::NotADirectory(path) => write!(f, "{path} is not a directory"),
+            Self::NotAFile(path) => write!(f, "{path} is not a file"),
+            Self::ForeignOwner { path, owner } => write!(
+                f,
+                "{path} is owned by {owner}, not the system, administrators or its service"
+            ),
+            Self::KeySource(reason) => write!(f, "the key file cannot be used: {reason}"),
+            Self::NoKeySource(path) => {
+                write!(
+                    f,
+                    "no key is installed at {path} and no --key-source was given"
+                )
+            }
+            Self::ConfigUnreadable(reason) => write!(
+                f,
+                "the configuration cannot be loaded, so it is left alone: {reason}"
+            ),
+            Self::BinaryInUse(services) => write!(
+                f,
+                "the installed binary differs while {} run from it; replacing a running \
+                 release is an update, not an install",
+                services.join(", ")
+            ),
+        }
+    }
+}
+
+/// The changes that make `observed` the `desired` host, or why nothing
+/// may be changed.
+pub fn plan(desired: &Desired, observed: &Observed) -> Result<Vec<Change>, Vec<Refusal>> {
+    let refusals = refusals(desired, observed);
+    if !refusals.is_empty() {
+        return Err(refusals);
+    }
+    let mut changes = Vec::new();
+    directories(desired, observed, &mut changes);
+    files(desired, observed, &mut changes);
+    key(desired, observed, &mut changes);
+    for service in &desired.services {
+        service_changes(service, observed.service(&service.name), &mut changes);
+    }
+    Ok(changes)
+}
+
+/// Every reason to leave the host alone.
+fn refusals(desired: &Desired, observed: &Observed) -> Vec<Refusal> {
+    if !observed.elevated {
+        return vec![Refusal::NotElevated];
+    }
+    let mut found = Vec::new();
+    for directory in &desired.directories {
+        let state = observed.path(&directory.path);
+        found.extend(directory_refusal(&directory.path, &directory.owners, state));
+    }
+    found.extend(key_refusals(desired, observed));
+    found.extend(config_refusal(desired, observed));
+    found.extend(binary_refusal(desired, observed));
+    found
+}
+
+/// Whether `owner` is the system, administrators or one of `others`.
+pub(super) fn trusted(owner: &str, others: &[String]) -> bool {
+    owner == SYSTEM || owner == ADMINISTRATORS || others.iter().any(|sid| sid == owner)
+}
+
+/// Why the directory at `path` cannot be adopted, if it cannot.
+pub(super) fn directory_refusal(
+    path: &str,
+    owners: &[String],
+    state: &PathState,
+) -> Option<Refusal> {
+    match state {
+        PathState::Missing => None,
+        PathState::Link => Some(Refusal::Link(path.to_owned())),
+        PathState::File { .. } => Some(Refusal::NotADirectory(path.to_owned())),
+        PathState::Directory { owner, .. } if trusted(owner, owners) => None,
+        PathState::Directory { owner, .. } => Some(Refusal::ForeignOwner {
+            path: path.to_owned(),
+            owner: owner.clone(),
+        }),
+    }
+}
+
+/// Why the key or this run's key file cannot be used, if either cannot.
+fn key_refusals(desired: &Desired, observed: &Observed) -> Vec<Refusal> {
+    let Some(key) = &desired.key else {
+        return Vec::new();
+    };
+    let path = || key.path.clone();
+    let mut found = Vec::new();
+    match (observed.path(&key.path), &observed.key_source) {
+        (PathState::Link, _) => found.push(Refusal::Link(path())),
+        (PathState::Directory { .. }, _) => found.push(Refusal::NotAFile(path())),
+        (PathState::File { owner, .. }, _) if !trusted(owner, &[]) => {
+            let owner = owner.clone();
+            found.push(Refusal::ForeignOwner {
+                path: path(),
+                owner,
+            });
+        }
+        (PathState::Missing, KeySource::NotGiven) => found.push(Refusal::NoKeySource(path())),
+        _ => {}
+    }
+    if let KeySource::Unreadable(reason) = &observed.key_source {
+        found.push(Refusal::KeySource(reason.clone()));
+    }
+    found
+}
+
+/// A configuration file the services could not load is the owner's to fix.
+fn config_refusal(desired: &Desired, observed: &Observed) -> Option<Refusal> {
+    let unreadable = config_text::changed(observed.config.as_deref(), &desired.settings).err()?;
+    Some(Refusal::ConfigUnreadable(format!("{unreadable:#}")))
+}
+
+/// A different binary is never put under running services.
+fn binary_refusal(desired: &Desired, observed: &Observed) -> Option<Refusal> {
+    let installed = observed.binary_sha256.as_ref()?;
+    if *installed == desired.binary_sha256 {
+        return None;
+    }
+    let running = |s: &&ServiceSpec| {
+        observed
+            .service(&s.name)
+            .is_some_and(|s| s.process.is_some())
+    };
+    let names: Vec<String> = desired
+        .services
+        .iter()
+        .filter(running)
+        .map(|s| s.name.clone())
+        .collect();
+    (!names.is_empty()).then_some(Refusal::BinaryInUse(names))
+}
+
+/// Adds `action` with its `detail`.
+fn push(changes: &mut Vec<Change>, action: Action, detail: String) {
+    changes.push(Change { action, detail });
+}
+
+/// A missing directory is made; one whose access list differs gets its own.
+fn directories(desired: &Desired, observed: &Observed, changes: &mut Vec<Change>) {
+    for directory in &desired.directories {
+        let path = directory.path.clone();
+        let wanted = directory.access.describe();
+        match observed.path(&directory.path) {
+            PathState::Directory { access, .. } if *access == directory.access => {}
+            PathState::Directory { access, .. } => {
+                let detail = format!("found {}; wanted {wanted}", access.describe());
+                push(changes, Action::SetAccessList { path }, detail);
+            }
+            _ => push(
+                changes,
+                Action::CreateDirectory { path },
+                format!("missing; wanted {wanted}"),
+            ),
+        }
+    }
+}
+
+/// The binary, the manifest and the configuration.
+fn files(desired: &Desired, observed: &Observed, changes: &mut Vec<Change>) {
+    if observed.binary_sha256.as_ref() != Some(&desired.binary_sha256) {
+        let found = observed.binary_sha256.as_deref().unwrap_or("none");
+        let detail = format!("found SHA-256 {found}; wanted {}", desired.binary_sha256);
+        push(changes, Action::InstallBinary, detail);
+    }
+    if observed.manifest.as_ref() != Some(&desired.manifest) {
+        push(
+            changes,
+            Action::WriteManifest,
+            "the recorded inputs differ".into(),
+        );
+    }
+    let entries = config_text::changed(observed.config.as_deref(), &desired.settings);
+    let entries = entries.unwrap_or_default();
+    if !entries.is_empty() {
+        let detail = format!("differs in {}", entries.join(", "));
+        push(changes, Action::WriteConfig { entries }, detail);
+    }
+}
+
+/// The key is copied when it is missing or this run's file differs from
+/// it, and its access list is put right when it differs.
+fn key(desired: &Desired, observed: &Observed, changes: &mut Vec<Change>) {
+    let Some(key) = &desired.key else { return };
+    let state = observed.path(&key.path);
+    let differs = observed.key_source == KeySource::Readable { installed: false };
+    if *state == PathState::Missing || differs {
+        let detail = "copy this run's key file; its bytes are never shown";
+        return push(changes, Action::InstallKey, detail.into());
+    }
+    if let PathState::File { access, .. } = state
+        && *access != key.access
+    {
+        let detail = format!(
+            "found {}; wanted {}",
+            access.describe(),
+            key.access.describe()
+        );
+        push(
+            changes,
+            Action::SetAccessList {
+                path: key.path.clone(),
+            },
+            detail,
+        );
+    }
+}
+
+/// Makes the change to one setting of the service it is given.
+type Setting = fn(String) -> Action;
+const BIN_PATH: Setting = |service| Action::SetBinPath { service };
+const START: Setting = |service| Action::SetStartType { service };
+const DEPENDENCIES: Setting = |service| Action::SetDependencies { service };
+const ACCOUNT: Setting = |service| Action::SetAccount { service };
+const RECOVERY: Setting = |service| Action::SetRecovery { service };
+const PRESHUTDOWN: Setting = |service| Action::SetPreshutdown { service };
+const PRIVILEGES: Setting = |service| Action::SetPrivileges { service };
+
+/// A missing service is registered and given the settings registration
+/// cannot carry; a registered one gets a change for each setting that
+/// differs.
+fn service_changes(want: &ServiceSpec, seen: Option<&ServiceState>, changes: &mut Vec<Change>) {
+    let Some(seen) = seen else {
+        let service = want.name.clone();
+        push(
+            changes,
+            Action::CreateService { service },
+            "not registered".into(),
+        );
+        for setting in [RECOVERY, PRESHUTDOWN, PRIVILEGES] {
+            push(changes, setting(want.name.clone()), "new service".into());
+        }
+        return;
+    };
+    setting_changes(want, &seen.spec, changes);
+}
+
+/// One change for each setting of a registered service that differs.
+fn setting_changes(w: &ServiceSpec, s: &ServiceSpec, changes: &mut Vec<Change>) {
+    let mut row = |setting: Setting, same: bool, seen: &dyn fmt::Debug, want: &dyn fmt::Debug| {
+        if !same {
+            let detail = format!("found {seen:?}; wanted {want:?}");
+            push(changes, setting(w.name.clone()), detail);
+        }
+    };
+    let (depends, account) = (&s.dependencies, &s.account);
+    row(BIN_PATH, s.bin_path == w.bin_path, &s.bin_path, &w.bin_path);
+    row(START, s.start == w.start, &s.start, &w.start);
+    row(
+        DEPENDENCIES,
+        same_names(depends, &w.dependencies),
+        depends,
+        &w.dependencies,
+    );
+    row(
+        ACCOUNT,
+        account.eq_ignore_ascii_case(&w.account),
+        account,
+        &w.account,
+    );
+    row(RECOVERY, s.recovery == w.recovery, &s.recovery, &w.recovery);
+    let (seen, want) = (&s.preshutdown_ms, &w.preshutdown_ms);
+    row(PRESHUTDOWN, seen == want, seen, want);
+    row(
+        PRIVILEGES,
+        same_names(&s.privileges, &w.privileges),
+        &s.privileges,
+        &w.privileges,
+    );
+}
+
+/// Whether two lists hold the same names, whatever their order and case.
+fn same_names(one: &[String], other: &[String]) -> bool {
+    let folded = |names: &[String]| {
+        let mut names: Vec<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+        names.sort();
+        names
+    };
+    folded(one) == folded(other)
+}
