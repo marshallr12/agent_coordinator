@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production and both hosts on `9a324c5`, schema 50; all three window-3 enablers deployed; rollout task `84d981cf` submitted for review (2026-11-23 15:30 UTC)
+## Current resume point — production and both hosts on `9a324c5`, schema 50; all three window-3 enablers deployed; rollout task `84d981cf` Done (2026-11-23 15:32 UTC)
 
 The 2026-11-16 to 2026-11-20 updates (P6 second NO-GO, the rollouts of `4705310`, `818a7b1`,
 `f590db8` and `c05a052`, the roster change, the canary, 502 and transport-reset investigations)
@@ -154,8 +154,10 @@ on 2026-11-21. This section keeps only what a new session needs.
       timers and workers restored. Host upgrades finished 15:20 UTC: oracle-1 113 PASS / 0 FAIL
       / 1 SKIP, mxmini 104 / 0 / 2, installed binaries equal to the native builds. Markers
       cleared 15:21–15:22 UTC (oracle-1 absent; mxmini `quiet-hours` from its cron job, it
-      being daytime). Submitted 15:28 UTC; review claimed by the review subagent (session
-      `review-84d981cf`).
+      being daytime). Submitted 15:28 UTC; the review subagent (session `review-84d981cf`) approved at
+      15:31 UTC with three advisory findings (the long drain, the mxmini marker before and
+      after, and what it could not verify: production VM internals, suites not re-run,
+      attestations not re-verified). **`84d981cf` Done.**
     - **P6 window 3 preconditions re-checked 2026-11-23 15:30 UTC** (read-only; appended to
       `p6-window3-prep/PRECONDITIONS.md`, `window.draft.json` updated, previous draft kept as
       `window.draft.20261121.json`): 1, 3, 4, 5 met (main equals what runs, `9a324c5`; no open
@@ -164,8 +166,7 @@ on 2026-11-21. This section keeps only what a new session needs.
       old code and read `requires_human: true`, `resolution_kind: automatic`. 6 is for the
       start day; 7 stays a draft. Put to the owner in the draft: ready = `opened_at` for
       window 3; accept the two automatic exercises or wait for one under `9a324c5`; start
-      date, the 20 task ids and their `not_before` times. **Next:** Done of `84d981cf`; then
-      the owner imports, schedules and admits `e6685dbf`; pin `window.json` at the start.
+      date, the 20 task ids and their `not_before` times. **Next:** the owner imports, schedules and admits `e6685dbf`; pin `window.json` at the start.
     - **Rollout scripts prepared 2026-11-22 (owner's pick; local files only):**
       `~/.local/state/agent-coordinator-evidence/rollout-main-prep/` (`README.md` first).
       `render.py --commit … --task … --attempt … --session …` writes the script set for the
