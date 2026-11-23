@@ -102,6 +102,9 @@ pub fn checkpoint(
     request: &CheckpointRequest<'_>,
     helper_socket: Option<&Path>,
 ) -> Result<CandidateCheckpoint, Failure> {
+    if helper_socket.is_none() || HELPERS_SUPPORTED {
+        require_descends_from_base(request.checkout, request.base_revision)?;
+    }
     match helper_socket {
         None => checkpoint_directly(request),
         Some(socket) if HELPERS_SUPPORTED => checkpoint_through_helper(request, socket),
@@ -161,7 +164,7 @@ fn publish_through_helper(
 ) -> Result<CandidateCheckpoint, Failure> {
     let snapshot =
         capture_clean_snapshot(request.checkout, request.repository).map_err(Failure::invalid)?;
-    require_base_commit(&snapshot, request.base_revision)?;
+    require_base_commit(&snapshot.checkout, request.base_revision)?;
     scan_candidate_bundle(
         &snapshot,
         request.base_revision,
@@ -197,11 +200,36 @@ fn refuse_explicit_ref(request: &CheckpointRequest<'_>) -> Result<(), Failure> {
     ))
 }
 
+/// Requires the checkout's current commit to descend from the registered base
+/// commit, before anything is pushed or submitted. The service records the
+/// base with the candidate and the integrator needs it to be an ancestor of
+/// the candidate; the service cannot read Git, so this is the only place to
+/// notice a worktree registered at one commit (an unpushed pre-squash commit,
+/// say) whose work was then squashed or rebased onto another parent. The
+/// failure is invalid input: it cannot succeed on retry.
+fn require_descends_from_base(checkout: &Path, base_revision: &str) -> Result<(), Failure> {
+    require_base_commit(checkout, base_revision)?;
+    let candidate = crate::worktree::git_text(checkout, ["rev-parse", "HEAD^{commit}"])
+        .map_err(Failure::invalid)?;
+    let descends = crate::worktree::is_ancestor(checkout, base_revision, &candidate)
+        .map_err(Failure::invalid)?;
+    if descends {
+        return Ok(());
+    }
+    Err(Failure::invalid(format!(
+        "the candidate commit {candidate} does not descend from the attempt's registered base \
+         revision {base_revision}, so no integrator could apply it; the work was probably \
+         squashed or rebased onto a different parent after the worktree was prepared. Prepare \
+         a worktree at the real base (the commit the candidate is built on), apply the work \
+         there and submit again"
+    )))
+}
+
 /// Requires the launch's base commit, the bundle's prerequisite, to exist in
 /// the checkout.
-fn require_base_commit(snapshot: &CleanSnapshot, base_revision: &str) -> Result<(), Failure> {
+fn require_base_commit(checkout: &Path, base_revision: &str) -> Result<(), Failure> {
     let object = format!("{base_revision}^{{commit}}");
-    crate::worktree::git_ok(&snapshot.checkout, ["cat-file", "-e", object.as_str()]).map_err(|_| {
+    crate::worktree::git_ok(checkout, ["cat-file", "-e", object.as_str()]).map_err(|_| {
         Failure::invalid(format!(
             "the launch's base revision {base_revision} is not a commit in the checkout; \
                  the candidate push helper needs it as the bundle prerequisite"

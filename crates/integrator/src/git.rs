@@ -133,6 +133,21 @@ pub fn is_ancestor(mirror: &Path, ancestor: &str, descendant: &str) -> Result<bo
     )
 }
 
+/// True when `revision` is a full commit ID of a commit the mirror holds.
+/// Anything else (an absent object, or text that is not a full commit ID) is
+/// false; only a failure to run Git is an error.
+pub fn has_commit(mirror: &Path, revision: &str) -> Result<bool> {
+    let full_id =
+        matches!(revision.len(), 40 | 64) && revision.bytes().all(|b| b.is_ascii_hexdigit());
+    if !full_id {
+        return Ok(false);
+    }
+    let object = format!("{revision}^{{commit}}");
+    Ok(run(mirror, ["cat-file", "-e", object.as_str()])?
+        .status
+        .success())
+}
+
 /// True when `x` and `c` merge without conflicts (`merge-tree` exit 0).
 pub fn merges_cleanly(mirror: &Path, x: &str, c: &str) -> Result<bool> {
     exit_flag(mirror, ["merge-tree", "--write-tree", x, c])

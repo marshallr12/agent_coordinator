@@ -697,7 +697,19 @@ Helper failures use these codes:
 | `candidate_push_unavailable` | `7` | yes | Connecting to the socket fails. |
 | `candidate_push_failed` | `7` | yes | A read from or write to the connected socket fails, or the helper closes the connection without replying. A retry is safe: the helper accepts a ref that already names the same commit. |
 | `candidate_push_protocol_violation` | `5` | no | The helper's reply is malformed or acknowledges another commit, tree or ref. |
-| `invalid_client_input` | `2` | no | The checkout cannot be scanned or bundled, it adds a likely secret, or the base commit is missing. |
+| `invalid_client_input` | `2` | no | The checkout cannot be scanned or bundled, it adds a likely secret, the base commit is missing, or the candidate does not descend from the base commit. |
+
+Before it scans, pushes or sends anything, `submissions code` also requires the
+candidate commit to descend from the attempt's registered base commit
+(`git merge-base --is-ancestor`), whether it pushes directly or through the
+helper. The service records the base with the candidate and cannot read Git, and
+the integrator cannot integrate a candidate whose recorded base is not part of
+its history. A worktree registered at an unpushed commit whose work was then
+squashed or rebased onto another parent fails this check with
+`invalid_client_input` (exit `2`, not retryable). The message names the candidate
+and base commits and says to prepare a worktree at the real base, apply the work
+there and submit again. An ordinary descendant, including one with several
+commits or a merge of the base, submits as before.
 
 The immutable submission records the credential-free canonical project remote
 identity and exact candidate ref in addition to commit and tree IDs. The remote

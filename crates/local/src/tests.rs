@@ -310,6 +310,26 @@ async fn wait_for_fixture_start(
     )
 }
 
+#[test]
+fn a_failed_git_step_names_its_subcommand_but_not_its_arguments() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    git(directory.path(), &["init", "--quiet"])?;
+    let secret = "https://user:hunter2@example.invalid/repo.git";
+    let failed = git_workflow::git_text(directory.path(), ["rev-parse", "--verify", secret]);
+    let message = format!("{:#}", failed.unwrap_err());
+    assert!(
+        message.starts_with("Git command failed: git rev-parse ("),
+        "{message}"
+    );
+    assert!(message.contains("exit"), "{message}");
+    assert!(!message.contains("hunter2") && !message.contains("example.invalid"));
+    let missing = format!("{}^{{commit}}", "1".repeat(40));
+    let failed = git_workflow::git_ok(directory.path(), ["cat-file", "-e", missing.as_str()]);
+    let message = format!("{:#}", failed.unwrap_err());
+    assert!(message.contains("git cat-file"), "{message}");
+    Ok(())
+}
+
 fn git(directory: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)

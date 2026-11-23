@@ -516,6 +516,54 @@ fn missing_base_commit_is_refused_before_sending_and_not_retryable() {
     assert_eq!(fixture.remote_candidates(), "");
 }
 
+/// Commits `pre.txt` on a side branch off the fixture's base, standing in for
+/// the unpushed commit a worktree was registered at before the work was
+/// squashed onto another parent, and returns it. The checkout is left on
+/// the candidate.
+fn unrelated_base(fixture: &Fixture) -> String {
+    git(
+        &fixture.checkout,
+        &["checkout", "--quiet", "-b", "pre", &fixture.base],
+    );
+    let pre = commit(&fixture.checkout, "pre.txt", "pre\n");
+    git(&fixture.checkout, &["checkout", "--quiet", "-"]);
+    assert_eq!(
+        git(&fixture.checkout, &["rev-parse", "HEAD"]),
+        fixture.candidate
+    );
+    pre
+}
+
+#[test]
+fn a_candidate_not_descending_from_its_base_is_refused_before_any_push() {
+    let fixture = fixture("feature\n");
+    let pre = unrelated_base(&fixture);
+    let request = CheckpointRequest {
+        base_revision: &pre,
+        ..fixture.request(None)
+    };
+    let helper = fixture.helper();
+    let socket = helper.socket.clone();
+    for through in [None, Some(socket.as_path())] {
+        let failure = checkpoint(&request, through).unwrap_err();
+        assert_eq!(code(&failure), "invalid_client_input", "{through:?}");
+        assert_eq!(failure.exit, 2);
+        assert_eq!(failure.output["error"]["retryable"], false);
+        let message = failure.output["error"]["message"].as_str().unwrap();
+        assert!(message.contains(&pre), "{message}");
+        assert!(message.contains(&fixture.candidate), "{message}");
+        assert!(
+            message.contains("Prepare a worktree at the real base"),
+            "{message}"
+        );
+    }
+    assert!(!matches!(helper.finish(), Some(PushReply::Accepted(_))));
+    assert_eq!(fixture.remote_candidates(), "");
+    // The same candidate with its real base still goes through.
+    let pushed = checkpoint(&fixture.request(None), None).unwrap();
+    assert_eq!(pushed.revision, fixture.candidate);
+}
+
 #[test]
 fn mismatched_receipt_is_a_non_retryable_protocol_violation() {
     let fixture = fixture("feature\n");

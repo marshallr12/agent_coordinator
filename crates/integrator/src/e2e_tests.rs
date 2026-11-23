@@ -1600,6 +1600,87 @@ async fn a_conflict_with_an_out_of_band_landing_cites_no_result() {
     assert_eq!(cited_landing(&h), Value::Null);
 }
 
+/// A harness whose queue holds submission `s1` with `reviewed_base` as its
+/// base (a candidate of its own off the seeded base) ahead of a sound `s2`.
+async fn bad_base_harness(remote: &Remote, base: &str, reviewed_base: &str) -> (Harness, String) {
+    let bad = push_candidate(remote, base, "bad.txt", "bad\n");
+    let good = push_candidate(remote, base, "good.txt", "good\n");
+    let h = Harness::new(second_item(remote, base, &good)).await;
+    h.mock.lock().unwrap().ahead = vec![item(remote, reviewed_base, &bad)];
+    h.checks(Some("success"), &RULES);
+    (h, bad)
+}
+
+/// Asserts that `s1`'s base was reported exactly once with `verdict`, that
+/// the integrator never prepared an integration for it and that `s2` landed.
+fn assert_base_reported_once(h: &Harness, verdict: &str, base: &str, bad: &str) {
+    let reports = h.peek(|m| m.reports.clone());
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    let report = &reports[0];
+    assert_eq!(report["kind"], "fix_target");
+    assert_eq!(report["submission_id"], "s1");
+    assert_eq!(report["details"]["verdict"], verdict);
+    assert_eq!(report["details"]["blocks_subject"], true);
+    assert_eq!(report["details"]["reviewed_base"], base);
+    assert_eq!(report["details"]["candidate"], bad);
+    assert!(h.peek(|m| m.revises.is_empty()));
+    let submissions = h.peek(|m| {
+        let ids = m.results.iter().map(|r| r["submission_id"].clone());
+        ids.collect::<Vec<_>>()
+    });
+    assert!(submissions.iter().all(|id| id == "s2"), "{submissions:?}");
+    let intents = h._state.path().join("intents");
+    let names = std::fs::read_dir(intents).unwrap();
+    for name in names.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()) {
+        assert!(!name.starts_with("s1-"), "prepared an intent: {name}");
+    }
+}
+
+#[tokio::test]
+async fn a_base_missing_from_the_mirror_is_reported_once_and_others_integrate() {
+    let (remote, base) = seeded_remote();
+    let missing = "1".repeat(40);
+    let (mut h, bad) = bad_base_harness(&remote, &base, &missing).await;
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    assert_base_reported_once(&h, "base_missing", &missing, &bad);
+    // With s2 landed the queue holds only s1: it is skipped, never retried
+    // into `prepare`, and the report is not repeated.
+    h.mock.lock().unwrap().item = None;
+    for _ in 0..3 {
+        let Step::Blocked(reason) = h.cycle().await else {
+            panic!("expected the item to be blocked");
+        };
+        assert!(reason.starts_with("base missing:"), "{reason}");
+        assert!(
+            reason.contains(&missing) && reason.contains(&bad),
+            "{reason}"
+        );
+    }
+    assert_base_reported_once(&h, "base_missing", &missing, &bad);
+}
+
+#[tokio::test]
+async fn a_base_that_is_not_an_ancestor_is_reported_once_and_others_integrate() {
+    let (remote, base) = seeded_remote();
+    // A commit the mirror holds (it is on `main`) that the candidate lacks.
+    let sibling = advance_main(&remote, "sibling.txt");
+    let (mut h, bad) = bad_base_harness(&remote, &base, &sibling).await;
+    assert_eq!(h.cycle().await, Step::Observed("published".into()));
+    assert_base_reported_once(&h, "base_not_ancestor", &sibling, &bad);
+    h.mock.lock().unwrap().item = None;
+    for _ in 0..3 {
+        let Step::Blocked(reason) = h.cycle().await else {
+            panic!("expected the item to be blocked");
+        };
+        assert!(reason.starts_with("base not an ancestor:"), "{reason}");
+        assert!(
+            reason.contains(&sibling) && reason.contains(&bad),
+            "{reason}"
+        );
+    }
+    assert_base_reported_once(&h, "base_not_ancestor", &sibling, &bad);
+}
+
 /// The queue's `reverts` entry for revert task `rt1` of the mock's first
 /// result (subject `t1`'s published candidate) on `remote`'s `main`.
 fn revert_of(h: &Harness, remote: &Remote) -> Value {

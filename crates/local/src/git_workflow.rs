@@ -1797,8 +1797,16 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = git(checkout, arguments)?;
-    ensure!(output.status.success(), "Git command failed");
+    let arguments: Vec<OsString> = arguments
+        .into_iter()
+        .map(|value| value.as_ref().to_os_string())
+        .collect();
+    let output = git(checkout, &arguments)?;
+    ensure!(
+        output.status.success(),
+        "{}",
+        git_failure(&arguments, &output.status)
+    );
     String::from_utf8(output.stdout)
         .context("Git returned non-UTF-8 output")
         .map(|value| value.trim().to_owned())
@@ -1809,9 +1817,37 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = git(checkout, arguments)?;
-    ensure!(output.status.success(), "Git command failed");
+    let arguments: Vec<OsString> = arguments
+        .into_iter()
+        .map(|value| value.as_ref().to_os_string())
+        .collect();
+    let output = git(checkout, &arguments)?;
+    ensure!(
+        output.status.success(),
+        "{}",
+        git_failure(&arguments, &output.status)
+    );
     Ok(())
+}
+
+/// The message for a failed [`git_text`] or [`git_ok`]: which Git subcommand
+/// failed and how it exited. Only the subcommand name is named, never its
+/// other arguments (they can hold remote URLs) or its standard error (which
+/// is discarded and may hold credentials).
+fn git_failure(arguments: &[OsString], status: &std::process::ExitStatus) -> String {
+    let subcommand = arguments
+        .iter()
+        .filter_map(|argument| argument.to_str())
+        .find(|argument| !argument.starts_with('-'))
+        .filter(|argument| {
+            !argument.is_empty()
+                && argument.len() <= 32
+                && argument
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+        .unwrap_or("?");
+    format!("Git command failed: git {subcommand} ({status})")
 }
 
 fn git<I, S>(checkout: &Path, arguments: I) -> Result<Output>

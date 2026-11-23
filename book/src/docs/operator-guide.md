@@ -232,6 +232,27 @@ leaves no result, the report's verdict is `target_unverified`.
 The `fix_target` report's `target_result` and the `check_failed` evidence name the
 tip's run, attempt and completion time that the decision relied on.
 
+### A candidate that does not descend from its recorded base
+
+`agent-coordinator submissions code` refuses a candidate whose commit does not
+descend from the attempt's registered base (exit `2`, `invalid_client_input`,
+before anything is pushed or recorded); the usual cause is a worktree prepared at
+an unpushed commit whose work was then squashed onto another parent. If such a
+submission still reaches the queue (a client without the check), its base can
+never become an ancestor, so the integrator does not retry it. Before preparing an
+item it checks that the reviewed base is in its mirror after fetching the
+candidate and is an ancestor of the candidate. If not, it posts one `fix_target`
+report with verdict `base_missing` or `base_not_ancestor` and `blocks_subject`,
+which requires a human and is keyed by the submission so it is raised once however
+many cycles pass. It integrates the other queue items in the same cycle, and its
+log line for the item reads `base missing: reviewed base <commit> of candidate
+<commit> …` or `base not an ancestor: reviewed base <commit> is not an ancestor
+of candidate <commit>`. A person decides the real base and has the work
+resubmitted from a worktree prepared there. A failed `prepare_integration` that
+is not one of these is logged with the operation that failed (`prepare_integration
+of candidate … (reviewed base …) on target tip …`, then the failing Git
+subcommand and its exit status).
+
 ### A failing target must not stall every landing
 
 A check can start failing on the target branch with no commit involved: the

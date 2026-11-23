@@ -16,11 +16,12 @@ use crate::github::RepoId;
 use crate::reverts::reverted_commits;
 use crate::roster::{self, Roster};
 use crate::service::{
-    Cite, NewResult, Queue, QueueItem, ResultRecord, Service, is_service_failure,
+    Cite, NewReport, NewResult, Queue, QueueItem, ResultRecord, Service, is_service_failure,
 };
 use crate::state::{LoopState, Published, target_key};
 use anyhow::{Context, Result};
 use coordinator_local::git_workflow::{self, IntegrationIntentSummary, PrepareIntegration};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 /// What one cycle did; logged, and asserted by tests.
@@ -157,6 +158,9 @@ impl<C: ChecksSource> Integrator<C> {
 
     /// Steps 3 and 5–7 for one job.
     async fn integrate(&mut self, job: &Job, queue: &Queue) -> Result<Step> {
+        if let Some(step) = self.refuse_bad_base(job).await? {
+            return Ok(step);
+        }
         let roster =
             match roster::at_target(&job.mirror, &job.x, &self.config.roster_path, &queue.roster) {
                 Ok(roster) => roster,
@@ -177,6 +181,55 @@ impl<C: ChecksSource> Integrator<C> {
             return Ok(skip);
         }
         self.check_and_publish(job, &result, &roster).await
+    }
+
+    /// A submission whose reviewed base is missing from the mirror (after the
+    /// candidate was fetched) or is not an ancestor of the candidate can never
+    /// be integrated: both are permanent properties of an immutable
+    /// submission, so retrying `prepare` would fail every cycle without
+    /// telling anyone. Instead the integrator reports it once per submission
+    /// and skips the item. The report is a `fix_target` with `blocks_subject`,
+    /// which the service queues for a human (the submission is the subject; a
+    /// revise reason would need a service change, and the author cannot fix a
+    /// worktree registered at the wrong base without a human deciding what
+    /// the real base is). The report's dedupe key is the submission alone, so
+    /// the first cause found wins and repeated cycles add nothing. `None`
+    /// when the base is sound.
+    async fn refuse_bad_base(&self, job: &Job) -> Result<Option<Step>> {
+        let (base, c) = (&job.item.reviewed_base, &job.item.candidate_revision);
+        let cause = if !git::has_commit(&job.mirror, base)? {
+            "base_missing"
+        } else if !git::is_ancestor(&job.mirror, base, c)? {
+            "base_not_ancestor"
+        } else {
+            return Ok(None);
+        };
+        let reason = match cause {
+            "base_missing" => format!(
+                "base missing: reviewed base {base} of candidate {c} is not in the mirror \
+                 after fetching the candidate"
+            ),
+            _ => format!(
+                "base not an ancestor: reviewed base {base} is not an ancestor of candidate {c}"
+            ),
+        };
+        let report = NewReport {
+            kind: "fix_target",
+            dedupe_key: format!("{}:candidate_base", job.item.submission_id),
+            task_id: Some(job.item.subject_task_id.clone()),
+            submission_id: Some(job.item.submission_id.clone()),
+            result_id: None,
+            details: json!({"verdict": cause, "reviewed_base": base, "candidate": c,
+                "x": job.x, "blocks_subject": true,
+                "reason": "the submission's recorded base is not part of the candidate's \
+                    history; resubmit from a worktree prepared at the real base"}),
+        };
+        Ok(Some(
+            match self.service.report(&job.project, &report).await? {
+                Ok(record) => Step::Blocked(format!("{reason} (report {})", record.id)),
+                Err(refusal) => Step::Refused(refusal.code),
+            },
+        ))
     }
 
     /// The pinned result for (S, X). R is always (re)computed locally, so
@@ -237,7 +290,8 @@ impl<C: ChecksSource> Integrator<C> {
     /// Prepares (or reloads) the job's integration intent in its worktree.
     fn prepare(&self, job: &Job) -> Result<IntegrationIntentSummary> {
         let (worktree, branch, intent) = self.job_paths(job);
-        git::ensure_worktree(&job.mirror, &worktree, &branch, &job.x)?;
+        git::ensure_worktree(&job.mirror, &worktree, &branch, &job.x)
+            .context("prepare: create the integration worktree")?;
         git_workflow::prepare_integration(PrepareIntegration {
             state_file: &intent,
             checkout: &worktree,
@@ -246,6 +300,12 @@ impl<C: ChecksSource> Integrator<C> {
             expected_target: &job.x,
             candidate_base: &job.item.reviewed_base,
             candidate: &job.item.candidate_revision,
+        })
+        .with_context(|| {
+            format!(
+                "prepare_integration of candidate {} (reviewed base {}) on target tip {}",
+                job.item.candidate_revision, job.item.reviewed_base, job.x
+            )
         })
     }
 

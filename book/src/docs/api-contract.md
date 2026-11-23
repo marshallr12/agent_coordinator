@@ -700,7 +700,17 @@ reports and only a human resolves one.
   task, and `true` again when it cannot. A
   `reverted_in_history` revise the service refuses with
   `not_reverted_in_history` is a `fix_target` report with `verdict`
-  `not_reverted_in_history`, and the integrator skips the subject. The
+  `not_reverted_in_history`, and the integrator skips the subject. A queue item
+  whose `reviewed_base` is absent from the integrator's mirror after it fetched
+  the candidate, or is not an ancestor of the candidate, can never be
+  integrated (both are permanent facts about an immutable submission), so the
+  integrator does not prepare it: it posts one `fix_target` report with
+  `verdict` `base_missing` or `base_not_ancestor`, `details.reviewed_base`,
+  `details.candidate` and `blocks_subject`, keyed `<submission id>:candidate_base`
+  so repeated cycles add nothing, and skips the item while it integrates the
+  others. It does not revise: no revise reason fits, and the author cannot know
+  the real base without a human deciding it. The integrator's cycle log line
+  for the item names the cause and both commit IDs. The
   integrator raises `privilege_gate`, failing closed, when any path that
   differs between the target tip and the result lies under `.github/`, is the
   `.github` entry itself, `.gitmodules` or a `CODEOWNERS` file, or is in

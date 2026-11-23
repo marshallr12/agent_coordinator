@@ -390,7 +390,24 @@ fn local_branch_exists(repository: &Path, branch: &str) -> Result<bool> {
     }
 }
 
-fn git_text<I, S>(repository: &Path, args: I) -> Result<String>
+/// True when `ancestor` is reachable from `descendant` in `repository`
+/// (`git merge-base --is-ancestor`); any exit other than 0 or 1 is an error.
+pub(crate) fn is_ancestor(repository: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let output = git(
+        repository,
+        ["merge-base", "--is-ancestor", ancestor, descendant],
+    )?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "Git could not verify commit ancestry: {}",
+            safe_stderr(&output)
+        ),
+    }
+}
+
+pub(crate) fn git_text<I, S>(repository: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
