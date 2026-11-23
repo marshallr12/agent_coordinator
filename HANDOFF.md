@@ -4,7 +4,7 @@ Written 2026-09-25 by the planning session (Claude Opus 5.5, lead) at the end of
 multi-agent planning discussion. **Read this file first**; it is self-contained enough to start
 execution, and links everything else.
 
-## Current resume point — production and both hosts on `c05a052`; two of three window-3 enablers landed, the third in review, rollout scripts prepared (2026-11-22 05:20 UTC)
+## Current resume point — production and both hosts on `9a324c5`, schema 50; all three window-3 enablers deployed; rollout task `84d981cf` submitted for review (2026-11-23 15:30 UTC)
 
 The 2026-11-16 to 2026-11-20 updates (P6 second NO-GO, the rollouts of `4705310`, `818a7b1`,
 `f590db8` and `c05a052`, the roster change, the canary, 502 and transport-reset investigations)
@@ -12,23 +12,33 @@ were moved verbatim to `docs/archive/HANDOFF-autonomy-resume-points-2026-11-16-t
 on 2026-11-21. This section keeps only what a new session needs.
 
 - **What runs:** production (`https://agents.sithbit.com`), both hosts' CLI/supervisor/push and
-  oracle-1's integrators run **`c05a052`** (rollout task `0b9c367a`, Done 2026-11-20 17:53 UTC;
-  release run `44777650029`). Schema 47. Agent pins Claude 2.1.329 / Codex 0.171.0 (they move
+  oracle-1's integrators run **`9a324c5`** (rollout task `84d981cf`, upgraded 2026-11-23
+  15:04–15:21 UTC; release run `45118026796`, full acceptance). Schema 50 (migrations `0048`,
+  `0049`, `0050`). Agent pins Claude 2.1.330 / Codex 0.171.0 (they move
   with the owner's installed versions at each host-setup; do not put old pins back). mxmini has
   Rust 1.100.0 as the agents' default (owner: keep); oracle-1 has 1.98.1. mxmini quiet hours
   22:00–07:00 local, marker `quiet-hours`; oracle-1 has no marker.
-- **Rollback for `c05a052`:** production
-  `/var/lib/agent-coordinator-deployments/claude-0b9c367a-c05a052-20261120/rollback`; each host
-  `/opt/agentc/rollback-cli-c05a052-20261120` and `/opt/agentc/rollback-host-c05a052-20261120`.
+- **Rollback for `9a324c5`:** production
+  `/var/lib/agent-coordinator-deployments/claude-84d981cf-9a324c5-20261123/rollback`; each host
+  `/opt/agentc/rollback-cli-9a324c5-20261123` and `/opt/agentc/rollback-host-9a324c5-20261123`.
+  **Binaries alone are not a rollback:** the old server refuses a database holding `0048`–`0050`,
+  so it is the preserved pre-upgrade snapshot (schema 47, in the production rollback directory)
+  restored together with the old binaries, losing everything recorded after 15:04 UTC on
+  2026-11-23. The `c05a052` rollback directories are still on the hosts.
   On oracle-1 the real pre-rollout CLI is in the `rollback-cli-…` directory; `rollback-host-…`
   holds the release-bundle CLI that `rollout.py` installed just before the native build.
-- **How a rollout is done** (four done this way): human-delivered task; owner or agent (on the
+- **How a rollout is done** (five done this way): human-delivered task; owner or agent (on the
   owner's instruction) dispatches the release run; drain marker `deploy-drain-<task>` on both
   hosts; `start-rollout.sh` (runs `rollout.py` as a production job; the repository's
   `scripts/drain_check.py` runs unmodified), then `oracle-upgrade.sh` and `mxmini-upgrade.sh`
   with sudo; unmodified containment suite (expected oracle-1 113 PASS / 0 FAIL / 1 SKIP, mxmini
-  104 / 0 / 2); clear the markers; publish evidence; submit; subagent review. Scripts to adapt:
-  `~/.local/state/agent-coordinator-evidence/rollout-c05a052/`. oracle-1 builds natively
+  104 / 0 / 2); clear the markers; publish evidence; submit; subagent review. Scripts:
+  render with `~/.local/state/agent-coordinator-evidence/rollout-main-prep/render.py`; the last
+  set is `~/.local/state/agent-coordinator-evidence/rollout-9a324c5/`. **Never create
+  `ROLLOUT-STARTED` by hand** (`rollout.py` creates it exclusively and exits if it exists), and
+  bound any wait on the job by its process as well as its report. `agentc-push` is a binary of
+  the `agentc-integrator` package. mxmini's kill switch is absent inside its 22:00–07:00 claim
+  window and `quiet-hours` outside it; the cron job leaves any other marker alone. oracle-1 builds natively
   (aarch64, `APPARMOR_BWRAP=1 UPDATE_TIMER=0`), mxmini in `target/host-1.98.1/release`. The
   drain check refuses while any other task holds a current attempt.
 - **Review of this session's submissions:** oracle-1's contained reviewer claims within seconds
@@ -117,6 +127,35 @@ on 2026-11-21. This section keeps only what a new session needs.
       duplicate migration number, then put the rollout to the owner (expected schema 47 → 50;
       the dry render below predates `0049`), asking before any production read, release
       dispatch or rollout step. The owner imports the 20 value tasks themselves.
+    - **Enabler state read 2026-11-23 05:22 UTC and rollout of main started** (coordinator CLI
+      session `resume-20261123`; saved in
+      `~/.local/state/agent-coordinator-evidence/resume-20261123/`): **`1ee4e53c` Done**
+      (review approved 2026-11-22 05:36 UTC), on main as `74c5459` and `58785d7` with
+      `0050_task_not_before.sql`. Main `9a324c5` (31 commits past `c05a052`) had all five check
+      runs green; migrations `0048`, `0049`, `0050` once each and no applied migration edited.
+      On the owner's go-ahead: rollout task **`84d981cf`** created (human-delivered) and
+      claimed (attempt `a369ddff`, generation 1), worktree
+      `/home/marshall/src/worktrees/ac-84d981cf-rollout` at `9a324c5` (registered from the
+      clean `ac-0b9c367a-rollout` checkout, because the main checkout's
+      `.claude/decisions-pending.md` is modified), scripts rendered to
+      `~/.local/state/agent-coordinator-evidence/rollout-9a324c5/` (schema 47 → 50), lease
+      renewed by its `renew.sh`. Release run **`45118026796`** dispatched by the agent on the
+      owner's instruction at 05:28 UTC on `9a324c5`, full acceptance: passed; packages and
+      attestations verified; native builds on both hosts.
+    - **Rollout of `9a324c5` done 2026-11-23** (evidence artifact `97e4afe8`, files in
+      `~/.local/state/agent-coordinator-evidence/rollout-9a324c5/`). Drain marker
+      `deploy-drain-84d981cf` on both hosts from 06:48:59 UTC. **The first start (job
+      `d4598a8f`, 06:49 UTC) failed at once and changed nothing:** the session had created
+      `ROLLOUT-STARTED` by hand and `rollout.py`'s exclusive guard exited; the session's wait
+      loop did not notice, so the hosts stayed drained (workers running, claiming nothing)
+      until the owner asked at 15:01 UTC. On the owner's "retry now": job `275acea3` succeeded
+      in 984 s; drain check exit 0 (two parked `recovery_required` rows, not blocking);
+      pre-upgrade backup schema 47, post-upgrade 50, both verified with off-server copies;
+      timers and workers restored. Host upgrades finished 15:20 UTC: oracle-1 113 PASS / 0 FAIL
+      / 1 SKIP, mxmini 104 / 0 / 2, installed binaries equal to the native builds. Markers
+      cleared 15:21–15:22 UTC (oracle-1 absent; mxmini `quiet-hours` from its cron job, it
+      being daytime). **Next:** review and Done of `84d981cf`; the P6 window 3 precondition
+      re-check and `window.draft.json` (see below); the owner imports, schedules and admits.
     - **Rollout scripts prepared 2026-11-22 (owner's pick; local files only):**
       `~/.local/state/agent-coordinator-evidence/rollout-main-prep/` (`README.md` first).
       `render.py --commit … --task … --attempt … --session …` writes the script set for the
