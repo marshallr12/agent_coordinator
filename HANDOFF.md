@@ -164,9 +164,10 @@ on 2026-11-21. This section keeps only what a new session needs.
       requires-human report). **2 still not met as worded:** no audit auto-fix has run under
       the new code; `0706c338` (11-23 00:42–02:39 UTC, url 2.5.9) and `61453d56` ran under the
       old code and read `requires_human: true`, `resolution_kind: automatic`. 6 is for the
-      start day; 7 stays a draft. Put to the owner in the draft: ready = `opened_at` for
-      window 3; accept the two automatic exercises or wait for one under `9a324c5`; start
-      date, the 20 task ids and their `not_before` times. **Next:** the owner imports, schedules and admits `e6685dbf`; pin `window.json` at the start.
+      start day; 7 stays a draft. **Owner decisions 2026-11-23:** the two automatic
+      exercises are accepted, so 2 is met by acceptance; window 3's ready time is the task's
+      `opened_at`. Both are in the draft. Still open: start date, the 20 task ids and their
+      `not_before` times. **Next:** the owner imports, schedules and admits `e6685dbf`; pin `window.json` at the start.
     - **Rollout scripts prepared 2026-11-22 (owner's pick; local files only):**
       `~/.local/state/agent-coordinator-evidence/rollout-main-prep/` (`README.md` first).
       `render.py --commit … --task … --attempt … --session …` writes the script set for the
