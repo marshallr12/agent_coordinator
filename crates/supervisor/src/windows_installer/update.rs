@@ -58,7 +58,7 @@ pub enum Stage {
     Started,
     /// Every service runs and logged its start: the commit point.
     Checked,
-    /// The services that did not run before the update are stopped again.
+    /// Each service runs or is stopped as it was before the update.
     Settled,
     /// The update is being undone; nothing of it is undone yet.
     Reverting,
@@ -425,16 +425,18 @@ fn begin(run: &mut Run, kind: Kind, from: Release, to: Release, retry: bool) -> 
 }
 
 /// Finishes or undoes the record an earlier run left: one that had not
-/// passed its checks is undone, one that had is finished.
+/// passed its checks is undone, one that had is finished. An undo that was
+/// interrupted starts again from its first stage: a power loss may have
+/// stopped every service since, and each stage may be done again.
 pub fn resume(run: &mut Run, record: Record) -> Result<UpdateReport> {
-    let record = if record.stage < Stage::Checked {
-        let reason = format!("an earlier run stopped after {:?}", record.stage);
-        let record = record.revert(reason);
-        save(run, &record)?;
-        record
-    } else {
-        record
+    let record = match record.stage {
+        stage if stage >= Stage::Reverting => record.at(Stage::Reverting),
+        stage if stage < Stage::Checked => {
+            record.revert(format!("an earlier run stopped after {stage:?}"))
+        }
+        _ => record,
     };
+    save(run, &record)?;
     drive(run, record, true)
 }
 
@@ -494,8 +496,9 @@ pub fn advance(run: &mut Run, record: &Record) -> Result<Option<Record>> {
             ..next.at(Stage::Retained)
         }),
         // Nothing was stopped or switched before the installed release was
-        // kept: undoing it only forgets the record.
-        Stage::Reverting if !record.retained => return finish(run, record).map(|()| None),
+        // kept: the undo only starts again what ran before and is stopped
+        // now, as after a power loss.
+        Stage::Reverting if !record.retained => Ok(next.at(Stage::Restored)),
         Stage::Retained | Stage::Reverting => {
             let stage = if record.reverting() {
                 Stage::Halted
@@ -513,7 +516,13 @@ pub fn advance(run: &mut Run, record: &Record) -> Result<Option<Record>> {
         Stage::Measured | Stage::Remeasured => start_all(run, record),
         Stage::Started | Stage::Restarted => check_all(run, record),
         Stage::Checked => settle(run, record).map(|()| next.at(Stage::Settled)),
-        Stage::Settled | Stage::Rechecked => return finish(run, record).map(|()| None),
+        // Settling again first is what a power loss after the settle needs.
+        Stage::Settled => {
+            return settle(run, record)
+                .and_then(|()| finish(run, record))
+                .map(|()| None);
+        }
+        Stage::Rechecked => return finish(run, record).map(|()| None),
     };
     done.map(Some)
 }
@@ -612,7 +621,11 @@ fn started(run: &Run, record: &Record) -> Vec<(Role, String)> {
 fn measure(run: &mut Run, record: &Record) -> Result<Record> {
     let mut offsets = BTreeMap::new();
     for (role, name) in started(run, record) {
-        offsets.insert(name, run.host.length(&run.layout().log(role))?);
+        // A service that still runs is not started again, so it writes no
+        // new start line: it is checked by its state alone.
+        if run.services.state(&name)? != RunState::Running {
+            offsets.insert(name, run.host.length(&run.layout().log(role))?);
+        }
     }
     let stage = if record.reverting() {
         Stage::Remeasured
@@ -641,10 +654,11 @@ fn start_all(run: &mut Run, record: &Record) -> Result<Record> {
 /// Checks that each started service runs and logged its start.
 fn check_all(run: &mut Run, record: &Record) -> Result<Record> {
     for (role, name) in started(run, record) {
-        let offset = *record
-            .offsets
-            .get(&name)
-            .context("no log length was recorded")?;
+        let Some(&offset) = record.offsets.get(&name) else {
+            let state = run.services.state(&name)?;
+            ensure!(state == RunState::Running, "{name} does not run: {state:?}");
+            continue;
+        };
         let layout = run.layout().clone();
         control::check(&*run.host, run.services, &layout, (role, &name), offset)?;
     }
@@ -656,11 +670,18 @@ fn check_all(run: &mut Run, record: &Record) -> Result<Record> {
     Ok(record.clone().at(stage))
 }
 
-/// Stops again the services that did not run before the update.
+/// Returns each service to how it was before the update: those that did
+/// not run are stopped again, and those that did are started if they no
+/// longer run, as after a power loss that came once the checks had passed.
 fn settle(run: &mut Run, record: &Record) -> Result<()> {
     for (_, name) in run.layout().named(&STOP_ORDER) {
         if !record.running_before.contains(&name) {
             control::stop(run.services, &name)?;
+        }
+    }
+    for (_, name) in run.layout().named(&Role::ALL) {
+        if record.running_before.contains(&name) {
+            control::start(run.services, &name)?;
         }
     }
     Ok(())

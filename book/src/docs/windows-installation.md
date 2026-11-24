@@ -136,7 +136,7 @@ Every service has the same registration besides its name and role:
 | Start | On demand, or automatic with `--start auto` |
 | Recovery | Restart after 60 s, twice, then nothing; the count resets after a day. No failure program |
 | Preshutdown time limit | 120 s |
-| Required privileges | `SeChangeNotifyPrivilege`, `SeImpersonatePrivilege`. Windows documents that it removes every other privilege from the service's token when it starts it; no service the installer registered has been started yet, so this is not yet observed here |
+| Required privileges | `SeChangeNotifyPrivilege`, `SeImpersonatePrivilege`. Windows documents that it removes every other privilege from the service's token when it starts it; the installer's services have been started only by a test that did not read their tokens, so this is not yet observed here |
 
 A service's SID is derived from its name (`sc.exe showsid agentc-runner`
 prints it) and is the same on every machine. Each service is configured with
@@ -315,9 +315,11 @@ until you ask for it again with `--retry`.
 
 If the update is interrupted, by a crash, a kill or a power loss, the next
 `update` or `rollback` finishes it when the checks had passed and otherwise
-undoes it, before doing anything else. The host is never left with one
-release's binary and the other's configuration. `install` and `status`
-refuse while an update is open.
+undoes it, before doing anything else; an undone update whose release had
+already been put in place is recorded as rolled back. Either way the
+services that ran before the update run again, also after a power loss.
+The host is never left with one release's binary and the other's
+configuration. `install` and `status` refuse while an update is open.
 
 `update` prints one JSON report and exits 0 when the new release is
 installed (or was already). Its `outcome` is `updated`, `unchanged`,

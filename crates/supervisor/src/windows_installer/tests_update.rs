@@ -230,8 +230,9 @@ fn killed(
         save(&mut run, &next).unwrap();
         record = next;
     }
-    if acted {
-        let _ = advance(&mut run, &record);
+    // Work done past the last stage finishes the record.
+    if acted && matches!(advance(&mut run, &record), Ok(None)) {
+        return None;
     }
     Some(record.stage)
 }
@@ -254,25 +255,106 @@ fn begun(run: &mut Run) -> Record {
     record
 }
 
+/// A power loss: every service is stopped when the machine comes back.
+fn power_loss(services: &mut FakeServices) {
+    for state in services.states.values_mut() {
+        *state = RunState::Stopped {
+            exit: 0,
+            specific: 0,
+        };
+    }
+}
+
 #[test]
 fn an_update_killed_in_either_window_of_any_stage_ends_old_or_new_never_mixed() {
-    for stages in 0..12 {
-        for acted in [false, true] {
-            let (mut host, mut services) = installed();
-            let before = host.texts[&Layout::default().config()].clone();
-            let at = killed(&mut host, &mut services, stages, acted);
-            // The next run is any `update`: it finishes or undoes the record.
-            let report = run_update(&mut host, &mut services, &request());
-            let new_wins = at.is_none_or(|stage| stage >= Stage::Checked);
-            let case = format!("{stages} stages, acted {acted}, at {at:?}: {report:?}");
-            if new_wins {
-                fully(&host, &services, &new(), &new_config(&before));
-            } else {
-                fully(&host, &services, &old(), &before);
-                let rejected = releases(&host).rejected(&new().sha256);
-                assert_eq!(rejected, at.is_some_and(|s| s >= Stage::Switched), "{case}");
-            }
+    for (stages, acted, lost) in cases(12) {
+        let (mut host, mut services) = installed();
+        let before = host.texts[&Layout::default().config()].clone();
+        let at = killed(&mut host, &mut services, stages, acted);
+        // A power loss after a finished update only stops the services, as
+        // any restart does; it matters while a record is open.
+        if lost && at.is_some() {
+            power_loss(&mut services);
         }
+        // The next run is any `update`: it finishes or undoes the record.
+        let report = run_update(&mut host, &mut services, &request());
+        let new_wins = at.is_none_or(|stage| stage >= Stage::Checked);
+        let case = format!("{stages} stages, acted {acted}, lost {lost}, at {at:?}: {report:?}");
+        assert!(report.succeeded() || report.outcome == "reverted", "{case}");
+        if new_wins {
+            fully(&host, &services, &new(), &new_config(&before));
+        } else {
+            fully(&host, &services, &old(), &before);
+            let rejected = releases(&host).rejected(&new().sha256);
+            assert_eq!(rejected, at.is_some_and(|s| s >= Stage::Switched), "{case}");
+        }
+    }
+}
+
+/// Every number of stages below `limit`, with the kill before or after the
+/// next stage's work, and with or without a power loss after it.
+fn cases(limit: usize) -> Vec<(usize, bool, bool)> {
+    let flags = [false, true];
+    (0..limit)
+        .flat_map(|s| {
+            flags
+                .into_iter()
+                .flat_map(move |a| flags.map(move |l| (s, a, l)))
+        })
+        .collect()
+}
+
+/// Runs an update through its start, turns it to undoing itself as a failed
+/// check would, and kills the undo after `stages` saved stages, before or
+/// after the next one's work.
+fn killed_undoing(
+    host: &mut FakeHost,
+    services: &mut FakeServices,
+    stages: usize,
+    acted: bool,
+) -> bool {
+    let desired = model(&new().sha256);
+    let mut run = Run {
+        host,
+        services,
+        desired: &desired,
+        source: SOURCE.into(),
+    };
+    let mut record = begun(&mut run);
+    while record.stage < Stage::Started {
+        record = advance(&mut run, &record).unwrap().unwrap();
+        save(&mut run, &record).unwrap();
+    }
+    record = Record {
+        stage: Stage::Reverting,
+        reason: Some("a check failed".into()),
+        ..record
+    };
+    save(&mut run, &record).unwrap();
+    for _ in 0..stages {
+        let Some(next) = advance(&mut run, &record).unwrap() else {
+            return false;
+        };
+        save(&mut run, &next).unwrap();
+        record = next;
+    }
+    !(acted && matches!(advance(&mut run, &record), Ok(None)))
+}
+
+#[test]
+fn an_undo_killed_in_either_window_of_any_stage_ends_with_the_old_release_running() {
+    for (stages, acted, lost) in cases(8) {
+        let (mut host, mut services) = installed();
+        let before = host.texts[&Layout::default().config()].clone();
+        let open = killed_undoing(&mut host, &mut services, stages, acted);
+        if lost && open {
+            power_loss(&mut services);
+        }
+        let report = run_update(&mut host, &mut services, &request());
+        let case = format!("{stages} undo stages, acted {acted}, lost {lost}: {report:?}");
+        assert!(matches!(report.outcome, "reverted" | "refused"), "{case}");
+        fully(&host, &services, &old(), &before);
+        assert!(releases(&host).rejected(&new().sha256), "{case}");
     }
 }
 
