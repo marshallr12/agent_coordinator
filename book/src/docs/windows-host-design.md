@@ -1112,9 +1112,10 @@ of the product's four names in `C:\Program Files\agentc` and
 - The service SID type and each service's own security descriptor are left
   as Windows makes them.
 - The program directory's protected access list is new: the kits left that
-  directory inheriting from `Program Files`. No service has started from it
-  and no launch has run against it, so that the services can read it and
-  that a launch cannot are both expected from the list, not observed.
+  directory inheriting from `Program Files`. At step 7a no service had
+  started from it and no launch had run against it. Step 7c observed both:
+  the four services ran from it, and a stand-in launch was refused (error
+  5) listing it and reading `supervisor.toml`.
 - The directories the acceptance kits staged for their probes (`probe`,
   `probe-drop`, `runner\probe-launches`) are not part of the model.
 - Update, rollback and uninstall are [step 7b](#step-7b-update-rollback-and-uninstall-2026-11-24).
@@ -1360,7 +1361,7 @@ the round was run again.
 | Round | Result |
 | --- | --- |
 | Stop | **Passed**: `... start_result stop_requested terminate exited release cleanup` |
-| Runner stop | **Passed**: `sc.exe stop agentc-runner` refused with 1051, both process ids kept, the launch ran to its end and traced `exited release cleanup` |
+| Runner stop | **Passed**: `sc.exe stop agentc-runner` refused with 1051, the runner and the supervisor kept their process ids, the launch ran to its end and traced `exited release cleanup` |
 | Supervisor crash | **Passed**: Windows restarted the supervisor (pid 13840 to 7984); `recover:may_be_running` every 10 s while the fixture ran, then `release` and `cleanup`, and the next item was claimed only after the release |
 | Runner crash | **Passed**: Windows restarted the runner (pid 10140 to 1808); the supervisor traced `gone release cleanup` (`removed: nothing`, the restarted runner had reclaimed the directories) |
 | Child crash | **Passed**: `exited release cleanup` |
@@ -1403,10 +1404,11 @@ automatically through `install --start auto`, and a launch was started at
 asked the launch to stop at 20:42:09 and ended it at 20:42:39, the runner
 logged `stopped: every launch is confirmed ended`, and Windows shut down at
 20:42:58, 56 s after the restart began. Windows booted at 20:43:06. The
-owner signed in at 20:43:27, 21 s after boot, from the sign-in screen: the
-event has the same shape as the owner's sign-ins earlier in the run (type
-11, `User32` by `svchost.exe`, the same Winlogon events), auto-logon is not
-set, and automatic restart sign-on stayed off. Egress, publication and the
+owner signed in at 20:43:27, 21 s after boot, and confirmed having signed in
+by hand before the three minutes were up. Automatic restart sign-on read
+back as off before and after the restart and auto-logon is not set; as the
+fourth phase 4c run found, the event itself (type 11, `User32` by
+`svchost.exe`) does not tell a hand sign-in from an automatic one. Egress, publication and the
 runner had started at 20:43:24, before it; the supervisor started at
 20:43:40, after it, 0.4 s after the runner reported `running` at the end of
 its start-up reclaim (`start-up: 1 reclaimed`): the supervisor depends on
