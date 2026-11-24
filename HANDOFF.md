@@ -183,6 +183,24 @@ on 2026-11-21. This section keeps only what a new session needs.
       `not_before` on a human-origin task** (`coordination.rs`), so the owner schedules in the
       dashboard; this CLI's principal `250802da` holds the task-definition grant `c9c6152f`,
       so an agent can fill descriptions, criteria and kind after the import.
+    - **20 value tasks imported and defined 2026-11-24.** The agent ran the dashboard
+      Markdown import in the owner's browser session at the owner's request (preview
+      `1dc3cde2`, no conflicts; source identity `p6-window3-workload`, revision `1f4ecdc`):
+      20 tasks, **human-origin, planned**. Specs drafted by four read-only subagents against
+      main `1f4ecdc`, then applied by CLI edit (session `resume-20261123`), all at revision 2,
+      kind `code`, still planned, `not_before` empty; `efcb9884` (#4) depends on `3cdcd658`
+      (#3). Files in `p6-window3-prep/`: `imported-ids.json`, `task-drafts-20261124.json`,
+      `TASK-DRAFTS.md`, `edits/` (inputs and outputs), `SCHEDULE-PROPOSAL.md` and
+      `schedule.json` (ids filled in). **Owner decisions 2026-11-24:** #19 as drafted (no
+      human takeover of a designated review; a closed named session becomes human-required;
+      review subagent under the submitter's credential allowed); #10 fixes the message only,
+      no automatic admission at rollover; #13 flaky expiry 14 days; #17 warns only. Parked
+      for later, not in the 20: aligning `decisions_ready` (raw revision pins) with decision
+      status (judged-field digests) — a priority edit or scheduled opening can block a task
+      with a decision. Integrate #2, #16, #22 one at a time (same Autonomy view code).
+      **Next:** the owner sets the 20 `not_before` times (`schedule.json`); on 11-30 the
+      start-day checks, pin `window.json`, admit `e6685dbf` before 14:00 UTC. Do not open
+      the 20 by hand.
     - **Rollout scripts prepared 2026-11-22 (owner's pick; local files only):**
       `~/.local/state/agent-coordinator-evidence/rollout-main-prep/` (`README.md` first).
       `render.py --commit … --task … --attempt … --session …` writes the script set for the
