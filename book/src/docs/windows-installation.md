@@ -11,9 +11,10 @@ and `uninstall` removes the host.
 **What this is not.** No provider harness runs on Windows yet: the installed
 supervisor service claims nothing unless the acceptance stand-in is enabled.
 An installed host is not an admitted host; see
-[what is not supported](#what-is-not-supported). The installer has been
-exercised by its tests only; the owner-attended acceptance run is step 7c of
-the [design](windows-host-design.md#phase-7-steps).
+[what is not supported](#what-is-not-supported). Besides its tests, the
+installer passed one owner-attended acceptance run on MiniAir, with the
+stand-in as the workload; the design records it as
+[step 7c](windows-host-design.md#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24).
 
 ## Prerequisites
 
@@ -136,7 +137,7 @@ Every service has the same registration besides its name and role:
 | Start | On demand, or automatic with `--start auto` |
 | Recovery | Restart after 60 s, twice, then nothing; the count resets after a day. No failure program |
 | Preshutdown time limit | 120 s |
-| Required privileges | `SeChangeNotifyPrivilege`, `SeImpersonatePrivilege`. Windows documents that it removes every other privilege from the service's token when it starts it; the installer's services have been started only by a test that did not read their tokens, so this is not yet observed here |
+| Required privileges | `SeChangeNotifyPrivilege`, `SeImpersonatePrivilege`. Windows documents that it removes every other privilege from the service's token when it starts it; in the [step 7c run](windows-host-design.md#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24) each running service's token held exactly these two |
 
 A service's SID is derived from its name (`sc.exe showsid agentc-runner`
 prints it) and is the same on every machine. Each service is configured with

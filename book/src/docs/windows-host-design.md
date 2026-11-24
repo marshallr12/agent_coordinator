@@ -918,9 +918,9 @@ Phase 7 turns what the owner did by hand in the runs of tasks `ec6d901c`,
 
 | Step | Content | Task | State |
 | --- | --- | --- | --- |
-| 7a | The installer core: a desired-state model, `windows-host install` and `windows-host status` | `ddeb5d76` | Implemented; see below. Its services were first started by step 7b's gated test; none has been inventoried running |
+| 7a | The installer core: a desired-state model, `windows-host install` and `windows-host status` | `ddeb5d76` | Implemented; see below. Its services were first started by step 7b's gated test; step 7c inventoried the four installed services' tokens running |
 | 7b | `windows-host update`, `rollback` and `uninstall`, each stage journaled before it is acted on | `2064cf54` | Implemented; see [step 7b](#step-7b-update-rollback-and-uninstall-2026-11-24). Driven natively with a runner in the test process, and once against four registered throwaway services that Windows started, with the owner's consent |
-| 7c | Owner-attended installer acceptance on MiniAir, using only the `windows-host` subcommands, with the stand-in as the workload and the phase 4c lifecycle rounds | `012ff9f2` | Not started |
+| 7c | Owner-attended installer acceptance on MiniAir, using only the `windows-host` subcommands, with the stand-in as the workload and the phase 4c lifecycle rounds | `012ff9f2` | Run on 2026-11-24; see [step 7c](#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24). Install, drift repair, the stand-in launch through both brokers with a candidate push, every lifecycle round asked for (logoff and reboot on their second attempts), the three updates and the uninstall **passed**; the machine was left as the run found it |
 | 7d | The host acceptance gap report against the [parity map](#linux-p2-parity-and-acceptance-map) and the phase 8 plan | `748f6c3a` | Not started |
 
 The operator's view of the installer is the
@@ -1083,15 +1083,18 @@ The services carried a random prefix (`agentc-t` and ten hex digits) and
 lived under a temporary directory, so this is the installer on the real
 Service Control Manager and file system of MiniAir but not an installation
 of the product's four names in `C:\Program Files\agentc` and
-`C:\ProgramData\agentc`. That is step 7c's.
+`C:\ProgramData\agentc`. Step 7c installed those; see
+[step 7c](#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24).
 
 **What 7a leaves unverified:**
 
 - At step 7a no service the installer registered had been started (step 7b's
   gated test later started four throwaway ones without reading their
   tokens). The effect of the
-  required-privileges list on a service's token is therefore not observed:
-  Windows applies it when it starts the service. That is step 7c's.
+  required-privileges list on a service's token was therefore not observed
+  here: Windows applies it when it starts the service. Step 7c observed it:
+  each of the four running services' tokens held exactly
+  `SeChangeNotifyPrivilege` and `SeImpersonatePrivilege`.
 - `SeImpersonatePrivilege` stays in the list because every service
   identifies its pipe client by impersonating it. Whether impersonation at
   identification level, which needs no privilege, would be enough was not
@@ -1247,17 +1250,21 @@ is therefore not yet observed.
   service under the Service Control Manager: the drained launch is reclaimed
   by a service's next start because the old runner process is gone, which a
   runner in the test process cannot show. The gated run started the real
-  services but with no launch in flight; a drain of a real launch under the
-  services is step 7c's.
+  services but with no launch in flight. Step 7c drained a real launch
+  under the installed services during an update, and after a reboot the
+  restarted runner reclaimed the launch the shutdown had drained.
 - An update keeps the services' registrations as they are. A release whose
   model registers a service differently needs `install` after the update.
 - A kill or power loss is shown against the host in memory, not against
-  the machine.
+  the machine. Step 7c killed one update on the machine, at `retained`,
+  and the next run undid it; no power loss was run.
 - The health check is the start line and 5 s of running; a release that
   fails later is not caught by the update. `rollback` is the owner's answer.
-- Deleting a service profile Windows has unloaded is not yet observed: in
+- Deleting a service profile Windows has unloaded was not observed in 7b: in
   the gated run all four stayed loaded until a restart, and
-  `DeleteProfileW` has not yet succeeded on this machine.
+  `DeleteProfileW` had not yet succeeded on this machine. In step 7c it
+  did: after a restart the second `uninstall` removed the four product
+  service profiles.
 - That the launches' AppContainer profiles go with the runner's service
   profile follows from `CreateAppContainerProfile` acting on the caller's
   store; it is expected, not observed. The gated run made no launch.
@@ -1266,6 +1273,210 @@ is therefore not yet observed.
   covered by the neutral tests, and were not run against registered
   services: each such run leaves four more service profiles until a
   restart.
+
+Step 7c below ran the installer on the machine and answers several of these.
+
+#### Step 7c: owner-attended installer acceptance on MiniAir (2026-11-24)
+
+Task `012ff9f2-50f2-42e9-94bf-1d19d3f4f689`, on MiniAir (Windows 11 Pro
+10.0.26300). `agentc-supervisor.exe` was built in release mode (rustc
+1.99.1) from a clean checkout of `main` at
+`1f4ecdc05aa17a014a09966b9081d3f37af51c20`, step 7b's result; this build,
+build1, has SHA-256
+`e7dcfed54ab6006c4be554464e6df53f0c89754a6b843b0b49f6dddffa9ac0d9`. The
+updates used three more builds. Build2
+(`91a775834586af2135bf548aa9c2d3819d1b85816e9e491eddcce3ffd29b6432`) and
+build4 (`a4b619fb34bd41632c65841dc302183c2df6c301755dc54e0b9a5d7fe35ac64d`)
+are build1 with a different trailer appended, so another SHA-256 and the
+same commit. Build3
+(`8e0d1e0817c59963bfa8703cd189cf589add722a458c1375c7a269d1c82691fb`) is a
+throwaway commit `ad6bda8` on `1f4ecdc`, never on `main`, whose egress
+broker stops 1 s after logging its start line. The stand-in's workload was
+the probe fixture from the same commit
+(`a8cbd1eb059d5409b1d495e18235a0ad8e6505036add02df10d03f3023400950`).
+Before the install the machine had no `agentc` service, tree, service
+profile or AppContainer profile (`baseline-before.json`).
+
+The evidence is coordinator artifact
+`e0a00dc6-81a6-46e8-928a-bcbe0efe9022`, pinned, SHA-256
+`2cd37bea163548790662f2b609be6f3a9ed947fe8b1c651be0abe2e0def01a89`: one zip
+of every step's log with each command, its output and its exit code, the
+installer's JSON reports, the service logs, ledger, heartbeat, installer
+journal and release records collected after each round, the System and
+Service Control Manager events, the sign-in facts of the logoff and reboot
+rounds, the before and after baselines, the manifest with the commit and
+hashes, and the scripts. It was packed by registered job
+`55d9b647-c8c8-4fc3-ab15-3c388a082f5a` from a copy of the kit in which the
+owner's account name is replaced with `OWNER`; its `SANITIZED.txt` lists the
+four files that changed. All times are UTC; the run was in the afternoon of
+2026-11-24 local time.
+
+Who ran what: only the `windows-host` subcommands registered, changed or
+removed anything of the host. The kit used `sc.exe` to start, stop, query
+and, in the drift step, misconfigure the services, and `icacls` to read
+access lists and make one drift. The agent ran the kit's scripts from the
+owner's elevated Claude Code session, each step that registered, started,
+stopped or deleted services, used the push key, signed out, restarted or
+deleted a remote ref only after the owner's go-ahead; from 20:59 the owner
+let the agent run the kit's scripts without asking. The owner signed out
+and restarted, and ran the second halves of the logoff and reboot rounds
+and the second uninstall pass from one-line launchers in the Downloads
+folder that run the kit's scripts in place (`launchers/` in the artifact).
+
+**Install, drift and start (criterion 1), 19:16 to 19:19: passed.**
+`install` with the push App's key applied 32 changes and registered the four
+services stopped; a second `install` applied nothing, and `status` exited 0.
+The key's access list is the system and administrators with full control
+and `agentc-publication` with read, and no evidence file holds the key's
+bytes. An owner entry the installer does not manage (`[run] poll_seconds`)
+was added by hand, and `status` did not report it. Then three drifts were
+made by hand: the runner's start type with `sc.exe config`, Everyone granted
+read on `egress\` with `icacls`, and the remote edited in the
+configuration. `status` exited 1 and named exactly `set_start_type`,
+`set_access_list` and `write_config`; `install` applied exactly those three
+and kept the owner's entry; `status` exited 0 again. The four services were
+then started through the Service Control Manager. Every service's token
+held exactly `SeChangeNotifyPrivilege` and `SeImpersonatePrivilege`, which
+step 7a could not observe, and `status` exited 0 with them running.
+
+**Stand-in launch (criterion 2), 19:19: passed.** The installed supervisor
+had the installed runner make one launch, as the runner's SID in a less
+privileged AppContainer, which read its controls and was refused (error 5)
+the push key and its directory, the publication broker's state and work
+directories, the program directory and `supervisor.toml`. The egress broker
+answered `200` for the allowed host and `403` for a refused one. The
+publication broker pushed the launch's candidate, commit `85b1537`, to
+`refs/agent-coordinator/candidates/c7-standin-141921/f69915b3-a2b2-47ea-aa99-e6bdd92e5d15`
+on the real remote with a per-push App token and logged the token
+`revoked`; the launch was then refused its own repository, which the broker
+removed once the launch closed. The supervisor answered `current` for the
+launch three times; the judge found no problem and nothing was left.
+
+**Rounds that need no session change, 19:41 to 19:55: passed.** The first
+stop round was a kit error: the fixture got no seconds argument and exited
+with code 2 before the stop. It is kept as `stop-attempt1-kit-error` and
+the round was run again.
+
+| Round | Result |
+| --- | --- |
+| Stop | **Passed**: `... start_result stop_requested terminate exited release cleanup` |
+| Runner stop | **Passed**: `sc.exe stop agentc-runner` refused with 1051, both process ids kept, the launch ran to its end and traced `exited release cleanup` |
+| Supervisor crash | **Passed**: Windows restarted the supervisor (pid 13840 to 7984); `recover:may_be_running` every 10 s while the fixture ran, then `release` and `cleanup`, and the next item was claimed only after the release |
+| Runner crash | **Passed**: Windows restarted the runner (pid 10140 to 1808); the supervisor traced `gone release cleanup` (`removed: nothing`, the restarted runner had reclaimed the directories) |
+| Child crash | **Passed**: `exited release cleanup` |
+
+After every round the judge found no problem, and no fixture process,
+launch directory or launch profile was left.
+
+**Updates (criterion 3), 19:55 to 19:59: each ended as step 7b says.**
+
+| Update | Result |
+| --- | --- |
+| To build2 during a 180 s launch | Exit 0, `updated`. The supervisor was stopped first and drained the launch (`stop_requested terminate exited release cleanup`); all four services came back on build2, with build1 kept as the previous release |
+| To build3, whose egress broker stops after its start line | Exit 1, `reverted`, reason `agentc-egress logged its start and then stopped`. Build2 back in place with all four running and no record open; build3 recorded as rolled back, and a second update to it refused without `--retry` |
+| To build4, the update process killed once its record said `retained` and the supervisor was stopping | The record stayed open and `status` refused. The next `update` from build4 undid it: exit 1, `reverted`, `resumed: true`, reason `an earlier run stopped after Retained`; build2 in place with all four running; build4 not recorded as rolled back, since it was never put in place. The launch in flight was drained and released |
+
+The journal, the service logs and the ledger of each are in the artifact.
+The host stayed on build2 for the rest of the run.
+
+**Logoff, first attempt, 20:03 to 20:20: not a pass.** A 900 s launch was
+started at 20:03:39. The owner signed out at 20:06:40 and signed in again
+at 20:20:36, but the second half did not run before the launch ended. The
+ledger shows the launch renewing every 60 s while no one was signed in,
+then `exited` with code 0 at 20:18:39, its own end, `release` and
+`cleanup`; the four services kept their process ids. That shows the logoff
+disturbed nothing, but not the launch alive after the sign-in nor the stop
+that ends it, so the round was run again (`logoff-attempt1-*`, with a
+note).
+
+**Logoff, second attempt, 20:33 to 20:38: passed.** A launch was started at
+20:33:10. The owner signed out at 20:33:51 and in again at 20:36:03. At
+20:37:20 the four services had the same process ids and the fixture was
+still running, having renewed through the sign-out; an ordinary supervisor
+stop then traced `stop_requested terminate exited release cleanup`. The
+judge found no problem and nothing was left.
+
+**Reboot, first attempt, 20:41 to 20:45: not a pass.** Automatic restart
+sign-on was off (owner opt-out 1), the four services were set to start
+automatically through `install --start auto`, and a launch was started at
+20:41:20. The owner restarted from the Start menu at 20:42:02. Preshutdown
+asked the launch to stop at 20:42:09 and ended it at 20:42:39, the runner
+logged `stopped: every launch is confirmed ended`, and Windows shut down at
+20:42:58, 56 s after the restart began. Windows booted at 20:43:06. The
+owner signed in at 20:43:27, 21 s after boot, from the sign-in screen: the
+event has the same shape as the owner's sign-ins earlier in the run (type
+11, `User32` by `svchost.exe`, the same Winlogon events), auto-logon is not
+set, and automatic restart sign-on stayed off. Egress, publication and the
+runner had started at 20:43:24, before it; the supervisor started at
+20:43:40, after it, 0.4 s after the runner reported `running` at the end of
+its start-up reclaim (`start-up: 1 reclaimed`): the supervisor depends on
+the runner. So its start most likely followed the runner and not the
+sign-in, but the round cannot show it. The rest held: `recover:ended release
+cleanup` (`removed: nothing`), the item asked to start once, nothing left.
+The round was run again (`reboot-attempt1-*`, with a note).
+
+**Reboot, second attempt, 20:50 to 20:57: passed.** Automatic restart
+sign-on read back as off, the services were set to start automatically and
+a launch was started at 20:50:58. The owner restarted at 20:52:04.
+Preshutdown asked the launch to stop at 20:52:11 and ended it at the 30 s
+drain deadline at 20:52:41, and Windows shut down at 20:52:59, 56 s after
+the restart began and within the 120 000 ms limit. Windows booted at
+20:53:09. Egress, publication and the runner started at 20:53:27 and the
+supervisor at 20:53:34, when it traced `recover:ended release cleanup`
+(`removed: nothing`). The owner waited at the sign-in screen and signed in
+at 20:56:34, 205 s after boot, the first interactive sign-in since boot, so
+all four services ran and settled the launch before anyone signed in. The
+item was asked to start once, the fixture was gone, the judge found no
+problem and nothing was left; `install --start demand` set the services
+back to demand start.
+
+**Uninstall (criterion 4), 21:00 and 21:03: passed after one restart.** The
+first `uninstall`, from build1 outside the program directory, deleted the
+four services and both trees, left nothing it could not remove, found no
+launch profile, and exited 1 with the four service accounts' profiles
+pending, all still loaded. Its report notes that the push App's key stays
+registered with the App until the owner deletes it there. After the owner
+restarted (booted 21:02:22) a second `uninstall` removed the four profiles,
+which Windows had unloaded, and exited 0 with nothing pending or left.
+`sc.exe query` reports each service as not existing (1060), and no profile
+or `C:\Windows\ServiceProfiles\agentc-*` folder remains. With the owner's
+consent the kit then deleted the stand-in's candidate ref from the remote,
+with a lease on `85b1537`; `ls-remote` returns nothing for it. The kit
+removed its staging directory, and the after baseline equals the before
+one in every field: no service, tree, staging directory, service, user or
+launch profile, the same `.wslconfig`, no machine `wsl.conf`, and the same
+WSL distribution list. The owner decided to keep the key registered with
+the push App for later Windows host runs.
+
+| Item | Result |
+| --- | --- |
+| A second `install` changes nothing; drift in a service setting, an access list and a configuration entry is reported by `status` and repaired by `install` | **Demonstrated** |
+| The required-privileges list on each running service's token | **Demonstrated**: exactly `SeChangeNotifyPrivilege` and `SeImpersonatePrivilege` on all four |
+| A stand-in launch of the installed services admitted by both installed brokers, its candidate pushed with a per-push token that was then revoked | **Demonstrated** |
+| Rounds: stop, runner stop, supervisor crash, runner crash, child crash | **Passed** |
+| Round: logoff | **Passed** on the second attempt; the first missed its second half |
+| Round: reboot without logon, services set to start automatically | **Passed** on the second attempt; in the first the owner signed in 21 s after boot, before the supervisor started |
+| Preshutdown drains within the limit | **Demonstrated** twice: asked to stop 7 s after the restart began, ended at the 30 s drain deadline, Windows down 56 s after the restart began |
+| Update during a launch, update forced to fail its check, update killed part-way | **Each as step 7b says** |
+| Uninstall: services and trees removed; loaded service profiles pending and removed after a restart; WSL unchanged | **Demonstrated** |
+| The candidate ref removed | **Demonstrated**, by the kit with the owner's consent |
+| Round: power loss | **Not run**: criterion 2 does not ask for it |
+
+**What 7c leaves unverified:**
+
+- The stand-in is the only workload: no coordinator loop and no provider
+  harness ran. The host is installed and its installer accepted, not
+  admitted; admission is phase 8's, and step 7d writes the gap report.
+- No launch profile was left for `uninstall` to remove: the runner removed
+  each launch's profile when the launch closed. That a profile a runner
+  left behind goes with the runner's service profile is still expected,
+  not observed.
+- An update was killed on the machine once, at `retained`; the other stages
+  and a power loss during an update or its undo are shown against the host
+  in memory only.
+- The first reboot attempt cannot say whether the supervisor would have
+  started without the sign-in; the second shows that all four do.
+- MiniAir, on Windows 11 Pro 10.0.26300, is the only machine.
 
 ## Local broker contracts
 
@@ -3313,7 +3524,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Steps 5a to 5f done**; the phase is complete when task `9cf04a5c`'s review and integration are. It first **closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim) and step 5e (the readiness check and the fixture checks), whose native tests pass. In step 5f, an owner-attended run [inside a contained reviewer launch](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17) sent a Bash command from native Claude Code 2.1.326 in the recorded form through the prefix and the shim into the candidate. The capability record now admits only that build. No Windows driver calls the record, so no product Claude launch runs on Windows. The [items still open](#phase-5-steps) include the process a job still counts after the shell ends |
 | 6 | Egress and publication brokers | Phase 3 | Steps 6a, 6b and 6c implemented (task `13ae81c1`); step 6d implemented and run by the owner on MiniAir on 2026-11-20 (task `daa42f71`): both brokers served a launch as services under their own virtual accounts, and publication pushed to the real remote with a per-push token. Task `f71179f5` followed on 2026-11-22: the installed supervisor and runner services made a stand-in launch that both installed brokers admitted, launches made by the installed runner were refused the push key and the publication broker's directories, and a closed launch's repository is removed ([follow-up](#step-6d-follow-up-the-services-own-launches-2026-11-22)). No harness has used either broker; see [phase 6 steps](#phase-6-steps) |
-| 7 | Idempotent installer, update/rollback/uninstall, then a host acceptance gap report; the real coordinator loop, a harness driver, WFP, resource caps and quiet hours are a later phase 8 (owner decision of 2026-11-23) | Phases 4 to 6 | Step 7a implemented (task `ddeb5d76`): `agentc-supervisor windows-host install` and `status`, a desired-state model with a platform-neutral plan, and a Windows backend over the Service Control Manager. **Nothing is machine-accepted.** Step 7b implemented (task `2064cf54`): `update`, `rollback` and `uninstall`, each stage journaled, driven natively with the runner in the test process and once against four throwaway services Windows started. Steps 7c (owner-attended acceptance) and 7d (gap report) are not started; see [phase 7 steps](#phase-7-steps) |
+| 7 | Idempotent installer, update/rollback/uninstall, then a host acceptance gap report; the real coordinator loop, a harness driver, WFP, resource caps and quiet hours are a later phase 8 (owner decision of 2026-11-23) | Phases 4 to 6 | Step 7a implemented (task `ddeb5d76`): `agentc-supervisor windows-host install` and `status`, a desired-state model with a platform-neutral plan, and a Windows backend over the Service Control Manager. Step 7b implemented (task `2064cf54`): `update`, `rollback` and `uninstall`, each stage journaled, driven natively with the runner in the test process and once against four throwaway services Windows started. Step 7c (task `012ff9f2`) ran the owner-attended installer acceptance on MiniAir on 2026-11-24 from `1f4ecdc`: install and drift repair, a stand-in launch through both installed brokers with a candidate push, the stop, runner-stop, crash, logoff and reboot-without-logon rounds, the three updates and the uninstall **passed**, and the machine was left as the run found it; see [step 7c](#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24). **No Windows host is admitted**: no coordinator loop or provider harness ran. Step 7d (gap report) is not started; see [phase 7 steps](#phase-7-steps) |
 
 No intermediate phase is production acceptance. Independent review and guarded
 integration complete each task; only the final acceptance can admit a host.

@@ -216,9 +216,8 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   owns is refused before anything changes, and every change is journaled.
   The [design](windows-host-design.md#phase-7-steps) records it and the
   [Windows host installation](windows-installation.md) chapter is the
-  operator's view. **No Windows host is accepted, and no provider harness
-  runs on Windows.** The owner-attended acceptance and the gap report are
-  steps 7c and 7d.
+  operator's view. **No Windows host is admitted, and no provider harness
+  runs on Windows.** The gap report is step 7d.
 
 - Phase 7 step 7b added `windows-host update`, `rollback` and `uninstall`.
   An update is run by the new release, which must be the SHA-256 and commit
@@ -232,6 +231,18 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   loaded until a restart, and leaves WSL alone. With the owner's consent a
   native test ran all three against four throwaway services that Windows
   started; see [step 7b](windows-host-design.md#step-7b-update-rollback-and-uninstall-2026-11-24).
+
+- Phase 7 step 7c ran the installer's owner-attended acceptance on MiniAir
+  on 2026-11-24, from a release build of `1f4ecdc`, with the acceptance
+  stand-in as the only workload. `install` was idempotent and repaired
+  deliberate drift; the installed services ran a launch that both installed
+  brokers admitted and whose candidate was pushed; the stop, crash, logoff
+  and reboot-without-logon rounds, an update during a launch, a forced
+  failed update and a killed one, and the uninstall (its service profiles
+  after a restart) all ended as designed, and the machine was left as the
+  run found it. This accepts the installer, not a host: no coordinator
+  loop or provider harness ran. See
+  [step 7c](windows-host-design.md#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24).
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
