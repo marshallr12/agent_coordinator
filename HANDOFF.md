@@ -201,6 +201,15 @@ on 2026-11-21. This section keeps only what a new session needs.
       **Next:** the owner sets the 20 `not_before` times (`schedule.json`); on 11-30 the
       start-day checks, pin `window.json`, admit `e6685dbf` before 14:00 UTC. Do not open
       the 20 by hand.
+    - **20 opening times set 2026-11-24 (owner's request, in the owner's browser).** The
+      agent set each task's `not_before` through the dashboard's Edit task dialog in the
+      owner's signed-in session (the service accepts it only from a human on these tasks).
+      CLI read-back: all 20 at revision 3, planned, human-origin, `not_before` equal to
+      `schedule.json` (14:00 / 18:00 UTC each weekday, 11-30 to 12-11), title, description,
+      criteria, priority, kind and `depends_on` unchanged. They open on their own; nothing
+      else to do for them. **Next (2026-11-30):** start-day checks, pin `window.json`, the
+      owner admits `e6685dbf` before 14:00 UTC. Next-session prompt saved as
+      `~/Downloads/2026-11-30_agent-coordinator-prompt.txt`.
     - **Rollout scripts prepared 2026-11-22 (owner's pick; local files only):**
       `~/.local/state/agent-coordinator-evidence/rollout-main-prep/` (`README.md` first).
       `render.py --commit … --task … --attempt … --session …` writes the script set for the
