@@ -8,6 +8,7 @@ use super::journal::Journal;
 use super::model::{Desired, Inputs, Layout, Overrides, RecoveryAction, StartType};
 use super::observed::{KeySource, PathState};
 use super::plan::{Action, Change, plan};
+use super::release::Releases;
 
 /// A user who is none of the system, administrators or a service.
 const SOMEONE: &str = "S-1-5-21-1-2-3-1001";
@@ -89,12 +90,13 @@ fn a_clean_host_gets_the_whole_plan_in_order() {
             }
         );
     }
-    let files = &planned[directories..directories + 4];
+    let files = &planned[directories..directories + 5];
     assert_eq!(files[0], Action::InstallBinary);
     assert_eq!(files[1], Action::WriteManifest);
-    assert!(matches!(files[2], Action::WriteConfig { .. }));
-    assert_eq!(files[3], Action::InstallKey);
-    let services = &planned[directories + 4..];
+    assert_eq!(files[2], Action::RecordRelease);
+    assert!(matches!(files[3], Action::WriteConfig { .. }));
+    assert_eq!(files[4], Action::InstallKey);
+    let services = &planned[directories + 5..];
     assert_eq!(services.len(), 16, "{services:?}");
     for (spec, four) in desired.services.iter().zip(services.chunks(4)) {
         let service = spec.name.clone();
@@ -642,18 +644,54 @@ fn a_configuration_that_does_not_load_is_left_alone() {
 }
 
 #[test]
-fn a_different_binary_is_not_put_under_running_services() {
+fn another_release_is_never_installed_over_the_installed_one() {
     let desired = desired();
     let mut host = installed(&desired);
-    host.binary = Some("cd".repeat(32));
-    assert_eq!(
-        actions(&host, &desired),
-        [Action::InstallBinary],
-        "all stopped: replaced"
+    host.digests
+        .insert(desired.layout.binary(), "cd".repeat(32));
+    let said = refused(host.clone(), &desired);
+    assert!(
+        said[0].contains("is `windows-host update`"),
+        "all stopped: {said:?}"
     );
     host.services.get_mut("agentc-runner").unwrap().process = Some(41);
     let said = refused(host, &desired);
-    assert!(said[0].contains("agentc-runner run from it"), "{said:?}");
+    assert!(
+        said[0].contains("is `windows-host update`"),
+        "running: {said:?}"
+    );
+}
+
+#[test]
+fn install_records_its_release_and_keeps_what_the_record_says_of_others() {
+    let desired = desired();
+    let mut host = installed(&desired);
+    let path = desired.layout.releases();
+    let recorded = Releases::parse(&host.texts[&path]).unwrap();
+    assert_eq!(recorded.current, Some(desired.release()));
+    let mut earlier = recorded.clone();
+    earlier.current = None;
+    earlier.rejected = vec!["ab".repeat(32)];
+    host.texts.insert(path.clone(), earlier.text().unwrap());
+    assert_eq!(actions(&host, &desired), [Action::RecordRelease]);
+    let dir = tempfile::tempdir().unwrap();
+    install(&mut host, &desired, &mut journal(&dir)).unwrap();
+    let again = Releases::parse(&host.texts[&path]).unwrap();
+    let kept = (again.current, again.rejected);
+    assert_eq!(kept, (Some(desired.release()), earlier.rejected));
+}
+
+#[test]
+fn install_and_status_refuse_while_an_update_is_open() {
+    let desired = desired();
+    let mut host = installed(&desired);
+    host.texts
+        .insert(desired.layout.update_record(), "{}".into());
+    let said = refused(host, &desired);
+    assert!(
+        said.iter().any(|s| s.contains("has not finished")),
+        "{said:?}"
+    );
 }
 
 #[test]

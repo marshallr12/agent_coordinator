@@ -37,6 +37,21 @@ pub struct ServiceState {
     pub process: Option<u32>,
 }
 
+/// The user profile Windows keeps for a service's virtual account once the
+/// service has run: its directory under `C:\Windows\ServiceProfiles\` and
+/// its hive. An AppContainer profile a launch made lives in it, because
+/// the runner made it for its own account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileState {
+    /// Windows has no profile for the account.
+    Absent,
+    /// The profile exists and its hive is not loaded: it can be deleted.
+    Unloaded,
+    /// The hive is loaded, as Windows keeps it after the service stopped,
+    /// often until a restart; it cannot be deleted yet.
+    Loaded,
+}
+
 /// This run's key file, as far as the installer could tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeySource {
@@ -69,6 +84,10 @@ pub struct Observed {
     pub config: Option<String>,
     /// The manifest's text, when there is one.
     pub manifest: Option<String>,
+    /// The release record's text, when there is one.
+    pub releases: Option<String>,
+    /// Whether an update or rollback has not finished.
+    pub update_open: bool,
     /// This run's key file.
     pub key_source: KeySource,
 }
@@ -83,6 +102,8 @@ impl Observed {
             binary_sha256: None,
             config: None,
             manifest: None,
+            releases: None,
+            update_open: false,
             key_source: KeySource::NotGiven,
         }
     }

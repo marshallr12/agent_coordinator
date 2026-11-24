@@ -545,7 +545,7 @@ fn install_registers_the_host_once_and_repairs_only_what_drifts() {
     assert_eq!(first.code, 0, "{}\n{}", first.errors, first.report);
     assert_eq!(
         actions(&first.report["applied"]).len(),
-        31,
+        32,
         "{}",
         first.report
     );

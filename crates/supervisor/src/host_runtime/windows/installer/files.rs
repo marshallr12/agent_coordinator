@@ -77,19 +77,157 @@ fn discard(path: &str) -> Result<()> {
     }
 }
 
-/// Writes `text` as the file at `path`, whole or not at all.
+/// Flushes the file at `path` to disk, so a rename that follows never puts
+/// a file in place whose bytes a power loss could take back.
+fn sync(path: &str) -> Result<()> {
+    let file = std::fs::OpenOptions::new().write(true).open(path);
+    let file = file.with_context(|| format!("open {path} to flush it"))?;
+    file.sync_all().with_context(|| format!("flush {path}"))
+}
+
+/// Puts the synced file `staged` in place at `path`.
+fn put_in_place(staged: &str, path: &str) -> Result<()> {
+    sync(staged)?;
+    std::fs::rename(staged, path).with_context(|| format!("put {path} in place"))
+}
+
+/// Writes `text` as the file at `path`, synced and whole or not at all.
 pub fn write_text(path: &str, text: &str) -> Result<()> {
     let staged = staged(path);
     std::fs::write(&staged, text).with_context(|| format!("write {staged}"))?;
-    std::fs::rename(&staged, path).with_context(|| format!("put {path} in place"))
+    put_in_place(&staged, path)
 }
 
-/// Copies the binary at `source` to `path`, whole or not at all.
+/// Copies the binary at `source` to `path`, synced and whole or not at all.
 pub fn copy_binary(source: &Path, path: &str) -> Result<()> {
     let staged = staged(path);
     let copied = std::fs::copy(source, &staged);
     copied.with_context(|| format!("copy {} to {staged}", source.display()))?;
-    std::fs::rename(&staged, path).with_context(|| format!("put {path} in place"))
+    put_in_place(&staged, path)
+}
+
+/// Copies the plain file `from` to `to`, synced and whole or not at all
+/// (phase 7, step 7b). A link at either end is refused.
+pub fn copy_file(from: &str, to: &str) -> Result<()> {
+    plain(from, u64::MAX)?.with_context(|| format!("{from} does not exist"))?;
+    plain(to, u64::MAX)?;
+    copy_binary(Path::new(from), to)
+}
+
+/// Makes a plain directory at `path`, which inherits its parent's access
+/// list. One already there is kept; a link or a file there is refused.
+pub fn make_directory(path: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure!(!is_link(&metadata), "{path} is a link or reparse point");
+            ensure!(metadata.is_dir(), "{path} is not a directory");
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path).with_context(|| format!("make {path}"))
+        }
+        Err(error) => Err(error).with_context(|| format!("inspect {path}")),
+    }
+}
+
+/// The names of what is directly in the directory at `path`; none when
+/// nothing is there. A link is refused rather than listed through.
+pub fn entries(path: &str) -> Result<Vec<String>> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("inspect {path}")),
+        Ok(metadata) => ensure!(!is_link(&metadata), "{path} is a link or reparse point"),
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(path).with_context(|| format!("list {path}"))? {
+        let entry = entry.with_context(|| format!("list {path}"))?;
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// How many bytes the plain file at `path` holds; 0 when there is none.
+pub fn length(path: &str) -> Result<u64> {
+    let Some(file) = plain(path, u64::MAX)? else {
+        return Ok(0);
+    };
+    Ok(file
+        .metadata()
+        .with_context(|| format!("inspect {path}"))?
+        .len())
+}
+
+/// The text of the plain file at `path` after its first `offset` bytes;
+/// `None` when there is no such file. A service's log is read while the
+/// service writes it, so the read shares the file.
+pub fn read_after(path: &str, offset: u64) -> Result<Option<String>> {
+    use std::io::{Seek, SeekFrom};
+    let Some(mut file) = plain(path, u64::MAX)? else {
+        return Ok(None);
+    };
+    file.seek(SeekFrom::Start(offset))
+        .with_context(|| format!("read {path}"))?;
+    let mut bytes = Vec::new();
+    file.take(TEXT_LIMIT)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {path}"))?;
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// Removes the tree at `path` and returns each path that could not be
+/// removed, with why. A link or junction anywhere in it is removed itself,
+/// never what it points to. A read-only file loses that attribute first;
+/// no ownership is ever taken, so a file only its owner may delete stays
+/// and is reported.
+pub fn remove_tree(path: &str) -> Result<Vec<String>> {
+    let mut left = Vec::new();
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => left.push(format!("{path}: {error}")),
+        Ok(metadata) => remove_entry(Path::new(path), &metadata, &mut left),
+    }
+    Ok(left)
+}
+
+/// Removes one entry of a tree, below it first when it is a directory.
+fn remove_entry(path: &Path, metadata: &std::fs::Metadata, left: &mut Vec<String>) {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+    let directory = metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if directory && !is_link(metadata) {
+        remove_children(path, left);
+    } else if metadata.permissions().readonly() {
+        let mut writable = metadata.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        let _ = std::fs::set_permissions(path, writable);
+    }
+    // A directory link is removed as a directory, which removes the link.
+    let removed = match directory {
+        true => std::fs::remove_dir(path),
+        false => std::fs::remove_file(path),
+    };
+    if let Err(error) = removed {
+        left.push(format!("{}: {error}", path.display()));
+    }
+}
+
+/// Removes everything in the plain directory at `path`.
+fn remove_children(path: &Path, left: &mut Vec<String>) {
+    let listed = match std::fs::read_dir(path) {
+        Ok(listed) => listed,
+        Err(error) => return left.push(format!("{}: {error}", path.display())),
+    };
+    for entry in listed {
+        let child = entry
+            .map(|e| e.path())
+            .and_then(|p| Ok((p.symlink_metadata()?, p)));
+        match child {
+            Ok((metadata, child)) => remove_entry(&child, &metadata, left),
+            Err(error) => left.push(format!("{}: {error}", path.display())),
+        }
+    }
 }
 
 /// The bytes of the key file at `path`: a plain, non-empty file of at most

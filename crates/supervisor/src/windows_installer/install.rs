@@ -4,7 +4,7 @@
 //! was only checked earlier. [`status`] observes and changes nothing.
 use super::journal::{Journal, Stage};
 use super::model::{Desired, Inputs, Layout, Overrides, ServiceSpec};
-use super::observed::{KeySource, Observed, PathState, ServiceState};
+use super::observed::{KeySource, Observed, PathState, ProfileState, ServiceState};
 use super::plan::{self, Action, Change, Refusal};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -29,6 +29,40 @@ pub trait Host {
     fn privileges(&self, process: u32) -> Result<Vec<String>>;
     /// Makes one change.
     fn apply(&mut self, desired: &Desired, action: &Action) -> Result<()>;
+}
+
+/// What updating and removing a host asks of a machine beyond what
+/// installing asks (phase 7, step 7b).
+pub trait Machine: Host {
+    /// Copies the file `from` to `to`, synced to disk and whole or not at
+    /// all. A link at either is refused.
+    fn copy(&mut self, from: &str, to: &str) -> Result<()>;
+    /// Writes `text` as the file at `path`, synced and whole or not at all.
+    fn write(&mut self, path: &str, text: &str) -> Result<()>;
+    /// Removes the file at `path`; nothing there is no error.
+    fn remove(&mut self, path: &str) -> Result<()>;
+    /// Makes a plain directory at `path` that inherits its parent's access
+    /// list; one already there is kept.
+    fn make_directory(&mut self, path: &str) -> Result<()>;
+    /// The names of what is directly in the directory at `path`; none when
+    /// nothing is there.
+    fn entries(&self, path: &str) -> Result<Vec<String>>;
+    /// How many bytes the file at `path` holds; 0 when there is none.
+    fn length(&self, path: &str) -> Result<u64>;
+    /// The text of the file at `path` after its first `offset` bytes; `None`
+    /// when there is no such file.
+    fn read_after(&self, path: &str, offset: u64) -> Result<Option<String>>;
+    /// Removes the tree at `path` without following any link in it and
+    /// without taking ownership of anything, and returns each path that
+    /// could not be removed with why. Nothing there is no error.
+    fn remove_tree(&mut self, path: &str) -> Result<Vec<String>>;
+    /// Deletes the registered service `name`; one that is not registered,
+    /// or is already marked for deletion, is done.
+    fn delete_service(&mut self, name: &str) -> Result<()>;
+    /// Where the profile of the account with `sid` stands.
+    fn profile(&self, sid: &str) -> Result<ProfileState>;
+    /// Deletes the unloaded profile of the account with `sid`.
+    fn delete_profile(&mut self, sid: &str) -> Result<()>;
 }
 
 /// What one service's token holds, against what it may hold.
@@ -148,6 +182,8 @@ fn observe_files(host: &dyn Host, desired: &Desired, seen: &mut Observed) -> Res
     }
     if open(desired, seen, &layout.installer_dir()) {
         seen.manifest = host.text(&layout.manifest())?;
+        seen.releases = host.text(&layout.releases())?;
+        seen.update_open = host.text(&layout.update_record())?.is_some();
     }
     let Some(key) = &desired.key else {
         return Ok(());
@@ -166,7 +202,10 @@ fn observe_files(host: &dyn Host, desired: &Desired, seen: &mut Observed) -> Res
 /// or why the manifest may not be read. The manifest is read only through
 /// directories the installer may use: never through a link, and never from
 /// a tree someone else owns.
-fn recorded(host: &dyn Host, layout: &Layout) -> Result<Result<Option<Inputs>, Vec<Refusal>>> {
+pub(super) fn recorded(
+    host: &dyn Host,
+    layout: &Layout,
+) -> Result<Result<Option<Inputs>, Vec<Refusal>>> {
     if !host.elevated()? {
         return Ok(Err(vec![Refusal::NotElevated]));
     }
@@ -184,6 +223,11 @@ fn recorded(host: &dyn Host, layout: &Layout) -> Result<Result<Option<Inputs>, V
         .as_deref()
         .map(Inputs::from_manifest)
         .transpose()?))
+}
+
+/// The inputs the manifest records, when it may be read and there is one.
+pub fn recorded_inputs(host: &dyn Host, layout: &Layout) -> Result<Option<Inputs>> {
+    Ok(recorded(host, layout)?.ok().flatten())
 }
 
 /// `windows-host install`: makes the machine a host laid out as `layout`,

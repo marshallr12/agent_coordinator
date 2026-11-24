@@ -4,27 +4,36 @@
 //! script around `ChangeServiceConfig2W` is done here directly, so no
 //! command line is ever built for another program to parse.
 //!
-//! Nothing here starts, stops or deletes a service.
+//! Step 7a's `install` and `status` only register and read. Step 7b's
+//! `update`, `rollback` and `uninstall` also start, stop and delete a
+//! service, through [`start`], [`stop`] and [`delete`].
 use super::super::sys::{check, last_error};
 use super::super::text::wide;
+use crate::windows_installer::control::RunState;
 use crate::windows_installer::model::{Recovery, RecoveryAction, ServiceSpec, StartType};
 use crate::windows_installer::observed::ServiceState;
 use anyhow::{Context, Result, bail, ensure};
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_SERVICE_DOES_NOT_EXIST, GetLastError,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_CANNOT_ACCEPT_CTRL,
+    ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_NOT_ACTIVE,
+    GetLastError,
 };
+use windows_sys::Win32::Storage::FileSystem::DELETE;
 use windows_sys::Win32::System::Services::{
-    ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, CreateServiceW,
-    OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW, QueryServiceConfig2W, QueryServiceConfigW,
-    QueryServiceStatusEx, SC_ACTION, SC_ACTION_NONE, SC_ACTION_RESTART, SC_HANDLE,
-    SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SC_STATUS_PROCESS_INFO, SERVICE_AUTO_START,
-    SERVICE_CHANGE_CONFIG, SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_PRESHUTDOWN_INFO,
-    SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, SERVICE_DEMAND_START, SERVICE_DISABLED,
-    SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_NO_CHANGE, SERVICE_PRESHUTDOWN_INFO,
-    SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_REQUIRED_PRIVILEGES_INFOW, SERVICE_START,
-    SERVICE_STATUS_PROCESS, SERVICE_WIN32_OWN_PROCESS,
+    ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
+    CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW,
+    QueryServiceConfig2W, QueryServiceConfigW, QueryServiceStatusEx, SC_ACTION, SC_ACTION_NONE,
+    SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE,
+    SC_STATUS_PROCESS_INFO, SERVICE_AUTO_START, SERVICE_CHANGE_CONFIG,
+    SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_PRESHUTDOWN_INFO,
+    SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, SERVICE_CONTROL_STOP, SERVICE_DEMAND_START,
+    SERVICE_DISABLED, SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_NO_CHANGE,
+    SERVICE_PRESHUTDOWN_INFO, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS,
+    SERVICE_REQUIRED_PRIVILEGES_INFOW, SERVICE_RUNNING, SERVICE_START, SERVICE_STATUS,
+    SERVICE_STATUS_PROCESS, SERVICE_STOP, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS,
+    StartServiceW,
 };
 use windows_sys::core::BOOL;
 
@@ -453,9 +462,102 @@ pub fn set_privileges(spec: &ServiceSpec) -> Result<()> {
     set_extended(spec, 0, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, &info)
 }
 
+/// The service's status, as `QueryServiceStatusEx` reports it.
+fn status(service: &Sc) -> Result<SERVICE_STATUS_PROCESS> {
+    // SAFETY: the service handle is live; the pointer is writable for the
+    // size given with it.
+    let buffer = query("QueryServiceStatusEx", |pointer, size, needed| unsafe {
+        QueryServiceStatusEx(service.0, SC_STATUS_PROCESS_INFO, pointer, size, needed)
+    })?;
+    // SAFETY: Windows wrote a SERVICE_STATUS_PROCESS into the aligned buffer.
+    Ok(unsafe { *buffer.as_ptr().cast::<SERVICE_STATUS_PROCESS>() })
+}
+
+/// Where the service called `name` stands (phase 7, step 7b).
+pub fn state(name: &str) -> Result<RunState> {
+    let Some(service) = open(name, SERVICE_QUERY_STATUS)? else {
+        return Ok(RunState::Missing);
+    };
+    let raw = status(&service)?;
+    Ok(match raw.dwCurrentState {
+        SERVICE_STOPPED => RunState::Stopped {
+            exit: raw.dwWin32ExitCode,
+            specific: raw.dwServiceSpecificExitCode,
+        },
+        SERVICE_RUNNING => RunState::Running,
+        _ => RunState::Pending,
+    })
+}
+
+/// Asks Windows to start the service called `name`, with no arguments: it
+/// runs the command line it is registered with. One already running is
+/// left as it is.
+pub fn start(name: &str) -> Result<()> {
+    let service = registered(name, SERVICE_START)?;
+    // SAFETY: the handle is live; no arguments are passed.
+    if unsafe { StartServiceW(service.0, 0, null()) } != 0 {
+        return Ok(());
+    }
+    // SAFETY: reads the calling thread's last error.
+    match unsafe { GetLastError() } {
+        ERROR_SERVICE_ALREADY_RUNNING => Ok(()),
+        code => bail!("starting the service {name} failed with Windows error {code}"),
+    }
+}
+
+/// Asks the service called `name` to stop. One that is not running, or
+/// cannot take a stop now because it is already stopping, is left as it is.
+pub fn stop(name: &str) -> Result<()> {
+    let service = registered(name, SERVICE_STOP)?;
+    let mut status = SERVICE_STATUS::default();
+    // SAFETY: the handle is live and `status` is writable.
+    if unsafe { ControlService(service.0, SERVICE_CONTROL_STOP, &mut status) } != 0 {
+        return Ok(());
+    }
+    // SAFETY: reads the calling thread's last error.
+    match unsafe { GetLastError() } {
+        ERROR_SERVICE_NOT_ACTIVE | ERROR_SERVICE_CANNOT_ACCEPT_CTRL => Ok(()),
+        code => bail!("stopping the service {name} failed with Windows error {code}"),
+    }
+}
+
+/// Deletes the service called `name`. Windows removes it once nothing
+/// holds a handle to it; one that is not registered, or is already marked
+/// for deletion, is done.
+pub fn delete(name: &str) -> Result<()> {
+    let Some(service) = open(name, DELETE)? else {
+        return Ok(());
+    };
+    // SAFETY: the handle is live and was opened with DELETE.
+    if unsafe { DeleteService(service.0) } != 0 {
+        return Ok(());
+    }
+    // SAFETY: reads the calling thread's last error.
+    match unsafe { GetLastError() } {
+        ERROR_SERVICE_MARKED_FOR_DELETE => Ok(()),
+        code => bail!("deleting the service {name} failed with Windows error {code}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_service_that_is_not_registered_is_missing_and_deleting_it_is_done() {
+        assert_eq!(
+            state("agentc-no-such-service-7b").unwrap(),
+            RunState::Missing
+        );
+        delete("agentc-no-such-service-7b").unwrap();
+        assert!(start("agentc-no-such-service-7b").is_err());
+    }
+
+    /// Reads a service Windows itself runs. Nothing is changed.
+    #[test]
+    fn a_running_service_reads_as_running() {
+        assert_eq!(state("EventLog").unwrap(), RunState::Running);
+    }
 
     #[test]
     fn a_list_ends_with_an_empty_string_and_reads_back() {

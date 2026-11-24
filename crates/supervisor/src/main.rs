@@ -180,6 +180,37 @@ enum HostCommand {
     /// token holds. It changes nothing and exits non-zero unless the
     /// machine is an installed host.
     Status(LayoutArgs),
+    /// Install this binary as a new release of an installed host: keep the
+    /// installed release, stop the services, switch, start them and check
+    /// each. If a check fails the kept release is put back and started
+    /// again. Run it from the new build, not from the program directory.
+    /// An update an earlier run left unfinished is finished or undone first.
+    Update(UpdateArgs),
+    /// Return to the kept previous release and the configuration it ran
+    /// with. It refuses when no previous release is kept.
+    Rollback(LayoutArgs),
+    /// Stop and delete the four services, remove the program directory and
+    /// the state tree, and remove the services' account profiles. A profile
+    /// Windows keeps loaded is reported as pending: run it again after a
+    /// restart. WSL is never touched.
+    Uninstall(LayoutArgs),
+}
+
+/// What `windows-host update` is told: which release this binary is.
+#[cfg(windows)]
+#[derive(Args)]
+struct UpdateArgs {
+    #[command(flatten)]
+    layout: LayoutArgs,
+    /// The SHA-256 of this binary, as recorded when it was built.
+    #[arg(long)]
+    sha256: String,
+    /// The full source commit this binary was built from.
+    #[arg(long)]
+    source_commit: String,
+    /// Install it even though it was rolled back before.
+    #[arg(long)]
+    retry: bool,
 }
 
 /// Where an installation lives.
@@ -466,8 +497,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Runs `windows-host install` or `status`, prints its report as JSON and
-/// exits non-zero unless the machine is, or now is, an installed host.
+/// Runs one `windows-host` subcommand, prints its report as JSON and exits
+/// non-zero unless the machine is, or now is, what was asked for.
 #[cfg(windows)]
 fn windows_host(command: &HostCommand) -> Result<ExitCode> {
     use agentc_supervisor::host_runtime::windows::installer::WindowsHost;
@@ -481,7 +512,103 @@ fn windows_host(command: &HostCommand) -> Result<ExitCode> {
             let mut journal = Journal::at(layout.journal());
             install_from(&mut host, layout, &args.overrides(), digest, &mut journal)?
         }
+        HostCommand::Update(args) => return windows_update(host, args, digest),
+        HostCommand::Rollback(layout) => return windows_rollback(host, layout, digest),
+        HostCommand::Uninstall(layout) => return windows_uninstall(host, layout),
     };
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(report_code(report.clean()))
+}
+
+/// The model of the host laid out as `layout` as this binary, whose digest
+/// is `digest`, builds it from the recorded manifest: what `update` and
+/// `rollback` need to name the services and their files. A host with no
+/// manifest gets the default inputs; the updater refuses it anyway.
+#[cfg(windows)]
+fn host_model(
+    host: &agentc_supervisor::host_runtime::windows::installer::WindowsHost,
+    layout: &LayoutArgs,
+    digest: String,
+) -> Result<agentc_supervisor::windows_installer::Desired> {
+    use agentc_supervisor::windows_installer::{Desired, Inputs, install::recorded_inputs};
+    let layout = layout.layout();
+    let inputs = recorded_inputs(host, &layout)?.unwrap_or_else(|| Inputs {
+        remote: "unknown".into(),
+        ..Inputs::default()
+    });
+    Desired::new(layout, inputs, digest, None)
+}
+
+/// Runs `windows-host update`, prints its report and exits non-zero unless
+/// this binary is now the installed release.
+#[cfg(windows)]
+fn windows_update(
+    mut host: agentc_supervisor::host_runtime::windows::installer::WindowsHost,
+    args: &UpdateArgs,
+    digest: String,
+) -> Result<ExitCode> {
+    use agentc_supervisor::host_runtime::windows::installer::WindowsServices;
+    use agentc_supervisor::windows_installer::release::Release;
+    use agentc_supervisor::windows_installer::update::{Request, Run, update};
+    let desired = host_model(&host, &args.layout, digest)?;
+    let request = Request {
+        to: Release {
+            sha256: args.sha256.to_ascii_lowercase(),
+            commit: args.source_commit.to_ascii_lowercase(),
+        },
+        dirty: coordinator_core::BUILD_DIRTY != "false",
+        built_from: coordinator_core::BUILD_SOURCE_COMMIT.to_owned(),
+        retry: args.retry,
+    };
+    let source = host.source();
+    let mut services = WindowsServices;
+    let mut run = Run {
+        host: &mut host,
+        services: &mut services,
+        desired: &desired,
+        source,
+    };
+    let report = update(&mut run, &request)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(report_code(report.succeeded()))
+}
+
+/// Runs `windows-host rollback`, prints its report and exits non-zero
+/// unless the previous release is now installed.
+#[cfg(windows)]
+fn windows_rollback(
+    mut host: agentc_supervisor::host_runtime::windows::installer::WindowsHost,
+    layout: &LayoutArgs,
+    digest: String,
+) -> Result<ExitCode> {
+    use agentc_supervisor::host_runtime::windows::installer::WindowsServices;
+    use agentc_supervisor::windows_installer::update::{Run, rollback};
+    let desired = host_model(&host, layout, digest)?;
+    let source = host.source();
+    let mut services = WindowsServices;
+    let mut run = Run {
+        host: &mut host,
+        services: &mut services,
+        desired: &desired,
+        source,
+    };
+    let report = rollback(&mut run)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(report_code(report.succeeded()))
+}
+
+/// Runs `windows-host uninstall`, prints its report and exits non-zero
+/// unless nothing of the host is left.
+#[cfg(windows)]
+fn windows_uninstall(
+    mut host: agentc_supervisor::host_runtime::windows::installer::WindowsHost,
+    layout: &LayoutArgs,
+) -> Result<ExitCode> {
+    use agentc_supervisor::host_runtime::windows::installer::WindowsServices;
+    use agentc_supervisor::windows_installer::uninstall::uninstall;
+    let (layout, source) = (layout.layout(), host.source());
+    layout.validate()?;
+    let report = uninstall(&mut host, &mut WindowsServices, &layout, &source)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(report_code(report.clean()))
 }

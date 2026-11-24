@@ -407,6 +407,8 @@ pub struct Desired {
     pub services: Vec<ServiceSpec>,
     /// The SHA-256 of the binary being installed, in hex.
     pub binary_sha256: String,
+    /// The source commit of the binary being installed: the running one's.
+    pub commit: String,
     /// The settings the generated configuration must carry.
     pub settings: Settings,
     /// The manifest's text.
@@ -435,6 +437,7 @@ impl Desired {
             services: Role::ALL.map(|role| service(&layout, &inputs, role)).into(),
             key: key(&layout, &inputs, &sids, key_source),
             manifest: inputs.manifest()?,
+            commit: coordinator_core::BUILD_SOURCE_COMMIT.to_owned(),
             binary_sha256,
             settings,
             layout,
@@ -445,6 +448,14 @@ impl Desired {
     /// The directory spec for `path`, if the model has one.
     pub fn directory(&self, path: &str) -> Option<&DirectorySpec> {
         self.directories.iter().find(|d| d.path == path)
+    }
+
+    /// The release being installed.
+    pub fn release(&self) -> super::release::Release {
+        super::release::Release {
+            sha256: self.binary_sha256.clone(),
+            commit: self.commit.clone(),
+        }
     }
 
     /// The service spec called `name`, if the model has one.

@@ -6,6 +6,7 @@ use super::access::{ADMINISTRATORS, SYSTEM};
 use super::config_text;
 use super::model::{Desired, ServiceSpec};
 use super::observed::{KeySource, Observed, PathState, ServiceState};
+use super::release::Releases;
 use serde::Serialize;
 use std::fmt;
 
@@ -22,6 +23,8 @@ pub enum Action {
     InstallBinary,
     /// Record what the owner asked for.
     WriteManifest,
+    /// Record the installed release as the current one.
+    RecordRelease,
     /// Write the configuration; `entries` are the managed ones that differ.
     WriteConfig { entries: Vec<String> },
     /// Copy the push App's key from this run's key file.
@@ -90,8 +93,12 @@ pub enum Refusal {
     NoKeySource(String),
     /// The configuration is not one the services could load.
     ConfigUnreadable(String),
-    /// The installed binary differs while these services run from it.
-    BinaryInUse(Vec<String>),
+    /// The installed binary is another release: replacing it is an update.
+    BinaryDiffers { installed: String, wanted: String },
+    /// An update or rollback has not finished.
+    UpdateOpen(String),
+    /// The release record is not one the installer wrote.
+    ReleasesUnreadable(String),
 }
 
 impl fmt::Display for Refusal {
@@ -116,12 +123,19 @@ impl fmt::Display for Refusal {
                 f,
                 "the configuration cannot be loaded, so it is left alone: {reason}"
             ),
-            Self::BinaryInUse(services) => write!(
+            Self::BinaryDiffers { installed, wanted } => write!(
                 f,
-                "the installed binary differs while {} run from it; replacing a running \
-                 release is an update, not an install",
-                services.join(", ")
+                "the installed binary has SHA-256 {installed}, not {wanted}; replacing an \
+                 installed release is `windows-host update`, not an install"
             ),
+            Self::UpdateOpen(path) => write!(
+                f,
+                "an update or rollback has not finished ({path}); run `windows-host update` \
+                 or `windows-host rollback` to finish or undo it"
+            ),
+            Self::ReleasesUnreadable(reason) => {
+                write!(f, "the release record cannot be read: {reason}")
+            }
         }
     }
 }
@@ -144,7 +158,7 @@ pub fn plan(desired: &Desired, observed: &Observed) -> Result<Vec<Change>, Vec<R
 }
 
 /// Every reason to leave the host alone.
-fn refusals(desired: &Desired, observed: &Observed) -> Vec<Refusal> {
+pub(super) fn refusals(desired: &Desired, observed: &Observed) -> Vec<Refusal> {
     if !observed.elevated {
         return vec![Refusal::NotElevated];
     }
@@ -156,6 +170,20 @@ fn refusals(desired: &Desired, observed: &Observed) -> Vec<Refusal> {
     found.extend(key_refusals(desired, observed));
     found.extend(config_refusal(desired, observed));
     found.extend(binary_refusal(desired, observed));
+    found.extend(release_refusals(desired, observed));
+    found
+}
+
+/// An unfinished update, and a release record that cannot be read, are
+/// left for the owner.
+fn release_refusals(desired: &Desired, observed: &Observed) -> Vec<Refusal> {
+    let mut found = Vec::new();
+    if observed.update_open {
+        found.push(Refusal::UpdateOpen(desired.layout.update_record()));
+    }
+    if let Some(Err(error)) = observed.releases.as_deref().map(Releases::parse) {
+        found.push(Refusal::ReleasesUnreadable(format!("{error:#}")));
+    }
     found
 }
 
@@ -214,24 +242,14 @@ fn config_refusal(desired: &Desired, observed: &Observed) -> Option<Refusal> {
     Some(Refusal::ConfigUnreadable(format!("{unreadable:#}")))
 }
 
-/// A different binary is never put under running services.
+/// A binary is installed once: another release replaces it only through an
+/// update, which keeps the one it replaces and can go back to it.
 fn binary_refusal(desired: &Desired, observed: &Observed) -> Option<Refusal> {
     let installed = observed.binary_sha256.as_ref()?;
-    if *installed == desired.binary_sha256 {
-        return None;
-    }
-    let running = |s: &&ServiceSpec| {
-        observed
-            .service(&s.name)
-            .is_some_and(|s| s.process.is_some())
-    };
-    let names: Vec<String> = desired
-        .services
-        .iter()
-        .filter(running)
-        .map(|s| s.name.clone())
-        .collect();
-    (!names.is_empty()).then_some(Refusal::BinaryInUse(names))
+    (*installed != desired.binary_sha256).then(|| Refusal::BinaryDiffers {
+        installed: installed.clone(),
+        wanted: desired.binary_sha256.clone(),
+    })
 }
 
 /// Adds `action` with its `detail`.
@@ -272,6 +290,12 @@ fn files(desired: &Desired, observed: &Observed, changes: &mut Vec<Change>) {
             Action::WriteManifest,
             "the recorded inputs differ".into(),
         );
+    }
+    let recorded = observed.releases.as_deref().map(Releases::parse);
+    let current = recorded.and_then(Result::ok).and_then(|r| r.current);
+    if current.as_ref() != Some(&desired.release()) {
+        let detail = format!("the current release is {}", desired.release().short());
+        push(changes, Action::RecordRelease, detail);
     }
     let entries = config_text::changed(observed.config.as_deref(), &desired.settings);
     let entries = entries.unwrap_or_default();

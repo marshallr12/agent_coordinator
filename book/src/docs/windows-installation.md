@@ -4,14 +4,16 @@
 host: it registers the four services, makes their state tree, writes their
 configuration and, when there is a push App, installs its key. `windows-host
 status` reports how a machine differs from an installed host and changes
-nothing.
+nothing. `update` installs a new release and goes back to the old one if the
+new one does not come up, `rollback` returns to the kept previous release,
+and `uninstall` removes the host.
 
 **What this is not.** No provider harness runs on Windows yet: the installed
 supervisor service claims nothing unless the acceptance stand-in is enabled.
-An installed host is not an admitted host. Update, rollback and uninstall
-arrive with step 7b of the [design](windows-host-design.md#phase-7-steps);
-until then a host is removed by hand. The installer has been exercised by its
-tests only; the owner-attended acceptance run is step 7c.
+An installed host is not an admitted host; see
+[what is not supported](#what-is-not-supported). The installer has been
+exercised by its tests only; the owner-attended acceptance run is step 7c of
+the [design](windows-host-design.md#phase-7-steps).
 
 ## Prerequisites
 
@@ -106,7 +108,9 @@ A refusal changes nothing. Fix what it names and run `install` again.
 | The key file cannot be used | It is missing, empty, larger than 64 KiB, not a plain file or a link |
 | A key is wanted, none is installed and no `--key-source` was given | |
 | The configuration cannot be loaded | The services could not start from it either; it is left for you to fix or remove, never overwritten |
-| The installed binary differs while services run from it | Replacing a running release is an update, not an install |
+| The installed binary is another release | Replacing an installed release is [`update`](#update), which keeps the one it replaces; `install` never does it, whether or not the services run |
+| An update or rollback has not finished | Run `update` or `rollback` again: it finishes or undoes the open one first |
+| The release record cannot be read | `installer\releases.json` is not one the installer wrote |
 
 If a change fails part-way, `install` stops with an error. The changes it
 made are in `installer\journal.jsonl`; run `install` again and it makes the
@@ -147,9 +151,9 @@ have full control of all of them.
 
 | Directory | Who else | Holds |
 | --- | --- | --- |
-| `C:\Program Files\agentc` | `BUILTIN\Users`: read and execute | `agentc-supervisor.exe`, `supervisor.toml` |
+| `C:\Program Files\agentc` | `BUILTIN\Users`: read and execute | `agentc-supervisor.exe`, `supervisor.toml`, and `releases\<sha256>\` with each kept release's binary and configuration |
 | `C:\ProgramData\agentc` | Nobody | The state tree |
-| `...\installer` | Nobody | `manifest.json`, `journal.jsonl` |
+| `...\installer` | Nobody | `manifest.json`, `journal.jsonl`, `releases.json`, and `update.json` while an update is open |
 | `...\runner`, `...\runner\stand-in-launches` | The runner: modify | The launch journal, `service.log`, stand-in launch directories |
 | `...\supervisor` | The supervisor: modify | Launch records, `heartbeat.json`, `service.log` |
 | `...\stand-in`, `...\stand-in\queue` | The supervisor: modify | The stand-in's ledger and queue |
@@ -266,12 +270,140 @@ In `tokens`, `stopped` means the service has no process and so no token to
 read. It is not a pass: start the service and run `status` again to see what
 its token holds.
 
+## Update
+
+Build the new release and record its SHA-256 and the commit it was built
+from, as for an install. Then run `update` from the new build, not from
+`C:\Program Files\agentc`:
+
+```text
+cd C:\src\agent_coordinator
+target\release\agentc-supervisor.exe windows-host update ^
+    --sha256 <SHA-256 of that file> --source-commit <full commit>
+```
+
+The update is refused, with nothing changed, unless the binary has exactly
+that SHA-256, was built from exactly that commit, from a tree with no
+uncommitted changes, and the host is one `install` would not refuse. It then
+goes through these stages, writing each to `installer\update.json`, flushed
+to disk, before the next begins:
+
+1. **Stage and keep.** It copies itself to `releases\<sha256>\` below the
+   program directory and checks the copy's digest. It copies the installed
+   binary and `supervisor.toml` to `releases\<old sha256>\`.
+2. **Stop.** It stops the supervisor, then the runner, then the two brokers,
+   and waits for each (up to 150 s each). The runner stops admitting launches
+   at once, asks each launch to stop, ends what is left at its
+   `stop_grace_seconds` deadline and journals each end. A service that stops
+   with an error, such as a runner whose launches Windows has not confirmed
+   ended, stops the update before anything is switched.
+3. **Switch.** It puts the new binary in place and writes the configuration:
+   your entries kept, the managed entries as the new release has them.
+4. **Start and check.** It starts all four services, the brokers first. Each
+   must report running within 60 s, write its start line to its
+   `service.log` after the update asked it to start, and still run 5 s
+   later.
+5. **Settle.** Services that were stopped before the update are stopped
+   again. The release record now names the new release as current and the
+   old one as previous; other kept releases are removed.
+
+If a stage before the checks pass fails, the update is undone: the services
+are stopped, the old binary and its configuration are put back, the services
+that ran before are started and checked again, and the new release is
+recorded as **rolled back**. An update to a rolled-back release is refused
+until you ask for it again with `--retry`.
+
+If the update is interrupted, by a crash, a kill or a power loss, the next
+`update` or `rollback` finishes it when the checks had passed and otherwise
+undoes it, before doing anything else. The host is never left with one
+release's binary and the other's configuration. `install` and `status`
+refuse while an update is open.
+
+`update` prints one JSON report and exits 0 when the new release is
+installed (or was already). Its `outcome` is `updated`, `unchanged`,
+`reverted` (with the `reason`) or `refused` (with `refusals`); `resumed` says
+that it finished or undid an earlier run's update.
+
+## Rollback
+
+```text
+C:\some\copy\agentc-supervisor.exe windows-host rollback
+```
+
+`rollback` returns to the kept previous release and the configuration it
+ran with, through the same stages, and records the release it left as rolled
+back. Afterwards no previous release is kept, so a second `rollback` is
+refused. Run it from a copy of the binary outside the program directory: a
+binary in the program directory would replace itself.
+
+## Uninstall
+
+```text
+C:\some\copy\agentc-supervisor.exe windows-host uninstall
+```
+
+`uninstall` stops each registered service, the supervisor first, deletes all
+four, removes `C:\Program Files\agentc` and `C:\ProgramData\agentc`, and
+deletes each service account's profile under `C:\Windows\ServiceProfiles\`.
+
+- It refuses, with nothing changed, a root that is a link, one someone
+  else owns, or one that holds anything the installer did not make there,
+  so a mistaken `--program-dir` removes nothing.
+- Nothing is removed through a link: a link or junction inside the trees
+  is removed itself, never what it points to. No ownership is taken; a
+  file that cannot be removed is listed under `left`.
+- The AppContainer profiles the launches made belong to the runner's
+  account, which made them, and live in its service profile; they are
+  listed under `launch_profiles` and go with that profile.
+- Windows keeps a service account's profile loaded after the service has
+  stopped, often until a restart. Such a profile is listed under `pending`:
+  restart Windows and run `uninstall` again.
+- It is safe to run again at any point; a run on a removed host changes
+  nothing and exits 0.
+- It never touches WSL: no distribution, no `.wslconfig`, no WSL setting.
+
+The push App's key file goes with the state tree, but the key stays
+registered with the App until you delete it in the App's settings on GitHub;
+`uninstall` says so under `notes`. `uninstall` exits 0 only when nothing of
+the host is left.
+
+## Provider enrollment and credentials
+
+The installer stores one credential: the push App's private key, in a
+directory only the publication account can read (see
+[identities and access lists](#identities-and-access-lists)). It stores no
+provider credential and enrolls no provider account. Provider enrollment is a
+separate interactive setup operation, done by the owner outside any
+service's state; no service or launch reads it from the state tree. No
+provider harness runs on Windows yet, so no provider credential has a
+product path on a Windows host.
+
+## What is not supported
+
+These are not supported, and the installer does not make them so:
+
+- Windows Server, Windows Home, ARM64 and Windows builds other than the
+  evaluated one (Windows 11 Pro x86-64, build 26300). A different build needs
+  the same acceptance gates.
+- Any provider harness or role: the Claude reviewer and implementer and the
+  Codex implementer and reviewer are all unsupported on a Windows host, as
+  are browser, MCP and auxiliary tools. The design's
+  [support matrix](windows-host-design.md#target-and-support-matrix) records
+  why.
+- WSL as a host, or as a fallback for a Windows host.
+- API billing in place of the owner's provider enrollment.
+- Editing `supervisor.toml`'s managed entries, or replacing the installed
+  binary, by hand: `install` puts a managed entry back, and only `update`
+  replaces a release.
+
 ## Logs and diagnostics
 
 | Where | What |
 | --- | --- |
 | `C:\ProgramData\agentc\installer\journal.jsonl` | One line before and one after every change `install` made, with the run, the time and any failure |
 | `C:\ProgramData\agentc\installer\manifest.json` | What `install` was told |
+| `C:\ProgramData\agentc\installer\releases.json` | The current release, the kept previous one and every release that was rolled back |
+| `C:\ProgramData\agentc\installer\update.json` | Only while an update or rollback is open: its stage and what it needs to finish or undo it |
 | `C:\ProgramData\agentc\<service>\service.log` | Each service's own log. A broker logs its token's user, groups and privileges at start; the runner logs its preshutdown limit |
 | `C:\ProgramData\agentc\supervisor\heartbeat.json` | The supervisor loop's state and, when it claims nothing, why |
 | `C:\ProgramData\agentc\stand-in\ledger.jsonl` | Every claim, launch and release of the acceptance stand-in |

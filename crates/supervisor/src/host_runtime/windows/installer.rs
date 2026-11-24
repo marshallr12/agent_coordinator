@@ -1,15 +1,22 @@
-//! The Windows host the installer works on (phase 7, step 7a): the
-//! [`Host`] of [`crate::windows_installer`], answered by the Service
-//! Control Manager and the file system. Every decision is the neutral
-//! core's; this module reads what Windows says and makes one change when
-//! told to.
+//! The Windows host the installer works on (phase 7): the [`Host`] and
+//! [`Machine`] of [`crate::windows_installer`], answered by the Service
+//! Control Manager, the file system and the profile list, and the
+//! [`Services`] it starts and stops. Every decision is the neutral core's;
+//! this module reads what Windows says and makes one change when told to.
 //!
-//! It registers services and never starts, stops or deletes one. It makes
-//! and secures directories and never removes one. It runs no program.
+//! `install` and `status` (step 7a) only register services and make and
+//! secure directories. `update`, `rollback` and `uninstall` (step 7b) also
+//! start, stop and delete services, remove the two trees and delete the
+//! services' account profiles. Nothing here runs a program.
 pub mod access;
 pub mod files;
+pub mod profiles;
 pub mod services;
 pub mod tokens;
+
+use crate::windows_installer::Machine;
+use crate::windows_installer::control::{RunState, Services};
+use crate::windows_installer::observed::ProfileState;
 
 use super::reader;
 use crate::windows_installer::Host;
@@ -17,6 +24,7 @@ use crate::windows_installer::config_text;
 use crate::windows_installer::model::{Desired, ServiceSpec};
 use crate::windows_installer::observed::{KeySource, PathState, ServiceState};
 use crate::windows_installer::plan::Action;
+use crate::windows_installer::release::Releases;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
@@ -32,6 +40,12 @@ impl WindowsHost {
     pub fn new() -> Result<Self> {
         let binary = std::env::current_exe().context("find the running executable")?;
         Ok(Self { binary })
+    }
+
+    /// The binary this process runs, which `install` copies and `update`
+    /// stages.
+    pub fn source(&self) -> String {
+        self.binary.display().to_string()
     }
 
     /// The SHA-256, in hex, of the binary `install` copies.
@@ -125,6 +139,11 @@ impl Host for WindowsHost {
             Action::SetAccessList { path } => Self::secure(desired, path),
             Action::InstallBinary => files::copy_binary(&self.binary, &layout.binary()),
             Action::WriteManifest => files::write_text(&layout.manifest(), &desired.manifest),
+            Action::RecordRelease => {
+                let existing = files::read_text(&layout.releases())?;
+                let text = Releases::with_current(existing.as_deref(), desired.release())?;
+                files::write_text(&layout.releases(), &text)
+            }
             Action::WriteConfig { .. } => Self::write_config(desired),
             Action::InstallKey => Self::install_key(desired),
             other => {
@@ -135,5 +154,78 @@ impl Host for WindowsHost {
                 Self::set_service(spec, other)
             }
         }
+    }
+}
+
+impl Machine for WindowsHost {
+    fn copy(&mut self, from: &str, to: &str) -> Result<()> {
+        files::copy_file(from, to)
+    }
+
+    fn write(&mut self, path: &str, text: &str) -> Result<()> {
+        files::write_text(path, text)
+    }
+
+    fn remove(&mut self, path: &str) -> Result<()> {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(error).with_context(|| format!("remove {path}"))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn make_directory(&mut self, path: &str) -> Result<()> {
+        files::make_directory(path)
+    }
+
+    fn entries(&self, path: &str) -> Result<Vec<String>> {
+        files::entries(path)
+    }
+
+    fn length(&self, path: &str) -> Result<u64> {
+        files::length(path)
+    }
+
+    fn read_after(&self, path: &str, offset: u64) -> Result<Option<String>> {
+        files::read_after(path, offset)
+    }
+
+    fn remove_tree(&mut self, path: &str) -> Result<Vec<String>> {
+        files::remove_tree(path)
+    }
+
+    fn delete_service(&mut self, name: &str) -> Result<()> {
+        services::delete(name)
+    }
+
+    fn profile(&self, sid: &str) -> Result<ProfileState> {
+        profiles::state(sid)
+    }
+
+    fn delete_profile(&mut self, sid: &str) -> Result<()> {
+        profiles::delete(sid)
+    }
+}
+
+/// The services as the Service Control Manager runs them.
+#[derive(Debug, Default)]
+pub struct WindowsServices;
+
+impl Services for WindowsServices {
+    fn state(&mut self, name: &str) -> Result<RunState> {
+        services::state(name)
+    }
+
+    fn start(&mut self, name: &str) -> Result<()> {
+        services::start(name)
+    }
+
+    fn stop(&mut self, name: &str) -> Result<()> {
+        services::stop(name)
+    }
+
+    fn pause(&mut self, duration: std::time::Duration) {
+        std::thread::sleep(duration);
     }
 }

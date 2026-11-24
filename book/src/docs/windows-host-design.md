@@ -919,7 +919,7 @@ Phase 7 turns what the owner did by hand in the runs of tasks `ec6d901c`,
 | Step | Content | Task | State |
 | --- | --- | --- | --- |
 | 7a | The installer core: a desired-state model, `windows-host install` and `windows-host status` | `ddeb5d76` | Implemented; see below. **No service the installer registered has been started** |
-| 7b | `windows-host update`, `rollback` and `uninstall`, each stage journaled before it is acted on | `2064cf54` | Not started |
+| 7b | `windows-host update`, `rollback` and `uninstall`, each stage journaled before it is acted on | `2064cf54` | Implemented; see [step 7b](#step-7b-update-rollback-and-uninstall-2026-11-24). Driven natively with a runner in the test process; the run against registered, started services is gated on the owner's consent |
 | 7c | Owner-attended installer acceptance on MiniAir, using only the `windows-host` subcommands, with the stand-in as the workload and the phase 4c lifecycle rounds | `012ff9f2` | Not started |
 | 7d | The host acceptance gap report against the [parity map](#linux-p2-parity-and-acceptance-map) and the phase 8 plan | `748f6c3a` | Not started |
 
@@ -1112,10 +1112,120 @@ of the product's four names in `C:\Program Files\agentc` and
   that a launch cannot are both expected from the list, not observed.
 - The directories the acceptance kits staged for their probes (`probe`,
   `probe-drop`, `runner\probe-launches`) are not part of the model.
-- Update, rollback and uninstall are step 7b. Until then a host is removed
-  by hand, as in step 9 of the [phase 4c runbook](#owner-runbook-for-phase-4c).
+- Update, rollback and uninstall are [step 7b](#step-7b-update-rollback-and-uninstall-2026-11-24).
 
-## Local broker contracts
+#### Step 7b: update, rollback and uninstall (2026-11-24)
+
+Step 7b adds `windows-host update`, `rollback` and `uninstall`. The
+decisions are in the neutral `windows_installer::update`, `uninstall`,
+`release` and `control` modules; the Windows backend gains the calls that
+start, stop and delete a service (`StartServiceW`, `ControlService`,
+`DeleteService`) and that read and delete a service account's profile
+(the profile list, `HKEY_USERS` and `DeleteProfileW`). The operator's view is
+the [installation chapter](windows-installation.md#update).
+
+**Releases.** A release is a binary named by its SHA-256 and its source
+commit. The installed binary keeps its one path, so the services' command
+lines never change. Each release a host keeps has its binary and the
+configuration it ran with in `releases\<sha256>\` below the program
+directory; `installer\releases.json` names the current release, the
+previous one and every release that was rolled back. `install` now records
+the current release, and refuses a different binary over an installed one
+whether or not the services run: replacing a release is an update, which
+keeps the one it replaces.
+
+**An update is run by the new release.** The owner states the SHA-256 and the
+commit; the update is refused unless the running binary has that digest and
+was built from that commit from a clean tree, and it copies itself into its
+release directory. Nothing a caller supplies is run to learn what it is, and
+a binary inside the program directory is refused, since it would replace or
+remove itself.
+
+**One record, one stage at a time.** Before anything changes, the update
+writes `installer\update.json` and flushes it; after every stage it
+rewrites it, naming the stage that is done. The stages are: stage the new
+binary, keep the installed binary and configuration, stop the services
+(supervisor, runner, then the brokers; Windows refuses to stop the runner
+under the supervisor that depends on it), switch the binary and the
+configuration, record each log's length, start all four (brokers first),
+check them, and stop again those that were not running before. A service
+is healthy when Windows reports it running within 60 s, its log gained its
+start line after the length recorded before the start, and it still runs
+5 s later; the supervisor's and the brokers' lines carry no time, so an
+old line in the log never counts. The checks passing is the commit point.
+A failure before it turns the record to undoing itself: stop all, put the
+kept binary and configuration back, start those that ran before and check
+them. A release undone after it was put in place is recorded as rolled
+back, and an update to it is refused until the owner gives `--retry`. A
+runner that stops with its own code for launches whose end Windows did not
+confirm counts as a failed stop, so nothing is switched under a launch that
+may still run.
+
+**Interruptions.** Each stage checks what is already in place, so it may be
+done again. The next `update` or `rollback`, whatever it was asked, first
+finishes a record past the commit point and undoes any other. `install` and
+`status` refuse while a record is open. The neutral tests kill an update in
+both windows of every stage (the record of a stage written and its work not
+done, and its work done and the next record not written) and check that the
+next run leaves the old or the new release fully in place, with the four
+services running, never a mixture. `install`'s own writes are now flushed
+before they are renamed into place.
+
+**Rollback** is the same record with the kept previous release as its
+target and that release's own configuration, not a merge. It records the
+release it left as rolled back and keeps no previous release, so a second
+rollback is refused.
+
+**Uninstall** stops each registered service, deletes the four, removes both
+trees and deletes the four service accounts' profiles. Each step looks at
+the host as it is, so it is safe to run again. A root that is a link, has
+another owner or holds anything the installer did not make is refused
+before anything changes. The removal never descends a link or junction
+(the runner's account could plant one in its own directory) and takes no
+ownership; what cannot be removed is reported. The AppContainer profiles
+the launches made were made by the runner for its own account
+(`CreateAppContainerProfile` acts on the caller's store), so they live in
+the runner's service profile, not in the administrator's; `uninstall`
+reads their names from the runner's journal before the tree goes and they
+go with the runner's profile. A profile whose hive Windows still keeps
+loaded is reported as pending; the next run computes the four accounts from
+the service names and removes it, so no record has to outlive the tree.
+Nothing touches WSL.
+
+**Tests.** The neutral suite (`windows_installer::tests_update`, on Linux
+and Windows) covers an update with its stop and start order, a failed check
+and the rolled-back memory, `--retry`, the kill at every stage, the unclean
+runner stop, services that were stopped before, rollback and its refusal,
+every refusal of a binary that is not the release named, and uninstall
+with a loaded profile, a link inside the tree, a file that cannot be
+removed, foreign content, a link as a root and the push key's note. On
+MiniAir, `tests/windows_update.rs` runs, with nothing registered:
+
+| Test | What it shows |
+| --- | --- |
+| The update over real files with the role runner in the test process | The runner refuses new launches as soon as the stop is asked; its drain ends a launch that ignores the stop at the 1 s deadline and journals `ended`; the services come back on the second build's binary with the old one kept; the restarted runner reclaims the launch an ended runner left, leaves the drained one and one whose jobs' owner still runs, and refuses to prepare either of those again |
+| `uninstall` through the built binary on a temporary tree | Both trees go; a junction planted in `runner\` is removed and its target kept; a read-only file is removed; a second run removes nothing and exits 0; the WSL configuration files and the distribution list are the same before and after |
+
+The test that installs a throwaway host, updates it to a second build,
+rolls it back and uninstalls it, with its four services registered and
+started by Windows, is ignored and gated on
+`AGENTC_INSTALLER_STARTS_SERVICES=1`.
+
+**What 7b leaves unverified:**
+
+- The in-process runner is the runner's own code, but not the runner
+  service under the Service Control Manager: the drained launch is reclaimed
+  by a service's next start because the old runner process is gone, which a
+  runner in the test process cannot show. The gated test and step 7c run the
+  services themselves.
+- An update keeps the services' registrations as they are. A release whose
+  model registers a service differently needs `install` after the update.
+- A kill or power loss is shown against the host in memory, not against
+  the machine.
+- The health check is the start line and 5 s of running; a release that
+  fails later is not caught by the update. `rollback` is the owner's answer.
+- Removing a service profile was not run against a real one in the ungated
+  tests: no service had run under those names.
 
 Named pipes are local-only, reject remote clients, and have an explicit DACL.
 Authenticate the peer token and its package SID, service SID, role, launch
@@ -3161,7 +3271,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Steps 5a to 5f done**; the phase is complete when task `9cf04a5c`'s review and integration are. It first **closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim) and step 5e (the readiness check and the fixture checks), whose native tests pass. In step 5f, an owner-attended run [inside a contained reviewer launch](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17) sent a Bash command from native Claude Code 2.1.326 in the recorded form through the prefix and the shim into the candidate. The capability record now admits only that build. No Windows driver calls the record, so no product Claude launch runs on Windows. The [items still open](#phase-5-steps) include the process a job still counts after the shell ends |
 | 6 | Egress and publication brokers | Phase 3 | Steps 6a, 6b and 6c implemented (task `13ae81c1`); step 6d implemented and run by the owner on MiniAir on 2026-11-20 (task `daa42f71`): both brokers served a launch as services under their own virtual accounts, and publication pushed to the real remote with a per-push token. Task `f71179f5` followed on 2026-11-22: the installed supervisor and runner services made a stand-in launch that both installed brokers admitted, launches made by the installed runner were refused the push key and the publication broker's directories, and a closed launch's repository is removed ([follow-up](#step-6d-follow-up-the-services-own-launches-2026-11-22)). No harness has used either broker; see [phase 6 steps](#phase-6-steps) |
-| 7 | Idempotent installer, update/rollback/uninstall, then a host acceptance gap report; the real coordinator loop, a harness driver, WFP, resource caps and quiet hours are a later phase 8 (owner decision of 2026-11-23) | Phases 4 to 6 | Step 7a implemented (task `ddeb5d76`): `agentc-supervisor windows-host install` and `status`, a desired-state model with a platform-neutral plan, and a Windows backend over the Service Control Manager. **No service the installer registered has been started and nothing is machine-accepted.** Steps 7b (update, rollback, uninstall), 7c (owner-attended acceptance) and 7d (gap report) are not started; see [phase 7 steps](#phase-7-steps) |
+| 7 | Idempotent installer, update/rollback/uninstall, then a host acceptance gap report; the real coordinator loop, a harness driver, WFP, resource caps and quiet hours are a later phase 8 (owner decision of 2026-11-23) | Phases 4 to 6 | Step 7a implemented (task `ddeb5d76`): `agentc-supervisor windows-host install` and `status`, a desired-state model with a platform-neutral plan, and a Windows backend over the Service Control Manager. **No service the installer registered has been started and nothing is machine-accepted.** Step 7b implemented (task `2064cf54`): `update`, `rollback` and `uninstall`, each stage journaled, driven natively with the runner in the test process. Steps 7c (owner-attended acceptance) and 7d (gap report) are not started; see [phase 7 steps](#phase-7-steps) |
 
 No intermediate phase is production acceptance. Independent review and guarded
 integration complete each task; only the final acceptance can admit a host.
