@@ -207,8 +207,12 @@ on 2026-11-21. This section keeps only what a new session needs.
       CLI read-back: all 20 at revision 3, planned, human-origin, `not_before` equal to
       `schedule.json` (14:00 / 18:00 UTC each weekday, 11-30 to 12-11), title, description,
       criteria, priority, kind and `depends_on` unchanged. They open on their own; nothing
-      else to do for them. **Next (2026-11-30):** start-day checks, pin `window.json`, the
-      owner admits `e6685dbf` before 14:00 UTC. Next-session prompt saved as
+      else to do for them. **Next (2026-11-30):** start-day checks, draft `window.json`,
+      then, at the owner's request, the agent admits `e6685dbf` before 14:00 UTC through the
+      dashboard in the owner's signed-in browser session (stop if not signed in), then pins
+      `window.json` with start = `e6685dbf`'s `opened_at`. If admission slips past 14:00 UTC,
+      `4372ea4c` (and at 18:00 `752597b3`) open before the window starts: the owner decides
+      whether to push their openings back. Next-session prompt saved as
       `~/Downloads/2026-11-30_agent-coordinator-prompt.txt`.
     - **Rollout scripts prepared 2026-11-22 (owner's pick; local files only):**
       `~/.local/state/agent-coordinator-evidence/rollout-main-prep/` (`README.md` first).
