@@ -216,10 +216,22 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   owns is refused before anything changes, and every change is journaled.
   The [design](windows-host-design.md#phase-7-steps) records it and the
   [Windows host installation](windows-installation.md) chapter is the
-  operator's view. **No service the installer registered has been started,
-  no Windows host is accepted, and no provider harness runs on Windows.**
-  Update, rollback and uninstall, the owner-attended acceptance and the gap
-  report are steps 7b to 7d.
+  operator's view. **No Windows host is accepted, and no provider harness
+  runs on Windows.** The owner-attended acceptance and the gap report are
+  steps 7c and 7d.
+
+- Phase 7 step 7b added `windows-host update`, `rollback` and `uninstall`.
+  An update is run by the new release, which must be the SHA-256 and commit
+  the owner names; it keeps the installed release beside it, stops the
+  services, switches, starts them and checks each, and puts the kept
+  release back if a check fails. Every stage is journaled before the next,
+  so an interrupted update is finished or undone by the next run, never
+  left half applied, and a rolled-back release is not installed again
+  unasked. `uninstall` removes the services, both trees (never through a
+  link) and the services' account profiles, which Windows often keeps
+  loaded until a restart, and leaves WSL alone. With the owner's consent a
+  native test ran all three against four throwaway services that Windows
+  started; see [step 7b](windows-host-design.md#step-7b-update-rollback-and-uninstall-2026-11-24).
 
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the

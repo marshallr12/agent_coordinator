@@ -919,7 +919,7 @@ Phase 7 turns what the owner did by hand in the runs of tasks `ec6d901c`,
 | Step | Content | Task | State |
 | --- | --- | --- | --- |
 | 7a | The installer core: a desired-state model, `windows-host install` and `windows-host status` | `ddeb5d76` | Implemented; see below. **No service the installer registered has been started** |
-| 7b | `windows-host update`, `rollback` and `uninstall`, each stage journaled before it is acted on | `2064cf54` | Implemented; see [step 7b](#step-7b-update-rollback-and-uninstall-2026-11-24). Driven natively with a runner in the test process; the run against registered, started services is gated on the owner's consent |
+| 7b | `windows-host update`, `rollback` and `uninstall`, each stage journaled before it is acted on | `2064cf54` | Implemented; see [step 7b](#step-7b-update-rollback-and-uninstall-2026-11-24). Driven natively with a runner in the test process, and once against four registered throwaway services that Windows started, with the owner's consent |
 | 7c | Owner-attended installer acceptance on MiniAir, using only the `windows-host` subcommands, with the stand-in as the workload and the phase 4c lifecycle rounds | `012ff9f2` | Not started |
 | 7d | The host acceptance gap report against the [parity map](#linux-p2-parity-and-acceptance-map) and the phase 8 plan | `748f6c3a` | Not started |
 
@@ -1211,21 +1211,42 @@ rolls it back and uninstalls it, with its four services registered and
 started by Windows, is ignored and gated on
 `AGENTC_INSTALLER_STARTS_SERVICES=1`.
 
+**The native run on MiniAir, 2026-11-24.** With the owner's consent, both
+gated tests were run from an elevated development session on the clean
+commit 3910cac: step 7a's install test, which still passes with the release
+record (32 changes now), and the registered-host test, on a host with the
+prefix `agentc-tb17a1dc714` in `C:\agentc-tb17a1dc714`:
+
+| Observation | Result |
+| --- | --- |
+| `install --remote` from the test binary | Exit 0; four services registered, stopped |
+| `update` run from a second build (the binary with a trailer appended, so another SHA-256 and the same commit) | Exit 0, `updated`: the Service Control Manager started all four services on the second build, each logged its start line, and the update stopped them again, since none ran before it; the installed binary has the second build's digest |
+| `update` again; `status` | `unchanged`; `status` exits 0 |
+| `rollback` from the first build | Exit 0, `returned`: the first build's binary is in place again |
+| `rollback` again; `update` to the second build again | Each refused with exit 1: no previous release is kept, and the second build was rolled back (`--retry`) |
+| `uninstall` | Deleted the four services and both trees, left nothing it could not remove, and reported the four service accounts' profiles as pending: Windows kept all four loaded after their services stopped, as in every phase 4c run. `sc.exe query` reports each service as not existing (1060) |
+| WSL | The `.wslconfig`, the machine's WSL configuration and the distribution list are the same before and after |
+
+The four profiles stayed under `C:\Windows\ServiceProfiles\` for the next
+`uninstall` after a restart; removing a profile that Windows has unloaded
+is therefore not yet observed.
+
 **What 7b leaves unverified:**
 
 - The in-process runner is the runner's own code, but not the runner
   service under the Service Control Manager: the drained launch is reclaimed
   by a service's next start because the old runner process is gone, which a
-  runner in the test process cannot show. The gated test and step 7c run the
-  services themselves.
+  runner in the test process cannot show. The gated run started the real
+  services but with no launch in flight; a drain of a real launch under the
+  services is step 7c's.
 - An update keeps the services' registrations as they are. A release whose
   model registers a service differently needs `install` after the update.
 - A kill or power loss is shown against the host in memory, not against
   the machine.
 - The health check is the start line and 5 s of running; a release that
   fails later is not caught by the update. `rollback` is the owner's answer.
-- Removing a service profile was not run against a real one in the ungated
-  tests: no service had run under those names.
+- Deleting a service profile Windows has unloaded is not yet observed: in
+  the gated run all four stayed loaded until a restart.
 
 Named pipes are local-only, reject remote clients, and have an explicit DACL.
 Authenticate the peer token and its package SID, service SID, role, launch
