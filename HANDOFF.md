@@ -168,6 +168,21 @@ on 2026-11-21. This section keeps only what a new session needs.
       exercises are accepted, so 2 is met by acceptance; window 3's ready time is the task's
       `opened_at`. Both are in the draft. Still open: start date, the 20 task ids and their
       `not_before` times. **Next:** the owner imports, schedules and admits `e6685dbf`; pin `window.json` at the start.
+    - **Workload settled 2026-11-24** (re-checked against main `1f4ecdc`, 25 commits past the
+      `90adaed` check). Dropped: #5 resolution kind (on main via `6dcb16b6`: API, CLI,
+      dashboard) and #18 roster CLI (the dashboard dialog already edits declared inputs).
+      Narrowed: #6 to the stalled-queue exclusions only (the clock already starts at
+      `opened_at`). **Owner decisions:** #19 = the submission names its reviewer (principal
+      or session), supervised queue when none is named; #20 = the root supervisor downloads
+      the artifacts read-only into the reviewer's worktree before launch, with a size cap;
+      added #21 bulk scheduling of `not_before` and #22 upcoming-openings view; #15 also
+      carries kind. Import file `p6-window3-workload.md` (20 items; the 11-21 version kept as
+      `p6-window3-workload.20261121.md`); proposed stagger in `SCHEDULE-PROPOSAL.md`
+      (start Mon 11-30 13:00 UTC, 2 per weekday at 14:00 and 18:00 UTC). Found: the import
+      creates unchecked items **planned, kind `general`**; **only a human may set
+      `not_before` on a human-origin task** (`coordination.rs`), so the owner schedules in the
+      dashboard; this CLI's principal `250802da` holds the task-definition grant `c9c6152f`,
+      so an agent can fill descriptions, criteria and kind after the import.
     - **Rollout scripts prepared 2026-11-22 (owner's pick; local files only):**
       `~/.local/state/agent-coordinator-evidence/rollout-main-prep/` (`README.md` first).
       `render.py --commit … --task … --attempt … --session …` writes the script set for the
