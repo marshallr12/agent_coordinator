@@ -48,6 +48,7 @@
 - [Implementation and acceptance specification](docs/implementation-spec.md)
 - [Onboarding contract](docs/onboarding-contract.md)
 - [Repository and hook review](docs/repository-review.md)
+- [Project scaffolding design (`adopt`)](docs/project-scaffolding-design.md)
 
 # Adoption review
 
