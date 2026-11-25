@@ -1597,8 +1597,14 @@ first criterion, every parity row demonstrated, still needs it.
 #### The step 7d bundle
 
 The report and the logs it rests on are attached to the parent task
-`7011c55f` as one pinned zip, packed by a registered job of step 7d. It
-holds `README.txt`; `report/step-7d.md`, this section as first committed;
+`7011c55f` as coordinator artifact `36e5b9e3-545c-4765-8dcd-ee30cac684c2`,
+pinned, one zip of 983 630 bytes with SHA-256
+`75cbd92da2fc20c759745d30dc556898116d91263aa7140f559263de7ab8175b`. It was
+packed by registered job `b5ae339a-a568-4b95-b0f8-5b8e359f28d5` of an
+attempt on the parent, since an artifact's producer job must belong to the
+task it is attached to, and it was downloaded again and its hash checked. It
+holds `README.txt`; `report/step-7d.md`, the report as first committed in
+`7604ba6`;
 `source.txt`, with that commit, the commit and build under report, and the
 phase 8 task IDs; `evidence-index.json`, with each artifact's task, ID,
 name, size, SHA-256 and whether the downloaded bytes matched; and below
