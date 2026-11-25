@@ -244,6 +244,20 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   loop or provider harness ran. See
   [step 7c](windows-host-design.md#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24).
 
+- Phase 7 step 7d is the host acceptance
+  [gap report](windows-host-design.md#step-7d-host-acceptance-gap-report-2026-11-25):
+  every row of the Linux parity map and every criterion of the Windows host
+  task, classed against the host step 7c installed. None is demonstrated in
+  full on the installed host; the rows the installed services did show are
+  the installer itself, the services running without WSL, the stand-in
+  launch through both brokers and the lifecycle rounds. Phase 7 is complete
+  for the installer only. Phase 8, planned as nine human-delivered tasks
+  (steps 8a to 8i), holds the real coordinator loop, the role-account
+  question, coordinator credentials for launches, a provider harness
+  driver, a WFP policy, resource caps and quiet hours, pinned tool profiles
+  with a hardened clone and the browser checks, the workspace build inside
+  a launch, and the full host acceptance.
+
 - Reviewer candidate shells accept both flat harness cwd files and the bounded
   `tmp/claude-UID/cwd-ID` layout. The nested directory is recreated inside the
   isolated tmpfs; the host harness directory stays hidden. Invalid paths,

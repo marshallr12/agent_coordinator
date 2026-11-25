@@ -170,9 +170,11 @@ once the host works. The key stays registered with the App until you remove
 it there.
 
 A launch is meant to read nothing below `C:\Program Files\agentc`: it runs
-in an AppContainer, which a grant to Users does not reach. No launch has run
-against a program directory with this access list yet, so that too is not
-yet observed.
+in an AppContainer, which a grant to Users does not reach. In the
+[step 7c run](windows-host-design.md#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24)
+the installed runner's launch was refused the program directory and
+`supervisor.toml` with error 5; it tried only to list the one and read the
+other.
 
 ## The pinned native tools
 

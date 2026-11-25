@@ -1,16 +1,17 @@
 # Native Windows supervisor: design and prototype
 
-Status: **proposed; phase 2 of the containment prototype is complete; phase 3
-is under way; not approved for unattended execution**. Task
+Status: **proposed; phases 1 to 6 and the installer of phase 7 are
+delivered; phase 8 is planned; no Windows host is admitted and nothing is
+approved for unattended execution**. Task
 `7011c55f-652e-47d3-a409-7d46420c7eb6` activates a native Windows replacement
 for the abandoned WSL host approach. Its first phase, task
-`a9126e52-654c-4b26-8a7d-7748261d2c4a`, delivers this design and the
-containment prototype. Task `3787e738-d381-4e4f-96b0-75f7afe22155` prepares
-phase 2. Task `37788fa5-da1c-4a76-80ed-c893d8ae74f3` is phase 3: the
-[host-runtime interface and a Windows launcher](#host-runtime-interface-and-windows-backend)
-that reuses the prototype's boundary. Its acceptance run under a role account
-has not been done. This chapter does not claim that Windows services or a
-production Windows sandbox are implemented. The
+`a9126e52-654c-4b26-8a7d-7748261d2c4a`, delivered this design and the
+containment prototype; the [delivery phases](#delivery-phases-and-gates)
+table lists every later phase and its task. The installed services have run
+only an acceptance stand-in, never a coordinator loop or a provider harness;
+the [step 7d gap report](#step-7d-host-acceptance-gap-report-2026-11-25)
+says, row by row, what is demonstrated and what is left. This chapter does
+not claim that a production Windows sandbox is implemented. The
 [current implementation](implementation-status.md) remains authoritative. The
 Linux backend remains supported.
 
@@ -921,7 +922,7 @@ Phase 7 turns what the owner did by hand in the runs of tasks `ec6d901c`,
 | 7a | The installer core: a desired-state model, `windows-host install` and `windows-host status` | `ddeb5d76` | Implemented; see below. Its services were first started by step 7b's gated test; step 7c inventoried the four installed services' tokens running |
 | 7b | `windows-host update`, `rollback` and `uninstall`, each stage journaled before it is acted on | `2064cf54` | Implemented; see [step 7b](#step-7b-update-rollback-and-uninstall-2026-11-24). Driven natively with a runner in the test process, and once against four registered throwaway services that Windows started, with the owner's consent |
 | 7c | Owner-attended installer acceptance on MiniAir, using only the `windows-host` subcommands, with the stand-in as the workload and the phase 4c lifecycle rounds | `012ff9f2` | Run on 2026-11-24; see [step 7c](#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24). Install, drift repair, the stand-in launch through both brokers with a candidate push, every lifecycle round asked for (logoff and reboot on their second attempts), the three updates and the uninstall **passed**; the machine was left as the run found it |
-| 7d | The host acceptance gap report against the [parity map](#linux-p2-parity-and-acceptance-map) and the phase 8 plan | `748f6c3a` | Not started |
+| 7d | The host acceptance gap report against the [parity map](#linux-p2-parity-and-acceptance-map) and the phase 8 plan | `748f6c3a` | Written; see [step 7d](#step-7d-host-acceptance-gap-report-2026-11-25). No parity row and no parent criterion is demonstrated in full on the installed host; [phase 8](#phase-8-steps) has a planned task for each gap |
 
 The operator's view of the installer is the
 [Windows host installation](windows-installation.md) chapter. This section
@@ -1479,6 +1480,132 @@ the push App for later Windows host runs.
 - The first reboot attempt cannot say whether the supervisor would have
   started without the sign-in; the second shows that all four do.
 - MiniAir, on Windows 11 Pro 10.0.26300, is the only machine.
+
+#### Step 7d: host acceptance gap report (2026-11-25)
+
+Task `748f6c3a-c74a-4351-a72a-f0a981d2d7dc`. This is a **blocker report, not
+production acceptance**. It goes through every row of the
+[parity map](#linux-p2-parity-and-acceptance-map) and the eight acceptance
+criteria of the parent task `7011c55f`, and says for each what the host
+installed by `windows-host` has shown, what has been shown only some other
+way, and what is not built. It leaves the parent task incomplete.
+
+**The host and the commit.** The host under report is the one step 7c
+installed on MiniAir: build1, the release build of
+`1f4ecdc05aa17a014a09966b9081d3f37af51c20` (SHA-256
+`e7dcfed54ab6006c4be554464e6df53f0c89754a6b843b0b49f6dddffa9ac0d9`),
+registered by `windows-host install`. Nothing was run on the machine for this
+report. Step 7c's run ended with the host uninstalled and the machine as it
+had found it, and the report is drawn from the logs that run kept, in
+artifact `e0a00dc6`, and from the earlier phases' records. A row's log is
+named by its path in that artifact. `main` when this was written, `4bb848e`,
+differs from `1f4ecdc` only in documentation and `CANARY.md`.
+
+**How a row is classed.**
+
+- **Demonstrated on the installed host**: the whole guarantee the row asks
+  for was shown by the services that `windows-host install` registered from
+  `1f4ecdc`, in a log of `e0a00dc6`.
+- **In part**: some of it was shown, and the row says how. That may be on
+  the installed host, by services installed by hand (phase 4c, step 6d and
+  its follow-up), by launches run as the owner or as a role account outside
+  any service (phases 1 to 3), at another commit, or only by native tests.
+- **Not built**: nothing on Windows does it yet.
+
+A skipped check, a Linux result, or a launch run as the owner where the row
+needs the installed services, never counts as demonstrated. Every row that
+is not demonstrated names the [phase 8](#phase-8-steps) step that closes it.
+
+**Evidence.** Each artifact here was downloaded on 2026-11-25, and its size
+and SHA-256 matched the coordinator's record. The
+[bundle](#the-step-7d-bundle) on the parent task holds all of them, with the
+earlier phase 2 and phase 4c runs' artifacts besides.
+
+| Artifact | Task | What it holds |
+| --- | --- | --- |
+| `e0a00dc6` | `012ff9f2`, step 7c | The installed host: install, drift, start, the stand-in launch, the lifecycle rounds, the updates and the uninstall |
+| `e509bdc0` | `f71179f5`, step 6d follow-up | Four services installed by hand from `b531e6f`: the stand-in round and the role round |
+| `4af18ffd` | `daa42f71`, step 6d | The two brokers installed by hand as services |
+| `d8804bf9` | `ec6d901c`, phase 4c fourth run | The supervisor and runner installed by hand from `29d97e9`: the lifecycle rounds |
+| `6c33cd9d` | `37788fa5`, phase 3 | The Rust launcher's containment matrix under a role account |
+| `9b76fb34`, `edc18a08`, `a679dd83` | `7011c55f`, phase 2 | The prototype's role-account runs and the network policy run |
+| `359785c5`, `a0ce81a0` | `a9126e52`, phase 1 | The prototype's containment matrix, as the owner |
+| `16739f48` | `d8ae17f5` | busybox-w32 `sh` starting in an AppContainer |
+| `6da8f119`, `832645f4`, `1c948aec`, `af91e95b` | `ddeb5d76`, `2064cf54`, steps 7a and 7b | The installer's native test runs |
+
+Phases 4a and 4b (tasks `e0459185`, `078703b3`, `49aaca03`), steps 5a to 5f
+(tasks `61fe9ca2`, `9cf04a5c`) and steps 6a to 6c (task `13ae81c1`) have no
+artifact. Their evidence is this chapter's record of them and their native
+tests.
+
+**The parity map, row by row.** No row is demonstrated on the installed
+host.
+
+| Row | State | On the installed host (`e0a00dc6`) | Elsewhere, and how | Left, and the step |
+| --- | --- | --- | --- | --- |
+| `check_profiles`, exact versions, trusted binaries | In part | The installed binary is in `C:\Program Files\agentc`, which only the system and administrators can change; the stand-in launch was refused that directory and `supervisor.toml` with error 5 (`evidence/standin-log.txt`) | The capability record admits the busybox-w32 shell and Claude Code 2.1.326 only by SHA-256, in native tests (steps 5a and 5e). Git is found on `PATH` and not pinned | No wrong-version, writable-binary or candidate-hook refusal on a host; Git unpinned: **8g** |
+| `check_git`, hardened clone | Not built | The stand-in's candidate was committed by the kit outside the launch, not cloned for it | None | An immutable mirror, the exact base, hooks and push URL disabled: **8g** |
+| `check_writes`, `check_seeds` | In part | The launch read its controls and was refused (error 5) the push key, its directory, the publication broker's state and work directories, the program directory and `supervisor.toml` (`evidence/standin-log.txt`). The probes open and list; they do not write | Writes to the host directory, the tool directory and every other launch's directory were denied as the owner and as a role account (phases 1 to 3) | Write, delete and rename probes from an installed host's launch: **8h**. Role state and seeds are not built: **8g** |
+| `check_codex_sandbox`, `check_claude_sandbox` | In part | The launch ran as the runner's service SID in a less-privileged AppContainer at low integrity, in a job (`evidence/standin-log.txt`: `token.lpac`, `token.integrity`, `token.in_job`) | Host and cross-launch files, processes, pipes, events and the interactive window station were denied, and the owner's registry was denied to a launch run as a separate account, in the role-account runs of phases 2 and 3; those launches ran outside any service | Same-role and cross-role access between launches of the installed runner, and which account a role runs as: **8b** |
+| `check_egress` | In part | The installed egress broker answered the launch's CONNECT to `github.com:443` with 200 and to `example.com:443` with 403 (`evidence/standin-log.txt`, `evidence/standin/egress-service.log`) | A launch's direct TCP and its name resolution failed with the egress service installed by hand (step 6d). Direct IPv4 and IPv6, loopback, local network, UDP and DNS were denied, also with the firewall profiles disabled, in the role-account runs (phases 2 and 3). Forged and non-CONNECT requests were refused by the broker run as the owner (step 6b) | No WFP policy; a stopped firewall service untested; direct-network refusals not probed from the installed host: **8e** |
+| `check_claude_launch`, `check_relay_probe`, shell execution | In part | No harness ran: the workload was the probe fixture | Native Claude Code 2.1.326 ran in a contained reviewer launch as the owner, owner-attended, and its Bash command went through the prefix and the shim (step 5f). The runner refuses a launch whose candidate runner is broken (step 5e) or whose broker is missing or does not admit it (step 6b), in native tests | No Windows harness driver, and no harness has used either broker: **8d** |
+| `check_claude_token`, `check_candidate_token`, reviewer isolation | In part | The installed services made only an implementer stand-in launch, given no credential | A synthetic credential in a reviewer's environment, files, inherited handle and registry was out of its candidate's reach in native tests (step 5e). A reviewer launch and its candidate, made by the runner installed by hand while it served the owner's account, were refused the push key and the broker's directories (step 6d follow-up) | No Windows launch is given a coordinator credential: **8c**. Whether the candidate reaches the real provider credential its harness holds is unprobed: **8d** |
+| `check_push_kill`, `check_push_launch`, `check_live_helper` | In part | The installed publication broker asked the installed supervisor (`current` three times), pushed the launch's own candidate to its own ref with a per-push token it then logged `revoked`, refused the launch its own repository, and removed that repository at close (`evidence/standin-log.txt`) | Reviewer, foreign-launch, wrong-tree and lost-authority refusals were shown with the broker run as the owner (step 6c), and lost authority once from the broker installed by hand (step 6d follow-up). The start-up sweep was shown only natively | Those refusals from the installed services, and a broker crash with a repository present: **8h** |
+| `check_push_key`, `check_attention_token` | In part | The key's access list is the system and administrators with full control and `agentc-publication` with read (`evidence/install-log.txt`); the installed egress service could not open it (`evidence/standin/egress-service.log`), nor could the stand-in launch, its directory included (error 5, `evidence/standin-log.txt`) | Implementer, reviewer and candidate launches of the runner installed by hand were refused it (step 6d follow-up) | Only an implementer launch of the installed host tried it, by opening and listing: **8h**. No attention token exists on Windows; the loop's own credentials are **8a** |
+| `check_apparmor_bwrap`, group/tool access | In part | Each running service's token held exactly `SeChangeNotifyPrivilege` and `SeImpersonatePrivilege` (`evidence/start-log.txt`); the launch's token was a less-privileged AppContainer at low integrity in a job (`evidence/standin-log.txt`) | The launcher refuses a launch whose token or job is not what it asked for, and the Task Scheduler refused the less-privileged token (phase 3) | A launch trying to get a service or elevated token: **8h**. Tool access lists: **8g** |
+| `check_browser_install`, `check_pinned_shell`, `check_browser` | Not built | None | None: the busybox-w32 shell pinned for candidate commands is not a browser shell | A pinned browser in its own bounded context, or a refusal documented as unsupported: **8g** |
+| `check_cargo_test` | In part | The workload was the probe fixture; nothing was built in a launch | A real offline `cargo build` and `cargo test` of the fixture crate passed inside both boundaries, as the owner (phase 1) | The workspace built and tested inside a launch of the installed host: **8i** |
+| Child cleanup and no privilege gain | In part | After every round the judge found no problem and no fixture process, launch directory or launch profile was left; the child-crash round traced `exited release cleanup` (`evidence/*-log.txt` of each round) | Children inherit the token and the job, breakaway is refused, the process and memory limits hold and a deliberate orphan dies with the job, in the prototype's and the launcher's runs (phases 1 to 3) | Child, grandchild and breakaway attempts from a launch of the installed runner: **8h**. Limits set from configured caps: **8f** |
+| Additional Windows path hazards | In part | Nothing was probed | Nine aliases of a host file were denied; a contained process could not make a junction, a symbolic link, a hard link to a host or tool file, or a stream on a host file; the host reader refuses links and a path swapped mid-read: all as the owner (phases 1 to 3). The installer refuses a link or reparse point in its tree (step 7a, native tests) | Handle-relative creation and deletion, and every probe from the installed host: **8h** |
+
+**The parent task's criteria.** None is demonstrated on the installed host
+in full.
+
+| Criterion of `7011c55f` | State | What is shown, and how | Left, and the step |
+| --- | --- | --- | --- |
+| 1. A reviewed design: threat model, support matrix, identities, broker interfaces, the parity map, proposed apart from demonstrated | In part | This chapter has each, and each phase was reviewed. The identities it names (separate implementer and reviewer accounts) are not what was built (one runner account with a package per launch) | **8b** |
+| 2. A prototype runs a real build/test workload and passes the adversarial probes before unattended execution | In part | The fixture crate's build and tests passed in the prototype as the owner (phase 1), and the adversarial matrix passed as the owner and as a role account, in the prototype and through the launcher (phases 1 to 3); unattended execution is not enabled | The workspace build: **8i**. The probes from the installed host's launches: **8h** |
+| 3. Native services without WSL, preserving the coordinator's lease, idempotency and recovery contracts, over a shared runtime interface, Linux kept | In part | Demonstrated on the installed host: the four services ran natively without WSL through every step 7c round. The runtime interface and the Linux backend behind it exist (phase 3), and the Linux gate passes. No coordinator loop ran, so the coordinator's contracts were exercised only by the stand-in | **8a** |
+| 4. Reviewer candidate commands without any credential; real harness command paths; unsupported combinations fail closed | In part | See the `check_claude_launch` and reviewer isolation rows. Unsupported harnesses and roles are documented in the support matrix; none can be launched, since no driver exists | **8c**, **8d** |
+| 5. Brokers enforce per-launch authorization and policy; direct networking, bypasses, forged requests and key access denied; policy loss opens nothing | In part | See the `check_egress`, `check_push_*` and `check_push_key` rows. Policy loss (firewall profiles disabled) was shown in the phase 2 and phase 3 role-account runs | **8e**, **8h** |
+| 6. Host acceptance: boot without logon, logoff, failure and restart, crashes, stop, preshutdown and reboot, bounded drain, orphan cleanup, caps and quiet hours, reconciliation | In part | Demonstrated on the installed host, with the stand-in as the workload: the stop, runner-stop, supervisor-crash, runner-crash and child-crash rounds, logoff, reboot without logon, preshutdown draining within the limit, nothing left after any round, and the interrupted item started once (in `evidence/`: `stop-log.txt`, `runner-stop-log.txt`, `supervisor-crash-log.txt`, `runner-crash-log.txt`, `child-crash-log.txt`, `logoff-log.txt`, `reboot-log.txt`) | Resource caps and quiet hours are not built: **8f**. Power loss and network loss were not run: **8h**. Reconciling against coordinator authority: **8a** |
+| 7. An idempotent installer and canonical documentation; no credential exposed and WSL untouched | In part | Demonstrated on the installed host: a second install changed nothing, drift was repaired, the services' identities and access lists, the key readable only by the publication account, updates that revert a failed release, and an uninstall that left WSL as it was (in `evidence/`: `install-log.txt`, `drift-log.txt`, `start-log.txt`, `update-*-log.txt`, `uninstall-*-log.txt`, `baseline-*.json`). The [installation chapter](windows-installation.md) covers prerequisites, identities, pinned tools, provider enrollment, credential storage, update, rollback, logs, uninstall and what is not supported. The stand-alone `rollback` ran only against step 7b's throwaway services | Storage for provider and coordinator credentials: **8a**, **8c**, **8d**. Git pinned: **8g** |
+| 8. A full containment acceptance report with exact-source checks and retained logs; a blocker report leaves the task incomplete | Not built | This is the blocker report; the parent stays incomplete | **8h** |
+
+#### Phase 8 steps
+
+Each step is a planned, human-delivered coordinator task toward the parent
+`7011c55f`: it must be built and tested on MiniAir, and the owner activates
+it.
+
+| Step | Content | Task | Depends on |
+| --- | --- | --- | --- |
+| 8a | The real coordinator loop in the supervisor service, with its credential and journals in protected state | `69a4a809-05a6-43e4-8cc9-2494b11e8b38` | |
+| 8b | Separate implementer and reviewer accounts or one runner account: the owner's decision, then the installer and same-role concurrency probes | `c87010e8-112c-4b31-ad77-60821d0844cb` | |
+| 8c | Coordinator credentials for launches, out of the candidate's reach | `97bead44-4224-48e5-8f6a-3ba49063d2c0` | 8a, 8b |
+| 8d | A provider harness driver on Windows: native Claude Code as reviewer and implementer through both brokers | `f050f4ac-8466-4082-bd05-99fea545bcb9` | 8c |
+| 8e | A WFP policy for launches, managed by the installer, tested with the firewall service stopped | `bcbd3f91-17b6-459f-a2e5-3dbb337dfdaa` | |
+| 8f | Resource caps and quiet hours on Windows | `0a2c6d66-21a3-4f20-98be-f562513aa916` | 8a |
+| 8g | Pinned tool profiles, a hardened clone, protected role state and seeds, and the browser checks | `96a8b81b-9c2b-4a7e-aaa1-0ba2b63539c3` | 8a |
+| 8i | The workspace build and test inside a launch | `412bd4ae-cfe2-4e02-aea6-a9e2a966711a` | 8a, 8g |
+| 8h | The full host acceptance on MiniAir, including what step 7c left unverified (power loss, network loss, a launch profile left behind, an update killed at each stage) | `e2345221-6690-4ee9-8f40-59106456f302` | 8a to 8g |
+
+Step 8i was split out after 8h had been created, and an agent cannot change
+a task's dependencies here, so 8h's stored dependencies do not name it. 8h's
+first criterion, every parity row demonstrated, still needs it.
+
+#### The step 7d bundle
+
+The report and the logs it rests on are attached to the parent task
+`7011c55f` as one pinned zip, packed by a registered job of step 7d. It
+holds `README.txt`; `report/step-7d.md`, this section as first committed;
+`source.txt`, with that commit, the commit and build under report, and the
+phase 8 task IDs; `evidence-index.json`, with each artifact's task, ID,
+name, size, SHA-256 and whether the downloaded bytes matched; and below
+`evidence/` the bytes of every artifact of the Windows host's phase tasks,
+23 in all, each as downloaded on 2026-11-25. The report in the bundle
+differs from this section only in lacking the bundle's own identity, which
+cannot be known before the bundle is made.
 
 ## Local broker contracts
 
@@ -3526,7 +3653,8 @@ before it has passed; a blocked gate stops the phases behind it.
 | 4c | Owner-run machine acceptance: boot without logon, logoff, stop, preshutdown and reboot, forced service and child crashes, orphan cleanup, and its record | 4a and 4b | Run by task `62d9942f` on 2026-11-11 and **stopped at runbook step 6**: both services install, run and stop under the Service Control Manager, but the runner **cannot make a launch** as a service (`station_not_ours`). No lifecycle round was run. Task `7f6f242d` fixes the window station and a refused prepare's leftover directories; see [Phase 4c machine run](#phase-4c-machine-run-2026-11-11). Run again by task `7b848696` on 2026-11-12 with that fix and **stopped at step 6 again**: Windows refuses the runner's account full access to its window station, so the take-over refuses; a refused prepare now leaves nothing. See the [second machine run](#phase-4c-second-machine-run-2026-11-12); task `8981c84a` followed. Run a third time by task `4197c362` on 2026-11-13 from `103e640`: step 6 **passed** three times; the stop and supervisor-crash rounds **passed**, the runner-stop round **cannot run as written** (error 1051), and the runner-crash round **failed**: the supervisor never releases a launch the restarted runner reclaimed, and then does not stop. Child crash, logoff, reboot and power loss were not run. See the [third machine run](#phase-4c-third-machine-run-2026-11-13); task `76685e6b` follows. Run a fourth time by task `ec6d901c` on 2026-11-14 from `29d97e9`, which holds that fix: install, step 6 and **every lifecycle round passed**, the reboot round on its second attempt after automatic restart sign-on was turned off, and both services, trees and service profiles were removed. See the [fourth machine run](#phase-4c-fourth-machine-run-2026-11-14). The phase is complete when that task's review and integration are; the runbook does not cover a real coordinator or any provider harness |
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Steps 5a to 5f done**; the phase is complete when task `9cf04a5c`'s review and integration are. It first **closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim) and step 5e (the readiness check and the fixture checks), whose native tests pass. In step 5f, an owner-attended run [inside a contained reviewer launch](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17) sent a Bash command from native Claude Code 2.1.326 in the recorded form through the prefix and the shim into the candidate. The capability record now admits only that build. No Windows driver calls the record, so no product Claude launch runs on Windows. The [items still open](#phase-5-steps) include the process a job still counts after the shell ends |
 | 6 | Egress and publication brokers | Phase 3 | Steps 6a, 6b and 6c implemented (task `13ae81c1`); step 6d implemented and run by the owner on MiniAir on 2026-11-20 (task `daa42f71`): both brokers served a launch as services under their own virtual accounts, and publication pushed to the real remote with a per-push token. Task `f71179f5` followed on 2026-11-22: the installed supervisor and runner services made a stand-in launch that both installed brokers admitted, launches made by the installed runner were refused the push key and the publication broker's directories, and a closed launch's repository is removed ([follow-up](#step-6d-follow-up-the-services-own-launches-2026-11-22)). No harness has used either broker; see [phase 6 steps](#phase-6-steps) |
-| 7 | Idempotent installer, update/rollback/uninstall, then a host acceptance gap report; the real coordinator loop, a harness driver, WFP, resource caps and quiet hours are a later phase 8 (owner decision of 2026-11-23) | Phases 4 to 6 | Step 7a implemented (task `ddeb5d76`): `agentc-supervisor windows-host install` and `status`, a desired-state model with a platform-neutral plan, and a Windows backend over the Service Control Manager. Step 7b implemented (task `2064cf54`): `update`, `rollback` and `uninstall`, each stage journaled, driven natively with the runner in the test process and once against four throwaway services Windows started. Step 7c (task `012ff9f2`) ran the owner-attended installer acceptance on MiniAir on 2026-11-24 from `1f4ecdc`: install and drift repair, a stand-in launch through both installed brokers with a candidate push, the stop, runner-stop, crash, logoff and reboot-without-logon rounds, the three updates and the uninstall **passed**, and the machine was left as the run found it; see [step 7c](#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24). **No Windows host is admitted**: no coordinator loop or provider harness ran. Step 7d (gap report) is not started; see [phase 7 steps](#phase-7-steps) |
+| 7 | Idempotent installer, update/rollback/uninstall, then a host acceptance gap report; the real coordinator loop, a harness driver, WFP, resource caps and quiet hours are a later phase 8 (owner decision of 2026-11-23) | Phases 4 to 6 | Step 7a implemented (task `ddeb5d76`): `agentc-supervisor windows-host install` and `status`, a desired-state model with a platform-neutral plan, and a Windows backend over the Service Control Manager. Step 7b implemented (task `2064cf54`): `update`, `rollback` and `uninstall`, each stage journaled, driven natively with the runner in the test process and once against four throwaway services Windows started. Step 7c (task `012ff9f2`) ran the owner-attended installer acceptance on MiniAir on 2026-11-24 from `1f4ecdc`: install and drift repair, a stand-in launch through both installed brokers with a candidate push, the stop, runner-stop, crash, logoff and reboot-without-logon rounds, the three updates and the uninstall **passed**, and the machine was left as the run found it; see [step 7c](#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24). **No Windows host is admitted**: no coordinator loop or provider harness ran. Step 7d (task `748f6c3a`) wrote the [gap report](#step-7d-host-acceptance-gap-report-2026-11-25) on 2026-11-25: no parity row and no parent criterion is demonstrated in full. **Phase 7 is complete for the installer only**, when step 7d's review and integration are; see [phase 7 steps](#phase-7-steps) |
+| 8 | The real coordinator loop, the role-account question, coordinator credentials for launches, a provider harness driver, WFP, resource caps and quiet hours, pinned tool profiles with a hardened clone and the browser checks, the workspace build in a launch, and the full host acceptance | Phase 7 | **Planned**: steps 8a to 8i are planned, human-delivered tasks; see [phase 8 steps](#phase-8-steps). Only step 8h's acceptance, if every row passes, can admit a host |
 
 No intermediate phase is production acceptance. Independent review and guarded
 integration complete each task; only the final acceptance can admit a host.
