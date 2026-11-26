@@ -271,6 +271,174 @@ For local development only, `--allow-insecure-loopback` permits `http://localhos
 or a loopback IP address. Other HTTP origins are rejected. Redirects are never
 followed, and the CLI accepts only `/api/v1` and `/healthz` request paths.
 
+## Adopt a repository
+
+`agent-coordinator adopt` (alias `scaffold`) connects an existing Git repository
+to a project in one guided run, so the next Claude Code or Codex session started
+there connects and can claim work. Run it inside the repository:
+
+```text
+agent-coordinator adopt
+```
+
+It needs no `.agent-coordinator.toml` and no `--session`: it is the command that
+creates the binding. It needs only the credential the CLI already holds for the
+service. Every request it sends is a `GET`, so it never changes the service and
+running it again is always safe. The name is unrelated to `session adopt-mcp`
+below, which adopts an MCP *session*. The full design is in
+[project scaffolding design](project-scaffolding-design.md).
+
+What a run does, in order:
+
+1. **Preflight.** The path must be in a Git work tree with no merge or rebase in
+   progress. The service must be reachable and this client compatible with it
+   (exit 6 otherwise). The credential must be an agent credential with write
+   access (exit 3 with the setup pointer otherwise; nothing is written).
+2. **Detect.** The repository URL comes from `origin` (or the only remote) with
+   any `user:password@`, query and fragment removed; the branch from the
+   remote's default branch; the project name from the URL's last segment.
+3. **Interview.** Only what could not be detected is asked. Each question has a
+   flag.
+4. **Plan.** The exact files and actions are shown, then one confirmation.
+5. **Project.** An existing project whose repository URL matches is linked (or
+   the one named by `--project`). Otherwise adopt prints, and opens in a
+   browser, a dashboard link that prefills the **Create project** dialog,
+   together with the same three values in plain text. You press **Create
+   project**; adopt polls the project list until a project that was not there
+   before appears with the same repository URL, and binds to it. Project
+   creation stays a human action.
+6. **Write.** `.agent-coordinator.toml` (`service_url` and `project_id`) and the
+   managed instruction block described under
+   [the instruction block](#the-instruction-block).
+7. **Verify.** The binding loads from the root and from a nested directory, the
+   credential works, the project is listed, and the client is compatible.
+8. **Commit.** Only the files adopt wrote, with the message `Connect repository
+   to Agent Coordinator`. It honours hooks and signing, adds no trailer, and
+   never pushes.
+9. **Migrate.** Optional; see [backlog migration](#backlog-migration).
+
+| Option | Meaning |
+| --- | --- |
+| `PATH` | Repository to adopt. Default: the current directory. |
+| `--service-url URL` | Service to connect to. Default: the existing binding's, else `https://agents.sithbit.com`. |
+| `--name NAME` | Project display name. Default: the repository name. |
+| `--repository-url URL` | Overrides the detected remote URL. |
+| `--branch BRANCH` | Target branch. Default: detected. |
+| `--project ID` | Link to this existing project; the dashboard is never opened. |
+| `--harness claude\|codex\|both\|auto` | Assistants whose instruction files to prepare. Default `auto`: what is installed or already configured, else both. |
+| `--no-browser` | Print the dashboard link without opening it. |
+| `--approval-timeout SECS` | How long to wait for the project to appear. Default 900. |
+| `--commit`, `--no-commit` | Commit the files adopt wrote. Default: commit. |
+| `--migrate ask\|now\|off` | Backlog migration session. Default `ask`. |
+| `--migration-agent claude\|codex` | Assistant that runs the migration. Default: the first selected one that is installed. |
+| `--replace-binding` | Overwrite a binding that points to another service or project. |
+| `--force-instructions` | Insert the block even if the file already mentions the binding. |
+| `--non-interactive` | Never prompt. |
+| `--yes` | Accept every default and confirmation (implies `--non-interactive`). |
+| `--dry-run` | Print the plan and a diff of every file; write nothing and open nothing. |
+
+**Unattended runs.** Prompts appear only when stdin and stderr are terminals and
+neither `--non-interactive` nor `--yes` is set. Without prompts nothing is
+assumed: a run that still needs an answer exits 2 with `needs_input` and lists
+every missing flag at once, before anything is opened or written. `--yes` links
+an exact existing match, confirms the plan, commits, and starts no migration.
+With `--json`, each step is one JSON object per line on stdout
+(`{"step": …, "status": "done|skipped|waiting|failed", …}`), followed by a final
+`{"result": …}` object with the project ID, the files written, the commit ID,
+the migration outcome and any warnings.
+
+**Running it again.** There is no state to resume. In a repository whose binding
+names this service and an existing project, adopt is in *repair mode*: it asks
+nothing, completes or re-verifies the files, and reports `already_connected`
+when nothing needed writing. A binding that points to another service or
+project, or whose project no longer exists, is refused (exit 5) unless
+`--replace-binding` is given. An interrupted run is finished by running the
+command again.
+
+**File safety.** A file adopt would modify must have no uncommitted changes
+(exit 6). Writes are atomic, keep the file's mode, line endings, byte-order mark
+and final-newline habit, and are abandoned (exit 5) if the file changed while
+adopt was running. A symlinked instruction file is written through to its target
+when that is inside the repository, and left alone otherwise.
+
+| Exit | Meaning for `adopt` |
+| --- | --- |
+| 0 | Connected, or already connected, and verified. |
+| 2 | Invalid input, a declined confirmation, or `needs_input`. |
+| 3 | No usable credential for the service. Nothing was written. |
+| 5 | The binding points elsewhere, several projects match, or a file changed during the run. |
+| 6 | Client upgrade needed, a target file has uncommitted changes, a merge or rebase is in progress, or verification failed. |
+| 7 | Transport failure, or the project did not appear before the timeout. |
+
+A session that runs in a sandbox may not see `$HOME/.config` or the network.
+Give it the credential through `AGENT_COORDINATOR_TOKEN` and
+`AGENT_COORDINATOR_ORIGIN` in its environment, or use `--state-dir` inside the
+allowed area ([session state locations](#session-state-locations-and-diagnostics)).
+
+### The instruction block
+
+`AGENTS.md` is read by Codex and other harnesses, `CLAUDE.md` by Claude Code.
+Adopt places this block at the top of the file, below any YAML front matter and
+leading `# ` title:
+
+```markdown
+<!-- agent-coordinator:begin v1 -->
+## Agent Coordinator
+
+This repository's work is coordinated by an Agent Coordinator service.
+Read `.agent-coordinator.toml` and anonymously fetch the service's
+`/api/v1/info` over HTTPS without redirects. The response is large: save it to
+a temporary file and read `data.agent_startup.guide` one section at a time.
+Follow that guide and same-origin authentication help, preferring an available
+authenticated MCP connection; otherwise use the `agent-coordinator` CLI with a
+session name unique to this harness (`AGENT_COORDINATOR_SESSION`).
+Automatically select and claim eligible work unless the user changes the
+scope. Keep credentials outside the repository and never expose them. Report a
+concrete blocker if neither MCP nor the CLI is usable; do not select work from
+local files.
+<!-- agent-coordinator:end -->
+```
+
+| Existing files | What adopt does |
+| --- | --- |
+| Neither | Creates `AGENTS.md` with the block. If Claude is selected, also creates `CLAUDE.md` holding the single line `@AGENTS.md`. |
+| `AGENTS.md` only | Inserts the block. If Claude is selected, creates `CLAUDE.md` as `@AGENTS.md`. |
+| `CLAUDE.md` only | Inserts the block into `CLAUDE.md`. If Codex is selected, also creates `AGENTS.md` with the block. |
+| Both | Inserts into `AGENTS.md`, and into `CLAUDE.md` unless it already imports `AGENTS.md` (a line starting `@AGENTS.md`) or is the same file. |
+
+On a later run, the text between the markers is replaced, so a newer CLI
+upgrades the block; keep your own instructions outside the markers. A file with
+no markers that already mentions `.agent-coordinator.toml` is left alone and
+reported, unless `--force-instructions` is given. A begin marker without its end
+marker is never guessed at: that file is left for you to fix.
+
+### Backlog migration
+
+When `HANDOFF.md` or `BACKLOG.md` is at the repository root and the run is
+interactive, adopt offers, after the repository is connected and committed, to
+start an interactive Claude Code or Codex session that migrates those documents
+into coordinator tasks, knowledge records and decisions and then archives them
+under `docs/pre-coordinator/`. Adopt itself creates no records; you review and
+approve the plan inside that session.
+
+- The procedure, its mapping rules and a Python helper are compiled into the
+  CLI and written to a private directory under the CLI's configuration
+  directory (`adopt/migrate-kit-<client commit>/`), never into the repository.
+- The assistant is started as `claude "<prompt>" --add-dir <kit>` or
+  `codex "<prompt>"`, in the repository, with `AGENT_COORDINATOR_SESSION` set to
+  a fresh `adopt-migrate-…` name when it is not already set. Adopt checks the
+  assistant's `--help` first and passes only options that exist. It never
+  passes a permission-bypass option, so the assistant's own permission prompts
+  stay in force.
+- The offer is skipped, with the reason, when there is nothing to migrate, with
+  `--migrate off`, without a terminal (so also with `--yes`), or when the
+  assistant or `python3` is not on `PATH`. Start it at any later time with
+  `agent-coordinator adopt --migrate now`.
+- A repository that has `docs/pre-coordinator/`, or whose `HANDOFF.md` is the
+  stub containing `<!-- agent-coordinator:migrated -->`, is already migrated and
+  is not offered the migration again.
+- However the session ends, adopt's own exit code does not change.
+
 ## Adopt an existing MCP session
 
 An authenticated MCP connection can coordinate work without this CLI. To perform
@@ -1090,17 +1258,27 @@ failures.
 
 ## Repository bootstrap text
 
-Repositories can place this short bootstrap in `AGENTS.md`, `CLAUDE.md`, or the
-equivalent harness instruction file after the CLI workflow has been installed:
+`agent-coordinator adopt` writes this text into `AGENTS.md` and `CLAUDE.md` and
+keeps it current; see [the instruction block](#the-instruction-block) for where
+it goes and how reruns treat it. To prepare a repository by hand, place the same
+block in the harness instruction file:
 
-```text
-This project coordinates work through Agent Coordinator.
-Read .agent-coordinator.toml and run `agent-coordinator connect --json` with a
-stable session name unique to this harness. Read the complete orientation and
-all required instruction sections before claiming work. Reconnect or show the
-returned setup/error details when coordination is unavailable; do not silently
-fall back to uncoordinated work. Claim a task before changing code, then renew,
-checkpoint, and release it with its exact attempt ID and ownership generation.
+```markdown
+<!-- agent-coordinator:begin v1 -->
+## Agent Coordinator
+
+This repository's work is coordinated by an Agent Coordinator service.
+Read `.agent-coordinator.toml` and anonymously fetch the service's
+`/api/v1/info` over HTTPS without redirects. The response is large: save it to
+a temporary file and read `data.agent_startup.guide` one section at a time.
+Follow that guide and same-origin authentication help, preferring an available
+authenticated MCP connection; otherwise use the `agent-coordinator` CLI with a
+session name unique to this harness (`AGENT_COORDINATOR_SESSION`).
+Automatically select and claim eligible work unless the user changes the
+scope. Keep credentials outside the repository and never expose them. Report a
+concrete blocker if neither MCP nor the CLI is usable; do not select work from
+local files.
+<!-- agent-coordinator:end -->
 ```
 
 ## Shared knowledge, decisions, and Markdown records

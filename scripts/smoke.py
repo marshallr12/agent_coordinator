@@ -29,6 +29,7 @@ from mcp_launcher_smoke import exercise_mcp_launcher
 from mcp_adoption_smoke import exercise_mcp_adoption
 from mcp_transport_smoke import exercise_mcp_transport
 from session_idle_smoke import exercise_session_idle
+from adopt_smoke import exercise_adopt
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -196,6 +197,7 @@ def run():
             exercise_shared(temporary, api, cli, project, owner)
 
             exercise_operator(api, cli, owner, options)
+            exercise_adopt(temporary, api, origin, credentials[owner]["token"], CLI)
 
             adapter_project = api("/api/v1/projects", {"name": "Adapter smoke", "repository_url": "https://example.com/adapter.git", "target_branch": "main"})["id"]
             adapter = BUILD / f"agent-coordinator-mcp{BINARY_SUFFIX}"
@@ -213,7 +215,7 @@ def run():
             assert "error" in rejected
             print("PASS: service startup, operator login, two-project visibility, two native harness sessions,")
             print("      atomic competing claims, renewal, checkpoint visibility, connected-session listing, safe release,")
-            print("      idle-session closing with CLI reconnection, and revocation.")
+            print("      idle-session closing with CLI reconnection, repository adoption, and revocation.")
         finally:
             process.terminate()
             try:

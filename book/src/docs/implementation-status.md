@@ -423,6 +423,23 @@ defined by [PLAN.md](../PLAN.md); this document records current behavior.
   toolbar's options and invalid entries are ignored. They hold no task data or
   secrets, and applying one makes no request. When storage throws, views last for
   the page only and a note says so. `scripts/test_task_views.mjs` covers it.
+- Project scaffolding: `agent-coordinator adopt` (alias `scaffold`) connects an
+  existing Git repository to a project in one run, as specified in
+  [project scaffolding design](project-scaffolding-design.md). It needs no
+  binding and no session, sends only `GET` requests, links the project whose
+  repository URL matches or waits for a human to create it from a prefilled
+  dashboard link (`#/new-project?…`), writes `.agent-coordinator.toml` and the
+  managed instruction block in `AGENTS.md`/`CLAUDE.md`, verifies, commits only
+  its own files and never pushes. It can then start an interactive Claude Code
+  or Codex session with the compiled-in migration kit to move `HANDOFF.md` and
+  `BACKLOG.md` into coordinator records. The CLI's unit and whole-command tests
+  run against a loopback stand-in for the service; `scripts/adopt_smoke.py`
+  (part of `scripts/smoke.py`) runs the built CLI against the built service,
+  `scripts/test_new_project_link.mjs` checks the dashboard route in headless
+  Chrome, and `scripts/migrate_kit_test.py` covers the migration helper. The
+  interactive migration session itself is exercised only by a person. Not
+  built: project creation without a human, credential issuance from the CLI,
+  and enrolling a workstation that has no credential.
 - Public authentication help and service-delivered project instructions with
   version acknowledgments. Task/project/event lists use bounded cursor pages.
 - Native CLI with origin-bound credentials, separate local harness sessions,

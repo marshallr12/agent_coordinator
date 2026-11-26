@@ -141,6 +141,15 @@ part of the route. `scripts/test_deep_links.mjs` clicks through ten views,
 walks back and forward through them, and opens a task link directly; it runs
 the same way as `scripts/test_ui_refresh.mjs`.
 
+One route carries a query: `#/new-project?name=…&repository_url=…&target_branch=…`,
+the link `agent-coordinator adopt` prints. The query is taken off before the
+path is split, the overview is shown with the **Create project** dialog filled
+from the three values as text, and the hash is then replaced like any other
+route that is not a view. `scripts/test_new_project_link.mjs` checks, in the
+same way, that the values arrive as text, that out-of-bounds values are dropped,
+that nothing is submitted, that the hash is cleared, and that a visit which
+starts signed out opens the dialog after sign-in.
+
 ## Knowledge filters
 
 `scripts/test_knowledge_filters.mjs` verifies the Knowledge & evidence filters in

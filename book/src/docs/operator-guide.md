@@ -110,6 +110,27 @@ Verify both URLs identify the same repository; shared or historically used bindi
 cannot be changed. New policy versions require agents to reread and
 acknowledge instructions; existing candidates may require reconciliation.
 
+### Creating a project from an `adopt` link
+
+`agent-coordinator adopt` connects a repository to a project
+([CLI guide](CLI.md#adopt-a-repository)). An agent credential cannot create a
+project, so when no project matches the repository adopt prints a link of the
+form `/#/new-project?name=…&repository_url=…&target_branch=…` and waits.
+
+Opening the link (after sign-in if needed) shows the **Create project** dialog
+with those three fields filled in and the notice "Prefilled by a link. Check the
+repository URL before creating." Nothing is created until you press **Create
+project**; the project is then recorded as created by you, exactly as when you
+type the values yourself. Check the repository URL in particular: adopt binds
+the repository only to a new project with the same URL, so if you change it,
+pass the new project's ID to `agent-coordinator adopt --project ID` instead.
+
+The link only fills the form. A value longer than the field allows (120, 2048
+and 255 bytes) or containing a control character is dropped and its field left
+empty, and the address is cleared once the dialog opens, so reloading or going
+back does not reopen it. Treat a link you did not request like any other
+prefilled form: read it before you press the button.
+
 ### Keeping a task from supervisors
 
 Mark a task you deliver yourself (for example one that needs a host no supervisor can

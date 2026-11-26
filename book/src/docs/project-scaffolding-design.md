@@ -1,12 +1,14 @@
 # Project scaffolding design: `agent-coordinator adopt`
 
-Status: **proposed design, revision 2, not implemented.** No command or
-dashboard route described here exists yet.
-[Implementation status](implementation-status.md) lists what works today; this
-chapter must not be read as a description of it. It is the complete input for
-the implementation task in [Implementation plan](#implementation-plan). Task
-`e4e9d7e0` (design only) produced revision 1; [Revision notes](#revision-notes)
-records what the review changed and why.
+Status: **implemented (design revision 2).** The command, the dashboard route
+and the migration kit described here exist; the [CLI guide](CLI.md#adopt-a-repository)
+is the user documentation and [implementation status](implementation-status.md)
+records what is and is not built. This chapter remains the specification.
+[Implementation notes](#implementation-notes) lists the details the
+implementation settled where the design left room. Task `e4e9d7e0` (design
+only) produced revision 1 and task `389b976e` implemented revision 2;
+[Revision notes](#revision-notes) records what the design review changed and
+why.
 
 ## Purpose
 
@@ -75,7 +77,7 @@ Consequences:
 
 ```text
 agent-coordinator adopt [PATH]          # PATH defaults to the current directory
-  --service-url URL        default https://agents.sithbit.com
+  --service-url URL        default: the existing binding's, else https://agents.sithbit.com
   --name NAME              project display name (default: repository name)
   --repository-url URL     override the detected remote URL
   --branch BRANCH          target branch (default: detected)
@@ -157,7 +159,7 @@ Fail early with a concrete fix:
 | --- | --- | --- |
 | Repository URL | `git remote get-url origin`, or the sole remote. **Strip any `user:password@` userinfo, query and fragment before use or display**; say so if stripping changed it. | Ask. A project needs a non-empty URL. |
 | Target branch | `git symbolic-ref --short refs/remotes/origin/HEAD`, else the current branch, else `main` | Ask |
-| Project name | Last path segment of the URL minus `.git`; else the directory name | Ask. ≤120 characters. |
+| Project name | Last path segment of the URL minus `.git`; else the directory name | Ask. ≤120 bytes. |
 | Existing project | `GET /api/v1/projects` (all pages): match by normalised `repository_url` | Offer to link instead of create |
 | Harnesses | `claude` / `codex` on `PATH`; presence of `CLAUDE.md`, `.claude/`, `AGENTS.md`, `.codex/` | Both |
 | Migration sources | Regular files at the repository root named `HANDOFF.md` or `BACKLOG.md` (case-insensitive). A repository that has `docs/pre-coordinator/`, or whose `HANDOFF.md` contains the stub marker `<!-- agent-coordinator:migrated -->`, is **already migrated** and has no sources. | None |
@@ -566,19 +568,20 @@ credential, token, or request header appears in either form.
 
 ## Documentation updates required
 
-On implementation: this chapter moves from "proposed" to current; add an
-`adopt` section to [the CLI guide](CLI.md) and replace its "Repository
-bootstrap text"; add the prefilled-link route to the
-[operator guide](operator-guide.md); record the feature in
-[implementation status](implementation-status.md). The
+Done with the implementation: this chapter moved from "proposed" to current;
+[the CLI guide](CLI.md#adopt-a-repository) gained an `adopt` section and its
+"Repository bootstrap text" is now the managed block; the
+[operator guide](operator-guide.md#creating-a-project-from-an-adopt-link)
+describes the prefilled-link route; and
+[implementation status](implementation-status.md) records the feature. The
 [API contract](api-contract.md) and [agent startup](agent-startup.md) do not
 change: no endpoint is added and the bootstrap text served in `/api/v1/info` is
 untouched.
 
 ## Implementation plan
 
-One `code` task, delivered in four gated phases. Each phase leaves the tree
-green and is independently testable.
+One `code` task (`389b976e`), delivered in four gated phases. Each phase left
+the tree green and is independently testable.
 
 | Phase | Scope | Files |
 | --- | --- | --- |
@@ -590,6 +593,13 @@ green and is independently testable.
 `crates/cli/src/main.rs` is already several thousand lines; keep the new code
 in the `adopt` module with small, commented functions and add only the command
 variant and its dispatch line to `main.rs`.
+
+As built, the module also has `preflight.rs`, `git.rs`, `repo_url.rs`,
+`service.rs` (the only code that talks to the service, and only with `GET`),
+`text.rs` (the block and its placement), `report.rs`, and `host.rs`, a trait
+that holds every side effect outside the repository and the service so the
+whole command runs in tests against a loopback stand-in. `main.rs` gained the
+command variant, its dispatch, and one line that prints the final report.
 
 Acceptance criteria (copied into the task):
 
@@ -625,6 +635,28 @@ Acceptance criteria (copied into the task):
     "already connected" without writing.
 11. Documentation is updated as listed; fmt, clippy, workspace tests,
     `scripts/smoke.py` and `scripts/check_docs.py` pass.
+
+## Implementation notes
+
+Details the implementation settled. None changes the design's rules.
+
+| Detail | As built | Reason |
+| --- | --- | --- |
+| Default service | `--service-url` resolves to the flag, else the existing binding's `service_url`, else `https://agents.sithbit.com`. | With a fixed default, a bare rerun in a repository adopted against another service would have read as "binding points elsewhere" (exit 5) instead of repair mode. |
+| Field limits | Name, repository URL and branch are limited to 120, 2048 and 255 **bytes**, in the CLI and in the dashboard route. | The service counts bytes; counting characters would let a non-ASCII value pass here and fail on Create. |
+| Dirty target files | The rule applies to files adopt would **modify**. A file that is already current is not checked. | Otherwise a repository adopted with `--no-commit`, or interrupted before its commit, could not be rerun. |
+| Dry run without a terminal | A `--dry-run` that cannot prompt takes the defaults (it links an exact match and needs no `--yes`). | It writes and opens nothing, so there is nothing to confirm. A missing repository URL still reports `needs_input`. |
+| Commit on a rerun | The commit is made only when this run wrote a file; it then includes every adopt-managed file with uncommitted changes. | A completed repository must report "already connected" without touching Git, while an interrupted run's earlier files are still committed with the rest. |
+| Refused instruction file | A symlink leading outside the repository, a non-UTF-8 file, or a begin marker without its end is left alone with a warning; the run continues. | These need a person, and the binding is still valid without the block. |
+| Existing own instructions | A file that already mentions `.agent-coordinator.toml` counts as instructed in verification. | Such a file is deliberately not rewritten, so it must not produce a warning on every run. |
+| Kit location | `<state home>/adopt/…`, beside the `sessions` directory, never inside `--state-dir`. | A session state directory is validated as holding nothing but session files. |
+| Kit helper | `migrate.py verify` lists ready tasks the weekly budget held `planned`; `preflight` connects the provided session. | The first is the report the admission rule above asks for; the second is required before the CLI accepts a create. |
+| Tests | `scripts/adopt_smoke.py` (run by `scripts/smoke.py`), `scripts/test_new_project_link.mjs` (headless Chrome), `scripts/migrate_kit_test.py` (`python3 -I`, run by `scripts/smoke.py`). | The smoke, browser and helper checks named in the testing strategy. |
+
+The launch form was checked against Claude Code 2.1.332 and codex-cli 0.172.0:
+both list a positional prompt in `--help`, Claude Code lists
+`--add-dir <directories...>`, and Claude Code itself reports a prompt placed
+after `--add-dir` as "read as a value of --add-dir, not as a prompt".
 
 ## Later options
 
