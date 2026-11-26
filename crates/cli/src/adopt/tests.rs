@@ -104,6 +104,10 @@ fn adopt_and_its_alias_parse_without_a_binding_or_session() {
         "--no-browser",
         "--approval-timeout",
         "30",
+        "--migrate",
+        "off",
+        "--migration-agent",
+        "codex",
         "--replace-binding",
         "--force-instructions",
         "--non-interactive",
@@ -122,6 +126,8 @@ fn adopt_and_its_alias_parse_without_a_binding_or_session() {
     );
     assert!(args.no_commit && args.yes && args.dry_run && cli.json);
     assert!(args.no_browser && args.approval_timeout == 30);
+    assert_eq!(args.migrate, super::MigrateArg::Off);
+    assert_eq!(args.migration_agent, Some(super::AgentArg::Codex));
     assert_eq!(AdoptArgs::default().approval_timeout, 900);
     assert!(
         crate::Cli::try_parse_from(["agent-coordinator", "adopt", "--commit", "--no-commit"])
@@ -779,4 +785,259 @@ async fn a_silent_run_without_yes_opens_nothing() {
         1,
         "only preflight read the project list"
     );
+}
+
+/// Tests of the backlog migration step. They start real (fake) assistant
+/// executables, so they are limited to Unix, where a shell script is one.
+#[cfg(unix)]
+mod migration {
+    use std::path::{Path, PathBuf};
+
+    use super::super::{AgentArg, MigrateArg, migrate};
+    use super::*;
+
+    const CLAUDE_HELP: &str = "Usage: claude [options] [command] [prompt]\n  --add-dir <directories...>  More directories";
+    const CODEX_HELP: &str = "Usage: codex [OPTIONS] [PROMPT]\n      --add-dir <DIR>";
+
+    /// Writes a fake assistant that prints `help` for `--help` and otherwise
+    /// records its arguments, working directory and session variable, then exits 3.
+    fn fake_assistant(host: &mut TestHost, name: &str, help: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let record = host.state.path().join(format!("{name}.record"));
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\ncat <<'HELP'\n{help}\nHELP\nexit 0\nfi\n{{\n\
+             for argument in \"$@\"; do printf 'arg=%s\\n' \"$argument\"; done\n\
+             printf 'cwd=%s\\n' \"$(pwd)\"\nprintf 'session=%s\\n' \"$AGENT_COORDINATOR_SESSION\"\n\
+             }} > '{}'\nexit 3\n",
+            record.display()
+        );
+        let program = host.state.path().join(name);
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        host.program_paths.push((name.to_owned(), program));
+        record
+    }
+
+    /// An interactive host with python3 and a fake Claude Code; returns the fake's record file.
+    fn host_with_claude(answers: &[&str]) -> (TestHost, PathBuf) {
+        let mut host = TestHost::new(TOKEN).answering(answers);
+        host.programs.push("python3".to_owned());
+        let record = fake_assistant(&mut host, "claude", CLAUDE_HELP);
+        (host, record)
+    }
+
+    /// A repository with a committed handoff file and its matching project.
+    fn fixture_with_handoff() -> (TestRepo, FakeService) {
+        let (repo, service) = fixture();
+        repo.commit_file("HANDOFF.md", "# Handoff\n\nNext: ship it.\n");
+        (repo, service)
+    }
+
+    /// The recorded lines of a fake assistant run.
+    fn recorded(record: &Path) -> Vec<String> {
+        std::fs::read_to_string(record)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_accepted_offer_starts_claude_with_the_kit_and_no_bypass_option() {
+        let (repo, service) = fixture_with_handoff();
+        let (mut host, record) = host_with_claude(&["", "", "", ""]);
+        let (result, output) = adopt(&repo, &service, &mut host, AdoptArgs::default(), false).await;
+        let value = result.as_ref().unwrap();
+        assert_eq!(
+            value["result"]["status"], "connected",
+            "the migration never changes the outcome"
+        );
+        assert_eq!(
+            value["result"]["migration"],
+            serde_json::json!({"status": "finished", "exit_status": 3})
+        );
+        let kit = migrate::materialize_kit(&host).unwrap();
+        let prompt = migrate::prompt(&kit);
+        let launch = &host.launched[0];
+        assert_eq!(
+            launch.args,
+            [
+                prompt.clone(),
+                "--add-dir".to_owned(),
+                kit.display().to_string()
+            ]
+        );
+        let lines = recorded(&record);
+        let expected = [
+            format!("arg={prompt}"),
+            "arg=--add-dir".to_owned(),
+            format!("arg={}", kit.display()),
+            format!("cwd={}", repo.root().display()),
+            "session=adopt-migrate-0123abcd".to_owned(),
+        ];
+        assert_eq!(lines, expected);
+        let forbidden = [
+            "dangerous",
+            "bypass",
+            "skip-permissions",
+            "permission-mode",
+            "yolo",
+            "full-auto",
+        ];
+        assert!(
+            !launch
+                .args
+                .iter()
+                .any(|arg| forbidden.iter().any(|word| arg.contains(word)))
+        );
+        assert!(
+            host.prompts
+                .last()
+                .unwrap()
+                .starts_with("Start a session now to migrate HANDOFF.md (1 KiB)?")
+        );
+        assert!(
+            output.contains("Migration      offered afterwards: HANDOFF.md (1 KiB)"),
+            "{output}"
+        );
+        assert_eq!(
+            repo.git(&["status", "--porcelain"]),
+            "",
+            "adopt committed before the session started"
+        );
+        assert_no_token(&repo, &output, &result);
+    }
+
+    #[tokio::test]
+    async fn migrate_now_in_a_connected_repository_starts_codex_without_asking() {
+        let (repo, service) = fixture_with_handoff();
+        let mut first = TestHost::new(TOKEN).silent();
+        adopt(&repo, &service, &mut first, yes(), false)
+            .await
+            .0
+            .unwrap();
+        let mut host = TestHost::new(TOKEN);
+        host.programs.push("python3".to_owned());
+        host.session = Some("my-own-session".to_owned());
+        let record = fake_assistant(&mut host, "codex", CODEX_HELP);
+        let args = AdoptArgs {
+            migrate: MigrateArg::Now,
+            migration_agent: Some(AgentArg::Codex),
+            ..AdoptArgs::default()
+        };
+        let (result, _) = adopt(&repo, &service, &mut host, args, false).await;
+        assert_eq!(result.unwrap()["result"]["status"], "already_connected");
+        assert!(
+            host.prompts.is_empty(),
+            "repair mode and --migrate now ask nothing: {:?}",
+            host.prompts
+        );
+        let kit = migrate::materialize_kit(&host).unwrap();
+        assert_eq!(
+            host.launched[0].args,
+            [migrate::prompt(&kit)],
+            "codex gets the prompt alone"
+        );
+        assert!(
+            host.launched[0].env.is_empty(),
+            "a session name already set is left alone"
+        );
+        assert_eq!(
+            recorded(&record)[1],
+            format!("cwd={}", repo.root().display())
+        );
+    }
+
+    /// Runs adopt on a repository with a handoff file and returns the migration summary and output.
+    async fn migration_of(host: &mut TestHost, args: AdoptArgs) -> (Value, String) {
+        let (repo, service) = fixture_with_handoff();
+        let (result, output) = adopt(&repo, &service, host, args, false).await;
+        (result.unwrap()["result"]["migration"].clone(), output)
+    }
+
+    #[tokio::test]
+    async fn every_skip_gives_a_reason_and_the_command_for_later() {
+        let off = AdoptArgs {
+            migrate: MigrateArg::Off,
+            ..AdoptArgs::default()
+        };
+        let codex = AdoptArgs {
+            migration_agent: Some(AgentArg::Codex),
+            ..AdoptArgs::default()
+        };
+        let (mut silent, _) = host_with_claude(&[]);
+        silent.interactive = false;
+        let (mut declined, _) = host_with_claude(&["", "", "", "n"]);
+        let (mut switched_off, _) = host_with_claude(&["", "", ""]);
+        let (mut no_python, _) = host_with_claude(&["", "", ""]);
+        no_python.programs.retain(|program| program != "python3");
+        let (mut no_codex, _) = host_with_claude(&["", "", ""]);
+        let cases: [(&mut TestHost, AdoptArgs, &str); 5] = [
+            (&mut silent, yes(), "needs a terminal"),
+            (&mut declined, AdoptArgs::default(), "declined"),
+            (&mut switched_off, off, "--migrate off"),
+            (
+                &mut no_python,
+                AdoptArgs::default(),
+                "python3 is not on PATH",
+            ),
+            (&mut no_codex, codex, "codex is not on PATH"),
+        ];
+        for (host, args, reason) in cases {
+            let (migration, output) = migration_of(host, args).await;
+            assert_eq!(migration["status"], "skipped", "{reason}");
+            assert!(
+                migration["reason"].as_str().unwrap().contains(reason),
+                "{migration}"
+            );
+            assert!(
+                output.contains("Start it later with: agent-coordinator adopt --migrate now"),
+                "{output}"
+            );
+            assert!(host.launched.is_empty(), "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn nothing_is_offered_without_sources_or_after_a_migration() {
+        let (plain, service) = fixture();
+        let (mut host, _) = host_with_claude(&["", "", ""]);
+        let (result, _) = adopt(&plain, &service, &mut host, AdoptArgs::default(), false).await;
+        assert_eq!(result.unwrap()["result"]["migration"]["status"], "skipped");
+        assert_eq!(
+            host.prompts.len(),
+            3,
+            "no migration question: {:?}",
+            host.prompts
+        );
+
+        let (migrated, service) = fixture_with_handoff();
+        migrated.commit_file("docs/pre-coordinator/BACKLOG.md", "archived\n");
+        let (mut host, _) = host_with_claude(&["", "", ""]);
+        let (result, output) =
+            adopt(&migrated, &service, &mut host, AdoptArgs::default(), false).await;
+        assert!(
+            result.unwrap()["result"]["migration"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("already migrated")
+        );
+        assert!(host.launched.is_empty() && !output.contains("Migration      offered"));
+    }
+
+    #[tokio::test]
+    async fn an_assistant_without_a_prompt_argument_gets_the_prompt_to_paste() {
+        let (repo, service) = fixture_with_handoff();
+        let mut host = TestHost::new(TOKEN).answering(&["", "", "", ""]);
+        host.programs.push("python3".to_owned());
+        fake_assistant(&mut host, "claude", "Usage: claude [options]");
+        let (result, output) = adopt(&repo, &service, &mut host, AdoptArgs::default(), false).await;
+        assert_eq!(result.unwrap()["result"]["migration"]["status"], "skipped");
+        assert!(host.launched.is_empty());
+        let kit = migrate::materialize_kit(&host).unwrap();
+        assert!(
+            output.contains("paste this prompt:") && output.contains(&migrate::prompt(&kit)),
+            "{output}"
+        );
+    }
 }

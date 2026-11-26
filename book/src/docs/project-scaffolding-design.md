@@ -442,10 +442,14 @@ workstation skill; the implementation adapts them:
    the run is not interactive; the chosen harness or `python3` is not on
    `PATH`. In every skipped case print the command that starts it later:
    `agent-coordinator adopt --migrate now`.
-2. Materialise the kit into `<state-dir>/adopt/migrate-kit-<client commit>/`
+2. Materialise the kit into `<state home>/adopt/migrate-kit-<client commit>/`
    (outside the repository; directory `0700`, files `0600`, or the protected
-   ACL the state directory already uses on Windows). Rewriting an existing kit
-   directory for the same commit is a no-op.
+   ACL the session state already uses on Windows). The state home is the
+   CLI's configuration directory, beside the default `sessions` directory
+   and the `worktrees` and `jobs` state; it is deliberately not inside
+   `--state-dir`, because a session state directory must hold nothing but
+   session files. Rewriting an existing kit directory for the same commit is
+   a no-op.
 3. Start the harness as a foreground child with inherited terminal, working
    directory = repository root, and the environment unchanged except
    `AGENT_COORDINATOR_SESSION`, which is set to `adopt-migrate-<8 random hex>`

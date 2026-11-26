@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::host::Host;
+use super::migrate::{self, Launch};
 use crate::Failure;
 
 /// A temporary Git repository with a local identity and signing switched off.
@@ -164,6 +165,14 @@ pub struct TestHost {
     pub compatible: bool,
     /// Every URL handed to the browser.
     pub opened: Vec<String>,
+    /// A private directory standing in for the CLI's local state home.
+    pub state: tempfile::TempDir,
+    /// The session name "already in the environment", if any.
+    pub session: Option<String>,
+    /// Real executables for named programs (fake assistants written by a test).
+    pub program_paths: Vec<(String, PathBuf)>,
+    /// Every command the migration step started.
+    pub launched: Vec<Launch>,
 }
 
 impl TestHost {
@@ -177,6 +186,10 @@ impl TestHost {
             programs: vec!["agent-coordinator".to_owned()],
             compatible: true,
             opened: Vec::new(),
+            state: tempfile::tempdir().unwrap(),
+            session: None,
+            program_paths: Vec::new(),
+            launched: Vec::new(),
         }
     }
 
@@ -216,10 +229,13 @@ impl Host for TestHost {
     }
 
     fn find_program(&self, name: &str) -> Option<PathBuf> {
-        self.programs
+        let real = self
+            .program_paths
             .iter()
-            .any(|program| program == name)
-            .then(|| PathBuf::from(format!("/usr/bin/{name}")))
+            .find(|(program, _)| program == name);
+        let listed = self.programs.iter().any(|program| program == name);
+        let assumed = listed.then(|| PathBuf::from(format!("/usr/bin/{name}")));
+        real.map(|(_, path)| path.clone()).or(assumed)
     }
 
     fn compatibility(&self, _info: &Value) -> Result<Value, Failure> {
@@ -241,6 +257,27 @@ impl Host for TestHost {
 
     fn backoff_interval(&self) -> Duration {
         Duration::from_millis(20)
+    }
+
+    fn state_home(&self) -> anyhow::Result<PathBuf> {
+        Ok(self.state.path().to_path_buf())
+    }
+
+    fn session_name(&self) -> Option<String> {
+        self.session.clone()
+    }
+
+    fn random_suffix(&self) -> String {
+        "0123abcd".to_owned()
+    }
+
+    fn help_text(&self, program: &Path) -> Option<String> {
+        migrate::help_of(program)
+    }
+
+    fn launch(&mut self, launch: &Launch) -> io::Result<Option<i32>> {
+        self.launched.push(launch.clone());
+        migrate::run_foreground(launch)
     }
 }
 

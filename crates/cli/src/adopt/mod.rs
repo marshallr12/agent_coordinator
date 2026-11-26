@@ -12,6 +12,7 @@ mod files;
 mod git;
 mod host;
 mod interview;
+mod migrate;
 mod plan;
 mod preflight;
 mod provision;
@@ -90,6 +91,14 @@ pub struct AdoptArgs {
     #[arg(long)]
     pub no_commit: bool,
 
+    /// Migrate HANDOFF.md / BACKLOG.md in an interactive assistant session: ask first, start now, or never.
+    #[arg(long, value_enum, default_value_t = MigrateArg::Ask)]
+    pub migrate: MigrateArg,
+
+    /// Assistant that runs the migration [default: the first selected one that is installed].
+    #[arg(long, value_enum)]
+    pub migration_agent: Option<AgentArg>,
+
     /// Overwrite a binding that points to another service or project.
     #[arg(long)]
     pub replace_binding: bool,
@@ -115,6 +124,7 @@ pub struct AdoptArgs {
 /// produces for a bare `adopt`, so the tests see the real defaults.
 #[cfg(test)]
 impl Default for AdoptArgs {
+    /// The flags of a bare `adopt`.
     fn default() -> Self {
         use clap::Parser;
         match Cli::try_parse_from(["agent-coordinator", "adopt"]).map(|cli| cli.command) {
@@ -133,6 +143,25 @@ pub enum HarnessArg {
     /// Decide from what is installed and which files the repository has.
     #[default]
     Auto,
+}
+
+/// When the backlog migration session starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum MigrateArg {
+    /// Offer it after the repository is connected.
+    #[default]
+    Ask,
+    /// Start it without asking.
+    Now,
+    /// Never start it.
+    Off,
+}
+
+/// The assistant that runs the backlog migration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AgentArg {
+    Claude,
+    Codex,
 }
 
 /// The assistants that will work in the repository.
@@ -230,44 +259,48 @@ pub async fn execute(
     let pre = preflight::run(options, host, reporter).await?;
     let detected = detect::run(&pre, options, host, reporter);
     let settings = interview::run(&pre, &detected, options, host)?;
-    let instructions = files::plan_instructions(
-        &pre.root,
-        settings.harnesses,
-        options.args.force_instructions,
-    );
+    let force = options.args.force_instructions;
+    let instructions = files::plan_instructions(&pre.root, settings.harnesses, force);
     let preview = binding_change(&pre, preview_project_id(&settings));
     require_clean(&pre, &preview, &instructions)?;
-    plan::present(
-        &pre,
-        &settings,
-        &preview,
-        &instructions,
-        options.args.dry_run,
-        reporter,
-    );
+    plan::present(&pre, &settings, &preview, &instructions, options, reporter);
     if options.args.dry_run {
-        return Ok(outcome("dry_run", &pre, None, &[], None, reporter));
+        return Ok(outcome(
+            "dry_run",
+            &pre,
+            None,
+            &Written::default(),
+            reporter,
+        ));
     }
     interview::confirm_plan(&pre, options, host)?;
     let project = provision::resolve(&pre, &settings, options, host, reporter).await?;
     let binding = binding_change(&pre, &project.id);
-    let written = write_files(&binding, &instructions, reporter)?;
+    let mut done = Written {
+        files: write_files(&binding, &instructions, reporter)?,
+        ..Written::default()
+    };
     verify::run(&pre, &project, settings.harnesses, options, host, reporter).await?;
     let managed = managed_paths(&binding, &instructions);
-    let commit = commit::run(&pre.root, &managed, &written, settings.commit, reporter);
-    let status = if written.is_empty() {
+    done.commit = commit::run(&pre.root, &managed, &done.files, settings.commit, reporter);
+    done.migration = migrate::run(&pre.root, settings.harnesses, options, host, reporter);
+    let status = if done.files.is_empty() {
         "already_connected"
     } else {
         "connected"
     };
-    Ok(outcome(
-        status,
-        &pre,
-        Some(&project),
-        &written,
-        commit,
-        reporter,
-    ))
+    Ok(outcome(status, &pre, Some(&project), &done, reporter))
+}
+
+/// What a run changed, for the final report.
+#[derive(Default)]
+struct Written {
+    /// Git paths of the files written.
+    files: Vec<String>,
+    /// The commit adopt made, if any.
+    commit: Option<String>,
+    /// How the migration step ended (`null` when it was never reached).
+    migration: Value,
 }
 
 /// The project ID shown in a plan: the real one when linking, a placeholder when creating.
@@ -369,8 +402,7 @@ fn outcome(
     status: &str,
     pre: &Preflight,
     project: Option<&Project>,
-    written: &[String],
-    commit: Option<String>,
+    done: &Written,
     reporter: &Reporter,
 ) -> Value {
     json!({"result": {
@@ -379,8 +411,9 @@ fn outcome(
         "service_url": pre.service_url,
         "project_id": project.map(|project| project.id.clone()),
         "project_name": project.map(|project| project.name.clone()),
-        "files_written": written,
-        "commit": commit,
+        "files_written": done.files,
+        "commit": done.commit,
+        "migration": done.migration,
         "warnings": reporter.warnings(),
         "next_session": next_session(status),
     }})

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""coordinator-migrate helper.
+"""Migration kit helper, provided by `agent-coordinator adopt`.
 
 Inventories a repository's Markdown project memory, validates a migration plan
 (JSON fragments written by the agent), and applies it idempotently to Agent
 Coordinator through the `agent-coordinator` CLI. Standard library only.
+
+Every CLI call uses the session named by AGENT_COORDINATOR_SESSION, which
+`adopt` sets before it starts the migration session.
 
 Subcommands: preflight, inventory, validate, apply [--dry-run], verify.
 """
@@ -26,6 +29,8 @@ MARKER = "migration key `{key}`"
 MARKER_RE = re.compile(r"migration key `([^`]+)`")
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9/_.-]{0,119}$")
 KINDS = ("tasks", "knowledge", "decisions")
+SESSION_VARIABLE = "AGENT_COORDINATOR_SESSION"
+HARNESS_NAME = "adopt-migration"
 
 
 class MigrationError(Exception):
@@ -53,7 +58,7 @@ def binding(root: Path) -> dict:
     """Read the non-secret repository binding (.agent-coordinator.toml)."""
     path = root / ".agent-coordinator.toml"
     if not path.is_file():
-        raise MigrationError(f"{path} not found; the skill requires it at the repo root.")
+        raise MigrationError(f"{path} not found; run `agent-coordinator adopt` in this repository first.")
     with path.open("rb") as fh:
         data = tomllib.load(fh)
     for field in ("service_url", "project_id"):
@@ -68,9 +73,18 @@ def state_dir(project_id: str) -> Path:
     return Path(base) / "coordinator-migrate" / project_id
 
 
+def session_name() -> str:
+    """The session `adopt` provided; every CLI call of the migration must use it."""
+    name = os.environ.get(SESSION_VARIABLE, "").strip()
+    if not name:
+        raise MigrationError(f"{SESSION_VARIABLE} is not set. Start the migration with "
+                             "`agent-coordinator adopt --migrate now`, which sets it.")
+    return name
+
+
 def cli(root: Path, *args, body=None) -> dict:
-    """Call the agent-coordinator CLI with --json and return its `data` value."""
-    argv = ["agent-coordinator", *args, "--json"]
+    """Call the agent-coordinator CLI in the provided session and return its `data` value."""
+    argv = ["agent-coordinator", "--session", session_name(), *args, "--json"]
     if body is not None:
         argv.extend(["--input", "-"])
     out = run(argv, stdin=json.dumps(body) if body is not None else None, cwd=root)
@@ -96,7 +110,9 @@ def cmd_preflight(args) -> None:
     """Check binding, CLI compatibility, auth, git state and existing records."""
     root = repo_root()
     bind = binding(root)
-    run(["agent-coordinator", "compatibility", "--json"], cwd=root)
+    cli(root, "compatibility")
+    connected = cli(root, "connect", "--harness", HARNESS_NAME, "--capability", "code")
+    print(f"session:   {session_name()} ({connected.get('local_session', 'connected')}); no work is reserved")
     policy = cli(root, "policy", "show")
     print(f"repo:      {root}")
     print(f"project:   {policy.get('name')} ({bind['project_id']}) at {bind['service_url']}")
@@ -406,6 +422,8 @@ class Applier:
             return
         data = cli(self.root, *args, body=body)
         self.ledger[kind][key] = {"id": data["id"], "revision": data.get("revision")}
+        if kind == "tasks" and body.get("planned") is False:
+            self.ledger[kind][key]["ready"] = True
         self.save_ledger()
         print(f"created {kind} {key} -> {data['id']}")
 
@@ -512,14 +530,27 @@ def cmd_verify(args) -> None:
     bind = binding(root)
     ledger_path = plan_dir(args, bind).parent / "ledger.json"
     ledger = json.loads(ledger_path.read_text())
-    present = {kind: {i["id"] for i in paged(root, kind, "list")} for kind in KINDS}
+    listed = {kind: {i["id"]: i for i in paged(root, kind, "list")} for kind in KINDS}
     missing = [(kind, key) for kind in KINDS for key, entry in ledger[kind].items()
-               if entry["id"] not in present[kind]]
+               if entry["id"] not in listed[kind]]
     for kind in KINDS:
         print(f"{kind}: {len(ledger[kind])} in ledger")
     for kind, key in missing:
         print(f"MISSING {kind} {key} ({ledger[kind][key]['id']}) — closed/archived or deleted?")
+    for key, task_id in held_ready_tasks(ledger["tasks"], listed["tasks"]):
+        print(f"HELD task {key} ({task_id}) — created ready but held planned by the project's "
+              "weekly budget; open it in the dashboard")
     print("verify ok" if not missing else f"{len(missing)} ledger entries not listed as current")
+
+
+def held_ready_tasks(ledger_tasks: dict, listed_tasks: dict) -> list:
+    """(key, id) of tasks the plan created ready that the service is holding planned."""
+    held = []
+    for key, entry in sorted(ledger_tasks.items()):
+        task = listed_tasks.get(entry["id"])
+        if entry.get("ready") and task and task.get("lifecycle") == "planned":
+            held.append((key, entry["id"]))
+    return held
 
 
 # ----------------------------------------------------------------------- main

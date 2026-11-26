@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::migrate::{self, Launch};
 use crate::{Failure, config};
 
 /// Everything outside the repository and the service that a run touches.
@@ -41,6 +42,21 @@ pub trait Host {
 
     /// How long to wait after a transport error while polling.
     fn backoff_interval(&self) -> Duration;
+
+    /// The CLI's local state home, where the migration kit is kept.
+    fn state_home(&self) -> anyhow::Result<PathBuf>;
+
+    /// The session name already in the environment, if any.
+    fn session_name(&self) -> Option<String>;
+
+    /// Eight random hexadecimal characters, for a fresh session name.
+    fn random_suffix(&self) -> String;
+
+    /// Everything `<program> --help` prints, to see which options it has.
+    fn help_text(&self, program: &Path) -> Option<String>;
+
+    /// Starts a program in the foreground on this terminal and returns its exit status.
+    fn launch(&mut self, launch: &Launch) -> io::Result<Option<i32>>;
 }
 
 /// The real machine: the user's credential store, terminal, `PATH` and browser.
@@ -93,6 +109,31 @@ impl Host for RealHost {
 
     fn backoff_interval(&self) -> Duration {
         Duration::from_secs(10)
+    }
+
+    fn state_home(&self) -> anyhow::Result<PathBuf> {
+        config::coordinator_home()
+    }
+
+    fn session_name(&self) -> Option<String> {
+        env::var(migrate::SESSION_VARIABLE)
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+    }
+
+    fn random_suffix(&self) -> String {
+        let mut bytes = [0u8; 4];
+        // A failed random source still yields a usable, if predictable, name.
+        let _ = getrandom::fill(&mut bytes);
+        hex::encode(bytes)
+    }
+
+    fn help_text(&self, program: &Path) -> Option<String> {
+        migrate::help_of(program)
+    }
+
+    fn launch(&mut self, launch: &Launch) -> io::Result<Option<i32>> {
+        migrate::run_foreground(launch)
     }
 }
 

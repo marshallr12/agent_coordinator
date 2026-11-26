@@ -42,6 +42,8 @@ def run():
     global CLI
     assert SERVER.is_file() and CLI.is_file(), "Build the workspace first."
     subprocess.run([sys.executable, str(ROOT / "scripts/upgrade_client_test.py")], check=True, timeout=30)
+    subprocess.run([sys.executable, "-I", str(ROOT / "scripts/migrate_kit_test.py")], check=True,
+                   timeout=60, stdout=subprocess.DEVNULL)
     with tempfile.TemporaryDirectory(prefix="coordinator-smoke-") as directory:
         temporary = Path(directory)
         with socket.socket() as listener:

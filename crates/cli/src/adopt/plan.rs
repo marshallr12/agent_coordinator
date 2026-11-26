@@ -8,6 +8,7 @@ use super::files::{FileChange, InstructionPlan};
 use super::interview::{Settings, Target};
 use super::preflight::Preflight;
 use super::report::{Reporter, Status};
+use super::{Options, migrate};
 
 /// Lines of unchanged text shown around a change in a diff.
 const CONTEXT: usize = 3;
@@ -18,16 +19,24 @@ pub fn present(
     settings: &Settings,
     binding: &Option<FileChange>,
     instructions: &InstructionPlan,
-    dry_run: bool,
+    options: &Options,
     reporter: &mut Reporter,
 ) {
+    let dry_run = options.args.dry_run;
     let changes: Vec<&FileChange> = binding.iter().chain(&instructions.changes).collect();
     let mut lines = plan_lines(pre, settings, &changes, instructions);
+    let migration = migrate::plan_line(&pre.root, options);
+    lines.extend(
+        migration
+            .iter()
+            .map(|line| format!("Migration      {line}")),
+    );
     if dry_run {
         lines.extend(changes.iter().flat_map(|change| unified_diff(change)));
     }
     reporter.text(&lines);
-    let fields = plan_fields(pre, settings, &changes, instructions, dry_run);
+    let mut fields = plan_fields(pre, settings, &changes, instructions, dry_run);
+    fields["migration"] = json!(migration);
     reporter.event("plan", Status::Done, "plan ready", fields);
 }
 
