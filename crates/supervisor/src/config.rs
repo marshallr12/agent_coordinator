@@ -268,9 +268,11 @@ mod tests {
             .filter(|l| !l.starts_with('['))
             .count();
         let defaults = Config::default();
+        // A nested table counts by its own settings, not as one.
         let settings = |table: toml::Table| {
-            let nested = table.get("stand_in").and_then(|t| t.as_table());
-            table.len() - usize::from(nested.is_some()) + nested.map_or(0, |t| t.len())
+            let nested = table.values().filter_map(|value| value.as_table());
+            let (tables, inner) = nested.fold((0, 0), |(n, s), t| (n + 1, s + t.len()));
+            table.len() - tables + inner
         };
         let expected = settings(toml::Table::try_from(&defaults.windows_service).unwrap())
             + settings(toml::Table::try_from(&defaults.windows_supervisor).unwrap())
