@@ -87,8 +87,10 @@ fn serve(config: &Config, host: &Host) -> Result<bool> {
 /// launches run a fixture, holds fitted to a launch that never submits.
 /// The stand-in's queue offers each item once, so it needs no hold. A
 /// coordinator offers a released task again, so each task is held after
-/// one launch that exited cleanly without a submission (`next` then
-/// leaves it out); no total hold, since every fixture launch is one.
+/// one launch the loop released, however it ended short of a drain (`next`
+/// then leaves it out): a fixture never submits, and one that fails must
+/// not have its task claimed again on every poll. No total hold, since
+/// every fixture launch is one.
 fn loop_config(config: &Config, settings: &SupervisorSettings) -> Config {
     let mut config = Config {
         state_dir: settings.state_dir.clone(),
@@ -99,6 +101,7 @@ fn loop_config(config: &Config, settings: &SupervisorSettings) -> Config {
         (run.empty_exit_limit, run.empty_exit_total_limit) = (0, 0);
     } else if settings.coordinator.enabled {
         (run.empty_exit_limit, run.empty_exit_total_limit) = (1, 0);
+        run.hold_every_release = true;
     }
     config
 }
@@ -432,6 +435,8 @@ mod tests {
             coordinator.run.empty_exit_total_limit,
         );
         assert_eq!(limits, (1, 0));
+        assert!(coordinator.run.hold_every_release);
+        assert!(!stand_in.run.hold_every_release && !plain.run.hold_every_release);
     }
 
     #[test]

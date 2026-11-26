@@ -197,6 +197,24 @@ fn a_launch_that_never_ran_keeps_no_logs_and_counts_nothing() {
 }
 
 #[test]
+fn with_every_release_held_a_launch_that_never_ran_counts_and_is_not_claimed_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = config(dir.path());
+    settings.run.hold_every_release = true;
+    let mut fake = Fake::new();
+    fake.fail_start = true;
+    for _ in 0..3 {
+        poll(&mut fake, &settings);
+    }
+    assert_eq!(claims(&fake), 2, "held at the limit of 2");
+    assert!(fake.releases[0].contains("Launch 1 in a row for this task"));
+    assert!(fake.releases[0].contains("ended without submitting"));
+    assert!(!unsubmitted::retained_dir(&settings).exists(), "no logs");
+    // Code sets it, never the config file.
+    assert!(toml::from_str::<RunConfig>("hold_every_release = true").is_err());
+}
+
+#[test]
 fn final_message_reads_claude_and_codex_streams() {
     let claude = format!(
         "{}\n{}\n",

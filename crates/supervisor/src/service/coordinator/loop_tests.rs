@@ -23,6 +23,10 @@ use std::time::Duration;
 enum Behaviour {
     /// It exits 0 at the first look.
     Exits,
+    /// It exits with this code at the first look.
+    ExitsWith(i32),
+    /// It cannot be started: the runner refuses it after the claim.
+    CannotStart,
     /// The supervisor dies while it runs.
     KillsTheSupervisor,
 }
@@ -40,6 +44,10 @@ impl HostRuntime for Scripted {
     }
 
     fn start(&mut self, _launch: &Launch) -> Result<LaunchIdentity> {
+        anyhow::ensure!(
+            self.behaviour != Behaviour::CannotStart,
+            "the runner refused the launch"
+        );
         Ok(LaunchIdentity {
             pid: 4242,
             started: Some(1),
@@ -49,6 +57,8 @@ impl HostRuntime for Scripted {
     fn observe(&mut self, _launch: &Launch) -> Observation {
         match self.behaviour {
             Behaviour::Exits => Observation::Exited { code: 0 },
+            Behaviour::ExitsWith(code) => Observation::Exited { code },
+            Behaviour::CannotStart => unreachable!("a launch that never started is observed"),
             Behaviour::KillsTheSupervisor => panic!("the supervisor died"),
         }
     }
@@ -163,6 +173,7 @@ fn setup() -> (tempfile::TempDir, Config) {
         config.run.empty_exit_limit,
         config.run.empty_exit_total_limit,
     ) = (1, 0);
+    config.run.hold_every_release = true;
     config.run.drain_seconds = 5;
     (dir, config)
 }
@@ -259,6 +270,67 @@ fn a_round_claims_launches_checkpoints_and_releases_then_the_task_is_left_out() 
     assert_eq!(calls.borrow().len(), 4);
     assert!(LaunchRecord::load_all(&config).is_empty());
     assert_eq!(judged(dir.path()), Vec::<String>::new());
+}
+
+/// Whether each start the ledger in `root` asked of the runner succeeded.
+fn start_results(root: &Path) -> Vec<bool> {
+    let all = Ledger::at(&root.join("ledger.jsonl")).events();
+    (all.iter().filter(|e| e["event"] == "start_result"))
+        .map(|e| e["ok"].as_bool().unwrap())
+        .collect()
+}
+
+/// What two polls did: their outcomes, the CLI's commands, the ledger's
+/// events and whether each start succeeded.
+type TwoPolls = (Outcome, Outcome, Vec<String>, Vec<String>, Vec<bool>);
+
+/// Polls twice over one ready task whose launch behaves as `behaviour`. A
+/// broken fixture must not churn claims: the task is claimed and released
+/// once, then held.
+fn polled_twice(behaviour: Behaviour) -> TwoPolls {
+    let (dir, config) = setup();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let cli = Commands {
+        calls: calls.clone(),
+        ..Commands::default()
+    };
+    let host = scripted(behaviour, Recovery::Ended);
+    let mut driver = driver(dir.path(), &["t1"], host, cli);
+    let first = iterate(&mut driver, &config);
+    let second = iterate(&mut driver, &config);
+    assert!(LaunchRecord::load_all(&config).is_empty());
+    assert_eq!(judged(dir.path()), Vec::<String>::new());
+    let calls = calls.borrow().clone();
+    let started = start_results(dir.path());
+    (first, second, calls, events(dir.path()), started)
+}
+
+#[test]
+fn a_fixture_that_exits_non_zero_is_claimed_once_then_held() {
+    let (first, second, calls, events, started) = polled_twice(Behaviour::ExitsWith(3));
+    let launched = Outcome::Launched {
+        task: "t1".into(),
+        exit_code: 3,
+    };
+    assert_eq!(first, launched);
+    assert_eq!(second, Outcome::Idle);
+    assert_eq!(calls, ["connect", "claim", "checkpoint", "release"]);
+    assert_eq!(events, ["claim", "start", "checkpoint", "release"]);
+    assert_eq!(started, [true]);
+}
+
+#[test]
+fn a_start_that_fails_after_the_claim_is_claimed_once_then_held() {
+    let (first, second, calls, events, started) = polled_twice(Behaviour::CannotStart);
+    assert!(
+        matches!(&first, Outcome::Failed(why) if why.contains("the runner refused the launch")),
+        "{first:?}"
+    );
+    assert_eq!(second, Outcome::Idle);
+    assert_eq!(calls, ["connect", "claim", "checkpoint", "release"]);
+    // The ledger shows the start asked for, and refused.
+    assert_eq!(events, ["claim", "start", "checkpoint", "release"]);
+    assert_eq!(started, [false]);
 }
 
 #[test]

@@ -135,16 +135,17 @@ pub fn submitted(config: &Config, task: &str) {
 }
 
 /// What the handoff of a launch that ended without a submission adds: the
-/// strike it counts (when it exited 0 by itself), where its logs are kept
-/// and the agent's final message. Empty for a launch that never ran.
+/// strike it counts ([`struck`]), where its logs are kept and the agent's
+/// final message. For a launch that never ran, only its strike, if any.
 pub fn evidence(
     driver: &impl Driver,
     config: &Config,
     launch: &Launch,
     result: &Result<lease::Ended>,
 ) -> String {
-    let Ok(ended) = result else {
-        return String::new();
+    let how = struck(&config.run, result);
+    let Ok(_) = result else {
+        return how.map_or(String::new(), |how| strike(config, launch, how));
     };
     let events = driver.events(launch).unwrap_or_default();
     let stderr = driver.stderr(launch).unwrap_or_default();
@@ -160,15 +161,30 @@ pub fn evidence(
         )),
         Err(error) => eprintln!("agentc-supervisor run: keep launch logs: {error:#}"),
     }
-    if ended.code == Some(0) && ended.drained.is_none() {
-        text.push_str(&strike(config, launch));
+    if let Some(how) = how {
+        text.push_str(&strike(config, launch, how));
     }
     text
 }
 
-/// Counts an exit without a submission against the launch's task; returns
-/// the sentence saying so, and when the task or the host is now held.
-fn strike(config: &Config, launch: &Launch) -> String {
+/// How a launch whose release counts a strike ended, for the strike's
+/// sentence; `None` when it counts none. A drained launch never counts.
+/// One that exited 0 by itself always does; any other (a non-zero or
+/// unseen exit, a failure after the claim) only under
+/// [`RunConfig::hold_every_release`].
+fn struck(settings: &RunConfig, result: &Result<lease::Ended>) -> Option<&'static str> {
+    match result {
+        Ok(ended) if ended.drained.is_some() => None,
+        Ok(ended) if ended.code == Some(0) => Some("exited 0"),
+        _ if settings.hold_every_release => Some("ended"),
+        _ => None,
+    }
+}
+
+/// Counts a launch that `how` (ended) without a submission against its
+/// task; returns the sentence saying so, and when the task or the host is
+/// now held.
+fn strike(config: &Config, launch: &Launch, how: &str) -> String {
     let task = &launch.suggestion.task;
     let mut strikes = Strikes::load(config);
     strikes.total += 1;
@@ -179,7 +195,7 @@ fn strike(config: &Config, launch: &Launch) -> String {
         eprintln!("agentc-supervisor run: {error:#}");
     }
     let mut text = format!(
-        " Launch {count} in a row for this task (and {} in total on this host) exited 0 without submitting.",
+        " Launch {count} in a row for this task (and {} in total on this host) {how} without submitting.",
         strikes.total
     );
     let held = strikes.task_hold(&config.run, config, task);

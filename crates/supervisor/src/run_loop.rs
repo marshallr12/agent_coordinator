@@ -106,6 +106,14 @@ pub struct RunConfig {
     /// Stop claiming anything after this many such launches in a row,
     /// whatever their tasks (0: never).
     pub empty_exit_total_limit: u32,
+    /// Count every launch the loop releases itself (unless drained) toward
+    /// those limits, not only one that exited 0: a launch that exited
+    /// non-zero or could not start after its claim too. Set in code for
+    /// work whose launches never submit (the Windows supervisor's
+    /// coordinator fixture), so a broken fixture cannot have its task
+    /// claimed again on every poll. Not a config entry.
+    #[serde(skip)]
+    pub hold_every_release: bool,
 }
 
 impl Default for RunConfig {
@@ -128,6 +136,7 @@ impl Default for RunConfig {
             drain_seconds: 30,
             empty_exit_limit: 2,
             empty_exit_total_limit: 5,
+            hold_every_release: false,
         }
     }
 }
