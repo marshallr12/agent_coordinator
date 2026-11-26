@@ -30,12 +30,25 @@ struct CredentialEntry {
 }
 
 pub fn binding(explicit: Option<&Path>) -> Result<(PathBuf, RepositoryBinding)> {
-    let path = match explicit {
-        Some(path) => path.to_path_buf(),
-        None => find_binding(&env::current_dir().context("read current directory")?).ok_or_else(
-            || anyhow!("could not find .agent-coordinator.toml in this directory or its parents"),
-        )?,
-    };
+    match explicit {
+        Some(path) => load_binding(path.to_path_buf()),
+        None => binding_from(&env::current_dir().context("read current directory")?),
+    }
+}
+
+/// Finds and loads the binding a command started in `start` would use.
+///
+/// `adopt` verifies the file it wrote with this, from the repository root and
+/// from a nested directory, without changing the process's working directory.
+pub fn binding_from(start: &Path) -> Result<(PathBuf, RepositoryBinding)> {
+    let path = find_binding(start).ok_or_else(|| {
+        anyhow!("could not find .agent-coordinator.toml in this directory or its parents")
+    })?;
+    load_binding(path)
+}
+
+/// Reads and validates one binding file.
+fn load_binding(path: PathBuf) -> Result<(PathBuf, RepositoryBinding)> {
     let input = fs::read_to_string(&path)
         .with_context(|| format!("read repository binding {}", path.display()))?;
     let binding: RepositoryBinding = toml::from_str(&input)
@@ -96,6 +109,11 @@ fn validate_project_name(name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Where the credential file for this selection lives; `adopt` names it in setup messages.
+pub fn credential_location(project_name: Option<&str>) -> Result<PathBuf> {
+    credential_path(project_name)
 }
 
 fn credential_path(project_name: Option<&str>) -> Result<PathBuf> {

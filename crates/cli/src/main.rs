@@ -1,3 +1,4 @@
+mod adopt;
 mod artifact_transfer;
 mod candidate_checkpoint;
 mod config;
@@ -59,6 +60,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Adopt a repository: connect an existing Git repository to a coordinator project.
+    ///
+    /// Links the matching project (or waits for you to create it in the
+    /// dashboard), writes `.agent-coordinator.toml` and the instruction block
+    /// for Claude Code and Codex, verifies, and commits. Sends only GET
+    /// requests and needs no binding or --session. Unrelated to
+    /// `session adopt-mcp`, which adopts an MCP session.
+    #[command(alias = "scaffold")]
+    Adopt(adopt::AdoptArgs),
     /// Diagnose, migrate, or adopt protected session state without renewing ownership.
     Session {
         #[command(subcommand)]
@@ -908,6 +918,7 @@ fn print_human(command: &Command, value: &Value) {
         Command::IntegratorReports {
             command: integrator_reports::IntegratorReportsCommand::Show(_),
         } => integrator_reports::print_detail(value),
+        Command::Adopt(_) => adopt::print_report(value),
         Command::Connect(_) => print_connection(value),
         Command::Claim(_) => print_claim(value),
         Command::Export(_) => {
@@ -1137,8 +1148,12 @@ async fn run(cli: &Cli) -> std::result::Result<Value, Failure> {
     if matches!(&cli.command, Command::Compatibility) {
         return compatibility_report(cli).await;
     }
+    if let Command::Adopt(args) = &cli.command {
+        return adopt::run(cli, args).await;
+    }
     let context = build_context(cli).await?;
     match &cli.command {
+        Command::Adopt(_) => unreachable!("handled before any binding is read"),
         Command::Session { command } => session_adoption::run(cli, &context, command).await,
         Command::Sessions { command } => sessions::run(cli, &context, command).await,
         Command::McpClient(args) => mcp_client::launch(cli, &context, args).await,
