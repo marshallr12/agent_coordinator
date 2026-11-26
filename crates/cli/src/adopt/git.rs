@@ -94,6 +94,12 @@ pub fn default_branch(root: &Path) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
+/// Returns the content of `path` as committed at `HEAD`, or `None` when `HEAD` has no such file.
+pub fn head_content(root: &Path, path: &str) -> Option<Vec<u8>> {
+    let output = run(root, &["show", &format!("HEAD:{path}")]).ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
 /// Lists which of `paths` have uncommitted changes (modified, staged or untracked).
 pub fn dirty_paths(root: &Path, paths: &[String]) -> Result<Vec<String>> {
     if paths.is_empty() {

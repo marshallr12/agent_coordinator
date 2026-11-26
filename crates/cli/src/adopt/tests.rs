@@ -341,6 +341,56 @@ async fn an_interrupted_run_is_finished_by_running_again() {
 }
 
 #[tokio::test]
+async fn a_run_interrupted_after_the_first_instruction_file_commits_all_of_adopts_files() {
+    let (repo, service) = fixture();
+    repo.write(
+        files::BINDING_FILE,
+        &files::render_binding(&service.origin, PROJECT),
+    );
+    repo.write(files::AGENTS_FILE, &format!("{}\n", text::BLOCK));
+    let mut host = TestHost::new(TOKEN).silent();
+    let args = AdoptArgs {
+        harness: super::HarnessArg::Both,
+        ..AdoptArgs::default()
+    };
+    let (result, _) = adopt(&repo, &service, &mut host, args, false).await;
+    assert_eq!(
+        result.unwrap()["result"]["files_written"],
+        serde_json::json!(["CLAUDE.md"])
+    );
+    assert_eq!(
+        repo.git(&["status", "--porcelain"]),
+        "",
+        "the earlier files hold only adopt's text"
+    );
+}
+
+#[tokio::test]
+async fn a_persons_uncommitted_edits_are_never_swept_into_the_commit() {
+    let (repo, service) = fixture();
+    repo.commit_file(files::AGENTS_FILE, &format!("{}\n\nRules.\n", text::BLOCK));
+    let edited = format!("{}\n\nRules.\n\nAn unsaved thought.\n", text::BLOCK);
+    repo.write(files::AGENTS_FILE, &edited);
+    let mut host = TestHost::new(TOKEN).silent();
+    let (result, _) = adopt(&repo, &service, &mut host, yes(), false).await;
+    assert_eq!(
+        result.unwrap()["result"]["files_written"],
+        serde_json::json!([".agent-coordinator.toml"])
+    );
+    assert_eq!(
+        repo.git(&["show", "--name-only", "--format=", "HEAD"])
+            .trim(),
+        ".agent-coordinator.toml"
+    );
+    assert_eq!(
+        repo.git(&["status", "--porcelain"]).trim(),
+        "M AGENTS.md",
+        "their edit is still theirs to commit"
+    );
+    assert_eq!(repo.read(files::AGENTS_FILE), edited);
+}
+
+#[tokio::test]
 async fn a_missing_or_rejected_credential_exits_3_with_nothing_written() {
     let (repo, service) = fixture();
     let before = repo.files();

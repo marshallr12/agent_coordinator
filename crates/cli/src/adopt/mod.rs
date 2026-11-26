@@ -28,7 +28,7 @@ mod testing;
 mod tests;
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use serde_json::{Value, json};
@@ -281,7 +281,7 @@ pub async fn execute(
         ..Written::default()
     };
     verify::run(&pre, &project, settings.harnesses, options, host, reporter).await?;
-    let managed = managed_paths(&binding, &instructions);
+    let managed = commit_paths(&pre.root, &instructions, &done.files);
     done.commit = commit::run(&pre.root, &managed, &done.files, settings.commit, reporter);
     done.migration = migrate::run(&pre.root, settings.harnesses, options, host, reporter);
     let status = if done.files.is_empty() {
@@ -386,13 +386,23 @@ fn write_files(
     Ok(written)
 }
 
-/// Every Git path adopt manages in this repository, written now or earlier.
-fn managed_paths(binding: &Option<FileChange>, instructions: &InstructionPlan) -> Vec<String> {
-    let mut paths = vec![files::BINDING_FILE.to_owned()];
-    for change in binding.iter().chain(&instructions.changes) {
-        if !paths.contains(&change.git_path) {
+/// The Git paths the commit may include: what this run wrote, the binding,
+/// and any instruction file an interrupted earlier run left holding nothing
+/// but adopt's text. A file with someone's own uncommitted edits never qualifies.
+fn commit_paths(root: &Path, instructions: &InstructionPlan, written: &[String]) -> Vec<String> {
+    let mut paths = written.to_vec();
+    let earlier = instructions
+        .changes
+        .iter()
+        .filter(|change| !written.contains(&change.git_path));
+    for change in earlier {
+        let committed = git::head_content(root, &change.git_path);
+        if files::holds_only_adopt_text(change, committed.as_deref()) {
             paths.push(change.git_path.clone());
         }
+    }
+    if !paths.iter().any(|path| path == files::BINDING_FILE) {
+        paths.push(files::BINDING_FILE.to_owned());
     }
     paths
 }

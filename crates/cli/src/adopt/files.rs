@@ -287,6 +287,31 @@ fn insert_summary() -> String {
     )
 }
 
+/// True when the file differs from its committed version by adopt's own text and nothing else.
+///
+/// The commit step asks this about a file an earlier, interrupted run wrote,
+/// so it can be committed with the rest. A file that also carries a person's
+/// uncommitted edits fails the test and is left for them to commit.
+pub fn holds_only_adopt_text(change: &FileChange, committed: Option<&[u8]>) -> bool {
+    let Ok(working) = fs::read(&change.target) else {
+        return false;
+    };
+    let created = [format!("{}\n", text::BLOCK), format!("{IMPORT_LINE}\n")];
+    match committed {
+        None => created.iter().any(|content| content.as_bytes() == working),
+        Some(committed) => with_block(committed).is_some_and(|expected| expected == working),
+    }
+}
+
+/// Returns the committed bytes with the block placed, as adopt would have written them.
+fn with_block(committed: &[u8]) -> Option<Vec<u8>> {
+    let (content, shape) = text::decode(committed)?;
+    match text::merge_block(&content, true) {
+        Merge::Inserted(merged) | Merge::Replaced(merged) => Some(text::encode(&merged, &shape)),
+        _ => None,
+    }
+}
+
 /// Writes one planned change atomically; returns false when the file was already current.
 ///
 /// A file that changed on disk since it was planned is left untouched and the
@@ -654,6 +679,33 @@ mod tests {
         };
         assert_eq!(mode(AGENTS_FILE), 0o640);
         assert_eq!(mode(CLAUDE_FILE), 0o644);
+    }
+
+    #[test]
+    fn only_adopts_own_text_counts_as_an_adopt_change() {
+        let repo = TestRepo::new();
+        let head = b"# Rules\n\nBe kind.\n";
+        repo.write(AGENTS_FILE, "# Rules\n\nBe kind.\n");
+        let plan = adopt_files(&repo, CODEX);
+        let change = &plan.changes[0];
+        assert!(holds_only_adopt_text(change, Some(head)));
+        assert!(
+            !holds_only_adopt_text(change, None),
+            "an untracked file with other text is the person's"
+        );
+        repo.write(
+            AGENTS_FILE,
+            &format!("{}\nAn unsaved thought.\n", repo.read(AGENTS_FILE)),
+        );
+        assert!(!holds_only_adopt_text(change, Some(head)));
+        let fresh = TestRepo::new();
+        let created = adopt_files(&fresh, BOTH);
+        assert!(
+            created
+                .changes
+                .iter()
+                .all(|change| holds_only_adopt_text(change, None))
+        );
     }
 
     #[test]

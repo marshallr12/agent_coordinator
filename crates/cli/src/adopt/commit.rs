@@ -17,8 +17,8 @@ pub const MESSAGE: &str = "Connect repository to Agent Coordinator";
 
 /// Commits adopt's files when asked to and safe; returns the commit ID.
 ///
-/// `managed` is every path adopt manages here; `written` is what this run
-/// changed. A run that wrote nothing commits nothing.
+/// `managed` is every path the commit may include (see `commit_paths`);
+/// `written` is what this run changed. A run that wrote nothing commits nothing.
 pub fn run(
     root: &Path,
     managed: &[String],
