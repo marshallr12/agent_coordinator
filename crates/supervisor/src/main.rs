@@ -97,11 +97,15 @@ enum Commands {
     },
     /// Judge the ledger of an acceptance stand-in run: print what it shows
     /// went wrong as JSON, and exit non-zero when anything did or when the
-    /// ledger holds no event.
+    /// ledger holds no event. With --coordinator, the ledger is of a
+    /// supervisor that took its work from a coordinator, which may offer a
+    /// released task again.
     #[command(hide = true)]
     StandInJudge {
         #[arg(long)]
         ledger: PathBuf,
+        #[arg(long)]
+        coordinator: bool,
     },
     /// Inside a launch's network namespace: relay each loopback `ip:port`
     /// to its host socket, run the command and return its exit code.
@@ -546,7 +550,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         #[cfg(windows)]
         Commands::WindowsHost { .. } => unreachable!("dispatched before loading config"),
-        Commands::StandInJudge { ledger } => return stand_in_judge(&ledger),
+        Commands::StandInJudge {
+            ledger,
+            coordinator,
+        } => return stand_in_judge(&ledger, coordinator),
         Commands::ShadowReport { log } => {
             let log = log.unwrap_or_else(|| config.shadow.log.clone());
             println!("{}", serde_json::to_string_pretty(&shadow::report(&log)?)?);
@@ -718,11 +725,15 @@ fn windows_candidate_shell(command: &Commands) -> Option<u32> {
 
 /// Judges a stand-in ledger. An empty or missing ledger is an error, not
 /// a clean run: it shows nothing either way.
-fn stand_in_judge(ledger: &std::path::Path) -> Result<ExitCode> {
-    use agentc_supervisor::service::stand_in::{Ledger, judge};
+fn stand_in_judge(ledger: &std::path::Path, coordinator: bool) -> Result<ExitCode> {
+    use agentc_supervisor::service::stand_in::{Ledger, judge, judge_coordinator};
     let events = Ledger::at(ledger).events();
     anyhow::ensure!(!events.is_empty(), "{} holds no event", ledger.display());
-    Ok(report(&judge(&events)))
+    let problems = match coordinator {
+        true => judge_coordinator(&events),
+        false => judge(&events),
+    };
+    Ok(report(&problems))
 }
 
 /// Prints preflight problems as JSON; non-zero exit when any exist.

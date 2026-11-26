@@ -5,7 +5,9 @@
 //!
 //! Every step looks at the host as it is, so a second run, or one after a
 //! restart, does only what is left. Nothing is removed through a link and
-//! no ownership is taken: what cannot be removed is reported. A tree that
+//! no ownership is taken, but of one tree: the coordinator CLI's session
+//! state, which the CLI locks to the supervisor's account, is given to the
+//! administrators first. What cannot be removed is reported. A tree that
 //! holds anything the installer did not make there is refused before
 //! anything changes, so a mistaken `--program-dir` removes nothing.
 //!
@@ -86,6 +88,7 @@ pub fn uninstall(
         ..UninstallReport::default()
     };
     remove_services(host, services, layout, &mut report)?;
+    reclaim_cli_state(host, layout, &mut report)?;
     for root in [&layout.program_dir, &layout.state_root] {
         remove_root(host, root, &mut report)?;
     }
@@ -236,6 +239,33 @@ fn remove_services(
         host.delete_service(&name)?;
         report.removed.push(format!("service {name}"));
     }
+    Ok(())
+}
+
+/// Takes back the coordinator CLI's session state, which the CLI locks to
+/// the supervisor's account, so the state root can be removed. It runs
+/// after the services are gone, whatever the manifest says of the
+/// coordinator. The state is found by listing the coordinator's directory,
+/// since its own descriptor cannot be read before it is taken.
+fn reclaim_cli_state(
+    host: &mut dyn Machine,
+    layout: &Layout,
+    report: &mut UninstallReport,
+) -> Result<()> {
+    let directory = layout.coordinator_dir();
+    if !matches!(host.path(&directory)?, PathState::Directory { .. }) {
+        return Ok(());
+    }
+    if !host
+        .entries(&directory)?
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case("state"))
+    {
+        return Ok(());
+    }
+    report
+        .left
+        .extend(host.reclaim_tree(&format!(r"{directory}\state"))?);
     Ok(())
 }
 

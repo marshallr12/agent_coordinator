@@ -426,6 +426,23 @@ fn uninstall_removes_the_cli_and_the_credential_and_notes_the_token() {
 }
 
 #[test]
+fn uninstall_takes_back_the_cli_state_locked_to_the_supervisor_and_nothing_else() {
+    let mut host = installed();
+    let layout = Layout::default();
+    let proof = format!(r"{}\state\proof.json", layout.coordinator_dir());
+    let elsewhere = layout.state(r"runner\locked.json");
+    for locked in [&proof, &elsewhere] {
+        host.texts.insert(locked.clone(), "{}".into());
+        host.stuck.push(locked.clone());
+    }
+    let mut services = FakeServices::of(&host, &layout);
+    let report = uninstall(&mut host, &mut services, &layout, SOURCE).unwrap();
+    let left = |name: &str| report.left.iter().any(|l| l.contains(name));
+    assert!(!left("proof.json"), "{report:?}");
+    assert!(left("locked.json"), "the control: {report:?}");
+}
+
+#[test]
 fn an_update_leaves_the_cli_and_credential_and_keeps_the_coordinator_configured() {
     let mut host = installed();
     let layout = Layout::default();

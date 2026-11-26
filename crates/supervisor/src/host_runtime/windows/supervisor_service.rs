@@ -84,18 +84,21 @@ fn serve(config: &Config, host: &Host) -> Result<bool> {
 }
 
 /// The loop's configuration: this service's state directory and, while
-/// launches run a fixture (the stand-in's or a coordinator's), no hold on
-/// launches that end without a submission, since a fixture never submits.
+/// launches run a fixture, holds fitted to a launch that never submits.
+/// The stand-in's queue offers each item once, so it needs no hold. A
+/// coordinator offers a released task again, so each task is held after
+/// one launch that exited cleanly without a submission (`next` then
+/// leaves it out); no total hold, since every fixture launch is one.
 fn loop_config(config: &Config, settings: &SupervisorSettings) -> Config {
     let mut config = Config {
         state_dir: settings.state_dir.clone(),
         ..config.clone()
     };
-    if settings.stand_in.enabled || settings.coordinator.enabled {
-        (
-            config.run.empty_exit_limit,
-            config.run.empty_exit_total_limit,
-        ) = (0, 0);
+    let run = &mut config.run;
+    if settings.stand_in.enabled {
+        (run.empty_exit_limit, run.empty_exit_total_limit) = (0, 0);
+    } else if settings.coordinator.enabled {
+        (run.empty_exit_limit, run.empty_exit_total_limit) = (1, 0);
     }
     config
 }
@@ -428,7 +431,7 @@ mod tests {
             coordinator.run.empty_exit_limit,
             coordinator.run.empty_exit_total_limit,
         );
-        assert_eq!(limits, (0, 0));
+        assert_eq!(limits, (1, 0));
     }
 
     #[test]
