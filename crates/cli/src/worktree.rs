@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::config::coordinator_home;
+use crate::file_lock::HeldLock;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparationIntent {
@@ -29,8 +30,9 @@ pub struct PreparationIntent {
     pub git_dir_identity: Option<PathBuf>,
 }
 
+/// The worktree preparation journal's exclusive lock, held until dropped.
 pub struct PreparationLock {
-    _file: File,
+    _held: HeldLock,
 }
 
 pub struct PrepareRequest<'a> {
@@ -57,6 +59,8 @@ pub fn intent_path(service_origin: &str, project_id: &str, attempt_id: &str) -> 
         .join(format!("{}.json", hex::encode(digest.finalize()))))
 }
 
+/// Takes the preparation lock beside the intent file without waiting; a
+/// second holder is refused as busy.
 pub fn lock(path: &Path) -> Result<PreparationLock> {
     let parent = path
         .parent()
@@ -79,7 +83,9 @@ pub fn lock(path: &Path) -> Result<PreparationLock> {
             lock_path.display()
         )
     })?;
-    Ok(PreparationLock { _file: file })
+    Ok(PreparationLock {
+        _held: HeldLock::holding(file),
+    })
 }
 
 pub fn prepare(request: PrepareRequest<'_>) -> Result<PreparationIntent> {
@@ -807,5 +813,23 @@ mod tests {
     fn rejects_unsupported_verbatim_git_paths() {
         assert!(git_compatible_path(Path::new(r"\\?\GLOBALROOT\Device\HarddiskVolume1")).is_err());
         assert!(git_compatible_path(Path::new(r"\\.\C:\repository")).is_err());
+    }
+
+    #[test]
+    fn dropping_the_lock_releases_it_while_a_forked_child_still_holds_the_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state/worktree-intent.json");
+        let first = lock(&path).unwrap();
+        // A process forked on another thread holds a duplicate of the open
+        // file description until its exec closes the close-on-exec descriptor.
+        let forked_child = first._held.forked_child_descriptor();
+        drop(first);
+        let relocked = lock(&path);
+        drop(forked_child);
+        assert!(
+            relocked.is_ok(),
+            "{:?}",
+            relocked.err().map(|error| format!("{error:#}"))
+        );
     }
 }

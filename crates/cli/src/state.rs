@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::config::coordinator_home;
+use crate::file_lock::HeldLock;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PendingMutation {
@@ -101,17 +102,9 @@ impl SessionState {
     }
 }
 
+/// The native session's exclusive lock, held until dropped.
 pub struct SessionLock {
-    _file: File,
-}
-
-impl Drop for SessionLock {
-    /// Unlocks explicitly: closing the descriptor alone keeps a `flock` held
-    /// while any other process still has a duplicate of the open file
-    /// description, as a child forked by another thread does until its exec.
-    fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self._file);
-    }
+    _held: HeldLock,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,7 +209,9 @@ pub fn lock(state_path: &Path) -> std::result::Result<SessionLock, StateAccessEr
             error,
         )
     })?;
-    Ok(SessionLock { _file: file })
+    Ok(SessionLock {
+        _held: HeldLock::holding(file),
+    })
 }
 
 fn open_lock_file(state_path: &Path) -> std::result::Result<File, StateAccessError> {
@@ -903,7 +898,7 @@ mod tests {
         let first = lock(&path).unwrap();
         // A process forked on another thread holds a duplicate of the open
         // file description until its exec closes the close-on-exec descriptor.
-        let forked_child = first._file.try_clone().unwrap();
+        let forked_child = first._held.forked_child_descriptor();
         drop(first);
         let relocked = lock(&path);
         drop(forked_child);

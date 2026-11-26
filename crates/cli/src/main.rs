@@ -2,6 +2,7 @@ mod adopt;
 mod artifact_transfer;
 mod candidate_checkpoint;
 mod config;
+mod file_lock;
 mod integrator_reports;
 mod job_state;
 mod lifecycle;

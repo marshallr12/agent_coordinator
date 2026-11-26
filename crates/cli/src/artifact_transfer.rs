@@ -15,6 +15,7 @@ use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 use crate::config::coordinator_home;
+use crate::file_lock::HeldLock;
 
 pub struct TransferContext<'a> {
     pub client: &'a CoordinatorClient,
@@ -446,7 +447,9 @@ fn upload_paths(context: &TransferContext<'_>, artifact_id: &str) -> Result<Uplo
     })
 }
 
-fn lock(path: &Path) -> Result<File> {
+/// Takes the transfer journal's lock without waiting; a second holder is
+/// refused as busy.
+fn lock(path: &Path) -> Result<HeldLock> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -461,7 +464,7 @@ fn lock(path: &Path) -> Result<File> {
             path.display()
         )
     })?;
-    Ok(file)
+    Ok(HeldLock::holding(file))
 }
 
 fn snapshot(source: &Path, payload: &Path, directory: &Path) -> Result<(u64, String)> {
@@ -989,5 +992,19 @@ mod tests {
             inspect_upload(&detail, 14, &digest).unwrap(),
             UploadState::Finalized
         );
+    }
+
+    #[test]
+    fn dropping_the_lock_releases_it_while_a_forked_child_still_holds_the_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("intent.lock");
+        let first = lock(&path).unwrap();
+        // A process forked on another thread holds a duplicate of the open
+        // file description until its exec closes the close-on-exec descriptor.
+        let forked_child = first.forked_child_descriptor();
+        drop(first);
+        let relocked = lock(&path);
+        drop(forked_child);
+        assert!(relocked.is_ok(), "{:?}", relocked.err());
     }
 }
