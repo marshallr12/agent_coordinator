@@ -101,6 +101,9 @@ fn adopt_and_its_alias_parse_without_a_binding_or_session() {
         "--harness",
         "both",
         "--no-commit",
+        "--no-browser",
+        "--approval-timeout",
+        "30",
         "--replace-binding",
         "--force-instructions",
         "--non-interactive",
@@ -118,6 +121,8 @@ fn adopt_and_its_alias_parse_without_a_binding_or_session() {
         Some(std::path::Path::new("some/path"))
     );
     assert!(args.no_commit && args.yes && args.dry_run && cli.json);
+    assert!(args.no_browser && args.approval_timeout == 30);
+    assert_eq!(AdoptArgs::default().approval_timeout, 900);
     assert!(
         crate::Cli::try_parse_from(["agent-coordinator", "adopt", "--commit", "--no-commit"])
             .is_err()
@@ -580,4 +585,198 @@ async fn a_merge_in_progress_or_a_plain_directory_is_refused() {
         .await
         .unwrap_err();
     assert_eq!((failure.exit, code(&failure)), (2, "not_a_repository"));
+}
+
+/// The project a person creates in the dashboard while adopt waits.
+const CREATED: &str = "33333333-3333-4333-8333-333333333333";
+
+/// A repository whose remote has no project on the service yet.
+fn unmatched_fixture() -> (TestRepo, FakeService) {
+    let (repo, service) = fixture();
+    service.state.lock().unwrap().projects.clear();
+    service.add_project(
+        "00000000-0000-4000-8000-00000000000a",
+        "Other",
+        "https://example.com/acme/other",
+    );
+    (repo, service)
+}
+
+/// How many project listings (first pages) the service has answered or dropped.
+fn listings(service: &FakeService) -> usize {
+    let first_page =
+        |target: &str| target.starts_with("/api/v1/projects") && !target.contains("cursor=");
+    service
+        .seen()
+        .iter()
+        .filter(|request| first_page(&request.target))
+        .count()
+}
+
+#[tokio::test]
+async fn a_new_project_is_found_by_polling_after_the_link_is_shown() {
+    let (repo, service) = unmatched_fixture();
+    service.appear_after(4, CREATED, "billing", "git@example.com:acme/billing.git");
+    let mut host = TestHost::new(TOKEN).silent();
+    let (result, output) = adopt(&repo, &service, &mut host, yes(), false).await;
+    let value = result.as_ref().unwrap();
+    assert_eq!(value["result"]["project_id"], CREATED);
+    assert_eq!(
+        repo.read(files::BINDING_FILE),
+        files::render_binding(&service.origin, CREATED)
+    );
+    let link = format!(
+        "{}/#/new-project?name=billing&repository_url=https%3A%2F%2Fexample.com%2Facme%2Fbilling.git&target_branch=main",
+        service.origin
+    );
+    assert_eq!(host.opened, std::slice::from_ref(&link));
+    for expected in [
+        link.as_str(),
+        "Repository URL  https://example.com/acme/billing.git",
+        "Waiting for the project to appear",
+    ] {
+        assert!(
+            output.contains(expected),
+            "missing {expected:?} in {output}"
+        );
+    }
+    assert!(
+        listings(&service) >= 5,
+        "the project appeared on the third poll"
+    );
+    assert!(service.seen().iter().all(|request| request.method == "GET"));
+    assert_no_token(&repo, &output, &result);
+}
+
+#[tokio::test]
+async fn no_browser_prints_the_link_and_opens_nothing() {
+    let (repo, service) = unmatched_fixture();
+    service.appear_after(2, CREATED, "billing", REMOTE);
+    let mut host = TestHost::new(TOKEN).silent();
+    let args = AdoptArgs {
+        no_browser: true,
+        ..yes()
+    };
+    let (result, output) = adopt(&repo, &service, &mut host, args, true).await;
+    assert_eq!(result.unwrap()["result"]["project_id"], CREATED);
+    assert!(host.opened.is_empty());
+    let waiting = output
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|event| event["status"] == "waiting")
+        .expect("a waiting event");
+    assert!(
+        waiting["link"]
+            .as_str()
+            .unwrap()
+            .contains("#/new-project?name=billing&")
+    );
+    assert_eq!(waiting["manual"]["target_branch"], "main");
+}
+
+#[tokio::test]
+async fn a_timeout_exits_7_with_nothing_written() {
+    let (repo, service) = unmatched_fixture();
+    let before = repo.files();
+    let mut host = TestHost::new(TOKEN).silent();
+    let args = AdoptArgs {
+        approval_timeout: 0,
+        ..yes()
+    };
+    let (result, _) = adopt(&repo, &service, &mut host, args, false).await;
+    let failure = result.unwrap_err();
+    assert_eq!((failure.exit, code(&failure)), (7, "project_not_created"));
+    let message = failure.output["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("--project ID") && message.contains("Nothing was written"),
+        "{message}"
+    );
+    assert_eq!(repo.files(), before);
+}
+
+#[tokio::test]
+async fn two_new_matching_projects_need_a_choice() {
+    let (repo, service) = unmatched_fixture();
+    service.appear_after(2, CREATED, "billing", REMOTE);
+    service.appear_after(
+        2,
+        "44444444-4444-4444-8444-444444444444",
+        "billing-2",
+        REMOTE,
+    );
+    let before = repo.files();
+    let mut host = TestHost::new(TOKEN).silent();
+    let (result, _) = adopt(&repo, &service, &mut host, yes(), false).await;
+    let failure = result.unwrap_err();
+    assert_eq!((failure.exit, code(&failure)), (5, "ambiguous_project"));
+    assert!(
+        failure.output["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--project ID")
+    );
+    assert_eq!(repo.files(), before);
+}
+
+#[tokio::test]
+async fn an_older_project_with_the_same_url_is_never_taken_for_the_new_one() {
+    let (repo, service) = fixture();
+    service.appear_after(3, CREATED, "billing-two", REMOTE);
+    let answers = ["n", "", "both", "", "", ""];
+    let mut host = TestHost::new(TOKEN).answering(&answers);
+    let (result, _) = adopt(&repo, &service, &mut host, AdoptArgs::default(), false).await;
+    assert_eq!(result.unwrap()["result"]["project_id"], CREATED);
+    let asked = host.prompts.join("\n");
+    assert!(asked.contains("Use these values? [Y/n]"), "{asked}");
+    assert!(
+        asked.contains(&format!(
+            "Use project \"billing-two\" (id {CREATED})? [Y/n]"
+        )),
+        "{asked}"
+    );
+}
+
+#[tokio::test]
+async fn declining_the_created_project_writes_nothing() {
+    let (repo, service) = unmatched_fixture();
+    service.appear_after(2, CREATED, "billing", REMOTE);
+    let before = repo.files();
+    let mut host = TestHost::new(TOKEN).answering(&["", "both", "", "", "n"]);
+    let (result, _) = adopt(&repo, &service, &mut host, AdoptArgs::default(), false).await;
+    let failure = result.unwrap_err();
+    assert_eq!((failure.exit, code(&failure)), (2, "cancelled"));
+    assert_eq!(repo.files(), before);
+}
+
+#[tokio::test]
+async fn transport_errors_while_waiting_back_off_and_do_not_end_the_wait() {
+    let (repo, service) = unmatched_fixture();
+    {
+        let mut state = service.state.lock().unwrap();
+        state.drop_after = 2;
+        state.drop_listings = 3;
+    }
+    service.appear_after(2, CREATED, "billing", REMOTE);
+    let mut host = TestHost::new(TOKEN).silent();
+    let (result, _) = adopt(&repo, &service, &mut host, yes(), false).await;
+    assert_eq!(result.unwrap()["result"]["project_id"], CREATED);
+    assert_eq!(
+        service.state.lock().unwrap().drop_listings,
+        0,
+        "every dropped listing was attempted"
+    );
+}
+
+#[tokio::test]
+async fn a_silent_run_without_yes_opens_nothing() {
+    let (repo, service) = unmatched_fixture();
+    let mut host = TestHost::new(TOKEN).silent();
+    let (result, _) = adopt(&repo, &service, &mut host, AdoptArgs::default(), false).await;
+    assert_eq!(code(&result.unwrap_err()), "needs_input");
+    assert!(host.opened.is_empty());
+    assert_eq!(
+        listings(&service),
+        1,
+        "only preflight read the project list"
+    );
 }

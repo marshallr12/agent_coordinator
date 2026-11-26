@@ -510,8 +510,11 @@
   }
   // Shows the view a hash names. An unknown project or page falls back to the overview.
   function applyRoute(hash) {
+    // A link may carry a query (#/new-project?name=…). It comes off before the path is split on '/',
+    // because a query value may itself contain an encoded '/'.
+    const [route, query = ''] = text(hash).replace(/^#\/?/, '').split(/\?(.*)/s);
     let parts;
-    try { parts = text(hash).replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent); } catch { parts = []; }
+    try { parts = route.split('/').filter(Boolean).map(decodeURIComponent); } catch { parts = []; }
     const [head, id, page, extra] = parts;
     routing = true;
     try {
@@ -528,6 +531,7 @@
         else if (page === 'task' && extra) openTask(extra);
         else { updateTaskViewTabs(); showView('tasks'); loadTasks(); }
       } else if (head === 'account') { showView('overview'); myAccount(); }
+      else if (head === 'new-project') { showView('overview'); openPrefilledProject(new URLSearchParams(query)); }
       else if (head === 'archived') selectTaskView('archived');
       else if (head === 'archived-projects') openArchivedProjects();
       else if (head === 'tasks' || head === 'shared' || head === 'resources' || (head === 'admin' && state.actor?.role === 'admin')) enterTopLevel(head);
@@ -1887,6 +1891,27 @@
     const actions = el('div', 'dialog-actions'); const cancel = el('button', 'button subtle', 'Cancel'); cancel.type = 'button'; cancel.addEventListener('click', () => dialog.close()); const submit = el('button', 'button primary', kind === 'project' ? 'Create project' : 'Create task'); submit.type = 'submit'; add(actions, cancel); add(actions, submit); add(form, actions); dialog.appendChild(form); document.body.appendChild(dialog);
     form.addEventListener('submit', (event) => { event.preventDefault(); if (!form.reportValidity()) return; const value = Object.fromEntries(new FormData(form).entries()); dialog.close(); if (kind === 'project') createProject(value); else createTask(value); });
     dialog.addEventListener('close', () => dialog.remove()); dialog.showModal(); fields[0]?.focus();
+    return dialog;
+  }
+
+  // ---- Prefilled project link ----------------------------------------------------------------
+  // `agent-coordinator adopt` prints #/new-project?name=…&repository_url=…&target_branch=… so the person
+  // adopting a repository creates its project with one click. The link only fills the form: each value
+  // is assigned as text, a value over the server's limit or holding a control character is dropped
+  // (its field stays empty), and nothing here ever submits. Creation still needs the Create button.
+  const PROJECT_PREFILL = [['name', 'project-name', 120], ['repository_url', 'repository-url', 2048], ['target_branch', 'target-branch', 255]];
+  // One link value, or '' when it is missing, too long in UTF-8 bytes, or not plain single-line text.
+  function prefillValue(params, key, limit) {
+    const value = params.get(key) ?? '';
+    return new TextEncoder().encode(value).length <= limit && !/[\u0000-\u001f\u007f-\u009f]/.test(value) ? value : '';
+  }
+  // Opens the project dialog with the link's values and a notice saying where they came from.
+  function openPrefilledProject(params) {
+    const dialog = openDialog('project');
+    PROJECT_PREFILL.forEach(([key, id, limit]) => { dialog.querySelector(`#${id}`).value = prefillValue(params, key, limit); });
+    const notice = el('p', 'muted dialog-notice', 'Prefilled by a link. Check the repository URL before creating.');
+    notice.id = 'project-prefill-notice'; dialog.setAttribute('aria-describedby', notice.id);
+    dialog.querySelector('.dialog-header').after(notice);
   }
 
   function createProject(value) { startMutation('/api/v1/projects', { name: value['project-name'].trim(), repository_url: value['repository-url'].trim(), target_branch: value['target-branch'].trim() }, 'project creation', async () => { await loadProjects(); setGlobalAlert('Project created.', 'success'); }); }

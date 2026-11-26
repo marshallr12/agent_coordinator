@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 pub enum Status {
     Done,
     Skipped,
+    Waiting,
     Failed,
 }
 
@@ -22,6 +23,7 @@ impl Status {
         match self {
             Status::Done => "done",
             Status::Skipped => "skipped",
+            Status::Waiting => "waiting",
             Status::Failed => "failed",
         }
     }

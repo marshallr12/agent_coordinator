@@ -14,6 +14,7 @@ mod host;
 mod interview;
 mod plan;
 mod preflight;
+mod provision;
 mod repo_url;
 mod report;
 mod service;
@@ -44,7 +45,7 @@ pub const DEFAULT_SERVICE_URL: &str = "https://agents.sithbit.com";
 
 /// Options of `agent-coordinator adopt`. Every one has a default, so the bare
 /// command is the normal call; each prompt also has a flag for unattended use.
-#[derive(Args, Clone, Debug, Default)]
+#[derive(Args, Clone, Debug)]
 pub struct AdoptArgs {
     /// Repository to adopt; any directory inside its work tree [default: current directory].
     pub path: Option<PathBuf>,
@@ -73,6 +74,14 @@ pub struct AdoptArgs {
     #[arg(long, value_enum, default_value_t = HarnessArg::Auto)]
     pub harness: HarnessArg,
 
+    /// Print the dashboard link instead of also opening it in a browser.
+    #[arg(long)]
+    pub no_browser: bool,
+
+    /// Seconds to wait for the project to appear after the link is shown.
+    #[arg(long, value_name = "SECS", default_value_t = 900)]
+    pub approval_timeout: u64,
+
     /// Commit the files adopt wrote (the default); never pushes.
     #[arg(long, conflicts_with = "no_commit")]
     pub commit: bool,
@@ -100,6 +109,19 @@ pub struct AdoptArgs {
     /// Print the plan and the file diffs; write nothing and open nothing.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Test code builds flags with struct-update syntax; the base is what clap
+/// produces for a bare `adopt`, so the tests see the real defaults.
+#[cfg(test)]
+impl Default for AdoptArgs {
+    fn default() -> Self {
+        use clap::Parser;
+        match Cli::try_parse_from(["agent-coordinator", "adopt"]).map(|cli| cli.command) {
+            Ok(crate::Command::Adopt(args)) => args,
+            _ => unreachable!("a bare adopt always parses"),
+        }
+    }
 }
 
 /// Which assistants' instruction files `--harness` selects.
@@ -227,7 +249,7 @@ pub async fn execute(
         return Ok(outcome("dry_run", &pre, None, &[], None, reporter));
     }
     interview::confirm_plan(&pre, options, host)?;
-    let project = resolve_project(&settings)?;
+    let project = provision::resolve(&pre, &settings, options, host, reporter).await?;
     let binding = binding_change(&pre, &project.id);
     let written = write_files(&binding, &instructions, reporter)?;
     verify::run(&pre, &project, settings.harnesses, options, host, reporter).await?;
@@ -305,19 +327,6 @@ fn require_clean(
         message,
         json!({"paths": dirty}),
     ))
-}
-
-/// Returns the project to bind to. Creating one arrives with the dashboard flow.
-fn resolve_project(settings: &Settings) -> Result<Project, Failure> {
-    match &settings.target {
-        Target::Link(project) => Ok(project.clone()),
-        Target::Create { .. } => Err(failure(
-            6,
-            "project_required",
-            "No project matches this repository. Create it in the dashboard, then run adopt \
-             again or pass --project ID.",
-        )),
-    }
 }
 
 /// Writes the binding and the instruction files; returns the Git paths actually written.

@@ -30,6 +30,8 @@ pub struct Preflight {
     pub root: PathBuf,
     /// The service origin in normal form (no trailing slash).
     pub service_url: String,
+    /// The authenticated read-only connection, reused to watch for a new project.
+    pub service: Service,
     /// Every unarchived project the credential can see.
     pub projects: Vec<Project>,
     pub binding: BindingState,
@@ -55,6 +57,7 @@ pub async fn run(
     Ok(Preflight {
         root,
         service_url,
+        service,
         projects,
         binding,
     })

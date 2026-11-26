@@ -170,7 +170,7 @@ fn accept_match(
 }
 
 /// Lets the person pick among several matching projects; unattended runs must name one.
-fn choose_match(
+pub fn choose_match(
     matches: &[Project],
     options: &Options,
     host: &mut dyn Host,

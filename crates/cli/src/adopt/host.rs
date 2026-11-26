@@ -7,6 +7,7 @@
 use std::env;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -31,9 +32,18 @@ pub trait Host {
 
     /// Compares this client with the service's compatibility contract.
     fn compatibility(&self, info: &Value) -> Result<Value, Failure>;
+
+    /// Opens `url` in the default browser; false when that could not be started.
+    fn open_browser(&mut self, url: &str) -> bool;
+
+    /// How long to wait between two looks for the new project.
+    fn poll_interval(&self) -> Duration;
+
+    /// How long to wait after a transport error while polling.
+    fn backoff_interval(&self) -> Duration;
 }
 
-/// The real machine: the user's credential store, terminal and `PATH`.
+/// The real machine: the user's credential store, terminal, `PATH` and browser.
 pub struct RealHost {
     /// Whether plain HTTP to a loopback service was explicitly permitted.
     pub allow_insecure_loopback: bool,
@@ -71,6 +81,18 @@ impl Host for RealHost {
 
     fn compatibility(&self, info: &Value) -> Result<Value, Failure> {
         crate::compatibility_value(info)
+    }
+
+    fn open_browser(&mut self, url: &str) -> bool {
+        super::provision::open_in_browser(url)
+    }
+
+    fn poll_interval(&self) -> Duration {
+        Duration::from_secs(3)
+    }
+
+    fn backoff_interval(&self) -> Duration {
+        Duration::from_secs(10)
     }
 }
 

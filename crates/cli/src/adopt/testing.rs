@@ -8,6 +8,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -161,6 +162,8 @@ pub struct TestHost {
     pub programs: Vec<String>,
     /// Whether the client is compatible with the service.
     pub compatible: bool,
+    /// Every URL handed to the browser.
+    pub opened: Vec<String>,
 }
 
 impl TestHost {
@@ -173,6 +176,7 @@ impl TestHost {
             prompts: Vec::new(),
             programs: vec!["agent-coordinator".to_owned()],
             compatible: true,
+            opened: Vec::new(),
         }
     }
 
@@ -225,6 +229,19 @@ impl Host for TestHost {
             Err(crate::upgrade_required(json!({"compatible": false})))
         }
     }
+
+    fn open_browser(&mut self, url: &str) -> bool {
+        self.opened.push(url.to_owned());
+        true
+    }
+
+    fn poll_interval(&self) -> Duration {
+        Duration::from_millis(5)
+    }
+
+    fn backoff_interval(&self) -> Duration {
+        Duration::from_millis(20)
+    }
 }
 
 /// One request the fake service received.
@@ -247,6 +264,13 @@ pub struct ServiceState {
     /// Items per project page, to exercise paging.
     pub page_size: usize,
     pub seen: Vec<Seen>,
+    /// A project that appears once this many more project listings were served,
+    /// as when a person creates it in the dashboard while adopt waits.
+    pub appears: Vec<(usize, Value)>,
+    /// Project listings still answered normally before the dropped ones begin.
+    pub drop_after: usize,
+    /// How many of the next project listings are cut off without a response.
+    pub drop_listings: usize,
 }
 
 /// A loopback HTTP stand-in for the service: info, authentication help, `me` and projects.
@@ -285,6 +309,12 @@ impl FakeService {
         id.to_owned()
     }
 
+    /// Schedules a project to appear after `listings` more project listings.
+    pub fn appear_after(&self, listings: usize, id: &str, name: &str, repository_url: &str) {
+        let project = json!({"id": id, "name": name, "repository_url": repository_url, "target_branch": "main"});
+        self.state.lock().unwrap().appears.push((listings, project));
+    }
+
     /// Every request received so far.
     pub fn seen(&self) -> Vec<Seen> {
         self.state.lock().unwrap().seen.clone()
@@ -312,6 +342,9 @@ fn serve(mut stream: TcpStream, state: &Mutex<ServiceState>) {
         .filter_map(|line| line.split_once(": "))
         .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
         .map(|(_, value)| value.to_owned());
+    if cut_off(state, method, target) {
+        return;
+    }
     let (status, mut body) = answer(state, method, target, authorization.as_deref());
     body["request_id"] = json!("request");
     body["server_time"] = json!("2026-01-01T00:00:00.000Z");
@@ -321,6 +354,24 @@ fn serve(mut stream: TcpStream, state: &Mutex<ServiceState>) {
         "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
         payload.len()
     );
+}
+
+/// True when this project listing must be dropped without a response (a transport failure).
+fn cut_off(state: &Mutex<ServiceState>, method: &str, target: &str) -> bool {
+    let mut state = state.lock().unwrap();
+    if state.drop_listings == 0 || !target.starts_with("/api/v1/projects") {
+        return false;
+    }
+    if state.drop_after > 0 {
+        state.drop_after -= 1;
+        return false;
+    }
+    state.drop_listings -= 1;
+    state.seen.push(Seen {
+        method: method.to_owned(),
+        target: target.to_owned(),
+    });
+    true
 }
 
 /// Routes one request the way the real service would for an agent credential.
@@ -353,12 +404,30 @@ fn answer(
             200,
             json!({"data": {"actor": state.actor, "csrf_token": null}}),
         ),
-        ("GET", "/api/v1/projects") => (200, project_page(&state, query)),
+        ("GET", "/api/v1/projects") => {
+            reveal_due_projects(&mut state, query);
+            (200, project_page(&state, query))
+        }
         _ => (
             404,
             json!({"error": {"code": "not_found", "message": "No such route."}}),
         ),
     }
+}
+
+/// Counts one listing (a first page) and adds every project whose time has come.
+fn reveal_due_projects(state: &mut ServiceState, query: &str) {
+    if query.contains("cursor=") {
+        return;
+    }
+    let (due, later): (Vec<_>, Vec<_>) = state.appears.drain(..).partition(|(left, _)| *left == 0);
+    state
+        .projects
+        .extend(due.into_iter().map(|(_, project)| project));
+    state.appears = later
+        .into_iter()
+        .map(|(left, project)| (left - 1, project))
+        .collect();
 }
 
 /// Returns one page of projects after the `cursor` in the query.
