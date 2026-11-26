@@ -175,7 +175,8 @@ mod tests {
         let repo = TestRepo::new();
         let nested = repo.root().join("a/b");
         std::fs::create_dir_all(&nested).unwrap();
-        assert_eq!(toplevel(&nested).unwrap(), repo.root());
+        let found = std::fs::canonicalize(toplevel(&nested).unwrap()).unwrap();
+        assert_eq!(found, std::fs::canonicalize(repo.root()).unwrap());
         let outside = tempfile::tempdir().unwrap();
         assert!(toplevel(outside.path()).is_err());
     }

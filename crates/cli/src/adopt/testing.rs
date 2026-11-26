@@ -27,7 +27,7 @@ impl TestRepo {
     /// Creates an empty repository on branch `main`.
     pub fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let root = resolved(directory.path());
         let repo = Self {
             _directory: directory,
             root,
@@ -36,6 +36,7 @@ impl TestRepo {
         repo.git(&["config", "user.name", "Adopt Test"]);
         repo.git(&["config", "user.email", "adopt@example.invalid"]);
         repo.git(&["config", "commit.gpgsign", "false"]);
+        repo.git(&["config", "core.autocrlf", "false"]);
         repo
     }
 
@@ -105,6 +106,17 @@ impl TestRepo {
         collect_files(&self.root, &self.root, &mut found);
         found.sort();
         found
+    }
+}
+
+/// The directory as Git names it. Unix resolves symlinks (a temporary directory
+/// is often behind one); Windows keeps the plain path, because the resolved
+/// `\\?\` form is not accepted by `git -C`.
+fn resolved(path: &Path) -> PathBuf {
+    if cfg!(unix) {
+        std::fs::canonicalize(path).unwrap()
+    } else {
+        path.to_path_buf()
     }
 }
 

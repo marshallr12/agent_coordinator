@@ -4,6 +4,11 @@ The native `agent-coordinator` client connects a harness to the project selected
 by `.agent-coordinator.toml`. See the [complete CLI guide in the mdBook](../../book/src/docs/CLI.md)
 for session, worktree, task, and review commands.
 
+In a repository that is not connected yet, run `agent-coordinator adopt`: it
+links or helps you create the project, writes the binding below and the
+instruction block for Claude Code and Codex, verifies, and commits. The CLI
+guide's "Adopt a repository" section describes it.
+
 ## Credentials and project selection
 
 Keep the non-secret binding in the repository root, including each worktree:
