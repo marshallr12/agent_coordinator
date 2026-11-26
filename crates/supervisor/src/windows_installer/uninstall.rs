@@ -1,6 +1,7 @@
 //! `windows-host uninstall` (phase 7, step 7b): stops and deletes the four
 //! services, removes both trees, and removes what Windows kept for the
-//! services' accounts.
+//! services' accounts. The coordinator CLI goes with the program directory,
+//! and the coordinator's directory and credential with the state root.
 //!
 //! Every step looks at the host as it is, so a second run, or one after a
 //! restart, does only what is left. Nothing is removed through a link and
@@ -15,6 +16,7 @@
 //! pending, and the next run removes it. That run needs no record: the four
 //! accounts follow from the service names. WSL is never touched.
 use super::control::{self, RunState, STOP_ORDER, Services};
+use super::coordinator::CLI;
 use super::install::Machine;
 use super::model::{BINARY, CONFIG, Inputs, Layout, Role, Sids};
 use super::observed::{PathState, ProfileState};
@@ -23,8 +25,9 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 /// What the program directory may hold: the binary, the configuration, the
-/// kept releases and a file an interrupted write left beside its place.
-const PROGRAM_ENTRIES: [&str; 3] = [BINARY, CONFIG, "releases"];
+/// coordinator CLI, the kept releases and a file an interrupted write left
+/// beside its place.
+const PROGRAM_ENTRIES: [&str; 4] = [BINARY, CONFIG, CLI, "releases"];
 /// What the state root may hold: the installer's and each service's
 /// directories, and the key's.
 const STATE_ENTRIES: [&str; 7] = [
@@ -79,7 +82,7 @@ pub fn uninstall(
     }
     let mut report = UninstallReport {
         launch_profiles: launch_profiles(&*host, layout)?,
-        notes: key_note(&*host, layout)?,
+        notes: notes(&*host, layout)?,
         ..UninstallReport::default()
     };
     remove_services(host, services, layout, &mut report)?;
@@ -171,29 +174,43 @@ fn collect_profiles(value: &serde_json::Value, names: &mut Vec<String>) {
     }
 }
 
-/// The note about the push App's key, when the host had one: removing the
-/// file does not remove the key from the App.
-fn key_note(host: &dyn Machine, layout: &Layout) -> Result<Vec<String>> {
+/// The notes about the secrets the host had: removing the push App's key
+/// file does not remove the key from the App, and removing the coordinator
+/// credential file does not revoke its token.
+fn notes(host: &dyn Machine, layout: &Layout) -> Result<Vec<String>> {
+    let inputs = manifest_inputs(host, layout)?;
+    let recorded = |had: fn(&Inputs) -> bool| inputs.as_ref().is_some_and(had);
+    let had_key = recorded(|i| i.push_key) || host.path(&layout.key())? != PathState::Missing;
+    let had_credential = recorded(|i| i.coordinator_credential)
+        || host.path(&layout.credential())? != PathState::Missing;
+    let root = &layout.state_root;
+    let key = format!(
+        "the push App's key file is removed with {root}, but the key stays registered with the \
+         push App until you delete it in the App's settings on GitHub"
+    );
+    let credential = format!(
+        "the coordinator credential file is removed with {root}, but its token stays valid \
+         until it is revoked on the coordinator"
+    );
+    Ok([(had_key, key), (had_credential, credential)]
+        .into_iter()
+        .filter_map(|(had, note)| had.then_some(note))
+        .collect())
+}
+
+/// The inputs the manifest records, when the installer's directory is a
+/// plain directory and the manifest one it can read.
+fn manifest_inputs(host: &dyn Machine, layout: &Layout) -> Result<Option<Inputs>> {
     let manifest = match host.path(&layout.installer_dir())? {
         PathState::Directory { .. } => host.text(&layout.manifest())?,
         _ => None,
     };
-    let inputs = manifest
+    Ok(manifest
         .as_deref()
         .map(Inputs::from_manifest)
         .transpose()
         .ok()
-        .flatten();
-    let had_key =
-        inputs.is_some_and(|i| i.push_key) || host.path(&layout.key())? != PathState::Missing;
-    Ok(match had_key {
-        true => vec![format!(
-            "the push App's key file is removed with {}, but the key stays registered with the \
-             push App until you delete it in the App's settings on GitHub",
-            layout.state_root
-        )],
-        false => Vec::new(),
-    })
+        .flatten())
 }
 
 /// Stops each registered service, the supervisor first, and deletes it.

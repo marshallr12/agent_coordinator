@@ -1,12 +1,15 @@
 //! The desired state of an installed host: one binary, four services, a
 //! state tree with its access lists, a generated configuration, the record
-//! of what the owner asked for and, when there is a push App, its key.
+//! of what the owner asked for and, when there is a push App, its key; and,
+//! when the supervisor takes its work from a coordinator project, the
+//! coordinator's CLI and credential ([`super::coordinator`]).
 //!
 //! Everything is derived from a [`Layout`] (where things go) and the
 //! owner's [`Inputs`] (what has no default). Paths are Windows paths kept
 //! as text, so the model reads the same on every platform.
 use super::access::{ADMINISTRATORS, AccessList, FULL, MODIFY, READ, READ_EXECUTE, SYSTEM, USERS};
 use super::config_text::{self, Settings};
+use super::coordinator::{self, CliSpec};
 use super::service_sid::service_sid;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -248,6 +251,24 @@ pub struct Inputs {
     pub stand_in_fixture: Vec<String>,
     /// Whether the push App's key is installed. It goes with `app_id`.
     pub push_key: bool,
+    /// The coordinator's HTTPS origin; empty leaves the coordinator off.
+    /// Each `coordinator_` entry is left out of the manifest while it is
+    /// empty, so the manifest of a host without a coordinator names none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub coordinator_url: String,
+    /// The coordinator project the supervisor claims from.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub coordinator_project: String,
+    /// The command every coordinator launch runs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub coordinator_fixture: Vec<String>,
+    /// Whether the coordinator credential is installed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub coordinator_credential: bool,
+    /// The SHA-256, in hex, of the coordinator CLI an install copied;
+    /// `status` reports an installed CLI that differs.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub coordinator_cli_sha256: String,
 }
 
 /// What one `install` run was told on its command line. Each `None` keeps
@@ -264,10 +285,13 @@ pub struct Overrides {
     pub start: Option<StartType>,
     /// The stand-in's command; an empty one turns the stand-in off.
     pub stand_in_fixture: Option<Vec<String>>,
+    /// The coordinator, its project, files and command.
+    pub coordinator: coordinator::Overrides,
 }
 
 impl Inputs {
-    /// These inputs with what one run's command line says instead.
+    /// These inputs with what one run's command line says instead. A CLI
+    /// file's digest is not known here: `install_from` records it.
     pub fn with(mut self, overrides: &Overrides) -> Self {
         let Overrides {
             remote,
@@ -275,12 +299,14 @@ impl Inputs {
             key_source,
             start,
             stand_in_fixture,
+            coordinator,
         } = overrides;
         self.remote = remote.clone().unwrap_or(self.remote);
         (self.app_id, self.installation_id) = app.unwrap_or((self.app_id, self.installation_id));
         self.push_key |= key_source.is_some();
         self.start = start.unwrap_or(self.start);
         self.stand_in_fixture = stand_in_fixture.clone().unwrap_or(self.stand_in_fixture);
+        coordinator.apply(&mut self);
         self
     }
 
@@ -299,7 +325,12 @@ impl Inputs {
             "a push App and its key go together: give --app-id, --installation-id and \
              --key-source, or none of them"
         );
-        Ok(())
+        coordinator::validate(self)
+    }
+
+    /// Whether the supervisor takes its work from a coordinator project.
+    pub fn coordinator(&self) -> bool {
+        !self.coordinator_url.is_empty()
     }
 
     /// The manifest's text.
@@ -382,15 +413,16 @@ pub struct DirectorySpec {
     pub owners: Vec<String>,
 }
 
-/// The push App's key.
+/// A secret file the installer copies and never shows: the push App's key,
+/// or the coordinator credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeySpec {
-    /// Where the key is installed.
+    /// Where the file is installed.
     pub path: String,
     /// The file's whole access list.
     pub access: AccessList,
-    /// The file this run copies the key from, when one was given. It is a
-    /// path; the model never holds the key.
+    /// The file this run copies it from, when one was given. It is a path;
+    /// the model never holds the secret.
     pub source: Option<String>,
 }
 
@@ -415,6 +447,10 @@ pub struct Desired {
     pub manifest: String,
     /// The key, when there is a push App.
     pub key: Option<KeySpec>,
+    /// The coordinator credential, when there is a coordinator.
+    pub credential: Option<KeySpec>,
+    /// The coordinator CLI, when there is a coordinator.
+    pub cli: Option<CliSpec>,
 }
 
 impl Desired {
@@ -436,6 +472,8 @@ impl Desired {
             directories: directories(&layout, &inputs, &sids),
             services: Role::ALL.map(|role| service(&layout, &inputs, role)).into(),
             key: key(&layout, &inputs, &sids, key_source),
+            credential: coordinator::credential(&layout, &inputs, &sids),
+            cli: coordinator::cli(&layout, &inputs),
             manifest: inputs.manifest()?,
             commit: coordinator_core::BUILD_SOURCE_COMMIT.to_owned(),
             binary_sha256,
@@ -445,9 +483,29 @@ impl Desired {
         })
     }
 
+    /// This model with the files this run copies the coordinator credential
+    /// and CLI from, each when one was given. They are paths: the model
+    /// never holds the credential.
+    pub fn with_sources(mut self, credential: Option<String>, cli: Option<String>) -> Self {
+        if let Some(spec) = &mut self.credential {
+            spec.source = credential;
+        }
+        if let Some(spec) = &mut self.cli {
+            spec.source = cli;
+        }
+        self
+    }
+
     /// The directory spec for `path`, if the model has one.
     pub fn directory(&self, path: &str) -> Option<&DirectorySpec> {
         self.directories.iter().find(|d| d.path == path)
+    }
+
+    /// The secret file installed at `path`, the key or the credential, if
+    /// the model has one there.
+    pub fn secret(&self, path: &str) -> Option<&KeySpec> {
+        let mut both = self.key.iter().chain(&self.credential);
+        both.find(|spec| spec.path == path)
     }
 
     /// The release being installed.
@@ -492,7 +550,7 @@ fn bin_path(layout: &Layout, role: Role) -> String {
 }
 
 /// A directory the system and administrators control, with `extra` grants.
-fn directory(path: String, extra: &[(&str, u32)], owners: &[&str]) -> DirectorySpec {
+pub(super) fn directory(path: String, extra: &[(&str, u32)], owners: &[&str]) -> DirectorySpec {
     let mut grants = vec![(SYSTEM, FULL), (ADMINISTRATORS, FULL)];
     grants.extend_from_slice(extra);
     DirectorySpec {
@@ -506,7 +564,9 @@ fn directory(path: String, extra: &[(&str, u32)], owners: &[&str]) -> DirectoryS
 /// supervisor may modify their own trees; a broker has full control of its
 /// own directory, which it needs to set that directory's access list again
 /// at every start. Users may read the program directory; nothing else is
-/// granted to anyone.
+/// granted to anyone. The key's directory, and the coordinator's protected
+/// directory and launch root ([`coordinator::directories`]), come last and
+/// only when they are used.
 fn directories(layout: &Layout, inputs: &Inputs, sids: &Sids) -> Vec<DirectorySpec> {
     let (runner, supervisor) = (sids.runner.as_str(), sids.supervisor.as_str());
     let (egress, publication) = (sids.egress.as_str(), sids.publication.as_str());
@@ -527,6 +587,7 @@ fn directories(layout: &Layout, inputs: &Inputs, sids: &Sids) -> Vec<DirectorySp
         let grant = [(publication, READ_EXECUTE)];
         all.push(directory(layout.key_dir(), &grant, &[]));
     }
+    all.extend(coordinator::directories(layout, inputs, sids));
     all
 }
 
