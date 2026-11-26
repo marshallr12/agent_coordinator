@@ -122,6 +122,20 @@ pub(crate) fn client_from(
     origin: &str,
     insecure: bool,
 ) -> Result<CoordinatorClient> {
+    let (origin, token) = credential_from(text, shown, origin, insecure)?;
+    CoordinatorClient::new(&origin, token, insecure)
+        .map_err(|error| anyhow::anyhow!("coordinator client: {error}"))
+}
+
+/// The origin and token of the entry of the CLI-format credentials file
+/// `text` (read from `shown`) whose origin is `origin` (normalized), or of
+/// its first entry when `origin` is empty. No error quotes the file.
+pub(crate) fn credential_from(
+    text: &str,
+    shown: &Path,
+    origin: &str,
+    insecure: bool,
+) -> Result<(String, String)> {
     let Ok(file) = toml::from_str::<CredentialFile>(text) else {
         bail!("{} is not a valid credentials file", shown.display());
     };
@@ -131,8 +145,7 @@ pub(crate) fn client_from(
         .into_iter()
         .find(|c| origin.is_empty() || normal(&c.origin) == normal(origin))
         .with_context(|| format!("no matching credential in {}", shown.display()))?;
-    CoordinatorClient::new(&entry.origin, entry.token, insecure)
-        .map_err(|error| anyhow::anyhow!("coordinator client: {error}"))
+    Ok((entry.origin, entry.token))
 }
 
 /// One cycle over every project × role; failures are logged, never fatal.

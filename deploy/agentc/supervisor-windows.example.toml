@@ -76,8 +76,9 @@
 # publication_broker_sid = ""
 
 # The acceptance stand-in. It replaces the coordinator with a directory of
-# queued items and a ledger, for machine acceptance only. While it is off,
-# the supervisor claims nothing: no provider harness is supported on Windows.
+# queued items and a ledger, for machine acceptance only. While it and the
+# coordinator below are both off, the supervisor claims nothing. Never enable
+# both.
 [windows_supervisor.stand_in]
 # enabled = false
 # One file per queued item; the file's name is the item's task id.
@@ -89,6 +90,29 @@
 # fixture = []
 # An existing directory the runner's account can create launch directories in.
 # launch_root = 'C:\ProgramData\agentc\runner\stand-in-launches'
+
+# Work from one coordinator project, claimed with the supervisor's own
+# credential. Each launch still runs a fixture command: no provider harness
+# is supported on Windows yet. Use a project no other supervisor is bound to.
+[windows_supervisor.coordinator]
+# enabled = false
+# The coordinator's https:// origin. No default; required when enabled.
+# service_url = ""
+# The one project claimed from. No default; required when enabled.
+# project_id = ""
+# The pinned coordinator CLI the supervisor runs for claims and releases.
+# cli = 'C:\Program Files\agentc\agent-coordinator.exe'
+# The protected directory (the supervisor's account, the system and
+# administrators only) holding credentials.toml, which windows-host install
+# imports, the binding the service writes and the CLI's session state.
+# directory = 'C:\ProgramData\agentc\supervisor\coordinator'
+# The command every launch runs, as an argument vector. No default; required
+# when enabled.
+# fixture = []
+# An existing directory the runner's account can create launch directories in.
+# launch_root = 'C:\ProgramData\agentc\runner\fixture-launches'
+# Every claim, renewal, checkpoint, release and launch event.
+# ledger = 'C:\ProgramData\agentc\supervisor\ledger.jsonl'
 
 # The egress broker (`... windows-service --role egress`). It forwards a
 # launch's CONNECT requests to the hosts the Linux proxy allows

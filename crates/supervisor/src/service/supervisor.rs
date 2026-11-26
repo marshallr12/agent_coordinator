@@ -9,11 +9,14 @@
 //! preshutdown its control handler recorded ([`Signal`]) and keep reporting
 //! while the loop drains ([`Pace::pause`]).
 //!
-//! Where the work comes from is a [`Work`]. On Windows there are two:
+//! Where the work comes from is a [`Work`]. On Windows there are three:
 //! [`NoHarness`], which claims nothing because no provider harness is
-//! supported there, and the acceptance stand-in
-//! ([`super::stand_in::StandIn`]). Neither contacts a coordinator.
-use super::authority::{Authority, Held};
+//! supported there; the acceptance stand-in ([`super::stand_in::StandIn`]),
+//! which never contacts a coordinator; and a coordinator project
+//! ([`super::coordinator::CoordinatorWork`], step 8a), whose launches still
+//! run a fixture until a provider harness driver exists.
+use super::authority::{ACTIVE, Authority, Held};
+use super::coordinator::CoordinatorSettings;
 use super::lifecycle::Signal;
 use super::pipe_policy::{checked_sid, pipe_path};
 use super::stand_in::{StandIn, StandInSettings};
@@ -57,6 +60,9 @@ pub struct SupervisorSettings {
     pub publication_broker_sid: String,
     /// The acceptance stand-in; off by default.
     pub stand_in: StandInSettings,
+    /// Work from a coordinator project; off by default. Never on together
+    /// with the stand-in.
+    pub coordinator: CoordinatorSettings,
 }
 
 impl Default for SupervisorSettings {
@@ -70,6 +76,7 @@ impl Default for SupervisorSettings {
             authority_pipe: "agentc-supervisor-authority".into(),
             publication_broker_sid: String::new(),
             stand_in: StandInSettings::default(),
+            coordinator: CoordinatorSettings::default(),
         }
     }
 }
@@ -93,7 +100,13 @@ impl SupervisorSettings {
         if !self.publication_broker_sid.is_empty() {
             checked_sid(&self.publication_broker_sid)?;
         }
-        self.stand_in.validate()
+        ensure!(
+            !(self.stand_in.enabled && self.coordinator.enabled),
+            "windows_supervisor.stand_in and windows_supervisor.coordinator are both enabled; \
+             a supervisor takes its work from one of them"
+        );
+        self.stand_in.validate()?;
+        self.coordinator.validate()
     }
 
     /// The publication broker's account, when the authority pipe is to be
@@ -105,13 +118,27 @@ impl SupervisorSettings {
 
 /// Where a supervisor's work comes from.
 pub trait Work {
+    /// The project launch records carry; `local` when no coordinator
+    /// project is worked on.
+    fn project(&self) -> &str {
+        "local"
+    }
     /// Whether launches can run at `now_ms`; an error stops every claim
     /// and is the reason the heartbeat shows.
     fn available(&self, now_ms: i64) -> Result<()>;
-    /// The `next` answer.
-    fn next(&mut self) -> Result<Value>;
+    /// The `next` answer, leaving the task ids in `exclude` (this host's
+    /// holds) out where the source knows how.
+    fn next(&mut self, exclude: &[String]) -> Result<Value>;
+    /// Claims the suggested task for `launch`.
     fn claim(&mut self, launch: &Launch) -> Result<Lease>;
-    fn renew(&mut self, lease: &Lease) -> Result<Lease>;
+    /// Renews `launch`'s attempt.
+    fn renew(&mut self, launch: &Launch, lease: &Lease) -> Result<Lease>;
+    /// The attempt's state now; a source with no coordinator has only
+    /// active attempts.
+    fn attempt_state(&mut self, _launch: &Launch, _lease: &Lease) -> Option<String> {
+        Some(ACTIVE.to_owned())
+    }
+    /// Releases `launch`'s attempt with the loop's handoff `summary`.
     fn release(&mut self, launch: &Launch, lease: &Lease, summary: &str) -> Result<()>;
 }
 
@@ -124,7 +151,7 @@ impl Work for NoHarness {
         bail!(NO_HARNESS)
     }
 
-    fn next(&mut self) -> Result<Value> {
+    fn next(&mut self, _exclude: &[String]) -> Result<Value> {
         Ok(json!({ "action": null }))
     }
 
@@ -132,7 +159,7 @@ impl Work for NoHarness {
         bail!(NO_HARNESS)
     }
 
-    fn renew(&mut self, _lease: &Lease) -> Result<Lease> {
+    fn renew(&mut self, _launch: &Launch, _lease: &Lease) -> Result<Lease> {
         bail!(NO_HARNESS)
     }
 
@@ -151,7 +178,9 @@ impl Work for StandIn {
         }
     }
 
-    fn next(&mut self) -> Result<Value> {
+    /// The stand-in's queue knows no holds; the loop still checks what it
+    /// is offered.
+    fn next(&mut self, _exclude: &[String]) -> Result<Value> {
         Ok(StandIn::next(self))
     }
 
@@ -159,7 +188,7 @@ impl Work for StandIn {
         StandIn::claim(self, launch)
     }
 
-    fn renew(&mut self, lease: &Lease) -> Result<Lease> {
+    fn renew(&mut self, _launch: &Launch, lease: &Lease) -> Result<Lease> {
         StandIn::renew(self, lease)
     }
 
@@ -225,14 +254,15 @@ impl<H: HostRuntime, W: Work, P: Pace> LoopDriver<H, W, P> {
 }
 
 impl<H: HostRuntime, W: Work, P: Pace> Driver for LoopDriver<H, W, P> {
-    /// There is no coordinator project; launch records carry this name.
+    /// The work source's project; launch records carry its name.
     fn project(&self) -> &str {
-        "local"
+        self.work.project()
     }
 
-    fn next(&mut self, role: Role, _exclude: &[String]) -> Result<Value> {
+    /// Implementer work from the source; this host runs no reviews.
+    fn next(&mut self, role: Role, exclude: &[String]) -> Result<Value> {
         match role {
-            Role::Implementer => self.work.next(),
+            Role::Implementer => self.work.next(exclude),
             Role::Reviewer => Ok(json!({ "action": null })),
         }
     }
@@ -275,14 +305,14 @@ impl<H: HostRuntime, W: Work, P: Pace> Driver for LoopDriver<H, W, P> {
 
     /// Renews, holding the attempt as the renewal describes it.
     fn renew(&mut self, launch: &Launch, lease: &Lease) -> Result<Lease> {
-        let renewed = self.work.renew(lease)?;
+        let renewed = self.work.renew(launch, lease)?;
         self.hold(launch, &renewed);
         Ok(renewed)
     }
 
-    /// Nothing here submits an attempt.
-    fn attempt_state(&mut self, _launch: &Launch, _lease: &Lease) -> Option<String> {
-        Some("active".to_owned())
+    /// The attempt's state as the work source reads it.
+    fn attempt_state(&mut self, launch: &Launch, lease: &Lease) -> Option<String> {
+        self.work.attempt_state(launch, lease)
     }
 
     /// Forgets the launch's attempt first, so nothing is published for it
@@ -496,6 +526,28 @@ mod tests {
     fn events(root: &Path, name: &str) -> Vec<Value> {
         let all = ledger(root).events();
         all.into_iter().filter(|e| e["event"] == name).collect()
+    }
+
+    #[test]
+    fn the_stand_in_and_a_coordinator_are_never_both_the_source_of_work() {
+        let mut settings = SupervisorSettings {
+            runner_sid: "S-1-5-80-1".into(),
+            ..SupervisorSettings::default()
+        };
+        settings.validate().unwrap();
+        settings.stand_in.enabled = true;
+        settings.stand_in.fixture = vec!["probe.exe".into()];
+        settings.coordinator = CoordinatorSettings {
+            enabled: true,
+            service_url: "https://agents.example.com".into(),
+            project_id: "p1".into(),
+            fixture: vec!["probe.exe".into()],
+            ..CoordinatorSettings::default()
+        };
+        let error = settings.validate().unwrap_err().to_string();
+        assert!(error.contains("both enabled"), "{error}");
+        settings.stand_in.enabled = false;
+        settings.validate().unwrap();
     }
 
     #[test]
