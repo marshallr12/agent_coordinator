@@ -206,12 +206,42 @@ mod tests {
     /// The design chapter, whose block text the constant must match exactly.
     const CHAPTER: &str = include_str!("../../../../book/src/docs/project-scaffolding-design.md");
 
+    /// True when `chapter` holds the block, whatever line endings its checkout has.
+    ///
+    /// `include_str!` keeps a file's bytes exactly as Git checked them out,
+    /// which is CRLF under `core.autocrlf=true` (the Windows CI runner), while
+    /// rustc always reads the `BLOCK` literal's own line endings as `\n`. So
+    /// the chapter goes through [`decode`], as every real instruction file does.
+    fn chapter_holds_block(chapter: &str) -> bool {
+        decode(chapter.as_bytes()).is_some_and(|(text, _)| has_intact_block(&text))
+    }
+
+    /// Rewrites `text` with CRLF line endings, as a Windows checkout would hold it.
+    fn with_crlf(text: &str) -> String {
+        text.replace("\r\n", "\n").replace('\n', "\r\n")
+    }
+
     #[test]
     fn the_block_is_the_text_in_the_design_chapter() {
         assert!(
-            CHAPTER.contains(BLOCK),
+            chapter_holds_block(CHAPTER),
             "BLOCK drifted from the design chapter"
         );
+    }
+
+    #[test]
+    fn a_crlf_checkout_of_the_chapter_still_holds_the_block() {
+        let chapter = with_crlf(CHAPTER);
+        assert!(!chapter.contains(BLOCK), "the copy must really be CRLF");
+        assert!(chapter_holds_block(&chapter));
+    }
+
+    #[test]
+    fn a_chapter_whose_block_text_changed_is_reported_as_drift() {
+        let drifted = CHAPTER.replace("without redirects", "with redirects");
+        assert_ne!(drifted, CHAPTER, "the edit must change the chapter");
+        assert!(!chapter_holds_block(&drifted));
+        assert!(!chapter_holds_block(&with_crlf(&drifted)));
     }
 
     #[test]
