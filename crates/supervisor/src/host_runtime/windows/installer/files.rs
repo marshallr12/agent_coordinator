@@ -1,8 +1,9 @@
-//! The installer's files: the binary, the configuration, the manifest and
-//! the push App's key. Each is written beside its place and renamed into
-//! it, so a file is never seen half written. A link is refused, never
-//! followed. Nothing here prints, logs or returns a key's bytes; an error
-//! names a path and what Windows said about it.
+//! The installer's files: the binary, the configuration, the manifest, the
+//! push App's key and the coordinator's CLI and credential. Each is written
+//! beside its place and renamed into it, so a file is never seen half
+//! written. A link is refused, never followed. Nothing here prints, logs or
+//! returns the bytes of a key or a credential; an error names a path and
+//! what Windows said about it.
 use super::super::sys::{Descriptor, last_error};
 use super::super::text::wide;
 use super::access::is_link;
@@ -19,7 +20,8 @@ use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, CreateFileW, FILE_ATTR
 
 /// The most a text file of the installer's may hold.
 const TEXT_LIMIT: u64 = 1024 * 1024;
-/// The most a key file may hold; a PEM RSA key is a few thousand bytes.
+/// The most a secret file, a key or a credential, may hold; a PEM RSA key
+/// is a few thousand bytes.
 const KEY_LIMIT: u64 = 64 * 1024;
 
 /// Opens the plain file at `path`; `None` when nothing is there. A link,
@@ -230,8 +232,8 @@ fn remove_children(path: &Path, left: &mut Vec<String>) {
     }
 }
 
-/// The bytes of the key file at `path`: a plain, non-empty file of at most
-/// [`KEY_LIMIT`] bytes.
+/// The bytes of the secret file at `path`, a key or a credential: a plain,
+/// non-empty file of at most [`KEY_LIMIT`] bytes.
 fn key_bytes(path: &str) -> Result<Vec<u8>> {
     let mut file = plain(path, KEY_LIMIT)?.with_context(|| format!("{path} does not exist"))?;
     let mut bytes = Vec::new();
@@ -241,8 +243,8 @@ fn key_bytes(path: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Whether the key file `source` can be used, and whether the key at
-/// `installed` already holds the same bytes.
+/// Whether the secret file `source`, a key or a coordinator credential, can
+/// be used, and whether the one at `installed` already holds the same bytes.
 pub fn key_source(source: &str, installed: Option<&str>) -> KeySource {
     let bytes = match key_bytes(source) {
         Ok(bytes) => bytes,
@@ -274,10 +276,11 @@ fn create_protected(path: &str, sddl: &str) -> Result<File> {
     Ok(unsafe { File::from_raw_handle(raw) })
 }
 
-/// Copies the key file `source` to `path` under the access list `sddl`.
-/// The copy is made beside its place with that list from its first byte
-/// and then renamed, so the key is never readable by anyone else and a
-/// replaced key is replaced whole. The source is only read.
+/// Copies the secret file `source`, a key or a coordinator credential, to
+/// `path` under the access list `sddl`. The copy is made beside its place
+/// with that list from its first byte and then renamed, so the secret is
+/// never readable by anyone else and a replaced one is replaced whole. The
+/// source is only read.
 pub fn install_key(source: &str, path: &str, sddl: &str) -> Result<()> {
     let bytes = key_bytes(source)?;
     let staged = staged(path);

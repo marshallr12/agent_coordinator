@@ -17,6 +17,13 @@
 //! into `releases\<sha256>\`, beside the installed one, and nothing a caller
 //! supplies is ever run. The release it replaces is kept beside it with
 //! the configuration it ran with, which is what `rollback` returns to.
+//!
+//! The coordinator CLI and credential are not part of a release: an update
+//! or rollback leaves both as they are, and only the configuration's
+//! coordinator entries change with it. Like a missing key, a CLI that is
+//! not the one the manifest records, or a missing credential, refuses the
+//! update; `install` with `--coordinator-cli-source` or
+//! `--coordinator-credential-source` puts it right.
 use super::config_text;
 use super::control::{self, RunState, STOP_ORDER, Services};
 use super::install::{Machine, recorded};

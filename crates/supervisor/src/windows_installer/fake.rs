@@ -20,7 +20,7 @@ use std::time::Duration;
 pub struct FakeHost {
     /// Whether the session is elevated.
     pub elevated: bool,
-    /// Every directory and the key file.
+    /// Every directory and the key and credential files.
     pub paths: BTreeMap<String, PathState>,
     /// Text files by path.
     pub texts: BTreeMap<String, String>,
@@ -37,6 +37,9 @@ pub struct FakeHost {
     pub services: BTreeMap<String, ServiceState>,
     /// What this run's key file is like.
     pub key_source: KeySource,
+    /// What each other secret file, such as a coordinator credential file,
+    /// is like, by path; a file not named here is like the key file.
+    pub sources: BTreeMap<String, KeySource>,
     /// The privileges of each running process's token.
     pub tokens: BTreeMap<u32, Vec<String>>,
     /// Fail the change with this number (counting from 0), once.
@@ -58,6 +61,7 @@ impl FakeHost {
             stuck: Vec::new(),
             services: BTreeMap::new(),
             key_source: KeySource::Readable { installed: false },
+            sources: BTreeMap::new(),
             tokens: BTreeMap::new(),
             fail_at: None,
             applied: 0,
@@ -100,8 +104,8 @@ impl FakeHost {
                 .insert(path.to_owned(), PathState::Directory { owner, access });
             return Ok(());
         }
-        let key = desired.key.as_ref().filter(|key| key.path == path);
-        let access = key.context("no such path in the model")?.access.clone();
+        let secret = desired.secret(path).context("no such path in the model")?;
+        let access = secret.access.clone();
         self.paths
             .insert(path.to_owned(), PathState::File { owner, access });
         Ok(())
@@ -158,6 +162,8 @@ impl FakeHost {
             }
             Action::WriteConfig { .. } => return self.write_config(desired),
             Action::InstallKey => return self.install_key(desired),
+            Action::InstallCredential => return self.install_credential(desired),
+            Action::InstallCli => return self.install_cli(desired),
             other => bail!("{other:?} is a service change"),
         }
         Ok(())
@@ -177,6 +183,24 @@ impl FakeHost {
         let key = desired.key.as_ref().context("no key in the model")?;
         self.secure(desired, &key.path.clone())?;
         self.key_source = KeySource::Readable { installed: true };
+        Ok(())
+    }
+
+    /// Copies the credential: the file appears with its access list, and
+    /// this run's file is now the installed one.
+    fn install_credential(&mut self, desired: &Desired) -> Result<()> {
+        let spec = desired.credential.as_ref().context("no credential")?;
+        let source = spec.source.clone().context("no credential file")?;
+        self.secure(desired, &spec.path.clone())?;
+        let installed = KeySource::Readable { installed: true };
+        self.sources.insert(source, installed);
+        Ok(())
+    }
+
+    /// Copies the CLI: the file appears with the digest the model wants.
+    fn install_cli(&mut self, desired: &Desired) -> Result<()> {
+        let cli = desired.cli.as_ref().context("no CLI in the model")?;
+        self.digests.insert(cli.path.clone(), cli.sha256.clone());
         Ok(())
     }
 }
@@ -202,8 +226,9 @@ impl Host for FakeHost {
         Ok(self.services.get(name).cloned())
     }
 
-    fn key_source(&self, _source: &str, _installed: Option<&str>) -> KeySource {
-        self.key_source.clone()
+    fn key_source(&self, source: &str, _installed: Option<&str>) -> KeySource {
+        let named = self.sources.get(source);
+        named.unwrap_or(&self.key_source).clone()
     }
 
     fn privileges(&self, process: u32) -> Result<Vec<String>> {
