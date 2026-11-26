@@ -396,10 +396,14 @@ fn another_layout_writes_the_coordinators_paths_only_while_enabled() {
         settings.ledger,
         path(r"D:\test\state\supervisor\ledger.jsonl")
     );
-    assert_eq!(
-        settings.credentials(),
-        path(&desired.credential.unwrap().path)
-    );
+    // The service finds the installed credential in its directory by the
+    // name it reads. (Compared as text: on another system, joining a
+    // Windows path would add that system's separator.)
+    let installed = desired.credential.unwrap().path;
+    let directory = settings.directory.display().to_string();
+    assert_eq!(installed, format!(r"{directory}\credentials.toml"));
+    let read = settings.credentials();
+    assert_eq!(read.file_name().unwrap(), "credentials.toml");
     let text = config_text::merged(None, &desired.settings).unwrap();
     assert_eq!(Settings::parse(&text).unwrap(), desired.settings);
     let file: toml::Table = text.parse().unwrap();
