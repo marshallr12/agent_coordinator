@@ -58,6 +58,12 @@ pub trait Machine: Host {
     /// without taking ownership of anything, and returns each path that
     /// could not be removed with why. Nothing there is no error.
     fn remove_tree(&mut self, path: &str) -> Result<Vec<String>>;
+    /// Gives the tree at `path` to the administrators, with an access list
+    /// of the system and administrators only, never through a link, and
+    /// returns each path that could not be taken with why. Only `uninstall`
+    /// calls it, and only on the coordinator CLI's session state, which the
+    /// CLI locks to the supervisor's account.
+    fn reclaim_tree(&mut self, path: &str) -> Result<Vec<String>>;
     /// Deletes the registered service `name`; one that is not registered,
     /// or is already marked for deletion, is done.
     fn delete_service(&mut self, name: &str) -> Result<()>;

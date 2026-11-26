@@ -110,6 +110,9 @@ impl Machine for Files {
     fn remove_tree(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
         self.inner.remove_tree(path)
     }
+    fn reclaim_tree(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+        anyhow::bail!("this test takes no tree: {path}")
+    }
     fn delete_service(&mut self, name: &str) -> anyhow::Result<()> {
         anyhow::bail!("this test deletes no service: {name}")
     }

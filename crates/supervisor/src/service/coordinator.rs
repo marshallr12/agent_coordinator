@@ -371,4 +371,6 @@ fn bounded(summary: &str) -> String {
 }
 
 #[cfg(test)]
+mod loop_tests;
+#[cfg(test)]
 mod tests;

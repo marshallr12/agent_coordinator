@@ -11,6 +11,7 @@
 pub mod access;
 pub mod files;
 pub mod profiles;
+pub mod reclaim;
 pub mod services;
 pub mod tokens;
 
@@ -212,6 +213,10 @@ impl Machine for WindowsHost {
 
     fn remove_tree(&mut self, path: &str) -> Result<Vec<String>> {
         files::remove_tree(path)
+    }
+
+    fn reclaim_tree(&mut self, path: &str) -> Result<Vec<String>> {
+        reclaim::reclaim_tree(path)
     }
 
     fn delete_service(&mut self, name: &str) -> Result<()> {

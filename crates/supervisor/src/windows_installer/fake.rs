@@ -357,6 +357,12 @@ impl Machine for FakeHost {
             .collect())
     }
 
+    /// Taking a tree frees whatever below it could not be removed.
+    fn reclaim_tree(&mut self, path: &str) -> Result<Vec<String>> {
+        self.stuck.retain(|s| !below(s, path));
+        Ok(Vec::new())
+    }
+
     fn delete_service(&mut self, name: &str) -> Result<()> {
         self.services.remove(name);
         Ok(())
