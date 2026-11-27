@@ -397,10 +397,10 @@ mod tests {
 
     /// The pids of Git maintenance processes (`git maintenance run ...`, the
     /// detached one a fetch leaves behind on Git 2.47 and later) working on
-    /// the repository at `repo`. The maintenance of other tests running in parallel
-    /// is not counted: a maintenance
-    /// process is this repository's when its working directory is `repo` or
-    /// it holds a file under `repo` open (its `objects/maintenance.lock`).
+    /// the repository at `repo`. The maintenance of other tests running in
+    /// parallel is not counted: a maintenance process is this repository's
+    /// when its working directory is `repo` or it holds a file under `repo`
+    /// open (its `objects/maintenance.lock`).
     fn git_maintenance_processes(repo: &Path) -> Vec<String> {
         let repo = repo.canonicalize().unwrap();
         let mut found = Vec::new();
@@ -440,7 +440,8 @@ mod tests {
         // detaches by default (2.47 or later) leaves its maintenance running
         // after every one of these without the foreground setting; an older
         // Git runs it in the foreground and passes either way.
-        for round in 0..5 {
+        const ROUNDS: usize = 5;
+        for round in 0..ROUNDS {
             commit_to(Path::new(&url), &format!("round {round}"));
             git_output(&mirror, &["fetch", "--prune", "--quiet"]).unwrap();
             assert_eq!(
@@ -449,13 +450,20 @@ mod tests {
                 "maintenance outlived the fetch in round {round}"
             );
         }
-        // The maintenance did run, and a clone of the mirror right after is whole.
+        // The maintenance did run, and a clone of the mirror right after is
+        // whole. Every fetch keeps its pack (`fetch.unpackLimit=1`), so a
+        // mirror whose maintenance never ran has the clone's pack and one per
+        // round. How far a repack merges them differs between Git versions
+        // (one pack on 2.53, three on 2.56), so only require that it merged.
         let packs = fs::read_dir(mirror.join("objects/pack"))
             .unwrap()
             .flatten()
             .filter(|e| e.path().extension().is_some_and(|x| x == "pack"))
             .count();
-        assert_eq!(packs, 1, "the fetch's maintenance did not repack");
+        assert!(
+            packs < ROUNDS + 1,
+            "the fetch's maintenance did not repack: {packs} packs"
+        );
         let clone = dir.path().join("clone");
         run(
             None,
@@ -477,19 +485,14 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (url, _) = remote(dir.path());
-        // The fetch's own maintenance repacks, so the objects checked below
-        // include what maintenance wrote.
+        // The fetch's own maintenance repacks, in the foreground (see
+        // `git_output`), so the objects checked below include what maintenance
+        // wrote and no maintenance is left running to change them during the walk.
         let mirror = mirror_with_due_maintenance(dir.path(), &url);
         // This enforces restrictive creation modes independent of the test
         // runner's umask, without mutating process-global state in parallel
         // tests. The production failure is the equivalent umask 0077 case.
         run(Some(&mirror), &["config", "core.sharedRepository", "0600"]).unwrap();
-        // Git 2.47 and later let `fetch` leave `git maintenance run --auto`
-        // running detached. Its `objects/maintenance.lock` is removed just
-        // after `fetch` returns, so the walk below could list the lock and
-        // then find it gone. With automatic maintenance off, `fetch` leaves
-        // no process behind and the walk reads a directory at rest.
-        run(Some(&mirror), &["config", "maintenance.auto", "false"]).unwrap();
         let work = Path::new(&url);
         fs::write(work.join("a.txt"), "new mirror content\n").unwrap();
         run(
