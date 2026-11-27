@@ -66,8 +66,36 @@ no credentials, which only a local remote accepts.
 | `--start demand\|auto` | When Windows starts the services | `demand` |
 | `--stand-in-fixture ARG...` | Enables the acceptance stand-in with this command. The installer records the command and never runs it. Give it last: everything after it is the command | Stand-in off |
 | `--no-stand-in` | Turns the stand-in off again | |
+| `--coordinator-url URL` | The coordinator's `https://` origin. With the next four, makes a coordinator project the supervisor's source of work (step 8a): it claims, renews, checkpoints and releases that project's tasks and runs the fixture command for each | Coordinator off |
+| `--coordinator-project ID` | The project the supervisor claims from | |
+| `--coordinator-credential-source PATH` | The supervisor's own agent credential, the `credentials.toml` the dashboard issues (Supervised, Write) for that project. It is copied, never moved, shown or logged | |
+| `--coordinator-cli-source PATH` | The coordinator CLI, `agent-coordinator.exe`, of the build the service names (`agent-coordinator.exe compatibility --json`). It is copied beside the binary and known by the SHA-256 the manifest records; the installer never runs it | |
+| `--coordinator-fixture ARG...` | The command every coordinator launch runs, until a provider harness driver exists (step 8d). The installer records it and never runs it. Give it last: everything after it is the command | |
+| `--no-coordinator` | Turns the coordinator off again. The credential, the CLI and the CLI's state stay on disk, with their access lists, until `uninstall` removes them | |
 | `--program-dir PATH` | Where the binary and the configuration go | `C:\Program Files\agentc` |
 | `--state-dir PATH` | The root of the services' state | `C:\ProgramData\agentc` |
+
+A coordinator's five arguments go together on the install that turns it on,
+and the stand-in must be off; a later run needs only what it changes, such
+as another `--coordinator-fixture`. For example, on a host without a push
+App:
+
+```text
+agentc-supervisor.exe windows-host install ^
+    --remote https://github.com/OWNER/REPO.git ^
+    --coordinator-url https://coordinator.example ^
+    --coordinator-project 00000000-0000-0000-0000-000000000000 ^
+    --coordinator-credential-source C:\Users\you\Downloads\credentials.toml ^
+    --coordinator-cli-source C:\Users\you\.local\bin\agent-coordinator.exe ^
+    --coordinator-fixture C:\fixtures\fixture.exe sleeper 180
+```
+
+The supervisor holds a task after one launch it released, however that
+launch ended short of a stop: a fixture never submits, so the task would
+otherwise be claimed again on every poll. A task whose launch was settled
+after a crash or restart, or ended by a service stop, is claimed once more.
+The holds are in `supervisor\unsubmitted.json`; remove the file to claim a
+held task again.
 
 Everything `install` is told is recorded in `installer\manifest.json` below
 the state root. A later run needs an argument only to change something:
@@ -108,6 +136,8 @@ A refusal changes nothing. Fix what it names and run `install` again.
 | A file is where a directory belongs, or the reverse for the key | |
 | The key file cannot be used | It is missing, empty, larger than 64 KiB, not a plain file or a link |
 | A key is wanted, none is installed and no `--key-source` was given | |
+| A coordinator is asked for without all five of its arguments, with an origin that is not `https://`, or while the stand-in is on | The stand-in and a coordinator are never the source of work together |
+| The `--coordinator-cli-source` file does not exist or cannot be read | |
 | The configuration cannot be loaded | The services could not start from it either; it is left for you to fix or remove, never overwritten |
 | The installed binary is another release | Replacing an installed release is [`update`](#update), which keeps the one it replaces; `install` never does it, whether or not the services run |
 | An update or rollback has not finished | Run `update` or `rollback` again: it finishes or undoes the open one first |
@@ -152,11 +182,13 @@ have full control of all of them.
 
 | Directory | Who else | Holds |
 | --- | --- | --- |
-| `C:\Program Files\agentc` | `BUILTIN\Users`: read and execute | `agentc-supervisor.exe`, `supervisor.toml`, and `releases\<sha256>\` with each kept release's binary and configuration |
+| `C:\Program Files\agentc` | `BUILTIN\Users`: read and execute | `agentc-supervisor.exe`, `supervisor.toml`, `agent-coordinator.exe` (only with a coordinator), and `releases\<sha256>\` with each kept release's binary and configuration |
 | `C:\ProgramData\agentc` | Nobody | The state tree |
 | `...\installer` | Nobody | `manifest.json`, `journal.jsonl`, `releases.json`, and `update.json` while an update is open |
 | `...\runner`, `...\runner\stand-in-launches` | The runner: modify | The launch journal, `service.log`, stand-in launch directories |
-| `...\supervisor` | The supervisor: modify | Launch records, `heartbeat.json`, `service.log` |
+| `...\supervisor` | The supervisor: modify | Launch records, `heartbeat.json`, `service.log`, `unsubmitted.json`, and the coordinator loop's `ledger.jsonl` |
+| `...\supervisor\coordinator` | The supervisor: modify | `credentials.toml` (the supervisor: read only), the `binding.toml` the supervisor writes for the CLI, and `state\`, the CLI's session state and mutation journals, which the CLI restricts to the supervisor's account. Only with a coordinator |
+| `...\runner\fixture-launches` | The runner: modify | Coordinator launch directories |
 | `...\stand-in`, `...\stand-in\queue` | The supervisor: modify | The stand-in's ledger and queue |
 | `...\egress` | The egress broker: full control | `service.log` |
 | `...\publication` | The publication broker: full control | `service.log`, and each launch's repository below `work\` |
@@ -324,6 +356,13 @@ services that ran before the update run again, also after a power loss.
 The host is never left with one release's binary and the other's
 configuration. `install` and `status` refuse while an update is open.
 
+A release older than step 8a cannot read a manifest that names a
+coordinator, since it knows no coordinator entry and refuses entries it does
+not know; so its `install` and `status`, and an `update` run from it, refuse
+such a host. Run `install --no-coordinator` before going back to such a
+release: a manifest without a coordinator names no coordinator entry, and
+every release reads it.
+
 `update` prints one JSON report and exits 0 when the new release is
 installed (or was already). Its `outcome` is `updated`, `unchanged`,
 `reverted` (with the `reason`) or `refused` (with `refusals`); `resumed` says
@@ -355,8 +394,11 @@ deletes each service account's profile under `C:\Windows\ServiceProfiles\`.
   else owns, or one that holds anything the installer did not make there,
   so a mistaken `--program-dir` removes nothing.
 - Nothing is removed through a link: a link or junction inside the trees
-  is removed itself, never what it points to. No ownership is taken; a
-  file that cannot be removed is listed under `left`.
+  is removed itself, never what it points to. A file that cannot be
+  removed is listed under `left`. Ownership is taken of one tree only: the
+  coordinator CLI's `supervisor\coordinator\state`, which the CLI restricts
+  to the supervisor's account, is given to the administrators first (with
+  the take-ownership privilege, never through a link), then removed.
 - The AppContainer profiles the launches made belong to the runner's
   account, which made them, and live in its service profile; they are
   listed under `launch_profiles` and go with that profile.
@@ -369,14 +411,19 @@ deletes each service account's profile under `C:\Windows\ServiceProfiles\`.
 
 The push App's key file goes with the state tree, but the key stays
 registered with the App until you delete it in the App's settings on GitHub;
-`uninstall` says so under `notes`. `uninstall` exits 0 only when nothing of
-the host is left.
+`uninstall` says so under `notes`. Likewise the supervisor's coordinator
+credential file goes with the state tree, but its token stays valid until
+you revoke it on the coordinator. `uninstall` exits 0 only when nothing of
+the host is left, so it exits 1 while a service profile is `pending`.
 
 ## Provider enrollment and credentials
 
-The installer stores one credential: the push App's private key, in a
-directory only the publication account can read (see
-[identities and access lists](#identities-and-access-lists)). It stores no
+The installer stores at most two credentials: the push App's private key, in
+a directory only the publication account can read, and, with a coordinator,
+the supervisor's agent credential, which only the supervisor's account can
+read (see [identities and access lists](#identities-and-access-lists)). The
+supervisor hands its token only to the CLI processes it starts itself, in
+their environment; no launch is given it. It stores no
 provider credential and enrolls no provider account. Provider enrollment is a
 separate interactive setup operation, done by the owner outside any
 service's state; no service or launch reads it from the state tree. No
@@ -409,8 +456,10 @@ These are not supported, and the installer does not make them so:
 | `C:\ProgramData\agentc\installer\manifest.json` | What `install` was told |
 | `C:\ProgramData\agentc\installer\releases.json` | The current release, the kept previous one and every release that was rolled back |
 | `C:\ProgramData\agentc\installer\update.json` | Only while an update or rollback is open: its stage and what it needs to finish or undo it |
-| `C:\ProgramData\agentc\<service>\service.log` | Each service's own log. A broker logs its token's user, groups and privileges at start; the runner logs its preshutdown limit |
+| `C:\ProgramData\agentc\<service>\service.log` | Each service's own log. A broker logs its token's user, groups and privileges at start; the runner logs its preshutdown limit; with a coordinator, the supervisor logs each claim, renewal, checkpoint and release as `agentc-supervisor coordinator: <event> task=... session=... attempt=... generation=...` |
 | `C:\ProgramData\agentc\supervisor\heartbeat.json` | The supervisor loop's state and, when it claims nothing, why |
+| `C:\ProgramData\agentc\supervisor\ledger.jsonl` | With a coordinator: every claim, launch, renewal, checkpoint, release and recovery verdict of the coordinator loop, which `agentc-supervisor.exe stand-in-judge --coordinator --ledger <file>` checks |
+| `C:\ProgramData\agentc\supervisor\unsubmitted.json` | The tasks the supervisor holds and why; remove it to claim a held task again |
 | `C:\ProgramData\agentc\stand-in\ledger.jsonl` | Every claim, launch and release of the acceptance stand-in |
 | Windows Application event log, source = the service's name | Why a service failed to start or stopped with an error |
 
