@@ -192,7 +192,9 @@ impl<A: Api, C: Cli> CoordinatorWork<A, C> {
         serde_json::from_slice(&output.stdout).context("the CLI printed no JSON")
     }
 
-    /// Appends `event` about `launch`'s attempt to the ledger.
+    /// Appends `event` about `launch`'s attempt to the ledger, and names it
+    /// in the service log (standard error) too, so the log alone shows each
+    /// claim, renewal, checkpoint and release.
     fn record(&self, event: &str, launch: &Launch, lease: &Lease, extra: Value) -> Result<()> {
         let mut fields = json!({"task": launch.suggestion.task,
                                 "session": session(launch),
@@ -200,6 +202,7 @@ impl<A: Api, C: Cli> CoordinatorWork<A, C> {
         if let (Some(fields), Value::Object(extra)) = (fields.as_object_mut(), extra) {
             fields.extend(extra);
         }
+        eprintln!("{}", log_line(event, &fields));
         self.ledger.append(event, fields)
     }
 
@@ -368,6 +371,24 @@ fn bounded(summary: &str) -> String {
         end -= 1;
     }
     summary[..end].to_owned()
+}
+
+/// The fields of a ledger event the service log names, in this order. The
+/// release's summary is left out: it is in the ledger and the coordinator.
+const LOGGED: [&str; 6] = ["task", "session", "attempt", "generation", "ok", "ended"];
+
+/// The service-log line for ledger `event` with `fields`, such as
+/// `agentc-supervisor coordinator: renew task=T session=S attempt=A generation=2`.
+fn log_line(event: &str, fields: &Value) -> String {
+    let mut line = format!("agentc-supervisor coordinator: {event}");
+    for name in LOGGED {
+        match &fields[name] {
+            Value::Null => {}
+            Value::String(text) => line.push_str(&format!(" {name}={text}")),
+            other => line.push_str(&format!(" {name}={other}")),
+        }
+    }
+    line
 }
 
 #[cfg(test)]

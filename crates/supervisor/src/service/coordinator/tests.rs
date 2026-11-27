@@ -402,3 +402,24 @@ fn an_unreadable_or_invalid_credential_file_is_refused_without_quoting_it() {
     std::fs::write(settings.credentials(), other).unwrap();
     assert!(Access::open(&settings).is_err());
 }
+
+#[test]
+fn the_service_log_names_each_event_and_its_attempt_but_not_the_summary() {
+    let fields = json!({"task": "t1", "session": "s1", "attempt": "a1", "generation": 2});
+    assert_eq!(
+        log_line("claim", &fields),
+        "agentc-supervisor coordinator: claim task=t1 session=s1 attempt=a1 generation=2"
+    );
+    let mut checkpoint = fields.clone();
+    checkpoint["ok"] = json!(false);
+    assert!(log_line("checkpoint", &checkpoint).ends_with("generation=2 ok=false"));
+    let mut release = fields;
+    release["ended"] = json!(true);
+    release["summary"] = json!("the launch exited with code 0");
+    let line = log_line("release", &release);
+    assert!(
+        line.ends_with("attempt=a1 generation=2 ended=true"),
+        "{line}"
+    );
+    assert!(!line.contains("exited"), "{line}");
+}
