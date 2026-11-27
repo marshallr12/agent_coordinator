@@ -1663,6 +1663,11 @@ Mirror Git commands use an invocation-local `core.sharedRepository=0644`: new
 refs and objects remain readable by the isolated role UIDs even when the
 supervisor uses `umask 0077`, while only the mirror owner can write them. This
 does not change the process umask or credential and launch-state permissions.
+They also set `maintenance.autoDetach=false` and `gc.autoDetach=false`: Git 2.47
+and later let `git fetch` leave `git maintenance run --auto --detach` running
+after it returns, and its repack can delete objects a role's clone of the mirror
+has already listed. With the settings the maintenance finishes inside the fetch,
+under the same override; Git versions that do not know a key ignore it.
 An older supervisor can leave root-owned `0600` refs or `0700` directories
 behind; an unprivileged clone may then report a misleading "null OID" error.
 Inspect ownership and permissions before treating that message as corruption.
