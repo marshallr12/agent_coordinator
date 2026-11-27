@@ -2,19 +2,23 @@
 
 `agentc-supervisor windows-host install` makes a Windows machine a supervised
 host: it registers the four services, makes their state tree, writes their
-configuration and, when there is a push App, installs its key. `windows-host
-status` reports how a machine differs from an installed host and changes
-nothing. `update` installs a new release and goes back to the old one if the
+configuration and, when there is a push App, installs its key and, when
+there is a coordinator, the supervisor's credential and the coordinator CLI.
+`windows-host status` reports how a machine differs from an installed host
+and changes nothing. `update` installs a new release and goes back to the old one if the
 new one does not come up, `rollback` returns to the kept previous release,
 and `uninstall` removes the host.
 
 **What this is not.** No provider harness runs on Windows yet: the installed
-supervisor service claims nothing unless the acceptance stand-in is enabled.
-An installed host is not an admitted host; see
+supervisor service claims nothing unless the acceptance stand-in or a
+coordinator is enabled, and a coordinator's launches run only the fixture
+command `install` was given. An installed host is not an admitted host; see
 [what is not supported](#what-is-not-supported). Besides its tests, the
 installer passed one owner-attended acceptance run on MiniAir, with the
-stand-in as the workload; the design records it as
-[step 7c](windows-host-design.md#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24).
+stand-in as the workload, recorded as
+[step 7c](windows-host-design.md#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24),
+and the coordinator loop ran on the installed host in
+[step 8a](windows-host-design.md#step-8a-the-coordinator-loop-on-the-installed-host-2026-11-27).
 
 ## Prerequisites
 
@@ -68,7 +72,7 @@ no credentials, which only a local remote accepts.
 | `--no-stand-in` | Turns the stand-in off again | |
 | `--coordinator-url URL` | The coordinator's `https://` origin. With the next four, makes a coordinator project the supervisor's source of work (step 8a): it claims, renews, checkpoints and releases that project's tasks and runs the fixture command for each | Coordinator off |
 | `--coordinator-project ID` | The project the supervisor claims from | |
-| `--coordinator-credential-source PATH` | The supervisor's own agent credential, the `credentials.toml` the dashboard issues (Supervised, Write) for that project. It is copied, never moved, shown or logged | |
+| `--coordinator-credential-source PATH` | The supervisor's own agent credential for that project, the `credentials.toml` the dashboard issues for the agent principal you create for the supervisor. It is copied, never moved, shown or logged | |
 | `--coordinator-cli-source PATH` | The coordinator CLI, `agent-coordinator.exe`, of the build the service names (`agent-coordinator.exe compatibility --json`). It is copied beside the binary and known by the SHA-256 the manifest records; the installer never runs it | |
 | `--coordinator-fixture ARG...` | The command every coordinator launch runs, until a provider harness driver exists (step 8d). The installer records it and never runs it. Give it last: everything after it is the command | |
 | `--no-coordinator` | Turns the coordinator off again. The credential, the CLI and the CLI's state stay on disk, with their access lists, until `uninstall` removes them | |
@@ -259,10 +263,16 @@ runner_sid = "S-1-5-80-2505214551-3868131734-2396360996-2952680925-136825992"
 `[windows_service]` is the runner. The two control pipes are written because
 their default is empty, which offers a launch no broker at all.
 
+With a coordinator, the file also has a `[windows_supervisor.coordinator]`
+table: `enabled = true`, `service_url`, `project_id` and `fixture` as
+`install` was told, and the paths of the CLI, the coordinator directory, the
+launch root and the ledger where they are not the in-code default.
+
 The installer **manages** these entries, in every table: the service names,
 state directories and pipe names, the SIDs, the remote, the App's ids and key
 path, the egress broker's `must_not_open` list and the whole
-`[windows_supervisor.stand_in]` table. `status` reports a managed entry
+`[windows_supervisor.stand_in]` and `[windows_supervisor.coordinator]`
+tables. `status` reports a managed entry
 whose value differs and `install` puts it back; a managed entry is left out
 of the file when its value is the default.
 
@@ -297,9 +307,11 @@ changes only what drifted:
 | Command line, start type, dependencies or account | `set_bin_path`, `set_start_type`, `set_dependencies`, `set_account` |
 | Recovery, preshutdown limit or required privileges | `set_recovery`, `set_preshutdown`, `set_privileges` |
 | A directory is missing | `create_directory` |
-| A directory's or the key's access list differs in any entry | `set_access_list` |
+| A directory's, the key's or the coordinator credential's access list differs in any entry | `set_access_list` |
 | A managed configuration entry differs | `write_config`, naming the entries |
 | The key is missing, or a different `--key-source` is given | `install_key` |
+| The coordinator credential is missing, or a different `--coordinator-credential-source` is given | `install_credential` |
+| The installed coordinator CLI is missing or has another SHA-256 than the manifest records | `install_cli` |
 
 In `tokens`, `stopped` means the service has no process and so no token to
 read. It is not a pass: start the service and run `status` again to see what

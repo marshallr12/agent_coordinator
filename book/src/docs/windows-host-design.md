@@ -8,9 +8,12 @@ for the abandoned WSL host approach. Its first phase, task
 `a9126e52-654c-4b26-8a7d-7748261d2c4a`, delivered this design and the
 containment prototype; the [delivery phases](#delivery-phases-and-gates)
 table lists every later phase and its task. The installed services have run
-only an acceptance stand-in, never a coordinator loop or a provider harness;
-the [step 7d gap report](#step-7d-host-acceptance-gap-report-2026-11-25)
-says, row by row, what is demonstrated and what is left. This chapter does
+an acceptance stand-in and, since
+[step 8a](#step-8a-the-coordinator-loop-on-the-installed-host-2026-11-27), a
+coordinator loop whose launches run a probe fixture, but never a provider
+harness; the [step 7d gap report](#step-7d-host-acceptance-gap-report-2026-11-25)
+says, row by row, what is demonstrated and what is left, and step 8a which of
+its rows it closed. This chapter does
 not claim that a production Windows sandbox is implemented. The
 [current implementation](implementation-status.md) remains authoritative. The
 Linux backend remains supported.
@@ -1695,12 +1698,13 @@ record is that shell's: take-ownership and restore present and disabled.
 
 *Reboot.* Automatic restart sign-on was off (owner opt-out 1) and
 `install --start auto` had set the four services to start automatically. A
-300 s launch was claimed at 17:08:48 and renewed at 17:09:49; the kit
-restarted Windows at 17:09:27. Preshutdown asked the launch to stop and
-ended it (`stop_requested`, `terminate`), the runner logged `stopped: every
-launch is confirmed ended`, and nothing was released before the power went
-off. Windows booted at 17:11:36, 162 s after the first half saved its state
-and within the lease. The four services ran from 17:11:59 to 17:12:06. The
+300 s launch was claimed at 17:08:48. The kit ran `shutdown.exe` at
+17:09:27 with a 60 s delay, and the launch renewed at 17:09:49. Preshutdown
+asked the launch to stop at 17:10:37 and ended it at 17:11:07
+(`stop_requested`, `terminate`), the runner logged `stopped: every launch is
+confirmed ended`, nothing was released, and Windows went down at 17:11:26.
+It booted at 17:11:36, 162 s after the first half saved its state and within
+the lease. The four services ran from 17:11:59 to 17:12:06. The
 first interactive sign-in was at 17:15:20, 224 s after boot (logon type 11,
 the owner's PIN, one console session in `quser`). Before it, the supervisor
 had traced `recover:ended`, saved a checkpoint and released the attempt with
@@ -1753,7 +1757,7 @@ deploy tests.
 | 1. The installed supervisor runs `run_loop` against the coordinator: claims a test task, has the runner start a fixture launch, renews, checkpoints and releases, in the service log, the ledger and the task's history; the stand-in only a test driver | **Demonstrated on the installed host** | Run 2's lifecycle round; run 1's showed the ledger and the history |
 | 2. The credential, session proofs and journals in a directory only the supervisor, the system and administrators open; launches refused it (probe with a positive control); install, status and uninstall manage it without printing it | **Demonstrated on the installed host** | The access lists in both installs' logs; both probe rounds; no log holds the credential's bytes and its file was passed only by path |
 | 3. Supervisor crash, runner crash and reboot during a claimed launch reconciled with coordinator authority: no duplicate launch, no false completion, the attempt resumed or released as the recovery contract says; Linux unchanged | **Demonstrated on the installed host**, at `6a75481` | Run 1's crash and reboot rounds: two sessions of a task never overlapped, every release was accepted and none completed a task. `dc1457b` adds only log lines. A lease that runs out during a restart was not reached on the host; the Linux gate passes |
-| 4. Windows native tests, the Linux gate and the pinned mdBook checks on the exact candidate; this record | **Demonstrated** for `dc1457b`; the documentation commit's own gate and mdBook checks are in its submission | As above |
+| 4. Windows native tests, the Linux gate and the pinned mdBook checks on the exact candidate; this record | **In part** | The Linux gate passes at `dc1457b`, and the registered gate and the pinned mdBook checks on the candidate are recorded with its submission, as is a registered run of the supervisor crate's Windows tests that skips the six environmental tests named under *Tests*: those fail in an elevated shell at older commits too and are not counted as passes. The gated installer and update tests, which register services, ran at `6a75481` only; the candidate does not change the installer |
 
 **The step 7d rows that named 8a.** No coordinator loop had run, so parent
 criterion 3's coordinator contracts were exercised only by the stand-in. Now
@@ -1768,21 +1772,23 @@ credentials **8d**.
 
 - Only the probe fixture ran. A provider harness is **8d**, coordinator
   credentials for launches **8c**.
-- Holds are kept on the host only, so an uninstall forgets them and a
-  reinstalled host claims every open task again (run 2). Close a fixture
-  task on the coordinator once its round is done.
 - A release after a recovery or a drain launches the task once more. With a
-  harness that is the resume; with the fixture it is one more launch.
-- `--no-coordinator` leaves the credential, the CLI and its state on disk
-  until `uninstall`.
-- A release older than 8a cannot read a manifest that names a coordinator;
-  run `install --no-coordinator` before going back to one.
+  harness that is the resume (**8d**); with the fixture it is one more
+  launch.
+- The reboot was a planned restart within the lease. A lapsed lease, power
+  loss and network loss on this host are **8h**.
 - The egress broker's start check refuses to run if it can open the push key,
   but the list it checks does not name the coordinator credential. The
   credential's access list keeps that account out; the check does not show
-  it.
-- The reboot was a planned restart within the lease. A lapsed lease, power
-  loss and network loss on this host are **8h**.
+  it. **8h** probes the credential from the installed services.
+- Holds are kept on the host only, so an uninstall forgets them and a
+  reinstalled host claims every open task again (run 2). Close a fixture
+  task on the coordinator once its round is done. No step changes this yet.
+- `--no-coordinator` leaves the credential, the CLI and its state on disk
+  until `uninstall`. No step changes this yet.
+- A release older than 8a cannot read a manifest that names a coordinator;
+  run `install --no-coordinator` before going back to one. No step changes
+  this; the installation chapter says so.
 - The four service profiles of run 2 stay loaded on MiniAir until a restart
   and another `uninstall`, and the supervisor's coordinator token stays
   valid until the owner revokes it.
@@ -3835,7 +3841,7 @@ before it has passed; a blocked gate stops the phases behind it.
 | 5 | Reviewer candidate isolation on real native harness command paths | Phase 3 | **Steps 5a to 5f done**; the phase is complete when task `9cf04a5c`'s review and integration are. It first **closed at step 5c, blocked**, by task `61fe9ca2` on the owner's decision of 2026-11-15. The [command paths](#native-claude-code-command-paths-2026-11-14) of native Claude Code 2.1.325 are observed; the [candidate runner](#proposed-candidate-runner) is a proposal, built in [steps](#phase-5-steps). Steps 5a (command-form parser and capability record) and 5b (pipe admission by package) are implemented, and 5c (the candidate launch) is implemented. It was **blocked** because [Git Bash does not start in an AppContainer](#git-bash-does-not-start-in-an-appcontainer-2026-11-14). Task `d8ae17f5` on 2026-11-16 found that a pinned busybox-w32 shell [starts there](#a-posix-shell-that-starts-in-an-appcontainer-2026-11-16) and that native Claude Code 2.1.325 accepts it behind a shim-like prefix (observed uncontained); with it step 5c's native tests **pass**. Task `9cf04a5c` on 2026-11-17 implemented step 5d (the candidate pipe's threads and the shim) and step 5e (the readiness check and the fixture checks), whose native tests pass. In step 5f, an owner-attended run [inside a contained reviewer launch](#native-claude-code-in-a-contained-reviewer-launch-2026-11-17) sent a Bash command from native Claude Code 2.1.326 in the recorded form through the prefix and the shim into the candidate. The capability record now admits only that build. No Windows driver calls the record, so no product Claude launch runs on Windows. The [items still open](#phase-5-steps) include the process a job still counts after the shell ends |
 | 6 | Egress and publication brokers | Phase 3 | Steps 6a, 6b and 6c implemented (task `13ae81c1`); step 6d implemented and run by the owner on MiniAir on 2026-11-20 (task `daa42f71`): both brokers served a launch as services under their own virtual accounts, and publication pushed to the real remote with a per-push token. Task `f71179f5` followed on 2026-11-22: the installed supervisor and runner services made a stand-in launch that both installed brokers admitted, launches made by the installed runner were refused the push key and the publication broker's directories, and a closed launch's repository is removed ([follow-up](#step-6d-follow-up-the-services-own-launches-2026-11-22)). No harness has used either broker; see [phase 6 steps](#phase-6-steps) |
 | 7 | Idempotent installer, update/rollback/uninstall, then a host acceptance gap report; the real coordinator loop, a harness driver, WFP, resource caps and quiet hours are a later phase 8 (owner decision of 2026-11-23) | Phases 4 to 6 | Step 7a implemented (task `ddeb5d76`): `agentc-supervisor windows-host install` and `status`, a desired-state model with a platform-neutral plan, and a Windows backend over the Service Control Manager. Step 7b implemented (task `2064cf54`): `update`, `rollback` and `uninstall`, each stage journaled, driven natively with the runner in the test process and once against four throwaway services Windows started. Step 7c (task `012ff9f2`) ran the owner-attended installer acceptance on MiniAir on 2026-11-24 from `1f4ecdc`: install and drift repair, a stand-in launch through both installed brokers with a candidate push, the stop, runner-stop, crash, logoff and reboot-without-logon rounds, the three updates and the uninstall **passed**, and the machine was left as the run found it; see [step 7c](#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24). **No Windows host is admitted**: no coordinator loop or provider harness ran. Step 7d (task `748f6c3a`) wrote the [gap report](#step-7d-host-acceptance-gap-report-2026-11-25) on 2026-11-25: no parity row and no parent criterion is demonstrated in full. **Phase 7 is complete for the installer only**, when step 7d's review and integration are; see [phase 7 steps](#phase-7-steps) |
-| 8 | The real coordinator loop, the role-account question, coordinator credentials for launches, a provider harness driver, WFP, resource caps and quiet hours, pinned tool profiles with a hardened clone and the browser checks, the workspace build in a launch, and the full host acceptance | Phase 7 | **Planned**: steps 8a to 8i are planned, human-delivered tasks; see [phase 8 steps](#phase-8-steps). Only step 8h's acceptance, if every row passes, can admit a host |
+| 8 | The real coordinator loop, the role-account question, coordinator credentials for launches, a provider harness driver, WFP, resource caps and quiet hours, pinned tool profiles with a hardened clone and the browser checks, the workspace build in a launch, and the full host acceptance | Phase 7 | **In progress**: step 8a ran the coordinator loop on the installed host ([step 8a](#step-8a-the-coordinator-loop-on-the-installed-host-2026-11-27)); steps 8b to 8i are planned, human-delivered tasks; see [phase 8 steps](#phase-8-steps). Only step 8h's acceptance, if every row passes, can admit a host |
 
 No intermediate phase is production acceptance. Independent review and guarded
 integration complete each task; only the final acceptance can admit a host.
