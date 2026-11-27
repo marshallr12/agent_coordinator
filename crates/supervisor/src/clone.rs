@@ -110,7 +110,23 @@ pub fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
     // turn newly fetched refs/objects into unreadable clone inputs. Keep this
     // override local to mirror Git; changing the process umask would also
     // expose credentials and per-launch state.
-    let mut mirror_args = vec!["-c", "core.sharedRepository=0644"];
+    //
+    // Git 2.47 and later let a fetch leave `git maintenance run --auto
+    // --detach` running after it returns, and its repack deletes files a
+    // role's `clone --no-hardlinks` of the mirror may already have listed.
+    // Run the maintenance in the foreground so it is finished (and has
+    // written its files under the same sharedRepository override) before this
+    // returns. Git versions that do not know a key ignore it: `gc.autoDetach`
+    // is the older spelling the gc task honours, `maintenance.autoDetach` the
+    // one 2.47 added.
+    let mut mirror_args = vec![
+        "-c",
+        "core.sharedRepository=0644",
+        "-c",
+        "maintenance.autoDetach=false",
+        "-c",
+        "gc.autoDetach=false",
+    ];
     mirror_args.extend_from_slice(args);
     text(run(Some(cwd), &mirror_args)?)
 }
@@ -307,24 +323,122 @@ mod tests {
         assert_eq!(hardening_problems(&dest).unwrap().len(), 1);
     }
 
-    #[test]
-    fn mirror_fetch_keeps_updated_and_new_refs_readable_without_worker_writes() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (url, _) = remote(dir.path());
-        let mirror = dir.path().join("mirror.git");
+    /// A mirror of the remote at `url` whose next fetch always has Git's
+    /// automatic maintenance to run: the fetch keeps its pack (one pack more
+    /// than `gc.autoPackLimit`), so the maintenance repacks. This is the
+    /// repack that removes files a clone of the mirror may have listed.
+    fn mirror_with_due_maintenance(dir: &Path, url: &str) -> std::path::PathBuf {
+        let mirror = dir.join("mirror.git");
         run(
             None,
             &[
                 "clone",
                 "--mirror",
                 "--quiet",
-                &url,
+                url,
                 mirror.to_str().unwrap(),
             ],
         )
         .unwrap();
+        for (key, value) in [
+            ("gc.auto", "1"),
+            ("gc.autoPackLimit", "1"),
+            ("fetch.unpackLimit", "1"),
+        ] {
+            run(Some(&mirror), &["config", key, value]).unwrap();
+        }
+        mirror
+    }
+
+    /// Commits to the remote's work tree.
+    fn commit_to(work: &Path, message: &str) {
+        run(
+            Some(work),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                message,
+            ],
+        )
+        .unwrap();
+    }
+
+    /// The pids of Git maintenance processes (`git maintenance run ...`, the
+    /// detached one a fetch leaves behind on Git 2.47 and later) on this host.
+    fn git_maintenance_processes() -> Vec<String> {
+        let mut found = Vec::new();
+        for entry in fs::read_dir("/proc").unwrap().flatten() {
+            let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+                continue;
+            };
+            let words: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+            let is_git = words[0].rsplit(|b| *b == b'/').next() == Some(b"git");
+            if is_git && words.contains(&&b"maintenance"[..]) {
+                found.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn mirror_fetch_leaves_no_detached_maintenance_running() {
+        if !Path::new("/proc/self/cmdline").exists() {
+            eprintln!("note: skipping mirror fetch maintenance check: no /proc");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _) = remote(dir.path());
+        let mirror = mirror_with_due_maintenance(dir.path(), &url);
+        // Detaching is racy, so look after several fetches. A Git that
+        // detaches by default (2.47 or later) leaves its maintenance running
+        // after every one of these without the foreground setting; an older
+        // Git runs it in the foreground and passes either way.
+        for round in 0..5 {
+            commit_to(Path::new(&url), &format!("round {round}"));
+            git_output(&mirror, &["fetch", "--prune", "--quiet"]).unwrap();
+            assert_eq!(
+                git_maintenance_processes(),
+                Vec::<String>::new(),
+                "maintenance outlived the fetch in round {round}"
+            );
+        }
+        // The maintenance did run, and a clone of the mirror right after is whole.
+        let packs = fs::read_dir(mirror.join("objects/pack"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "pack"))
+            .count();
+        assert_eq!(packs, 1, "the fetch's maintenance did not repack");
+        let clone = dir.path().join("clone");
+        run(
+            None,
+            &[
+                "clone",
+                "--no-hardlinks",
+                "--quiet",
+                mirror.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        run(Some(&clone), &["fsck", "--connectivity-only"]).unwrap();
+    }
+
+    #[test]
+    fn mirror_fetch_keeps_updated_and_new_refs_readable_without_worker_writes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _) = remote(dir.path());
+        // The fetch's own maintenance repacks, so the objects checked below
+        // include what maintenance wrote.
+        let mirror = mirror_with_due_maintenance(dir.path(), &url);
         // This enforces restrictive creation modes independent of the test
         // runner's umask, without mutating process-global state in parallel
         // tests. The production failure is the equivalent umask 0077 case.
