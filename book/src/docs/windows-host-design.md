@@ -674,7 +674,10 @@ why the first is still a requirement and not a result.
 
 1. **Role identity (proposed, required).** The launch runs as a dedicated role
    account whose registry hive and profile hold nothing worth protecting. This
-   is the only layer that keeps a launch out of the owner's registry.
+   is the only layer that keeps a launch out of the owner's registry. The
+   owner has decided that each role gets an account of its own
+   ([step 8b](#step-8b-one-runner-account-per-role-2026-11-27)); the
+   installed host still has one account for both.
 2. **Package identity (demonstrated).** Each launch gets a unique disposable
    AppContainer profile, including concurrent launches of one role. The token is
    *less privileged* (LPAC): the launcher sets
@@ -880,10 +883,19 @@ privileges and groups during installation and acceptance; never assume the
 account name proves its privilege level. A privileged installer/policy helper
 may install SCM/WFP policy, but cannot run caller-supplied programs.
 
-A credentialed harness and the candidate commands it runs must not share an
-account: with `registryRead`, a launch can read the registry hive of the account
-it runs as. Keep provider state out of any hive a launch can reach, and keep
-user-level environment variables out of every role account.
+The host installed since phase 7 differs: it has one runner account,
+`agentc-runner`, in place of the implementer's and the reviewer's. The owner
+has decided that the two role accounts stay the design; see
+[step 8b](#step-8b-one-runner-account-per-role-2026-11-27).
+
+With `registryRead`, a launch can read the registry hive of the account it
+runs as, and a reviewer's candidate runs as its reviewer's account, in a
+package of its own. So an account is not what separates a credentialed harness
+from the candidate commands it runs. The candidate's package is: the harness's
+files and pipes carry access lists that name the harness's package and not the
+candidate's (shown natively in [step 5e](#phase-5-steps)). Keep credentials
+and provider state out of the registry and out of any hive a launch can reach,
+and keep user-level environment variables out of every role account.
 
 Keep administrator-owned binaries/configuration under a dedicated Program Files
 directory and protected state under a dedicated ProgramData directory. Each
@@ -899,6 +911,158 @@ files. Hold protected parent handles while creating/granting launch files;
 validate final identities again before execution and cleanup. NT aliases,
 case folding, short names, junction swaps and concurrent rename attacks require
 tests. Host brokers must not follow worker-controlled links with service rights.
+
+### Step 8b: one runner account per role (2026-11-27)
+
+Task `c87010e8-112c-4b31-ad77-60821d0844cb`. This section records the owner's
+decision on the account model and the design that follows from it. **Nothing
+in it is built.** The installed host is still the one of
+[step 7c](#step-7c-owner-attended-installer-acceptance-on-miniair-2026-11-24):
+one runner service, `agentc-runner`, whose launches of either role run as its
+account, each in a package of its own. This section was written on a Linux
+workstation. The installer, the native tests and the probes need MiniAir and
+are left to a session there, after step 8a (task `69a4a809`), which changes
+the same installer files.
+
+**The decision.** The Windows host uses **separate role accounts**: one runner
+service per role, each under its own virtual account. The owner decided it on
+2026-11-26 in the Claude Code session on MiniAir; checkpoint `e9197af8` of
+this task holds that question and answer word for word. On 2026-11-27 the
+session that wrote this section put the question again and got the same
+answer. Both times two options were offered, "Separate role accounts
+(Recommended)" and "One runner account", and the owner's answer was "Separate
+role accounts (Recommended)". The reasons below are the ones put to the owner
+with the option chosen. The owner gave no others.
+
+| Reason | Separate role accounts (chosen) | One runner account (as built) |
+| --- | --- | --- |
+| Hive reach | With `registryRead`, a launch reads parts of the hive of its own role's account and of no other. An implementer launch whose package boundary failed still cannot open the reviewer account's hive | Launches of both roles that carry `registryRead` read parts of one hive |
+| Credential separation | Each role's credentials and state sit with a different account. The implementer's runner cannot open the reviewer's subtree, so a mistake inside a runner cannot hand implementer code the reviewer's credential | One runner process holds both roles' material. The separation rests on package access lists and on that process giving each launch the right role's grants |
+| Same-role isolation | No gain. Two launches of one role share an account and are kept apart by their packages, jobs and desktops alone | The same |
+| Window station | Each runner service has its own logon session and so its own station. Launches of different roles stop sharing a clipboard and an atom table | Launches of both roles share one station, behind the job's user-interface restrictions |
+| Parity | Linux runs `agentc-impl` and `agentc-rev`, and this chapter named an account per role from its first version | The chapter would change to match the build |
+| Cost | A second runner service through the installer, both brokers, the supervisor and the lifecycle rounds | Documentation, `status` and the concurrency probes |
+
+**What the decision does not give.**
+
+- Same-role isolation. Two implementer launches, or two reviewer launches,
+  still share an account, a hive and a window station. Their packages, jobs
+  and desktops keep them apart, as in the one-account model, and the
+  concurrency probes below are owed in full.
+- A separate account for a reviewer's candidate. The reviewer's runner makes
+  the candidate, so it runs as the reviewer's account. What keeps it from the
+  reviewer's credential is its package, as said
+  [above](#service-identities-and-filesystem).
+- An empty hive. A launch that carries `registryRead` can read parts of its
+  role account's hive, where Windows keeps the AppContainer mappings of the
+  role's launches. Nothing else may be put there.
+
+**The design (proposed).** `agentc-runner` goes and two services take its
+place. The host then has five services: the two brokers, the two runners and
+the supervisor.
+
+| Service | Account | Command | Pipe | State directory |
+| --- | --- | --- | --- | --- |
+| `agentc-implementer` | `NT SERVICE\agentc-implementer` | `windows-service --role implementer` | `\\.\pipe\agentc-implementer`, served to the supervisor's SID alone | `C:\ProgramData\agentc\implementer`: that account, the system and administrators |
+| `agentc-reviewer` | `NT SERVICE\agentc-reviewer` | `windows-service --role reviewer` | `\\.\pipe\agentc-reviewer`, served to the supervisor's SID alone | `C:\ProgramData\agentc\reviewer`: that account, the system and administrators |
+
+1. **A runner is bound to its role when it starts.** The role comes from the
+   service's command line, which only an administrator can change. It does
+   not come from a request. A runner refuses a `prepare` that names the other
+   role or no role; today the field is optional and one runner takes both.
+   Each runner keeps its own journal and launch directories in its own state
+   directory, which the other role's account is not on the access list of. A
+   reviewer's candidate is made by the reviewer's runner, as now.
+2. **The supervisor addresses a runner by role.** `[windows_supervisor]` names
+   a pipe and a SID for each role in place of `runner_pipe` and `runner_sid`.
+   The supervisor uses a pipe only when that role's account owns it and
+   refuses to start while either SID is empty. It sends each launch to the
+   runner of the launch's role and settles a launch it finds after a restart
+   with that same runner, so its launch record has to hold the role. The
+   supervisor's service depends on both runner services, so Windows keeps
+   refusing a stop of either runner while the supervisor runs (the
+   [runner stop round](#phase-4c-third-machine-run-2026-11-13)).
+3. **A broker takes the role from the account that asks.** The egress broker
+   serves both role accounts on its control pipe. The publication broker
+   serves the implementer's account alone, so the reviewer's runner cannot
+   open that control pipe at all; today a reviewer goes without publication
+   because the one runner does not ask for it. A broker already learns its
+   client's account by impersonating it. It compares the role an `open` names
+   with the role of that account and refuses a mismatch. A launch's role then
+   stops being a claim in a request: Windows has authenticated it.
+4. **Start and stop order.** Start: egress, publication, implementer,
+   reviewer, supervisor. Stop: supervisor, implementer, reviewer, egress,
+   publication.
+5. **Window station.** Each runner takes over the station of its own logon
+   session, as [the one runner does now](#the-station-of-a-runner-that-is-a-service).
+   The one runner was observed alone in its session; each of the two is
+   expected to be, and the take-over refuses a runner that is not. A station
+   per launch stays unestablished.
+6. **State and credentials.** Each role's subtree lists its own account, the
+   system and administrators, and never the other role's account. Nothing a
+   role holds is ever granted to the other role's account. The supervisor's
+   own coordinator credential (step 8a) stays with the supervisor's account;
+   neither runner reads it. Where a role's coordinator or provider
+   credential lives is not settled here; see the open items.
+7. **The installer.** `windows-host install`, `status`, `update`, `rollback`
+   and `uninstall` manage five services. `status` inventories the running
+   token of each, as step 7c did for four. An install over a host that still
+   has `agentc-runner` removes that service and its directory in the same
+   journaled run, and only when the service is stopped and its journal names
+   no launch that is not confirmed ended; otherwise it refuses and names the
+   launch. `uninstall` removes both role accounts' profiles, with a hive
+   Windows keeps loaded left pending as now.
+
+**The probes this step owes.** They run on the installed host, in launches the
+installed supervisor asks the installed runners for, never as the owner. Two
+implementer launches, two reviewer launches and the candidate of one reviewer
+are alive at once. Each first passes a positive control on its own object of
+each kind, then tries the same object of every other launch. A refusal is
+recorded with its Windows error; `allowed` is a finding.
+
+| Kind | The launch's own, as the control | Tried on every other launch |
+| --- | --- | --- |
+| Files | Read a file in its control directory; list its working directory | The other's control and working directories |
+| Processes | Open its own process | Open the other's process to query it and to read its memory |
+| Pipes | Connect to its own broker pipes | The other's egress, publication and candidate pipes |
+| Registry | Read a key granted to its own package | The key granted to the other's package; across roles, also the other account's hive by SID |
+| Credentials | Read its own synthetic credential from a file, an inherited handle and a registry key | The other's credential by each of those routes |
+
+Same-role pairs, cross-role pairs in both directions, and the candidate
+against its own reviewer and against the other reviewer are each a row.
+
+**Open, for the session that builds it.**
+
+- Where a role's credential lives. The
+  [threat model](#threat-model-and-authority) says a launch never runs as an
+  account that holds a provider, coordinator or publication credential, and
+  a role's launches run as the role's account. Steps 8c and 8d decide which
+  account holds a role's credential and how a launch is given it. This step
+  fixes only that it is never the other role's account.
+- At `dac5fd6` the supervisor service asks for implementer launches only.
+  Its loop driver answers every request for reviewer work with nothing, and
+  the stand-in queues implementer items. Step 8a changes that file and may
+  change this. The probes need reviewer launches, and
+  two launches of one role alive at once, from the installed supervisor.
+  Whether the loop can hold two launches of one role at once was not checked
+  for this section.
+- `update` and `rollback` journal their stages for a fixed set of four
+  services. Whether a release that changes the set of services can be
+  reverted to one with `agentc-runner` is not designed.
+- How one `supervisor.toml` names two runners. `[windows_service]` describes
+  one today.
+- Step 8a changes the installer's model, plan, install and uninstall code and
+  adds the coordinator directory. Build this step on `main` after 8a's
+  integration.
+
+**Demonstrated or not.**
+
+| Claim | State |
+| --- | --- |
+| The owner's decision between the two models is recorded with its reasons | **Done** in this section |
+| `windows-host install`, `status` and `uninstall` manage the role accounts, and each installed service's token is inventoried running | **Not built** |
+| Concurrent launches of one role and of both roles on the installed host are refused each other's files, processes, pipes, registry and credentials | **Not run**. What stands from before: a launch run as a separate account was refused the owner's registry, outside any service (phases 2 and 3); an implementer launch, a reviewer launch and the reviewer's candidate, made by a runner installed by hand, each ran in a package of its own under the one runner account ([step 6d follow-up](#step-6d-follow-up-the-services-own-launches-2026-11-22)); two reviewer launches and their candidates were each refused the other launch's credential files, pipe and root process in a native test, in a new logon session of the developer's account (step 5e) |
+| Windows native tests of the changed crates and the Linux gate on the exact candidate | **Not run**: no code is changed. The pinned mdBook checks passed on the commit that added this section |
 
 ### Phase 7 steps
 
