@@ -214,6 +214,14 @@ pub fn lock(state_path: &Path) -> std::result::Result<SessionLock, StateAccessEr
     })
 }
 
+/// Takes the exclusive lock on an opened lock file for a diagnostic. The
+/// returned guard unlocks explicitly, so a finished probe never leaves the
+/// session lock held through a forked child's copy of the descriptor.
+fn probe_exclusive(file: File) -> std::io::Result<HeldLock> {
+    fs2::FileExt::try_lock_exclusive(&file)?;
+    Ok(HeldLock::holding(file))
+}
+
 fn open_lock_file(state_path: &Path) -> std::result::Result<File, StateAccessError> {
     let parent = state_path.parent().ok_or_else(|| {
         StateAccessError::new(
@@ -303,8 +311,8 @@ pub fn diagnose(state_path: &Path) -> Value {
         match open_lock_file(state_path) {
             Ok(file) => {
                 checks.push(json_check("lock_file", "open", &lock_path, None));
-                match fs2::FileExt::try_lock_exclusive(&file) {
-                    Ok(()) => {
+                match probe_exclusive(file) {
+                    Ok(_probe) => {
                         checks.push(json_check("exclusive_lock", "acquired", &lock_path, None));
                     }
                     Err(source) => {
@@ -900,6 +908,18 @@ mod tests {
         // file description until its exec closes the close-on-exec descriptor.
         let forked_child = first._held.forked_child_descriptor();
         drop(first);
+        let relocked = lock(&path);
+        drop(forked_child);
+        assert!(relocked.is_ok(), "{:?}", relocked.err());
+    }
+
+    #[test]
+    fn a_finished_lock_probe_releases_it_while_a_forked_child_still_holds_the_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions/state.json");
+        let probe = probe_exclusive(open_lock_file(&path).unwrap()).unwrap();
+        let forked_child = probe.forked_child_descriptor();
+        drop(probe);
         let relocked = lock(&path);
         drop(forked_child);
         assert!(relocked.is_ok(), "{:?}", relocked.err());

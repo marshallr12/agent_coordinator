@@ -6,6 +6,7 @@
 //! a security boundary against the role uid: host OS write confinement and
 //! enforcement of descendant process lifetime are separate requirements.
 use crate::config::Config;
+use crate::file_lock::HeldLock;
 use crate::profile::{LaunchSpec, Role};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -60,7 +61,7 @@ impl StatePaths {
 pub struct RunState {
     run: PathBuf,
     role: Role,
-    _lock: File,
+    _lock: HeldLock,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -86,6 +87,7 @@ impl RunState {
         );
         let lock = open_lock(&spec.run, true)?;
         lock.try_lock().context("run state is already in use")?;
+        let lock = HeldLock::holding(lock);
         for marker in [STARTED, TERMINAL] {
             ensure!(
                 fs::symlink_metadata(spec.run.join(marker))
@@ -178,16 +180,9 @@ fn prune_terminal(config: &Config, role: Role, current: &Path) -> Result<()> {
     }
     candidates.sort_unstable_by(|left, right| right.cmp(left));
     for (completed, run) in candidates.into_iter().skip(KEEP_TERMINAL) {
-        let lock = match open_lock(&run, false) {
-            Ok(lock) => lock,
-            // No lock file or an unreadable one is not evidence of inactivity.
-            Err(_) => continue,
+        let Some(_idle) = idle_run_lock(&run)? else {
+            continue;
         };
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => continue,
-            Err(TryLockError::Error(error)) => return Err(error).context("lock retained run"),
-        }
         if !terminal_record(&run, role).is_some_and(|r| r.finished_unix_nanos == completed) {
             continue;
         }
@@ -260,6 +255,20 @@ pub fn protected_executable(_path: &Path) -> Result<()> {
 pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
     regular_file(path)?;
     Ok(fs::read(path)?)
+}
+
+/// Takes the lifecycle lock of a retained run nobody is using, or `None` when
+/// the run is in use or its lock cannot be opened: no lock file or an
+/// unreadable one is not evidence of inactivity.
+fn idle_run_lock(run: &Path) -> Result<Option<HeldLock>> {
+    let Ok(lock) = open_lock(run, false) else {
+        return Ok(None);
+    };
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(HeldLock::holding(lock))),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error).context("lock retained run"),
+    }
 }
 
 fn open_lock(run: &Path, create: bool) -> Result<File> {
@@ -460,9 +469,6 @@ mod tests {
         )
         .unwrap();
         fs::write(spec.run.join("last.md"), "keep this output").unwrap();
-        // Release the lifecycle lock explicitly: a flock outlives drop while a
-        // child forked by a parallel test still holds a copy of the descriptor.
-        state._lock.unlock().unwrap();
         spec
     }
 
@@ -611,6 +617,34 @@ mod tests {
             );
         }
         assert!(prepare_run(&terminal[0], &config).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_run_state_releases_its_lock_while_a_forked_child_still_holds_the_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let spec = spec(&config, Role::Implementer, "one");
+        let state = RunState::prepare(&spec, &config).unwrap();
+        let forked_child = state._lock.forked_child_descriptor();
+        drop(state);
+        RunState::prepare(&spec, &config).unwrap();
+        drop(forked_child);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_retention_probe_releases_the_lock_while_a_forked_child_still_holds_the_descriptor()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let done = completed(&config, Role::Implementer, "done", 1);
+        let idle = idle_run_lock(&done.run).unwrap().unwrap();
+        let forked_child = idle.forked_child_descriptor();
+        assert!(idle_run_lock(&done.run).unwrap().is_none());
+        drop(idle);
+        assert!(idle_run_lock(&done.run).unwrap().is_some());
+        drop(forked_child);
     }
 
     #[cfg(unix)]

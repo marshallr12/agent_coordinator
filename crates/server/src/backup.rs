@@ -1,6 +1,6 @@
 //! Consistent, bounded, self-contained SQLite and artifact backups.
 
-use crate::{artifacts, state::AppState};
+use crate::{artifacts, file_lock::HeldLock, state::AppState};
 use anyhow::{Context, anyhow, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -72,7 +72,7 @@ struct Completion {
 }
 
 struct RepositoryLock {
-    _file: File,
+    _held: HeldLock,
 }
 
 #[derive(Default)]
@@ -961,7 +961,9 @@ fn acquire_repository_lock(repository: &Path, exclusive: bool) -> anyhow::Result
         fs2::FileExt::try_lock_shared(&file)
     };
     result.context("Backup repository is busy; retry after the active operation finishes.")?;
-    Ok(RepositoryLock { _file: file })
+    Ok(RepositoryLock {
+        _held: HeldLock::holding(file),
+    })
 }
 
 fn acquire_snapshot_lock(snapshot: &Path) -> anyhow::Result<Option<RepositoryLock>> {
@@ -991,7 +993,9 @@ fn acquire_snapshot_lock(snapshot: &Path) -> anyhow::Result<Option<RepositoryLoc
     let file = OpenOptions::new().read(true).write(true).open(lock_path)?;
     fs2::FileExt::try_lock_shared(&file)
         .context("Backup repository is busy; retry after the active operation finishes.")?;
-    Ok(Some(RepositoryLock { _file: file }))
+    Ok(Some(RepositoryLock {
+        _held: HeldLock::holding(file),
+    }))
 }
 
 fn reject_repository_overlap(state: &AppState, repository: &Path) -> anyhow::Result<()> {
@@ -1433,8 +1437,35 @@ fn rename_noreplace(_source: &Path, _destination: &Path) -> std::io::Result<()> 
 
 #[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
 mod tests {
-    use super::rename_noreplace;
+    use super::{acquire_repository_lock, acquire_snapshot_lock, rename_noreplace};
     use std::fs;
+
+    #[test]
+    fn dropping_a_repository_lock_releases_it_while_a_forked_child_still_holds_the_descriptor() {
+        let repository = tempfile::tempdir().unwrap();
+        for exclusive in [true, false] {
+            let lock = acquire_repository_lock(repository.path(), exclusive).unwrap();
+            let forked_child = lock._held.forked_child_descriptor();
+            assert!(acquire_repository_lock(repository.path(), true).is_err());
+            drop(lock);
+            acquire_repository_lock(repository.path(), true).unwrap();
+            drop(forked_child);
+        }
+    }
+
+    #[test]
+    fn dropping_a_snapshot_lock_releases_it_while_a_forked_child_still_holds_the_descriptor() {
+        let repository = tempfile::tempdir().unwrap();
+        let snapshot = repository.path().join("snapshots/one");
+        fs::create_dir_all(&snapshot).unwrap();
+        drop(acquire_repository_lock(repository.path(), true).unwrap());
+        let lock = acquire_snapshot_lock(&snapshot).unwrap().unwrap();
+        let forked_child = lock._held.forked_child_descriptor();
+        assert!(acquire_repository_lock(repository.path(), true).is_err());
+        drop(lock);
+        acquire_repository_lock(repository.path(), true).unwrap();
+        drop(forked_child);
+    }
 
     #[test]
     fn atomic_publication_never_replaces_an_existing_empty_directory() {

@@ -12,6 +12,7 @@ pub mod credential_attributes;
 pub mod discovery;
 mod documentation;
 pub mod error;
+mod file_lock;
 pub mod history;
 pub mod imports;
 pub mod integrator;

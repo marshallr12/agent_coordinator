@@ -545,7 +545,10 @@ fn stale_launch_directories_are_swept_only_when_owned_unlocked_directories() {
     );
     assert!(outside.path().join("keep").exists(), "followed a symlink");
     layout::sweep_stale(root.path(), owner + 1).unwrap();
-    drop(held);
+    // Unlock explicitly: dropping only closes this descriptor, and a child
+    // forked by a parallel test can briefly hold a copy of it, which would
+    // keep the directory locked and make the final sweep skip it.
+    held.unlock().unwrap();
     layout::sweep_stale(root.path(), owner + 1).unwrap();
     assert!(live.exists(), "removed a directory another account owns");
     layout::sweep_stale(root.path(), owner).unwrap();

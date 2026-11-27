@@ -1,5 +1,7 @@
 //! Bounded artifact links and streamed uploads.
-use crate::{auth::Auth, error::AppError, mutation::Mutation, response, state::AppState};
+use crate::{
+    auth::Auth, error::AppError, file_lock::HeldLock, mutation::Mutation, response, state::AppState,
+};
 use axum::{
     Json, Router,
     body::Body,
@@ -327,7 +329,7 @@ async fn ensure_store(root: &FsPath) -> Result<(), AppError> {
 /// assembled. Physical cleanup takes the corresponding exclusive lock and
 /// defers rather than blocking a request when a backup is active.
 pub(crate) struct ArtifactBackupGuard {
-    _file: std::fs::File,
+    _held: HeldLock,
 }
 
 pub(crate) async fn acquire_backup_guard(
@@ -337,26 +339,35 @@ pub(crate) async fn acquire_backup_guard(
     ensure_store(&root).await?;
     let path = root.join(".gc.lock");
     tokio::task::spawn_blocking(move || {
-        let file = open_gc_lock(&path)?;
-        fs2::FileExt::lock_shared(&file).map_err(|_| AppError::internal())?;
-        Ok(ArtifactBackupGuard { _file: file })
+        shared_gc_lock(&path).map(|held| ArtifactBackupGuard { _held: held })
     })
     .await
     .map_err(|_| AppError::internal())?
 }
 
-async fn try_acquire_cleanup_guard(root: &FsPath) -> Result<Option<std::fs::File>, AppError> {
+async fn try_acquire_cleanup_guard(root: &FsPath) -> Result<Option<HeldLock>, AppError> {
     let path = root.join(".gc.lock");
-    tokio::task::spawn_blocking(move || {
-        let file = open_gc_lock(&path)?;
-        match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(Some(file)),
-            Err(error) if lock_is_held(&error) => Ok(None),
-            Err(_) => Err(AppError::internal()),
-        }
-    })
-    .await
-    .map_err(|_| AppError::internal())?
+    tokio::task::spawn_blocking(move || exclusive_gc_lock(&path))
+        .await
+        .map_err(|_| AppError::internal())?
+}
+
+/// Takes the store's lock shared, waiting for an active cleanup to finish.
+fn shared_gc_lock(path: &FsPath) -> Result<HeldLock, AppError> {
+    let file = open_gc_lock(path)?;
+    fs2::FileExt::lock_shared(&file).map_err(|_| AppError::internal())?;
+    Ok(HeldLock::holding(file))
+}
+
+/// Takes the store's lock exclusively, or returns `None` while a backup or
+/// another cleanup holds it.
+fn exclusive_gc_lock(path: &FsPath) -> Result<Option<HeldLock>, AppError> {
+    let file = open_gc_lock(path)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(Some(HeldLock::holding(file))),
+        Err(error) if lock_is_held(&error) => Ok(None),
+        Err(_) => Err(AppError::internal()),
+    }
 }
 
 /// Whether `error` says another holder has the lock. Windows reports that
@@ -1528,4 +1539,34 @@ async fn cleanup_orphan_prefix(state: &AppState, root: &FsPath) -> Result<(), Ap
         drop(lock);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::{exclusive_gc_lock, shared_gc_lock};
+
+    #[test]
+    fn dropping_the_backup_guard_lock_releases_it_while_a_forked_child_still_holds_the_descriptor()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".gc.lock");
+        let held = shared_gc_lock(&path).unwrap();
+        let forked_child = held.forked_child_descriptor();
+        assert!(exclusive_gc_lock(&path).unwrap().is_none());
+        drop(held);
+        assert!(exclusive_gc_lock(&path).unwrap().is_some());
+        drop(forked_child);
+    }
+
+    #[test]
+    fn dropping_the_cleanup_guard_releases_it_while_a_forked_child_still_holds_the_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".gc.lock");
+        let held = exclusive_gc_lock(&path).unwrap().unwrap();
+        let forked_child = held.forked_child_descriptor();
+        assert!(exclusive_gc_lock(&path).unwrap().is_none());
+        drop(held);
+        assert!(exclusive_gc_lock(&path).unwrap().is_some());
+        drop(forked_child);
+    }
 }

@@ -7,8 +7,9 @@
 //! the helper publishes `push.sock` and its 0660 socket inherits the
 //! implementer group; and `work/` (helper user, mode 0700), the helper's
 //! home and the parent of its private repository.
+use crate::file_lock::HeldLock;
 use anyhow::{Context, Result, bail, ensure};
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, OpenOptions, TryLockError};
 use std::io::ErrorKind;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -49,7 +50,7 @@ pub struct Owners {
 /// One launch's helper directory, locked until it is removed.
 pub struct LaunchDir {
     path: PathBuf,
-    _lock: File,
+    _lock: HeldLock,
 }
 
 impl LaunchDir {
@@ -99,7 +100,7 @@ impl LaunchDir {
 }
 
 /// Builds the directory tree at `staging` and returns its held lock.
-fn build(staging: &Path, owners: &Owners) -> Result<File> {
+fn build(staging: &Path, owners: &Owners) -> Result<HeldLock> {
     new_dir(staging, 0o711)?;
     let lock = OpenOptions::new()
         .write(true)
@@ -108,6 +109,7 @@ fn build(staging: &Path, owners: &Owners) -> Result<File> {
         .open(staging.join(LOCK))
         .context("create the launch lock")?;
     lock.lock().context("lock the launch directory")?;
+    let lock = HeldLock::holding(lock);
     let (helper_uid, helper_gid) = owners.helper;
     owned_dir(
         &staging.join("sock"),
@@ -171,7 +173,7 @@ fn absent(path: &Path) -> Result<bool> {
 
 /// Takes the push root's `.sweep` lock, waiting for any other `launch-root`
 /// that is sweeping or building.
-fn sweep_lock(root: &Path) -> Result<File> {
+fn sweep_lock(root: &Path) -> Result<HeldLock> {
     let lock = OpenOptions::new()
         .write(true)
         .create(true)
@@ -181,7 +183,7 @@ fn sweep_lock(root: &Path) -> Result<File> {
         .open(root.join(SWEEP_LOCK))
         .context("open the sweep lock")?;
     lock.lock().context("take the sweep lock")?;
-    Ok(lock)
+    Ok(HeldLock::holding(lock))
 }
 
 /// Removes the launch directories a killed `launch-root` left behind, holding
@@ -220,21 +222,85 @@ pub(super) fn is_stale(path: &Path, owner: u32) -> Result<bool> {
     if !metadata.is_dir() || metadata.uid() != owner {
         return Ok(false);
     }
-    Ok(building || unlocked(path)?)
+    Ok(building || idle_launch_lock(path)?.is_some())
 }
 
-/// Whether the launch directory's lock exists and nobody holds it.
-fn unlocked(path: &Path) -> Result<bool> {
+/// Takes the launch directory's lock when it exists and nobody holds it, or
+/// `None` when the launch is live or the directory has no lock.
+fn idle_launch_lock(path: &Path) -> Result<Option<HeldLock>> {
     let lock = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path.join(LOCK));
     let Ok(lock) = lock else {
-        return Ok(false);
+        return Ok(None);
     };
     match lock.try_lock() {
-        Ok(()) => Ok(true),
-        Err(TryLockError::WouldBlock) => Ok(false),
+        Ok(()) => Ok(Some(HeldLock::holding(lock))),
+        Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(error)) => bail!("lock {}: {error}", path.display()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::push_helper::accounts::{self, Account};
+    use std::fs::File;
+
+    /// Whether nobody holds the lock on the file at `path`.
+    fn free(path: &Path) -> bool {
+        let file = File::open(path).unwrap();
+        let free = file.try_lock().is_ok();
+        if free {
+            file.unlock().unwrap();
+        }
+        free
+    }
+
+    #[test]
+    fn dropping_a_launch_directory_releases_its_lock_while_a_forked_child_still_holds_the_descriptor()
+     {
+        let name = "dropping_a_launch_directory_releases_its_lock";
+        if crate::test_support::skip_when_nested_because(name, crate::test_support::READ_ONLY_TMP) {
+            return;
+        }
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let me = Account::current();
+        let owners = Owners {
+            supervisor: accounts::effective_uid(),
+            helper: (me.uid, me.gid),
+            implementer_group: me.gid,
+        };
+        let directory = LaunchDir::create(&root.path().join("push"), "l1", &owners).unwrap();
+        let path = directory.path.clone();
+        let forked_child = directory._lock.forked_child_descriptor();
+        drop(directory);
+        assert!(free(&path.join(LOCK)));
+        assert!(is_stale(&path, owners.supervisor).unwrap());
+        drop(forked_child);
+    }
+
+    #[test]
+    fn dropping_the_sweep_lock_releases_it_while_a_forked_child_still_holds_the_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let held = sweep_lock(root.path()).unwrap();
+        let forked_child = held.forked_child_descriptor();
+        assert!(!free(&root.path().join(SWEEP_LOCK)));
+        drop(held);
+        assert!(free(&root.path().join(SWEEP_LOCK)));
+        drop(forked_child);
+    }
+
+    #[test]
+    fn a_finished_stale_probe_releases_the_lock_while_a_forked_child_still_holds_the_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(LOCK), "").unwrap();
+        let idle = idle_launch_lock(root.path()).unwrap().unwrap();
+        let forked_child = idle.forked_child_descriptor();
+        assert!(idle_launch_lock(root.path()).unwrap().is_none());
+        drop(idle);
+        assert!(idle_launch_lock(root.path()).unwrap().is_some());
+        drop(forked_child);
     }
 }

@@ -23,8 +23,20 @@ struct State {
 
 pub struct Journal {
     directory: PathBuf,
-    _lock: File,
+    _lock: HeldLock,
     state: State,
+}
+
+/// Holds the journal's exclusive lock until dropped.
+struct HeldLock(File);
+
+impl Drop for HeldLock {
+    /// Unlocks explicitly: closing the descriptor alone keeps a `flock` held
+    /// while any other process still has a duplicate of the open file
+    /// description, as a forked child does until its exec.
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 pub fn binding(parts: &[&str]) -> String {
@@ -116,6 +128,7 @@ impl Journal {
         protect_file(&lock_path)?;
         lock.try_lock()
             .context("another adapter owns this journal")?;
+        let lock = HeldLock(lock);
         let path = directory.join("journal.json");
         let state = if path.exists() {
             ordinary(&path, false)?;
@@ -278,6 +291,18 @@ mod tests {
         drop(j);
         assert!(Journal::open(&path, "another identity".into()).is_err());
     }
+    #[test]
+    fn dropping_the_journal_releases_its_lock_while_a_forked_child_still_holds_the_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let journal = Journal::open(&path, "a".into()).unwrap();
+        let forked_child = journal._lock.0.try_clone().unwrap();
+        drop(journal);
+        let reopened = Journal::open(&path, "a".into());
+        drop(forked_child);
+        assert!(reopened.is_ok(), "{:?}", reopened.err());
+    }
+
     #[test]
     fn failed_persistence_cannot_leave_an_unsaved_retry() {
         let dir = tempfile::tempdir().unwrap();
